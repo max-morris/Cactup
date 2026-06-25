@@ -1,0 +1,201 @@
+:root {
+  --bg: #fbfaf7;
+  --fg: #1d2b22;
+  --muted: #5c6b62;
+  --accent: #2e7d4f;       /* cactus green */
+  --accent-dark: #1f5c39;
+  --box-bg: #102a1c;       /* terminal-ish dark */
+  --box-fg: #e8f3ec;
+  --border: #dcdcd2;
+  --radius: 10px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14130f;
+    --fg: #eef0ea;
+    --muted: #9aa79f;
+    --accent: #4fb277;
+    --accent-dark: #3c8f5e;
+    --box-bg: #0c1f15;
+    --box-fg: #e8f3ec;
+    --border: #2a2a24;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  justify-content: center;
+  padding: 2.5rem 1.25rem 4rem;
+  min-height: 100vh;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 680px;
+}
+
+/* Masthead */
+.masthead {
+  text-align: center;
+  margin-bottom: 2.75rem;
+}
+
+.logo {
+  font-size: 4rem;
+  line-height: 1;
+}
+
+h1 {
+  font-size: 2.6rem;
+  margin: 0.4rem 0 0.6rem;
+  letter-spacing: -0.02em;
+  color: var(--accent-dark);
+}
+
+@media (prefers-color-scheme: dark) {
+  h1 { color: var(--accent); }
+}
+
+.tagline {
+  margin: 0;
+  font-size: 1.15rem;
+  color: var(--muted);
+}
+
+/* Install command */
+.lede {
+  text-align: center;
+  margin: 0 0 0.9rem;
+}
+
+.command {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  background: var(--box-bg);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.4rem 0.4rem 1rem;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+
+.command code {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  color: var(--box-fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92rem;
+  white-space: nowrap;
+  overflow-x: auto;
+  padding: 0.5rem 0;
+  -ms-overflow-style: none;
+  scrollbar-width: thin;
+}
+
+.command--sm code { font-size: 0.85rem; }
+
+.command button {
+  flex: 0 0 auto;
+  cursor: pointer;
+  border: 0;
+  border-radius: calc(var(--radius) - 3px);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0 1.05rem;
+  transition: background 0.15s ease;
+}
+
+.command button:hover { background: var(--accent-dark); }
+.command button:focus-visible { outline: 2px solid var(--box-fg); outline-offset: 2px; }
+.command button.copied { background: #3c8f5e; }
+
+.note {
+  margin: 1.1rem 0 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.note code,
+.next code {
+  background: rgba(46, 125, 79, 0.12);
+  color: var(--accent-dark);
+  padding: 0.08em 0.36em;
+  border-radius: 4px;
+  font-size: 0.88em;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .note code, .next code { color: var(--accent); }
+}
+
+/* Alternative (wget) */
+.alt {
+  margin-top: 1.25rem;
+}
+
+.alt summary {
+  cursor: pointer;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+  list-style: none;
+}
+
+.alt summary::-webkit-details-marker { display: none; }
+.alt summary:hover { color: var(--accent); }
+.alt[open] summary { margin-bottom: 0.7rem; }
+
+/* Next steps */
+.next {
+  margin-top: 3rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.75rem;
+}
+
+.next p { margin: 0 0 0.6rem; }
+
+.next ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+}
+
+.next li { margin: 0.3rem 0; }
+
+/* Footer */
+.foot {
+  margin-top: 3rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.foot a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.foot a:hover { text-decoration: underline; }

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cactup &mdash; install the Einstein Toolkit</title>
+  <meta name="description" content="cactup is the easiest way to install and manage Einstein Toolkit (Cactus) releases.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#127797;</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="wrap">
+    <header class="masthead">
+      <div class="logo" aria-hidden="true">&#127797;</div>
+      <h1>cactup</h1>
+      <p class="tagline">The easiest way to install and manage<br>Einstein&nbsp;Toolkit (Cactus) releases.</p>
+    </header>
+
+    <section class="install" aria-label="Installation command">
+      <p class="lede">To install, run the following in your terminal:</p>
+
+      <div class="command" id="command">
+        <code id="cmd-text">curl --proto '=https' --tlsv1.2 -sSf https://cct.lsu.edu/~mmorris/cactup/cactup-init.sh | sh</code>
+        <button id="copy-btn" type="button" aria-label="Copy command to clipboard">Copy</button>
+      </div>
+
+      <p class="note">
+        cactup runs on Linux and macOS. It downloads the <code>cactup</code> manager,
+        installs it to <code>~/.cactup/bin</code>, and adds it to your <code>PATH</code>.
+      </p>
+
+      <details class="alt">
+        <summary>Don't have <code>curl</code>?</summary>
+        <div class="command command--sm">
+          <code id="cmd-wget-text">wget -qO- https://cct.lsu.edu/~mmorris/cactup/cactup-init.sh | sh</code>
+          <button id="copy-wget-btn" type="button" aria-label="Copy wget command to clipboard">Copy</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="next" aria-label="Next steps">
+      <p>Once installed, get going with:</p>
+      <ul>
+        <li><code>cactup list</code> &mdash; see the available Einstein Toolkit releases</li>
+        <li><code>cactup install</code> &mdash; install the latest release (or a chosen one)</li>
+      </ul>
+    </section>
+
+    <footer class="foot">
+      <p>cactup is developed at the <a href="https://cct.lsu.edu/">LSU Center for Computation &amp; Technology</a>.</p>
+    </footer>
+  </main>
+
+  <script src="cactup.js"></script>
+</body>
+</html>
