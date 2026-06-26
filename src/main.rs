@@ -142,9 +142,9 @@ fn main() -> Res<()> {
             }
 
             let release_default = tags.first().unwrap().short_name.clone();
-            let install_prefix_default = |tag_name: &str|
+            let install_prefix_default = |alias: &str|
                 p2s(cactup_root.join("cacti")
-                               .join(tag_name));
+                               .join(alias));
             let symlink_prefix_default = base_dirs.home_dir();
             let symlink_name_default = "Cactus";
 
@@ -187,6 +187,8 @@ fn main() -> Res<()> {
                     let alias_sel = prompt_with_default("What should the installation's alias be? This unique name will be used to identify the installation in the future.", release)?;
                     if database.installations.contains_key(&alias_sel) {
                         println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
+                    } else if false {
+                        todo!("Verify alias is a valid path component with no spaces or special characters.")
                     } else {
                         break alias_sel;
                     }
@@ -195,8 +197,8 @@ fn main() -> Res<()> {
 
             let install_prefix = match install_prefix {
                 Some(install_prefix) => install_prefix,
-                None if silent => install_prefix_default(release)?,
-                None => prompt_with_default("Where should the installation live?", &install_prefix_default(release)?)?
+                None if silent => install_prefix_default(&alias)?,
+                None => prompt_with_default("Where should the installation live? The Cactus directory will be created here.", &install_prefix_default(&alias)?)?
             };
             let install_prefix = shell::expand_path(&install_prefix, &base_dirs);
 
