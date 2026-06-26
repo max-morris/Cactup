@@ -22,10 +22,19 @@ pub(crate) enum Commands {
         #[clap(short, long, help = "List all releases instead of only the few most recent.")]
         all: bool
     },
+    /// Show all Einstein Toolkit installations on the machine
+    Show,
+    /// Set the active Einstein Toolkit installation
+    Use {
+        #[clap(help = "The alias of the installation to activate.")]
+        alias: String,
+    },
     /// Install an Einstein Toolkit release
     Install {
         #[clap(help = "The release to install. If unspecified, the most recent release will be installed.")]
         release: Option<String>,
+        #[clap(short, long, help = "The unique name of the installation. If unspecified, the release name will be used.")]
+        alias: Option<String>,
         #[clap(short, long, help = "Assume default answers to all unspecified flags instead of prompting.")]
         silent: bool,
         #[clap(long, help = "The prefix to install to.")]

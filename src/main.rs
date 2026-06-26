@@ -1,175 +1,27 @@
 mod args;
+mod database;
+mod manifest;
+mod shell;
 
 use crate::args::{Args, Commands};
 use anyhow::{anyhow, Context};
 use clap::Parser;
 use directories::BaseDirs;
-use prodash::{Progress, Root};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::LazyLock;
 use colored::Colorize;
-use gix::refs::transaction::{Change, PreviousValue, RefEdit, RefLog};
-use gix::remote::Direction;
-use prodash::render::line::{JoinHandle, StreamKind};
-use gix::remote::fetch::Tags;
-use gix::{Object, Reference, Repository};
-use gix::date::Time;
+use crate::database::{CactusInstallation, Database};
 
 type Res<T> = anyhow::Result<T>;
-type ProgressHandle = Arc<prodash::tree::Root>;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+    let base_dirs = BaseDirs::new().expect("Failed to get base directories");
+    let home_dir = base_dirs.home_dir().to_path_buf();
+    home_dir.join(".cactup")
+});
 
-
-fn setup_prodash() -> (ProgressHandle, JoinHandle) {
-    let progress = prodash::tree::Root::new();
-
-    let progress_renderer_options = prodash::render::line::Options {
-        frames_per_second: 6.0,
-        hide_cursor: true, // signal-hook feature restores cursor on exit
-        ..Default::default()
-    }.auto_configure(StreamKind::Stderr);
-
-    let progress_renderer = prodash::render::line::render(
-        std::io::stderr(),
-        progress.downgrade(),
-        progress_renderer_options
-    );
-
-    (progress, progress_renderer)
-}
-
-fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str, progress: &ProgressHandle) -> Res<Repository> {
-    let manifest_dir = cactup_root.join("manifest");
-    let mut fetch_progress = progress.add_child("Fetching manifest");
-
-    //fetch_progress.info(format!("Manifest directory: {}", manifest_dir.display()));
-
-    if manifest_dir.exists() && !manifest_dir.is_dir() {
-        return Err(anyhow!("Manifest directory exists but is not a directory"));
-    }
-
-    let need_clone = !manifest_dir.exists()
-        || manifest_dir.read_dir()
-                       .map(|mut d| d.next().is_none()) // Checking for empty dir
-                       .unwrap_or(true);
-
-    if need_clone {
-        fetch_progress.info("Fetching the manifest for the first time.".to_string());
-
-        fs::create_dir_all(&manifest_dir)
-           .with_context(|| "Failed to create manifest directory")?;
-
-        let mut prepare =
-            gix::prepare_clone(manifest_url, &manifest_dir)?
-                .configure_remote(|r| {
-                    Ok(r.with_fetch_tags(Tags::All))
-                });
-
-        let (repo, _) = prepare.fetch_only(
-            fetch_progress,
-            &gix::interrupt::IS_INTERRUPTED
-        ).with_context(|| "Failed to fetch manifest")?;
-
-        Ok(repo)
-    } else {
-        fetch_progress.info("Checking for updates.".to_string());
-
-        let fetch_progress_1 = fetch_progress.add_child("Checking for updates");
-        let fetch_progress_2 = fetch_progress.add_child("Fetching updates");
-
-        let repo =
-            gix::open(&manifest_dir)
-                .with_context(|| "Failed to open manifest repository")?;
-
-        // Fetching tags won't delete old ones. To keep it simple, we'll just annihilate
-        // whatever tags are already there before fetching.
-
-        let tag_deletions: Vec<RefEdit> =
-            repo.references()?
-                .tags()?
-                .filter_map(|t| t.ok())
-                .map(|t| RefEdit {
-                    change: Change::Delete {
-                        expected: PreviousValue::Any,
-                        log: RefLog::AndReference
-                    },
-                    name: t.name().to_owned(),
-                    deref: false,
-                })
-                .collect();
-
-        repo.edit_references(tag_deletions)?;
-
-        let remote =
-            repo.find_fetch_remote(None)? // origin
-                .with_fetch_tags(Tags::All);
-
-        remote.connect(Direction::Fetch)?
-              .prepare_fetch(fetch_progress_1, Default::default())?
-              .receive(fetch_progress_2, &gix::interrupt::IS_INTERRUPTED)?;
-
-        fetch_progress.done("Manifest is up to date.".to_string());
-        Ok(repo)
-    }
-}
-
-struct Tag<'repo> {
-    repo: &'repo Repository,
-    short_name: String,
-    ancestry_rank: usize,
-    tree_id: gix::ObjectId
-}
-
-fn get_tags(repo: &Repository) -> Res<Vec<Tag<'_>>> {
-    let mut tags: Vec<Tag<'_>> =
-        repo.references()?
-            .tags()?
-            .filter_map(|t| t.ok())
-            .filter_map(|t| Tag::new(repo, t).ok())
-            .collect();
-
-    tags.sort_by_key(|t| std::cmp::Reverse(t.ancestry_rank));
-    Ok(tags)
-}
-
-impl<'repo> Tag<'repo> {
-    pub fn new(repo: &'repo Repository, tag: Reference<'repo>) -> Res<Self> {
-        let short_name = tag.name().shorten().to_string();
-        let peeled_id = tag.into_fully_peeled_id()?;
-        let tree_id = peeled_id.object()?.peel_to_commit()?.tree_id()?.detach();
-        let commit_id = peeled_id.detach();
-
-        // Number of commits between the tag and the root of the repository.
-        // We use this as a stand-in for commit time to determine the release order of the tags,
-        // since the git history has become too mangled for the former to work.
-        // I also do not trust that the current naming convention, where the release date is
-        // encoded in the tag name, will be followed in perpetuity. This method is more robust.
-        let ancestry_rank = repo.rev_walk(Some(commit_id)).all()?.count();
-
-        Ok(Self {
-            repo,
-            short_name,
-            ancestry_rank,
-            tree_id
-        })
-    }
-
-    fn read_file(&self, path: impl AsRef<std::path::Path>) -> Res<Vec<u8>> {
-        let tree = self.repo.find_tree(self.tree_id)?;
-        Ok(
-            tree.lookup_entry_by_path(&path)?
-                .ok_or({
-                    let path_name = path.as_ref().to_str().ok_or(anyhow!("Invalid path"))?;
-                    anyhow!("File {} not found", path_name)
-                })?
-                .object()?
-                .into_blob()
-                .data
-                .clone()
-        )
-    }
-}
 
 fn prompt_with_default(question: &str, default: &str) -> Res<String> {
     use std::io::{self, Write};
@@ -194,105 +46,25 @@ fn p2s(pb: PathBuf) -> Res<String> {
       .ok_or(anyhow!("Failed to convert path to string"))
 }
 
-/// Expand `$VAR`/`${VAR}` references against the current environment.
-/// Undefined variables expand to the empty string, matching shell behaviour.
-fn expand_env_vars(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c != '$' {
-            out.push(c);
-            continue;
-        }
-
-        match chars.peek() {
-            // ${NAME}
-            Some('{') => {
-                chars.next(); // consume '{'
-                let mut name = String::new();
-                let mut closed = false;
-                while let Some(&nc) = chars.peek() {
-                    chars.next();
-                    if nc == '}' {
-                        closed = true;
-                        break;
-                    }
-                    name.push(nc);
-                }
-                if closed {
-                    out.push_str(&std::env::var(&name).unwrap_or_default());
-                } else {
-                    // Unterminated `${...` — leave it untouched.
-                    out.push_str("${");
-                    out.push_str(&name);
-                }
-            }
-            // $NAME (alphanumeric/underscore, not starting with a digit)
-            Some(&c2) if c2 == '_' || c2.is_ascii_alphabetic() => {
-                let mut name = String::new();
-                while let Some(&nc) = chars.peek() {
-                    if nc == '_' || nc.is_ascii_alphanumeric() {
-                        name.push(nc);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                out.push_str(&std::env::var(&name).unwrap_or_default());
-            }
-            // A lone `$` (or `$` followed by punctuation) is emitted literally.
-            _ => out.push('$'),
-        }
-    }
-
-    out
-}
-
-/// Expand a user-supplied path string the way a shell would: a leading `~`
-/// becomes the home directory and `$VAR`/`${VAR}` are substituted. Paths typed
-/// at our prompts are read straight from stdin with no shell involved, so
-/// without this a literal `~` directory would be created in the current
-/// working directory. Values passed as flags are already shell-expanded, so
-/// running them through this again is a harmless no-op.
-fn expand_path(input: &str, base_dirs: &BaseDirs) -> String {
-    let expanded = expand_env_vars(input);
-    let home = base_dirs.home_dir();
-
-    if expanded == "~" {
-        home.to_string_lossy().into_owned()
-    } else if let Some(rest) = expanded.strip_prefix("~/") {
-        home.join(rest).to_string_lossy().into_owned()
-    } else {
-        expanded
-    }
-}
-
 fn main() -> Res<()> {
-    // First Ctrl+C sets IS_INTERRUPTED so the fetch aborts gracefully; a second one force-quits.
     unsafe {
         // SAFETY: This method is unsafe because the signal handler we pass in has a certain contract.
         //         We satisfy the contract by virtue of doing nothing.
-        gix::interrupt::init_handler(1, || {})?;
+        gix::interrupt::init_handler(0, || {})?;
     }
 
     let args = Args::parse();
 
-    let (progress, progress_renderer) = setup_prodash();
-
     let base_dirs = BaseDirs::new().ok_or(anyhow!("Failed to determine base directories"))?;
 
-    // All cactup state lives under ~/.cactup (cactup-init installs the binary into ~/.cactup/bin).
-    let cactup_root = base_dirs.home_dir().join(".cactup");
-
-    let repo = ensure_manifest_repo(&cactup_root, &args.manifest_url, &progress)?;
-    progress_renderer.shutdown_and_wait();
+    let cactup_root = &CACTUP_ROOT;
+    let database = Database::load()?;
 
     match args.command {
         Commands::List { all } => {
-            //progress_renderer.shutdown_and_wait();
+            let repo = manifest::ensure_manifest_repo(cactup_root, &args.manifest_url)?;
 
-            let tags = get_tags(&repo)?;
+            let tags = manifest::get_tags(&repo)?;
 
             if tags.is_empty() {
                 println!("No releases found.");
@@ -317,15 +89,52 @@ fn main() -> Res<()> {
                 }
             }
         }
+        Commands::Show => {
+            let database = lock!(database);
+
+            if database.installations.is_empty() {
+                println!("{}", "No installations found.".bright_red());
+                return Ok(());
+            }
+
+            for installation in database.installations.values() {
+                print!("- {}", installation.alias.bold());
+                if let Some(release) = &installation.release {
+                    print!(" (release {})", release.bold());
+                } else {
+                    print!(" (manual installation)");
+                }
+                if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
+                    print!("{}", " (active)".bold().bright_green());
+                }
+                println!();
+                if args.verbose {
+                    println!("\t Path: {}", installation.path);
+                }
+            }
+        }
+        Commands::Use { alias } => {
+            let mut database = lock!(database);
+            if !database.installations.contains_key(&alias) {
+                println!("{}", format!("There is no installation named {}.", alias.bold()).bright_red());
+                return Ok(());
+            }
+
+            println!("{}", format!("Switched to installation {}.", &alias.bold()).bright_green());
+            database.active_installation = Some(alias);
+        }
         Commands::Install {
             release,
+            alias,
             silent,
             install_prefix,
             no_symlink,
             symlink_prefix,
             symlink_name
         } => {
-            let tags = get_tags(&repo)?;
+            let repo = manifest::ensure_manifest_repo(cactup_root, &args.manifest_url)?;
+            let tags = manifest::get_tags(&repo)?;
+            let mut database = lock!(database);
 
             if tags.is_empty() {
                 println!("No releases found.");
@@ -363,12 +172,33 @@ fn main() -> Res<()> {
 
             let release = &release_tag.short_name;
 
+            let alias = match alias {
+                Some(alias) if database.installations.contains_key(&alias) => {
+                    println!("{}", format!("An installation with the alias {} already exists.", alias.bold()).bright_red());
+                    return Ok(());
+                },
+                Some(alias) => alias,
+                None if silent && database.installations.contains_key(release) => {
+                    println!("{}", format!("An installation with the alias {} (derived from the release name) already exists. Please choose a different alias by passing {}.", release.bold(), "--alias".bold()).bright_red());
+                    return Ok(());
+                }
+                None if silent => release.to_owned(),
+                None => loop {
+                    let alias_sel = prompt_with_default("What should the installation's alias be? This unique name will be used to identify the installation in the future.", release)?;
+                    if database.installations.contains_key(&alias_sel) {
+                        println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
+                    } else {
+                        break alias_sel;
+                    }
+                }
+            };
+
             let install_prefix = match install_prefix {
                 Some(install_prefix) => install_prefix,
                 None if silent => install_prefix_default(release)?,
                 None => prompt_with_default("Where should the installation live?", &install_prefix_default(release)?)?
             };
-            let install_prefix = expand_path(&install_prefix, &base_dirs);
+            let install_prefix = shell::expand_path(&install_prefix, &base_dirs);
 
             let do_symlink = match no_symlink {
                 true => false,
@@ -386,7 +216,7 @@ fn main() -> Res<()> {
                 },
                 false => "".to_owned()
             };
-            let symlink_prefix = expand_path(&symlink_prefix, &base_dirs);
+            let symlink_prefix = shell::expand_path(&symlink_prefix, &base_dirs);
 
             let symlink_name = match do_symlink {
                 true => {
@@ -504,9 +334,21 @@ fn main() -> Res<()> {
                                      .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), target.display()))?;
             }
 
+            database.installations.insert(alias.clone(), CactusInstallation {
+                alias: alias.clone(),
+                release: Some(release.clone()),
+                path: install_dir.to_string_lossy().to_string(),
+            });
+
             println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, install_dir.join("Cactus").display()).bold().bright_green());
             if do_symlink {
                 println!("{}", format!("Created a symlink at {}/{}", symlink_prefix, symlink_name).bold().bright_green());
+            }
+
+            if database.active_installation.is_none() {
+                database.active_installation = Some(alias.clone());
+            } else {
+                println!("Another installation is already active. To switch to this installation, run `{}`", format!("cactup use {}", alias).bold());
             }
         }
     }
