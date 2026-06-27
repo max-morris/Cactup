@@ -1,0 +1,104 @@
+Simfactory can be found at `/home/max/src/simfactory2`. This tool allows for interaction
+with a Cactus installation: building configs and running simulations on clusters. The goal is to subsume Simfactory's functionality
+into cactup completely, replacing simfactory entirely. cactup differs in a few key ways: it is a global tool which can manage multiple independent
+cactus installations on the same machine. It also has a more intuitive command-line interface. Each cactus installation used to have its own
+instance of simfactory -- cactup only has a single global instance on the machine for managing all cactus installations.
+
+Simfactory does a lot of work to make it easy to build configs and run simulations on various clusters, taking care of interacting with Slurm and other idiosyncraticities.
+We need to preserve all of this functionality while fundamentally overhauling the infrastructure and interface.
+
+Important concepts:
+Cactus installation - A particular self-contained instance of Cactus on the machine.
+
+alias - A cactup concept; a unique name for a particular Cactus installation.
+
+database - The global database used by cactup to store information about Cactus installations, which installation is currently active, etc. Any data
+*about* a particular Cactus installation is stored in the database.
+
+Cactus root - The top-level directory of a Cactus installation. Typically called Cactus. Under cactup, multiple Cactus installations can be managed on the same machine,
+and they will typically live under ~/.cactup/cacti/<alias name>/Cactus. The "installation directory" according to cactup is one level up from the Cactus root.
+
+Active installation - The particular Cactus installation that is currently active, i.e., the default target for most commands (excluding obvious ones like installing, uninstalling, or listing installations)
+
+thorn - A module for Cactus.
+
+arrangement - A collection of thorns for Cactus. All thorns must live in an arrangement.
+
+thornlist - A list of thorns that are used to build a particular config. Basically, which modules are compiled into the executable. The "default" thornlist for a particular installation is under <Cactus root>/thornlists/einsteintoolkit.th -- thornlists have the .th extension
+
+config - A particular build of Cactus WITHIN a particular Cactus installation. There can be multiple configs for a particular Cactus installation. Configs differ from each other in two key ways: the compilation settings/flags, and the thorn list used to build it. Similar to how cactup recognizes a global "active installation", it also recognizes a per-installation "active config".
+
+simulation - A concept encapsulating a particular simulation - a run of a particular config with a particular set of parameters (called a parfile). Each simulation stores its results in its own directory and supports checkpointing/resuming.
+
+parfile - A file ending in .par containing the parameters for a particular simulation.
+
+mdb - the "machine database" - a repository of scripts and other information about various clusters which allows simfactory to interact with them.
+
+submitscript - a templated script which is used to submit a simulation to a cluster. Various parameters are substituted into the script at runtime.
+runscript - a templated script which is used to run a simulation, i.e., how to invoke Cactus.
+optionlist - specifies build flags and library locations for building a config.
+
+Important improvement for submitscripts, runscripts, optionlist in cactup: Each machine might have multiple *variants* of each of these. If there is only 1 variant, this can be hidden from the user. If the optionlist has multiple variants, a variant should be selected during `config build` via the `--variant` flag. For runscripts and submitscripts, each variant should be associated with one or more particular *queues* on that machine, and cactup should select the appropriate variant based on the queue specified when submitting a job. submitscripts and runscripts can have a default variant to be used on all queues which don't have a specific variant assigned. Optionlists cannot have a default unless there is only one; if there are multiple optionlist variants, one must be selected by the user at `config build` time. Variants in simfactory were handled by a hack wherein different machine definitions were used: examples are the runscripts `db-sing-{cpu,nv}.run`. In cactup, these would be variants under the same machine.
+
+Organization of MDB:
+At the top level, a file called meta.toml contains a small subset of the information in each machine-specific meta file: only the information used to identify a machine via the hostname. This avoids needing to walk the entire directory structure to find a machine.
+Machines own:
+    - A meta file, describing certain metadata about the machine (e.g., the hostname used to detect which machine we're on)
+        - Simfactory equivalent: mdb/machines/<machine name>.ini
+        - In cactup: mdb/<machine name>/meta.toml
+        - In cactup, these should be TOML files with simple templating extensions a la @FOO@. These should also map SubmitScript/RunScript variant names to their queue names.
+    - One or more SubmitScripts, each defining which queue it is for (or "default")
+        - Simfactory equivalent: mdb/submitscripts/<machine name>.sub
+        - In cactup: mdb/<machine name>/submitscripts/<variant name>.sh
+    - One or more RunScripts, each defining which queue it is for (or "default")
+        - Simfactory equivalent: mdb/runscripts/<machine name>.run
+        - In cactup: mdb/<machine name>/runscripts/<variant name>.sh
+    - One or more OptionLists, each defining its variant name (or "default" if it is the only variant)
+        - Simfactory equivalent: mdb/optionlists/<machine name>.cfg
+        - In cactup: mdb/<machine name>/optionlists/<variant name>.toml
+        - In cactup, these should be TOML files with simple templating extensions.
+Try to keep the changes from the existing simfactory MDB format as minimal as possible, only making changes that are absolutely necessary to accommodate new features or explicit infrastructure changes.
+
+Core of the cactup reinterpretation of simfactory:
+
+1) Config command - interacts with configs directly. (Local to the active installation)
+    Build a config: `cactup config build <config name> (-f to overwrite a previously built config) --thornlist <thornlist path, default if unspecified> (--variant <variant name> optional to select OptionList variant) (all other flags/options passed to the compiler or what-have-you)`
+    Alias to config build: `cactup build`
+    List existing configs: `cactup config show`
+    Show details for a config (thornlist, build flags, etc.): `cactup config show <config name>`
+    Delete a config: `cactup config delete <config name>`
+    Set active config: `cactup config use <config name>`
+
+2) Simulation command - interacts with simulations directly. (Local to the active installation)
+    Create a simulation: `cactup sim create (-f to delete existing simulation with this name and replace) <simulation name> <parfile path> (--config <config name>, or active config if unspecified)`
+    Submit a simulation to the queueing system: `cactup sim submit (-f to not care about overwriting output) <simulation name> <TOPOLOGY>`
+    Run a simulation, bypassing the queueing system: `cactup sim run <simulation name> <TOPOLOGY>`
+    Alternate form of submit/run which also implicitly creates the simulation: `cactup sim submit/run <simulation name> <parfile path> (--config <config name>, or active config if unspecified) <TOPOLOGY>`
+    Delete a simulation: `cactup sim delete <simulation name>`
+    List existing simulations: `cactup sim show`
+    Show details for a simulation: `cactup sim show <simulation name>`
+
+3) TOPOLOGY - describes how to orchestrate the run of a simulation: how many nodes, processes, cpus per process, gpus, etc.
+
+Items with * are passed to the SubmitScripts.
+-a/--allocation: Which allocation to submit to. Pull from knobs if unspecified. *
+-q/--queue: Determines which queue in the queueing system to submit to. Pull from knobs if unspecified. *
+-m/--mail: Email address to send job status to. Pull from knobs if unspecified. *
+-M/--mail-type: Type of email to send. Pull from knobs if unspecified. *
+-n/--nodes: Number of nodes to use. Default=1. *
+-P/--procs: Number of processes to use in total. Default=1.
+-p/--ppn: Number of processes per node. Default=1. *
+-c/--cpus: Number of cpus per process. Default=1. *
+-g/--gpn: Number of gpus per node. Default=0. *
+-j/--job-name: Name of the job. Default=<simulation name>. *
+-w/--wall-time: How long before the queueing system kills the job. (DD-HH:MM:SS) *
+-o/--out: File name to write stdout to. *
+-e/--err: File name to write stderr to. *
+
+4) Configure certain knobs such as allocation id and email (for cluster queueing system). Knobs are global to the machine.
+    Set the allocation id: `cactup knob allocation <allocation id>`
+    Set the email address: `cactup knob mail <mail address>`
+    Get the current allocation id: `cactup knob allocation`
+    Get all the knobs and their values: `cactup knob`
+
+    Important knobs: mail, mail-type (default all), allocation, queue
