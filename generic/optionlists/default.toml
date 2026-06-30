@@ -1,0 +1,32 @@
+# generic optionlist (variant "default"), ported from simfactory2 generic.cfg.
+#
+# The [options] table renders to a native Cactus "NAME = value" optionlist
+# before make (design §7.8). Values are kept as TOML strings so the render is
+# byte-identical (yes/no emitted literally). This is a CPU build with a stock
+# GCC toolchain; library dirs are left to Cactus's autodetection + envsetup.
+
+[cactup]
+gpu               = false
+compatible-queues = ["local"]
+
+[options]
+# Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.
+VERSION = "2018-12-13"
+
+CPP  = "cpp"
+CC   = "gcc"
+CXX  = "g++"
+CUCC = "nvcc"
+
+FPP = "cpp"
+F90 = "gfortran"
+
+FPPFLAGS = "-traditional"
+# use gnu99 (not c99) since FFTW3 relies on gcc's "asm"
+CFLAGS   = "-g -std=gnu99"
+# c++17 for easier CUDA support; drop to c++11 for very old compilers w/o AMReX
+CXXFLAGS = "-g -std=c++17 -D_GNU_SOURCE"
+
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+
+LDFLAGS = "-rdynamic"

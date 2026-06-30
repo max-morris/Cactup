@@ -1,0 +1,70 @@
+# Melete 05 (mel5) — a single-node CCT workstation.
+# Ported from simfactory2 mdb/machines/mel5.ini for cactup development/testing.
+# There is no batch scheduler here: "submit" just backgrounds the script and
+# echoes its PID; status/stop use ps/kill. It is modeled with a single queue
+# ("local") and a single variant of each script.
+
+[machine]
+name        = "Melete 05"
+nickname    = "mel5"
+location    = "CCT"
+description = "Melete 05"
+status      = "personal"
+hostname    = "melete05.cct.lsu.edu"
+
+[paths]
+# @USER@ is substituted at use time (install/run context).
+sourcebasedir = "/home/@USER@"
+basedir       = "/home/@USER@/simulations"
+
+[hardware]
+ppn             = 80
+max-num-threads = 80
+num-threads     = 80
+memory          = 196608        # MB per node
+nodes           = 1
+
+[build]
+make = "make -j@MAKEJOBS@"
+
+[scheduler]
+# No real batch system: run the script in the background, echo its PID as the
+# "job id", and use ps/kill for status/stop.
+submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
+getstatus       = "ps @JOB_ID@"
+stop            = "kill @JOB_ID@"
+submitpattern   = "(.*)"
+statuspattern   = "^ *@JOB_ID@ "
+queuedpattern   = "$^"          # matches nothing: this machine never "queues"
+runningpattern  = "^"           # matches anything: in ps => running
+holdingpattern  = "$^"          # matches nothing: never "held"
+exechost        = "echo localhost"
+exechostpattern = "(.*)"
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+
+# Shell setup sourced before build/submit/run commands (module loads, env).
+envsetup = """
+export MPI_DIR="/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+export PATH="${MPI_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
+export LD_LIBRARY_PATH="${MPI_DIR}/lib"
+export CC="${MPI_DIR}/bin/mpicc"
+export CXX="${MPI_DIR}/bin/mpicxx"
+"""
+
+# Single local "queue". gpu=false; this is a CPU workstation.
+[queues.local]
+gpu          = false
+max-walltime = "8760:00:00"     # 1 year (effectively unlimited; no scheduler)
+default      = true
+
+# One variant of each script. With a single variant, "default" serves all queues.
+[variants.submitscript]
+default = "default"
+
+[variants.runscript]
+default = "default"
+
+[variants.optionlist]
+variants = ["default"]          # one optionlist => used implicitly at build

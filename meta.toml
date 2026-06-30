@@ -1,0 +1,17 @@
+# cactup MDB top-level index.
+# A small subset of each machine's meta, so cactup can enumerate machines
+# (e.g. `cactup machine show`) without walking every <machine>/ directory.
+# One entry per machine; the authoritative per-machine data lives in
+# <machine>/meta.toml.
+
+# The built-in default machine: zero-match fallback for unrecognized hosts and
+# the base template for `cactup machine create`. Never auto-matched.
+[machines.generic]
+name = "Generic Machine"
+nickname = "generic"
+status = "personal"
+
+[machines.mel5]
+name = "Melete 05"
+nickname = "mel5"
+status = "personal"        # personal|experimental|production|storage|outdated
