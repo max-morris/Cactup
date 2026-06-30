@@ -41,23 +41,31 @@ optionlist - specifies build flags and library locations for building a config.
 Important improvement for submitscripts, runscripts, optionlist in cactup: Each machine might have multiple *variants* of each of these. If there is only 1 variant, this can be hidden from the user. If the optionlist has multiple variants, a variant should be selected during `config build` via the `--variant` flag. For runscripts and submitscripts, each variant should be associated with one or more particular *queues* on that machine, and cactup should select the appropriate variant based on the queue specified when submitting a job. submitscripts and runscripts can have a default variant to be used on all queues which don't have a specific variant assigned. Optionlists cannot have a default unless there is only one; if there are multiple optionlist variants, one must be selected by the user at `config build` time. Variants in simfactory were handled by a hack wherein different machine definitions were used: examples are the runscripts `db-sing-{cpu,nv}.run`. In cactup, these would be variants under the same machine.
 
 Organization of MDB:
-At the top level, a file called meta.toml contains a small subset of the information in each machine-specific meta file: only the information used to identify a machine via the hostname. This avoids needing to walk the entire directory structure to find a machine.
+At the top level, a file called meta.toml contains a small subset of the information in each machine-specific meta file. This avoids needing to walk the entire directory structure to find a machine.
+In simfactory, machines are identified by running a regex on the hostname. In cactup, each possible machine is represented by a python function which returns a boolean indicating whether the machine matches the function.
+To discover which machine we are on, we register each machine discovery function in a python environment and then run each one. If a single function returns true, we assume that we are on that machine. If multiple return true, we ask the user for disambiguation.
+
 Machines own:
-    - A meta file, describing certain metadata about the machine (e.g., the hostname used to detect which machine we're on)
+    - A meta file, describing certain metadata about the machine (which queues are available, mapping variant names to queues, which queues have gpus, etc.)
         - Simfactory equivalent: mdb/machines/<machine name>.ini
         - In cactup: mdb/<machine name>/meta.toml
-        - In cactup, these should be TOML files with simple templating extensions a la @FOO@. These should also map SubmitScript/RunScript variant names to their queue names.
+        - In cactup, these should be TOML files with simple @templating@ extensions. These should also map SubmitScript/RunScript variant names to their queue names.
+    - A discovery function in python
+        - No direct simfactory equivalent (replaces hostname regex)
+        - In cactup: mdb/<machine name>/discover.py (must contain `def is_machine() -> bool:`)
     - One or more SubmitScripts, each defining which queue it is for (or "default")
         - Simfactory equivalent: mdb/submitscripts/<machine name>.sub
-        - In cactup: mdb/<machine name>/submitscripts/<variant name>.sh
+        - In cactup: mdb/<machine name>/submitscripts/<variant name>.sh (variables passed with @templating@) or .py (python variant emits a .sh script to stdout, variables are passed as globals)
     - One or more RunScripts, each defining which queue it is for (or "default")
         - Simfactory equivalent: mdb/runscripts/<machine name>.run
-        - In cactup: mdb/<machine name>/runscripts/<variant name>.sh
+        - In cactup: mdb/<machine name>/runscripts/<variant name>.sh (variables passed with @templating@) or .py (python variant emits a .sh script to stdout, variables are passed as globals)
     - One or more OptionLists, each defining its variant name (or "default" if it is the only variant)
         - Simfactory equivalent: mdb/optionlists/<machine name>.cfg
         - In cactup: mdb/<machine name>/optionlists/<variant name>.toml
-        - In cactup, these should be TOML files with simple templating extensions.
+        - In cactup, these should be TOML files with simple @templating@ extensions.
 Try to keep the changes from the existing simfactory MDB format as minimal as possible, only making changes that are absolutely necessary to accommodate new features or explicit infrastructure changes.
+
+For development purposes, store the MDB in this project under `<project root>/mdb` and hard-code the absolute path to it in the project. In production, the MDB will live in its own git repo and be dynamically cloned into ~/.cactup/mdb.
 
 Core of the cactup reinterpretation of simfactory:
 
@@ -86,10 +94,10 @@ Items with * are passed to the SubmitScripts.
 -m/--mail: Email address to send job status to. Pull from knobs if unspecified. *
 -M/--mail-type: Type of email to send. Pull from knobs if unspecified. *
 -n/--nodes: Number of nodes to use. Default=1. *
--P/--procs: Number of processes to use in total. Default=1.
--p/--ppn: Number of processes per node. Default=1. *
--c/--cpus: Number of cpus per process. Default=1. *
--g/--gpn: Number of gpus per node. Default=0. *
+-T/--tasks: Number of tasks (unix processes) to use in total. Default=Inferred from tpn.
+-t/--tpn: Number of tasks (unix processes) per node. Default=use the full node. *
+-c/--cpus: Number of cpus per task. Default=1. *
+-g/--gpu: Whether to use GPUs. Default=Inferred from whether the queue has GPUs, as defined in the meta file.
 -j/--job-name: Name of the job. Default=<simulation name>. *
 -w/--wall-time: How long before the queueing system kills the job. (DD-HH:MM:SS) *
 -o/--out: File name to write stdout to. *

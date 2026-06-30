@@ -1,0 +1,1387 @@
+################################################################################
+#                                                                              #
+#   SIMFACTORY (simfactory2) -- COMPLETE BEHAVIORAL DOCUMENTATION              #
+#                                                                              #
+#   Source tree documented: /home/max/src/simfactory2                         #
+#   Purpose: a precise, implementation-ready specification of everything       #
+#   SimFactory does, written to support a from-scratch replacement.            #
+#                                                                              #
+################################################################################
+
+HOW THIS DOCUMENT WAS PRODUCED
+------------------------------
+Five independent agents crawled disjoint (and, for the most safety-critical
+area, deliberately OVERLAPPING) parts of the source:
+  - CLI surface / dispatch / options       (lib/sim.py, simenv.py, simopts.py)
+  - On-disk simulation layout, pass 1       (simrestart.py, restartlib.py, simlib.py)
+  - On-disk simulation layout, pass 2       (independent re-derivation of the same)
+  - Machine DB / config / INI parser        (simdb.py, pyini.py, simdt.py, mdb/, etc/)
+  - Build/sync/remote/archive/subs/distribute
+
+The two on-disk-layout passes were run independently and AGREE on every load-
+bearing fact (directory templates, the active-restart symlink mechanism, the
+property model, the lifecycle). Single-source uncertainties raised by one agent
+were resolved by another, and the highest-value claims (simenv path constants,
+the "output-%04d" format, the symlink semantics, the skeleton directory set,
+the simulation-id / PBS-name format strings) were additionally re-verified
+directly against source. Every nontrivial claim carries a file:line anchor;
+literal strings (format strings, filenames, key names, delimiters) are quoted
+verbatim. Items that could not be fully resolved are marked "UNCERTAIN".
+
+Anchors are relative to /home/max/src/simfactory2. "BuildPath(a,b)" == "a/b"
+(os.sep.join; simlib.py:761-767).
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1.  What SimFactory is
+  2.  Invocation & bootstrap (bin/sim -> lib/sim.py)
+  3.  Command dispatch architecture
+  4.  Full command reference
+  5.  The option system (etc/options/*.ini -> optparse)
+  6.  Initialization order & option precedence
+  7.  The INI parser (lib/pyini.py) -- syntax & semantics
+  8.  The machine database (mdb/machines/*.ini) & every recognized key
+  9.  Machine detection (local vs remote)
+  10. Config DB & defs layering (etc/defs.ini, etc/defs.local.ini)
+  11. The @VAR@ substitution engine (lib/simsubs.py)
+  12. Optionlists / runscripts / submitscripts (mdb/) formats
+  13. ON-DISK SIMULATION LAYOUT  *** the primary deliverable ***
+  14. Simulation lifecycle (create/submit/run/restart/cleanup/stop/purge/archive)
+  15. The persisted state model (properties.ini)
+  16. Build subsystem (configs/<name>/ layout)
+  17. Sync subsystem (rsync)
+  18. Remote execution & SSH command construction
+  19. Archive subsystem
+  20. Decision trees: sim setup / setup-silent
+  21. Distribute & bench-create tools
+  22. Logging, errors, exit codes
+  23. Consolidated bugs / quirks / corner cases
+  24. Notes & recommendations for the replacement
+
+
+================================================================================
+1. WHAT SIMFACTORY IS
+================================================================================
+SimFactory is the command-line tool the Cactus computational framework / the
+Einstein Toolkit uses to configure, build, submit, manage, and archive numerical
+simulations across many HPC clusters and workstations. A single machine database
+(MDB) describes each cluster (queues, submit commands, paths, hardware), and
+SimFactory uses it to:
+  - build Cactus "configurations" (compiled executables) from option lists,
+    thorn lists, run scripts and submit scripts;
+  - lay out a per-simulation directory tree on disk, with numbered "restarts";
+  - generate batch submit scripts and run scripts via @VAR@ template substitution;
+  - submit/queue/run jobs, chain restarts to extend walltime, recover from
+    checkpoints, and clean up;
+  - sync the source tree to remote machines, run remotely over ssh, and archive
+    finished simulations to tape/grid stores.
+
+Runtime code is in lib/*.py (Python 2/3 compatible; several modules use
+`from __future__ import print_function`). The doc generators under
+doc/userguide/ are Python-2-only build tooling, not part of the CLI.
+
+
+================================================================================
+2. INVOCATION & BOOTSTRAP
+================================================================================
+
+2.1 bin/sim (bash wrapper)
+  Job: locate sim.py and a usable Python, then exec it.
+  - Locates sim.py with a fixed search list:
+        file="sim.py"; dirs=". ../lib ./simfactory/lib ../simfactory/lib"
+    First existing "$(dirname "$0")/$dir/sim.py" wins. None found:
+        echo "Could not find sim.py"; exit 1
+  - Picks the interpreter from env SIMFACTORY_PYTHONEXECS
+    (default "python3 python python2"). For each candidate it runs a probe that
+    `import shutil`; the first whose probe exits 0 is used:  exec $PYEXE "$cmd" "$@"
+    None usable:
+        echo "Could not find usable python executable. Looked for $SIMFACTORY_PYTHONEXECS."
+        exit 1
+  (bin/sim has no line anchors here: it was read via cat, not the line-numbered
+   reader; content reproduced faithfully.)
+
+2.2 bin/sim-syntax-check (developer tool, not a dispatcher)
+  Same sim.py-locating loop, then runs PyChecker / PyLint over lib/*.py if those
+  tools are on PATH. Always exits 0. No effect on normal CLI behavior.
+
+2.3 lib/sim.py self-location (sim.py:29-38)
+    rp = os.path.realpath(__file__)          # resolves symlinks
+    BASE_PATH = os.sep.join(rp.split(os.sep)[:-2])   # two levels above lib/sim.py
+    LIB_PATH  = BASE_PATH/lib
+    sys.path.append(BASE_PATH); sys.path.append(LIB_PATH)
+  BASE_PATH is the simfactory root containing bin/, lib/, etc/, mdb/.
+  Main guard (sim.py:147-150):
+    simenv.init(base=BASE_PATH,
+                callingExecutable=BASE_PATH/"bin/sim",
+                usageString=buildUsageString(),
+                optionGroups=['sim-build','sim-info','sim-manage','sim-sync','sim-util'])
+    main(); libutil.log.close()
+
+
+================================================================================
+3. COMMAND DISPATCH ARCHITECTURE
+================================================================================
+Two-level dispatch.
+
+Level 1 (sim.py): maps each command name to one of five "binary" modules and
+calls that module's main().
+  - known_binaries = ['sim-sync','sim-build','sim-manage','sim-info','sim-util']
+    (imported via __import__ by literal hyphenated name; sim.py:40-52).
+  - known_commands seeded {'sync':'sim-sync','build':'sim-build'} (sim.py:47),
+    then extended from each binary's module-level `known_commands` list
+    (buildKnownCommands, sim.py:57-65) -> dict {command -> owning binary}.
+  - CommandDispatch (sim.py:88-107):
+        command = OptionsManager.args[0]
+        if command == 'help': PrintHelp(); sys.exit(0)   # 'help' pseudo-command
+        simenv.COMMAND = command
+        args.pop(0)
+        if command not in known_commands: fatal("unknown command ...")
+        sys.modules[binary].main()
+  - If option --remote is set, sim.py short-circuits to RemoteExecute (section 18)
+    and does NOT dispatch locally (sim.py:139-143).
+  - No args -> PrintHelp(); exit 0 (sim.py:118-120).
+  - Startup banner prints "defs: <path>" (simenv.cdb) and "defs.local: <path>"
+    (simenv.udb) when present (sim.py:126-129).
+
+Level 2 (each binary): re-derives the command from simenv.COMMAND, replaces '-'
+with '_', and invokes the implementing function. Idioms differ slightly:
+  - sim-build:  main() RequireMachine(); mkdir CONFIGS_PATH; if first arg=='build'
+                pop it else append 'build'. CommandDispatch treats ANY unknown
+                subcommand token as a config name and falls through to
+                command_build() (sim-build.py:395-411,466-488). No "unknown
+                command" error under `sim build`.
+  - sim-info:   command = COMMAND or args[0]; unknown -> fatal; calls
+                globals()[name]() where functions are BARE-named (list_machines,
+                not command_list_machines) (sim-info.py:241-274).
+  - sim-manage: RequireMachine(); CommandDispatch via exec("command_%s()" % name);
+                unknown -> PrintHelp + exit 1 (sim-manage.py:361-398).
+  - sim-sync:   no CommandDispatch; main() runs sync directly, skipping any arg
+                literally 'sync' (sim-sync.py:204-281).
+  - sim-util:   mkdir CONFIGS_PATH; CommandDispatch via exec("command_%s()")
+                (sim-util.py:34-53,262-270). Does NOT RequireMachine globally;
+                individual commands call it as needed.
+  Aliases are implemented as duplicate wrapper functions: list-sim -> list_sim()
+  -> list_simulations() (sim-info.py:76-77); list-conf -> list_conf()
+  -> list_configurations() (sim-info.py:237-238).
+
+
+================================================================================
+4. FULL COMMAND REFERENCE
+================================================================================
+Format: name [aliases] -> implementing function (file:line). Per-command option
+groups are advertised via simenv.CommandOptions.
+
+--- sim-build -------------------------------------------------------------------
+build -> command_build() (sim-build.py:430-464)
+  "sim build [options] [config] [options]". Builds one or more Cactus configs.
+  No config name => GetDefaultConfiguration() (base "sim" + debug/optimise/
+  unsafe/profile suffixes; simlib.py:657-691). Any non-subcommand positional is a
+  config name. Per config: PrepConfiguration() then BuildConfiguration()
+  (make <config>, make <config>-utils) or BuildVirtual() if --virtual.
+  make failures -> sys.exit(1). See section 16.
+
+--- sim-info (bare-named, dispatched via globals()) -----------------------------
+list-machines -> list_machines() (sim-info.py:167-178)
+  "   %-12s   %6d nodes,  %4d ppn   %-30s   %s" (name, nodes, ppn, hostname, status).
+  --name-only: names only.
+print-mdb-entry -> print_mdb_entry() (sim-info.py:180-186)
+  Prints each named machine's raw mdb section. No arg -> fatal "no machine specified".
+print-mdb -> print_mdb() (sim-info.py:193-201)
+  No args: whole parsed MDB. With args: like print-mdb-entry.
+whoami -> whoami() (sim-info.py:188-191)
+  "Current machine: <name>".
+list-configurations / list-conf -> list_configurations() (sim-info.py:203-235)
+  Per config: "   %-40s" then "[built <date>]" (exe mtime) or "[incomplete]"
+  (no exe/cactus_<config>). --name-only. RequireMachine.
+list-simulations / list-sim -> list_simulations() (sim-info.py:76-165)
+  Per sim: active restart id, job id, state from job status map (section 14.7).
+  Default: "   %-21s   [%-9s, restart %04d, job id %s]".
+  --long adds restart id / job id / "Disk usage = %.1f GByte" (du -sk). --name-only.
+list-archived-simulations -> list_archived_simulations() (sim-info.py:38-73)
+  Requires machine key 'archivetype'; authenticates to the archive and lists
+  archived sims with restart detail. --name-only prints ids.
+
+--- sim-manage (command_<name>; '-' -> '_') -------------------------------------
+create        -> command_create()         (sim-manage.py:108-138)
+                 +opts parfile,configuration,config,testsuite,select-tests.
+                 Requires a parfile unless --testsuite; --testsuite + parfile is
+                 fatal (sim-manage.py:128-130).
+submit        -> command_submit()         (sim-manage.py:257-270)
+                 +opts recover,debugger,restart-id,job-id,from-restart-id,hide,
+                 hide-boring,hide-dangerous. -> restart.userSubmit.
+run           -> command_run()            (sim-manage.py:204-223)
+                 +opts recover,debugger,restart-id,from-restart-id. Interactive,
+                 no queue. --restart-id -> submitRun(name,id) else userRun(name).
+run-debug     -> command_run_debug()      (sim-manage.py:225-241)  userRun(debug=True)
+interactive   -> command_interactive()    (sim-manage.py:86-88)
+stop          -> command_stop()           (sim-manage.py:316-341)
+archive       -> command_archive()        (sim-manage.py:343-359)
+cleanup       -> command_cleanup()        (sim-manage.py:58-84)
+get-output-dir-> command_get_output_dir() (sim-manage.py:273-290)  prints restart dir
+show-output   -> command_show_output()    (sim-manage.py:292-314)
+create-submit -> command_create_submit()  (sim-manage.py:145-168)  create then submit
+create-run    -> command_create_run()     (sim-manage.py:170-185)  create then run
+purge         -> command_purge()          (sim-manage.py:40-56)    -> restart.trash()
+
+--- sim-sync --------------------------------------------------------------------
+sync -> sim-sync.py main() (sim-sync.py:204-281). See section 17.
+
+--- sim-util --------------------------------------------------------------------
+checkout                 -> command_checkout()                (sim-util.py:213-260)
+login                    -> command_login()                   (sim-util.py:106-178)
+get-archived-simulation  -> command_get_archived_simulation() (sim-util.py:180-211)
+setup                    -> command_setup()                   (sim-util.py:84-93)
+setup-silent             -> command_setup_silent()            (sim-util.py:95-104)
+execute                  -> command_execute()                 (sim-util.py:78-82)
+remove-submitscript      -> command_remove_submitscript()     (sim-util.py:55-76)
+
+--- pseudo ----------------------------------------------------------------------
+help -> handled in sim.py CommandDispatch: prints optparse --help, exit 0.
+
+4.1 Positional-arg parsing for simulation commands
+  simlib.ParseSimulationCommandLine (simlib.py:191-246), used by create/submit/
+  run/create-run/create-submit, keyed on positional count:
+    1 arg : if it contains ".par"/".rpar" it is the parfile (UpdateOption
+            'parfile'), sim name = FileBaseName(parfile); else the arg is the
+            sim name.
+    2 args: returns None (caller treats first as sim name).
+    3 args: parfile, procs, walltime (sim name from parfile basename).
+    4 args: simname, parfile, procs, walltime.
+  procs/walltime are injected into the option namespace via UpdateOption
+  (simlib.py:237,242). A non-.par where one is expected -> fatal "argument stream
+  in incorrect format".
+
+
+================================================================================
+5. THE OPTION SYSTEM
+================================================================================
+Options are NOT hard-coded; they are declared in etc/options/*.ini and turned
+into optparse options at runtime (simopts.py).
+
+5.1 Mechanism
+  - OptionManager(OPTIONS_PATH) (simopts.py:35); Discovery() builds one
+    pyini.IniParser per *.ini (simopts.py:153-167).
+  - usedGroups starts ["common"] (simopts.py:39); sim.py adds the 5 groups.
+  - Build() (simopts.py:217-230) creates optparse.OptionParser with a custom
+    option_class TypeNonNull, adds built-in callbacks, adds each group ("common"
+    on the parser, others as an OptionGroup "Options from <group>"), then
+    parse_args() -> OptionsManager.options (values), OptionsManager.args
+    (leftover positionals = command + command args).
+
+5.2 INI option schema (one [section] = one option) (AddOption, simopts.py:245-304)
+    long      : long flag (required), e.g. "--verbose"
+    short     : short flag, e.g. "-j"
+    alias     : alternate name; optparse dest is set to the alias (so --cores
+                writes options.procs)
+    desc      : help text
+    negatable : "yes" generates --[no]X visible plus hidden --noX and --no-X
+                (cannot combine with a short option -> fatal, simopts.py:251-252)
+    arg       : "yes" => takes an argument; "no" => store_true flag
+    argtype   : 'nonnull' (custom; rejects empty/whitespace), 'int', 'string'
+    argformat : metavar shown in help
+    multiarg  : "yes" => action="append" (repeatable; value is a list)
+    default   : default value
+  Options are added by eval("op.add_option(%s)" % optstring) (simopts.py:292-342).
+  *** BUG: in the arg=yes branch the code checks `if 'defeult' in sdict`
+     (misspelled, simopts.py:271), so `default=` is SILENTLY IGNORED for all
+     argument-taking options. Defaults only take effect for boolean flags
+     (simopts.py:278-280) and via the negatable meta option. Practical effect:
+     the ini defaults for --debugger ("totalview") and --select-tests ("all")
+     do NOT apply at the OptionsManager level; effective default is None unless
+     downstream code substitutes a value. ***
+
+5.3 Built-in (non-ini) callback options (BuildBuiltins, simopts.py:182-215)
+    --define <k> <v>      Macros[k]=v (leading "@" stripped). Feeds @k@ substitution.
+    --mdbkey <k> <v>      MDBKeys[k]=v -> written into EVERY machine section at load.
+    --substitute <a> <b>  appends (a,b) to Substitutions (regex content sub).
+    --replace <s>         appends to Replacements ("KEY=VALUE" line replace).
+    --append <s>          appends to Appends ("KEY=VALUE" line prepend).
+  Plus optparse's -h/--help.
+
+5.4 Introspection helpers
+    HasOption(o)        getattr(options,o) is not None
+    GetOption(o)        getattr(options,o,None)
+    UpdateOption(o,v)   setattr (used to inject parfile/procs/walltime positionals)
+    RawOptionDefined(o) PREFIX-scans raw sys.argv for "--<o>" (so "--optionlistx"
+                        matches "optionlist"); detects EXPLICIT user options
+    IsNegated(o)        scans raw argv for "--no<o>"; NOTE it does NOT detect the
+                        "--no-<o>" spelling
+    BuildOptionString() re-serializes parsed options for remote forwarding; only
+                        re-emits RawOptionDefined options (defaults not propagated)
+
+
+================================================================================
+6. INITIALIZATION ORDER & OPTION PRECEDENCE
+================================================================================
+
+6.1 simenv.init (simenv.py:56-151), guarded by INITIALIZED (idempotent):
+  1. Imports simopts, simdb, simlib.
+  2. Path globals from BASE_PATH (VERIFIED against simenv.py:69-74):
+        ETC_PATH      = BASE_PATH/etc
+        LOG_PATH      = BASE_PATH/../log        (parent of base!)
+        MDB_PATH      = BASE_PATH/mdb/machines
+        MDB_BASE_PATH = BASE_PATH/mdb
+        SYNTAX_PATH   = BASE_PATH/etc/syntax
+        OPTIONS_PATH  = BASE_PATH/etc/options
+     and constants: INTERNALDIRECTORY = "SIMFACTORY" (simenv.py:23,88, VERIFIED).
+  3. EXECUTABLE = callingExecutable (BASE_PATH/bin/sim); COMMAND=None; VERBOSE=True.
+  4. OptionsManager built and argv parsed (simenv.py:95-104).
+  5. VERBOSE/StoredVerbose = GetOption('verbose') (default False).
+  6. GetIniFiles() (simenv.py:153-168): ini_files {'cdb':'defs','udb':'defs.local'};
+     'defs' is REQUIRED. Sets simenv.cdb = etc/defs.ini (required) and
+     simenv.udb = etc/defs.local.ini (optional). Missing defs.ini ->
+        print "No defs.ini found in <ETC_PATH>, and --defs was not specified"; exit 1
+     IMPORTANT: paths are HARD-WIRED to etc/defs.ini / etc/defs.local.ini.
+     GetIniFiles consults NO CLI option (the --mdb/--cdb options are dead; the
+     "--defs" named in the error message does not exist as an option).
+  7. ConfigurationDatabase(mdbDirectory=MDB_PATH, udb, cdb).Load() (section 8/10).
+  8. CACTUS_PATH = simlib.GetCactusPath(); None -> BASE_PATH + warning.
+  9. CONFIGS_PATH = CACTUS_PATH/configs (env CACTUS_CONFIGS_DIR overrides);
+     EXE_PATH = CACTUS_PATH/exe (VERIFIED simenv.py:122-125).
+ 10. LocalMachine = simlib.GetMachineName(); LocalMachineEntry = matching mdb Entry.
+ 11. INITIALIZED = True.
+
+6.2 Precedence for a machine-related value
+  simlib.GetMachineOption(option, default=None) (simlib.py:829-839):
+        value = OptionsManager.GetOption(option)     # 1. CLI option (or ini default)
+        if None: value = LocalMachineEntry.GetKey(option)   # 2. machine DB
+        if None: value = default                     # 3. caller default
+  => CLI option > machine-DB key > hard-coded default. So --queue/--allocation/
+  --ppn/--walltime/--num-threads/etc. override the DB at run time without editing
+  it (used in simrestart.py:613-617).
+
+6.3 Build-flag precedence (GetConfigValue, sim-build.py:317-330):
+        if IsNegated(opt): return False
+        if RawOptionDefined(opt): return True
+        if prop.HasProperty(opt): return CoerceBool(prop.GetProperty(opt))
+        return OptionsManager.GetOption(opt)
+  => explicit CLI negate/affirm > stored configs/<name>/properties.ini > option default.
+
+6.4 Environment variables
+  Read:  SIMFACTORY_PYTHONEXECS (bin/sim), CACTUS_PATH (simlib.py:350-357),
+         PWD (simlib.py:362-368), CACTUS_CONFIGS_DIR (simenv.py:123-124),
+         PATH (simdt.py:461), arbitrary names via @ENV(NAME)@ (simsubs.py:200-207).
+  Set (run/submit machinery): PBS_JOBID (simrestart.py:797),
+         CACTUS_STARTTIME (1128), CCTK_TESTSUITE_RUN_COMMAND (1260),
+         CCTK_TESTSUITE_RUN_PROCESSORS (1261).
+
+
+================================================================================
+7. THE INI PARSER (lib/pyini.py)
+================================================================================
+A custom, line-oriented parser (NOT ConfigParser). class InternalParser.Parse()
+(pyini.py:658-800); each line is .strip()'d, then matched in this order:
+
+  (a) blank -> ignored.
+  (b) comment: line[0] in '#' or ';' (pyini.py:687). FULL-LINE only -- a '#'/';'
+      not at column 0 is not a line comment. Full-line comments accumulate as the
+      LeadingComment of the next key/block.
+  (c) if in block mode: look for the block terminator.
+  (d) section header: r'\[(\S+)\]' (pyini.py:661). No whitespace allowed inside
+      brackets (else fatal "no whitespace allowed in section identifier").
+  (e) block start: r'(\S+)\s*=\s*<<(\w+).*$' (pyini.py:667). Tried before the
+      plain key regex on purpose.
+  (f) key=value: r'(\S+)\s*=\s*([^#]*)[#]?.*$' (pyini.py:664). key = a run of
+      non-whitespace; value = up to the first '#'.
+  (g) else -> fatal syntax error.
+
+7.1 Keys
+  - A key is \S+ (may contain '/', '+', '.', etc. -- e.g. machine key "flop/cycle").
+    Whitespace before '=' -> fatal "no whitespace allowed in key identifier".
+  - DUPLICATE keys within a [section] are FATAL ("duplicate key %s",
+    pyini.py:720-722, 786-788). NOTE: this check fires only inside named sections;
+    GLOBAL (pre-section) duplicate keys are NOT caught and silently overwrite.
+
+7.2 Values / inline comments / quoting
+  - Inline comment: value stops at the first '#'. Only '#' terminates an inline
+    value, NOT ';'.
+  - Trailing whitespace stripped (OriginalValue = value.rstrip()).
+  - Quoting (InterpretQuotes, pyini.py:260-276): if the value starts with ' or ",
+    it must match the matched-quote regex; the inner text becomes the value
+    (IsQuoted=True), letting it contain '#'/spaces. A trailing " #comment" after
+    the close quote is allowed. Malformed quote -> fatal. Backslash escapes are
+    accepted by the regex but NOT unescaped (backslashes are kept literally).
+
+7.3 Block (heredoc / multi-line) values
+        KEY = <<IDENT
+        ...lines...
+        IDENT
+  - IDENT is \w+ (need NOT be "EOT"; e.g. <<EOF, <<EOT both work). Terminator is
+    a line containing only IDENT (r'\s*IDENT\s*$', rebuilt dynamically).
+  - Body lines appended verbatim with trailing newline.
+    *** QUIRK: only the FIRST body line is passed through inline-comment
+       stripping (#/; from StripInlineComment); subsequent lines are verbatim
+       (pyini.py:703-706). ***
+  - EOF before terminator -> fatal "Runaway <<%s block...".
+  - Callers may convert a block value to a LIST via ConvertToList() (splits on
+    "\n"). This is how config-DB list keys (sync-sources etc.) and list
+    properties are formed.
+
+7.4 Sections & globals
+  - Keys before any [section] are GLOBALS (parser.Globals). After a header, keys
+    go into parser.Section[name]. Section and per-section key order are preserved.
+  - NO %(name)s interpolation, NO include directive in pyini. @VAR@ substitution
+    is an entirely separate later pass (section 11); pyini stores @USER@ etc. as
+    literal text.
+
+7.5 Merge engine (IniParser.UpdateFromIni, pyini.py:64-124) -- see section 10.4.
+
+7.6 Syntax checker (IniSyntaxChecker, pyini.py:279-456)
+  Validates an INI against a "syntax file" (itself an INI; section 8). For each
+  section (= a permitted key) it reads necessity/type/pattern/default/example/
+  description. It:
+    - injects defaults for missing keys (SetSectionDefaults);
+    - REJECTS any key in the target not present in the syntax file (fatal "found
+      invalid keys");
+    - enforces required keys, type coercion (int/double/float), and pattern match.
+  The fatal handler can be softened (lambda) -- simdb uses this to drop incomplete
+  udb-only machines instead of aborting.
+
+
+================================================================================
+8. THE MACHINE DATABASE (mdb/machines/*.ini)
+================================================================================
+
+8.1 Physical layout
+  - One machine per file mdb/machines/<anything>.ini (only ".ini" loaded;
+    simdb.py:94). The filename need not match the section.
+  - Each file MUST contain EXACTLY ONE [section]; the section name IS the machine
+    name/key (e.g. [mike], [frontera], [generic]). >1 or 0 sections -> ValueError
+    (simdb.py:101-105). The same section in two files -> "defined twice"
+    (simdb.py:107-108).
+  - Standard pyini KEY=VALUE and <<EOT/<<EOF blocks. Values may carry @VAR@
+    placeholders, e.g.:
+        sourcebasedir = /home/@USER@                 (generic.ini:28)
+        make          = make -j@MAKEJOBS@            (generic.ini:32)
+        submit        = sbatch @SCRIPTFILE@ 2>&1     (mike.ini:47)
+        getstatus     = squeue -j @JOB_ID@           (mike.ini:48)
+
+8.2 AUTHORITATIVE key catalog: etc/syntax/mdb-syntax.ini
+  Every recognized machine key is a [section] there; any key NOT listed is
+  REJECTED at load. (etc/syntax/description-syntax.ini is the meta-schema that
+  mdb-syntax.ini itself is validated against, on every load: simdb.py:84-85.)
+  Each entry: key -- necessity / type / default / pattern -- meaning.
+
+  Group "machine" (descriptive):
+    nickname     req string  ^[a-zA-Z0-9_+-\.]+$    short nickname
+    name         req string                          full human name
+    location     req string                          geographic location
+    description  req string                          free text
+    webpage      opt string                          URL
+    status       req string  ^(personal|experimental|production|storage|outdated|
+                                trampoline)$
+                 (personal=permission only; experimental=may not work;
+                  production=works OOTB; storage=data only; outdated=do not use;
+                  trampoline=tunneling only)
+
+  Group "access":
+    user         req string  ^[a-zA-Z0-9_+-.]+$      login id
+    email        req string  .+
+    hostname     req string  .+                      externally reachable host
+    iomachine    opt string  .+                      host w/ faster FS access
+    trampoline   opt string  .*                      intermediate tunnel host
+    envsetup     opt string  DEFAULT ":"             shell setup before sf commands
+                                                      (usually a <<EOT of module loads)
+    rsynccmd     opt string  DEFAULT "rsync"
+    rsyncopts    opt string  DEFAULT ""
+    sshcmd       opt string  DEFAULT "ssh"
+    sshopts      opt string  DEFAULT "-Y"
+    localsshsetup   opt string DEFAULT ":"
+    localsshprefix  opt string DEFAULT ""
+    localsshopts    opt string DEFAULT ""
+    aliaspattern req string  .+   REGEX matched against local hostname to auto-
+                 detect this machine. e.g. ^mike\d+\.hpc\.lsu\.edu$ (mike.ini:16),
+                 ^qb[0-9](\.loni\.org)?$, ^generic\.some\.where$ (generic.ini:15).
+    (NOTE: a [sshsetup] entry is COMMENTED OUT in mdb-syntax.ini -> "sshsetup" is
+     NOT a recognized key.)
+
+  Group "source":
+    sourcebasedir req string [^/]$   base path for source trees (no trailing '/')
+    disabled-thorns / disabled-thorns-default / disabled-thorns-local  opt string ""
+    enabled-thorns  / enabled-thorns-default  / enabled-thorns-local   opt string ""
+                 (thorn enable/disable lists; -default applies to defs.local.ini
+                  [default], -local to its per-machine sections)
+    optionlist   req string  [^/]$   bare filename -> mdb/optionlists/<name>.cfg
+    thornlist    opt string  [^/]$   bare filename (*.th)
+    submitscript opt string  [^/]$   bare filename -> mdb/submitscripts/<name>.sub
+    runscript    req string  [^/]$   bare filename -> mdb/runscripts/<name>.run
+    make         opt string  [^/]$  DEFAULT "make"  (often "make -j@MAKEJOBS@")
+    makejobs     opt int                             parallel make jobs (@MAKEJOBS@)
+
+  Group "simulation":
+    basedir      req string  [^/]$   base path for simulation output
+    scratchbasedir opt string [^/]$  fast temp dir (NB: it is "scratchbasedir",
+                                     NOT "scratchdir")
+    quota        opt double          disk quota GB
+    cpu          opt string          CPU description
+    cpufreq      opt double          GHz (@CPUFREQ@)
+    flop/cycle   opt double          flop per cycle per core (literal '/' in key)
+    efficiency   opt double DEFAULT 0.1
+    ppn          req int             logical cores per node
+    spn          opt int             sockets per node
+    mpn          opt int             memory banks per node
+    max-num-threads opt int
+    num-threads  opt int   DEFAULT 1
+    max-num-smt  opt int   DEFAULT 1
+    num-smt      opt int   DEFAULT 1
+    memory       opt double DEFAULT 0   per-node MB (@MEMORY@)
+    I1size,I1linesize,I1assoc,I1cores   opt int   (L1 instr cache)
+    D1size,D1linesize,D1assoc,D1cores   opt int   (L1 data cache)
+    L2size,L2linesize,L2assoc,L2cores   opt int   (L2)
+    L3size,L3linesize,L3assoc,L3cores   opt int   (L3)
+    nodes        req int             nodes available
+    min-ppn      opt int  DEFAULT 1
+    allocation   opt string          account id (@ALLOCATION@)
+    queue        opt string DEFAULT "NOQUEUE"   (@QUEUE@)
+    maxwalltime  opt string ^\d+:\d+:\d+$ DEFAULT "8760:00:00"  (1 year)
+    maxqueueslots opt int
+    submit       req string          job submission cmd (uses @SCRIPTFILE@)
+    interactivecmd opt string        interactive-job submission cmd
+    getstatus    req string          status query cmd (uses @JOB_ID@)
+    stop         req string          kill/delete cmd (uses @JOB_ID@)
+    submitpattern  req string .+      regex; job id = group $1 (e.g.
+                                      "Submitted batch job ([0-9]+)")
+    statuspattern  req string .+      regex: job is in queue (active)
+    queuedpattern  req string .+      regex: active+queued
+    runningpattern req string .+      regex: active+running
+    holdingpattern req string .+      regex: active+held
+    exechost     opt string          cmd to find root compute-node hostname
+    exechostpattern opt string .+     regex; host = group $1
+    stdout / stderr / stdout-follow  opt string  cmds to print a running job's
+                 stdout/stderr (run in restart dir; may use @EXECHOST@, @JOB_ID@,
+                 @SIMULATION_NAME@)
+
+  Required keys: nickname, name, location, description, status, user, email,
+  hostname, aliaspattern, sourcebasedir, optionlist, runscript, basedir, ppn,
+  nodes, submit, getstatus, stop, submitpattern, statuspattern, queuedpattern,
+  runningpattern, holdingpattern. (NOTE: user/email required-checks are skipped
+  until a udb exists -- defs.local.ini's [default] supplies them; simdb.py:139-148.)
+
+
+================================================================================
+9. MACHINE DETECTION (LOCAL vs REMOTE)
+================================================================================
+
+9.1 Local machine name -- simlib.GetMachineName() (simlib.py:77-124):
+  1. --machine option wins outright.
+  2. else machineName = GetHostNameAlias().
+  3. A machine matches if section name == machineName OR entry.hostname ==
+     machineName OR aliaspattern regex matches machineName.
+  4. 0 matches -> warning "Unknown machine name %s", returns None.
+  5. >1 matches (shared login nodes): disambiguate by keeping machines whose
+     (subbed) sourcebasedir is a prefix of the real CACTUS_PATH. Exactly one
+     left -> use it; else warning "Could not identify machine ...".
+
+  GetHostNameAlias() (simlib.py:17-54), in order:
+    1. --hostname option, 2. ~/.hostname file contents, 3. shell `hostname` then
+    socket.gethostbyname_ex (prefer the first dotted name, "localhost" filtered).
+
+9.2 Local entry -- simenv.py:128-133. If unknown, RequireMachine() fatals with a
+  hint: "Please use 'sim setup' to create a local machine entry from the generic
+  template." (simlib.py:1075-1078).
+
+9.3 Local vs remote
+  - There is NO "local" flag in the MDB; the same entries describe a machine
+    whether you are on it or ssh-ing to it.
+  - LOCAL = the machine matched for the current host; commands run directly.
+  - REMOTE = chosen with --remote/--remotemachine; SimFactory ssh-es to it,
+    using access keys hostname/user/sshcmd/sshopts/localssh*/trampoline/iomachine/
+    rsync*. (Section 18.)
+  - The "generic" machine describes a workstation: submit is a local nohup/exec,
+    getstatus is `ps`, stop is `pkill` (generic.ini:38-47) -- no batch system.
+
+
+================================================================================
+10. CONFIG DB & DEFS LAYERING
+================================================================================
+
+10.1 Databases (ConfigurationDatabase.Load, simdb.py:66-148)
+  - mdbDirectory = mdb/machines/*.ini -> MachineParser
+  - cdb = etc/defs.ini                -> ConfigParser (global keys)
+  - udb = etc/defs.local.ini          -> merged into BOTH
+
+10.2 etc/defs.ini (built-in config DB / cdb)
+  GLOBAL (sectionless) <<EOT block keys, converted to LISTS (ConvertBlocks,
+  simdb.py:150-156):
+    sync-sources  = CONTRIBUTORS, COPYRIGHT, Makefile, arrangements, bin, lib,
+                    manifest, repos, simfactory, src, utils, thornlists
+    sync-parfiles = examples, par
+    default-configuration-name = sim   (scalar)
+  Because list globals ACCUMULATE on merge, a user's defs.local.ini sync-sources/
+  sync-parfiles PREPEND to these.
+
+10.3 etc/defs.local.ini (udb) -- NOT shipped; generated by `sim setup`
+  Templates: etc/defs.local.ini.simple (minimal [default] user/email/thornlist +
+  a commented per-machine override) and etc/defs.local.ini.complex (list-global
+  overrides + [default] + many per-machine sections).
+  *** STALE: the .complex example uses key "scratchdir" in per-machine sections,
+     but mdb-syntax.ini defines "scratchbasedir". An unknown key would be rejected
+     by the syntax checker unless the section is udb-only-and-incomplete (then
+     soft-dropped). Treat "scratchdir" as a legacy/suspect example. ***
+
+10.4 Load order & merge semantics
+  1. Validate mdb-syntax.ini against description-syntax.ini.
+  2. Load every mdb/machines/*.ini (UpdateFromIni(path, importSections=True)).
+  3. Load cdb; ConvertBlocks() turns global blocks into lists.
+  4. If udb: merge into MachineParser (importSections=True) AND ConfigParser.
+  5. Apply --mdbkey overrides: MachineParser.UpdateFromDict(MDBKeys) writes each
+     key into EVERY machine section (simdb.py:131).
+  6. SetSectionDefaults(): fill missing keys from mdb-syntax.ini defaults
+     (envsetup=":", sshcmd="ssh", sshopts="-Y", num-threads=1, queue="NOQUEUE",
+     maxwalltime="8760:00:00", make="make", efficiency=0.1, memory=0, min-ppn=1...).
+  7. If udb: syntax-check machines; udb-only machines that fail are DROPPED with a
+     warning; non-udb machines are hard-checked (simdb.py:140-148).
+
+  UpdateFromIni (pyini.py:64-124) precise rules:
+    (a) GLOBAL keys present in both: if self's value is a list, the incoming value
+        is converted to a list and the incoming items are placed FIRST, existing
+        AFTER (accumulate); else scalar overwrite. Incoming globals not already in
+        self are skipped.
+    (b) named sections: if importSections, create if absent; if present, every
+        incoming key OVERWRITES self's. (This is how a [mike] block in
+        defs.local.ini overrides mdb values.)
+    (c) special "default" section: applied to EVERY existing section but ONLY
+        where the key is not already present (fill-only fallback).
+
+10.5 Effective precedence for a machine key (highest first)
+  1. --mdbkey KEY VALUE (every section; applied after udb)
+  2. dedicated run-time options via GetMachineOption (--queue/--allocation/--ppn/
+     --walltime/etc.) -- override at use time without touching the DB
+  3. per-machine [<machine>] section in defs.local.ini
+  4. the machine's own mdb/machines/<m>.ini value
+  5. [default] section of defs.local.ini (fill-only)
+  6. mdb-syntax.ini defaults (fill-only)
+  (List-valued GLOBAL config keys accumulate rather than override.)
+
+  NOTE: lib/dt/defaults.ini, defaults-silent.ini, machine-override.ini are
+  DECISION TREES for `sim setup` (section 20), NOT part of this runtime layering.
+
+
+================================================================================
+11. THE @VAR@ SUBSTITUTION ENGINE (lib/simsubs.py)
+================================================================================
+class DefineDatabase. Delimiter is the AT sign: @NAME@. Applied to selected
+machine-entry strings (basedir, sourcebasedir, sshopts, envsetup) and to
+optionlist/runscript/submitscript/parfile CONTENTS at build/submit/run time.
+pyini does NOT do this; it is a separate pass.
+
+SubAll() (simsubs.py:167-216) loops to a fixpoint, each pass applying:
+  (a) Plain macro:  @NAME@ -> value (literal string replace). Nested @VAR@ in
+      values resolve because of the loop.
+  (b) Expression:   @( EXPR )@  (regex r"@\(([^@]+)\)@"). EXPR is Python eval'd
+      in a namespace providing only ifthen(). Ternary sugar: if EXPR contains '?'
+      it is rewritten to ifthen(cond,a,b) (TransformTernary). Word operators are
+      translated: ne->!=, eq->==, gt->>, lt-><, gte->>=, lte-><=. More than two
+      '?' -> fatal. ifthen swallows eval errors and returns the false-value.
+      Real example (frontera.sub:6):
+        #SBATCH @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
+  (c) Environment:  @ENV( NAME )@  -> os.environ[NAME]; missing -> fatal.
+  (d) Regex substitutions (from --substitute + config-DB "substitutions"):
+      (pattern, replacement) with "@1@" -> backreference \1, re.MULTILINE.
+  (e) Pattern substitutions from AddDefine/AddSubstitution/AddReplacement/AddAppend.
+  Fixpoint exit strips the literal marker "=SIMFACTORY-PROTECTED=".
+
+Content-editing helpers (used to force values into option lists / parfiles):
+  AddDefine(var,value)       pattern r"@var@" -> value
+  AddSubstitution(var,value) raw regex pattern -> value ("@1@" -> \1)
+  AddReplacement(var,value)  replaces the whole line  r"^[ \t]*VAR[ \t]*=.*$"
+                             with "=SIMFACTORY-PROTECTED=VAR = value"
+  AddAppend(var,value)       r'^[ \t]*VAR[ \t]*=[ \t]*(.*?)[ \t]*$' ->
+                             "=SIMFACTORY-PROTECTED=VAR = value \1" (PREPEND)
+  The PROTECTED marker prevents re-matching during the loop and is stripped at end.
+  CLI feeds: --define/--replace/--append/--substitute (split on first '=').
+
+The COMPLETE @VAR@ name set (submit phase simrestart.py:629-696; run phase
+1138-1203; each new_properties[KEY] becomes @KEY@):
+  @SOURCEDIR@ @SIMULATION_NAME@ @SHORT_SIMULATION_NAME@ @SIMULATION_ID@
+  @RESTART_ID@ @RUNDIR@ @SCRIPTFILE@ @SUBMITSCRIPT@ @EXECUTABLE@ @PARFILE@
+  @HOSTNAME@ @USER@ @EMAIL@ @MACHINE@ @NODES@ @PROCS_REQUESTED@ @PPN@ @NUM_PROCS@
+  @NODE_PROCS@ @PROCS@ @NUM_THREADS@ @PPN_USED@ @NUM_SMT@ @MEMORY@ @CPUFREQ@
+  @ALLOCATION@ @QUEUE@ @WALLTIME@ @WALLTIME_HH@ @WALLTIME_MM@ @WALLTIME_SS@
+  @WALLTIME_SECONDS@ @WALLTIME_MINUTES@ @WALLTIME_HOURS@ @SIMFACTORY@
+  @CONFIGURATION@ @FROM_RESTART_COMMAND@ ("" or "--from-restart-id=N")
+  @CHAINED_JOB_ID@ @RUNDEBUG@ (1/0) @DEBUGGER@ @MAKEJOBS@ @JOB_ID@ @EXECHOST@
+  @BASEDIR@
+  *** TYPO: "@QEUEUE@" appears in some mdb script(s) (a misspelling of @QUEUE@);
+     it will NOT be substituted and leaks literally. Fix during port. ***
+
+
+================================================================================
+12. OPTIONLISTS / RUNSCRIPTS / SUBMITSCRIPTS (mdb/)
+================================================================================
+Resolution (bare names from machine keys; pattern [^/]$):
+    optionlist   -> mdb/optionlists/<name>.cfg     (simlib.py:783-784)
+    runscript    -> mdb/runscripts/<name>.run      (simlib.py:826-827)
+    submitscript -> mdb/submitscripts/<name>.sub   (simlib.py:823-824)
+    thornlist    -> resolved under ETC_PATH         (simlib.py:786-789)
+  via GetCactusFile (simlib.py:1012-1073): if the value is a path that exists use
+  it; else try cwd/<value>, then <base>/<option>s/<value> (folder name = option
+  pluralised). Fatal if unreadable when required.
+
+12.1 OptionList (*.cfg): Cactus build option lists (NOT pyini). Plain
+  "NAME = value" + "# comment" lines. Passed through the substitution/replacement
+  engine before use. Carries CPP/CC/CXX/F90/LD, *FLAGS families, DEBUG/OPTIMISE/
+  PROFILE/WARN/OPENMP toggles, VECTORISE*, etc. The first line is a VERSION date
+  string; changing VERSION forces a full reconfigure+rebuild (section 16).
+
+12.2 RunScript (*.run): a bash template executed on the compute node to launch
+  Cactus. @VAR@ tokens. generic.run does:
+    cd @RUNDIR@-active; export CACTUS_NUM_PROCS/NUM_THREADS/OMP_NUM_THREADS;
+    launch @EXECUTABLE@ -L 3 @PARFILE@ (serial or mpirun -np @NUM_PROCS@);
+    honors @RUNDEBUG@ to run under gdb.
+
+12.3 SubmitScript (*.sub): a batch submit template. SLURM example (frontera.sub):
+    #SBATCH -A @ALLOCATION@ / -p @QUEUE@ / -t @WALLTIME@ / -N @NODES@ -n @NUM_PROCS@
+    #SBATCH @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
+    #SBATCH -J @SHORT_SIMULATION_NAME@
+    #SBATCH -o @RUNDIR@/@SIMULATION_NAME@.out
+    #SBATCH -e @RUNDIR@/@SIMULATION_NAME@.err
+    cd @SOURCEDIR@
+    @SIMFACTORY@ run @SIMULATION_NAME@ --basedir=@BASEDIR@ --machine=@MACHINE@ \
+        --restart-id=@RESTART_ID@ @FROM_RESTART_COMMAND@
+  KEY DESIGN POINT: the submit script re-invokes `sim run`, which then substitutes
+  the run script and execs the binary. The queue stdout/stderr filenames are
+  defined HERE in the template (e.g. @RUNDIR@/@SIMULATION_NAME@.out), NOT in the
+  Python; the generic (workstation) submitscript has no scheduler directives.
+
+12.4 Substitution timing: submitscript content subbed with the submit-phase
+  property set (simrestart.py:705); runscript content with the run-phase set
+  (simrestart.py:1209+). The two phases define slightly different @VAR@s.
+
+
+################################################################################
+# 13. ON-DISK SIMULATION LAYOUT  *** PRIMARY DELIVERABLE ***                    #
+#     Corroborated by two independent passes + direct source re-verification.  #
+################################################################################
+
+13.1 Path primitives & constants (VERIFIED)
+    INTERNALDIRECTORY = "SIMFACTORY"        (simenv.py:23,88)
+    basedir  = simlib.GetBaseDir(machineEntry) (simlib.py:249-273): --basedir
+        option, else machine 'basedir' key with @USER@/@ALLOCATION@ substituted;
+        made absolute against cwd if relative. (NB: GetBaseDir always uses
+        simenv.LocalMachineEntry, ignoring its argument, simlib.py:256.)
+        The literal default 'basedir' TEMPLATE lives in the machine DB, not in
+        Python. (generic uses $HOME/simulations via `sim setup`; simdt.py:415-416.)
+
+13.2 Top level of basedir
+    basedir/
+      <SimulationName>/      one directory per simulation
+      CACHE/                 literal "CACHE" -- executable hard-link cache
+                             (CACHE/exe). Created during skeleton creation.
+      TRASH/                 literal "TRASH" -- purge destination. Created on demand.
+  CACHE and TRASH are explicitly excluded from the simulation listing
+  (simlib.py:435). A directory under basedir counts as a simulation iff it
+  contains SIMFACTORY/properties.ini (simlib.py:434).
+
+13.3 The simulation directory
+    basedir/<SimulationName>/
+      log.txt                          the simulation log (append mode "a+";
+                                       line format "[LOG:%s] %s::%s\n" with
+                                       date "%Y-%m-%d %H:%M:%S"; restartlib.py:21,46,59)
+      SIMFACTORY/                      simulation-level metadata (INTERNALDIRECTORY)
+        properties.ini                 simulation-level properties (section 15)
+        exe/                           copied (cached) executable
+        cfg/                           substituted OptionList ("master" copy)
+        run/                           substituted SubmitScript and RunScript ("master")
+        par/                           substituted parfile ("master" copy)
+        data/                          optional --datadir contents
+      output-0000/                     restart 0  (section 13.5)
+      output-0000-active               SYMLINK marking the active restart (13.4)
+      output-0001/  ...  output-NNNN/
+      [SIMULATION_ID]                  legacy simfactory-1 marker FILE; if present,
+                                       load() returns -2. simfactory2 NEVER writes it.
+
+  The five SIMFACTORY subdirs come from CreateInternalDirs (VERIFIED
+  restartlib.py:687-700): roots = ['exe','cfg','run','par','data'], created under
+  the SIMULATION-level SIMFACTORY during create() (returned in order
+  exedir,cfgdir,rundir,pardir,datadir; consumed at simrestart.py:1391).
+
+  Skeleton creation (CreateRestartSkeleton, VERIFIED restartlib.py:720-755):
+  makes basedir, simulationdir, simulationdir/SIMFACTORY, and CACHE; FATALS if
+  SIMFACTORY already exists ("Simulation ... already exists and has been
+  initialized") -- this is the guard against re-creating a sim.
+
+13.4 The ACTIVE restart -- a symlink, not a property (VERIFIED)
+  makeActive() (simrestart.py:419-447):
+        os.chdir(self.RestartDir)
+        os.symlink("output-%s" % self.LongRestartID, "%s-active" % self.RestartDir)
+  The link NAME is the full path <SimulationDir>/output-NNNN-active; the TARGET is
+  the relative "output-NNNN". So it is a RELATIVE symlink living in the simulation
+  directory, pointing at the restart dir. (The chdir is purely so a submit script
+  that writes files lands in the restart dir; the code comments flag both the
+  chdir and the symlink as "TODO: must not".)
+  - makeActive FATALS if an active restart already exists.
+  - GetActiveRestartId (restartlib.py:435-460): scans for regex
+    "output-([0-9]+)-active"; 0 -> -1 (none); >1 -> FATAL "more than one active
+    restart id"; listdir ENOENT -> -2.
+  - HasActiveRestart: any dir entry ending in "-active" (restartlib.py:201-211).
+
+13.5 Restarts / segments
+  - Directory name "output-%04d" (VERIFIED simrestart.py:138,320; LongRestartID =
+    "%04d" % int(restartid)). ids 0..9999.
+  - Discovered by regex "output-([0-9]+)" over the sim dir, sorted ascending
+    (GetRestartIds, restartlib.py:418-433). (Regex matches any digit count, but
+    creation always 4-pads.)
+  - Id assignment (GetRestartId, simrestart.py:830-861): max_restart_id = last
+    sorted id (or -1); with --restart-id use it (fatal if already in use unless
+    forced); else my_restart_id = max + 1. >9999 -> FATAL "maximum number of
+    restarts reached. Please use sim purge ...".
+
+  A restart directory:
+    output-NNNN/
+      SIMFACTORY/                      restart-level metadata (its OWN SIMFACTORY)
+        properties.ini                 per-restart properties (extends the sim-level
+                                       copy because it is loaded from it first)
+        SubmitScript                   substituted submit script for this restart
+                                       (literal name; simrestart.py:625,750)
+        RunScript                      substituted run script (literal name;
+                                       simrestart.py:1246-1248)
+        job.ini                        LEGACY job-id store; READ-ONLY fallback only.
+                                       Current code stores jobid as a PROPERTY.
+        timestamp                      mark file (time.time()); written by finish()
+        simulation                     mark file; written right after submit
+      <parfile-basename>.par           the substituted, ready-to-run parfile copy
+                                       actually used by the run (BuildPath(RestartDir,
+                                       basename); .rpar becomes <base>.par)
+      <parfile-name>/                  Cactus working/output dir (parfile basename,
+                                       extension stripped; simrestart.py:1117-1118).
+                                       Cactus writes its output, checkpoints, and
+                                       Formaline tarballs HERE.
+      <SimulationName>.out             stdout  -- ONLY for foreground `sim run`
+      <SimulationName>.err             stderr  -- ONLY for foreground `sim run`
+                                       (BuildPath(RestartDir,"%s.out"/"%s.err" %
+                                       SimulationName); simrestart.py:983-984)
+      TERMINATE                        graceful-termination trigger file
+                                       (BuildPath(RestartDir,'TERMINATE'))
+      [exe/]                           testsuite mode only (13.7)
+
+  IMPORTANT (overloaded attribute): self.InternalDir is the SIMULATION-level
+  SIMFACTORY right after load()/create() with no restart id, but is RE-POINTED to
+  the RESTART-level SIMFACTORY once a restart id is loaded (simrestart.py:139,321).
+  Hence {exe,cfg,run,par,data} live under the SIMULATION-level SIMFACTORY (created
+  in create()), while per-restart properties.ini/SubmitScript/RunScript live under
+  the RESTART-level SIMFACTORY.
+
+13.6 stdout/stderr: queue vs foreground
+  - Queue-submitted jobs: stdout/stderr filenames are set by the machine's submit
+    SCRIPT TEMPLATE (e.g. #SBATCH -o @RUNDIR@/@SIMULATION_NAME@.out), not by Python.
+  - Foreground `sim run` (userRun): SimFactory itself forks and tees child
+    stdout/stderr into <Sim>.out / <Sim>.err while echoing to the terminal
+    (simrestart.py:1000-1052); show-output reads these back when the job is not
+    running.
+
+13.7 Testsuite layout (copyTestsuiteData, simrestart.py:473-549)
+  When Properties.testsuite == "True":
+    output-NNNN/exe/                          (os.mkdir)
+    output-NNNN/exe/<exe basename>            (hard-link/copy)
+    output-NNNN/exe/<configuration>/          (copytree of <sourcedir>/exe/<config>)
+  plus an rsync of arrangements/test data into the restart dir. The testsuite run
+  command embeds: "rm -f output-0000-active", "ln -s . output-0000-active",
+  "mkdir -p SIMFACTORY", then make "<configuration>-testsuite PROMPT=no"
+  (simrestart.py:1256-1273).
+
+13.8 Exact-naming quick reference
+    basedir/                                   (machine 'basedir' key, @USER@/@ALLOCATION@)
+    basedir/CACHE/exe/                         executable hard-link cache
+    basedir/TRASH/<simulationid>/              purged simulations (moved, not deleted)
+    basedir/<SimulationName>/log.txt
+    basedir/<SimulationName>/SIMFACTORY/properties.ini
+    basedir/<SimulationName>/SIMFACTORY/{exe,cfg,run,par,data}/
+    basedir/<SimulationName>/output-%04d/
+    basedir/<SimulationName>/output-%04d-active        relative symlink -> output-%04d
+    .../output-%04d/SIMFACTORY/{properties.ini,SubmitScript,RunScript,job.ini,
+                                timestamp,simulation}
+    .../output-%04d/<parfile-basename>.par             ready-to-run parfile
+    .../output-%04d/<parfile-name>/                    Cactus working dir
+    .../output-%04d/<Sim>.out, <Sim>.err               foreground run only
+    .../output-%04d/TERMINATE
+
+  simulation_id format (VERIFIED restartlib.py:532-550):
+    timestamp = "%4d.%02d.%02d-%02d.%02d.%02d" % (Y,Mo,D,H,Mi,S)
+    simulation_id = "simulation-%s-%s-%s-%s-%s-%s" %
+                    (simulationName, machine, hostname, user, timestamp, pid)
+    (`user` is captured live via `whoami`; `machine`/`hostname` from the entry.)
+  pbsSimulationName / @SHORT_SIMULATION_NAME@ (VERIFIED restartlib.py:552-585):
+    default = "<SimulationName>-<LongRestartID>"; then
+      --hide           -> "sim-%06d" % pid
+      --hide-boring    -> "sim-<word>-<pid>"  (word from a fixed list:
+                          headon,D3.0,a0.6,mu0.25,PN1.5,FMR,1+log,nowaves,findAH,
+                          coarse,singleBH,PUGH,movie)
+      --hide-dangerous -> "sim-<word>-<pid>"  (word list: paramesh,D25.0,a0.999,
+                          mu0.01,PN4.0,CCM,spec35,maximal,string,FE,tail,DSS,PRL,naked)
+    then: strip non-printables (re.sub "[^\x20-\x7E]"), whitespace -> '_'
+    (re.sub r"[\s]"), ensure leading char is a letter (re.sub "^(?![A-Za-z])"
+    prefixes 'J'), TRUNCATE to 15 chars.
+
+
+================================================================================
+14. SIMULATION LIFECYCLE
+================================================================================
+Commands: create, submit, run, run-debug, interactive, stop, archive, cleanup,
+get-output-dir, show-output, create-submit, create-run, purge (sim-manage.py:21-22).
+
+14.1 create() (simrestart.py:1303-1466) -- one-time setup, NO restart yet
+  Steps:
+   1. Validate parfile (empty "" is the testsuite sentinel).
+   2. configuration = GetConfiguration() (default sim[-debug|-optimise|...]).
+      configPath = CONFIGS_PATH/<configuration>.
+   3. GetExecutable() (restartlib.py:477-503):
+        exe          = CACTUS_PATH/exe/cactus_<configuration>  (FATAL if missing)
+        submitScript = configPath/SubmitScript (None if absent)
+        runScript    = configPath/RunScript    (FATAL if absent)
+      optionlist = configPath/OptionList.
+   4. config_id = configPath/CONFIG-ID (default 'no-config-id');
+      build_id  = configPath/BUILD-ID  (default 'no-build-id').
+   5. CreateRestartSkeleton -> (BaseDir, SimulationDir, InternalDir, CacheDir).
+   6. CreateSimulationId (section 13.8).
+   7. Write SIMFACTORY/properties.ini (section 15), CreateInternalDirs.
+   8. Copy executable via CopyFileWithCaching(exe, exedir, CACHE/exe) + chmod +x.
+   9. Substitute and write OptionList -> cfg/, SubmitScript -> run/ (or property
+      "None"), RunScript -> run/, parfile -> par/ (or "" if no parfile).
+  10. Optional --datadir copytree into SIMFACTORY/data.
+  NOTE: create() copies into the SIMULATION-level SIMFACTORY/. submit()/run() make
+  a SECOND, freshly substituted copy into the RESTART-level dir. The 'executable'
+  property always points at the simulation-level SIMFACTORY/exe copy.
+
+14.2 submit() (command_submit -> userSubmit -> submit, simrestart.py:333-828)
+  - initRestart(): if no sim exists, create() it; opportunistically cleanup a
+    stale active restart whose job status is 'U'; assign a new restart id and
+    create output-NNNN/ + output-NNNN/SIMFACTORY/.
+  - Build the submit-phase @VAR@ property set (nodes/procs/ppn/queue/allocation/
+    walltime/pbsSimulationName/chainedjobid/...); Save() restart properties.ini.
+  - Write substituted SubmitScript to InternalDir, chmod +x; copyTestsuiteData if
+    testsuite.
+  - makeActive() (create the -active symlink) UNLESS this is a chained presubmit.
+  - Run machineEntry.submit; mark("simulation"); parse job id via
+    machineEntry.submitpattern (extractJobId); store property 'jobid' ("-1" =
+    failed/unknown).
+  - CHAINING: if the sim is already active, chain the new submission onto the
+    current max job id (preSubmit; not made active). AUTO walltime chaining: if
+    requested walltime > maxwalltime, presubmit ceil(walltime/maxwalltime)
+    additional restarts, each chained onto the previous job id (simrestart.py:800-826).
+
+14.3 run / run-debug (command_run, sim-manage.py:204-241)
+  - With --restart-id: submitRun() loads that restart, optionally finishes the
+    from-restart-id, makeActive(); FATAL if no active dir; then run().
+  - Without: userRun() builds a fresh restart's properties (no submit), Save()s,
+    makeActive(), then fork()s and tees stdout/stderr to <Sim>.out/<Sim>.err while
+    running run().
+  run() (simrestart.py:1081-1295):
+    - assert IsActive(); PrepareCheckpointing(recover_id) (14.6) sets property
+      'checkpointing' "yes"/"no".
+    - create working dir RestartDir/<parname>.
+    - .rpar handling: copy .rpar into RestartDir, chmod +x, execute it to generate
+      the .par, read that; else read the stored parfile.
+    - substitute parfile, write to <RestartDir>/<basename>.par; Save() properties.
+    - write RunScript to InternalDir, chmod +x.
+    - os.chdir(RestartDir); ExecuteReplaceCommand (exec the run script / make
+      testsuite).
+
+14.4 marks / timestamps (simrestart.py:36-97)
+  mark(label) writes "%s\n" % time.time() into InternalDir/<label>. Labels used:
+  "timestamp" (default; written by finish()) and "simulation" (after submit).
+  CleanupRestarts uses them to throttle automatic cleanup (skip sims < 60s old;
+  re-clean only every 30s; restartlib.py:151-199). A legacy "<label>-<timestamp>"
+  filename form is also recognized on read/clear.
+
+14.5 cleanup / finish (simrestart.py:1630-1827)
+  cleanup() == finish(allowForce=True). finish() DEACTIVATES a restart:
+    - mark() (timestamp); no-op if no -active symlink.
+    - refuses if Properties.machine != local machine.
+    - leaves the restart alone if job status is 'E', or != 'U' without --force.
+    - if force: stop() the job first.
+    - removes the output-NNNN-active symlink (os.unlink).
+    - chmod TERMINATE to drop group/other write bits.
+    - deletes half-written checkpoints: find ... -name *.chkpt.tmp.it_*.* -exec rm -rf.
+    - Formaline tarball DEDUP: for every *.tar.gz >= 1000 bytes, scan previous
+      output-%04d dirs (descending); if an identical file (filecmp.cmp) exists,
+      replace this one with a HARD LINK via a .tmp rename
+      (oldpath = "%s/output-%04d/%s" % (SimulationDir, rid, f); simrestart.py:1797).
+  done() just closes the log.
+
+14.6 recovery / checkpointing (PrepareCheckpointing, simrestart.py:160-267)
+  - Recover source = 'from-restart-id' property if set, else max_restart_id;
+    default recovers from RestartID-1.
+  - GetCheckpointFiles(restore_dir): find <workdir> -name *chkpt.it_*. Each is
+    HARD-LINKED into the current restart at the corresponding path (restore_dir
+    string-replaced by RestartDir), falling back to copy. No checkpoint files ->
+    recovery disabled (returns False).
+
+14.7 Job status & state (queried LIVE, not stored)
+  GetJobStatus (restartlib.py:327-416) runs machineEntry.getstatus and matches the
+  output against the machine's *pattern regexes, returning one of:
+    'R' running, 'Q' queued, 'H' holding, 'U' unknown (not in queue),
+    'E' in-queue-but-status-unknown.
+  list-simulations maps these to ACTIVE (RUNNING/QUEUED/PRESUBMITTED/FINISHED) /
+  ERROR / INACTIVE (sim-info.py:130-141).
+
+14.8 stop (simrestart.py:1468-1518)
+  If TERMINATE exists and not --force: write the single char '1' into TERMINATE
+  (graceful) then finish(). Else run the machine 'stop' command (forced; finish
+  removes the symlink). NOTE: TERMINATE is CREATED by the running Cactus job
+  (TerminationTrigger), not by create/submit; SimFactory only writes "1" into it
+  and tightens its permissions.
+
+14.9 archive (simrestart.py:1830-1840) -- section 19.
+
+14.10 purge -> trash() (simrestart.py:1868-1911)
+  FATAL if any restart has a queued/holding/running job. Creates basedir/TRASH,
+  then shutil.move(SimulationDir, TRASH/<simulationid>). The WHOLE simulation dir
+  is moved (nothing deleted outright; TRASH is not auto-emptied).
+
+14.11 get-output-dir: prints RestartDir for the requested/max restart id (writes
+  nothing). show-output: read-only; live-tails via machine stdout/stderr commands
+  when running, else reads <Sim>.out/.err and
+  <RestartDir>/<parname>/formaline-jar.txt.
+
+
+================================================================================
+15. THE PERSISTED STATE MODEL (properties.ini)
+================================================================================
+Format: an INI with a SINGLE section literally "[properties]"
+(SimProperties.IniSection='properties', simproperties.py:13). File always named
+"properties.ini". Each AddProperty sets an object attribute AND writes the key;
+Save() rewrites the whole file (pyini GetIniAsString). Block (list) values are
+written terminated by "EOT".
+  *** QUIRK: AddProperty's `if value is list:` (simproperties.py:66) is an
+     identity test that is essentially always False, so list values are not
+     actually stored as blocks as intended. ***
+
+Two property files:
+  - SIMULATION level: <Sim>/SIMFACTORY/properties.ini      (written by create())
+  - RESTART level:    <Sim>/output-NNNN/SIMFACTORY/properties.ini
+                      (written by submit()/run(); inherits the sim-level contents
+                       because it is initialized by loading the same file)
+
+Keys at CREATE (simrestart.py:1373-1449):
+  machine, simulationid, sourcedir, configuration, configid, buildid, testsuite,
+  select_tests (only if --testsuite), executable, optionlist, submitscript (or
+  "None"), runscript (or "None"), parfile (or "").
+
+Keys added at SUBMIT (rr dict, simrestart.py:708-786):
+  nodes, procsrequested, ppn, numprocs, nodeprocs, procs, numthreads, ppnused,
+  numsmt, queue, allocation, hostname, user, memory, cpufreq, pbsSimulationName,
+  walltime, chainedjobid, jobid; plus from-restart-id (if --from-restart-id).
+  (userRun writes the same proc/host keys minus queue/allocation/walltime/
+  chainedjobid; run() also sets 'checkpointing'.)
+
+Job id storage (GetJobId, simrestart.py:1842-1858): prefers the 'jobid' property;
+falls back to reading 'jobid' from SIMFACTORY/job.ini (legacy). '-1' = unknown.
+
+NOTE: on-disk property KEYS are lowercase (submitscript, jobid; pbsSimulationName
+is mixed-case as shown). The UPPERCASE names (SIMULATION_NAME, RESTART_ID, RUNDIR,
+...) are @VAR@ substitution variables for templating, NOT property keys.
+
+
+================================================================================
+16. BUILD SUBSYSTEM (lib/sim-build.py)
+================================================================================
+On-disk: configs/<configName>/ under CONFIGS_PATH (= CACTUS_PATH/configs).
+  Subfolders (created): ['bindings','build','config-data','lib','scratch'].
+  Files managed in configBase:
+    properties.ini  (+ no .old)         -- build flags/state (SimProperties)
+    OptionList      + OptionList.old
+    SubmitScript    + SubmitScript.old
+    RunScript       + RunScript.old
+    ThornList       + ThornList.old
+    config-data/cctk_Config.h           -- presence => "complete config"
+    config-data/make.thornlist          -- removed to force rebuild
+  If configBase exists but has no properties.ini -> FATAL "not a SimFactory
+  configuration ... delete it and run sim build again".
+
+Flow (command_build -> PrepConfiguration -> BuildConfiguration/BuildVirtual):
+  - configList = args or [GetDefaultConfiguration()]. Requires machine keys
+    user, email.
+  - GetConfigValue precedence (section 6.3). If --debug, optimise forced False.
+  - "reconfig"/"clean" are read then REMOVED from properties; debug/optimise/
+    unsafe/profile persisted. Before reconfig, stale executables removed
+    (exe/cactus_<config>, exe/<config>/).
+  - OptionList: reuse stored unless --optionlist given. Build flags DEBUG/OPTIMISE/
+    UNSAFE/PROFILE substituted (AddReplacement + SubAll) before compare/write.
+    hasOutdatedConfig = no complete config OR no stored options OR stored != current.
+  - Reconfigure (if outdated or --reconfig): compare the VERSION line of old vs
+    new option list (regex r'^\s*VERSION\s*=\s*([^\n#;]*)$'); a VERSION change
+    forces a FULL rebuild. Then (unless --virtual):
+        cd <CACTUS_PATH> && echo yes | { <make> <config>-config options=<OptionList>; } 2>&1
+    nonzero -> exit 1; remove config-data/make.thornlist.
+  - Clean (unless --virtual): if requested or full-rebuild:
+        cd <CACTUS_PATH> && <make> <config>-realclean 2>&1   (nonzero -> exit 1)
+  - SubmitScript: --no-submitscript removes it (disables submission). Else copied
+    from GetSubmitScript (optional; absence just disables submission).
+  - RunScript: REQUIRED -- fatal if none stored and none available.
+  - ThornList: REQUIRED. Content processed by GetThornListContents using
+    enabled-thorns*/disabled-thorns* machine keys to toggle "#DISABLED " prefixes
+    via regex.
+  - BuildConfiguration: sets USER/EMAIL/ALLOCATION; MAKEJOBS = --makejobs option
+    else machine 'makejobs' key else 1; make = SubAll(machine 'make'). Then:
+        make <config>          ("Building %s")
+        make <config>-utils    ("Building utilities...")
+    each: cd <CACTUS_PATH> && <make> <target> 2>&1; nonzero -> exit 1.
+    (ThornGuide doc build is commented out.) Parallelism is ONLY via @MAKEJOBS@ in
+    the 'make' key; sim-build never passes -j directly.
+  - BuildVirtual (--virtual): requires --virtual-executable; copies it to
+    EXE_PATH/cactus_<config>; no configure/make.
+
+
+================================================================================
+17. SYNC SUBSYSTEM (lib/sim-sync.py)
+================================================================================
+"sim sync [machine...]" rsyncs the local Cactus source tree to remote machines.
+
+Path selection: --sync-parfiles -> config 'sync-parfiles'; --sync-sourcetree ->
+config 'sync-sources'; --sync-path <p> (repeatable) -> explicit; none -> BOTH
+sync-parfiles and sync-sources. Machines = positional args (excluding 'sync');
+none -> fatal. Cannot sync to the local machine.
+
+Remote path: redirects to the IO machine (key 'iomachine') if set. Requires keys
+user, allocation, sourcebasedir, hostname, rsynccmd, rsyncopts, sshcmd, sshopts.
+  fullpath = "<user>@<hostname>:<sourcebasedir>/<local_suffix>"
+where local_suffix = the relative path of CACTUS_PATH under the local source base
+dir. Multiple explicit paths: only top-level names allowed (a path with a dir
+component is fatal; a missing path is a warning).
+
+Rsync flags (EXACT default set, sim-sync.py:134-147):
+  --checksum --compress --delete --hard-links --links --partial --progress
+  --recursive --sparse --stats --verbose
+  (--perms and --times are intentionally OMITTED so the target recompiles changed
+  files; --checksum compensates for the missing --times. --group/--owner/-D omitted.)
+
+Filter rules: ruleFile = 'filter.rules' (or 'filter.prersync3.rules' for rsync
+<3.0.0). Always "--filter 'merge <BASE>/etc/<ruleFile>'"; if
+<BASE>/etc/filter.local.rules exists it is prepended as another merge filter.
+
+Command assembly:
+  <rsynccmd> --rsh=<sshcmd> --rsync-path=<entry rsynccmd> <defaults> <rsyncopts>
+  <entry rsyncopts> <arguments> <rsyncfiles> <fullpath>
+A remote "mkdir -p <sourcebasedir/local_suffix>" runs first (via GetSSHCommand on
+the IO machine). The whole thing is wrapped:
+  cd <local_sourcedir> && { <localsshsetup>; } && { <mkdircmd> && <rsync>; }
+Old/new fallback: runs the modern command; if it exits 2 (protocol mismatch),
+retries with the pre-3 rules.
+  *** BUG: the final "Sync complete." vs "Errors occurred" decision checks only
+     the LAST loop iteration's `ret`, not the accumulated `errors` (sim-sync.py:278). ***
+
+
+================================================================================
+18. REMOTE EXECUTION & SSH CONSTRUCTION
+================================================================================
+--remote short-circuits sim.py to RemoteExecute (sim.py:109-114): RequireMachine;
+RemoteEnvironment.init(machine); ExecuteSameCommand(parrotArguments=True,
+stripArguments=['remote','remotecactuspath','machine']).
+
+RemoteEnvironment (simremote.py):
+  - init: fatal if remote == local; requires remote keys envsetup, allocation,
+    sourcebasedir, user, hostname. localEnvSetup = local 'envsetup' (USER subbed).
+  - GetRemoteExePath: --remotecactuspath overrides; else remap CACTUS_PATH from
+    the local source base dir onto the remote source base dir; build remotes/
+    <suffix>/<exe>.
+  - ExecuteSameCommand: re-emit positional args (QuoteSafe'd) + BuildOptionString
+    (minus stripped keys) + "--machine=<remotemachine>", run over ssh, wrapped
+    "{ <localEnvSetup>; } && { <localsshsetup>; } && <cmd>". ssh status high byte
+    0xff -> fatal "Could not execute command".
+
+GetSSHCommand (simlib.py:473-533): builds
+  "<from_sshprefix> <sshcmd> <from_sshopts> <sshopts> <other_opts> <user>@<hostname> <QuoteSafe(cmd)>"
+then SubAll. If a 'trampoline' is set, it recurses to tunnel through the
+trampoline host. If cmd is None the user@host part is omitted (used as a plain
+rsync --rsh prefix). QuoteSafe = "'%s'" % cmd.replace("'", r"'\''").
+
+ExecuteCommand (simlib.py:535-584): prepends local 'envsetup' (USER subbed) and
+runs `/bin/bash -c '<...>'`; output=False uses os.system, output=True uses
+os.popen returning (output, ret).
+
+
+================================================================================
+19. ARCHIVE SUBSYSTEM (lib/simarchive.py + lib/archive/*)
+================================================================================
+SimArchive(driver, restart=None) (simarchive.py:12). Driver loaded by
+eval("<archivetype>.Driver(self)"); archivetype is a machine key. Drivers:
+'petashare' (iRODS/PetaShare) and 'uberftp' (GridFTP) (archive/__init__.py:2).
+
+authenticate(): requires local key 'archiveuser'; driver.authenticate(username);
+nonzero -> exit 1.
+store(): requires 'archivebasepath'.
+    dstPath = "<archivebasepath>/<simulationid>"
+    whole sim (RestartID==-1): srcPath = SimulationDir
+    one restart: srcPath = RestartDir; dstPath += "/output-<LongRestartID>"
+get(simulationid, dstPath, restartid): srcPath = "<archivebasepath>/<simulationid>".
+  *** BUG: forms the restart subpath from dstPath, not srcPath (simarchive.py:77,79). ***
+listSimulations(): driver.list; keeps lines starting "simulation-"; canonical
+  archived name format:
+    simulation-<name>-<machine>-<hostname>-<user>-<date1>-<date2>
+GetRestartsForSimulation: lists "output-" entries; id after the first '-'.
+
+petashare driver: requires local 'archivetoolspath'; runs <tools>/<cmd> 2>&1.
+  authenticate: pchangeuser <user> (prompts for password).
+  store: pmkdir -p <dst>; prsync -rV <src> i:<dst>.
+  get:   prsync -rV i:<src> <dst>.
+  list:  pls <src>; keeps "C-" (collection) lines.
+  *** lineToFile references an out-of-scope srcPath (would NameError if reached). ***
+uberftp driver: requires local 'archivehostname'; runs
+  uberftp <host> "quote wait; parallel 8; <cmd>" 2>&1.
+  authenticate: grid-proxy-info -timeleft; else myproxy-logon -l <user>.
+  store: repeated mkdir then "put -r <src>/* <dst>". get: "get -r <src> <dst>".
+  list: "ls <src>"; keeps "d" (directory) lines.
+
+User-facing: list-archived-simulations (sim-info), get-archived-simulation
+(sim-util), and store() invoked by the restart lifecycle (sim archive).
+  *** UNCERTAIN: sim-util get-archived-simulation calls SimArchive(simenv,
+     archiveType) (sim-util.py:190) but __init__ is (driver, restart=None) and
+     list-archived uses SimArchive(archiveType) (sim-info.py:48). One call site
+     has the wrong signature; whether the get path works as written is unverified. ***
+
+
+================================================================================
+20. DECISION TREES: sim setup / setup-silent (lib/simdt.py + lib/dt/*.ini)
+================================================================================
+Purpose: interactively GENERATE etc/defs.local.ini and create a local machine
+entry from generic.ini. Driven by lib/dt/*.ini:
+  defaults.ini        -- `sim setup` (prompts).
+  defaults-silent.ini -- `sim setup-silent` (no prompts; save=noprompt; uses
+                         option:setup-user / option:setup-email / NO_ALLOCATION).
+  machine-override.ini -- chained tree to append arbitrary mdb key/value pairs
+                         under a named machine section.
+
+Tree format: [decisiontree] (prompt, required, dest="ini:<relpath>", repeat,
+repeatstatement, next="decisiontree:<name>", save); [<section>] (type=section,
+fixed=yes/no); [action:N] (action=%MACRO()%, optional check, printresults);
+[keyvalue:N] (key/value prompts/defaults/dests; valuedefault may be "%MACRO()%",
+"@var@", or "option:<optname>"). Order encoded in the ":N" suffix.
+
+Key macros: GET_LOCAL_MACHINE_NAME; CHECK_CREATE_MACHINE (true if machine absent);
+CREATE_MACHINE (copies generic.ini -> <machine>.ini, renames the section, sets
+name/hostname/nickname, sourcebasedir/basedir, optionlist/submitscript/runscript
+if overridden, auto-detects ppn/num-threads via lscpu or macOS sysctl, handles
+macOS gcc-vs-clang by rewriting the optionlist to a generic<suffix>.cfg copy);
+GET_DEFAULT_USERNAME ($LOGNAME/$USER/passwd); GET_DEFAULT_EMAIL (git config
+user.email if it has '@', else username); GET_BASEDIR (<home>/simulations);
+GET_SOURCEBASEDIR (--setup-sourcebasedir or parent of CACTUS_PATH).
+
+Output: writes etc/defs.local.ini [default] with user/email/allocation/
+sourcebasedir/basedir, runs CREATE_MACHINE (guarded by CHECK_CREATE_MACHINE), and
+optionally appends per-machine overrides.
+
+
+================================================================================
+21. DISTRIBUTE & BENCH TOOLS (bin/, standalone, Python 2)
+================================================================================
+These are test-harness CLIENTS of `sim`; they shell out to bin/sim
+(--remote/--machine) and parse its textual output. They share the MDB/libs only
+to read machine parameters, never to manipulate simulation state directly.
+
+distribute (bin/distribute): for each machine, syncs, builds debug+production
+(+aligned) configs from scratch, runs the testsuite, submits a test job, waits,
+and can benchmark + recovery-test. Replaces libutil.fatal so a fatal does not
+exit globally. Default machine set: db1, expanse, golub, osx-homebrew,
+osx-macports, qb, qbc, shelob, smic, stampede2, stampede2-skx, summit,
+supermuc-ng. Subcommands used: execute, sync, list-configurations,
+list-simulations, purge, build, create-submit, submit, cleanup, show-output,
+get-output-dir. Runs each target in the BACKGROUND (double fork + setsid);
+stdout/stderr -> log/<machine>.out, results -> log/<machine>.results; output
+prefixed "DISTRIBUTE:" with "[%Y-%m-%d %H:%M:%S]" timestamps. Build status from
+list-configurations ("[built ...]"->S, "[incomplete]"->F); sim status from
+list-simulations (INACTIVE->I, QUEUED->Q, PRESUBMITTED|RUNNING->R, FINISHED->F);
+success from "^Done\.$" in show-output.
+
+distribute-watch: a 60s monitor loop reading only log/*.out (does not touch remote
+machines); prints a one-line-per-machine status table.
+
+distribute-gather (bash): pulls testsuite results via `sim execute`/
+list-simulations/get-output-dir; cats <outdir>/TEST/sim/summary.log between
+markers; renames per-run logs to "<machine>__<procs>_<threads>.log".
+
+bench-create (bin/bench-create.py): standalone benchmark generator. Sweeps the
+cartesian product of physics params (hydro, multipatch, levels, fdorder) and
+geometry (cores, ppn_used, threads, smt), sizing the grid to fill nodes*memory.
+Emits per combination: "<path>/<filename>.par" (McLachlan/Carpet), "<exename>.th"
+(thorn list), build/submit lines, with sim names formatted
+  "<filename>-nodes%04d-cores%06d-procs%06d-threads%04d-smt%02d-run%04d".
+Also writes build.sh, submit.sh, collect.sh (parses carpet-timing..asc column
+$26), and simulations.txt (names between BEGIN_SIMULATIONS/END_SIMULATIONS).
+
+
+================================================================================
+22. LOGGING, ERRORS, EXIT CODES (lib/libutil.py)
+================================================================================
+  fatal(msg)   -> "Error: <msg>" + "Aborting Simfactory." to stderr, close log,
+                  sys.exit(1). The universal error path.
+  warning(msg) -> "Warning: <msg>" (always shown).
+  info(msg)    -> "Info: <msg>" (only when --verbose).
+  display(msg) -> always printed.
+  Logging: messages go to <BASE>/../log/simfactory.log ("[LOG:<ts>] ..."). If the
+  log dir can't be created -> exit 1; if the file can't be opened -> falls back to
+  stderr (no abort). Before INITIALIZED, output goes straight to stdout/stderr.
+  CoerceBool: false_values = ['False','false','No','no','F','f','0', 0, False,
+  None, '']; True for anything else.
+  Exit codes observed: 0 (help/no-args), 1 (essentially everything else, via
+  fatal()/explicit exits). There is NO distinct exit code per failure class.
+
+
+================================================================================
+23. CONSOLIDATED BUGS / QUIRKS / CORNER CASES
+================================================================================
+  B1. simopts.py:271 'defeult' typo -> ini default= is ignored for ALL
+      argument-taking options. (--debugger, --select-tests ini defaults do not
+      apply at parse time.)
+  B2. Dead options declared in common.ini but never read: --mdb, --cdb,
+      --localdir, --console. The "--defs" in the GetIniFiles error message does
+      not exist as an option. (config DBs are hard-wired to etc/defs.ini /
+      etc/defs.local.ini.)
+  B3. RawOptionDefined / IsNegated do PREFIX matching on raw argv ("--optionlistx"
+      matches "optionlist"); IsNegated detects "--noX" but not "--no-X".
+  B4. eval/exec everywhere: options added via eval(add_option string); subcommands
+      via exec("command_%s()") / globals()[name](); archive driver via eval; @(...)@
+      via Python eval(). Security/robustness consideration for the rewrite.
+  B5. pyini duplicate-key detection only fires inside named sections, not globals.
+  B6. pyini block values: only the FIRST body line gets inline-comment (#/;)
+      stripping; later lines are verbatim.
+  B7. "@QEUEUE@" typo in some mdb script(s) leaks literally (should be @QUEUE@).
+  B8. defs.local.ini.complex uses "scratchdir" (not the recognized
+      "scratchbasedir") -- legacy/stale example.
+  B9. simproperties AddProperty `if value is list:` is an identity test, ~always
+      False -> list values not stored as blocks as intended.
+  B10. sim-sync final status checks only the last machine's `ret`, not `errors`.
+  B11. simarchive.get() builds the restart subpath from dstPath, not srcPath.
+  B12. sim-util get-archived-simulation: SimArchive(simenv, archiveType) vs the
+       __init__ (driver, restart=None) -- signature mismatch with the list path.
+  B13. petashare.lineToFile references an out-of-scope srcPath (NameError risk).
+  B14. simrestart create() datadir existence check tests the destination (always
+       exists) rather than the source -- harmless to the target layout.
+  B15. self.InternalDir is overloaded (sim-level vs restart-level by load state);
+       a faithful reimplementation must track which is meant where (section 13.5).
+  Behavioral corner cases: create + --testsuite + a parfile is fatal; --remote
+  bypasses local dispatch and force-appends --machine=<remote>; sim build treats
+  any unknown subcommand token as a config name (no "unknown command" error);
+  login pops the machine name from the END of args; simenv.init is idempotent.
+
+
+================================================================================
+24. NOTES & RECOMMENDATIONS FOR THE REPLACEMENT
+================================================================================
+  - The on-disk contract (section 13) is the load-bearing interface. Anything
+    that must interoperate with existing simulation directories MUST preserve:
+    the SIMFACTORY/ metadata dir name, "output-%04d" restart dirs, the
+    "output-NNNN-active" RELATIVE symlink as the single source of truth for "which
+    restart is active", properties.ini under "[properties]", the simulation_id /
+    pbsSimulationName format strings, CACHE/ and TRASH/ siblings, and the
+    parfile-basename working dir inside each restart.
+  - State is INFERRED, not stored: "active" = the symlink; job status = a LIVE
+    queue query against the machine's *pattern regexes. There is no state-machine
+    field. A replacement may store explicit state but must still recognize the
+    symlink for compatibility.
+  - Job-id lives in the 'jobid' property; job.ini is read-only legacy. SIMULATION_ID
+    (file) marks simfactory-1 sims and is never written by simfactory2.
+  - Several literal defaults (basedir, sourcebasedir templates; queue stdout/err
+    filenames; checkpoint and Formaline tarball naming) come from OUTSIDE this
+    Python: the machine DB, the submit-script templates, and Cactus/thorns at
+    runtime. The Python only constructs templates and matches patterns
+    ("*chkpt.it_*", "*.chkpt.tmp.it_*.*", "*.tar.gz", "formaline-jar.txt").
+  - The @VAR@/@(...)@/@ENV()@ substitution engine and the MDB syntax-checked key
+    catalog (section 8) are the other two hard interfaces: machine files, option
+    lists, run scripts and submit scripts in the wild depend on exactly these.
+
+################################################################################
+# END OF DOCUMENT                                                              #
+################################################################################

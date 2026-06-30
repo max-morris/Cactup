@@ -1,0 +1,97 @@
+# mel5 optionlist (variant "default"), ported from simfactory2 mdb/optionlists/mel5.cfg.
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8). Every value is kept as
+# a TOML string so the render is byte-identical to the original (e.g. yes/no are
+# emitted literally, not as TOML booleans). @NAME@ tokens are substituted after
+# render.
+
+[cactup]
+gpu               = false
+compatible-queues = ["local"]
+
+[options]
+# Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.
+VERSION = "2018-12-13"
+
+CPP = "cpp"
+CC  = "gcc"
+CXX = "g++"
+
+FPP = "cpp"
+F90 = "gfortran"
+
+CPPFLAGS = ""
+FPPFLAGS = "-traditional"
+
+CFLAGS = "-g -std=gnu99"
+# if compiler is old and you do not need AMReX, can change to gnu++11
+CXXFLAGS = "-g -std=gnu++17"
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+
+LDFLAGS = "-rdynamic"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = ""
+C_DEBUG_FLAGS   = ""
+CXX_DEBUG_FLAGS = ""
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+CPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+MPI_DIR      = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+MPI_INC_DIRS = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view/include"
+MPI_LIB_DIRS = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view/lib"
+MPI_LIBS     = "mpi"
+
+OPENSSL_DIR = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+
+ADIOS2_DIR  = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+ADIOS2_LIBS = "adios2_fortran_mpi adios2_cxx11_mpi adios2_core_mpi adios2_fortran adios2_cxx11 adios2_c adios2_core"
+
+SILO_DIR = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+
+OPENPMD_API_DIR = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+OPENPMD_DIR     = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+
+HDF5_DIR            = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+HDF5_ENABLE_CXX     = "yes"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_INC_DIRS       = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view/include"
+HDF5_LIB_DIRS       = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view/lib"
+HDF5_LIBS           = "hdf5_hl_cpp hdf5_cpp hdf5_hl_f90cstub hdf5_f90cstub hdf5_hl_fortran hdf5_fortran hdf5_hl hdf5"
+# (the original .cfg repeated HDF5_ENABLE_CXX = yes; deduplicated here — TOML
+#  forbids duplicate keys and the value is identical.)
+
+YAML_CPP_DIR = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+
+BOOST_DIR = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
+AMREX_DIR = "/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
