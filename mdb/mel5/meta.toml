@@ -14,8 +14,12 @@ hostname    = "melete05.cct.lsu.edu"
 
 [paths]
 # @USER@ is substituted at use time (install/run context).
-sourcebasedir = "/home/@USER@"
-basedir       = "/home/@USER@/simulations"
+# Default install prefix (design §4.2). Installs land under <install-home>/<alias>.
+# Omit this key to fall back to ~/.cactup/cacti.
+install-home    = "/home/@USER@/cacti"
+# The per-machine simulation root (design §4.2/§8.1). Per-alias sim-home is
+# <simulation-home>/<alias>. Omit this key to fall back to ~/.cactup/simulations.
+simulation-home = "/home/@USER@/simulations"
 
 [hardware]
 ppn             = 80
@@ -31,21 +35,21 @@ make = "make -j@MAKEJOBS@"
 # No real batch system: run the script in the background, echo its PID as the
 # "job id", and use ps/kill for status/stop.
 submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
-getstatus       = "ps @JOB_ID@"
+get-status       = "ps @JOB_ID@"
 stop            = "kill @JOB_ID@"
-submitpattern   = "(.*)"
-statuspattern   = "^ *@JOB_ID@ "
-queuedpattern   = "$^"          # matches nothing: this machine never "queues"
-runningpattern  = "^"           # matches anything: in ps => running
-holdingpattern  = "$^"          # matches nothing: never "held"
-exechost        = "echo localhost"
-exechostpattern = "(.*)"
+submit-pattern   = "(.*)"
+status-pattern   = "^ *@JOB_ID@ "
+queued-pattern   = "$^"          # matches nothing: this machine never "queues"
+running-pattern  = "^"           # matches anything: in ps => running
+holding-pattern  = "$^"          # matches nothing: never "held"
+exec-host        = "echo localhost"
+exec-host-pattern = "(.*)"
 stdout          = "cat @SIMULATION_NAME@.out"
 stderr          = "cat @SIMULATION_NAME@.err"
 stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
 # Shell setup sourced before build/submit/run commands (module loads, env).
-envsetup = """
+env-setup = """
 export MPI_DIR="/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
 export PATH="${MPI_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
 export LD_LIBRARY_PATH="${MPI_DIR}/lib"

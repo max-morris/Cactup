@@ -22,6 +22,7 @@ macro_rules! lock {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct CactusInstallation {
     pub alias: String,
     pub release: Option<String>,
@@ -29,6 +30,7 @@ pub struct CactusInstallation {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct Database {
     pub cactup_version: String,
     pub installations: HashMap<String, CactusInstallation>, // maps alias to installation
