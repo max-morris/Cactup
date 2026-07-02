@@ -15,9 +15,9 @@ status      = "personal"
 hostname    = "generic.some.where"
 
 [paths]
-# Omitted on purpose: cactup defaults basedir=$HOME/simulations and
-# sourcebasedir=$HOME at runtime for the generic machine (design §4.6), which is
-# correct on both Linux (/home/...) and macOS (/Users/...).
+# Both `simulation-home` and `install-home` are omitted on purpose: generic takes
+# the built-in ~/.cactup/simulations and ~/.cactup/cacti fallbacks (design
+# §4.6/§4.2/§8.1), correct on both Linux (/home/...) and macOS (/Users/...).
 
 [hardware]
 # No fixed core/RAM counts: cactup autodetects ppn/num-threads/memory from the
@@ -33,23 +33,23 @@ make = "make -j@MAKEJOBS@"
 # status/stop. @STDOUT_FILE@/@STDERR_FILE@ default to @RUNDIR@/@SIMULATION_NAME@.{out,err}
 # unless -o/-e are given (design §8.5).
 submit          = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
-getstatus       = "ps @JOB_ID@"
+get-status       = "ps @JOB_ID@"
 # Kill the whole process group descending from @JOB_ID@, not just the top process.
 stop            = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
-submitpattern   = "(.*)"
-statuspattern   = "^ *@JOB_ID@ "
-queuedpattern   = "$^"          # never "queued"
-runningpattern  = "^"           # in ps => running
-holdingpattern  = "$^"          # never "held"
-exechost        = "echo localhost"
-exechostpattern = "(.*)"
+submit-pattern   = "(.*)"
+status-pattern   = "^ *@JOB_ID@ "
+queued-pattern   = "$^"          # never "queued"
+running-pattern  = "^"           # in ps => running
+holding-pattern  = "$^"          # never "held"
+exec-host        = "echo localhost"
+exec-host-pattern = "(.*)"
 stdout          = "cat @SIMULATION_NAME@.out"
 stderr          = "cat @SIMULATION_NAME@.err"
 stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
 # The configure scripts strip /usr/local and system dirs from XXX_DIR to avoid
 # choosing system libraries; re-add them last so compilers still find them.
-envsetup = """
+env-setup = """
 export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
 export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
 """

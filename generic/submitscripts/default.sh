@@ -17,5 +17,5 @@ if [ "${CHAINED_JOB_ID}" != '' ]; then
 fi
 
 exec @CACTUP@ sim run @SIMULATION_NAME@ \
-    --installation=@ALIAS@ --basedir=@BASEDIR@ --machine=@MACHINE@ \
+    --installation=@ALIAS@ --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ \
     --restart-id=@RESTART_ID@ @FROM_RESTART_COMMAND@
