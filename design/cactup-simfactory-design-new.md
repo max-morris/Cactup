@@ -26,7 +26,7 @@ These were settled during design review and are treated as fixed below.
 | D4 | Restart / chaining / recovery & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, checkpoint recovery, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
-| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement only**, everywhere (TOML and shell templates). simfactory's `@(expr)@` Python-eval, ternary/word-operator sugar, and `@ENV(NAME)@` are **not** ported. Scripts needing logic use the Python `.py` variant escape hatch (see §6). |
+| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement only**, everywhere (TOML and shell templates). simfactory's `@(expr)@` Python-eval, ternary/word-operator sugar, and `@ENV(NAME)@` are **not** ported. Scripts and parfiles needing logic use the Python `.py` variant escape hatch (see §6). |
 | D8 | Machine-level thorn enable/disable toggles | **Kept** (see §7.5). |
 | D9 | Optionlist on-disk format | **TOML + render step.** Optionlists are authored as TOML; cactup renders them to the native Cactus `NAME = value` optionlist before `make`. Render rules, the `VERSION` semantics, and ordering are specified in §7.8. |
 | D10 | Pre-existing simfactory simulation dirs | **Greenfield / ignore.** cactup manages only simulations it created. A directory is recognized as a cactup simulation **iff** it contains `.cactup/simulation.toml`. cactup neither reads nor migrates legacy `SIMFACTORY/` simulations. |
@@ -86,18 +86,18 @@ and is concerned **exclusively** with global cactup state:
 - `active-installation`
 - **knobs** (new; see §5) — machine-global defaults.
 - **`detected-machine`** (new; see §4.3) — the resolved machine name for *this*
-  machine, a single string (**not** keyed by hostname — D3 resolution). A given
+  machine, a single string (**not** keyed by hostname). A given
   `~/.cactup` logically lives on one machine, so login and compute nodes of a
   cluster share one value transparently.
 
-**Version guard & on-disk schema policy (F1 — backward compatibility
+**Version guard & on-disk schema policy (backward compatibility
 required).** On-disk state is versioned by an integer **`schema`** (the DB and
 every cactup TOML carry one; §9.3), *separate* from the human `cactup-version`
 string. The binding rule is: **a newer cactup binary MUST be able to read any
 older `schema` it ever shipped** — reads are backward-compatible by contract, so
 a cactup upgrade never orphans existing installations, configs, or in-flight
 simulations/chains (this is what makes the compute-node `sim run --restart-id`
-safe across an upgrade; F1). cactup refuses only when the on-disk `schema` is
+safe across an upgrade). cactup refuses only when the on-disk `schema` is
 **newer** than the running binary understands (a genuinely forward-incompatible
 read), with guidance to upgrade. The `schema` integer is bumped **only** on a
 breaking on-disk change; during active prototyping it stays fixed, so iterating
@@ -211,7 +211,7 @@ Reclaiming a lock:
 the stale-restart reaper (§8.3) considers a restart's heartbeat stale only after
 **`HEARTBEAT_STALE_SECS = 300`** (5× the cadence, to tolerate a missed touch or
 NFS mtime lag) *and* only when live job status is `U` *and* the `running.lock`
-is unheld — all three must agree (B4). `LOCK_STALE_SECS` (900) is deliberately
+is unheld — all three must agree. `LOCK_STALE_SECS` (900) is deliberately
 larger than `HEARTBEAT_STALE_SECS` (300) so lock-breaking is strictly more
 conservative than restart-reaping. These constants live in one place in the code
 and are documented here as the source of truth.
@@ -245,7 +245,7 @@ Where a single command has more than one thing to force, `-f` is a **generic
 flags exist for callers who want to force exactly one thing. On `sim submit`/`sim
 run`: `--overwrite` (replace an existing sim on implicit create) and
 `--force-queue` (bypass the optionlist↔queue compatibility check, §4.4) are the
-two specific flags, and `-f` implies both (C2).
+two specific flags, and `-f` implies both.
 
 There is no `--basedir` flag. A simulation's directory is fixed at create time
 (defaulting under the installation's sim-home) and may be overridden only then,
@@ -524,7 +524,7 @@ Replaces simfactory's `aliaspattern` hostname regex (`simfactory-docs.txt` §9).
   file). Exactly one `True` → that machine. More than one → **prompt the user to
   disambiguate** — **except in non-interactive mode** (`--silent`, or no tty),
   where cactup cannot prompt: it then **errors and requires `--machine <name>`**
-  to pick one explicitly (F2). (Recall name-shadowing already removes the
+  to pick one explicitly. (Recall name-shadowing already removes the
   common self-collision, §4.1, so a genuine multi-match means two distinct
   machines both claim this host.)
 - **Zero matches → fall back to `generic`, do not fail (§4.6).** An unrecognized
@@ -541,7 +541,7 @@ Replaces simfactory's `aliaspattern` hostname regex (`simfactory-docs.txt` §9).
 **Discovery result is cached persistently, not "per session."** cactup is a
 one-shot CLI — there is no session to remember a choice in. The resolved machine
 (including a disambiguation choice) is cached in the global DB as a **single
-string** — **not** keyed by hostname (D3):
+string** — **not** keyed by hostname:
 
 ```jsonc
 // database.json
@@ -702,13 +702,12 @@ where the unprompted persist happens: at install time, an operation that is
 already interactive and already writes files, rather than as a side effect of an
 arbitrary later `sim`/`config` command.
 
-> **Zero-match default behavior (open — flip-able).** As specified (§4.3), a
+> **Zero-match default behavior (open).** As specified (§4.3), a
 > bare `sim`/`config` command on an unrecognized host that was *not* set up via
 > `install` uses `generic` in-place (with autodetect) and merely *suggests*
-> `machine create`; it does not silently write a machine file mid-command. If you
-> instead want every unrecognized host to auto-persist a local machine on first
-> touch (zero friction, one unprompted write), that is a one-line policy change
-> here — say the word and I'll make auto-create the default.
+> `machine create`; it does not silently write a machine file mid-command. An
+> alternative policy — auto-persisting a local machine on first touch (zero
+> friction, one unprompted write) — is a one-line change if preferred.
 
 ---
 
@@ -781,7 +780,7 @@ rewritten as a Python `.py` variant.
    string value of `NAME` from the active variable set (§6.3). Unknown `@NAME@`
    tokens are an error (caught at substitution time) rather than silently
    leaking — this fixes the simfactory `@QEUEUE@` class of bug
-   (`simfactory-docs.txt` §11, B7). **Escape (E1):** `@@` is the literal-`@`
+   (`simfactory-docs.txt` §11). **Escape:** `@@` is the literal-`@`
    escape — the substitution engine collapses every `@@` to a single `@` and
    never scans the result for a token, so a parfile or script needing a literal
    `@` writes `@@`. This is applied in the same single left-to-right pass as token
@@ -822,12 +821,23 @@ rewritten as a Python `.py` variant.
 - SubmitScript (queue-selected variant) → substituted at submit time, written
   into the restart metadata, and handed to the scheduler.
 - RunScript (queue-selected variant) → substituted at run time.
-- Parfile → substituted with the full §6.3 variable set, at **run** time (when
-  the topology and restart are known). Ordering with `.rpar`: an executable
-  `.rpar` is run **first** to generate the `.par`, and the generated `.par` is
-  **then** `@NAME@`-substituted (§8.4). So `.rpar` generators see no `@NAME@`
-  expansion; only their output does. (Literal `@` in a parfile is written `@@`,
-  which the run-time substitution collapses to a single `@` — E1, §6.1.)
+- Parfile → resolved at **run** time (when the topology and restart are known),
+  in one of the two template kinds above — exactly like submit/run scripts, and
+  chosen by the parfile's extension (§8.2):
+  - A **`.par`** parfile is `@NAME@`-substituted with the full §6.3 variable set
+    and written as the ready-to-run `<basename>.par`. (Literal `@` in a `.par` is
+    written `@@`, which the run-time substitution collapses to a single `@` —
+    §6.1.)
+  - A **`.py`** parfile is the escape hatch for computed/conditional parfiles
+    (replacing simfactory's executable-`.rpar` mechanism, §8.4). It is invoked
+    per the §6.1 `.py` calling convention — cactup runs `python3 <parfile>.py`
+    once, passing the full §6.3 variable set as a single JSON object on stdin,
+    with the fixed preamble binding every variable as a module global. Its stdout
+    is written as `<basename>.par` and used **as-is**: cactup does **not**
+    post-substitute it (the author already has every variable as a global —
+    including the typed companions — and interpolates in Python). Unlike
+    submit/run `.py` variants there is no `env-setup` to place; `ENV_SETUP` is a
+    submit/run-script concern only.
 
 ### 6.3 The canonical variable set
 
@@ -998,7 +1008,7 @@ enforce queue compatibility (§4.4) without re-reading the MDB. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
 portable across machines).
 
-**Rebuild-decision snapshot (A5).** At build time cactup also copies the chosen
+**Rebuild-decision snapshot.** At build time cactup also copies the chosen
 **source optionlist TOML** verbatim to `configs/<name>/cactup-optionlist.toml`.
 The rebuild decision (§7.8 rule 5) diffs the freshly-selected source TOML against
 this stored copy; *any* difference triggers a full realclean + reconfigure +
@@ -1055,13 +1065,13 @@ CFLAGS = "-O2 -g @SOME_TEMPLATED_VALUE@"
 ```
 
 **Render rules (deterministic; the rendered native file is fed to Cactus only —
-it is never diffed for the rebuild decision, A5):**
+it is never diffed for the rebuild decision):**
 
 1. Only the `[options]` table is rendered. `[cactup]` is stripped (snapshotted
    into the config metadata, §7.4).
 2. Emit `VERSION` first, then the remaining keys in **TOML document order**
    (`toml` preserves order). Each key → `KEY = value`.
-3. **Scalar → native value mapping (A4), applied to every `[options]` value:**
+3. **Scalar → native value mapping, applied to every `[options]` value:**
    - **string** → its inner text, unquoted (the common case; e.g. `"yes"` →
      `yes`). Whitespace/`#` inside a quoted string is preserved verbatim.
    - **boolean** → `true` renders `yes`, `false` renders `no` (Cactus's
@@ -1083,7 +1093,7 @@ it is never diffed for the rebuild decision, A5):**
    identifiers and are emitted **verbatim** — cactup maps `optimize` → `OPTIMISE`
    at render. Never Americanize keys inside `[options]`.
 
-**Rebuild trigger (A5 — one rule).** The decision to rebuild is made by diffing
+**Rebuild trigger (one rule).** The decision to rebuild is made by diffing
 the freshly-selected **source optionlist TOML** against the copy stored at build
 time (`configs/<name>/cactup-optionlist.toml`, §7.4). *Any* difference — a
 changed flag, a new key, or a bumped `VERSION` — triggers a full
@@ -1177,12 +1187,14 @@ cactup sim create [-f] <sim> <parfile> [--config C] [--sim-dir P]
 Port of `create()` (`simfactory-docs.txt` §14.1):
 1. Resolve config = `--config` or the installation's active config; locate
    `<Cactus root>/exe/cactus_<config>` (fatal if missing).
-2. **Validate `<parfile>`'s name (A2 — collision guard).** The parfile must end
-   in `.par` or `.rpar`. cactup strips that one extension to derive the working-
-   directory name (so intra-name dots are fine — `q1.5.par` → working dir
-   `q1.5/`). Create is rejected only if the extension-stripped basename equals a
-   **reserved name**: `.cactup`, `exe`, `cfg`, or `par` (the metadata dir and its
-   master-copy entries, §9.3). This is the *only* naming restriction.
+2. **Validate `<parfile>`'s name (collision guard).** The parfile must end
+   in `.par` (literal `@NAME@` substitution) or `.py` (Python variant —
+   §6.1/§6.2). cactup strips that one extension to derive the working-directory
+   name (so intra-name dots are fine — `q1.5.par` → working dir `q1.5/`,
+   `q1.5.py` → `q1.5/`). Create is rejected only if the extension-stripped
+   basename equals a **reserved name**: `.cactup`, `exe`, `cfg`, or `par` (the
+   metadata dir and its master-copy entries, §9.3). This is the *only* naming
+   restriction.
 3. Determine the simulation directory: `--sim-dir <path>` if given, else
    `<sim-home>/<config>/<SimName>` (§8.1). Register it in the per-installation
    `simulations.toml` registry (§8.1).
@@ -1209,13 +1221,13 @@ cactup sim submit [-f] [--overwrite] [--force-queue] <sim> <parfile> [--config C
 Port of `submit()` (`simfactory-docs.txt` §14.2):
 - If `<sim>` doesn't exist and a parfile is given, create it first (the
   `create-submit` fusion). If `<sim>` **does** exist and a parfile is *also*
-  given, that is an **error** (C3) unless `--overwrite`/`-f` is passed — cactup
+  given, that is an **error** unless `--overwrite`/`-f` is passed — cactup
   will not silently ignore a parfile that contradicts an existing sim.
 - Validate the built config's `compatible-queues` against the chosen queue
   (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`.
-- **Reap a stale active restart (C3, port of simfactory `initRestart`).** Before
+- **Reap a stale active restart (port of simfactory `initRestart`).** Before
   allocating a new restart, if an `output-NNNN-active` symlink exists cactup
-  decides whether its run is truly dead using the **liveness protocol (B4)**, not
+  decides whether its run is truly dead using the **liveness protocol**, not
   scheduler status alone: a restart is reaped (auto-`clean`ed — deactivate +
   finish, §8.6) **only if all of** (a) its live job status is `U` (gone from the
   queue), (b) its per-restart liveness marker (`.cactup/running.lock`, §9.3) is
@@ -1244,7 +1256,7 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   user-facing chaining command; the dependency flag is emitted by the
   submit-script variant (a `.py` variant, since this is conditional — §6).
 
-#### 8.3.1 Compute-node re-invocation (fixes C2)
+#### 8.3.1 Compute-node re-invocation
 
 The generated SubmitScript re-invokes cactup to do the actual run, as
 simfactory's template re-invoked `sim run` (`simfactory-docs.txt` §12.3). But in
@@ -1270,7 +1282,7 @@ does not touch the global DB or the registry. Scheduler stdout/stderr filenames
 come from the template via `@STDOUT_FILE@` / `@STDERR_FILE@`, not from cactup
 code (preserving simfactory's design point).
 
-#### 8.3.2 Active-symlink handoff across a chain (fixes C4)
+#### 8.3.2 Active-symlink handoff across a chain
 
 The exactly-one-active invariant (§9.2) is maintained across a pre-submitted
 chain as follows. At submit time, only the first restart of the chain is made
@@ -1283,7 +1295,7 @@ a chained job actually starts on its compute node, its `cactup sim run
 2. Create `output-K` under a unique temporary symlink name, then **atomically
    `rename()`** it onto `output-K-active`.
 
-**Why this ordering, and the correctness argument (B5).** Because the active
+**Why this ordering, and the correctness argument.** Because the active
 symlink's *name* encodes the restart id (`output-NNNN-active`, a preserved
 contract — §9.2), the predecessor and successor are two differently-named links,
 so there is no single syscall that swaps one for the other. The two steps are
@@ -1293,13 +1305,10 @@ create-new: the only observable transient (to a non-locking external reader) is 
 brief *zero*-active window, which the reader (§9.2) treats benignly as
 "inactive" — never a *two*-active window, which simfactory's reader treats as
 fatal. Step 2 uses `symlink`-to-temp + `rename()` so a reader never catches a
-half-created link. A crash between the two steps leaves at most a missing/one
-stale symlink, repaired by the next `submit`'s reaper (C3). Only one job in a
-dependency chain runs at a time, so successors never race each other here. A crash between steps leaves at most one extra stale
-predecessor symlink, which the next `submit`'s reaper (C3) clears.
-A job that is killed before starting leaves no `-active` symlink to clean up;
-a job killed mid-run leaves `K` active, which the next `submit`'s stale-reaper
-(C3) clears.
+half-created link. Only one job in a dependency chain runs at a time, so
+successors never race each other here. A crash — between the two steps, before a
+job starts, or mid-run — leaves at most one stale symlink, which the next
+`submit`'s reaper clears.
 
 ### 8.4 `sim run`
 
@@ -1315,13 +1324,18 @@ mode it accepts `--installation`/`--sim-dir`/`--machine` to locate the
 simulation without the global DB or the registry, performs the chain handoff
 (§8.3.2), and recovers checkpoints (§8.8). Throughout its run it holds the
 per-restart liveness marker and periodically touches the heartbeat file (§9.3)
-so the reaper (§8.3, B4) never mistakes it for dead. Without `--restart-id`, it
+so the reaper (§8.3) never mistakes it for dead. Without `--restart-id`, it
 builds a fresh restart, makes it active, forks, and tees child stdout/stderr to
 `<SimName>.out` / `<SimName>.err` while echoing to the terminal. `--debug`
 launches under the debugger (`@RUNDEBUG@`/`@DEBUGGER@`).
 
-`.rpar` handling preserved: an executable `.rpar` is copied into the restart,
-run to generate the `.par`, which is then substituted and used.
+Computed parfiles use the **`.py` variant** (§6.2), replacing simfactory's
+executable `.rpar`: the `.py` parfile's master copy (§8.2) is invoked per the
+§6.1 calling convention (the full §6.3 variable set as JSON on stdin, bound as
+globals), and its stdout is written into the restart as the ready-to-run
+`<basename>.par` and used **as-is** — no post-substitution, since the author
+interpolates the variables directly in Python. A plain `.par` is `@NAME@`-
+substituted as before.
 
 ### 8.5 TOPOLOGY → process layout
 
@@ -1344,7 +1358,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | `-o/--out` * | stdout filename | template default |
 | `-e/--err` * | stderr filename | template default |
 
-**Canonical walltime format (C1).** Every walltime cactup accepts or emits —
+**Canonical walltime format.** Every walltime cactup accepts or emits —
 `--wall-time`, `[queues.<q>].max-walltime`, machine `max-walltime` — uses the
 single grammar **`(DD-)?HH:MM:SS`**. The `DD-` day prefix is optional and elided
 when zero (`00-1:00:00` ≡ `1:00:00`); when `DD-` is absent, `HH` may exceed 23
@@ -1379,8 +1393,8 @@ Ports of `simfactory-docs.txt` §14.8 / §14.5:
 - `cactup sim clean <sim>`: deactivate the active restart (remove the
   `-active` symlink), tighten `TERMINATE` perms, delete half-written checkpoints
   (`*.chkpt.tmp.it_*.*`), and run the Formaline tarball **hard-link dedup** across
-  prior restarts. Dedup semantics are preserved verbatim from simfactory (E2,
-  `simfactory-docs.txt` §14.5): for each `*.tar.gz` ≥ 1000 bytes, scan prior
+  prior restarts. Dedup semantics are preserved verbatim from simfactory
+  (`simfactory-docs.txt` §14.5): for each `*.tar.gz` ≥ 1000 bytes, scan prior
   `output-%04d` dirs (descending) for a file **of the same name whose contents
   are byte-identical** (`filecmp`-style full comparison — *not* name-only), and if
   found replace this copy with a hard link to it via a `.tmp` rename. Because the
@@ -1410,7 +1424,7 @@ Port of `purge`/`trash()` (`simfactory-docs.txt` §14.10): **fatal if any restar
 has a queued/holding/running job, unless `-f`** — as the "bypass all nagging"
 umbrella (§3), `-f` overrides the live-job guard (cactup first `stop`s the
 running/queued jobs, §8.6, then deletes), the trash/purge default, *and* the
-`--purge` prompt (F3). Without `-f` on a live simulation, cactup refuses and tells
+`--purge` prompt. Without `-f` on a live simulation, cactup refuses and tells
 the user to `sim stop` first. Deletion otherwise does a `shutil.move`-equivalent
 of the whole simulation dir into `<sim-home>/TRASH/<simulation-id>/`, removes the
 simulation's entry from the per-installation registry (§8.1), and then **runs
@@ -1431,7 +1445,7 @@ recovery-source restart's working dir and **hard-link** them into the current
 restart (fall back to copy), rewriting the path prefix. No checkpoints ⇒
 recovery is a no-op (fresh start).
 
-**Recovery-source selection (B2 — best effort, no silent data loss).** The
+**Recovery-source selection (best effort, no silent data loss).** The
 recovery source is **not** blindly "the highest-numbered restart" — a restart
 that crashed before writing any checkpoint has none, and picking it would
 silently cold-start and discard the last good run. Instead cactup scans restarts
@@ -1547,7 +1561,7 @@ just computed, not asked for.
 
 This is the load-bearing interface (`simfactory-docs.txt` §13, §24).
 
-**What the contract actually promises (A1/A9 — precise statement).** The thing
+**What the contract actually promises (precise statement).** The thing
 external analysis tools depend on is the **layout of Cactus output data** — the
 numbered `output-%04d` restart dirs, the per-restart Cactus working directory
 (the parfile-basename dir where HDF5/ASCII output, checkpoints, and Formaline
@@ -1576,7 +1590,8 @@ metadata directory and its TOML format (§9.3), which no external tool reads (D4
     output-0000/  output-0001/ … output-NNNN/  numbered restarts ("output-%04d")[PRESERVED]
     output-NNNN-active                         RELATIVE symlink → output-NNNN   [PRESERVED]
     output-%04d/
-      <parfile-basename>.par                   substituted ready-to-run parfile [PRESERVED]
+      <parfile-basename>.par                   ready-to-run parfile (substituted from
+                                               `.par`, or emitted by a `.py` parfile — §6.2) [PRESERVED]
       <parfile-name>/                          Cactus working/output dir        [PRESERVED]
                                                (checkpoints, Formaline tarballs,
                                                 Cactus output land here)
@@ -1627,13 +1642,13 @@ format. External tools do not read this metadata, so changing it is safe.
   cfg/  par/                       master copies of the optionlist + parfile (§8.2)
 output-%04d/.cactup/               restart-level metadata              [cactup-owned]
   restart.toml                     (replaces restart properties.ini; absorbs the
-                                    old timestamp/simulation mark files — A9)
+                                    old timestamp/simulation mark files)
   submit-script  run-script        substituted scripts for this restart
                                    (cactup-owned `.cactup/` files → kebab-case per §4.2;
                                     the CamelCase `SubmitScript`/`RunScript` elsewhere in
                                     this doc name the MDB *variant* artifacts, not these)
-  running.lock                     per-restart liveness marker held by a live run (B4)
-  heartbeat                        mtime touched periodically by a live run (B4)
+  running.lock                     per-restart liveness marker held by a live run
+  heartbeat                        mtime touched periodically by a live run
 ```
 
 **Metadata dir name & simulation detection (D10 — greenfield).** cactup uses
@@ -1647,7 +1662,7 @@ user mid-migrating from simfactory manages old sims with old simfactory and new
 sims with cactup; there is no interop. If that proves painful, a one-shot
 `cactup sim import` could be added later, but it is explicitly out of scope.)
 
-**Schema versioning (backward-compatible reads — A8/E5, F1).** Every cactup TOML
+**Schema versioning (backward-compatible reads).** Every cactup TOML
 file (`simulation.toml`, `restart.toml`, `cactup-config.toml`,
 `installation.toml`, `simulations.toml`) — and the global `database.json` — carries
 a top-level integer **`schema`** as its first key. The policy matches §2.1: **a
@@ -1671,14 +1686,14 @@ is dropped for v1 — D3.) `restart.toml` carries `schema` plus the submit/run k
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
 `checkpt-buffer`, `job-id`, `chained-job-id`, `checkpointing`, `from-restart-id`,
 the last observed `status`, and the creation/marking timestamps that simfactory
-kept in the separate `timestamp`/`simulation` mark files — folded in here per A9).
+kept in the separate `timestamp`/`simulation` mark files — folded in here).
 Job id lives in `restart.toml` (`job-id`); there is no `job.ini` (D10 — no legacy
 fallback to read).
 
 TOML naturally stores lists, fixing the simfactory "list values weren't stored as
-blocks" bug (`simfactory-docs.txt` §15, B9).
+blocks" bug (`simfactory-docs.txt` §15).
 
-**Liveness files (B4).** `running.lock` is a per-restart lock (link-based, §2.3)
+**Liveness files.** `running.lock` is a per-restart lock (link-based, §2.3)
 acquired by a live `sim run` for the duration of the run; `heartbeat` is a file
 whose mtime that run touches periodically. The stale-restart reaper (§8.3)
 consults both — plus live job status — before reaping, so a compute job that is
@@ -1743,6 +1758,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<variant>.toml` (rendered to native `.cfg` before make — §7.8) |
 | SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<variant>.{sh,py}` |
 | RunScript | `mdb/runscripts/<m>.run` | `mdb/<m>/runscripts/<variant>.{sh,py}` |
+| Parfile | user-supplied `.par` / executable `.rpar` | user-supplied `.par` (literal `@NAME@`) / `.py` variant (JSON-on-stdin, emits `.par` to stdout — §6.1/§6.2) |
 | Config metadata | `configs/<name>/properties.ini` | `configs/<name>/cactup-config.toml` |
 | Sim metadata | `SIMFACTORY/properties.ini` | `.cactup/simulation.toml`, `.cactup/restart.toml` (schema-versioned) |
 | Sim detection | dir has `SIMFACTORY/properties.ini` | dir has `.cactup/simulation.toml` (greenfield — D10) |
@@ -1780,58 +1796,12 @@ Each is marked **ASSUMPTION** inline above; collected here:
 10. Checkpoint buffer defaults to `max(reserved-walltime/24, 10 min)`, overridable
     with `--checkpt-buffer`; it only sets the *exposed* `@CHECKPOINT_WALLTIME@`
     hint variables (hard wall − buffer). cactup reserves the full hard wall and
-    does not inject or consider any Cactus termination parameter (§8.8, B1).
+    does not inject or consider any Cactus termination parameter (§8.8).
 11. Test-suite support dropped for v1 (D3, §11) — to be designed later.
 12. Schema/version handling: newer binaries **must read older `schema`**
     (backward-compatible reads), refusing only a `schema` newer than understood;
     the `schema` integer is bumped only on a breaking change and in-place
-    up-migration is deferred (§2.1, §9.3 — F1).
-
-Resolved during the critique/second pass (no longer open): optionlist format (D9,
-§7.8) and its scalar→native mapping + single rebuild trigger (A4/A5, §7.8);
-legacy-sim handling (D10, §9.3); DB locking made NFS-safe + per-config build lock
-(D11, §2.3, B3/B6); GPU/queue coupling (D12, §4.4/§7.8); `max-walltime` precedence
-and the canonical `(DD-)?HH:MM:SS` walltime format (§4.2, §8.5, C1); compute-node
-locator now `--sim-dir` (§8.3.1); chained active-symlink handoff made atomic via
-temp+`rename()` under the per-sim lock (§8.3.2, B5); stale-restart reaper given a
-heartbeat+marker liveness gate (§8.3/§9.3, B4); best-effort recovery-source with
-prompt-on-divergence (§8.8, B2); walltime scoped to scheduler reservation only —
-cactup does not target/inject/consider `TerminationTrigger` or any Cactus
-termination param, but exposes two walltimes to parfiles (hard wall
-`@WALLTIME@` and checkpoint hint `@CHECKPOINT_WALLTIME@` = hard wall − buffer,
-`--checkpt-buffer`, §8.8, B1); simulation home = machine `simulation-home`
-key with `~/.cactup/simulations` fallback + per-install `installation.toml`/
-`simulations.toml` registry, `--basedir` dropped for create-time `--sim-dir`
-(§8.1, A7); `sourcebasedir` reworked into machine `install-home` (default install
-prefix; falls back to `~/.cactup/cacti`; §4.2); parfile-name collision guard
-(§8.2, A2); top-level MDB index removed
-(§4.1, D1); `--from-existing` override provenance/warning (§4.7, D2);
-`detected-machine` de-keyed from hostname (§4.3, D3); `CACHE/exe` purpose
-documented (§8.1, A3); Formaline dedup clarified as content-verified
-(§8.6, E2); `@SIMFACTORY@`→`@CACTUP@` (§6.3); `-f` split into `--overwrite` +
-`--force-queue` umbrella (§3, C2); `--machine`/`--installation` flags added, `-f`
-per-command (§3).
-
-Resolved during the third/final pass (no longer open): `.cactup/exe` is a single
-hard link to `CACHE/exe/<build-id>`, not a master-copy dir; `data/` master-copy
-removed; cache keyed by `build-id` (no content hash), one build per config, with
-orphan GC on rebuild and on `sim delete` (§8.1, §8.2, §9.3); per-installation
-`link()` lock added for `installation.toml`/`simulations.toml` (§2.3); global-DB
-writes are lock-held re-read + field-scoped, and drop/signal auto-persist removed
-for long-running commands (§2.3); concrete lock/heartbeat constants
-(`LOCK_STALE_SECS`, `HEARTBEAT_SECS`, `HEARTBEAT_STALE_SECS`) and cross-host
-mtime-only liveness (§2.3); null-config installation state + `config delete`
-warns/`-f` when sims depend on it (§7.1); `@@` literal-`@` escape (§6.1); `.py`
-variants get `env-setup` as the `ENV_SETUP` variable (author-emitted), `.sh`
-auto-prepend unchanged (§6.1, §6.3); backward-compatible schema reads (§2.1, §9.3,
-F1); non-interactive discovery multi-match requires `--machine` (§4.3, F2);
-`sim delete -f` bypasses the live-job guard and stops running jobs first (§8.7,
-F3); MDB name-shadowing applied before discovery (§4.1, §4.3); compute-node
-recovery re-scans backward from its stored `from-restart-id` hint so a
-checkpoint-less predecessor in a pre-submitted chain cannot cause a silent
-cold-start (§8.8); chained tail jobs after early completion are accepted as
-harmless no-ops rather than cancelled (cactup does not inspect Cactus termination;
-sizing `--wall-time` sensibly is the runner's responsibility) (§8.8).
+    up-migration is deferred (§2.1, §9.3).
 
 ---
 
@@ -1858,6 +1828,6 @@ sizing `--wall-time` sensibly is the runner's responsibility) (§8.8).
 | 20 setup decision trees | `cactup machine create` + `generic` fallback + autodetect (§4.6, §4.7); knobs (§5) |
 | 21 distribute/bench tools | out of scope (external test harnesses) |
 | 22 logging/errors | §12 |
-| 23 bugs/quirks | fixed where noted (B7 §6.1, B9 §9.3) or N/A |
+| 23 bugs/quirks | fixed where noted (§6.1, §9.3) or N/A |
 | 24 recommendations | honored (§9 contract, inferred state) |
 ```
