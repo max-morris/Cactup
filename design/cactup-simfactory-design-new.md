@@ -260,15 +260,15 @@ cactup show                                                               (exist
 cactup use <alias>                                                        (existing; set active installation)
 cactup uninstall <alias> [-f]                                             (new; see §3.1)
 
-cactup config build <name> [-f] [--thornlist P] [--variant V] [build flags…]
+cactup config build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [build flags…]
 cactup build …                       (alias for `config build`)
 cactup config show [<name>]
 cactup config use <name>
 cactup config delete <name>
 
 cactup sim create [-f] <sim> <parfile> [--config C] [--sim-dir P]
-cactup sim submit [-f] [--overwrite] [--force-queue] <sim> [<parfile> --config C] <TOPOLOGY…> [--no-recover] [--restart-id N]
-cactup sim run    [-f] [--overwrite] [--force-queue] <sim> [<parfile> --config C] <TOPOLOGY…> [--debug] [--no-recover] [--restart-id N]
+cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--no-recover] [--restart-id N]
+cactup sim run    [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--debug] [--no-recover] [--restart-id N]
 cactup sim stop   <sim> [-f]
 cactup sim clean <sim>
 cactup sim delete <sim> [-f]
@@ -376,8 +376,20 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   **replaced** by the per-machine `optionlists/`, `runscripts/`,
   `submitscripts/` directories and the **variant→queue mapping** described in
   §4.4. (This is the headline MDB change.)
-- `env-setup` (shell setup, usually module loads) is kept verbatim — it is
-  prepended to every submit/run script (§6).
+- `env-setup` (shell setup, usually module loads) is kept verbatim. Unlike
+  simfactory (where it fed only submit/run scripts), cactup applies `env-setup`
+  to **all three** execution phases by default — **build**, **submit**, and
+  **run** — because a Cactus build usually needs the same module environment as
+  the eventual run (compilers, MPI, etc.), and requiring the user to duplicate it
+  was a common footgun. For phase-specific additions there are three optional
+  companion keys — **`env-build-setup`**, **`env-submit-setup`**, and
+  **`env-run-setup`** — each *appended* to `env-setup` for that phase only. The
+  effective environment for a phase is `env-setup` followed by the matching
+  `env-<phase>-setup` (empty when unset). This is opt-in granularity: a machine
+  that needs no per-phase difference sets only `env-setup`; a machine that (say)
+  loads a debugger module only when building sets `env-build-setup`. §6.1
+  specifies how each block is injected for `.sh` vs `.py` templates and for the
+  build's `make` invocation.
 - Scheduler keys carried over (semantics unchanged; names kebab-normalized —
   see the key-naming note below): `submit`, `interactive-cmd`, `get-status`,
   `stop`, `submit-pattern`, `status-pattern`, `queued-pattern`, `running-pattern`,
@@ -452,9 +464,12 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
 (`install-home`, `simulation-home`, `scratch-home`), `[hardware]` (`ppn`, `nodes`,
 `memory`, `num-threads`, `cpu-freq`, …), `[build]` (`make`, `make-jobs`,
-`enabled-thorns`, `disabled-thorns`), `[scheduler]` (`submit`, `get-status`,
-`stop`, the `*-pattern`s, `exec-host`, `stdout`/`stderr`, `env-setup`), then
-`[queues.*]` and `[variants.*]`.
+`enabled-thorns`, `disabled-thorns`), `[environment]` (`env-setup` and the
+phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
+grouped here rather than under `[scheduler]` because `env-setup` now spans build
+as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
+`*-pattern`s, `exec-host`, `stdout`/`stderr`), then `[queues.*]`, `[variants.*]`,
+and (optional) `[universes.*]` (§4.8).
 
 ```toml
 [machine]
@@ -472,7 +487,14 @@ nodes = 360
 [scheduler]
 submit = "sbatch @SCRIPTFILE@ 2>&1"
 get-status = "squeue -j @JOB_ID@"
-# … patterns, stop, env-setup, … …
+# … patterns, stop, … …
+
+[environment]
+env-setup = """
+module load gcc/11 openmpi/4
+"""                            # applied to build, submit, AND run (§6.1)
+env-build-setup = "module load cmake/3.27"   # appended only for `config build`
+# env-submit-setup / env-run-setup: appended only for submit / run (optional)
 
 [queues.checkpt]               # one table per queue
 gpu = false
@@ -483,7 +505,9 @@ default = true                 # the queue used when -q is omitted (one queue ma
 gpu = true
 max-walltime = "24:00:00"
 
-# Variant → queue association (§4.4)
+# Variant → queue association (§4.4). A variant is either the array shorthand
+# (queues only) or the inline-table form `{ queues = [...], universe = "…" }`
+# when it must run in a universe (§4.8).
 [variants.submitscript]
 "slurm-cpu" = ["checkpt", "single"]   # this variant serves these queues
 "slurm-gpu" = ["gpu"]
@@ -491,8 +515,9 @@ default = "slurm-cpu"                  # variant for queues with no explicit map
 
 [variants.runscript]
 "cpu" = ["checkpt", "single"]
-"gpu" = ["gpu"]
+"gpu-sing" = { queues = ["gpu"], universe = "et-sif" }   # runs inside a universe (§4.8)
 default = "cpu"
+# default-universe = "et-sif"          # optional: universe for runscript variants that omit one
 
 # Optionlists have NO default unless there is exactly one variant (§4.4).
 # Each variant just names the optionlist file under optionlists/<variant>.toml;
@@ -594,7 +619,11 @@ them first-class within one machine.
   explicit mapping, the `default` variant is used. (A machine with a single
   variant may just name it `default`.) The submit-script and run-script variant
   maps are independent of each other but must each cover every queue (validated
-  at load — §4.2).
+  at load — §4.2). A variant entry is written either as the **array shorthand**
+  (`"<v>" = ["q1", "q2"]` — queues only) or, when it must run in a universe
+  (§4.8), the **inline-table form** `"<v>" = { queues = ["q1", …], universe = "<name>" }`;
+  the two are interchangeable and a table entry with `universe` omitted is
+  equivalent to the shorthand.
 - Script variants may be `.sh` (literal `@NAME@` templating) or `.py` (emits a
   shell script to stdout; variables are injected per the §6.1 calling
   convention).
@@ -709,6 +738,140 @@ arbitrary later `sim`/`config` command.
 > alternative policy — auto-persisting a local machine on first touch (zero
 > friction, one unprompted write) — is a one-line change if preferred.
 
+### 4.8 Universes (wrapped / containerized execution)
+
+A **universe** lets a cactup-driven command run in a different execution context
+than the invoking user's — the motivating case being **building and running
+Cactus inside a Singularity/Apptainer image** rather than against the host
+toolchain. The wiring is deliberately generic: a universe is nothing more than a
+**command-wrapper** that cactup applies around a command it would otherwise run
+directly.
+
+**Scope: the three execution seams cactup owns.** A universe can attach at any of
+the seams where *cactup itself* spawns a process:
+
+- **build** — the `make` invocations of `config build` (§7.2).
+- **run** — the runscript execution of `sim run` (§8.4), both the interactive path
+  and the compute-node `sim run --restart-id` (§8.3.1). This is the meaningful
+  case for containerized simulations.
+- **submit** — the machine `submit` command, e.g. `sbatch @SCRIPTFILE@` (§10).
+  Wired for generality, but rarely useful: `submit` normally just hands the job to
+  the scheduler, which then runs `sim run` on a compute node — so the container
+  you actually care about is the **run** universe, recorded at submit time and
+  applied on the compute node (below), not a wrapper around `sbatch` itself. A
+  submit universe only makes sense when the *scheduler client* lives in a context
+  the login shell lacks (e.g. `sbatch` only inside an image, or an
+  `ssh headnode …` wrapper).
+
+The mechanism is phase-agnostic by construction — nothing below is
+phase-specific except which seam consults the resolved universe. Discovery and
+`.py` variant evaluation (cactup's own plumbing) are never wrapped.
+
+**Registry (`meta.toml`, machine-level).** Universes are declared per machine
+(images/contexts are machine-specific) and are user-MDB-overridable like anything
+else in `meta.toml` (§4.1):
+
+```toml
+[universes.et-sif]
+kind = "apptainer"                    # documentation only; cactup does not switch on it
+wrapper-argv = ["apptainer", "exec", "--bind", "@SOURCEDIR@", "/work/@USER@/et.sif"]
+
+# Template power-form (mutually exclusive with wrapper-argv):
+# [universes.head-ssh]
+# wrapper = "ssh headnode 'cd @SOURCEDIR@ && @COMMAND@'"
+```
+
+**Two representation forms** (exactly one per universe):
+
+1. **`wrapper-argv` (prefix form — default, recommended).** An argv *prefix*.
+   cactup runs `<wrapper-argv…> /bin/sh -c <inner>`, where `<inner>` is the
+   env-setup-prepended build snippet (below). cactup owns the trailing
+   `/bin/sh -c`, so there is **no quoting for the author to get wrong**. Covers
+   `apptainer exec`, `docker run`, `chroot`, `env -i`, `numactl`, `taskset`, etc.
+2. **`wrapper` (template form — power option).** A single shell-command string
+   containing exactly one reserved **`@COMMAND@`** placeholder. cactup
+   shell-quotes `<inner>` and substitutes it for `@COMMAND@`. Needed only when the
+   command must not sit at the end (e.g. `ssh host 'cd … && @COMMAND@'`). The
+   author owns any surrounding quoting.
+
+Both forms are first `@NAME@`-substituted with the full §6.3 variable set (so
+`@SOURCEDIR@`, `@USER@`, `@SCRATCH_HOME@`, … resolve in bind specs); `@COMMAND@`
+is reserved, filled **last**, and meaningful only in the template form. It is an
+error for a universe to define both `wrapper-argv` and `wrapper`, or for
+`wrapper` to omit `@COMMAND@`.
+
+**`env-setup` runs *inside* the universe.** The `<inner>` snippet cactup wraps is
+the phase's effective env-setup followed by the phase command — build:
+`<ENV_SETUP>\n<make …>`; run: the substituted runscript (with its `ENV_SETUP`
+already prepended for a `.sh` variant, §6.1); submit: the `submit` command — so
+the phase's `env-<phase>-setup` module loads resolve against the universe's
+environment (e.g. the container's modules), which is almost always what a
+containerized phase wants. Authors needing host-then-universe ordering use a
+`.py`-emitted script as usual.
+
+**Resolution precedence.** highest first:
+
+1. CLI `--universe <name>` / `--no-universe` (on `config build`, `sim run`, or
+   `sim submit`).
+2. **(run only) Config build-universe coercion.** If the config being run was
+   *built* in a universe (§7.4 records it) and the optionlist did **not** opt out
+   (`[cactup].coerce-run-universe = false`, §7.8), the run defaults to **that same
+   universe** — a container-built binary generally needs its build image at
+   runtime (its dynamic libs, toolchain, MPI live there), so running it bare is
+   usually broken. This coercion is inherited **by name**: cactup re-resolves the
+   build universe's name against the current machine's `[universes.*]` and
+   re-expands its wrapper with the **run** variable set, so run-specific binds
+   (e.g. `@RUNDIR@`) are correct — it does not reuse the build-time expanded
+   wrapper. It is deliberately stronger than the per-script/machine defaults below
+   (only an explicit CLI flag or the optionlist opt-out escapes it). If a runscript
+   variant *also* names a universe that differs from the coerced one, cactup uses
+   the coerced (build) universe and notes the override under `-v`.
+3. **Per-script association.** For **build**, the optionlist variant's
+   `[cactup].universe` (§7.8). For **run** / **submit**, the selected script
+   variant's `universe` field in `[variants.runscript]` / `[variants.submitscript]`
+   (§4.4) — the inline-table variant form `"<v>" = { queues = [...], universe = "…" }`.
+   This is where "an optionlist/script that only works in a given image names that
+   image" lives.
+4. **Machine phase default.** build: `[build].universe`; run/submit: the
+   `default-universe` key of `[variants.runscript]` / `[variants.submitscript]`.
+   Applies to any variant that does not name its own.
+5. None — run the phase in the invoking context (today's behavior).
+
+An unknown universe name is a hard error at resolution time (listing the
+machine's known universes). The build-universe coercion (step 2) can therefore
+fail if the config's build universe no longer exists on this machine; the error
+names it and points at `--no-universe` / a rebuild as the escape.
+
+**Where the resolved universe is recorded, and when it is applied.**
+
+- **build:** the resolved universe (name + expanded wrapper) is written to
+  `cactup-config.toml` (§7.4) and applied immediately around the `make` snippet. A
+  build produced in a universe is not interchangeable with one produced on the
+  host, so it participates in the rebuild decision (§7.8 rule 5): changing the
+  universe forces a full realclean + rebuild.
+- **run:** resolved at `sim run` / `sim submit` time and recorded in
+  `restart.toml` (§9.3). The interactive `sim run` applies it directly; for a
+  submitted job the **compute-node** `sim run --restart-id` re-reads it from
+  `restart.toml` and wraps the runscript there — satisfying the D11 rule that the
+  compute-node path reads only on-disk metadata, not the global DB (§8.3.1). This
+  is why the run universe is resolved on the login node at submit time (where the
+  MDB/knobs/CLI are available) and frozen into the restart, not re-resolved on the
+  compute node. Note that "resolved" here includes the build-universe coercion
+  (step 2): a config built in a universe gets that universe frozen into every
+  restart's `restart.toml` by default, so its simulations run in the build image
+  even with no `--universe` flag and no runscript-variant universe.
+- **submit:** resolved at `sim submit` time and applied around the `submit`
+  command on the spot; nothing about it needs persisting (it affects only the
+  one-shot `sbatch`-equivalent invocation).
+
+**Known boundary (MPI + containers).** Wrapping the *whole* runscript in a run
+universe runs the entire job in one context (correct for single-node / `generic`
+and typical single-image workflows). Per-rank containerization
+(`mpirun apptainer exec … cactus`, or a container-per-rank launcher) is a
+runscript-authoring concern and stays inside the author's runscript — cactup's
+universe wrapper is deliberately the coarse "whole command in a context" tool, not
+an MPI-launch rewriter.
+
 ---
 
 ## 5. Knobs
@@ -800,16 +963,29 @@ rewritten as a Python `.py` variant.
    (`typed["NODES"] == 4`) so authors needn't re-parse. The JSON-on-stdin choice
    keeps values out of the process table and argv length limits.
 
-**`env-setup` handling differs by template kind.** `env-setup` from
-`meta.toml` (module loads, etc.):
+**`env-setup` handling — the effective block and where it is injected.** For any
+given phase (build/submit/run), the **effective env-setup** is the concatenation
+of the machine's `env-setup` and that phase's optional `env-<phase>-setup`
+(`env-build-setup` / `env-submit-setup` / `env-run-setup`, §4.2), in that order,
+joined by a newline (an unset companion contributes nothing). The `ENV_SETUP`
+variable (§6.3) always holds the **already-combined** effective block for the
+current phase, so scripts and `.py` authors never see the split. Injection then
+depends on the artifact:
 
-- **`.sh` templates:** cactup **auto-prepends** `env-setup` to the generated
-  submit/run script before execution, exactly as simfactory did
-  (`simfactory-docs.txt` §6.4, §18 `ExecuteCommand`).
-- **`.py` variants:** cactup does **not** auto-prepend — the `.py` author has full
-  control over the emitted script and is responsible for placing `env-setup` where
-  they want it. cactup makes the value available to the script: it is bound as the
-  global **`ENV_SETUP`** (string) — and, like every variable, is also a literal
+- **Build (`config build`, §7.2):** the build has no submit/run *script* — cactup
+  drives `make` directly. cactup sources the effective build env-setup
+  (`env-setup` + `env-build-setup`) in the shell it spawns for the `make
+  <config>-config` / `make <config>` / `make <config>-utils` invocations, so the
+  compiler/MPI modules are loaded exactly as they will be at run time. (This is
+  new relative to simfactory, which never applied `env-setup` to builds.)
+- **`.sh` submit/run templates:** cactup **auto-prepends** the effective env-setup
+  for that phase (`env-setup` + `env-submit-setup` or `env-run-setup`) to the
+  generated script before execution, exactly as simfactory did for the base
+  `env-setup` (`simfactory-docs.txt` §6.4, §18 `ExecuteCommand`).
+- **`.py` submit/run variants:** cactup does **not** auto-prepend — the `.py`
+  author has full control over the emitted script and is responsible for placing
+  env-setup where they want it. cactup makes the combined value available as the
+  global **`ENV_SETUP`** (string) — and, like every variable, as a literal
   `@ENV_SETUP@` token — so the author typically emits `print(ENV_SETUP)` near the
   top of the generated script. (This is the deliberate consequence of the `.py`
   variant being the "cactup gets out of the way" escape hatch.)
@@ -897,8 +1073,9 @@ re-invoke `@CACTUP@ sim run …`; renamed from simfactory's `@SIMFACTORY@`).
 
 **Machine-derived** (read from `meta.toml`, available to scripts but not topology
 flags): `PPN` (logical cores/node), `MEMORY` (per-node MB), `CPUFREQ` (GHz),
-`NUM_SMT` (default 1; §8.5 assumption), `ENV_SETUP` (the machine `env-setup`
-block; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
+`NUM_SMT` (default 1; §8.5 assumption), `ENV_SETUP` (the **effective** env-setup
+block for the current phase — `env-setup` plus the phase's `env-<phase>-setup`,
+already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
 
 **Build-time only** (optionlists/build): `MAKEJOBS`, `DEBUGGER`, `RUNDEBUG`.
 
@@ -916,7 +1093,7 @@ Local to the active installation. Replaces `sim-build` (`simfactory-docs.txt`
 ### 7.1 Commands
 
 ```
-cactup config build <name> [-f] [--thornlist P] [--variant V] [flags…]
+cactup config build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [flags…]
 cactup build <name> …              # alias
 cactup config show [<name>]
 cactup config use <name>
@@ -927,6 +1104,9 @@ cactup config delete <name>
   installation. `--thornlist` defaults to
   `<Cactus root>/thornlists/einsteintoolkit.th`. `--variant` selects the
   optionlist variant (required iff the machine has >1 optionlist variant — §4.4).
+  `--universe <U>` runs the build inside a declared universe (e.g. an Apptainer
+  image), `--no-universe` forces the host context; both override the
+  optionlist/machine defaults (§4.8).
   Build flags (`--debug`, `--optimize`, `--unsafe`, `--profile`, `--reconfig`,
   `--clean`, `--make-jobs`, …) carry over from simfactory's `GetConfigValue`
   precedence (`simfactory-docs.txt` §6.3, §16); their effective precedence is
@@ -966,7 +1146,12 @@ scratch/`, `config-data/cctk_Config.h` (presence ⇒ complete), and the
 `make <config>` / `make <config>-config` flow exactly as `simfactory-docs.txt`
 §16. cactup drives `make` the same way (`echo yes | make <config>-config
 options=<OptionList>`, then `make <config>`, `make <config>-utils`; a `VERSION:`
-line change in the optionlist forces a full rebuild).
+line change in the optionlist forces a full rebuild). Each `make` runs in a shell
+that has first sourced the effective **build** env-setup (`env-setup` +
+`env-build-setup`, §4.2/§6.1), so the build sees the same compiler/MPI modules
+the run will. When a **universe** is resolved for the build (§4.8), that whole
+env-setup-plus-`make` shell snippet is what cactup wraps — i.e. the build runs
+inside the universe (container, chroot, …), with env-setup applied inside it.
 
 ### 7.3 What changed in build
 
@@ -993,6 +1178,8 @@ variant = "gpu"                 # optionlist variant used
 gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
 compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
 thornlist = "thornlists/einsteintoolkit.th"
+universe = "et-sif"             # resolved build universe, or omitted for host context (§4.8)
+coerce-run-universe = true      # snapshotted from optionlist [cactup]; default true (§4.8, §7.8)
 config-id = "…"                 # replaces CONFIG-ID
 build-id = "…"                  # replaces BUILD-ID
 [flags]
@@ -1006,7 +1193,14 @@ profile = false
 variant's `[cactup]` header at build time (§7.8) so that `sim submit` can
 enforce queue compatibility (§4.4) without re-reading the MDB. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
-portable across machines).
+portable across machines). The resolved build **`universe`** (§4.8) is recorded
+so `config show` reports it, the rebuild decision (below) can detect a universe
+change, and — unless the optionlist opted out — `sim run`/`sim submit` can coerce
+simulations of this config into the same universe (§4.8 precedence step 2); it is
+omitted when the build ran in the host context. **`coerce-run-universe`** is
+snapshotted from the optionlist `[cactup]` header (§7.8; default `true`) and
+governs that coercion. Only the universe **name** is inherited for the run — the
+run-time wrapper is re-resolved and re-expanded from the current MDB (§4.8).
 
 **Rebuild-decision snapshot.** At build time cactup also copies the chosen
 **source optionlist TOML** verbatim to `configs/<name>/cactup-optionlist.toml`.
@@ -1014,7 +1208,11 @@ The rebuild decision (§7.8 rule 5) diffs the freshly-selected source TOML again
 this stored copy; *any* difference triggers a full realclean + reconfigure +
 rebuild. This is the source-of-truth for "did the optionlist change?" — the
 rendered native file is never diffed (it exists only for the Cactus build system
-to consume, §7.8).
+to consume, §7.8). The recorded **`universe`** is compared the same way (its value
+can come from CLI/machine default, not just the optionlist TOML, so it is checked
+separately): a resolved universe that differs from the stored one also forces a
+full realclean + rebuild, since a host build and an in-container build are not
+interchangeable (§4.8).
 
 The installation's **active config** is recorded per-installation in
 `<installation home>/.cactup/installation.toml` (§8.1), not the global DB —
@@ -1055,6 +1253,9 @@ and **renders** them to that native format before invoking make.
 [cactup]                         # cactup-only metadata; NOT emitted to the native file
 gpu = true                       # binary capability (D12)
 compatible-queues = ["gpu"]      # which queues this build may be submitted to (D12)
+universe = "et-sif"              # optional: build this variant inside this universe (§4.8)
+coerce-run-universe = true       # optional, default true: sims of this config run in `universe` too (§4.8);
+                                 # set false to opt out (run resolves normally, no build-universe inheritance)
 
 [options]                        # rendered to native NAME = value lines
 VERSION = "2024-06-01"           # first emitted line; a change forces full rebuild
@@ -1067,8 +1268,10 @@ CFLAGS = "-O2 -g @SOME_TEMPLATED_VALUE@"
 **Render rules (deterministic; the rendered native file is fed to Cactus only —
 it is never diffed for the rebuild decision):**
 
-1. Only the `[options]` table is rendered. `[cactup]` is stripped (snapshotted
-   into the config metadata, §7.4).
+1. Only the `[options]` table is rendered. `[cactup]` is stripped (`gpu`,
+   `compatible-queues`, and `coerce-run-universe` snapshotted verbatim into the
+   config metadata, §7.4; `[cactup].universe` feeds universe resolution —
+   precedence in §4.8 — and the *resolved* value is what lands in the metadata).
 2. Emit `VERSION` first, then the remaining keys in **TOML document order**
    (`toml` preserves order). Each key → `KEY = value`.
 3. **Scalar → native value mapping, applied to every `[options]` value:**
@@ -1214,8 +1417,8 @@ No restart is created yet (matches simfactory).
 ### 8.3 `sim submit`
 
 ```
-cactup sim submit [-f] [--overwrite] [--force-queue] <sim> <TOPOLOGY…>
-cactup sim submit [-f] [--overwrite] [--force-queue] <sim> <parfile> [--config C] <TOPOLOGY…>   # implicit create
+cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <TOPOLOGY…>
+cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>   # implicit create
 ```
 
 Port of `submit()` (`simfactory-docs.txt` §14.2):
@@ -1242,11 +1445,19 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
 - Compute the topology variable set (§8.5), select the submit/run script
   variants for the chosen queue (§4.4), substitute, and write the substituted
   SubmitScript into the restart metadata.
+- **Resolve universes (§4.8).** Resolve the **run** universe (following the §4.8
+  precedence: `--universe` → the config's coerced build universe unless the
+  optionlist opted out → runscript variant / `default-universe` → none) and record
+  it in `restart.toml` so the compute-node `sim run` applies it (§8.3.1); resolve the
+  **submit** universe and, if any, wrap the `submit` command below in it. The
+  run-universe resolution happens here, on the login node, because the compute
+  node deliberately does not touch the MDB/knobs/CLI (D11).
 - `makeActive()` — create the `output-NNNN-active` symlink (§9.2) **only for the
   restart that will run first**; chained pre-submissions (below) are created
   un-activated.
-- Run the machine `submit` command; parse the job id with `submit-pattern`; store
-  it in the restart metadata (`job-id`; `-1` ⇒ failed/unknown).
+- Run the machine `submit` command (wrapped in the submit universe if one was
+  resolved, §4.8); parse the job id with `submit-pattern`; store it in the restart
+  metadata (`job-id`; `-1` ⇒ failed/unknown).
 - **Auto-recover + auto-chaining** (the simplified model — §8.8): if the
   simulation already has restarts, the new restart recovers from the latest one
   automatically (unless `--no-recover`). If requested walltime > the effective
@@ -1276,9 +1487,12 @@ global DB state:
 the restart (`@SIMULATION_DIR@/output-<RESTART_ID>`) with no registry lookup;
 `--installation` and `--machine` supply the alias and machine name without
 touching the global DB. `cactup sim run --restart-id` reads everything else
-(config, executable path, recovery source, topology) from that restart's on-disk
-`.cactup/` metadata (§9.3) — satisfying the D11 rule that the compute-node path
-does not touch the global DB or the registry. Scheduler stdout/stderr filenames
+(config, executable path, recovery source, topology, **and the run universe**)
+from that restart's on-disk `.cactup/` metadata (§9.3) — satisfying the D11 rule
+that the compute-node path does not touch the global DB or the registry. The run
+universe was resolved and frozen into `restart.toml` at submit time (§8.3, §4.8),
+so the compute node simply wraps the runscript in it without re-consulting the
+MDB. Scheduler stdout/stderr filenames
 come from the template via `@STDOUT_FILE@` / `@STDERR_FILE@`, not from cactup
 code (preserving simfactory's design point).
 
@@ -1313,8 +1527,8 @@ job starts, or mid-run — leaves at most one stale symlink, which the next
 ### 8.4 `sim run`
 
 ```
-cactup sim run [-f] [--overwrite] [--force-queue] <sim> <TOPOLOGY…> [--debug]
-cactup sim run [-f] [--overwrite] [--force-queue] <sim> <parfile> [--config C] <TOPOLOGY…>
+cactup sim run [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <TOPOLOGY…> [--debug]
+cactup sim run [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>
 ```
 
 Port of `run()` / `userRun` / `submitRun` (`simfactory-docs.txt` §14.3): runs
@@ -1328,6 +1542,15 @@ so the reaper (§8.3) never mistakes it for dead. Without `--restart-id`, it
 builds a fresh restart, makes it active, forks, and tees child stdout/stderr to
 `<SimName>.out` / `<SimName>.err` while echoing to the terminal. `--debug`
 launches under the debugger (`@RUNDEBUG@`/`@DEBUGGER@`).
+
+**Run universe (§4.8).** cactup executes the substituted runscript wrapped in the
+resolved **run** universe, if any. In the compute-node path the universe is read
+from `restart.toml` (frozen at submit time, §8.3.1); in the interactive path
+(`--restart-id` absent) it is resolved on the spot per the §4.8 precedence:
+`--universe` → the config's coerced build universe (unless the optionlist opted
+out) → runscript variant / `default-universe` → none. `--no-universe` forces the
+host context. The whole runscript — mpirun/`srun` line included — runs inside the
+universe (the per-rank-container boundary of §4.8 applies).
 
 Computed parfiles use the **`.py` variant** (§6.2), replacing simfactory's
 executable `.rpar`: the `.py` parfile's master copy (§8.2) is invoked per the
@@ -1685,7 +1908,9 @@ create (`simfactory-docs.txt` §15) — `machine`, `simulation-id`, `sourcedir`,
 is dropped for v1 — D3.) `restart.toml` carries `schema` plus the submit/run keys
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
 `checkpt-buffer`, `job-id`, `chained-job-id`, `checkpointing`, `from-restart-id`,
-the last observed `status`, and the creation/marking timestamps that simfactory
+the last observed `status`, the resolved **run** `universe` (name + expanded
+wrapper, or absent for the host context — §4.8, so the compute-node run applies it
+without re-reading the MDB), and the creation/marking timestamps that simfactory
 kept in the separate `timestamp`/`simulation` mark files — folded in here).
 Job id lives in `restart.toml` (`job-id`); there is no `job.ini` (D10 — no legacy
 fallback to read).
@@ -1771,6 +1996,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
 | Install root key | machine `sourcebasedir` (source base; also sync/disambiguation) | machine `install-home` (optional default install prefix; falls back to `~/.cactup/cacti`; `--install-prefix` overrides) — §4.2 |
 | Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock (D11, §2.3) |
+| Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `config build`, `sim run`, and `sim submit` (§4.8) |
 
 ---
 
@@ -1802,6 +2028,17 @@ Each is marked **ASSUMPTION** inline above; collected here:
     (backward-compatible reads), refusing only a `schema` newer than understood;
     the `schema` integer is bumped only on a breaking change and in-place
     up-migration is deferred (§2.1, §9.3).
+13. Universes (§4.8): generic command-wrapper (`wrapper-argv` prefix form default,
+    `wrapper`/`@COMMAND@` template power-form), wired for all three seams —
+    `config build`, `sim run`, and `sim submit` — via one `[universes.*]` registry
+    and a uniform resolution rule. The **run** universe is the load-bearing one
+    (containerized simulations); the **submit** universe is included for
+    generality but is rarely useful (it wraps `sbatch`, not the job — see §4.8).
+    A config built in a universe **coerces** its simulations into that same
+    universe at run time by default (§4.8 precedence step 2), overridable per-CLI
+    or opted out via the optionlist `[cactup].coerce-run-universe = false`.
+    Flag if you'd prefer a different representation or want the temp-script-file
+    (`@COMMAND_FILE@`) power-form instead of the `@COMMAND@` template.
 
 ---
 
