@@ -22,7 +22,7 @@ These were settled during design review and are treated as fixed below.
 |---|----------|----------|
 | D1 | Remote execution / source sync / `login` | **Dropped.** cactup is a local, per-machine tool. No `rsync` sync, no `--remote` SSH dispatch, no `login`, no trampoline/iomachine tunneling. You run cactup on the machine where the work happens. |
 | D2 | Archive subsystem (petashare/uberftp) | **Dropped entirely.** No archive command, no drivers. |
-| D3 | Cactus test-suite support | **Dropped for v1.** Deferred out of this spec; to be designed later. cactup has no `--testsuite` path yet. |
+| D3 | Cactus test-suite support | **Kept, as a first-class `cactup test …` command tree** separate from `config`/`sim` (§11). Test output lives under a dedicated, configurable **test-home** (`tests/`), *not* inside `simulations/`. There is a separate **active test-config**. Test scripts/optionlists are marked `test = true` in the MDB and resolved by the §11.2 rules. simfactory's overloading of `sim` (empty-parfile sentinel, monster `output-NNNN/exe/` copytree) is *not* ported. |
 | D4 | Restart / chaining / recovery & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, checkpoint recovery, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
@@ -69,6 +69,12 @@ Non-goals (dropped per §0): remote/SSH execution, source-tree sync, archiving.
   flags + thornlist). Each installation has an **active config**.
 - **simulation** — a run of a config with a given parfile; owns its output
   directory and supports checkpoint/restart.
+- **test config** — a Cactus build intended for testsuites, built via
+  `cactup test build`; the test-namespace analogue of a config, with its own
+  **active test-config** pointer (§11.1).
+- **test run** (**test-sim**) — one execution of a test config's testsuite; the
+  simplified, one-shot analogue of a simulation, living under **test-home**
+  (§11.5).
 - **MDB (machine database)** — per-cluster scripts and metadata.
 - **knob** — a machine-global default value (allocation, email, queue, …).
 
@@ -276,6 +282,16 @@ cactup sim show [<sim>] [--long] [--all]           (--all: across every installa
 cactup sim output-dir <sim> [--restart-id N]      (prints active/Nth restart dir)
 cactup sim log <sim>                              (tail stdout/err / formaline)
 
+cactup test build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [build flags…]   (§11)
+cactup test show [<name>]
+cactup test use <name>                            (set active test-config, separate from active config)
+cactup test delete <name> [-f]
+cactup test run    [--test-config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test submit [--test-config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test sim show   [<name>] [--long] [--all]
+cactup test sim stop   <name> [-f]
+cactup test sim delete <name> [-f]
+
 cactup knob [<name> [<value>]]                    (§5)
 
 cactup machine show [<name>]                      (replaces print-mdb / list-machines)
@@ -305,7 +321,7 @@ installation is active.
 | `sim show-output` | `cactup sim log` | |
 | `list-simulations` / `list-sim` | `cactup sim show` | |
 | `list-configurations` / `list-conf` | `cactup config show` | |
-| `--testsuite` / test-suite run | *dropped for v1* (D3) | Deferred; no `--testsuite` path in this spec. |
+| `sim create --testsuite` / `--select-tests` / test-suite run | `cactup test build` + `cactup test run`/`test submit [<test>…]` | Own command tree, not a `sim` flag (§11). Selection is the positional `[<test>…]` (default all); no empty-parfile sentinel. |
 | `list-machines` / `print-mdb*` / `whoami` | `cactup machine show` / `whoami` | §4 |
 | `interactive` | *dropped* | **ASSUMPTION**: rarely used; reintroduce later if needed. |
 | `sync`, `--remote`, `login`, `checkout`, `execute` | *dropped* (D1) | `checkout` is replaced by `GetComponents` at install time (already in `install`). |
@@ -429,6 +445,12 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
     still overrides per-install. (This subsumes simfactory's `sourcebasedir`,
     whose other jobs — remote-sync paths and machine disambiguation — are gone
     under D1/§4.3.)
+- **`test-home`** is the per-machine **testsuite-output root**, the direct
+  analogue of `simulation-home` for the `cactup test` subsystem (§11.5); optional,
+  omitted → falls back to `~/.cactup/tests`. Test runs live under
+  `<test-home>/<alias>/…`, kept entirely out of `simulation-home`. Clusters set it
+  to fast/large storage (e.g. `test-home = "/work/@USER@/tests"`) for the same
+  home-quota reason as `simulation-home`.
 - `scratch-home` kept. If set, it is exposed to scripts as `@SCRATCH_HOME@`
   (with `@USER@` substituted) for run scripts that stage to fast scratch; it is
   otherwise unused by cactup itself. A machine that does not set it leaves
@@ -462,7 +484,7 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 **meta.toml table structure.** Scalar keys are grouped into tables for clarity
 (TOML requires top-level keys before any table, so grouping avoids ordering
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
-(`install-home`, `simulation-home`, `scratch-home`), `[hardware]` (`ppn`, `nodes`,
+(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`ppn`, `nodes`,
 `memory`, `num-threads`, `cpu-freq`, …), `[build]` (`make`, `make-jobs`,
 `enabled-thorns`, `disabled-thorns`), `[environment]` (`env-setup` and the
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
@@ -505,32 +527,52 @@ default = true                 # the queue used when -q is omitted (one queue ma
 gpu = true
 max-walltime = "24:00:00"
 
-# Variant → queue association (§4.4). A variant is either the array shorthand
-# (queues only) or the inline-table form `{ queues = [...], universe = "…" }`
-# when it must run in a universe (§4.8).
+# Variant → queue association (§4.4). Every key names a variant; there are no
+# reserved keys. A variant is either the array shorthand (queues only) or the
+# inline-table form `{ queues = [...], universe = "…", test = …, default = … }`
+# when it carries a universe (§4.8), a test marker (§11.2), or the default flag.
+# `default = true` marks the fallback variant within its partition (see below).
 [variants.submitscript]
-"slurm-cpu" = ["checkpt", "single"]   # this variant serves these queues
+"slurm-cpu" = { queues = ["checkpt", "single"], default = true }   # normal default: serves these queues + any queue with no explicit mapping
 "slurm-gpu" = ["gpu"]
-default = "slurm-cpu"                  # variant for queues with no explicit mapping
+"slurm-test" = { queues = ["checkpt", "single"], test = true, default = true }   # testsuite submit + test-partition default (§11.2)
 
 [variants.runscript]
-"cpu" = ["checkpt", "single"]
+"cpu" = { queues = ["checkpt", "single"], default = true }
 "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }   # runs inside a universe (§4.8)
-default = "cpu"
+"test-cpu" = { queues = ["checkpt", "single"], test = true, default = true }   # drives make <config>-testsuite (§11.6)
 # default-universe = "et-sif"          # optional: universe for runscript variants that omit one
 
 # Optionlists have NO default unless there is exactly one variant (§4.4).
 # Each variant just names the optionlist file under optionlists/<variant>.toml;
-# that file declares its own gpu flag and compatible queues (D12, §7.8).
+# that file declares its own gpu flag, compatible queues, and (optional)
+# test flag (D12, §7.8, §11.2).
 [variants.optionlist]
-variants = ["cpu", "gpu"]               # selected at build time via --variant
+variants = ["cpu", "gpu", "test-cpu"]   # selected at build time via --variant;
+                                        # test-cpu.toml carries [cactup].test = true (§11.2)
 ```
+
+The default variant. Instead of a reserved `default = "<name>"` pointer key
+(which would collide with a variant literally named `default` and force the
+token `default` to serve as both a variant name and a directive), the fallback
+variant is marked in place with `default = true` inside its own inline table —
+exactly parallel to `test = true`. `default = true` designates the fallback
+**within its partition**: an un-marked variant is the *normal-partition* default;
+a variant carrying both `test = true` and `default = true` is the *test-partition*
+default (the old `test-default`). **At most one** variant per partition may carry
+`default = true`; a partition with exactly one variant makes that variant the
+implicit default, so the flag is optional there (it may still be stated for
+clarity, as mel5 does). Because every key names a variant, a variant may now be
+named `default` with no special meaning.
 
 Queue/variant consistency requirement: every queue listed in `[queues.*]` must
 be served by some `submitscript` variant and some `runscript` variant (an
-explicit mapping or the `default`). cactup validates this at MDB load and errors
-on a queue with no resolvable script variant, rather than failing cryptically at
-submit time.
+explicit mapping or the `default = true` variant). cactup validates this at MDB
+load and errors on a queue with no resolvable script variant, rather than failing
+cryptically at submit time. When a machine defines any **test-marked** variants
+of a kind (`test = true`), the same coverage check is applied **within the test
+partition** (against the test-partition default); a kind with no test variants is
+fine — tests borrow the normal partition (§11.2).
 
 The `@templating@` inside `meta.toml` values uses **literal `@NAME@`
 substitution only** (D7): the only variables meaningful here are the install-
@@ -616,14 +658,17 @@ them first-class within one machine.
 - **SubmitScript and RunScript variants** are each associated with one or more
   **queues** (the `[variants.*]` tables in §4.2). At submit/run time cactup
   picks the variant mapped to the chosen `-q/--queue`; if the queue has no
-  explicit mapping, the `default` variant is used. (A machine with a single
-  variant may just name it `default`.) The submit-script and run-script variant
-  maps are independent of each other but must each cover every queue (validated
-  at load — §4.2). A variant entry is written either as the **array shorthand**
-  (`"<v>" = ["q1", "q2"]` — queues only) or, when it must run in a universe
-  (§4.8), the **inline-table form** `"<v>" = { queues = ["q1", …], universe = "<name>" }`;
-  the two are interchangeable and a table entry with `universe` omitted is
-  equivalent to the shorthand.
+  explicit mapping, the variant marked `default = true` is used. (A machine with
+  a single variant makes it the implicit default, so the flag is optional there.)
+  The submit-script and run-script variant maps are independent of each other but
+  must each cover every queue (validated at load — §4.2). A variant entry is
+  written either as the **array shorthand** (`"<v>" = ["q1", "q2"]` — queues
+  only) or, when it must carry a field beyond its queues, the **inline-table
+  form** `"<v>" = { queues = ["q1", …], universe = "<name>", test = true, default = true }`
+  where `universe` (§4.8), `test` (§11.2), and `default` are each optional; a
+  table entry with only `queues` is equivalent to the shorthand. Every key names
+  a variant — there are no reserved keys — so a variant may be named `default`
+  with no special meaning; defaultness is carried solely by `default = true`.
 - Script variants may be `.sh` (literal `@NAME@` templating) or `.py` (emits a
   shell script to stdout; variables are injected per the §6.1 calling
   convention).
@@ -639,19 +684,29 @@ end-to-end test target (you can actually build and run locally). The port:
 ```
 mdb/
   mel5/
-    meta.toml                    # grouped tables (§4.2); single "local" queue
+    meta.toml                    # grouped tables (§4.2); single "local" queue;
+                                 #   normal + test-marked script/optionlist variants (§11.2);
+                                 #   test-home under [paths] (§11.5)
     discover.py                  # is_machine(): FQDN == melete05.cct.lsu.edu
     optionlists/default.toml     # ported from mel5.cfg; [cactup] gpu=false + [options]
+    optionlists/test.toml        # testsuite optionlist; [cactup] test=true, DEBUG on (§11.2)
     runscripts/default.sh        # @NUM_PROCS@→@TASKS@, @NUM_THREADS@→@CPUS_PER_TASK@
+    runscripts/test.sh           # test=true; drives make <config>-testsuite → test-home (§11.6)
     submitscripts/default.sh     # @SIMFACTORY@→@CACTUP@, +--installation, PID-wait chaining
+    submitscripts/test.sh        # test=true; re-invokes `cactup test run`, no chaining (§11.6)
 ```
 
 It exercises every load-bearing new mechanism: discovery function, grouped
 `meta.toml`, single-queue/single-variant resolution, the optionlist
-TOML→native render (§7.8), the renamed topology variables (§6.3), and the
-compute-node re-invocation locator (§8.3.1). Because mel5 has no scheduler, its
-`submit` backgrounds the script and echoes a PID; chaining is emulated by
-waiting on that PID in plain bash (no `.py` variant needed).
+TOML→native render (§7.8), the renamed topology variables (§6.3), the
+compute-node re-invocation locator (§8.3.1), and — via the `test`-marked
+variants — the whole `cactup test` subsystem (§11): the `test = true` marking and
+its respective-defaults resolution (§11.2), the testsuite-only variables (§11.9),
+and the results-into-test-home redirect (§11.6). Because mel5 has no scheduler,
+its `submit` backgrounds the script and echoes a PID; chaining is emulated by
+waiting on that PID in plain bash (no `.py` variant needed), and the testsuite
+`submit` re-invokes `cactup test run` directly (a testsuite is one-shot — no
+chaining, §11.6).
 
 ### 4.6 The `generic` machine & runtime hardware detection
 
@@ -1079,6 +1134,13 @@ already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
 
 **Build-time only** (optionlists/build): `MAKEJOBS`, `DEBUGGER`, `RUNDEBUG`.
 
+**Testsuite-only** (present only for `cactup test run`/`test submit` scripts and
+`test build` optionlists — never leaked into normal sim/config substitution;
+§11.9): `TEST_HOME`, `TEST_DIR`, `TEST_NAME`, `RESULTS_ID`,
+`TESTSUITE_RESULTS_DIR`, `TESTSUITE_SELECT`. (`CONFIGURATION` and `TASKS` are the
+existing §6.3 variables a test runscript uses for `make @CONFIGURATION@-testsuite`
+and `CCTK_TESTSUITE_RUN_PROCESSORS`.)
+
 Dropped (no longer produced): the simfactory proc-layout names above, the bare
 `SUBMITSCRIPT` machine key (variants replace it), and every remote/archive
 variable.
@@ -1174,6 +1236,8 @@ Stored next to the build, **not** in the global DB:
 ```toml
 schema = 1
 name = "sim-gpu"
+test = false                    # true iff built via `cactup test build` (§11.1); tracked
+                                # in the active-test-config pointer, not active-config
 variant = "gpu"                 # optionlist variant used
 gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
 compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
@@ -1253,6 +1317,8 @@ and **renders** them to that native format before invoking make.
 [cactup]                         # cactup-only metadata; NOT emitted to the native file
 gpu = true                       # binary capability (D12)
 compatible-queues = ["gpu"]      # which queues this build may be submitted to (D12)
+test = false                     # optional, default false: true marks this optionlist as a
+                                 # testsuite variant, considered only by `cactup test build` (§11.2)
 universe = "et-sif"              # optional: build this variant inside this universe (§4.8)
 coerce-run-universe = true       # optional, default true: sims of this config run in `universe` too (§4.8);
                                  # set false to opt out (run resolves normally, no build-universe inheritance)
@@ -1904,8 +1970,10 @@ when a breaking bump happens.
 `simulation.toml` (sim level) carries `schema`, the keys simfactory wrote at
 create (`simfactory-docs.txt` §15) — `machine`, `simulation-id`, `sourcedir`,
 `configuration`, `config-id`, `build-id`, `executable`, `optionlist`, `parfile`
-— plus cactup's `alias`. (No `testsuite`/`select-tests` keys: test-suite support
-is dropped for v1 — D3.) `restart.toml` carries `schema` plus the submit/run keys
+— plus cactup's `alias`. (No `testsuite`/`select-tests` keys on `simulation.toml`:
+a simulation is never a testsuite — testsuite state lives in the `cactup test`
+subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carries
+`schema` plus the submit/run keys
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
 `checkpt-buffer`, `job-id`, `chained-job-id`, `checkpointing`, `from-restart-id`,
 the last observed `status`, the resolved **run** `universe` (name + expanded
@@ -1949,14 +2017,433 @@ FINISHED / ERROR / INACTIVE as simfactory's `list-simulations` did.
 
 ---
 
-## 11. Test suites (dropped for v1 — D3)
+## 11. Test suites (D3)
 
-Cactus test-suite support is **deferred out of this spec** and will be designed
-later. cactup v1 has no `--testsuite`/`--select-tests` flags, no test-selection
-metadata, and no `make <configuration>-testsuite` path. simfactory's testsuite
-machinery (`copyTestsuiteData`, the `output-0000-active → .` self-link special
-case, `simfactory-docs.txt` §13.7) is intentionally out of scope here; when
-test-suite support is added it will get its own design section.
+Cactus ships each thorn with a `test/` directory of reference data, and the
+flesh exposes a `make <config>-testsuite` target (`simfactory-docs.txt` §13.7)
+that runs those tests and diffs the output against the reference. simfactory
+drove this by **overloading** its normal simulation machinery — `sim create
+--testsuite` with an empty-parfile sentinel, a `testsuite`/`select-tests`
+property on the simulation, a `copyTestsuiteData` step that built a **monster
+simulation directory** (`output-NNNN/exe/`, a `copytree` of the whole built
+config, an `rsync` of arrangement test data, and a `ln -s . output-0000-active`
+self-link special case). cactup **keeps the capability but not the
+entanglement**, per the two requirements that motivate this section:
+
+1. **A first-class `cactup test …` command tree**, parallel to but separate from
+   `config`/`sim`. You build a testsuite config with `cactup test build`, not
+   `cactup config build`; you run tests with `cactup test run`/`test submit`.
+2. **A separate, configurable output root.** Test output lands under a dedicated
+   **test-home** (`tests/`), *not* inside `simulations/` and *not* inside a
+   simulation directory. Its location is a machine key with a home-dir fallback,
+   exactly like `simulation-home` (§8.1) and `install-home` (§4.2).
+
+The rest of this section defines the model, the `test = true` marking that lets
+one machine ship both normal and test scripts/optionlists, the CLI, the on-disk
+layout, and what is deliberately dropped from simfactory's version.
+
+### 11.1 Model & concepts
+
+Three concepts mirror their normal-simulation counterparts (§1.1) but form a
+**separate namespace with separate active pointers**:
+
+- **test config** — a Cactus build (§7) intended for testsuites. It is an
+  ordinary config on disk (`<Cactus root>/configs/<name>/`, driven by
+  `make <name>` / `make <name>-testsuite`), distinguished only by `test = true`
+  in its `cactup-config.toml` (§7.4) and by having been built through
+  `cactup test build`, which resolves its optionlist from the machine's **test**
+  optionlist variants (§11.2). Config names are **unique across the
+  installation** — a name is either a normal config or a test config, never both
+  (they would collide on `configs/<name>/`). `config build`/`config delete`
+  operate only on normal configs and `test build`/`test delete` only on test
+  configs; each refuses a name owned by the other kind with a message pointing at
+  the right command. (**ASSUMPTION:** the shared `configs/` namespace is the
+  simplest model and matches D6/§7; if colliding names in both kinds are ever
+  wanted, test configs could be transparently name-prefixed on disk. Deferred.)
+- **active test-config** — recorded **per-installation** in
+  `installation.toml` (§11.8) as `active-test-config`, **independent of** the
+  normal `active-config` (§7.4). `cactup test use <name>` sets it; the first
+  successful `test build` becomes active; deleting the active test-config
+  re-points to the most-recently-built remaining test config, or drops to a
+  **null-test-config** state when the last one is deleted (exactly the §7.1
+  null-config discipline, applied to the test pointer). The two active pointers
+  never interfere: an installation can have active config `production` and active
+  test-config `et-tests` simultaneously.
+- **test run** (a.k.a. **test-sim**) — one execution of a test config's
+  testsuite against a chosen topology and test selection. It is the analogue of a
+  simulation but **much simpler**: one-shot, no restarts, no checkpoint recovery,
+  no walltime chaining (§11.6). Test runs live under **test-home** (§11.5) and
+  are addressed by name via `cactup test sim …` (`test sim delete <name>` in the
+  required surface).
+
+### 11.2 Marking test scripts & optionlists (`test = true`) and resolution
+
+A machine typically needs **different** optionlists, runscripts, and
+submitscripts for testsuites than for production (a test runscript drives
+`make <config>-testsuite` and exports `CCTK_TESTSUITE_RUN_*`, §11.6, rather than
+`mpirun`-ing a parfile). cactup lets one machine ship both, keyed by a single
+`test = true` marker, and resolves the right one by the rules the requirements
+specify.
+
+**Where the marker lives.**
+
+- **Optionlists** already carry a `[cactup]` header (§7.8); mark a test
+  optionlist with `test = true` there:
+  ```toml
+  [cactup]
+  test = true                    # this optionlist is for testsuites
+  gpu = false
+  compatible-queues = ["local"]
+  ```
+- **Run/submitscripts** have no header of their own, so the marker goes on the
+  `meta.toml` variant entry, using the inline-table form (§4.2):
+  ```toml
+  [variants.runscript]
+  "cpu"      = { queues = ["checkpt", "single"], default = true }              # normal default
+  "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true } # test-partition default (see resolution below)
+  ```
+  (`test = true` and `default = true` compose with each other and with
+  `universe = "…"` in the same inline table.)
+
+**Partitioning.** For each kind (optionlist / runscript / submitscript) cactup
+splits the machine's variants into a **normal** set (no marker) and a **test**
+set (`test = true`). Normal commands (`config build`, `sim run`, `sim submit`)
+consider **only the normal set** — a test variant is *never* used for a normal
+build/run. Test commands (`test build`, `test run`, `test submit`) prefer the
+**test set** but **fall back to the normal set when the test set is empty**. This
+is the asymmetry the requirements call out: *"if there is no testsuite optionlist
+but there is a regular one, use that for tests, but not vice versa."*
+
+**Resolution within the chosen set** (identical rules for all three kinds, and
+identical to §4.4/§7.8 applied to a subset):
+
+- **Optionlist** (selected at `test build` time):
+  - test set has **exactly one** variant → used implicitly (it is the test
+    default);
+  - test set has **more than one** → `--variant` is **required**;
+  - test set is **empty** → fall back to the normal set and apply the *same* rule
+    there (one normal → implicit; several normal → `--variant` required).
+  - So specification is only needed when there are ≥2 candidate variants in the
+    set that actually applies — precisely the requirement's *"specification is
+    only needed if … there are two normal optionlist variants or two testsuite
+    optionlist variants."* A machine with one normal + one test optionlist gets
+    the normal one for `config build` and the test one for `test build`, each with
+    no `--variant`.
+- **Run/submitscript** (selected at `test run`/`test submit` time, per the chosen
+  queue): pick the test-set variant whose `queues` include the chosen queue; if
+  none maps that queue, use the test-partition default (the `test = true`,
+  `default = true` variant, or the sole test variant). If the test set is empty,
+  resolve against the normal set exactly as a sim does (§4.4: queue → variant,
+  else the `default = true` variant). `--variant V` on `test run`/`test submit` is
+  the escape hatch that forces the entry named `V` in each map (it must be a
+  test-marked variant when the test set is non-empty); the runscript and
+  submitscript maps are resolved independently, and `V` names the entry in each.
+
+**Validation at MDB load** extends §4.2's "every queue is served" check
+**per-partition**: if a machine defines *any* test runscript (or submitscript)
+variant, then every queue in `[queues.*]` must be served by some test variant of
+that kind or by the test-partition default; a machine that defines **no** test variants of a
+kind is fine (tests borrow the normal partition, already validated). A machine
+that ships a test optionlist but no test runscript, or vice versa, is legal — the
+partitions are independent, and each falls back on its own.
+
+### 11.3 CLI surface
+
+Added to §3 (all operate on the **active installation**; the run/submit topology
+flags are the §8.5 set):
+
+```
+cactup test build [<name>] [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [build flags…]
+cactup test show [<name>]                         # list test configs / show one
+cactup test use <name>                            # set active test-config
+cactup test delete <name> [-f]                    # delete a test config (build + metadata)
+
+cactup test run    [--test-config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test submit [--test-config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+
+cactup test sim show   [<name>] [--long] [--all]  # list test runs (--all: across installations)
+cactup test sim stop   <name> [-f]                # stop a queue-submitted test run
+cactup test sim delete <name> [-f]                # move a test run to test-home TRASH/ (--purge to remove)
+```
+
+Notes:
+- `[<test>…]` is the optional test selection (`test run` / `test submit`). Omitted
+  ⇒ run **all** tests (the successor to simfactory's `--select-tests all`
+  default). A selector is a test name, a thorn (`arrangement/Thorn`), or an
+  arrangement; cactup passes the resolved selection to the flesh harness (§11.6).
+- `--test-config C` defaults to the **active test-config**; both `test run` and
+  `test submit` fail fast in the null-test-config state with guidance to
+  `test build`.
+- Unlike `sim submit`/`sim run`, there is **no parfile argument and no implicit
+  create** — a test run's "parfile" is the thorn test data, chosen by `[<test>…]`.
+  (This is where simfactory's empty-parfile `""` sentinel goes away entirely.)
+- `-f`/`--overwrite`/`--force-queue`/`--universe`/`--no-universe` carry the same
+  meanings as on `sim run`/`sim submit` (§3, §4.4, §4.8).
+
+### 11.4 `cactup test build`
+
+Identical to `config build` (§7) except:
+
+1. The optionlist variant is resolved from the machine's **test** optionlist
+   partition (§11.2), not the normal one; `--variant` is required only when that
+   partition has >1 candidate.
+2. The resulting `cactup-config.toml` records **`test = true`** (§7.4). Everything
+   else — the `configs/<name>/` build layout (§7.2), the `make <name>-config` /
+   `make <name>` flow, the optionlist TOML→native render (§7.8), build-flag
+   precedence (§7.6), universe wrapping of the build (§4.8), the
+   rebuild-decision snapshot (§7.4) — is unchanged. A test config **also** builds
+   the ordinary `make <name>` binary, because `make <name>-testsuite` runs that
+   binary.
+3. The name must be free across the whole `configs/` namespace (§11.1); a
+   collision with a normal config is a hard error.
+4. On success the config becomes the installation's **active test-config**
+   (§11.1), leaving the normal `active-config` untouched.
+
+`cactup test show` / `test use` / `test delete` are the test-namespace analogues
+of §7.1's `config show`/`use`/`delete`, filtered to `test = true` configs and
+operating on the `active-test-config` pointer. `test delete` GC-checks test runs
+(not simulations) that were built from the config and, as with `config delete`,
+warns + refuses without `-f` if any live test runs still reference it, then GCs
+the executable cache entry if it becomes orphaned (§8.1 — test runs are counted
+as live references the same way sims are).
+
+### 11.5 Where test runs live (test-home) — the second requirement
+
+**New machine key `test-home`** in `[paths]` (§4.2), alongside `simulation-home`,
+`install-home`, `scratch-home`. It behaves **exactly** like `simulation-home`:
+
+- optional, `@USER@`-substituted, made absolute;
+- omitted ⇒ falls back to **`~/.cactup/tests`**;
+- real clusters point it at fast/large storage (e.g.
+  `test-home = "/work/@USER@/tests"`).
+
+Like sim-home, the **effective test-home is resolved once at install time** as
+`<machine test-home>/<alias>` (or `~/.cactup/tests/<alias>`) and recorded in
+`installation.toml` (§11.8) so `test` subcommands never re-derive it. It is
+exposed to scripts as `@TEST_HOME@` (§11.9).
+
+**On-disk layout** (deliberately *not* the simulation layout of §9):
+
+```
+<test-home>/                                   = <machine test-home>/<alias>, or ~/.cactup/tests/<alias>
+  CACHE/exe/<build-id>                         (shared-semantics executable cache — see below)
+  TRASH/<test-run-id>/                         trashed test runs (test sim delete, §11.7)
+  <test-config>/<TestName>/                    one dir per test run (grouped by the test config)
+    log.txt                                    test-run log (same [LOG:…] format as §12)
+    results-%04d/                              numbered result sets (newest is "active")
+      <flesh testsuite output>                 pass/fail reports + diffs the harness writes
+      summary.log                              flesh testsuite summary (as produced by the target)
+    results-NNNN-active                        RELATIVE symlink → results-NNNN
+    test.out / test.err                        foreground `test run` stdout/stderr
+    submit-script / run-script                 substituted scripts for the latest run
+    .cactup/                                   test-run metadata (§11.8)   [cactup-owned]
+```
+
+Rationale for the divergences from §9:
+- **`results-%04d`, not `output-%04d`.** These are testsuite result sets, not
+  Cactus simulation restarts, and no external analysis tool should mistake a
+  `tests/` tree for a `simulations/` tree. Keeping a **numbered, newest-active**
+  scheme (mirroring the familiar restart convention, and reusing the §9.2 active
+  symlink mechanics — one relative `results-NNNN-active` link, exactly-one-active)
+  lets you re-run a config's tests and keep prior result sets for comparison,
+  without pulling in restart/checkpoint machinery. Each `test run`/`test submit`
+  allocates the next `results-%04d` and makes it active; `-f`/`--overwrite`
+  overwrites the active one instead of allocating a new set.
+- **No `output-NNNN/exe/` copytree, no arrangement `rsync`.** This is the "monster
+  directory" cactup drops (§11.10). `make <config>-testsuite` is driven from the
+  Cactus source tree (where `configs/<config>/` and the thorns' `test/` data
+  already live); cactup only **redirects the harness's result output** into the
+  active `results-%04d` under test-home (§11.6), leaving the source tree clean.
+- **Executable cache.** A test run does **not** freeze a private copy of the
+  binary the way a simulation does (§8.1): a testsuite runs `make
+  <config>-testsuite`, which uses the config's live `<Cactus root>/configs/<config>/exe`,
+  and a test run is short and one-shot, so the "survive a rebuild in flight"
+  guarantee that motivates a frozen `.cactup/exe` (§8.1) does not apply. The
+  test-home `CACHE/`/`TRASH/` exist for symmetry and for the cache-GC accounting
+  (§11.4 counts test runs as live `build-id` references so `test delete`/`config
+  delete` don't reap a binary a queued test still needs), but a test run's
+  `.cactup/` holds no `exe` link. (**ASSUMPTION:** using the live built binary is
+  the simpler, correct-for-one-shot choice; flag if you'd rather freeze it for
+  strict reproducibility under concurrent rebuilds.)
+
+### 11.6 `cactup test run` / `cactup test submit`
+
+The run/submit split mirrors §8.3/§8.4 (submit → queue; run → foreground /
+compute-node re-invocation), but the body is the **simplified, one-shot** path:
+
+1. Resolve test-config = `--test-config` or active test-config (fatal in
+   null-test-config). Locate its built binary in `<Cactus root>/configs/<config>/`
+   (fatal if the config is incomplete — no `config-data/cctk_Config.h`, §7.2).
+2. Enforce the built config's `compatible-queues` against the chosen queue (§4.4 /
+   D12) exactly as a sim does; `--force-queue`/`-f` overrides.
+3. Resolve the **test** submit/run script variants for the chosen queue (§11.2)
+   and the **run universe** (§4.8, same precedence as §8.3), recording the run
+   universe in the test-run metadata so a queued run applies it on the compute
+   node without touching the MDB (D11).
+4. Allocate the next `results-%04d` (or overwrite the active one with
+   `--overwrite`/`-f`), make it active (§9.2 mechanics), and compute the topology
+   variable set (§8.5).
+5. **Drive the testsuite.** The (test) runscript is responsible for exporting
+   `CCTK_TESTSUITE_RUN_COMMAND` and `CCTK_TESTSUITE_RUN_PROCESSORS`
+   (`simfactory-docs.txt` §6.4) and invoking `make @CONFIGURATION@-testsuite
+   PROMPT=no`, with the effective **run** env-setup applied (auto-prepended for
+   `.sh`, author-emitted via `@ENV_SETUP@` for `.py` — §6.1). cactup exposes the
+   values the script needs: `@TASKS@` (→ `CCTK_TESTSUITE_RUN_PROCESSORS`), the
+   run-command pieces (`@EXECUTABLE@` and the machine's launcher, exactly as a
+   normal runscript builds its `mpirun`/`srun` line — this is why tests get their
+   own runscript), `@TESTSUITE_SELECT@` (the selection, default `all`), and
+   `@TESTSUITE_RESULTS_DIR@` (the active `results-%04d`, §11.9).
+6. **Redirect results into test-home, keep the source tree clean.** cactup points
+   the flesh testsuite target's output at `@TESTSUITE_RESULTS_DIR@`. (**ASSUMPTION
+   / implementation detail:** the exact hook depends on the flesh version — prefer
+   the target's own output-directory option when present; otherwise cactup makes
+   `configs/<config>/TEST/<machine>` a symlink into the results dir before
+   running, so the harness writes straight into test-home and only a symlink is
+   left in the tree. Either way cactup **never** does simfactory's `copytree` of
+   the built config — §11.10.)
+7. Parse the harness's pass/fail summary, record it in `test.toml`
+   (`[results] passed/failed`, §11.8), print a one-line summary, and **exit
+   non-zero if any test failed** (so `test run` is CI-usable). `cactup test sim
+   show <name>` reprints the last run's results.
+
+**No chaining, no recovery, no restart bookkeeping.** A testsuite is a single
+job: §8.8's auto-chaining, checkpoint recovery, `from-restart-id`, and the
+stale-restart reaper **do not apply**. `--wall-time` is a single scheduler
+reservation for the one job (no splitting). This is the largest simplification
+versus the simulation path and the reason tests get their own, thinner code path
+instead of a `--testsuite` flag bolted onto `sim`.
+
+**Compute-node re-invocation (`test submit`).** As with `sim submit` (§8.3.1),
+the generated test submitscript re-invokes cactup on the compute node, passing the
+run target explicitly so it needs neither the global DB nor the registry:
+
+```
+@CACTUP@ test run @TEST_NAME@ \
+    --installation=@ALIAS@ --test-dir=@TEST_DIR@ --machine=@MACHINE@ \
+    --results-id=@RESULTS_ID@
+```
+
+`--test-dir` (the absolute test-run directory) + `--results-id` fully identify the
+result set; `cactup test run` in this mode reads the config, topology, selection,
+and run universe from `.cactup/test.toml` (§11.8) and drives the testsuite as
+above. It holds the per-run `running.lock` and touches `heartbeat` (§11.8) for the
+same liveness reasons as a sim run, but there is no reaper/chain handoff to
+perform. `--no-universe`/`--universe` and the §4.8 run-universe wrapping apply to
+the `make …-testsuite` shell exactly as they wrap a normal runscript.
+
+### 11.7 Managing test runs & deleting test configs
+
+- **`cactup test sim show [<name>] [--all]`** — lists the active installation's
+  test runs from the `tests.toml` registry (§11.8), or unions every
+  installation's with `--all` (the §8.1 cross-install discipline). Per-run display
+  state is coarser than a sim's (no restart chain): `RUNNING`/`QUEUED`/`HOLDING`
+  from the active result set's live job status, `DONE (passed/failed)` once the
+  job is `U` and a summary was recorded, `ERROR` on `E`.
+- **`cactup test sim stop <name> [-f]`** — the §8.6 `stop` semantics for the
+  active result set's job (there is no `clean`: no checkpoints/Formaline tarballs
+  to dedup, no chain to deactivate beyond removing the active symlink).
+- **`cactup test sim delete <name> [-f]`** (the required surface) — the §8.7
+  `sim delete` semantics against test-home: refuse a live run without `-f`
+  (`-f` stops it first), `shutil.move` the run dir into
+  `<test-home>/TRASH/<test-run-id>/`, remove its `tests.toml` entry, and run
+  executable-cache GC (a test run counts as a live `build-id` reference until
+  trashed/purged; `--purge`/`-f` removes outright and drops the reference
+  immediately). `test-run-id` reuses the §9.1 `simulation-id` string format
+  (`test-<name>-<machine>-<hostname>-<user>-<timestamp>-<pid>`) so it names the
+  `TRASH/` subdir unambiguously.
+- **`cactup test delete <name> [-f]`** — deletes the test **config** (§11.4),
+  distinct from `test sim delete` which deletes a test **run**. This is the two
+  required delete verbs kept explicitly separate.
+
+### 11.8 Metadata files
+
+Following D6/§9.3 (per-thing on-disk TOML, `schema`-versioned, backward-compatible
+reads), the test subsystem adds:
+
+- **`installation.toml` gains two keys** (§7.4/§8.1): `active-test-config` (the
+  test-config pointer, independent of `active-config`) and `test-home` (the
+  resolved per-alias test output root, resolved at install like `sim-home`).
+- **Per-installation test-run registry** `<installation home>/.cactup/tests.toml`
+  — the test analogue of `simulations.toml` (§8.1): `<TestName>` → `{ dir,
+  test-config, created }`. `test sim` subcommands locate a run by name through it;
+  mutations go under the per-installation lock (§2.3, item 5), which now also
+  guards `tests.toml` and the `active-test-config` pointer.
+- **Per-test-run metadata** `<TestName>/.cactup/test.toml`:
+  ```toml
+  schema = 1
+  name = "et-tests"
+  test-config = "et-test-cpu"       # the test config used
+  config-id = "…"
+  build-id  = "…"
+  machine = "mel5"
+  alias = "et-dev"
+  test-run-id = "test-et-tests-mel5-…-…"
+  select = "all"                    # or the resolved selector list
+  # topology + scheduler, as a restart records them (§9.3), for the single job:
+  queue = "local"
+  nodes = 1
+  tasks = 4
+  tpn = 4
+  cpus = 1
+  walltime = "1:00:00"
+  allocation = "…"
+  job-id = "…"
+  status = "U"                      # last observed live status (cached; §8.6)
+  universe = { name = "et-sif", wrapper = "…" }   # resolved run universe, or absent
+  [results]                         # written when a run completes (§11.6)
+  passed = 42
+  failed = 3
+  results-id = 0                    # the results-%04d this summary belongs to
+  [timestamps]
+  created = "…"
+  submitted = "…"
+  finished = "…"
+  ```
+  Plus the liveness files under the same `.cactup/`: `running.lock` and
+  `heartbeat` (§9.3 semantics; consulted by `test sim stop`/`show`, not by any
+  reaper). There is **no** `exe` link (§11.5) and no `restart.toml` (a test run
+  has result sets, not restarts).
+
+### 11.9 Variables added
+
+The §6.3 canonical variable set gains a small **test-only** group, available to
+test runscripts/submitscripts (and their `.py` variants) and to `test build`
+optionlists — never leaked into normal sim/config substitution:
+
+- `TEST_HOME` — the per-alias test output root (§11.5), the test analogue of
+  `SIM_HOME`.
+- `TEST_DIR` — absolute path to this test run's directory (passed to the
+  compute-node re-invocation as `--test-dir`, §11.6), the analogue of
+  `SIMULATION_DIR`.
+- `TEST_NAME` — the test-run name (analogue of `SIMULATION_NAME`).
+- `RESULTS_ID` — the active `results-%04d` id (analogue of `RESTART_ID`).
+- `TESTSUITE_RESULTS_DIR` — absolute path to the active `results-%04d`, where the
+  harness must write (§11.6, step 6).
+- `TESTSUITE_SELECT` — the test selection (`all` or the resolved selector list,
+  §11.3), the successor to simfactory's `select-tests`.
+
+`CONFIGURATION` (§6.3) is the test config name for `make @CONFIGURATION@-testsuite`;
+`TASKS` (§6.3) feeds `CCTK_TESTSUITE_RUN_PROCESSORS`; `EXECUTABLE`, `SOURCEDIR`,
+`ENV_SETUP`, and the topology/scheduler variables are the existing §6.3 ones. No
+new *build-time* variables are needed — a test optionlist uses the same set as a
+normal one (§7.8).
+
+### 11.10 Deliberately not ported from simfactory's testsuite
+
+- **The monster simulation directory.** No `output-NNNN/exe/` dir, no `copytree`
+  of the built config into the run dir, no `rsync` of arrangement test data
+  (`copyTestsuiteData`, `simfactory-docs.txt` §13.7). cactup runs the testsuite
+  from the source tree and redirects only its *results* into test-home (§11.5,
+  §11.6).
+- **The `output-0000-active → .` self-link special case.** cactup uses the normal
+  §9.2 active-symlink mechanics against `results-%04d`; there is no self-link hack.
+- **The empty-parfile `""` sentinel** and the `--testsuite`/`--select-tests` flags
+  bolted onto `sim create`/`sim submit`. Test selection is the positional
+  `[<test>…]` on `test run`/`test submit` (default all), and there is no parfile.
+- **Overloading simulation state.** No `testsuite`/`select-tests` keys on
+  `simulation.toml` (§9.3 already notes their absence); testsuite state lives only
+  in `test.toml` (§11.8), and testsuite output lives only under test-home — the
+  two requirements this section exists to satisfy.
 
 ---
 
@@ -1994,6 +2481,12 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Machine detection | `aliaspattern` regex on hostname | `discover.py`; result cached in DB as a single `detected-machine` string (not per-hostname — §4.3) |
 | Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) |
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
+| Test-suite command | `sim create --testsuite` (overloads `sim`) | `cactup test build` + `cactup test run`/`submit` (own command tree — §11) |
+| Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |
+| Active test-config | n/a (a `testsuite` property on a sim) | per-installation `installation.toml` `active-test-config` (separate from active config) — §11.1, §11.8 |
+| Test config metadata | sim `properties.ini` `testsuite=True` | `configs/<name>/cactup-config.toml` `test = true` (§7.4) |
+| Test run metadata | sim `properties.ini` + `output-NNNN/exe/` copytree | `<test-home>/…/<name>/.cactup/test.toml` + `tests.toml` registry (§11.8); no copytree (§11.10) |
+| Test/script/optionlist marking | separate faked machine defs | `test = true` on optionlist `[cactup]` / meta.toml variant entry (§11.2) |
 | Install root key | machine `sourcebasedir` (source base; also sync/disambiguation) | machine `install-home` (optional default install prefix; falls back to `~/.cactup/cacti`; `--install-prefix` overrides) — §4.2 |
 | Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock (D11, §2.3) |
 | Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `config build`, `sim run`, and `sim submit` (§4.8) |
@@ -2023,7 +2516,18 @@ Each is marked **ASSUMPTION** inline above; collected here:
     with `--checkpt-buffer`; it only sets the *exposed* `@CHECKPOINT_WALLTIME@`
     hint variables (hard wall − buffer). cactup reserves the full hard wall and
     does not inject or consider any Cactus termination parameter (§8.8).
-11. Test-suite support dropped for v1 (D3, §11) — to be designed later.
+11. Test-suite support is a first-class `cactup test …` tree with its own
+    configurable **test-home** output root and a separate **active test-config**
+    (D3, §11). Softer choices inside §11 to confirm:
+    (a) test configs share the `configs/` namespace with normal configs, so a name
+        is one kind or the other (name-prefixing deferred — §11.1);
+    (b) a test run uses the config's **live** built binary rather than freezing a
+        private copy, since it is one-shot (§11.5);
+    (c) results are redirected into test-home via the flesh testsuite target's
+        output-directory option when available, else a `configs/<config>/TEST/…`
+        symlink — the exact hook depends on the target Cactus flesh version
+        (§11.6). None of these change the two hard requirements (separate command
+        tree, separate configurable output root).
 12. Schema/version handling: newer binaries **must read older `schema`**
     (backward-compatible reads), refusing only a `schema` newer than understood;
     the `schema` integer is bumped only on a breaking change and in-place
@@ -2054,8 +2558,9 @@ Each is marked **ASSUMPTION** inline above; collected here:
 | 9 machine detection | `discover.py` (§4.3) |
 | 10 defs layering | removed; → knobs/meta (§5.2) |
 | 11 `@VAR@` engine | literal `@NAME@` + `.py` escape hatch (§6) |
-| 12 optionlists/run/submit | variants (§4.4, §6.2) |
+| 12 optionlists/run/submit | variants (§4.4, §6.2); test-marked variants (§11.2) |
 | 13 on-disk layout | **preserved** (§9) |
+| 13.7 testsuite layout / `copyTestsuiteData` | `cactup test` subsystem: test-home output root + `test.toml`; monster `output-NNNN/exe/` copytree **not** ported (§11) |
 | 14 lifecycle | §8 |
 | 15 properties.ini | `.cactup/*.toml` (§9.3) |
 | 16 build | §7 |
