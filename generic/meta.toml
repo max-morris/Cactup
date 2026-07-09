@@ -59,11 +59,13 @@ gpu          = false
 max-walltime = "8760:00:00"
 default      = true
 
+# Single variant of each script; being the sole variant it is the implicit
+# default, so default = true is optional but stated for clarity (design §4.2).
 [variants.submitscript]
-default = "default"
+"default" = { queues = ["local"], default = true }
 
 [variants.runscript]
-default = "default"
+"default" = { queues = ["local"], default = true }
 
 [variants.optionlist]
 variants = ["default"]

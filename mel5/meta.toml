@@ -20,6 +20,10 @@ install-home    = "/home/@USER@/cacti"
 # The per-machine simulation root (design §4.2/§8.1). Per-alias sim-home is
 # <simulation-home>/<alias>. Omit this key to fall back to ~/.cactup/simulations.
 simulation-home = "/home/@USER@/simulations"
+# The per-machine testsuite-output root (design §4.2/§11.5), kept OUT of
+# simulation-home. Per-alias test-home is <test-home>/<alias>. Omit this key to
+# fall back to ~/.cactup/tests.
+test-home       = "/home/@USER@/tests"
 
 [hardware]
 ppn             = 80
@@ -63,12 +67,24 @@ gpu          = false
 max-walltime = "8760:00:00"     # 1 year (effectively unlimited; no scheduler)
 default      = true
 
-# One variant of each script. With a single variant, "default" serves all queues.
+# One NORMAL variant of each script, plus one TESTSUITE variant marked
+# test = true (design §11.2). Every key names a variant; the fallback is marked
+# in place with default = true (§4.2, §4.4) rather than via a reserved pointer
+# key. With a single normal variant "default" is the implicit normal default and
+# with a single test variant "test" is the implicit test default, so the flag is
+# optional here — we state default = true on "default" for clarity. Each partition
+# must still cover every queue (here just "local").
 [variants.submitscript]
-default = "default"
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
 
 [variants.runscript]
-default = "default"
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
 
+# Two optionlists: the normal "default" and the testsuite "test" (whose
+# test.toml carries [cactup].test = true). They are respective defaults —
+# `config build` picks "default", `test build` picks "test" — neither needing
+# --variant, since each partition has exactly one candidate (design §11.2).
 [variants.optionlist]
-variants = ["default"]          # one optionlist => used implicitly at build
+variants = ["default", "test"]
