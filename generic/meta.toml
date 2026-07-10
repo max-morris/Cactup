@@ -66,9 +66,11 @@ default      = true
 # default, so default = true is optional but stated for clarity (design §4.2).
 [variants.submitscript]
 "default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
 
 [variants.runscript]
 "default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
 
 [variants.optionlist]
 variants = ["default"]

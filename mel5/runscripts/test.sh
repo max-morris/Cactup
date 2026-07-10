@@ -9,7 +9,9 @@
 #   TESTSUITE_RESULTS_DIR  absolute path to the active results-NNNN under
 #                          test-home; the harness output must land here so the
 #                          Cactus source tree stays clean (design §11.5/§11.6).
-#   TESTSUITE_SELECT       which tests to run ("all", or a selector list).
+#   TESTSUITE_SELECT       which tests to run, in the flesh's own format:
+#                          empty = all, else space-separated `Thorn` or
+#                          `Thorn/testname` entries.
 # Plus the usual CONFIGURATION / TASKS / MACHINE / SOURCEDIR (design §6.3).
 #
 # env-setup is auto-prepended by cactup for .sh variants (design §6.1), so the
@@ -26,30 +28,28 @@ pwd
 hostname
 date
 
-# The flesh testsuite harness launches each test with this command (it appends
-# the executable and parfile for each test itself) and this processor count
-# (design §11.6; simfactory-docs.txt §6.4). A plain mpirun suffices on mel5.
+# The flesh testsuite harness (lib/sbin/RunTestUtils.pl) launches each test by
+# substituting the literal placeholders $nprocs/$exe/$parfile into this command
+# — it does NOT append them (design §11.6; simfactory-docs.txt §6.4). Single
+# quotes keep the placeholders out of the shell's hands; RUN_PROCESSORS is the
+# $nprocs default, overridable per test by its test.ccl.
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
-export CCTK_TESTSUITE_RUN_COMMAND="mpirun -np @TASKS@"
+export CCTK_TESTSUITE_RUN_COMMAND='mpirun -np $nprocs $exe $parfile'
 
-# Redirect testsuite output into test-home (design §11.6, step 6). cactup keeps
-# the source tree clean by pointing the harness's results dir at the active
-# results-NNNN under test-home. When the flesh testsuite target exposes no
-# output-directory option, the portable fallback is to symlink the in-tree
-# results dir at TESTSUITE_RESULTS_DIR so the harness writes straight into
-# test-home and only a symlink is left behind in configs/<config>/.
-# (The exact hook is flesh-version-dependent — see the §11.6 ASSUMPTION.)
+# Redirect testsuite output into test-home (design §11.6, step 6). The flesh
+# harness honors the TESTS_DIR env var directly (RunTestUtils.pl; default is
+# $CCTK_HOME/TEST) and writes each test's run dirs plus the final summary.log
+# under $TESTS_DIR/@CONFIGURATION@/, keeping the source tree clean.
 mkdir -p @TESTSUITE_RESULTS_DIR@
-rm -rf configs/@CONFIGURATION@/TEST
-ln -s @TESTSUITE_RESULTS_DIR@ configs/@CONFIGURATION@/TEST
+export TESTS_DIR=@TESTSUITE_RESULTS_DIR@
 
-echo "Running testsuite (selection: @TESTSUITE_SELECT@):"
+echo "Running testsuite (selection: '@TESTSUITE_SELECT@', empty = all):"
 export CACTUS_STARTTIME=$(date +%s)
 
-# PROMPT=no runs non-interactively. With the default selection ("all") this runs
-# every thorn's tests; a narrower selection is passed through for the flesh
-# harness to honor (selection hook is flesh-version-dependent — design §11.6).
-export CCTK_TESTSUITE_SELECTION="@TESTSUITE_SELECT@"
+# PROMPT=no runs non-interactively. The flesh's selection hook is the
+# CCTK_TESTSUITE_RUN_TESTS env var: empty/unset runs every thorn's tests, else
+# a space-separated list of `Thorn` / `Thorn/testname` entries.
+export CCTK_TESTSUITE_RUN_TESTS="@TESTSUITE_SELECT@"
 make @CONFIGURATION@-testsuite PROMPT=no
 
 echo "Stopping:"
