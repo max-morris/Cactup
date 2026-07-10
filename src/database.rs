@@ -1,247 +1,270 @@
-use std::collections::HashMap;
-use anyhow::{anyhow, Context};
-use serde_derive::{Deserialize, Serialize};
-use signal_hook::consts::TERM_SIGNALS;
-use signal_hook::iterator::Signals;
-use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread;
+//! The global database, `~/.cactup/database.json` (spec §2.1) — the ONLY
+//! global mutable state: installations, the active installation, knobs (§5),
+//! and the detected-machine cache (§4.3). Config metadata and simulation
+//! state live on disk next to what they describe (D4, D6), never here.
+//!
+//! Locking follows §2.3 (D11): every mutation is a self-contained
+//! lock → re-read → mutate → persist → unlock via [`Db::update`], so the lock
+//! is never held across long-running work and a long command can never
+//! clobber an unrelated change made while it worked. Reads take a snapshot
+//! under the lock and release immediately. There is no whole-lifetime lock,
+//! and consequently no Drop/signal persistence: in-memory state never
+//! outlives the lock, so there is nothing to flush at exit.
 
+use anyhow::{bail, Context};
+use indexmap::IndexMap;
+use serde_derive::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::lock::LinkLock;
 use crate::Res;
 
-/// Lock an `Arc<Mutex<Database>>` (or any `Mutex`), recovering from poisoning.
-///
-/// A poisoned mutex means a thread panicked while holding the lock. For our use case, we
-/// just ignore the panic and recover what was there anyway.
-#[macro_export]
-macro_rules! lock {
-    ($db:expr) => {
-        $db.lock().unwrap_or_else(|e| e.into_inner())
-    };
+/// On-disk schema version (§2.1), carried by the DB and every cactup TOML.
+/// Bumped ONLY on a breaking on-disk change; a newer binary must read every
+/// older schema it ever shipped, and refuses only a *newer* one.
+pub const SCHEMA: u32 = 1;
+
+/// Files written before the schema field existed are schema 1.
+fn default_schema() -> u32 {
+    SCHEMA
 }
+
+/// Knob names cactup recognizes (§5). `user`/`email` are normally derived
+/// (`$USER`, `git config user.email`) but may be overridden as knobs.
+pub const KNOWN_KNOBS: &[&str] = &["allocation", "mail", "mail-type", "queue", "user", "email"];
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct CactusInstallation {
     pub alias: String,
     pub release: Option<String>,
-    pub path: String
+    pub path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Database {
+    #[serde(default = "default_schema")]
+    pub schema: u32,
     pub cactup_version: String,
-    pub installations: HashMap<String, CactusInstallation>, // maps alias to installation
-    pub active_installation: Option<String>, // default installation to use for most commands
-
-    // Runtime-only state. These are populated by `load` and never serialized
-    // into the on-disk JSON.
-    #[serde(skip)]
-    path: PathBuf,
-    #[serde(skip)]
-    lock: Option<File>,
+    /// alias → installation.
+    #[serde(default)]
+    pub installations: IndexMap<String, CactusInstallation>,
+    /// Default installation to use for most commands.
+    #[serde(default)]
+    pub active_installation: Option<String>,
+    /// Machine-global defaults, keyed by machine name (§5).
+    #[serde(default)]
+    pub knobs: IndexMap<String, IndexMap<String, String>>,
+    /// The resolved machine for *this* `~/.cactup` — a single string, not
+    /// keyed by hostname (§4.3).
+    #[serde(default)]
+    pub detected_machine: Option<String>,
 }
 
 impl Database {
     pub fn new() -> Self {
         Self {
+            schema: SCHEMA,
             cactup_version: crate::VERSION.to_owned(),
-            installations: HashMap::new(),
+            installations: IndexMap::new(),
             active_installation: None,
-            path: PathBuf::new(),
-            lock: None,
+            knobs: IndexMap::new(),
+            detected_machine: None,
         }
     }
 
-    /// Read the database from `~/.cactup/database.json`, creating a fresh one
-    /// (in memory) if the file doesn't exist yet. The returned handle holds an
-    /// exclusive advisory lock on `~/.cactup/database.lock` for its whole
-    /// lifetime, so a second cactup instance will fail fast rather than race on
-    /// the same file.
-    ///
-    /// The database is flushed back to disk when the handle is dropped (normal
-    /// exit, or error unwinding). Because a termination signal terminates the
-    /// process without running destructors, `load` also spawns a thread that
-    /// makes a best-effort attempt to persist the database when the program is
-    /// killed (SIGINT, SIGTERM, ...). See [`Database::install_kill_handler`].
-    pub fn load() -> Res<Arc<Mutex<Self>>> {
-        let dir = &crate::CACTUP_ROOT;
-        fs::create_dir_all(dir.as_path())
-            .with_context(|| format!("Failed to create cactup directory {}", dir.display()))?;
-
-        // Acquire an exclusive, non-blocking lock on a dedicated lock file. We
-        // hold this handle (in `self.lock`) until the Database is dropped, at
-        // which point the OS releases the lock automatically. Running multiple
-        // cactup instances at once is discouraged; this turns a silent
-        // last-writer-wins clobber into an explicit error.
-        let lock_path = dir.join("database.lock");
-        let lock = 
-            OpenOptions::new()
-                        .create(true)
-                        .read(true)
-                        .write(true)
-                        .truncate(false)
-                        .open(&lock_path)
-                        .with_context(|| format!("Failed to open lock file {}", lock_path.display()))?;
-
-        lock.try_lock().map_err(|e| {
-            anyhow!(
-                "Could not lock {} ({e}). Is another cactup instance running? \
-                 Running multiple instances at once is not supported.",
-                lock_path.display()
-            )
-        })?;
-
-        let path = dir.join("database.json");
-        let mut db = Self::read_from(&path)?;
-
-        db.path = path;
-        db.lock = Some(lock);
-
-        let db = Arc::new(Mutex::new(db));
-        Self::install_kill_handler(&db);
-        Ok(db)
+    /// The stored knob value for a machine, if set.
+    pub fn knob(&self, machine: &str, name: &str) -> Option<&str> {
+        self.knobs.get(machine)?.get(name).map(String::as_str)
     }
 
-    /// Spawn a background thread that attempts to persist the database when the
-    /// process receives a termination signal.
-    ///
-    /// `Drop` covers normal exit and error unwinding, but a signal kills the
-    /// process outright without running destructors, so the on-disk database
-    /// would be left stale. This handler persists whatever is in memory at the
-    /// time the signal arrives, then terminates the process itself.
-    ///
-    /// Registering a handler suppresses the default "terminate" action for these
-    /// signals, so we must re-emulate it once we've saved — otherwise the
-    /// process would become unkillable by SIGINT/SIGTERM. We do this ourselves
-    /// rather than relying on gix's interrupt handler, which is only installed
-    /// for the subcommands that touch the manifest repository; this path has to
-    /// work whether or not gix was activated.
-    ///
-    /// The thread holds only a [`Weak`] reference, so it never keeps the
-    /// database alive past normal exit (which would suppress the `Drop`-based
-    /// persist).
-    fn install_kill_handler(db: &Arc<Mutex<Self>>) {
-        let weak = Arc::downgrade(db);
-
-        let mut signals = match Signals::new(TERM_SIGNALS) {
-            Ok(signals) => signals,
-            Err(e) => {
-                eprintln!("Warning: could not install signal handler to persist the database on exit: {e:#}");
-                return;
-            }
-        };
-
-        thread::spawn(move || {
-            // We only ever handle the first signal: the body terminates the
-            // process, so there's nothing to loop for. `forever()` blocks until
-            // one arrives. If the iterator is somehow exhausted, the thread just
-            // ends, leaving the (now non-existent) signals to the default action.
-            let Some(signal) = signals.forever().next() else { return };
-
-            // The database may already be dropped (the program is exiting
-            // normally and has persisted itself); if so there's nothing to
-            // save, but we still honour the signal below.
-            if let Some(db) = weak.upgrade() {
-                let db = lock!(db);
-
-                // We're about to overwrite database.json with state that may be
-                // inconsistent (the program could have been mid-mutation). Back
-                // up the current file first so a good copy can be recovered.
-                if let Err(e) = db.backup() {
-                    eprintln!("Warning: failed to back up database before signal persist: {e:#}");
-                }
-
-                if let Err(e) = db.persist() {
-                    eprintln!("Warning: failed to persist database after signal: {e:#}");
-                }
-            }
-
-            // Now actually terminate. Registering the handler above suppressed
-            // the default terminate action, so re-emulate it; this works
-            // regardless of whether gix installed its own handler. The explicit
-            // exit is a fallback in case the signal can't be emulated (e.g. it
-            // isn't recognised).
-            let _ = signal_hook::low_level::emulate_default_handler(signal);
-            std::process::exit(128 + signal);
-        });
+    /// The effective knob value: stored → built-in/derived default (§5).
+    pub fn knob_or_default(&self, machine: &str, name: &str) -> Option<String> {
+        if let Some(v) = self.knob(machine, name) {
+            return Some(v.to_owned());
+        }
+        match name {
+            "mail-type" => Some("all".to_owned()),
+            "user" => std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).ok(),
+            "email" => git_config_email(),
+            _ => None,
+        }
     }
 
-    /// Deserialize the database from `path`, or build a fresh one if the file
-    /// doesn't exist.
+    pub fn set_knob(&mut self, machine: &str, name: &str, value: String) {
+        self.knobs.entry(machine.to_owned()).or_default().insert(name.to_owned(), value);
+    }
+
+    /// Deserialize from `path`, or build a fresh one if the file doesn't
+    /// exist. Enforces the §2.1 schema guard.
     fn read_from(path: &Path) -> Res<Self> {
         if !path.exists() {
             return Ok(Self::new());
         }
 
-        let contents = 
-            fs::read_to_string(path)
-               .with_context(|| format!("Failed to read database from {}", path.display()))?;
-        serde_json::from_str(&contents)
-                   .with_context(|| format!("Failed to parse database at {}", path.display()))
-    }
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read database from {}", path.display()))?;
+        let db: Database = serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse database at {}", path.display()))?;
 
-    /// Best-effort copy of the current on-disk `database.json` to a numbered
-    /// backup (`database.json.bak0`, `database.json.bak1`, ...) before it gets
-    /// overwritten. Used by the kill handler, whose flushed state may be
-    /// inconsistent; the backup preserves the last cleanly-written file for
-    /// manual recovery.
-    ///
-    /// The smallest unused number is chosen, so existing backups are never
-    /// clobbered. Does nothing if there's no file on disk yet.
-    fn backup(&self) -> Res<()> {
-        if !self.path.exists() {
-            return Ok(());
+        if db.schema > SCHEMA {
+            bail!(
+                "{} has schema {} but this cactup ({}) understands at most schema {SCHEMA}. \
+                 It was written by a newer cactup; please upgrade.",
+                path.display(),
+                db.schema,
+                crate::VERSION
+            );
         }
-
-        let mut n: u32 = 0;
-        let backup_path = loop {
-            let mut candidate = self.path.clone().into_os_string();
-            candidate.push(format!(".bak{n}"));
-            let candidate = PathBuf::from(candidate);
-            if !candidate.exists() {
-                break candidate;
-            }
-            n += 1;
-        };
-
-        fs::copy(&self.path, &backup_path).with_context(|| {
-            format!(
-                "Failed to back up {} to {}",
-                self.path.display(),
-                backup_path.display()
-            )
-        })?;
-        Ok(())
+        Ok(db)
     }
 
-    /// Write the current state back to `self.path` as pretty-printed JSON.
-    fn persist(&self) -> Res<()> {
+    /// Write to `path` as pretty JSON, atomically (temp file + rename), so a
+    /// kill mid-write can never leave a torn database.
+    fn persist(&self, path: &Path) -> Res<()> {
         let contents =
-            serde_json::to_string_pretty(self)
-                       .with_context(|| "Failed to serialize database")?;
-        fs::write(&self.path, contents)
-           .with_context(|| format!("Failed to write database to {}", self.path.display()))?;
+            serde_json::to_string_pretty(self).with_context(|| "Failed to serialize database")?;
+        let dir = path.parent().expect("database path has a parent");
+        let mut temp = tempfile::NamedTempFile::new_in(dir)
+            .with_context(|| format!("Failed to create temp file in {}", dir.display()))?;
+        temp.write_all(contents.as_bytes())
+            .and_then(|()| temp.as_file().sync_all())
+            .with_context(|| "Failed to write database temp file")?;
+        temp.persist(path)
+            .with_context(|| format!("Failed to move database into place at {}", path.display()))?;
         Ok(())
     }
 }
 
-impl Drop for Database {
-    fn drop(&mut self) {
-        // A Database built via `new()` (rather than `load()`) has no backing
-        // path and was never locked; there's nothing to persist.
-        if self.path.as_os_str().is_empty() {
-            return;
-        }
+/// Handle to the on-disk global DB. Cheap to construct; owns no lock. All
+/// access goes through [`Db::read`] / [`Db::update`].
+pub struct Db {
+    path: PathBuf,
+    lock_path: PathBuf,
+}
 
-        if let Err(e) = self.persist() {
-            // Drop can't return an error, so the best we can do is warn.
-            eprintln!("Warning: failed to persist database: {e:#}");
-        }
+impl Db {
+    /// The production handle under `~/.cactup`.
+    pub fn open() -> Res<Db> {
+        Ok(Self::in_dir(&crate::CACTUP_ROOT))
+    }
 
-        // The lock is released when `self.lock`'s File handle is dropped along
-        // with the rest of `self`.
+    /// A handle rooted at an explicit directory (tests, tools).
+    pub fn in_dir(dir: &Path) -> Db {
+        Db {
+            path: dir.join("database.json"),
+            lock_path: dir.join("database.lock"),
+        }
+    }
+
+    /// Take a consistent snapshot: lock, read, release. A snapshot is for
+    /// reading only — never persist one (that would be the stale-clobber §2.3
+    /// forbids); mutate through [`Db::update`] instead.
+    pub fn read(&self) -> Res<Database> {
+        self.ensure_dir()?;
+        let _lock = LinkLock::acquire(&self.lock_path)?;
+        Database::read_from(&self.path)
+    }
+
+    /// The §2.3 field-scoped read-modify-write: acquire the lock, re-read the
+    /// on-disk DB, apply `mutate` (touching only the keys the caller owns),
+    /// persist, release. Callers must keep the closure brief — long-running
+    /// work happens strictly outside.
+    pub fn update<T>(&self, mutate: impl FnOnce(&mut Database) -> Res<T>) -> Res<T> {
+        self.ensure_dir()?;
+        let _lock = LinkLock::acquire(&self.lock_path)?;
+        let mut db = Database::read_from(&self.path)?;
+        let result = mutate(&mut db)?;
+        db.schema = SCHEMA;
+        db.cactup_version = crate::VERSION.to_owned();
+        db.persist(&self.path)?;
+        Ok(result)
+    }
+
+    fn ensure_dir(&self) -> Res<()> {
+        let dir = self.path.parent().expect("database path has a parent");
+        fs::create_dir_all(dir)
+            .with_context(|| format!("Failed to create cactup directory {}", dir.display()))
+    }
+}
+
+fn git_config_email() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "user.email"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let email = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!email.is_empty()).then_some(email)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_is_a_scoped_rmw_and_read_sees_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+
+        db.update(|d| {
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        // A second, field-scoped update must not clobber the first field.
+        db.update(|d| {
+            d.set_knob("mel5", "queue", "local".to_owned());
+            Ok(())
+        })
+        .unwrap();
+
+        let snapshot = db.read().unwrap();
+        assert_eq!(snapshot.active_installation.as_deref(), Some("et"));
+        assert_eq!(snapshot.knob("mel5", "queue"), Some("local"));
+        assert_eq!(snapshot.schema, SCHEMA);
+        // No lock is left behind by read/update.
+        assert!(!dir.path().join("database.lock").exists());
+    }
+
+    #[test]
+    fn schema_guard_refuses_newer_reads_older() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+
+        let newer = format!(
+            r#"{{ "schema": {}, "cactup-version": "99.0.0", "installations": {{}} }}"#,
+            SCHEMA + 1
+        );
+        fs::write(dir.path().join("database.json"), newer).unwrap();
+        let err = format!("{:#}", db.read().unwrap_err());
+        assert!(err.contains("upgrade"), "unexpected error: {err}");
+
+        // A pre-schema file (like today's) reads fine and defaults to SCHEMA.
+        let legacy = r#"{
+            "cactup-version": "0.1.0",
+            "installations": { "et": { "alias": "et", "release": null, "path": "/x" } },
+            "active-installation": "et"
+        }"#;
+        fs::write(dir.path().join("database.json"), legacy).unwrap();
+        let snapshot = db.read().unwrap();
+        assert_eq!(snapshot.schema, SCHEMA);
+        assert_eq!(snapshot.installations["et"].path, "/x");
+        assert!(snapshot.knobs.is_empty());
+    }
+
+    #[test]
+    fn knob_defaults() {
+        let db = Database::new();
+        assert_eq!(db.knob_or_default("m", "mail-type").as_deref(), Some("all"));
+        assert_eq!(db.knob_or_default("m", "allocation"), None);
+        let mut db = db;
+        db.set_knob("m", "mail-type", "none".to_owned());
+        assert_eq!(db.knob_or_default("m", "mail-type").as_deref(), Some("none"));
     }
 }
