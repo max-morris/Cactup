@@ -135,7 +135,8 @@ pub(crate) struct TopologyFlags {
     /// Node count (default: 1).
     #[clap(short, long, value_name = "N")]
     pub nodes: Option<u32>,
-    /// Total tasks (MPI ranks; default: nodes * tasks-per-node).
+    /// Total tasks (MPI ranks; default: the script variant's `tasks` setting,
+    /// else nodes * tasks-per-node — but 2 for `test run`/`test submit`).
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,
     /// Tasks per node (default: fill the node, floor(PPN / cpus)).

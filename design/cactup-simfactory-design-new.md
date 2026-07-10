@@ -529,8 +529,10 @@ max-walltime = "24:00:00"
 
 # Variant → queue association (§4.4). Every key names a variant; there are no
 # reserved keys. A variant is either the array shorthand (queues only) or the
-# inline-table form `{ queues = [...], universe = "…", test = …, default = … }`
-# when it carries a universe (§4.8), a test marker (§11.2), or the default flag.
+# inline-table form `{ queues = [...], universe = "…", test = …, default = …,
+# tasks = … }` when it carries a universe (§4.8), a test marker (§11.2), the
+# default flag, or a default task count (`tasks = N`: the TASKS used when no
+# -n/-T/-t flag is given, instead of filling the node — §8.5).
 # `default = true` marks the fallback variant within its partition (see below).
 [variants.submitscript]
 "slurm-cpu" = { queues = ["checkpt", "single"], default = true }   # normal default: serves these queues + any queue with no explicit mapping
@@ -1664,6 +1666,12 @@ Derivation (produces the canonical §6.3 names directly — no legacy aliases):
 - `TASKS_PER_NODE` = `--tpn` if given, else `floor(PPN / CPUS_PER_TASK)`, min 1
   (fill the node).
 - `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
+- **Script-variant default tasks (§4.2).** When *no* process-layout flag
+  (`-n`/`-T`/`-t`) was given, the selected script variant's optional `tasks = N`
+  setting replaces the fill-the-node `TASKS` (capping `TASKS_PER_NODE` to keep
+  the layout self-consistent); for a submit the submitscript entry is consulted
+  first, then the runscript entry. Testsuite runs additionally fall back to
+  `TASKS = 2` when no variant sets it (§11.6).
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0`,
   cross-checked against the built binary's `gpu` flag (§4.4 / D12).
 - A script that needs "total cores" or "cores requested" computes them from
@@ -2287,8 +2295,12 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
    `CCTK_TESTSUITE_RUN_COMMAND` and `CCTK_TESTSUITE_RUN_PROCESSORS`
    (`simfactory-docs.txt` §6.4) and invoking `make @CONFIGURATION@-testsuite
    PROMPT=no`, with the effective **run** env-setup applied (auto-prepended for
-   `.sh`, author-emitted via `@ENV_SETUP@` for `.py` — §6.1). cactup exposes the
-   values the script needs: `@TASKS@` (→ `CCTK_TESTSUITE_RUN_PROCESSORS`), the
+   `.sh`, author-emitted via `@ENV_SETUP@` for `.py` — §6.1). Because thorn
+   tests are written for 1–2 MPI ranks, a testsuite run does NOT fill the node:
+   with no `-n`/`-T`/`-t` flag, `TASKS` is the selected script variant's
+   `tasks` setting (§4.2, mode-relevant script first), else **2**. cactup
+   exposes the values the script needs: `@TASKS@` (→
+   `CCTK_TESTSUITE_RUN_PROCESSORS`), the
    run-command pieces (`@EXECUTABLE@` and the machine's launcher, exactly as a
    normal runscript builds its `mpirun`/`srun` line — this is why tests get their
    own runscript), `@TESTSUITE_SELECT@` (the selection, default `all`), and
