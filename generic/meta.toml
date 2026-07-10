@@ -47,6 +47,9 @@ stdout          = "cat @SIMULATION_NAME@.out"
 stderr          = "cat @SIMULATION_NAME@.err"
 stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
+[environment]
+# Applied to build, submit, AND run (design §4.2/§6.1); phase-specific
+# additions would go in env-build-setup / env-submit-setup / env-run-setup.
 # The configure scripts strip /usr/local and system dirs from XXX_DIR to avoid
 # choosing system libraries; re-add them last so compilers still find them.
 env-setup = """

@@ -52,7 +52,9 @@ stdout          = "cat @SIMULATION_NAME@.out"
 stderr          = "cat @SIMULATION_NAME@.err"
 stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
-# Shell setup sourced before build/submit/run commands (module loads, env).
+[environment]
+# Shell setup sourced before build/submit/run commands (module loads, env);
+# applied to all three phases (design §4.2/§6.1).
 env-setup = """
 export MPI_DIR="/home/sbrandt/spack/var/spack/environments/cactus/.spack-env/view"
 export PATH="${MPI_DIR}/bin:/usr/local/bin:/usr/bin:/bin"
