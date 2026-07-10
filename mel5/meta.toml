@@ -76,6 +76,9 @@ default      = true
 # with a single test variant "test" is the implicit test default, so the flag is
 # optional here — we state default = true on "default" for clarity. Each partition
 # must still cover every queue (here just "local").
+# A variant may also set tasks = N — the default TASKS when no -n/-T/-t flag is
+# given, instead of filling the node (§8.5); testsuite runs already default to
+# 2 without it (§11.6), which is right for this machine.
 [variants.submitscript]
 "default" = { queues = ["local"], default = true }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test submit`

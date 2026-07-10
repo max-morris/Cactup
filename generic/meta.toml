@@ -64,6 +64,9 @@ default      = true
 
 # Single variant of each script; being the sole variant it is the implicit
 # default, so default = true is optional but stated for clarity (design §4.2).
+# A variant may also set tasks = N — the default TASKS when no -n/-T/-t flag is
+# given, instead of filling the node (§8.5); testsuite runs already default to
+# 2 without it (§11.6).
 [variants.submitscript]
 "default" = { queues = ["local"], default = true }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
