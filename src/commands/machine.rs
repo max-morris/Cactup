@@ -241,6 +241,7 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>) -> Res<()> {
     println!("{} ({:?} MDB, {})", machine.name.bold(), machine.layer, machine.dir.display());
     for (label, value) in [
         ("name", &meta.machine.name),
+        ("nickname", &meta.machine.nickname),
         ("hostname", &meta.machine.hostname),
         ("status", &meta.machine.status),
         ("location", &meta.machine.location),

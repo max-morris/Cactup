@@ -98,6 +98,10 @@ pub struct Paths {
     pub scratch_home: Option<String>,
 }
 
+/// §4.2 keeps simfactory's capacity keys verbatim. cactup itself consumes
+/// only `ppn`/`num-threads`/`num-smt` (§8.5 topology), `memory`, and
+/// `cpu-freq` (@CPUFREQ@); the `allow(dead_code)` fields are carried for MDB
+/// fidelity — valid keys a machine may document, not consumed by any command.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Hardware {
@@ -105,17 +109,23 @@ pub struct Hardware {
     #[serde(default)]
     pub autodetect: bool,
     pub ppn: Option<u32>,
+    #[allow(dead_code)]
     pub min_ppn: Option<u32>,
+    #[allow(dead_code)]
     pub spn: Option<u32>,
+    #[allow(dead_code)]
     pub mpn: Option<u32>,
     pub nodes: Option<u32>,
     pub num_threads: Option<u32>,
+    #[allow(dead_code)]
     pub max_num_threads: Option<u32>,
     pub num_smt: Option<u32>,
+    #[allow(dead_code)]
     pub max_num_smt: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
     pub cpu_freq: Option<f64>,
+    #[allow(dead_code)]
     pub flop_per_cycle: Option<u32>,
 }
 
@@ -168,10 +178,15 @@ impl Environment {
     }
 }
 
+/// §10 keeps simfactory's scheduler keys verbatim; the `allow(dead_code)`
+/// ones are carried for MDB fidelity, not consumed: `interactive` was dropped
+/// (§3.1), stdout/stderr filenames are template-owned via @STDOUT_FILE@/
+/// @STDERR_FILE@ (§8.3.1), and chain sizing is walltime-only (§8.8).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Scheduler {
     pub submit: Option<String>,
+    #[allow(dead_code)]
     pub interactive_cmd: Option<String>,
     pub get_status: Option<String>,
     pub stop: Option<String>,
@@ -182,9 +197,13 @@ pub struct Scheduler {
     pub holding_pattern: Option<String>,
     pub exec_host: Option<String>,
     pub exec_host_pattern: Option<String>,
+    #[allow(dead_code)]
     pub stdout: Option<String>,
+    #[allow(dead_code)]
     pub stderr: Option<String>,
+    #[allow(dead_code)]
     pub stdout_follow: Option<String>,
+    #[allow(dead_code)]
     pub max_queue_slots: Option<u32>,
     /// Machine-level fallback ceiling for queues that omit `max-walltime` (§4.2).
     pub max_walltime: Option<Walltime>,
@@ -306,6 +325,7 @@ impl<'de> Deserialize<'de> for ScriptVariants {
 #[serde(rename_all = "kebab-case")]
 pub struct Universe {
     /// Documentation only; cactup does not switch on it.
+    #[allow(dead_code)]
     pub kind: Option<String>,
     /// Prefix form: cactup runs `<wrapper-argv…> /bin/sh -c <inner>`.
     pub wrapper_argv: Option<Vec<String>>,

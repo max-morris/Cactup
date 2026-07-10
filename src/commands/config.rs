@@ -4,6 +4,7 @@ use super::{machine, Ctx};
 use crate::args::ConfigCommand;
 use crate::build::{self, ConfigMeta};
 use crate::installation::Installation;
+use crate::sim::cache;
 use crate::Res;
 use anyhow::bail;
 use colored::Colorize;
@@ -30,6 +31,14 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
                     format!("Built config {} (build-id {}).", args.name.bold(), outcome.meta.build_id)
                         .bright_green()
                 );
+                // The rebuild minted a new build-id and replaced the exe, so
+                // the previous build's CACHE/exe entry may now be
+                // unreferenced (§8.1). Best-effort.
+                if let Ok(inst_meta) = installation.meta() {
+                    if let Ok(sim_home) = inst_meta.sim_home() {
+                        let _ = cache::gc(sim_home, None);
+                    }
+                }
             }
             Ok(())
         }
@@ -173,7 +182,6 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
     if exe.exists() {
         fs::remove_file(&exe)?;
     }
-    // TODO(SIM/Phase 4): GC the now-orphaned CACHE/exe/<build-id> (§8.1).
 
     // §7.1: deleting the active config repoints to the most-recently-built
     // remaining config; only zero configs left ⇒ null-config.
@@ -193,6 +201,72 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
             None => println!("The last config is gone; this installation is now in the null-config state."),
         }
     }
+    drop(locked);
+
+    // GC the executable cache under sim-home: dropping the config's exe may
+    // have orphaned its CACHE/exe/<build-id> entry (§8.1). Best-effort — sims
+    // built from it keep their own frozen (hard-linked) exe either way.
+    if let Ok(inst_meta) = installation.meta() {
+        if let Ok(sim_home) = inst_meta.sim_home() {
+            let _ = cache::gc(sim_home, None);
+        }
+    }
     println!("{}", format!("Deleted config {}.", name.bold()).bright_green());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn delete_gcs_orphaned_cache_entry_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("et", tmp.path().join("et"));
+        let sim_home = tmp.path().join("simhome");
+        fs::create_dir_all(&sim_home).unwrap();
+        {
+            let locked = inst.locked().unwrap();
+            let mut meta = locked.meta().unwrap();
+            meta.sim_home = Some(sim_home.clone());
+            locked.set_meta(&meta).unwrap();
+        }
+
+        let root = inst.cactus_root();
+        let cfg_dir = root.join("configs").join("bbh");
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(
+            cfg_dir.join("cactup-config.toml"),
+            r#"
+            name = "bbh"
+            variant = "default"
+            thornlist = "einsteintoolkit.th"
+            machine = "fake"
+            config-id = "config-bbh-1"
+            build-id = "build-bbh-1"
+            "#,
+        )
+        .unwrap();
+
+        // The config's "built" exe, hard-linked into the sim-home cache (§8.1).
+        let exe = build::executable_path(&root, "bbh");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"bbh binary").unwrap();
+        let orphan = cache::ensure_cached(&sim_home, "build-bbh-1", &exe).unwrap();
+
+        // A cache entry from an older build that a simulation still links.
+        let old_src = tmp.path().join("old-binary");
+        fs::write(&old_src, b"old binary").unwrap();
+        let kept = cache::ensure_cached(&sim_home, "build-bbh-0", &old_src).unwrap();
+        cache::link_into(&kept, &sim_home.join("sim-frozen-exe")).unwrap();
+        fs::remove_file(&old_src).unwrap();
+
+        delete(&inst, "bbh", false).unwrap();
+
+        assert!(!root.join("configs/bbh").exists());
+        assert!(!exe.exists());
+        assert!(!orphan.exists(), "the deleted config's cache entry is reaped");
+        assert!(kept.exists(), "a sim-referenced cache entry survives");
+    }
 }

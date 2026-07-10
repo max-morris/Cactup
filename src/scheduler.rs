@@ -6,7 +6,6 @@
 //! live, never stored (D4).
 
 // Consumed by the Phase-3 SIM/TEST streams; unused until then.
-#![allow(dead_code)]
 
 use crate::mdb::meta::{Meta, Phase, Universe, WrappedCommand};
 use crate::template::VarSet;

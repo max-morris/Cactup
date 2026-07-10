@@ -3,7 +3,6 @@
 //! and the chaining division operate on this seconds value.
 
 // Consumed by the Phase-2/3 streams (SCHED, SIM); some accessors unused until then.
-#![allow(dead_code)]
 
 use crate::Res;
 use anyhow::bail;
@@ -72,6 +71,9 @@ impl Walltime {
         Ok(Walltime(days * 86400 + hh * 3600 + mm * 60 + ss))
     }
 
+    // Pinned foundation API; callers in this crate construct `Walltime(secs)`
+    // directly (the tuple field is crate-visible).
+    #[allow(dead_code)]
     pub fn from_seconds(secs: u64) -> Walltime {
         Walltime(secs)
     }

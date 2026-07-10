@@ -3,18 +3,14 @@
 //! variants/queues/universes and their validation), §7.8 (optionlist TOML +
 //! render), §11.2 (test-partition marking & resolution).
 
-// Consumed by the Phase-2/3 streams (MACH, CFG, SIM, TEST); unused until then.
-#![allow(dead_code)]
-
 pub mod autodetect;
 pub mod discover;
 pub mod meta;
 pub mod optionlist;
 
-#[allow(unused_imports)] // convenience re-exports for the consuming streams
+// Convenience re-exports for the consuming subsystems.
 pub use meta::{Meta, Phase, ScriptKind, Universe, WrappedCommand};
-#[allow(unused_imports)]
-pub use optionlist::{Optionlist, OptionlistHeader};
+pub use optionlist::Optionlist;
 
 use crate::template::VarSet;
 use crate::Res;
@@ -53,6 +49,7 @@ impl Mdb {
     }
 
     /// Explicit roots, for tests and tools.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_roots(system_root: PathBuf, user_root: PathBuf) -> Mdb {
         Mdb { system_root, user_root }
     }

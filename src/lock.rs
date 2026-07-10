@@ -13,7 +13,6 @@
 //! the other retries instead of unlinking a freshly re-acquired lock.
 
 // Consumed by the Phase-2/3 streams (DB, INST, CFG, SIM); unused until then.
-#![allow(dead_code)]
 
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -67,6 +66,9 @@ impl LinkLock {
     /// (same host: probe `/proc/<pid>` — NOT libc `kill(pid, 0)`; this project
     /// must not depend on the libc crate. Different host: mtime older than
     /// [`LOCK_STALE_SECS`]). Returns `Ok(None)` when held by a live holder.
+    // Pinned foundation API (§2.3); production code uses the blocking
+    // `acquire`, tests exercise this form.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn try_acquire(path: &Path) -> Res<Option<LinkLock>> {
         match Self::acquire_inner(path)? {
             Ok(lock) => Ok(Some(lock)),

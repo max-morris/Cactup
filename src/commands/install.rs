@@ -132,7 +132,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     // §4.7: an unrecognized host gets a machine persisted into the user MDB
     // right here — the successor to simfactory's `sim setup-silent`.
-    let machine = machine::ensure_local_machine(ctx)?.name;
+    let machine = machine::ensure_local_machine(ctx)?;
 
     // Knob prompts (§5): seeded from stored knobs or the derived defaults
     // ($USER, git email); empty answers are not stored.
@@ -144,7 +144,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             ("email", "Your email (for job notifications)?"),
             ("allocation", "Your default allocation/account (empty for none)?"),
         ] {
-            let default = snapshot.knob_or_default(&machine, knob).unwrap_or_default();
+            let default = snapshot.knob_or_default(&machine.name, knob).unwrap_or_default();
             let answer = prompt_with_default(question, &default)?;
             if !answer.is_empty() {
                 answers.push((knob, answer));
@@ -152,7 +152,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         ctx.db.update(|db| {
             for (knob, value) in &answers {
-                db.set_knob(&machine, knob, value.clone());
+                db.set_knob(&machine.name, knob, value.clone());
             }
             Ok(())
         })?;
@@ -244,6 +244,11 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         std::os::windows::fs::symlink_dir(&target, &link_path)
                              .with_context(|| format!("Failed to symlink {} -> {}", link_path.display(), target.display()))?;
     }
+
+    // Fix sim-home/test-home into installation.toml now, from the machine's
+    // [paths] (§8.1, §11.5) — every later sim/test command resolves against
+    // these, and they are set exactly once, at install time.
+    crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine)?;
 
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {

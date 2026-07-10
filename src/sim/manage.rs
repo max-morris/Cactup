@@ -425,6 +425,16 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
                     if let Some(u) = &r.meta.universe {
                         line.push_str(&format!(", universe {}", u.name));
                     }
+                    if let Some(s) = status {
+                        // The raw simfactory-letter scheduler status (§10),
+                        // alongside the derived display state.
+                        line.push_str(&format!(", sched {}", s.letter()));
+                        if s == JobStatus::Running {
+                            if let Ok(Some(host)) = sched.exec_host(&r.meta.job_id) {
+                                line.push_str(&format!(", host {host}"));
+                            }
+                        }
+                    }
                 }
                 println!("{line}");
             }

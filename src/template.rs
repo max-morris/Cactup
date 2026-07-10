@@ -14,7 +14,6 @@
 //! native ints/bools. The script's stdout is the produced artifact.
 
 // Consumed by the Phase-2/3 streams (CFG, SIM, TEST); unused until then.
-#![allow(dead_code)]
 
 use crate::Res;
 use anyhow::{Context, anyhow, bail};
@@ -97,6 +96,9 @@ impl VarSet {
         self.vars.insert(name.to_owned(), value.into());
     }
 
+    // Pinned foundation API; production code substitutes whole templates,
+    // tests inspect individual values.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn get(&self, name: &str) -> Option<&VarValue> {
         self.vars.get(name)
     }

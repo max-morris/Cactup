@@ -4,9 +4,6 @@
 //! (§4.8), the rebuild-decision snapshot diff (§7.8), the per-config build
 //! lock (§2.3 item 4), and `cactup-config.toml` metadata (§7.4).
 
-// Consumed by CFG/TEST dispatch; parts unused until Phase 4 wiring.
-#![allow(dead_code)]
-
 use crate::args::BuildOpts;
 use crate::database::SCHEMA;
 use crate::installation::Installation;

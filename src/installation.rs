@@ -10,7 +10,6 @@
 //! never contend.
 
 // Consumed by the Phase-3 CFG/SIM/TEST streams; unused until then.
-#![allow(dead_code)]
 
 use crate::commands::Ctx;
 use crate::database::SCHEMA;
@@ -85,13 +84,13 @@ impl InstallationMeta {
     pub fn sim_home(&self) -> Res<&Path> {
         self.sim_home
             .as_deref()
-            .ok_or_else(|| anyhow!("installation.toml records no sim-home; re-run `cactup install` setup"))
+            .ok_or_else(|| anyhow!("installation.toml records no sim-home; `cactup use <alias>` backfills it"))
     }
 
     pub fn test_home(&self) -> Res<&Path> {
         self.test_home
             .as_deref()
-            .ok_or_else(|| anyhow!("installation.toml records no test-home; re-run `cactup install` setup"))
+            .ok_or_else(|| anyhow!("installation.toml records no test-home; `cactup use <alias>` backfills it"))
     }
 }
 
@@ -220,26 +219,31 @@ impl Installation {
         Ok(LockedInstallation { inst: self, _lock: lock })
     }
 
-    /// First-time setup (install-time, §8.1): resolve sim-home/test-home from
-    /// the machine's `[paths]` (already @USER@-substituted at MDB load) and
-    /// write installation.toml — unless it already exists, which is returned
-    /// unchanged (homes are fixed at install time).
+    /// First-time setup (install-time, §8.1) and `cactup use` backfill:
+    /// resolve sim-home/test-home from the machine's `[paths]` (already
+    /// @USER@-substituted at MDB load) and write installation.toml. A home
+    /// that is already recorded is never changed (homes are fixed at install
+    /// time); only missing ones are filled.
     pub fn ensure_meta(&self, machine: &Machine) -> Res<InstallationMeta> {
         let locked = self.locked()?;
         let mut meta = locked.meta()?;
-        if meta.sim_home.is_some() {
+        if meta.sim_home.is_some() && meta.test_home.is_some() {
             return Ok(meta);
         }
-        meta.sim_home = Some(resolve_home(
-            machine.meta.paths.simulation_home.as_deref(),
-            "simulations",
-            &self.alias,
-        ));
-        meta.test_home = Some(resolve_home(
-            machine.meta.paths.test_home.as_deref(),
-            "tests",
-            &self.alias,
-        ));
+        if meta.sim_home.is_none() {
+            meta.sim_home = Some(resolve_home(
+                machine.meta.paths.simulation_home.as_deref(),
+                "simulations",
+                &self.alias,
+            ));
+        }
+        if meta.test_home.is_none() {
+            meta.test_home = Some(resolve_home(
+                machine.meta.paths.test_home.as_deref(),
+                "tests",
+                &self.alias,
+            ));
+        }
         locked.set_meta(&meta)?;
         Ok(meta)
     }
