@@ -108,6 +108,27 @@ pub fn resolve_topology(
     })
 }
 
+/// Apply the default-tasks chain to a resolved topology: the selected script
+/// variant's `tasks` setting (§4.2) first, then the caller's fallback (2 for
+/// testsuite runs — §11.6), else keep the §8.5 fill-the-node value. Any
+/// explicit process-layout flag (-n/-T/-t) disables the whole chain; tpn is
+/// capped so the recorded layout stays self-consistent.
+pub fn apply_tasks_default(
+    topo: &mut Topology,
+    flags: &TopologyFlags,
+    script_tasks: Option<u32>,
+    fallback: Option<u32>,
+) {
+    if flags.nodes.is_some() || flags.tasks.is_some() || flags.tpn.is_some() {
+        return;
+    }
+    if let Some(t) = script_tasks.or(fallback) {
+        let t = t.max(1);
+        topo.tasks = t;
+        topo.tpn = topo.tpn.min(t);
+    }
+}
+
 /// Automatic walltime chaining math (§8.8): `(segments, per-job wall)`.
 /// Each chained segment reserves the ceiling as its scheduler wall.
 pub fn chain_segments(total: Walltime, ceiling: Walltime) -> (u32, Walltime) {
@@ -378,6 +399,42 @@ mod tests {
         assert_eq!((topo.tpn, topo.tasks), (4, 16));
         assert_eq!(topo.allocation.as_deref(), Some("hpc_alloc"));
         assert_eq!(topo.mail_type, "all");
+    }
+
+    #[test]
+    fn tasks_default_chain() {
+        let machine = test_machine();
+        let db = Database::new();
+        let base = || resolve_topology(&flags(), &machine, &db, &test_cfg(false, &[]), false).unwrap();
+
+        // Script setting wins over the fallback; tpn is capped to match.
+        let mut topo = base();
+        apply_tasks_default(&mut topo, &flags(), Some(4), Some(2));
+        assert_eq!((topo.tasks, topo.tpn), (4, 4));
+
+        // No script setting → fallback (the testsuite 2).
+        let mut topo = base();
+        apply_tasks_default(&mut topo, &flags(), None, Some(2));
+        assert_eq!((topo.tasks, topo.tpn), (2, 2));
+
+        // Neither → the §8.5 fill-the-node value stays.
+        let mut topo = base();
+        apply_tasks_default(&mut topo, &flags(), None, None);
+        assert_eq!((topo.tasks, topo.tpn), (16, 16));
+
+        // Any explicit process-layout flag disables the chain entirely.
+        for set in [
+            (&|f: &mut TopologyFlags| f.tasks = Some(8)) as &dyn Fn(&mut TopologyFlags),
+            &|f| f.tpn = Some(8),
+            &|f| f.nodes = Some(2),
+        ] {
+            let mut f = flags();
+            set(&mut f);
+            let mut topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+            let before = (topo.tasks, topo.tpn);
+            apply_tasks_default(&mut topo, &f, Some(4), Some(2));
+            assert_eq!((topo.tasks, topo.tpn), before, "flags win over defaults");
+        }
     }
 
     #[test]

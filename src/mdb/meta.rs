@@ -260,6 +260,10 @@ pub struct VariantEntry {
     pub universe: Option<String>,
     pub test: bool,
     pub default: bool,
+    /// Default total task count for runs launched through this script when no
+    /// process-layout flag (-n/-T/-t) is given; overrides the fill-the-node
+    /// default of §8.5.
+    pub tasks: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -273,6 +277,7 @@ enum VariantEntryRaw {
         test: bool,
         #[serde(default)]
         default: bool,
+        tasks: Option<u32>,
     },
 }
 
@@ -284,9 +289,10 @@ impl From<VariantEntryRaw> for VariantEntry {
                 universe: None,
                 test: false,
                 default: false,
+                tasks: None,
             },
-            VariantEntryRaw::Full { queues, universe, test, default } => {
-                VariantEntry { queues, universe, test, default }
+            VariantEntryRaw::Full { queues, universe, test, default, tasks } => {
+                VariantEntry { queues, universe, test, default, tasks }
             }
         }
     }
@@ -310,7 +316,7 @@ impl<'de> Deserialize<'de> for ScriptVariants {
                 let entry: VariantEntryRaw = value.try_into().map_err(|e| {
                     D::Error::custom(format!(
                         "variant \"{key}\" must be a [\"queue\", …] array or a \
-                         {{ queues = […], universe = \"…\", test = …, default = … }} table: {e}"
+                         {{ queues = […], universe = \"…\", test = …, default = …, tasks = … }} table: {e}"
                     ))
                 })?;
                 out.variants.insert(key, entry.into());
@@ -680,7 +686,7 @@ mod tests {
         [variants.runscript]
         "cpu" = { queues = ["checkpt", "single"], default = true }
         "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }
-        "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true }
+        "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true, tasks = 2 }
 
         [variants.optionlist]
         variants = ["cpu", "gpu", "test-cpu"]
@@ -746,6 +752,9 @@ mod tests {
         assert!(rs.select("single", false, Some("nope")).is_err());
         // gpu-sing carries its universe association (§4.8 step 3).
         assert_eq!(rs.select("gpu", false, None).unwrap().1.universe.as_deref(), Some("et-sif"));
+        // test-cpu carries its default-tasks setting (§4.2); cpu has none.
+        assert_eq!(rs.select("single", true, None).unwrap().1.tasks, Some(2));
+        assert_eq!(rs.select("single", false, None).unwrap().1.tasks, None);
     }
 
     #[test]

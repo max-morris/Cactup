@@ -371,6 +371,10 @@ pub(crate) enum TestCommand {
     Run(TestStartArgs),
     /// Submit the test suite to the queue (§11.6)
     Submit(TestStartArgs),
+    /// Remove in-tree testsuite output the flesh harness left in the Cactus
+    /// source tree (TEST/ at the Cactus root, configs/<cfg>/TEST) — cactup
+    /// runs redirect it to test-home (§11.5)
+    Clean,
     /// Manage test runs (§11.7)
     #[clap(subcommand)]
     Sim(TestSimCommand),

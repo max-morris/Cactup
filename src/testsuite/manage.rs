@@ -8,7 +8,7 @@ use crate::sim::cache;
 use crate::sim::restart::NO_JOB_ID;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
-use anyhow::bail;
+use anyhow::{bail, Context};
 use colored::Colorize;
 use std::fs;
 
@@ -208,4 +208,103 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
     // Executable-cache GC (§11.7); the test-home cache exists for symmetry.
     let _ = cache::gc(&test_home, None)?;
     Ok(())
+}
+
+/// `test clean`: remove in-tree testsuite output from the Cactus source tree —
+/// `TEST/` at the Cactus root (the flesh's default output dir when TESTS_DIR
+/// is not exported) and any `configs/<cfg>/TEST` leftover. cactup-driven runs
+/// redirect results to test-home (§11.5), so anything found here is a dropping
+/// from a manual `make <cfg>-testsuite` or a pre-fix cactup run.
+pub fn clean(ctx: &Ctx) -> Res<()> {
+    let inst = Installation::resolve(ctx)?;
+    let removed = clean_tree(&inst.cactus_root())?;
+    if removed.is_empty() {
+        println!("Nothing to clean: the source tree has no in-tree testsuite output.");
+    } else {
+        for path in &removed {
+            println!("Removed {}", path.display());
+        }
+        println!("{}", format!("Cleaned {} in-tree testsuite path(s).", removed.len()).bright_green());
+    }
+    Ok(())
+}
+
+fn clean_tree(cactus_root: &std::path::Path) -> Res<Vec<std::path::PathBuf>> {
+    let mut removed = Vec::new();
+
+    let mut remove_entry = |path: std::path::PathBuf| -> Res<()> {
+        // symlink_metadata so a symlink is removed as a link — never follow
+        // it into the results dir it may point at.
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("Failed to inspect {}", path.display())),
+            Ok(meta) => {
+                if meta.file_type().is_dir() {
+                    fs::remove_dir_all(&path)
+                        .with_context(|| format!("Failed to remove {}", path.display()))?;
+                } else {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("Failed to remove {}", path.display()))?;
+                }
+                removed.push(path);
+                Ok(())
+            }
+        }
+    };
+
+    remove_entry(cactus_root.join("TEST"))?;
+
+    let configs_dir = cactus_root.join("configs");
+    match fs::read_dir(&configs_dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        entries => {
+            for entry in entries.with_context(|| format!("Failed to list {}", configs_dir.display()))? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    remove_entry(entry.path().join("TEST"))?;
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn clean_tree_removes_in_tree_test_output_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("Cactus");
+
+        // The flesh's default in-tree output dir.
+        fs::create_dir_all(cactus.join("TEST/tests/thorn")).unwrap();
+        fs::write(cactus.join("TEST/tests/summary.log"), "Number failed -> 0").unwrap();
+
+        // A pre-fix cactup symlink at configs/<cfg>/TEST, pointing into
+        // test-home — the link must go, its target must survive.
+        let results = tmp.path().join("testhome/results-0000");
+        fs::create_dir_all(&results).unwrap();
+        fs::write(results.join("keep.log"), "precious").unwrap();
+        fs::create_dir_all(cactus.join("configs/tests/config-data")).unwrap();
+        std::os::unix::fs::symlink(&results, cactus.join("configs/tests/TEST")).unwrap();
+
+        // A config without droppings stays untouched.
+        fs::create_dir_all(cactus.join("configs/other/config-data")).unwrap();
+
+        let removed = clean_tree(&cactus).unwrap();
+        assert_eq!(removed.len(), 2, "{removed:?}");
+        assert!(!cactus.join("TEST").exists());
+        assert!(fs::symlink_metadata(cactus.join("configs/tests/TEST")).is_err(), "link removed");
+        assert!(results.join("keep.log").is_file(), "symlink target untouched");
+        assert!(cactus.join("configs/tests/config-data").is_dir(), "config itself untouched");
+        assert!(cactus.join("configs/other/config-data").is_dir());
+
+        // Idempotent: a second clean finds nothing.
+        assert!(clean_tree(&cactus).unwrap().is_empty());
+        // A tree with no configs dir at all is fine too.
+        assert!(clean_tree(Path::new("/nonexistent-cactus")).unwrap().is_empty());
+    }
 }

@@ -239,7 +239,7 @@ fn submit_impl(
         )
     })?;
     let force_queue = args.force_queue || args.force;
-    let topo = vars::resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
+    let mut topo = vars::resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
 
@@ -281,6 +281,8 @@ fn submit_impl(
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, false, None)?;
     let (run_variant, run_entry) = run_scripts.select(&topo.queue, false, None)?;
+    // Script-variant default tasks (§4.2): submitscript first for a submit.
+    vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
     let submit_uni = resolve_submit_universe(
         machine,
         sub_entry.universe.as_deref(),
@@ -465,7 +467,7 @@ fn run_interactive(
         )
     })?;
     let force_queue = args.start.force_queue || args.start.force;
-    let topo = vars::resolve_topology(&args.start.topology, machine, db, &cfg, force_queue)?;
+    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &cfg, force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
 
@@ -489,6 +491,8 @@ fn run_interactive(
 
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     let (run_variant, run_entry) = run_scripts.select(&topo.queue, false, None)?;
+    // Script-variant default tasks (§4.2).
+    vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
     let run_uni = resolve_run_universe(
         machine,
         &cfg,

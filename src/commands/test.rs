@@ -13,6 +13,7 @@ pub fn dispatch(ctx: &Ctx, cmd: TestCommand) -> Res<()> {
         TestCommand::Delete { name, force } => testsuite::config::delete(ctx, &name, force),
         TestCommand::Run(args) => testsuite::run::start(ctx, args, false),
         TestCommand::Submit(args) => testsuite::run::start(ctx, args, true),
+        TestCommand::Clean => testsuite::manage::clean(ctx),
         TestCommand::Sim(sub) => match sub {
             TestSimCommand::Show { name, long, all } => {
                 testsuite::manage::show(ctx, name.as_deref(), long, all)

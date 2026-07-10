@@ -17,8 +17,8 @@ use crate::sim::start::{
     Identity,
 };
 use crate::sim::vars::{
-    default_checkpt_buffer, resolve_topology, set_machine_vars, set_topology_vars,
-    set_walltime_vars, Topology,
+    apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
+    set_topology_vars, set_walltime_vars, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -32,6 +32,11 @@ use colored::Colorize;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+
+/// Default task count for testsuite runs when neither the command line nor
+/// the script variant's `tasks` setting says otherwise (§11.6): thorn tests
+/// are written for 1–2 MPI ranks, so filling the node (§8.5) breaks them.
+const TESTSUITE_DEFAULT_TASKS: u32 = 2;
 
 /// Entry point for both `test run` and `test submit` (§11.3).
 pub fn start(ctx: &Ctx, args: TestStartArgs, submit: bool) -> Res<()> {
@@ -118,6 +123,21 @@ fn assemble_test_vars(
     Ok(v)
 }
 
+/// Many thorn tests read their data files as `../../../arrangements/…`, a
+/// path that resolves because the flesh runs each test with cwd
+/// `$TESTS_DIR/<config>/<thorn>` and TESTS_DIR defaults to `$CCTK_HOME/TEST`
+/// — three levels below the source tree. With TESTS_DIR redirected to
+/// `<run_dir>/results-NNNN` (§11.6), `../../..` lands in the run dir instead,
+/// so plant an `arrangements` link there to keep those paths resolving.
+fn link_arrangements(run_dir: &Path, cactus_root: &Path) -> Res<()> {
+    let link = run_dir.join("arrangements");
+    if fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        fs::remove_file(&link)?;
+    }
+    std::os::unix::fs::symlink(cactus_root.join("arrangements"), &link)
+        .with_context(|| format!("Failed to link {}", link.display()))
+}
+
 fn start_impl(
     inst: &Installation,
     machine: &Machine,
@@ -147,7 +167,7 @@ fn start_impl(
 
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
-    let topo = resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
+    let mut topo = resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
 
     // 3. TEST script variants for the queue (§11.2: prefer the test
@@ -156,6 +176,16 @@ fn start_impl(
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, true, args.variant.as_deref())?;
     let (run_variant, run_entry) = run_scripts.select(&topo.queue, true, args.variant.as_deref())?;
+
+    // Testsuites run on a couple of ranks, not a full node: script-variant
+    // `tasks` (§4.2, mode-relevant script first), else 2 (the ET convention;
+    // §11.6). @TASKS@ feeds CCTK_TESTSUITE_RUN_PROCESSORS, i.e. $nprocs.
+    let script_tasks = if submit {
+        sub_entry.tasks.or(run_entry.tasks)
+    } else {
+        run_entry.tasks.or(sub_entry.tasks)
+    };
+    apply_tasks_default(&mut topo, &args.topology, script_tasks, Some(TESTSUITE_DEFAULT_TASKS));
     let submit_uni = match sub_entry
         .universe
         .as_deref()
@@ -181,6 +211,7 @@ fn start_impl(
     let run_dir = test_home.join(&cfg_name).join(&name);
     fs::create_dir_all(run_dir.join(".cactup"))
         .with_context(|| format!("Failed to create {}", run_dir.display()))?;
+    link_arrangements(&run_dir, &cactus_root)?;
 
     // Register it (§11.8) under the per-installation lock.
     {
@@ -330,6 +361,11 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
 /// the harness summary, record it, and exit non-zero on failures.
 fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
     let vset = thaw_vars(&run.meta.vars)?;
+    // Re-assert the arrangements link like the results dir above: a run dir
+    // from an older cactup may predate it.
+    if let Some(src) = vset.get("SOURCEDIR") {
+        link_arrangements(&run.dir, Path::new(&src.canonical()))?;
+    }
     let script = run.dir.join("run-script");
     let universe: Option<Universe> = run.meta.universe.as_ref().map(|u| u.to_universe());
     let cmd = script_command(&script, universe.as_ref(), &vset, &run.dir)?;
@@ -554,11 +590,17 @@ mod tests {
 
         let run_dir = tmp.path().join("inst/testhome/tests/tests");
         assert!(inst.tests().unwrap().tests.contains_key("tests"), "registered (§11.8)");
+        // ../../../arrangements/… data paths in thorn tests must keep
+        // resolving from $TESTS_DIR/<config>/<thorn> (link_arrangements).
+        assert_eq!(
+            fs::read_link(run_dir.join("arrangements")).unwrap(),
+            inst.cactus_root().join("arrangements")
+        );
         assert_eq!(active_results_id(&run_dir).unwrap(), Some(0));
         let run = TestRun::open(&run_dir).unwrap();
         assert_eq!(run.meta.job_id, "JOB-T0");
         assert_eq!(run.meta.select, "all");
-        assert_eq!(run.meta.tasks, 4, "fill-the-node default from ppn");
+        assert_eq!(run.meta.tasks, 2, "testsuite default, not fill-the-node (§11.6)");
         assert!(run.meta.timestamps.submitted.is_some());
         // The TEST-marked variants were selected, not the normal ones (§11.2).
         let submit_script = fs::read_to_string(run_dir.join("submit-script")).unwrap();
@@ -575,7 +617,7 @@ mod tests {
         let harness = fs::read_to_string(run_dir.join("harness.txt")).unwrap();
         // Default selection substitutes as EMPTY — the flesh's "run all"
         // (CCTK_TESTSUITE_RUN_TESTS format); metadata keeps "all".
-        assert_eq!(harness.trim(), "selection= procs=4 config=tests");
+        assert_eq!(harness.trim(), "selection= procs=2 config=tests");
 
         // A second foreground run with failures: new result set, non-zero.
         fs::write(inst.cactus_root().join("failcount"), "2").unwrap();
@@ -591,12 +633,15 @@ mod tests {
         assert_eq!((results.passed, results.failed, results.results_id), (5, 2, 1));
         assert_eq!(run.meta.select, "McLachlan/ML_BSSN Arrangement");
 
-        // --overwrite reuses the active set instead of allocating (§11.5).
+        // --overwrite reuses the active set instead of allocating (§11.5);
+        // an explicit -T beats the testsuite tasks default.
         fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
         let mut args = test_args();
         args.overwrite = true;
+        args.topology.tasks = Some(4);
         start_impl(&inst, &machine, &db, &args, false, false, Some("testhost")).unwrap();
         assert_eq!(active_results_id(&run_dir).unwrap(), Some(1));
+        assert_eq!(TestRun::open(&run_dir).unwrap().meta.tasks, 4);
         assert_eq!(list_results_ids(&run_dir).unwrap(), vec![0, 1]);
     }
 
