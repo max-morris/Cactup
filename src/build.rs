@@ -332,6 +332,15 @@ pub fn build(
 
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create {}", config_dir.display()))?;
+    // Staging cactup's files makes configs/<name> exist before Cactus's
+    // setup_configuration.pl ever runs, so it takes its "Reconfiguring"
+    // branch — which chdirs into the skeleton only the new-config branch
+    // creates. Create that skeleton ourselves, or the first configure dies
+    // with "Internal error - couldn't enter '…/config-data'".
+    for sub in ["build", "lib", "scratch", "config-data"] {
+        fs::create_dir_all(config_dir.join(sub))
+            .with_context(|| format!("Failed to create {}", config_dir.join(sub).display()))?;
+    }
     let rendered_path = config_dir.join("cactup-optionlist.cfg");
     fs::write(&rendered_path, &rendered)?;
     let thornlist_out = config_dir.join("cactup-thornlist.th");
@@ -537,15 +546,21 @@ mod tests {
         fs::write(cactus.join("thornlists/einsteintoolkit.th"), "A/B\nC/D\n").unwrap();
 
         // Fake make: log every call; on `<name>-config` / `<name>` fabricate
-        // the marker / executable.
+        // the marker / executable. The `-config` step emulates the crucial
+        // setup_configuration.pl behavior: configs/sim already exists (cactup
+        // staged files there), so its "Reconfiguring" branch runs, which
+        // requires the config-data skeleton to exist already — it chdirs
+        // instead of creating it.
         let fake_make = root.join("fakemake");
         fs::write(
             &fake_make,
             format!(
                 "#!/bin/sh\necho \"$@\" >> {}/make.log\ncase \"$2\" in\n\
-                 sim-config) mkdir -p {}/configs/sim/config-data && touch {}/configs/sim/config-data/cctk_Config.h ;;\n\
+                 sim-config) cd {}/configs/sim/config-data || \
+                 {{ echo \"Internal error - couldn't enter config-data\"; exit 1; }}; \
+                 touch cctk_Config.h ;;\n\
                  sim) mkdir -p {}/exe && touch {}/exe/cactus_sim ;;\nesac\n",
-                root.display(), cactus.display(), cactus.display(), cactus.display(), cactus.display()
+                root.display(), cactus.display(), cactus.display(), cactus.display()
             ),
         )
         .unwrap();
