@@ -195,7 +195,7 @@ pub(crate) struct BuildOpts {
     #[clap(long)]
     pub clean: bool,
     /// Parallel make jobs (default: machine make-jobs, else 1 — §7.6).
-    #[clap(long, value_name = "N")]
+    #[clap(long, short = 'j', value_name = "N")]
     pub make_jobs: Option<u32>,
     /// Copy a prebuilt cactus_<config> into place, skipping configure/make (§7.7).
     #[clap(long, alias = "virtual", value_name = "EXE")]
@@ -478,7 +478,7 @@ mod tests {
             vec!["cactup", "list", "--all"],
             vec!["cactup", "install", "ET_2025_05", "--silent"],
             vec!["cactup", "uninstall", "old", "-f"],
-            vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "--make-jobs", "8"],
+            vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
             vec!["cactup", "config", "build", "sim", "--universe", "et-sif"],
             vec!["cactup", "config", "delete", "sim", "-f"],
             vec![

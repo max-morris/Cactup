@@ -87,7 +87,10 @@ fn assemble_test_vars(
     v.set("TEST_NAME", name);
     v.set("RESULTS_ID", results_id as u64);
     v.set("TESTSUITE_RESULTS_DIR", results_dir(run_dir, results_id).display().to_string());
-    v.set("TESTSUITE_SELECT", select);
+    // @TESTSUITE_SELECT@ carries the flesh's CCTK_TESTSUITE_RUN_TESTS format:
+    // empty = run everything, else space-separated Thorn / Thorn/test entries
+    // (metadata and logs keep the human-facing "all").
+    v.set("TESTSUITE_SELECT", if select == "all" { "" } else { select });
 
     // Shared §6.3 names a test script uses (§11.9): the LIVE built binary —
     // a test run freezes no private copy (§11.5).
@@ -344,7 +347,7 @@ fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
     run.meta.timestamps.finished = Some(Utc::now());
 
     // 7. Parse the harness's pass/fail summary (§11.6).
-    let summary = read_summary(&results_dir(&run.dir, results_id));
+    let summary = read_summary(&results_dir(&run.dir, results_id), &run.meta.test_config);
     if let Some((passed, failed)) = summary {
         run.meta.results = Some(ResultsSummary { passed, failed, results_id });
     }
@@ -390,8 +393,13 @@ fn parse_summary(text: &str) -> Option<(u32, u32)> {
     Some((grab("passed")?, grab("failed")?))
 }
 
-fn read_summary(results: &Path) -> Option<(u32, u32)> {
-    let text = fs::read_to_string(results.join("summary.log")).ok()?;
+fn read_summary(results: &Path, config: &str) -> Option<(u32, u32)> {
+    // The flesh writes $TESTS_DIR/<config>/summary.log (RunTestUtils.pl, with
+    // TESTS_DIR pointed at the results dir); tolerate a harness that wrote at
+    // the results root instead.
+    let text = fs::read_to_string(results.join(config).join("summary.log"))
+        .or_else(|_| fs::read_to_string(results.join("summary.log")))
+        .ok()?;
     parse_summary(&text)
 }
 
@@ -418,13 +426,16 @@ mod tests {
              --results-id=@RESULTS_ID@\n",
         )
         .unwrap();
-        // The test runscript fakes the flesh harness: it writes a summary.log
-        // into the results dir (§11.6 step 6).
+        // The test runscript fakes the flesh harness: like RunTestUtils.pl
+        // with TESTS_DIR pointed at the results dir, it writes summary.log
+        // under <results>/<config>/ (§11.6 step 6). The wording matches the
+        // real "Number of tests passed -> N" / "Number failed -> N" lines.
         fs::write(
             dir.join("runscripts/test.sh"),
             "#!/bin/sh\ncd @SOURCEDIR@\n\
-             printf 'Number passed -> 5\\nNumber failed -> %s\\n' \"$(cat @SOURCEDIR@/failcount)\" \
-             > @TESTSUITE_RESULTS_DIR@/summary.log\n\
+             mkdir -p @TESTSUITE_RESULTS_DIR@/@CONFIGURATION@\n\
+             printf 'Number of tests passed -> 5\\nNumber failed -> %s\\n' \"$(cat @SOURCEDIR@/failcount)\" \
+             > @TESTSUITE_RESULTS_DIR@/@CONFIGURATION@/summary.log\n\
              echo \"selection=@TESTSUITE_SELECT@ procs=@TASKS@ config=@CONFIGURATION@\" \
              > @TEST_DIR@/harness.txt\n",
         )
@@ -562,7 +573,9 @@ mod tests {
         assert_eq!((results.passed, results.failed, results.results_id), (5, 0, 0));
         assert!(run.meta.timestamps.finished.is_some());
         let harness = fs::read_to_string(run_dir.join("harness.txt")).unwrap();
-        assert_eq!(harness.trim(), "selection=all procs=4 config=tests");
+        // Default selection substitutes as EMPTY — the flesh's "run all"
+        // (CCTK_TESTSUITE_RUN_TESTS format); metadata keeps "all".
+        assert_eq!(harness.trim(), "selection= procs=4 config=tests");
 
         // A second foreground run with failures: new result set, non-zero.
         fs::write(inst.cactus_root().join("failcount"), "2").unwrap();
