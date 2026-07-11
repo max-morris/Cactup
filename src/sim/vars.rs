@@ -20,6 +20,11 @@ pub struct Topology {
     pub cpus: u32,
     pub gpu: bool,
     pub queue: String,
+    /// The scheduler-facing queue name (§4.2): the queue's `name` override
+    /// when set, else `queue` itself. `@QUEUE@` resolves to this; everything
+    /// cactup-internal (variant selection, walltime ceilings, records) keys
+    /// on `queue`.
+    pub scheduler_queue: String,
     pub allocation: Option<String>,
     pub mail: Option<String>,
     pub mail_type: String,
@@ -46,7 +51,7 @@ pub fn resolve_topology(
     let queue = flags
         .queue
         .clone()
-        .or_else(|| db.knob(m, "queue").map(str::to_owned))
+        .or_else(|| db.knob("queue").map(str::to_owned))
         .or_else(|| machine.meta.default_queue().map(str::to_owned))
         .ok_or_else(|| {
             anyhow!("no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue")
@@ -75,10 +80,11 @@ pub fn resolve_topology(
         );
     }
 
-    // Process layout (§8.5 derivation).
-    let ppn = machine.meta.hardware.ppn.unwrap_or(1);
+    // Process layout (§8.5 derivation), from the queue-effective hardware
+    // (per-queue overrides falling back to [hardware] — §4.2).
+    let max_tpn = machine.meta.effective_hardware(&queue)?.max_tasks_per_node.unwrap_or(1);
     let cpus = flags.cpus.unwrap_or(1).max(1);
-    let tpn = flags.tpn.unwrap_or_else(|| (ppn / cpus).max(1));
+    let tpn = flags.tpn.unwrap_or_else(|| (max_tpn / cpus).max(1));
     let nodes = flags.nodes.unwrap_or(1);
     let tasks = flags.tasks.unwrap_or(nodes * tpn);
 
@@ -93,13 +99,14 @@ pub fn resolve_topology(
         tpn,
         cpus,
         gpu,
+        scheduler_queue: queue_def.name.clone().unwrap_or_else(|| queue.clone()),
         queue,
-        allocation: flags.allocation.clone().or_else(|| db.knob(m, "allocation").map(str::to_owned)),
-        mail: flags.mail.clone().or_else(|| db.knob(m, "mail").map(str::to_owned)),
+        allocation: flags.allocation.clone().or_else(|| db.knob("allocation").map(str::to_owned)),
+        mail: flags.mail.clone().or_else(|| db.knob("mail").map(str::to_owned)),
         mail_type: flags
             .mail_type
             .clone()
-            .or_else(|| db.knob_or_default(m, "mail-type"))
+            .or_else(|| db.knob_or_default("mail-type"))
             .unwrap_or_else(|| "all".to_owned()),
         job_name: flags.job_name.clone(),
         total_wall,
@@ -196,7 +203,7 @@ pub fn set_topology_vars(v: &mut VarSet, topo: &Topology, default_job_name: &str
     v.set("CPUS_PER_TASK", topo.cpus as u64);
     v.set("GPU", topo.gpu);
     v.set("ALLOCATION", topo.allocation.as_deref().unwrap_or(""));
-    v.set("QUEUE", topo.queue.as_str());
+    v.set("QUEUE", topo.scheduler_queue.as_str());
     v.set("MAIL", topo.mail.as_deref().unwrap_or(""));
     v.set("MAIL_TYPE", topo.mail_type.as_str());
     v.set("JOB_NAME", topo.job_name.clone().unwrap_or_else(|| default_job_name.to_owned()));
@@ -217,14 +224,16 @@ pub fn set_walltime_vars(v: &mut VarSet, wall: Walltime, buffer: Walltime) {
     v.set("CHECKPOINT_WALLTIME_HOURS", hint.total_hours());
 }
 
-/// The machine-derived block (§6.3): hardware facts + the RUN-phase
+/// The machine-derived block (§6.3): the queue-effective hardware facts
+/// (per-queue overrides falling back to [hardware] — §4.2) + the RUN-phase
 /// `ENV_SETUP` (submit-phase artifacts override it — §6.1).
-pub fn set_machine_vars(v: &mut VarSet, machine: &Machine) {
-    v.set("PPN", machine.meta.hardware.ppn.unwrap_or(1) as u64);
-    v.set("MEMORY", machine.meta.hardware.memory.unwrap_or(0));
-    v.set("CPUFREQ", machine.meta.hardware.cpu_freq.map(|f| f.to_string()).unwrap_or_default());
-    v.set("NUM_SMT", machine.meta.hardware.num_smt() as u64);
+pub fn set_machine_vars(v: &mut VarSet, machine: &Machine, queue: &str) -> Res<()> {
+    let hw = machine.meta.effective_hardware(queue)?;
+    v.set("MAX_TASKS_PER_NODE", hw.max_tasks_per_node.unwrap_or(1) as u64);
+    v.set("MEMORY", hw.memory.unwrap_or(0));
+    v.set("THREADS_PER_CPU", hw.threads_per_cpu() as u64);
     v.set("ENV_SETUP", machine.meta.environment.effective(Phase::Run));
+    Ok(())
 }
 
 /// Assemble the canonical variable set (§6.3) for one restart. `ENV_SETUP` is
@@ -264,7 +273,7 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
     v.set("SIMULATION_DIR", sim.dir.display().to_string());
     v.set(
         "SCRATCH_HOME",
-        machine.meta.paths.scratch_home.clone().unwrap_or_default(),
+        machine.meta.resolved_paths()?.scratch_home.unwrap_or_default(),
     );
     v.set("ALIAS", sim.meta.alias.as_str());
     let cactup = std::env::current_exe()
@@ -282,7 +291,7 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
     v.set("CHAINED_JOB_ID", input.chained_job_id);
     v.set("FROM_RESTART_COMMAND", input.from_restart_command);
 
-    set_machine_vars(&mut v, machine);
+    set_machine_vars(&mut v, machine, &topo.queue)?;
 
     // Debug (§8.4).
     v.set("RUNDEBUG", input.debug);
@@ -305,9 +314,9 @@ mod tests {
             name = "testbox"
 
             [hardware]
-            ppn = 16
+            max-tasks-per-node = 16
             memory = 64000
-            num-smt = 2
+            threads-per-cpu = 2
 
             [queues.batch]
             default = true
@@ -316,6 +325,10 @@ mod tests {
             [queues.gpuq]
             gpu = true
             max-walltime = "12:00:00"
+            # Real scheduler name override (§4.2): @QUEUE@ resolves to this.
+            name = "gpu_part"
+            # Per-queue hardware override (§4.2): the GPU nodes are fatter.
+            max-tasks-per-node = 32
 
             [variants.submitscript]
             "default" = { queues = ["batch", "gpuq"], default = true }
@@ -377,6 +390,8 @@ mod tests {
         let db = Database::new();
         let topo = resolve_topology(&flags(), &machine, &db, &test_cfg(false, &[]), false).unwrap();
         assert_eq!(topo.queue, "batch");
+        // No `name` override: the scheduler-facing name is the key itself.
+        assert_eq!(topo.scheduler_queue, "batch");
         assert_eq!((topo.nodes, topo.cpus, topo.tpn, topo.tasks), (1, 1, 16, 16));
         assert_eq!(topo.total_wall, Walltime::parse("24:00:00").unwrap());
     }
@@ -385,8 +400,8 @@ mod tests {
     fn topology_derivation_with_flags_and_knobs() {
         let machine = test_machine();
         let mut db = Database::new();
-        db.set_knob("testbox", "allocation", "hpc_alloc".to_owned());
-        db.set_knob("testbox", "queue", "gpuq".to_owned());
+        db.set_knob("allocation", "hpc_alloc".to_owned());
+        db.set_knob("queue", "gpuq".to_owned());
 
         let mut f = flags();
         f.nodes = Some(4);
@@ -394,9 +409,12 @@ mod tests {
         // Knob queue is gpuq; the config must be gpu-built to pass the check.
         let topo = resolve_topology(&f, &machine, &db, &test_cfg(true, &[]), false).unwrap();
         assert_eq!(topo.queue, "gpuq");
+        // The queue's `name` override is what the scheduler (@QUEUE@) sees.
+        assert_eq!(topo.scheduler_queue, "gpu_part");
         assert!(topo.gpu, "queue gpu flag infers GPU");
-        // tpn = floor(16/4) = 4; tasks = 4 nodes * 4.
-        assert_eq!((topo.tpn, topo.tasks), (4, 16));
+        // The queue's max-tasks-per-node override (32) drives the layout, not [hardware]'s
+        // 16: tpn = floor(32/4) = 8; tasks = 4 nodes * 8.
+        assert_eq!((topo.tpn, topo.tasks), (8, 32));
         assert_eq!(topo.allocation.as_deref(), Some("hpc_alloc"));
         assert_eq!(topo.mail_type, "all");
     }
@@ -526,7 +544,7 @@ mod tests {
                 "@CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
                  --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@ \
                  @FROM_RESTART_COMMAND@ # @WALLTIME@ @CHECKPOINT_WALLTIME@ w=@WALLTIME_HH@:@WALLTIME_MM@ \
-                 q=@QUEUE@ n=@NODES@ t=@TASKS@ chained=@CHAINED_JOB_ID@ smt=@NUM_SMT@ mem=@MEMORY@",
+                 q=@QUEUE@ n=@NODES@ t=@TASKS@ chained=@CHAINED_JOB_ID@ smt=@THREADS_PER_CPU@ mem=@MEMORY@",
             )
             .unwrap();
         assert!(line.contains("sim run bbh --installation=et"), "{line}");

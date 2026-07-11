@@ -1,7 +1,7 @@
-//! Runtime hardware detection (spec §4.6): fills missing `ppn`/`num-threads`/
-//! `memory` for machines with `[hardware].autodetect = true` (or absent keys),
-//! so the built-in `generic` works on any laptop with zero configuration.
-//! Explicit `meta.toml` values always win.
+//! Runtime hardware detection (spec §4.6): fills missing `max-tasks-per-node`/
+//! `memory` for machines with `[hardware].autodetect = true` (or when some
+//! queue would otherwise resolve no value), so the built-in `generic` works on
+//! any laptop with zero configuration. Explicit `meta.toml` values always win.
 
 /// Best-effort detected hardware. `cores` always has a value (min 1);
 /// `memory_mb` is `None` when the OS query fails.

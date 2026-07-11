@@ -84,7 +84,7 @@ pub struct MachineInfo {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Paths {
     /// Default install prefix; fallback `~/.cactup/cacti` (§4.2).
@@ -98,41 +98,32 @@ pub struct Paths {
     pub scratch_home: Option<String>,
 }
 
-/// §4.2 keeps simfactory's capacity keys verbatim. cactup itself consumes
-/// only `ppn`/`num-threads`/`num-smt` (§8.5 topology), `memory`, and
-/// `cpu-freq` (@CPUFREQ@); the `allow(dead_code)` fields are carried for MDB
-/// fidelity — valid keys a machine may document, not consumed by any command.
+/// §4.2 carries only the hardware keys cactup actually feeds to submit/run
+/// scripts: `max-tasks-per-node` (simfactory's `ppn`; §8.5 topology +
+/// @MAX_TASKS_PER_NODE@), `memory` (@MEMORY@), and `threads-per-cpu`
+/// (simfactory's `num-smt`; @THREADS_PER_CPU@). Simfactory's other capacity
+/// keys (`min-ppn`, `spn`, `mpn`, `nodes`, `num-threads`, `max-*`,
+/// `cpu-freq`, `flop-per-cycle`, …) were dropped — nothing consumed them.
+///
+/// The whole table is optional: each key may instead (or additionally) be set
+/// per-queue in `[queues.<name>]`; queue values override these machine-wide
+/// ones (`Meta::effective_hardware`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Hardware {
     /// Fill missing core/memory values from the OS at load time (§4.6).
     #[serde(default)]
     pub autodetect: bool,
-    pub ppn: Option<u32>,
-    #[allow(dead_code)]
-    pub min_ppn: Option<u32>,
-    #[allow(dead_code)]
-    pub spn: Option<u32>,
-    #[allow(dead_code)]
-    pub mpn: Option<u32>,
-    pub nodes: Option<u32>,
-    pub num_threads: Option<u32>,
-    #[allow(dead_code)]
-    pub max_num_threads: Option<u32>,
-    pub num_smt: Option<u32>,
-    #[allow(dead_code)]
-    pub max_num_smt: Option<u32>,
+    pub max_tasks_per_node: Option<u32>,
+    pub threads_per_cpu: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
-    pub cpu_freq: Option<f64>,
-    #[allow(dead_code)]
-    pub flop_per_cycle: Option<u32>,
 }
 
 impl Hardware {
     /// SMT default per §8.5's assumption.
-    pub fn num_smt(&self) -> u32 {
-        self.num_smt.unwrap_or(1)
+    pub fn threads_per_cpu(&self) -> u32 {
+        self.threads_per_cpu.unwrap_or(1)
     }
 }
 
@@ -218,6 +209,16 @@ pub struct Queue {
     /// The queue used when -q is omitted (at most one may be marked).
     #[serde(default)]
     pub default: bool,
+    /// The scheduler's real queue/partition name when it differs from the
+    /// cactup queue key — several cactup queues (e.g. cpu/gpu build flavors)
+    /// may map onto one real partition. `@QUEUE@` resolves to this.
+    pub name: Option<String>,
+    /// Per-queue hardware overrides (§4.2): each falls back to the top-level
+    /// `[hardware]` value when unset (`Meta::effective_hardware`).
+    pub max_tasks_per_node: Option<u32>,
+    pub threads_per_cpu: Option<u32>,
+    /// MB per node.
+    pub memory: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,12 +477,31 @@ impl Meta {
             .map(|(n, _)| n.as_str())
     }
 
+    /// The scheduler-facing name of queue `key` (what `@QUEUE@` resolves to):
+    /// the queue's `name` override when set, else the key itself.
+    pub fn scheduler_queue_name<'a>(&'a self, key: &'a str) -> Res<&'a str> {
+        Ok(self.queue(key)?.name.as_deref().unwrap_or(key))
+    }
+
     pub fn queue(&self, name: &str) -> Res<&Queue> {
         self.queues.get(name).ok_or_else(|| {
             anyhow!(
                 "no queue named \"{name}\" (known: {})",
                 self.queues.keys().cloned().collect::<Vec<_>>().join(", ")
             )
+        })
+    }
+
+    /// The hardware in effect on `queue` (§4.2): the queue's own
+    /// `max-tasks-per-node`/`threads-per-cpu`/`memory` where set, inheriting anything else from the
+    /// top-level `[hardware]` table (which is itself optional).
+    pub fn effective_hardware(&self, queue: &str) -> Res<Hardware> {
+        let q = self.queue(queue)?;
+        Ok(Hardware {
+            autodetect: self.hardware.autodetect,
+            max_tasks_per_node: q.max_tasks_per_node.or(self.hardware.max_tasks_per_node),
+            threads_per_cpu: q.threads_per_cpu.or(self.hardware.threads_per_cpu),
+            memory: q.memory.or(self.hardware.memory),
         })
     }
 
@@ -619,14 +639,20 @@ impl Meta {
         Ok(())
     }
 
-    /// Substitute the install-context variables (only `@USER@`-style values are
-    /// meaningful in meta.toml — §4.2) into the `[paths]` values, in place.
-    pub fn substitute_paths(&mut self, vars: &VarSet) -> Res<()> {
+    /// Resolve the `[paths]` values for actual use: `@USER@` plus any
+    /// `@ENV(NAME)@` reads (§4.2, §6.1). Deliberately NOT run at MDB load —
+    /// an entry must load and validate on hosts that lack the machine's
+    /// environment (the dev-MDB sweep, `machine show`) — so an unset or
+    /// empty env var errors here, at the moment a path is actually needed.
+    pub fn resolved_paths(&self) -> Res<Paths> {
+        let mut vars = VarSet::new();
+        vars.set("USER", super::whoami());
+        let mut paths = self.paths.clone();
         for (key, path) in [
-            ("install-home", &mut self.paths.install_home),
-            ("simulation-home", &mut self.paths.simulation_home),
-            ("test-home", &mut self.paths.test_home),
-            ("scratch-home", &mut self.paths.scratch_home),
+            ("install-home", &mut paths.install_home),
+            ("simulation-home", &mut paths.simulation_home),
+            ("test-home", &mut paths.test_home),
+            ("scratch-home", &mut paths.scratch_home),
         ] {
             if let Some(value) = path {
                 *value = vars
@@ -634,7 +660,7 @@ impl Meta {
                     .with_context(|| format!("in [paths].{key}"))?;
             }
         }
-        Ok(())
+        Ok(paths)
     }
 }
 
@@ -654,8 +680,8 @@ mod tests {
         simulation-home = "/work/@USER@/simulations"
 
         [hardware]
-        ppn = 16
-        nodes = 360
+        max-tasks-per-node = 16
+        memory = 64000
 
         [scheduler]
         submit = "sbatch @SCRIPTFILE@ 2>&1"
@@ -677,6 +703,9 @@ mod tests {
         [queues.gpu]
         gpu = true
         max-walltime = "24:00:00"
+        # Per-queue hardware overrides (§4.2); unset keys inherit [hardware].
+        max-tasks-per-node = 64
+        threads-per-cpu = 2
 
         [variants.submitscript]
         "slurm-cpu" = { queues = ["checkpt", "single"], default = true }
@@ -714,6 +743,33 @@ mod tests {
         assert_eq!(sv["slurm-gpu"].queues, ["gpu"]);
         assert!(!sv["slurm-gpu"].test && !sv["slurm-gpu"].default);
         assert!(sv["slurm-test"].test && sv["slurm-test"].default);
+    }
+
+    #[test]
+    fn effective_hardware_inherits_and_overrides() {
+        let meta = mike();
+        // Queue with no overrides: pure inheritance from [hardware].
+        let hw = meta.effective_hardware("checkpt").unwrap();
+        assert_eq!((hw.max_tasks_per_node, hw.memory, hw.threads_per_cpu()), (Some(16), Some(64000), 1));
+        // Queue overrides win key-by-key; unset keys still inherit.
+        let hw = meta.effective_hardware("gpu").unwrap();
+        assert_eq!((hw.max_tasks_per_node, hw.memory, hw.threads_per_cpu()), (Some(64), Some(64000), 2));
+        assert!(meta.effective_hardware("nope").is_err());
+    }
+
+    #[test]
+    fn hardware_table_is_optional_when_queues_define_it() {
+        // No top-level [hardware] at all: queue-level keys carry the load.
+        let toml_text = MIKE
+            .replace("[hardware]\n        max-tasks-per-node = 16\n        memory = 64000", "")
+            .replace("[queues.checkpt]", "[queues.checkpt]\nmax-tasks-per-node = 32\nmemory = 128000");
+        let meta: Meta = toml::from_str(&toml_text).unwrap();
+        meta.validate("mike").unwrap();
+        let hw = meta.effective_hardware("checkpt").unwrap();
+        assert_eq!((hw.max_tasks_per_node, hw.memory), (Some(32), Some(128000)));
+        // A queue defining nothing gets the (empty) machine-wide values.
+        let hw = meta.effective_hardware("single").unwrap();
+        assert_eq!((hw.max_tasks_per_node, hw.memory), (None, None));
     }
 
     #[test]
@@ -858,13 +914,28 @@ mod tests {
     }
 
     #[test]
-    fn paths_substitution_only_touches_paths() {
-        let mut meta = mike();
-        let mut vars = VarSet::new();
-        vars.set("USER", "alice");
-        meta.substitute_paths(&vars).unwrap();
-        assert_eq!(meta.paths.simulation_home.as_deref(), Some("/work/alice/simulations"));
-        // Scheduler templates keep their @NAME@ tokens for use-time substitution.
+    fn paths_resolution_only_touches_paths() {
+        let meta = mike();
+        let user = super::super::whoami();
+        let paths = meta.resolved_paths().unwrap();
+        assert_eq!(
+            paths.simulation_home.as_deref(),
+            Some(format!("/work/{user}/simulations").as_str())
+        );
+        // The stored meta keeps its tokens (resolution is on-demand)…
+        assert_eq!(meta.paths.simulation_home.as_deref(), Some("/work/@USER@/simulations"));
+        // …and scheduler templates keep theirs for use-time substitution.
         assert_eq!(meta.scheduler.submit.as_deref(), Some("sbatch @SCRIPTFILE@ 2>&1"));
+    }
+
+    #[test]
+    fn env_token_in_paths_errors_when_unset() {
+        let mut meta = mike();
+        meta.paths.test_home = Some("@ENV(CACTUP_TEST_SURELY_UNSET)@/tests".into());
+        let err = format!("{:#}", meta.resolved_paths().unwrap_err());
+        assert!(
+            err.contains("test-home") && err.contains("CACTUP_TEST_SURELY_UNSET"),
+            "key and env var named: {err}"
+        );
     }
 }

@@ -12,7 +12,6 @@ pub mod optionlist;
 pub use meta::{Meta, Phase, ScriptKind, Universe, WrappedCommand};
 pub use optionlist::Optionlist;
 
-use crate::template::VarSet;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
@@ -145,23 +144,25 @@ impl Machine {
             .with_context(|| format!("Failed to parse {}", meta_path.display()))?;
         meta.validate(name)?;
 
-        // §4.6: fill missing hardware from the OS when asked to (or when the
-        // core keys are simply absent). Explicit values always win.
-        let hw = &mut meta.hardware;
-        if hw.autodetect || hw.ppn.is_none() || hw.num_threads.is_none() || hw.memory.is_none() {
+        // §4.6: fill missing hardware from the OS when asked to (or when some
+        // queue would otherwise resolve no value — hardware may live at the
+        // top level, per-queue, or both, per-queue winning; §4.2). Explicit
+        // values always win, and a machine whose queues fully cover a key is
+        // left alone even when the top-level key is absent.
+        let incomplete = meta.queues.values().any(|q| {
+            q.max_tasks_per_node.or(meta.hardware.max_tasks_per_node).is_none() || q.memory.or(meta.hardware.memory).is_none()
+        });
+        if meta.hardware.autodetect || incomplete {
             let detected = autodetect::detect();
-            hw.ppn = hw.ppn.or(Some(detected.cores));
-            hw.num_threads = hw.num_threads.or(Some(detected.cores));
+            let hw = &mut meta.hardware;
+            hw.max_tasks_per_node = hw.max_tasks_per_node.or(Some(detected.cores));
             hw.memory = hw.memory.or(detected.memory_mb);
         }
 
-        // MDB load substitutes only the [paths] (@USER@) values; scheduler/
-        // script templates keep their tokens for use-time substitution
-        // (cross-stream contract; §4.2).
-        let mut vars = VarSet::new();
-        vars.set("USER", whoami());
-        meta.substitute_paths(&vars)
-            .with_context(|| format!("in {}", meta_path.display()))?;
+        // [paths] values keep their @USER@/@ENV(NAME)@ tokens at load; they
+        // are resolved by Meta::resolved_paths at use time, on the machine
+        // itself, so entries for machines whose environment this host lacks
+        // (e.g. TACC's $SCRATCH) still load and validate everywhere (§4.2).
 
         let machine = Machine { name: name.to_owned(), dir, layer, meta };
         machine.validate_files()?;
@@ -290,8 +291,29 @@ mod tests {
     #[test]
     fn enumerates_dev_machines_skipping_pycache() {
         let machines = dev_mdb().machines().unwrap();
-        assert_eq!(machines.keys().cloned().collect::<Vec<_>>(), ["generic", "mel5"]);
+        for name in ["generic", "mel5", "mike"] {
+            assert!(machines.contains_key(name), "dev mdb should list {name}");
+        }
+        assert!(!machines.keys().any(|n| n.contains("pycache")));
         assert!(machines.values().all(|l| *l == Layer::System));
+    }
+
+    /// Sweep the whole dev MDB (the simfactory2 port): every machine must
+    /// load+validate (meta.toml schema, queue coverage, per-variant files),
+    /// every optionlist variant must parse under the §7.8 rules, and every
+    /// declared script variant must resolve to exactly one .sh/.py file.
+    #[test]
+    fn loads_and_validates_every_dev_machine() {
+        let mdb = dev_mdb();
+        for (name, _layer) in mdb.machines().unwrap() {
+            let machine = mdb
+                .load(&name)
+                .unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
+            for variant in &machine.meta.variants.optionlist.variants {
+                optionlist::Optionlist::load(&machine.optionlist_path(variant))
+                    .unwrap_or_else(|e| panic!("machine {name} optionlist {variant} failed: {e:#}"));
+            }
+        }
     }
 
     #[test]
@@ -300,11 +322,15 @@ mod tests {
 
         let mel5 = mdb.load("mel5").unwrap();
         assert_eq!(mel5.meta.default_queue(), Some("local"));
-        // [paths] @USER@ was substituted at load…
+        // [paths] keep their tokens at load (resolution is a use-time
+        // concern — §4.2)…
+        assert_eq!(mel5.meta.paths.simulation_home.as_deref(), Some("/home/@USER@/simulations"));
+        // …and resolve on demand.
         let user = whoami();
-        assert_eq!(mel5.meta.paths.simulation_home.as_deref(), Some(format!("/home/{user}/simulations").as_str()));
-        assert_eq!(mel5.meta.paths.test_home.as_deref(), Some(format!("/home/{user}/tests").as_str()));
-        // …but scheduler templates keep their tokens for use time.
+        let paths = mel5.meta.resolved_paths().unwrap();
+        assert_eq!(paths.simulation_home.as_deref(), Some(format!("/home/{user}/simulations").as_str()));
+        assert_eq!(paths.test_home.as_deref(), Some(format!("/home/{user}/tests").as_str()));
+        // Scheduler templates also keep their tokens for use time.
         assert!(mel5.meta.scheduler.submit.as_deref().unwrap().contains("@SCRIPTFILE@"));
         // env-setup lives in [environment] and spans all three phases.
         assert!(mel5.meta.environment.effective(Phase::Build).contains("MPI_DIR"));
@@ -318,10 +344,49 @@ mod tests {
         assert_eq!(rs.select("local", true, None).unwrap().0, "test");
         assert!(!mel5.script_path(ScriptKind::Submit, "test").unwrap().python);
 
+        // db1.hpc.lsu.edu unifies the former db-sing-nv/db-sing-cpu synthetic
+        // machines: two optionlist flavors and two cactup queues (gpu/cpu)
+        // over Deep Bayou's single SLURM partition.
+        let db1 = mdb.load("db1.hpc.lsu.edu").unwrap();
+        assert_eq!(db1.meta.default_queue(), Some("gpu"));
+        assert!(db1.meta.queues["gpu"].gpu && !db1.meta.queues["cpu"].gpu);
+        // Both queues face the scheduler as the one real partition, "gpu":
+        // the cpu queue carries a `name` override (@QUEUE@ resolves to it).
+        assert_eq!(db1.meta.scheduler_queue_name("gpu").unwrap(), "gpu");
+        assert_eq!(db1.meta.scheduler_queue_name("cpu").unwrap(), "gpu");
+        // Two non-test optionlists: a build must pick one with --variant (§4.4)…
+        assert!(db1.select_optionlist(None, false).is_err());
+        // …and either flavor resolves explicitly.
+        assert_eq!(db1.select_optionlist(Some("nv"), false).unwrap(), "nv");
+        assert_eq!(db1.select_optionlist(Some("cpu"), false).unwrap(), "cpu");
+        // The cpu flavor names the non---nv universe (§4.8 step 3); the
+        // machine default et-sing keeps --nv for the CUDA build.
+        let cpu = optionlist::load_header(&db1.optionlist_path("cpu")).unwrap();
+        assert_eq!(cpu.universe.as_deref(), Some("et-sing-cpu"));
+        let argv = |u: &str| db1.meta.universe(u).unwrap().wrapper_argv.clone().unwrap();
+        assert!(!argv("et-sing-cpu").iter().any(|a| a == "--nv"));
+        assert!(argv("et-sing").iter().any(|a| a == "--nv"));
+        // The single default/test script variants serve both queues.
+        let rs = db1.meta.script_variants(ScriptKind::Run);
+        assert_eq!(rs.select("cpu", false, None).unwrap().0, "default");
+        assert_eq!(rs.select("gpu", true, None).unwrap().0, "test");
+
+        // frontera's [paths] read TACC's hashed storage roots via @ENV()@
+        // (§4.2): the entry loads anywhere; resolution needs the machine's
+        // own environment and hard-errors without it.
+        let frontera = mdb.load("frontera").unwrap();
+        assert_eq!(
+            frontera.meta.paths.simulation_home.as_deref(),
+            Some("@ENV(SCRATCH)@/simulations")
+        );
+        if std::env::var("SCRATCH").is_err() {
+            let err = format!("{:#}", frontera.meta.resolved_paths().unwrap_err());
+            assert!(err.contains("SCRATCH"), "error names the env var: {err}");
+        }
+
         let generic = mdb.load("generic").unwrap();
         // §4.6: autodetect filled the missing hardware.
-        assert!(generic.meta.hardware.ppn.unwrap() >= 1);
-        assert!(generic.meta.hardware.num_threads.unwrap() >= 1);
+        assert!(generic.meta.hardware.max_tasks_per_node.unwrap() >= 1);
         assert!(generic.meta.hardware.memory.unwrap() > 0);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());

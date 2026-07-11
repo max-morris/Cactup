@@ -324,6 +324,15 @@ pub fn build(
     } else {
         vars.set("SCRATCH_HOME", "");
     }
+    // Several machines' make commands / build universes reference
+    // @ALLOCATION@ (e.g. mike's and Deep Bayou's `srun … singularity exec`
+    // build wrappers); bind it from the allocation knob the way the sim path
+    // does, empty when unset.
+    let allocation = crate::database::Db::open()
+        .and_then(|db| db.read())
+        .map(|db| db.knob("allocation").unwrap_or("").to_owned())
+        .unwrap_or_default();
+    vars.set("ALLOCATION", allocation);
 
     // Rendered native optionlist: render → inject flags → substitute (§7.8).
     let rendered = vars

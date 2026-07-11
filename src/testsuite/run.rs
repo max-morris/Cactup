@@ -117,7 +117,7 @@ fn assemble_test_vars(
     v.set("EXECHOST", "");
     v.set("JOB_ID", "");
 
-    set_machine_vars(&mut v, machine);
+    set_machine_vars(&mut v, machine, &topo.queue)?;
     v.set("RUNDEBUG", false);
     v.set("DEBUGGER", "gdb");
     Ok(v)
@@ -226,7 +226,7 @@ fn start_impl(
         }
     }
 
-    let identity = Identity::resolve(db, machine, hostname_override);
+    let identity = Identity::resolve(db, hostname_override);
     let sched = Scheduler::new(&machine.meta);
 
     // A previous run of this config that is still in the queue must be dealt
@@ -482,7 +482,7 @@ mod tests {
             name = "fake"
 
             [hardware]
-            ppn = 4
+            max-tasks-per-node = 4
 
             [scheduler]
             submit = "echo [JOB-T@RESULTS_ID@]"

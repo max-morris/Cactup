@@ -194,13 +194,11 @@ pub(crate) struct Identity {
 }
 
 impl Identity {
-    pub(crate) fn resolve(db: &Database, machine: &Machine, hostname_override: Option<&str>) -> Identity {
+    pub(crate) fn resolve(db: &Database, hostname_override: Option<&str>) -> Identity {
         Identity {
             hostname: discover::resolve_hostname(hostname_override),
-            user: db
-                .knob_or_default(&machine.name, "user")
-                .unwrap_or_else(|| "unknown".to_owned()),
-            email: db.knob_or_default(&machine.name, "email").unwrap_or_default(),
+            user: db.knob_or_default("user").unwrap_or_else(|| "unknown".to_owned()),
+            email: db.knob_or_default("email").unwrap_or_default(),
         }
     }
 }
@@ -312,7 +310,7 @@ fn submit_impl(
         );
     }
 
-    let identity = Identity::resolve(db, machine, hostname_override);
+    let identity = Identity::resolve(db, hostname_override);
     let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
 
     let mut from = recover_from;
@@ -509,7 +507,7 @@ fn run_interactive(
         .checkpt_buffer
         .unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
 
-    let identity = Identity::resolve(db, machine, hostname_override);
+    let identity = Identity::resolve(db, hostname_override);
     let id = restart::next_id(&sim.dir)?;
     let rdir = restart::restart_dir(&sim.dir, id);
     fs::create_dir_all(rdir.join(".cactup"))
@@ -819,7 +817,7 @@ mod tests {
             name = "fake"
 
             [hardware]
-            ppn = 8
+            max-tasks-per-node = 8
 
             [environment]
             env-setup = "export CACTUP_TEST_ENV=1"

@@ -134,25 +134,39 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // right here — the successor to simfactory's `sim setup-silent`.
     let machine = machine::ensure_local_machine(ctx)?;
 
-    // Knob prompts (§5): seeded from stored knobs or the derived defaults
-    // ($USER, git email); empty answers are not stored.
+    // We can seed the user knob from the machine's user in basically any case.
+    {
+        let snapshot = ctx.db.read()?;
+
+        if snapshot.knob("user").is_none() && let Some(user) = snapshot.knob_or_default("user") {
+            ctx.db.update(|db| {
+                db.set_knob("user", user);
+                Ok(())
+            })?;
+        }
+    }
+
+    // Prompt for knobs if they haven't been set yet.
     if !silent {
         let snapshot = ctx.db.read()?;
+
         let mut answers = Vec::new();
         for (knob, question) in [
             ("user", "Your username on this machine?"),
             ("email", "Your email (for job notifications)?"),
             ("allocation", "Your default allocation/account (empty for none)?"),
         ] {
-            let default = snapshot.knob_or_default(&machine.name, knob).unwrap_or_default();
-            let answer = prompt_with_default(question, &default)?;
-            if !answer.is_empty() {
-                answers.push((knob, answer));
+            if snapshot.knob(knob).is_none() {
+                let default = snapshot.knob_or_default(knob).unwrap_or_default();
+                let answer = prompt_with_default(question, &default)?;
+                if !answer.is_empty() {
+                    answers.push((knob, answer));
+                }
             }
         }
         ctx.db.update(|db| {
             for (knob, value) in &answers {
-                db.set_knob(&machine.name, knob, value.clone());
+                db.set_knob(knob, value.clone());
             }
             Ok(())
         })?;

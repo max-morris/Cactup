@@ -26,7 +26,7 @@ These were settled during design review and are treated as fixed below.
 | D4 | Restart / chaining / recovery & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, checkpoint recovery, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
-| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement only**, everywhere (TOML and shell templates). simfactory's `@(expr)@` Python-eval, ternary/word-operator sugar, and `@ENV(NAME)@` are **not** ported. Scripts and parfiles needing logic use the Python `.py` variant escape hatch (see §6). |
+| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus the one computed form `@ENV(NAME)@`** (the named environment variable, read at substitution time; unset or empty = hard error), everywhere (TOML and shell templates). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
 | D8 | Machine-level thorn enable/disable toggles | **Kept** (see §7.5). |
 | D9 | Optionlist on-disk format | **TOML + render step.** Optionlists are authored as TOML; cactup renders them to the native Cactus `NAME = value` optionlist before `make`. Render rules, the `VERSION` semantics, and ordering are specified in §7.8. |
 | D10 | Pre-existing simfactory simulation dirs | **Greenfield / ignore.** cactup manages only simulations it created. A directory is recognized as a cactup simulation **iff** it contains `.cactup/simulation.toml`. cactup neither reads nor migrates legacy `SIMFACTORY/` simulations. |
@@ -76,7 +76,7 @@ Non-goals (dropped per §0): remote/SSH execution, source-tree sync, archiving.
   simplified, one-shot analogue of a simulation, living under **test-home**
   (§11.5).
 - **MDB (machine database)** — per-cluster scripts and metadata.
-- **knob** — a machine-global default value (allocation, email, queue, …).
+- **knob** — a global default value (allocation, email, queue, …).
 
 ---
 
@@ -90,7 +90,8 @@ and is concerned **exclusively** with global cactup state:
 - `cactup-version`
 - `installations`: alias → `{ alias, release, path }`
 - `active-installation`
-- **knobs** (new; see §5) — machine-global defaults.
+- **knobs** (new; see §5) — global defaults, one flat map (a `~/.cactup` lives
+  on exactly one machine).
 - **`detected-machine`** (new; see §4.3) — the resolved machine name for *this*
   machine, a single string (**not** keyed by hostname). A given
   `~/.cactup` logically lives on one machine, so login and compute nodes of a
@@ -422,10 +423,23 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   in §8.5 — `(DD-)?HH:MM:SS` — parsed to an integer number of seconds internally,
   so comparisons and the chaining division are unit-consistent regardless of how
   the value was written.
-- Hardware/capacity keys kept verbatim: `ppn`, `spn`, `mpn`, `nodes`,
-  `num-threads`, `max-num-threads`, `num-smt`, `max-num-smt`, `min-ppn`,
-  `memory`, `cpu-freq`, `flop-per-cycle`, cache descriptors, `efficiency`, `quota`,
-  `cpu`.
+- Hardware/capacity keys **stripped to what submit/run scripts actually
+  consume**, and renamed for what they mean to cactup: `ppn` →
+  `max-tasks-per-node`, `num-smt` → `threads-per-cpu`, `memory` kept (plus the
+  `autodetect` control flag, §4.6). simfactory's informational keys (`spn`,
+  `mpn`, `nodes`, `num-threads`, `max-num-threads`, `max-num-smt`, `min-ppn`,
+  `cpu-freq`, `flop-per-cycle`, cache descriptors, `efficiency`, `quota`,
+  `cpu`) are dropped on port — nothing consumed them. Each kept key may be set
+  machine-wide in `[hardware]` and/or overridden per-queue in `[queues.<q>]`
+  (§4.2).
+- **`[paths]` values resolve at use time, not at MDB load** — `@USER@` plus
+  any `@ENV(NAME)@` reads (§6.1; unset or empty env var = hard error). Use-time
+  resolution lets an entry whose paths need the machine's own environment
+  (e.g. `simulation-home = "@ENV(SCRATCH)@/simulations"` for TACC's hashed
+  scratch root) load and validate on any host; the hard error fires only when
+  a path is actually needed (`install` / `sim create` / `test`). `machine
+  show` prints resolved paths when the host can resolve them and the raw
+  templates otherwise.
 - **`simulation-home`** (the renamed successor to simfactory's `basedir`) and
   **`install-home`** (the renamed successor to simfactory's `sourcebasedir`) are
   the two per-machine root-path keys; both are **optional** and behave the same
@@ -473,8 +487,8 @@ keys** (`allocation`, `mail`, `mail-type`, `queue`). simfactory's smushed
 spellings are normalized on port (`getstatus` → `get-status`, `submitpattern` →
 `submit-pattern`, `exechost` → `exec-host`, `maxqueueslots` → `max-queue-slots`,
 `envsetup` → `env-setup`, `makejobs` → `make-jobs`, `maxwalltime` →
-`max-walltime`, `scratchbasedir` → `scratch-home`, `cpufreq` → `cpu-freq`,
-`flop/cycle` → `flop-per-cycle`, …), and cactup's own keys use hyphens too
+`max-walltime`, `scratchbasedir` → `scratch-home`, …), and cactup's own keys
+use hyphens too
 (`config-id`, `build-id`, `job-id`, `chained-job-id`, `from-restart-id`,
 `simulation-id`, `compatible-queues`). The **only** identifiers that keep
 underscores are **template substitution variables**, which stay `UPPER_SNAKE`
@@ -484,8 +498,8 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 **meta.toml table structure.** Scalar keys are grouped into tables for clarity
 (TOML requires top-level keys before any table, so grouping avoids ordering
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
-(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`ppn`, `nodes`,
-`memory`, `num-threads`, `cpu-freq`, …), `[build]` (`make`, `make-jobs`,
+(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`max-tasks-per-node`,
+`threads-per-cpu`, `memory` — machine-wide defaults, each overridable per-queue; see below), `[build]` (`make`, `make-jobs`,
 `enabled-thorns`, `disabled-thorns`), `[environment]` (`env-setup` and the
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
@@ -501,10 +515,10 @@ status = "production"          # personal|experimental|production|storage|outdat
 hostname = "mike.hpc.lsu.edu"
 # … location, description, etc …
 
-[hardware]
-ppn = 16
-nodes = 360
-# … memory, cpu-freq, num-threads, … …
+[hardware]                     # machine-wide defaults; OPTIONAL if every queue
+max-tasks-per-node = 16        # sets its own values (see [queues.*] overrides)
+memory = 196608                # MB per node
+# threads-per-cpu = 1          # optional; defaults to 1 (§8.5)
 
 [scheduler]
 submit = "sbatch @SCRIPTFILE@ 2>&1"
@@ -526,6 +540,15 @@ default = true                 # the queue used when -q is omitted (one queue ma
 [queues.gpu]
 gpu = true
 max-walltime = "24:00:00"
+max-tasks-per-node = 64        # per-queue hardware override (heterogeneous
+threads-per-cpu = 2            # partitions); any key not set here inherits
+                               # the [hardware] value (memory, in this example)
+# name = "gpu_part"            # optional: the scheduler's REAL queue/partition
+                               # name when it differs from the table key. @QUEUE@
+                               # resolves to it (default: the key itself). Lets
+                               # several cactup queues — e.g. cpu/gpu build
+                               # flavors with different D12 gpu flags — map onto
+                               # one real queue without hardcoding it in scripts.
 
 # Variant → queue association (§4.4). Every key names a variant; there are no
 # reserved keys. A variant is either the array shorthand (queues only) or the
@@ -553,6 +576,24 @@ max-walltime = "24:00:00"
 variants = ["cpu", "gpu", "test-cpu"]   # selected at build time via --variant;
                                         # test-cpu.toml carries [cactup].test = true (§11.2)
 ```
+
+**Hardware keys.** `[hardware]` carries **only** the keys cactup actually
+feeds to submit/run scripts, named for what they mean to cactup:
+`max-tasks-per-node` (simfactory's `ppn`; drives the §8.5 process-layout
+defaults and `@MAX_TASKS_PER_NODE@`), `memory` (`@MEMORY@`, per-node MB), and
+`threads-per-cpu` (simfactory's `num-smt`; `@THREADS_PER_CPU@`, default 1) —
+plus the `autodetect` control flag (§4.6). simfactory's other
+capacity/documentation keys (`nodes`, `num-threads`, `min-ppn`, `spn`, `mpn`,
+`max-num-threads`, `max-num-smt`, `cpu-freq`, `flop-per-cycle`, …) are dropped:
+nothing consumed them (`@CPUFREQ@` is likewise no longer produced — no script
+ever used it). Each hardware key may **also** be set inside a
+`[queues.<name>]` table as a per-queue override for machines with
+heterogeneous partitions (e.g. fatter GPU nodes). Resolution is key-by-key:
+the queue's value where set, else the top-level `[hardware]` value. The
+top-level table is therefore **optional** — a machine may define hardware
+entirely per-queue — and a queue with no overrides simply inherits everything.
+Topology derivation (§8.5) and the machine-derived script variables (§6.3) use
+the **queue-effective** values for the queue the job targets.
 
 The default variant. Instead of a reserved `default = "<name>"` pointer key
 (which would collide with a variant literally named `default` and force the
@@ -726,11 +767,13 @@ It describes a single-node workstation with **no batch system**:
 
 **Hardware autodetection.** `generic` declares `[hardware].autodetect = true`
 instead of fixed core/RAM counts. When a machine has `autodetect = true` (or
-omits hardware keys), cactup fills the missing values at load time from the OS:
+some queue would otherwise resolve no `max-tasks-per-node`/`memory` value —
+counting both the top-level `[hardware]` keys and the per-queue overrides,
+§4.2), cactup fills the missing top-level values at load time from the OS:
 
 | Var | Linux | macOS |
 |-----|-------|-------|
-| `ppn` / `num-threads` | `nproc` (or `/proc/cpuinfo`) | `sysctl -n hw.ncpu` |
+| `max-tasks-per-node` | `nproc` (or `/proc/cpuinfo`) | `sysctl -n hw.ncpu` |
 | `memory` (MB) | `/proc/meminfo` `MemTotal` | `sysctl -n hw.memsize` |
 
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
@@ -767,7 +810,7 @@ cactup machine delete <name>
   the user may re-create to refresh). If the source no longer exists, the warning
   says so instead.
 - `<name>` defaults to the local hostname's short form.
-- **Autodetects and writes concrete hardware** (`ppn`, `num-threads`, `memory`
+- **Autodetects and writes concrete hardware** (`max-tasks-per-node`, `memory`
   via §4.6) so the persisted machine is stable rather than re-detecting each run.
 - Sets `simulation-home`/`install-home` (prompted; defaults are the
   `~/.cactup/simulations` and `~/.cactup/cacti` fallbacks, §4.2) and prompts for
@@ -933,7 +976,7 @@ an MPI-launch rewriter.
 
 ## 5. Knobs
 
-Machine-global default values, replacing simfactory's `defs.local.ini [default]`
+Global default values, replacing simfactory's `defs.local.ini [default]`
 section and the per-run `GetMachineOption` overrides.
 
 ```
@@ -947,16 +990,14 @@ Recognized knobs (from `cactup-simfactory-design.txt`): `allocation`, `mail`,
 extras (`user`, `email`) are derived automatically (`$USER`, `git config
 user.email`) the way simfactory's `setup` did, but can be overridden as knobs.
 
-**Storage:** knobs live in the **global database** (`~/.cactup/database.json`),
-keyed by machine name, because they are machine-global and not tied to any one
-installation. This is consistent with D4 (the global DB holds global cactup
-state).
+**Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
+as a single flat map — a `~/.cactup` lives on exactly one machine, so there is
+nothing to key them by. This is consistent with D4 (the global DB holds global
+cactup state).
 
 ```jsonc
 // database.json (excerpt)
-"knobs": {
-  "mike": { "allocation": "hpc_xxx", "mail": "me@lsu.edu", "mail-type": "all", "queue": "checkpt" }
-}
+"knobs": { "allocation": "hpc_xxx", "mail": "me@lsu.edu", "mail-type": "all", "queue": "checkpt" }
 ```
 
 ### 5.1 Value precedence
@@ -965,7 +1006,7 @@ For any value that can come from several places (mirrors `simfactory-docs.txt`
 §6.2, adapted):
 
 1. Explicit CLI flag (e.g. `-q/--queue`, `-a/--allocation`) — highest.
-2. Knob for the current machine.
+2. Knob.
 3. Machine `meta.toml` value / default.
 4. Built-in default.
 
@@ -987,9 +1028,16 @@ redistributed:
 
 ## 6. Templating / variable substitution
 
-Per D7, cactup implements **literal `@NAME@` replacement only**. There is no
-expression evaluation, no ternary sugar, no `@ENV()@`. Any MDB script that
-needs conditional logic (e.g. simfactory's
+Per D7, cactup implements **literal `@NAME@` replacement plus the one
+computed token form `@ENV(NAME)@`**: the value of environment variable
+`NAME`, read at substitution time — which always happens on the machine in
+question — with an unset or **empty** `NAME` being a hard error, never an
+empty splice. `@ENV()@` is the mechanism for machine paths only the machine's
+environment knows (TACC/LRZ-style hashed storage roots in `[paths]`, §4.2);
+because of it, `[paths]` values are resolved at **use time**
+(`Meta::resolved_paths`), not at MDB load, so entries for other machines
+still load and validate everywhere. There is no expression evaluation and no
+ternary sugar. Any MDB script that needs conditional logic (e.g. simfactory's
 `@("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@`) is
 rewritten as a Python `.py` variant.
 
@@ -1084,13 +1132,16 @@ flags exactly** — this is the primary divergence from simfactory's names.
 > Porter's map:
 > `@NUM_PROCS@`→`@TASKS@`, `@NODE_PROCS@`→`@TASKS_PER_NODE@`,
 > `@NUM_THREADS@`→`@CPUS_PER_TASK@`, `@PROCS@`/`@PROCS_REQUESTED@`/`@PPN_USED@`→
-> removed (compute from `@TASKS@`/`@CPUS_PER_TASK@`/`@PPN@` if needed),
-> `@SIMFACTORY@`→`@CACTUP@`.
+> removed (compute from `@TASKS@`/`@CPUS_PER_TASK@`/`@MAX_TASKS_PER_NODE@` if
+> needed), `@PPN@`→`@MAX_TASKS_PER_NODE@`, `@NUM_SMT@`→`@THREADS_PER_CPU@`,
+> `@CPUFREQ@`→removed (no script used it), `@SIMFACTORY@`→`@CACTUP@`.
 
 **Topology (canonical — one variable per §8.5 flag):**
 `NODES` (`-n`), `TASKS` (`-T`, total MPI ranks), `TASKS_PER_NODE` (`-t`/tpn),
 `CPUS_PER_TASK` (`-c`/cpus), `GPU` (`-g`; `1`/`0`), `ALLOCATION` (`-a`),
-`QUEUE` (`-q`), `MAIL` (`-m`), `MAIL_TYPE` (`-M`), `JOB_NAME` (`-j`),
+`QUEUE` (`-q`; the scheduler-facing name — the selected queue's `name` override
+when set, else its `[queues.<q>]` key — §4.2), `MAIL` (`-m`), `MAIL_TYPE` (`-M`),
+`JOB_NAME` (`-j`),
 `WALLTIME` (`-w`; the scheduler wall for **this job**, `(DD-)?HH:MM:SS`),
 `STDOUT_FILE` (`-o`), `STDERR_FILE` (`-e`).
 
@@ -1128,9 +1179,11 @@ re-invoke `@CACTUP@ sim run …`; renamed from simfactory's `@SIMFACTORY@`).
 `MACHINE`, `HOSTNAME`, `USER`, `EMAIL`, `EXECHOST`, `JOB_ID`, `CHAINED_JOB_ID`,
 `FROM_RESTART_COMMAND`.
 
-**Machine-derived** (read from `meta.toml`, available to scripts but not topology
-flags): `PPN` (logical cores/node), `MEMORY` (per-node MB), `CPUFREQ` (GHz),
-`NUM_SMT` (default 1; §8.5 assumption), `ENV_SETUP` (the **effective** env-setup
+**Machine-derived** (read from `meta.toml` — the **queue-effective** hardware
+values for the job's queue (§4.2), available to scripts but not topology
+flags): `MAX_TASKS_PER_NODE` (logical cores/node, from `max-tasks-per-node`),
+`MEMORY` (per-node MB), `THREADS_PER_CPU` (from `threads-per-cpu`, default 1;
+§8.5 assumption), `ENV_SETUP` (the **effective** env-setup
 block for the current phase — `env-setup` plus the phase's `env-<phase>-setup`,
 already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
 
@@ -1663,8 +1716,9 @@ whole simulation; cactup splits it into per-job segments during chaining (§8.8)
 
 Derivation (produces the canonical §6.3 names directly — no legacy aliases):
 - `CPUS_PER_TASK` = `--cpus` (default 1).
-- `TASKS_PER_NODE` = `--tpn` if given, else `floor(PPN / CPUS_PER_TASK)`, min 1
-  (fill the node).
+- `TASKS_PER_NODE` = `--tpn` if given, else
+  `floor(MAX_TASKS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node) — using
+  the queue-effective `max-tasks-per-node` (§4.2).
 - `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
 - **Script-variant default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the selected script variant's optional `tasks = N`
@@ -1675,11 +1729,11 @@ Derivation (produces the canonical §6.3 names directly — no legacy aliases):
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0`,
   cross-checked against the built binary's `gpu` flag (§4.4 / D12).
 - A script that needs "total cores" or "cores requested" computes them from
-  `TASKS`, `CPUS_PER_TASK`, `NODES`, and `PPN` — cactup no longer pre-derives
-  `PROCS`/`PROCS_REQUESTED`/`PPN_USED`.
+  `TASKS`, `CPUS_PER_TASK`, `NODES`, and `MAX_TASKS_PER_NODE` — cactup no
+  longer pre-derives `PROCS`/`PROCS_REQUESTED`/`PPN_USED`.
 
-**ASSUMPTION:** SMT (`NUM_SMT`) defaults to the machine `num-smt` (1) and is not
-a topology flag in v1; expose later if needed.
+**ASSUMPTION:** SMT (`THREADS_PER_CPU`) defaults to the machine (or queue)
+`threads-per-cpu` (1) and is not a topology flag in v1; expose later if needed.
 
 ### 8.6 `stop` / `clean`
 
@@ -2488,7 +2542,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Sim detection | dir has `SIMFACTORY/properties.ini` | dir has `.cactup/simulation.toml` (greenfield — D10) |
 | Sim output dirs | `output-%04d/…` | **identical (preserved)** |
 | Active restart | `output-NNNN-active` symlink | **identical (preserved)** |
-| Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` only**; `.py` for logic (JSON-on-stdin convention, §6.1) |
+| Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` + `@ENV(NAME)@`** (unset/empty env = hard error); `.py` for logic (JSON-on-stdin convention, §6.1) |
 | cactup binary var | `@SIMFACTORY@` | `@CACTUP@` |
 | Machine detection | `aliaspattern` regex on hostname | `discover.py`; result cached in DB as a single `detected-machine` string (not per-hostname — §4.3) |
 | Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) |

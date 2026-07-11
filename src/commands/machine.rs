@@ -255,17 +255,19 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>) -> Res<()> {
         println!("  created from: {} (hash {})", origin.from, origin.hash);
     }
     println!(
-        "  hardware: ppn={} num-threads={} memory={} MB nodes={}",
-        meta.hardware.ppn.map_or("?".into(), |v| v.to_string()),
-        meta.hardware.num_threads.map_or("?".into(), |v| v.to_string()),
+        "  hardware: max-tasks-per-node={} threads-per-cpu={} memory={} MB",
+        meta.hardware.max_tasks_per_node.map_or("?".into(), |v| v.to_string()),
+        meta.hardware.threads_per_cpu(),
         meta.hardware.memory.map_or("?".into(), |v| v.to_string()),
-        meta.hardware.nodes.map_or("?".into(), |v| v.to_string()),
     );
+    // Display resolved paths when this host can resolve them (@USER@/@ENV()@
+    // — §4.2); fall back to the raw meta.toml templates otherwise.
+    let paths = meta.resolved_paths().unwrap_or_else(|_| meta.paths.clone());
     for (label, value) in [
-        ("install-home", &meta.paths.install_home),
-        ("simulation-home", &meta.paths.simulation_home),
-        ("test-home", &meta.paths.test_home),
-        ("scratch-home", &meta.paths.scratch_home),
+        ("install-home", &paths.install_home),
+        ("simulation-home", &paths.simulation_home),
+        ("test-home", &paths.test_home),
+        ("scratch-home", &paths.scratch_home),
     ] {
         if let Some(value) = value {
             println!("  {label}: {value}");
@@ -273,8 +275,20 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>) -> Res<()> {
     }
     println!("  queues:");
     for (name, queue) in &meta.queues {
+        // Per-queue hardware overrides (§4.2) shown only where they differ
+        // from the top-level [hardware] values.
+        let mut overrides = String::new();
+        for (label, value) in [
+            ("max-tasks-per-node", queue.max_tasks_per_node.map(|v| v.to_string())),
+            ("threads-per-cpu", queue.threads_per_cpu.map(|v| v.to_string())),
+            ("memory", queue.memory.map(|v| format!("{v} MB"))),
+        ] {
+            if let Some(value) = value {
+                overrides.push_str(&format!("  {label} {value}"));
+            }
+        }
         println!(
-            "    {name}{}{}{}",
+            "    {name}{}{}{}{overrides}",
             if queue.default { " (default)" } else { "" },
             if queue.gpu { " [gpu]" } else { "" },
             queue.max_walltime.map_or(String::new(), |w| format!("  max-walltime {}", w.canonical())),
@@ -367,12 +381,10 @@ fn create_machine(
     let hw = crate::mdb::autodetect::detect();
     let hardware_tbl = subtable(&mut table, "hardware");
     hardware_tbl.remove("autodetect");
-    hardware_tbl.insert("ppn".into(), (hw.cores as i64).into());
-    hardware_tbl.insert("num-threads".into(), (hw.cores as i64).into());
+    hardware_tbl.insert("max-tasks-per-node".into(), (hw.cores as i64).into());
     if let Some(memory) = hw.memory_mb {
         hardware_tbl.insert("memory".into(), (memory as i64).into());
     }
-    hardware_tbl.entry("nodes").or_insert(1i64.into());
 
     let default_sim_home = crate::CACTUP_ROOT.join("simulations");
     let default_install_home = crate::CACTUP_ROOT.join("cacti");
@@ -422,27 +434,32 @@ fn create_machine(
         })?;
     }
 
-    // The user/email/allocation knobs (§4.7, §5), keyed by the new machine.
+    // The user/email/allocation knobs (§4.7, §5) — global, since this
+    // `~/.cactup` lives on the machine being created. Only knobs never set
+    // before are prompted for (silent takes the derived defaults).
     let snapshot = db.read()?;
-    let user_default = snapshot.knob_or_default(&name, "user").unwrap_or_default();
-    let email_default = snapshot.knob_or_default(&name, "email").unwrap_or_default();
-    let (user, email, allocation) = if silent {
-        (user_default, email_default, String::new())
-    } else {
-        (
-            prompt_with_default("Your username on this machine?", &user_default)?,
-            prompt_with_default("Your email (for job notifications)?", &email_default)?,
-            prompt_with_default("Your default allocation/account (empty for none)?", "")?,
-        )
-    };
-    db.update(|db| {
-        for (knob, value) in [("user", user), ("email", email), ("allocation", allocation)] {
-            if !value.is_empty() {
-                db.set_knob(&name, knob, value);
+    let mut answers = Vec::new();
+    for (knob, question) in [
+        ("user", "Your username on this machine?"),
+        ("email", "Your email (for job notifications)?"),
+        ("allocation", "Your default allocation/account (empty for none)?"),
+    ] {
+        if snapshot.knob(knob).is_none() {
+            let default = snapshot.knob_or_default(knob).unwrap_or_default();
+            let answer = if silent { default } else { prompt_with_default(question, &default)? };
+            if !answer.is_empty() {
+                answers.push((knob, answer));
             }
         }
-        Ok(())
-    })?;
+    }
+    if !answers.is_empty() {
+        db.update(|db| {
+            for (knob, value) in answers {
+                db.set_knob(knob, value);
+            }
+            Ok(())
+        })?;
+    }
 
     // Prove the new machine loads before declaring success.
     mdb.load(&name)?;
@@ -637,7 +654,7 @@ mod tests {
         assert_eq!(machine.layer, Layer::User);
         // Concrete autodetected hardware was persisted; autodetect flag gone.
         assert!(!machine.meta.hardware.autodetect);
-        assert!(machine.meta.hardware.ppn.unwrap() >= 1);
+        assert!(machine.meta.hardware.max_tasks_per_node.unwrap() >= 1);
         // Origin provenance recorded with the base's current hash.
         let origin = machine.meta.cactup.origin.as_ref().unwrap();
         assert_eq!(origin.from, "mel5");

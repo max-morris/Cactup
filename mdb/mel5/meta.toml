@@ -26,11 +26,8 @@ simulation-home = "/home/@USER@/simulations"
 test-home       = "/home/@USER@/tests"
 
 [hardware]
-ppn             = 80
-max-num-threads = 80
-num-threads     = 80
+max-tasks-per-node             = 80
 memory          = 196608        # MB per node
-nodes           = 1
 
 [build]
 make = "make -j@MAKEJOBS@"

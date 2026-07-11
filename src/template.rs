@@ -1,8 +1,11 @@
 //! Literal `@NAME@` substitution engine and the `.py` variant calling
-//! convention (spec §6.1–§6.3, D7). No expression evaluation, no `@ENV()@`.
+//! convention (spec §6.1–§6.3, D7). No expression evaluation; the one
+//! computed token form is `@ENV(NAME)@`.
 //!
 //! Substitution rules (§6.1, kind 1), applied in one left-to-right pass:
 //! - `@NAME@` is replaced by the variable's canonical string value.
+//! - `@ENV(NAME)@` is replaced by the environment variable `NAME`, read at
+//!   substitution time; unset or empty is a hard error, never an empty splice.
 //! - `@@` collapses to a literal `@` and the result is never re-scanned, so
 //!   `@@NAME@@` yields the literal `@NAME@`.
 //! - An unknown `@NAME@` token is an error (fixes simfactory's `@QEUEUE@` bug).
@@ -148,6 +151,35 @@ impl VarSet {
                 }
             }
 
+            // `@ENV(NAME)@` — the one computed token form (§6.1): read NAME
+            // from the process environment at substitution time (which always
+            // happens on the machine in question). Unset or empty is a hard
+            // error, never an empty splice.
+            if !closed && name == "ENV" && matches!(chars.peek(), Some(&(_, '('))) {
+                chars.next(); // consume '('
+                let mut env_name = String::new();
+                while let Some(&(_, nc)) = chars.peek() {
+                    if Self::is_name_char(nc) {
+                        env_name.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let well_formed = matches!(chars.next(), Some((_, ')')))
+                    && matches!(chars.next(), Some((_, '@')));
+                if !well_formed || env_name.is_empty() {
+                    bail!("malformed @ENV(NAME)@ token at byte {pos} (NAME must be UPPER_SNAKE)");
+                }
+                match std::env::var(&env_name) {
+                    Ok(v) if !v.is_empty() => out.push_str(&v),
+                    _ => bail!(
+                        "@ENV({env_name})@: environment variable {env_name} is unset or empty"
+                    ),
+                }
+                continue;
+            }
+
             if !closed || name.is_empty() {
                 bail!(
                     "stray '@' at byte {pos}: not an '@@' escape nor a well-formed @NAME@ token \
@@ -265,6 +297,24 @@ mod tests {
         assert!(vars().substitute("a @ b").is_err());
         assert!(vars().substitute("trailing@").is_err());
         assert!(vars().substitute("@lower@").is_err());
+    }
+
+    #[test]
+    fn env_token_reads_the_environment() {
+        // PATH is set and non-empty in any sane environment.
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(vars().substitute("p=@ENV(PATH)@!").unwrap(), format!("p={path}!"));
+        // Unset (and empty — same match arm) env vars are a hard error,
+        // never an empty splice.
+        let err =
+            vars().substitute("@ENV(CACTUP_TEST_SURELY_UNSET)@").unwrap_err().to_string();
+        assert!(err.contains("CACTUP_TEST_SURELY_UNSET"), "{err}");
+        // Malformed forms are errors, not pass-through.
+        assert!(vars().substitute("@ENV()@").is_err());
+        assert!(vars().substitute("@ENV(lower)@").is_err());
+        assert!(vars().substitute("@ENV(PATH@").is_err());
+        // Without parens, ENV is an ordinary (here unknown) variable.
+        assert!(vars().substitute("@ENV@").is_err());
     }
 
     #[test]

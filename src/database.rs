@@ -55,9 +55,10 @@ pub struct Database {
     /// Default installation to use for most commands.
     #[serde(default)]
     pub active_installation: Option<String>,
-    /// Machine-global defaults, keyed by machine name (§5).
+    /// Global default values (§5). A `~/.cactup` lives on exactly one
+    /// machine, so knobs are a single flat map, not keyed by machine.
     #[serde(default)]
-    pub knobs: IndexMap<String, IndexMap<String, String>>,
+    pub knobs: IndexMap<String, String>,
     /// The resolved machine for *this* `~/.cactup` — a single string, not
     /// keyed by hostname (§4.3).
     #[serde(default)]
@@ -76,14 +77,14 @@ impl Database {
         }
     }
 
-    /// The stored knob value for a machine, if set.
-    pub fn knob(&self, machine: &str, name: &str) -> Option<&str> {
-        self.knobs.get(machine)?.get(name).map(String::as_str)
+    /// The stored knob value, if set.
+    pub fn knob(&self, name: &str) -> Option<&str> {
+        self.knobs.get(name).map(String::as_str)
     }
 
     /// The effective knob value: stored → built-in/derived default (§5).
-    pub fn knob_or_default(&self, machine: &str, name: &str) -> Option<String> {
-        if let Some(v) = self.knob(machine, name) {
+    pub fn knob_or_default(&self, name: &str) -> Option<String> {
+        if let Some(v) = self.knob(name) {
             return Some(v.to_owned());
         }
         match name {
@@ -94,8 +95,8 @@ impl Database {
         }
     }
 
-    pub fn set_knob(&mut self, machine: &str, name: &str, value: String) {
-        self.knobs.entry(machine.to_owned()).or_default().insert(name.to_owned(), value);
+    pub fn set_knob(&mut self, name: &str, value: String) {
+        self.knobs.insert(name.to_owned(), value);
     }
 
     /// Deserialize from `path`, or build a fresh one if the file doesn't
@@ -219,14 +220,14 @@ mod tests {
         .unwrap();
         // A second, field-scoped update must not clobber the first field.
         db.update(|d| {
-            d.set_knob("mel5", "queue", "local".to_owned());
+            d.set_knob("queue", "local".to_owned());
             Ok(())
         })
         .unwrap();
 
         let snapshot = db.read().unwrap();
         assert_eq!(snapshot.active_installation.as_deref(), Some("et"));
-        assert_eq!(snapshot.knob("mel5", "queue"), Some("local"));
+        assert_eq!(snapshot.knob("queue"), Some("local"));
         assert_eq!(snapshot.schema, SCHEMA);
         // No lock is left behind by read/update.
         assert!(!dir.path().join("database.lock").exists());
@@ -261,10 +262,10 @@ mod tests {
     #[test]
     fn knob_defaults() {
         let db = Database::new();
-        assert_eq!(db.knob_or_default("m", "mail-type").as_deref(), Some("all"));
-        assert_eq!(db.knob_or_default("m", "allocation"), None);
+        assert_eq!(db.knob_or_default("mail-type").as_deref(), Some("all"));
+        assert_eq!(db.knob_or_default("allocation"), None);
         let mut db = db;
-        db.set_knob("m", "mail-type", "none".to_owned());
-        assert_eq!(db.knob_or_default("m", "mail-type").as_deref(), Some("none"));
+        db.set_knob("mail-type", "none".to_owned());
+        assert_eq!(db.knob_or_default("mail-type").as_deref(), Some("none"));
     }
 }

@@ -2,8 +2,8 @@
 # mel5 runscript (variant "default"), ported from simfactory2 mdb/runscripts/mel5.run.
 #
 # Variable renames vs. simfactory (design §6.3):
-#   @NUM_PROCS@   -> @TASKS@
-#   @NUM_THREADS@ -> @CPUS_PER_TASK@
+#   NUM_PROCS   -> @TASKS@
+#   NUM_THREADS -> @CPUS_PER_TASK@
 # Metadata dir SIMFACTORY/ -> .cactup/ (design §9.3).
 
 echo "Preparing:"

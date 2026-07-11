@@ -220,26 +220,28 @@ impl Installation {
     }
 
     /// First-time setup (install-time, §8.1) and `cactup use` backfill:
-    /// resolve sim-home/test-home from the machine's `[paths]` (already
-    /// @USER@-substituted at MDB load) and write installation.toml. A home
-    /// that is already recorded is never changed (homes are fixed at install
-    /// time); only missing ones are filled.
+    /// resolve sim-home/test-home from the machine's `[paths]` (resolved
+    /// here at use time — @USER@/@ENV()@, §4.2; an unset env var is a hard
+    /// error) and write installation.toml. A home that is already recorded
+    /// is never changed (homes are fixed at install time); only missing ones
+    /// are filled.
     pub fn ensure_meta(&self, machine: &Machine) -> Res<InstallationMeta> {
         let locked = self.locked()?;
         let mut meta = locked.meta()?;
         if meta.sim_home.is_some() && meta.test_home.is_some() {
             return Ok(meta);
         }
+        let paths = machine.meta.resolved_paths()?;
         if meta.sim_home.is_none() {
             meta.sim_home = Some(resolve_home(
-                machine.meta.paths.simulation_home.as_deref(),
+                paths.simulation_home.as_deref(),
                 "simulations",
                 &self.alias,
             ));
         }
         if meta.test_home.is_none() {
             meta.test_home = Some(resolve_home(
-                machine.meta.paths.test_home.as_deref(),
+                paths.test_home.as_deref(),
                 "tests",
                 &self.alias,
             ));
