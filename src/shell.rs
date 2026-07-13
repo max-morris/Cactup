@@ -1,4 +1,52 @@
+use colored::Colorize;
 use directories::BaseDirs;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether the global `--trace` flag is set. A process-global switch (rather
+/// than threading the flag through every `Ctx`/scheduler/build call) because
+/// command tracing is a cross-cutting concern touched at a dozen spawn sites.
+static TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Set by `main()` once from the parsed `--trace` flag.
+pub fn set_trace(on: bool) {
+    TRACE.store(on, Ordering::Relaxed);
+}
+
+/// When `--trace` is on, print `cmd` to stderr exactly as it is about to be
+/// spawned — program, args, and (if set) working directory — then let the
+/// caller run it. A no-op otherwise. Call immediately before
+/// `.output()`/`.status()`/`.spawn()` so the trace reflects reality.
+pub fn trace_command(cmd: &Command) {
+    if !TRACE.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut parts = vec![sh_quote(&cmd.get_program().to_string_lossy())];
+    parts.extend(cmd.get_args().map(|a| sh_quote(&a.to_string_lossy())));
+    let mut line = parts.join(" ");
+    if let Some(dir) = cmd.get_current_dir() {
+        line = format!("cd {} && {line}", sh_quote(&dir.to_string_lossy()));
+    }
+    // Stderr so it interleaves with the command's own output but never
+    // pollutes anything parsing cactup's stdout.
+    eprintln!("{} {}", "+".yellow().bold(), line.dimmed());
+}
+
+/// Render one argument for the trace line: bare if it is a "safe" shell token,
+/// otherwise single-quoted (with embedded quotes escaped). Multi-line snippets
+/// — e.g. an env-setup'd `/bin/sh -c` script — stay literal inside the quotes,
+/// so the traced line remains copy-pasteable into a shell.
+fn sh_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'/' | b'.' | b'=' | b':' | b'@' | b'%' | b'+' | b',')
+        });
+    if safe {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
 
 /// Expand `$VAR`/`${VAR}` references against the current environment.
 /// Undefined variables expand to the empty string, matching shell behaviour.

@@ -10,6 +10,27 @@ fn parse_walltime(s: &str) -> Result<Walltime, String> {
     Walltime::parse(s).map_err(|e| e.to_string())
 }
 
+/// `-j` / `--make-jobs` value: an explicit count, or `max` for "all threads
+/// available in whatever universe/context the build runs in" (§7.6). `Max` is
+/// resolved at build time (as a shell `$(nproc)`) so it reflects the wrapped
+/// build context — e.g. an `srun`/`singularity` allocation — not the login node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MakeJobs {
+    Count(u32),
+    Max,
+}
+
+/// clap adapter for `-j`: a positive integer or the word `max`.
+fn parse_make_jobs(s: &str) -> Result<MakeJobs, String> {
+    if s.eq_ignore_ascii_case("max") {
+        return Ok(MakeJobs::Max);
+    }
+    match s.parse::<u32>() {
+        Ok(n) if n >= 1 => Ok(MakeJobs::Count(n)),
+        _ => Err(format!("expected a positive integer or \"max\", got \"{s}\"")),
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "cactup")]
 #[command(version)]
@@ -25,6 +46,10 @@ pub(crate) struct Args {
 pub(crate) struct GlobalOpts {
     #[clap(short, long, global = true)]
     pub verbose: bool,
+    /// Print every shell command cactup runs to stderr as it happens (submit,
+    /// build, run, discovery, …) — useful for diagnosing scheduler failures.
+    #[clap(long, global = true)]
+    pub trace: bool,
     #[clap(long, global = true, default_value = "https://bitbucket.org/einsteintoolkit/manifest.git")]
     pub manifest_url: String,
     /// Override the system MDB location (§2.2; mainly for testing).
@@ -45,12 +70,14 @@ pub(crate) struct GlobalOpts {
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
     /// List available Einstein Toolkit releases
-    List {
+    Releases {
         #[clap(short, long, help = "List all releases instead of only the few most recent.")]
         all: bool,
     },
-    /// Show all Einstein Toolkit installations on the machine
-    Show,
+    /// List Einstein Toolkit installations on this machine
+    List,
+    /// Show the active installation, or a named one, in detail
+    Show { alias: Option<String> },
     /// Set the active Einstein Toolkit installation
     Use {
         #[clap(help = "The alias of the installation to activate.")]
@@ -195,9 +222,10 @@ pub(crate) struct BuildOpts {
     /// Clean the config before building.
     #[clap(long)]
     pub clean: bool,
-    /// Parallel make jobs (default: machine make-jobs, else 1 — §7.6).
-    #[clap(long, short = 'j', value_name = "N")]
-    pub make_jobs: Option<u32>,
+    /// Parallel make jobs: a number, or `max` for all threads available in the
+    /// build context (default: machine make-jobs, else 1 — §7.6).
+    #[clap(long, short = 'j', value_name = "N|max", value_parser = parse_make_jobs)]
+    pub make_jobs: Option<MakeJobs>,
     /// Copy a prebuilt cactus_<config> into place, skipping configure/make (§7.7).
     #[clap(long, alias = "virtual", value_name = "EXE")]
     pub virtual_executable: Option<PathBuf>,
@@ -236,7 +264,9 @@ pub(crate) struct ConfigBuildArgs {
 pub(crate) enum ConfigCommand {
     /// Build (or rebuild with -f) a config in the active installation
     Build(ConfigBuildArgs),
-    /// List configs, or show one config's stored metadata
+    /// List configs in the active installation
+    List,
+    /// Show the active config, or a named one's stored metadata
     Show { name: Option<String> },
     /// Set the installation's active config
     Use { name: String },
@@ -283,13 +313,18 @@ pub(crate) enum SimCommand {
         #[clap(short, long, help = "Permanently delete instead of moving to TRASH/.")]
         force: bool,
     },
-    /// List simulations, or show one in detail
-    Show {
-        sim: Option<String>,
+    /// List simulations
+    List {
         #[clap(long, help = "Show extended per-simulation details.")]
         long: bool,
-        #[clap(long, help = "Show simulations across every installation (§8.1).")]
+        #[clap(long, help = "List simulations across every installation (§8.1).")]
         all: bool,
+    },
+    /// Show one simulation in detail
+    Show {
+        sim: String,
+        #[clap(long, help = "Show extended per-restart details.")]
+        long: bool,
     },
     /// Print the active (or Nth) restart's output directory
     OutputDir {
@@ -399,14 +434,15 @@ pub(crate) struct TestStartArgs {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum TestSimCommand {
-    /// List test runs, or show one
-    Show {
-        name: Option<String>,
+    /// List test runs
+    List {
         #[clap(long)]
         long: bool,
-        #[clap(long, help = "Show test runs across every installation.")]
+        #[clap(long, help = "List test runs across every installation.")]
         all: bool,
     },
+    /// Show one test run
+    Show { name: String },
     /// Stop a queue-submitted test run
     Stop {
         name: String,
@@ -425,10 +461,17 @@ pub(crate) enum TestSimCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum MachineCommand {
-    /// Show one machine, or list all (replaces print-mdb / list-machines)
-    Show { name: Option<String> },
-    /// Print which machine this host resolves to (§4.3)
-    Whoami,
+    /// List all machines in the MDB (replaces print-mdb / list-machines)
+    List,
+    /// Show the machine this host resolves to, or a named one (§4.3)
+    Show {
+        name: Option<String>,
+        /// List the machine's optionlist variants with their details
+        /// (description, compatible queues, universe, …) instead of the
+        /// usual machine summary.
+        #[clap(long)]
+        variants: bool,
+    },
     /// Persist a tuned local machine into the user MDB (§4.7)
     Create {
         /// Machine name (default: this host's short hostname).
@@ -463,7 +506,9 @@ mod tests {
     #[test]
     fn parses_representative_command_lines() {
         for argv in [
-            vec!["cactup", "list", "--all"],
+            vec!["cactup", "releases", "--all"],
+            vec!["cactup", "list"],
+            vec!["cactup", "show", "et"],
             vec!["cactup", "install", "ET_2025_05", "--silent"],
             vec!["cactup", "uninstall", "old", "-f"],
             vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
@@ -478,7 +523,8 @@ mod tests {
                 "--machine", "mel5", "--installation", "et", "--no-recover",
             ],
             vec!["cactup", "sim", "output-dir", "bbh", "--restart-id", "2"],
-            vec!["cactup", "sim", "show", "--long", "--all"],
+            vec!["cactup", "sim", "list", "--long", "--all"],
+            vec!["cactup", "sim", "show", "bbh", "--long"],
             vec!["cactup", "test", "run", "-n", "1", "McLachlan/ML_BSSN", "TestArrangement"],
             vec![
                 "cactup", "test", "run", "tests", "--test-dir", "/work/tests/sim-test/tests",
@@ -487,12 +533,25 @@ mod tests {
             vec!["cactup", "test", "sim", "delete", "t1", "--purge"],
             vec!["cactup", "knob", "allocation", "hpc_xxx"],
             vec!["cactup", "machine", "create", "mylaptop", "--from-existing", "--silent"],
-            vec!["cactup", "machine", "whoami", "--hostname", "mel5.host"],
+            vec!["cactup", "machine", "list"],
+            vec!["cactup", "machine", "show", "--hostname", "mel5.host"],
         ] {
             if let Err(e) = Args::try_parse_from(&argv) {
                 panic!("failed to parse {argv:?}: {e}");
             }
         }
+    }
+
+    #[test]
+    fn make_jobs_accepts_number_or_max() {
+        assert_eq!(parse_make_jobs("8"), Ok(MakeJobs::Count(8)));
+        assert_eq!(parse_make_jobs("max"), Ok(MakeJobs::Max));
+        assert_eq!(parse_make_jobs("MAX"), Ok(MakeJobs::Max));
+        assert!(parse_make_jobs("0").is_err());
+        assert!(parse_make_jobs("lots").is_err());
+        // Wired through the parser end-to-end.
+        assert!(Args::try_parse_from(["cactup", "build", "sim", "-j", "max"]).is_ok());
+        assert!(Args::try_parse_from(["cactup", "build", "sim", "-j", "nope"]).is_err());
     }
 
     #[test]

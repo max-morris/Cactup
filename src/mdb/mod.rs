@@ -168,7 +168,7 @@ impl Mdb {
     pub fn load(&self, name: &str) -> Res<Machine> {
         let (dir, layer) = self
             .machine_dir(name)
-            .ok_or_else(|| anyhow!("no machine named \"{name}\" in the MDB (try `cactup machine show`)"))?;
+            .ok_or_else(|| anyhow!("no machine named \"{name}\" in the MDB (try `cactup machine list`)"))?;
         Machine::load(name, dir, layer)
     }
 

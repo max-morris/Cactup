@@ -37,7 +37,7 @@ impl JobStatus {
     }
 }
 
-/// What `sim show` displays for a simulation (§8.6, §10).
+/// What `sim list`/`show` displays for a simulation (§8.6, §10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayState {
     /// Non-active, dependency-gated member of a pre-submitted chain (Q/H).
@@ -176,8 +176,10 @@ impl<'m> Scheduler<'m> {
             Some(u) => match u.wrap(vars, inner)? {
                 WrappedCommand::Shell(cmd) => self.spawn_sh(&cmd, false),
                 WrappedCommand::Argv(argv) => {
-                    let output = Command::new(&argv[0])
-                        .args(&argv[1..])
+                    let mut command = Command::new(&argv[0]);
+                    command.args(&argv[1..]);
+                    crate::shell::trace_command(&command);
+                    let output = command
                         .output()
                         .with_context(|| format!("Failed to run {}", argv[0]))?;
                     collect_output(output, false)
@@ -187,8 +189,10 @@ impl<'m> Scheduler<'m> {
     }
 
     fn spawn_sh(&self, cmd: &str, tolerate_failure: bool) -> Res<String> {
-        let output = Command::new("/bin/sh")
-            .args(["-c", cmd])
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", cmd]);
+        crate::shell::trace_command(&command);
+        let output = command
             .output()
             .with_context(|| format!("Failed to run: {cmd}"))?;
         collect_output(output, tolerate_failure)

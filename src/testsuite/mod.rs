@@ -141,7 +141,7 @@ impl TestRun {
         let registry = inst.tests()?;
         let entry = registry.tests.get(name).ok_or_else(|| {
             anyhow!(
-                "no test run named \"{name}\" in installation \"{}\" (see `cactup test sim show`)",
+                "no test run named \"{name}\" in installation \"{}\" (see `cactup test sim list`)",
                 inst.alias
             )
         })?;

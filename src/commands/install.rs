@@ -227,12 +227,12 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
 
     // --- Run it on the user's behalf ---
-    let status =
-        std::process::Command::new(&script_path)
-                              .current_dir(&install_dir)
-                              .arg("einsteintoolkit.th")
-                              .status()
-                              .with_context(|| format!("Failed to execute {}", script_path.display()))?;
+    let mut command = std::process::Command::new(&script_path);
+    command.current_dir(&install_dir).arg("einsteintoolkit.th");
+    crate::shell::trace_command(&command);
+    let status = command
+        .status()
+        .with_context(|| format!("Failed to execute {}", script_path.display()))?;
 
     if !status.success() {
         return Err(anyhow!("GetComponents exited unsuccessfully: {status}"));

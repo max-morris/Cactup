@@ -1,35 +1,30 @@
-//! `cactup list` — list available Einstein Toolkit releases.
+//! `cactup list` — list Einstein Toolkit installations on this machine.
 
 use super::Ctx;
-use crate::manifest;
 use crate::Res;
 use colored::Colorize;
 
-pub fn dispatch(ctx: &Ctx, all: bool) -> Res<()> {
-    let repo = manifest::ensure_manifest_repo(&crate::CACTUP_ROOT, &ctx.globals.manifest_url)?;
+pub fn dispatch(ctx: &Ctx) -> Res<()> {
+    let database = ctx.db.read()?;
 
-    let tags = manifest::get_tags(&repo)?;
-
-    if tags.is_empty() {
-        println!("No releases found.");
+    if database.installations.is_empty() {
+        println!("{}", "No installations found.".bright_red());
         return Ok(());
     }
 
-    let mut tags = tags.into_iter();
-
-    if all {
-        println!("{} {}", tags.next().unwrap().short_name.bold(), "(latest)".bold().bright_green());
-        for tag in tags {
-            println!("{}", tag.short_name)
+    for installation in database.installations.values() {
+        print!("- {}", installation.alias.bold());
+        if let Some(release) = &installation.release {
+            print!(" (release {})", release.bold());
+        } else {
+            print!(" (manual installation)");
         }
-    } else {
-        const MAX_TAGS: usize = 10;
-        println!("Showing the {MAX_TAGS} most recent releases. Pass {} to see them all.", "--all".bold());
-
-        println!("{} {}", tags.next().unwrap().short_name.bold(), "(latest)".bold().bright_green());
-
-        for tag in tags.take(MAX_TAGS - 1) {
-            println!("{}", tag.short_name)
+        if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
+            print!("{}", " (active)".bold().bright_green());
+        }
+        println!();
+        if ctx.globals.verbose {
+            println!("\t Path: {}", installation.path);
         }
     }
 

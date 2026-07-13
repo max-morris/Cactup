@@ -38,6 +38,7 @@ fn main() -> Res<()> {
     }
 
     let args = Args::parse();
+    shell::set_trace(args.globals.trace);
 
     let ctx = Ctx {
         globals: args.globals,
@@ -45,8 +46,9 @@ fn main() -> Res<()> {
     };
 
     match args.command {
-        Commands::List { all } => commands::list::dispatch(&ctx, all),
-        Commands::Show => commands::show::dispatch(&ctx),
+        Commands::Releases { all } => commands::releases::dispatch(&ctx, all),
+        Commands::List => commands::list::dispatch(&ctx),
+        Commands::Show { alias } => commands::show::dispatch(&ctx, alias),
         Commands::Use { alias } => commands::use_cmd::dispatch(&ctx, alias),
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
         Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),

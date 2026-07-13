@@ -354,6 +354,46 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Byte offset of a `@COMMAND@` token sitting inside one of the template's own
+/// quotes, if any. `Universe::wrap` fills `@COMMAND@` with an *already
+/// shell-quoted* command, so the token must appear OUTSIDE the template's
+/// quotes (§4.8); nesting it inside a quoted run collapses that quoting the
+/// moment the command carries its own quote characters — the class of bug that
+/// broke Deep Bayou's `host` universe. Scans a byte at a time tracking POSIX
+/// `sh` quote state (single quotes are literal; `\` escapes outside single
+/// quotes).
+fn command_token_in_quotes(template: &str) -> Option<usize> {
+    #[derive(PartialEq)]
+    enum Q {
+        None,
+        Single,
+        Double,
+    }
+    const TOK: &[u8] = b"@COMMAND@";
+    let b = template.as_bytes();
+    let mut state = Q::None;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i..].starts_with(TOK) {
+            if state != Q::None {
+                return Some(i);
+            }
+            i += TOK.len();
+            continue;
+        }
+        match (&state, b[i]) {
+            (Q::None | Q::Double, b'\\') => i += 1, // escape the next byte
+            (Q::None, b'\'') => state = Q::Single,
+            (Q::None, b'"') => state = Q::Double,
+            (Q::Single, b'\'') => state = Q::None,
+            (Q::Double, b'"') => state = Q::None,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 impl Universe {
     /// Wrap `inner` (an already-substituted shell snippet) in this universe.
     /// The wrapper itself is `@NAME@`-substituted with `vars` first; the
@@ -557,10 +597,20 @@ impl Meta {
             match (&universe.wrapper_argv, &universe.wrapper) {
                 (Some(_), Some(_)) => bail!("universe \"{name}\" defines both wrapper-argv and wrapper; pick one (§4.8)"),
                 (None, None) => bail!("universe \"{name}\" defines neither wrapper-argv nor wrapper (§4.8)"),
-                (None, Some(t)) if !t.contains("@COMMAND@") => {
-                    bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@ (§4.8)")
+                (None, Some(t)) => {
+                    if !t.contains("@COMMAND@") {
+                        bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@ (§4.8)")
+                    }
+                    if let Some(pos) = command_token_in_quotes(t) {
+                        bail!(
+                            "universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
+                             quoted string (byte {pos}); wrap() supplies @COMMAND@ already \
+                             shell-quoted, so it must sit OUTSIDE the template's own quotes \
+                             — e.g. `bash -lc '… && '@COMMAND@` (§4.8)"
+                        )
+                    }
                 }
-                _ => {}
+                (Some(_), None) => {}
             }
         }
 
@@ -884,6 +934,43 @@ mod tests {
         let meta: Meta = toml::from_str(&no_command).unwrap();
         let err = format!("{:#}", meta.validate("mike").unwrap_err());
         assert!(err.contains("@COMMAND@"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validation_rejects_command_token_inside_template_quotes() {
+        // The Deep Bayou bug: @COMMAND@ nested inside the template's own quotes.
+        // wrap() already shell-quotes it, so this collapses once the command
+        // carries quotes. Swap et-sif's wrapper-argv for such a template.
+        let quoted = MIKE.replace(
+            "wrapper-argv = [\"apptainer\", \"exec\", \"--bind\", \"@SOURCEDIR@\", \"/work/@USER@/et.sif\"]",
+            "wrapper = \"bash -lc 'module load foo && @COMMAND@'\"",
+        );
+        let meta: Meta = toml::from_str(&quoted).unwrap();
+        let err = format!("{:#}", meta.validate("mike").unwrap_err());
+        assert!(err.contains("inside a quoted string"), "unexpected error: {err}");
+
+        // The fixed spelling (token outside the quotes) validates.
+        let ok = MIKE.replace(
+            "wrapper-argv = [\"apptainer\", \"exec\", \"--bind\", \"@SOURCEDIR@\", \"/work/@USER@/et.sif\"]",
+            "wrapper = \"bash -lc 'module load foo && '@COMMAND@\"",
+        );
+        let meta: Meta = toml::from_str(&ok).unwrap();
+        meta.validate("mike").unwrap();
+    }
+
+    #[test]
+    fn command_token_quote_scan() {
+        // Outside all quotes: fine.
+        assert_eq!(command_token_in_quotes("ssh h 'cd /x && '@COMMAND@"), None);
+        assert_eq!(command_token_in_quotes("@COMMAND@"), None);
+        // Inside single quotes: flagged (the db1 bug).
+        assert!(command_token_in_quotes("bash -lc 'a && @COMMAND@'").is_some());
+        // Inside double quotes: also flagged.
+        assert!(command_token_in_quotes("sh -c \"@COMMAND@\"").is_some());
+        // A closed quote run before the token leaves it unquoted.
+        assert_eq!(command_token_in_quotes("'a''b' @COMMAND@"), None);
+        // An escaped quote does not open a quote run, so the token stays free.
+        assert_eq!(command_token_in_quotes("echo \\' @COMMAND@"), None);
     }
 
     #[test]

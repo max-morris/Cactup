@@ -725,6 +725,7 @@ pub(crate) fn spawn_and_wait(
     if tee.is_some() {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
+    crate::shell::trace_command(&cmd);
     let mut child = cmd.spawn().with_context(|| "Failed to spawn the run-script")?;
 
     fn tee_thread(
@@ -887,6 +888,7 @@ mod tests {
         Ctx {
             globals: crate::args::GlobalOpts {
                 verbose: false,
+                trace: false,
                 manifest_url: String::new(),
                 mdb_path: None,
                 machine: Some("fake".to_owned()),

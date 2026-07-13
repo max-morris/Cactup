@@ -1,5 +1,5 @@
-//! `sim stop` / `clean` (§8.6), `sim delete` (§8.7), `sim show`, `sim log`,
-//! and `sim output-dir`.
+//! `sim stop` / `clean` (§8.6), `sim delete` (§8.7), `sim list` / `sim show`,
+//! `sim log`, and `sim output-dir`.
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
@@ -188,7 +188,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     // A stale registry entry (dir vanished) is pruned rather than fataled.
     let registry = inst.simulations()?;
     let Some(entry) = registry.simulations.get(name) else {
-        bail!("no simulation named \"{name}\" (see `cactup sim show`)");
+        bail!("no simulation named \"{name}\" (see `cactup sim list`)");
     };
     if !entry.dir.is_dir() {
         let locked = inst.locked()?;
@@ -306,16 +306,19 @@ fn state_str(state: DisplayState) -> colored::ColoredString {
     }
 }
 
-/// `sim show` (§8.1, §8.6): list the registry (or one sim in detail);
-/// `--all` unions every installation's registry.
-pub fn show(ctx: &Ctx, name: Option<&str>, long: bool, all: bool) -> Res<()> {
+/// `sim show` (§8.6): one simulation in detail.
+pub fn show(ctx: &Ctx, name: &str, long: bool) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let sched = Scheduler::new(&machine.meta);
+    let inst = Installation::resolve(ctx)?;
+    show_one(&inst, &sched, name, long)
+}
 
-    if let Some(name) = name {
-        let inst = Installation::resolve(ctx)?;
-        return show_one(&inst, &sched, name, long);
-    }
+/// `sim list` (§8.1, §8.6): list the registry; `--all` unions every
+/// installation's registry.
+pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
+    let machine = crate::commands::machine::resolve(ctx)?;
+    let sched = Scheduler::new(&machine.meta);
 
     let installations: Vec<Installation> = if all {
         let db = ctx.db.read()?;

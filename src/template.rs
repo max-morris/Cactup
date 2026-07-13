@@ -233,11 +233,14 @@ impl VarSet {
         tmp.write_all(body.as_bytes())?;
         tmp.flush()?;
 
-        let mut child = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg(tmp.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::shell::trace_command(&command);
+        let mut child = command
             .spawn()
             .with_context(|| format!("Failed to run python3 for {}", script.display()))?;
 

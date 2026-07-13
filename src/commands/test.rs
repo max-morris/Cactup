@@ -11,9 +11,8 @@ pub fn dispatch(ctx: &Ctx, cmd: TestCommand) -> Res<()> {
         TestCommand::Submit(args) => testsuite::run::start(ctx, args, true),
         TestCommand::Clean => testsuite::manage::clean(ctx),
         TestCommand::Sim(sub) => match sub {
-            TestSimCommand::Show { name, long, all } => {
-                testsuite::manage::show(ctx, name.as_deref(), long, all)
-            }
+            TestSimCommand::List { long, all } => testsuite::manage::list(ctx, long, all),
+            TestSimCommand::Show { name } => testsuite::manage::show(ctx, &name),
             TestSimCommand::Stop { name, force } => testsuite::manage::stop(ctx, &name, force),
             TestSimCommand::Delete { name, force, purge } => {
                 testsuite::manage::delete(ctx, &name, force, purge)

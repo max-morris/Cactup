@@ -10,7 +10,7 @@ use std::path::PathBuf;
 pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
     let db = ctx.db.read()?;
     let Some(entry) = db.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup show`)");
+        bail!("no installation named \"{alias}\" (see `cactup list`)");
     };
     let path = PathBuf::from(&entry.path);
 

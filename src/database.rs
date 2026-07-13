@@ -193,10 +193,10 @@ impl Db {
 }
 
 fn git_config_email() -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["config", "user.email"])
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("git");
+    command.args(["config", "user.email"]);
+    crate::shell::trace_command(&command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

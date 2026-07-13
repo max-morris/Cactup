@@ -42,10 +42,11 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
             }
             Ok(())
         }
+        ConfigCommand::List => list(&installation),
         ConfigCommand::Show { name } => show(&installation, name.as_deref()),
         ConfigCommand::Use { name } => {
             if ConfigMeta::load(&installation.cactus_root(), &name)?.is_none() {
-                bail!("no config named \"{name}\" in this installation (see `cactup config show`)");
+                bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
             }
             let locked = installation.locked()?;
             let mut meta = locked.meta()?;
@@ -83,37 +84,52 @@ pub fn list_configs(cactus_root: &Path) -> Res<Vec<(String, Option<ConfigMeta>)>
     Ok(out)
 }
 
+/// `cactup config list`: every config in the active installation (port of
+/// list-configurations, §7.1).
+fn list(installation: &Installation) -> Res<()> {
+    let cactus_root = installation.cactus_root();
+    let configs = list_configs(&cactus_root)?;
+    if configs.is_empty() {
+        println!("{}", "No configs in this installation.".bright_red());
+        return Ok(());
+    }
+    let active = installation.meta()?.active_config;
+    for (name, meta) in configs {
+        print!("- {}", name.bold());
+        if build::is_complete(&cactus_root, &name) {
+            match meta.as_ref().and_then(|m| m.built) {
+                Some(built) => print!(" [built {}]", built.format("%Y-%m-%d %H:%M")),
+                None => print!(" [built]"),
+            }
+        } else {
+            print!(" [incomplete]");
+        }
+        if active.as_deref() == Some(&name) {
+            print!("{}", " (active)".bold().bright_green());
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// `cactup config show [name]`: the active config, or a named one, in detail.
 fn show(installation: &Installation, name: Option<&str>) -> Res<()> {
     let cactus_root = installation.cactus_root();
 
-    let Some(name) = name else {
-        // Port of list-configurations (§7.1).
-        let configs = list_configs(&cactus_root)?;
-        if configs.is_empty() {
-            println!("{}", "No configs in this installation.".bright_red());
-            return Ok(());
-        }
-        let active = installation.meta()?.active_config;
-        for (name, meta) in configs {
-            print!("- {}", name.bold());
-            if build::is_complete(&cactus_root, &name) {
-                match meta.as_ref().and_then(|m| m.built) {
-                    Some(built) => print!(" [built {}]", built.format("%Y-%m-%d %H:%M")),
-                    None => print!(" [built]"),
-                }
-            } else {
-                print!(" [incomplete]");
-            }
-            if active.as_deref() == Some(&name) {
-                print!("{}", " (active)".bold().bright_green());
-            }
-            println!();
-        }
-        return Ok(());
+    // No name → the contextually-relevant config: the active one.
+    let name = match name {
+        Some(name) => name.to_owned(),
+        None => installation.meta()?.active_config.ok_or_else(|| {
+            anyhow::anyhow!(
+                "this installation has no active config (null-config state); \
+                 see `cactup config list`"
+            )
+        })?,
     };
+    let name = name.as_str();
 
     let Some(meta) = ConfigMeta::load(&cactus_root, name)? else {
-        bail!("no config named \"{name}\" in this installation (see `cactup config show`)");
+        bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
     println!("  variant: {}", meta.variant);

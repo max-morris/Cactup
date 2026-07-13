@@ -5,7 +5,7 @@
 use super::{prompt_with_default, Ctx};
 use crate::args::MachineCommand;
 use crate::database::Db;
-use crate::mdb::{discover, meta::ScriptKind, Layer, Machine, Mdb};
+use crate::mdb::{discover, meta::ScriptKind, optionlist, Layer, Machine, Mdb};
 use crate::Res;
 use anyhow::{bail, Context};
 use colored::Colorize;
@@ -16,12 +16,8 @@ use std::path::Path;
 pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
     match cmd {
-        MachineCommand::Show { name } => show(ctx, &mdb, name),
-        MachineCommand::Whoami => {
-            let machine = resolve(ctx)?;
-            println!("{}", machine.name.bold());
-            Ok(())
-        }
+        MachineCommand::List => list(ctx, &mdb),
+        MachineCommand::Show { name, variants } => show(ctx, &mdb, name, variants),
         MachineCommand::Create { name, from_existing, silent, no_discover } => create_machine(
             &ctx.db,
             &mdb,
@@ -208,35 +204,44 @@ fn load_checked(mdb: &Mdb, name: &str) -> Res<Machine> {
     Ok(machine)
 }
 
-fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>) -> Res<()> {
-    let Some(name) = name else {
-        let machines = mdb.machines()?;
-        if machines.is_empty() {
-            println!("{}", "No machines in the MDB.".bright_red());
-            return Ok(());
-        }
-        let detected = ctx.db.read()?.detected_machine;
-        for (name, layer) in machines {
-            let machine = mdb.load(&name)?;
-            print!("- {}", name.bold());
-            if let Some(nickname) = &machine.meta.machine.name {
-                print!(" ({nickname})");
-            }
-            if let Some(status) = &machine.meta.machine.status {
-                print!(" [{status}]");
-            }
-            if layer == Layer::User {
-                print!("{}", " (user MDB)".cyan());
-            }
-            if detected.as_deref() == Some(&name) {
-                print!("{}", " (detected)".bold().bright_green());
-            }
-            println!();
-        }
+/// `cactup machine list`: every machine in the MDB.
+fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
+    let machines = mdb.machines()?;
+    if machines.is_empty() {
+        println!("{}", "No machines in the MDB.".bright_red());
         return Ok(());
-    };
+    }
+    let detected = ctx.db.read()?.detected_machine;
+    for (name, layer) in machines {
+        let machine = mdb.load(&name)?;
+        print!("- {}", name.bold());
+        if let Some(nickname) = &machine.meta.machine.name {
+            print!(" ({nickname})");
+        }
+        if let Some(status) = &machine.meta.machine.status {
+            print!(" [{status}]");
+        }
+        if layer == Layer::User {
+            print!("{}", " (user MDB)".cyan());
+        }
+        if detected.as_deref() == Some(&name) {
+            print!("{}", " (detected)".bold().bright_green());
+        }
+        println!();
+    }
+    Ok(())
+}
 
-    let machine = load_checked(mdb, &name)?;
+/// `cactup machine show [name]`: the machine this host resolves to (§4.3), or
+/// a named one, in detail.
+fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
+    let machine = match name {
+        Some(name) => load_checked(mdb, &name)?,
+        None => resolve(ctx)?,
+    };
+    if variants {
+        return show_variants(&machine);
+    }
     let meta = &machine.meta;
     println!("{} ({:?} MDB, {})", machine.name.bold(), machine.layer, machine.dir.display());
     for (label, value) in [
@@ -312,6 +317,54 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>) -> Res<()> {
     println!("  optionlists: {}", meta.variants.optionlist.variants.join(", "));
     if !meta.universes.is_empty() {
         println!("  universes: {}", meta.universes.keys().cloned().collect::<Vec<_>>().join(", "));
+    }
+    Ok(())
+}
+
+/// `cactup machine show [name] --variants`: the machine's optionlist variants
+/// with their `[cactup]` header details (description, compatible queues,
+/// gpu/default markers, universe, per-variant thorn toggles).
+fn show_variants(machine: &Machine) -> Res<()> {
+    let listed = &machine.meta.variants.optionlist.variants;
+    println!(
+        "{} ({:?} MDB) — optionlist variants:",
+        machine.name.bold(),
+        machine.layer
+    );
+    if listed.is_empty() {
+        println!("  {}", "(none)".bright_red());
+        return Ok(());
+    }
+    for variant in listed {
+        let path = machine.optionlist_path(variant);
+        let header = optionlist::load_header(&path)
+            .with_context(|| format!("failed to read optionlist header for variant \"{variant}\""))?;
+        print!("- {}", variant.bold());
+        if header.default {
+            print!(" (default)");
+        }
+        if header.gpu {
+            print!("{}", " [gpu]".cyan());
+        }
+        println!();
+        if let Some(description) = &header.description {
+            println!("    {description}");
+        }
+        let queues = if header.compatible_queues.is_empty() {
+            "(any)".to_owned()
+        } else {
+            header.compatible_queues.join(", ")
+        };
+        println!("    compatible queues: {queues}");
+        if let Some(universe) = &header.universe {
+            println!("    build universe: {universe}");
+        }
+        if !header.enabled_thorns.is_empty() {
+            println!("    enabled thorns: {}", header.enabled_thorns.join(", "));
+        }
+        if !header.disabled_thorns.is_empty() {
+            println!("    disabled thorns: {}", header.disabled_thorns.join(", "));
+        }
     }
     Ok(())
 }

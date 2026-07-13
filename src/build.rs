@@ -4,13 +4,13 @@
 //! (§4.8), the rebuild-decision snapshot diff (§7.8), the per-config build
 //! lock (§2.3 item 4), and `cactup-config.toml` metadata (§7.4).
 
-use crate::args::BuildOpts;
+use crate::args::{BuildOpts, MakeJobs};
 use crate::database::SCHEMA;
 use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
 use crate::mdb::{Machine, Optionlist};
-use crate::template::VarSet;
+use crate::template::{VarSet, VarValue};
 use crate::Res;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
@@ -18,6 +18,31 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Make command used when a machine's `meta.toml` omits `[build].make`. It
+/// templates `@MAKEJOBS@` so `[build].make-jobs` (§7.6) is honored as the
+/// default `-j` without every machine having to hand-write the token.
+const DEFAULT_MAKE: &str = "make -j@MAKEJOBS@";
+
+/// The `-j max` expansion: count the CPUs available to the build shell at
+/// runtime. `nproc` honors the process's cpuset/affinity, so inside an
+/// srun/singularity wrapper it reports that allocation, not the login node.
+/// The `|| echo 1` fallback matters for safety: if `nproc` were missing, a bare
+/// `make -j` (empty count) means *unbounded* parallelism, so we degrade to 1.
+const MAX_MAKEJOBS: &str = "$(nproc 2>/dev/null || echo 1)";
+
+/// Resolve the `@MAKEJOBS@` build variable (§7.6): `--make-jobs` > machine
+/// `make-jobs` > 1. `-j max` becomes `MAX_MAKEJOBS`, a shell expression the
+/// build shell itself evaluates — inside the universe wrapper when there is one
+/// — so it counts the CPUs actually available in that context rather than on
+/// the login node cactup is invoked on. Any explicit count is a plain integer.
+fn make_jobs_var(cli: Option<MakeJobs>, machine_default: Option<u32>) -> VarValue {
+    match cli {
+        Some(MakeJobs::Max) => VarValue::Str(MAX_MAKEJOBS.to_owned()),
+        Some(MakeJobs::Count(n)) => VarValue::Int(n as i64),
+        None => VarValue::Int(machine_default.unwrap_or(1) as i64),
+    }
+}
 
 fn default_schema() -> u32 {
     SCHEMA
@@ -27,7 +52,7 @@ fn default_true() -> bool {
 }
 
 /// `configs/<name>/cactup-config.toml` (§7.4). `built` is a cactup extension
-/// used by `config show` and the §7.1 most-recently-built repoint.
+/// used by `config list`/`show` and the §7.1 most-recently-built repoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ConfigMeta {
@@ -319,12 +344,8 @@ pub fn build(
     }
 
     // Build-context variables (§6.3, build-time set).
-    let make_jobs = opts
-        .make_jobs
-        .or(machine.meta.build.make_jobs)
-        .unwrap_or(1);
     let mut vars = VarSet::new();
-    vars.set("MAKEJOBS", make_jobs as u64);
+    vars.set("MAKEJOBS", make_jobs_var(opts.make_jobs, machine.meta.build.make_jobs));
     vars.set("USER", std::env::var("USER").unwrap_or_default());
     vars.set("SOURCEDIR", cactus_root.display().to_string());
     vars.set("CONFIGURATION", name);
@@ -376,8 +397,13 @@ pub fn build(
         fs::copy(prebuilt, exe_dir.join(format!("cactus_{name}")))
             .with_context(|| format!("Failed to copy {}", prebuilt.display()))?;
     } else {
+        // The default (`DEFAULT_MAKE`) templates @MAKEJOBS@ so
+        // `[build].make-jobs` (§7.6: --make-jobs > machine make-jobs > 1) is
+        // honored as the default -j even on machines that don't hand-write a
+        // custom `make` key. A machine that sets its own `make` keeps full
+        // control of parallelism.
         let make = vars
-            .substitute(machine.meta.build.make.as_deref().unwrap_or("make"))
+            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE))
             .context("substituting the machine make command")?;
 
         let mut steps: Vec<String> = Vec::new();
@@ -484,18 +510,27 @@ fn run_build_snippet(
     universe: Option<&crate::mdb::Universe>,
     vars: &VarSet,
 ) -> Res<()> {
-    let status = match universe {
-        None => Command::new("/bin/sh").args(["-c", snippet]).status(),
+    let mut cmd = match universe {
+        None => {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", snippet]);
+            c
+        }
         Some(u) => match u.wrap(vars, snippet)? {
-            crate::mdb::WrappedCommand::Shell(cmd) => {
-                Command::new("/bin/sh").args(["-c", &cmd]).status()
+            crate::mdb::WrappedCommand::Shell(shell_cmd) => {
+                let mut c = Command::new("/bin/sh");
+                c.args(["-c", &shell_cmd]);
+                c
             }
             crate::mdb::WrappedCommand::Argv(argv) => {
-                Command::new(&argv[0]).args(&argv[1..]).status()
+                let mut c = Command::new(&argv[0]);
+                c.args(&argv[1..]);
+                c
             }
         },
-    }
-    .context("Failed to spawn the build shell")?;
+    };
+    crate::shell::trace_command(&cmd);
+    let status = cmd.status().context("Failed to spawn the build shell")?;
     if !status.success() {
         bail!("the build failed ({status})");
     }
@@ -535,6 +570,35 @@ mod tests {
         assert!(out.contains("UNSAFE = no") && out.contains("PROFILE = no"));
         assert!(out.starts_with("VERSION = 2020\n"), "order preserved: {out}");
         assert_eq!(out.matches("DEBUG").count(), 1, "replaced, not duplicated");
+    }
+
+    #[test]
+    fn default_make_honors_make_jobs() {
+        // When a machine omits `[build].make`, the default templates @MAKEJOBS@
+        // so the resolved -j tracks `[build].make-jobs` (here, 6).
+        let mut vars = VarSet::new();
+        vars.set("MAKEJOBS", 6u64);
+        assert_eq!(vars.substitute(DEFAULT_MAKE).unwrap(), "make -j6");
+    }
+
+    #[test]
+    fn make_jobs_precedence_and_max() {
+        // --make-jobs wins over the machine default.
+        assert_eq!(make_jobs_var(Some(MakeJobs::Count(12)), Some(4)), VarValue::Int(12));
+        // Falls back to the machine make-jobs, then to 1.
+        assert_eq!(make_jobs_var(None, Some(4)), VarValue::Int(4));
+        assert_eq!(make_jobs_var(None, None), VarValue::Int(1));
+        // `-j max` resolves to a runtime nproc, so the build shell counts the
+        // CPUs available in whatever context it runs in.
+        assert_eq!(make_jobs_var(Some(MakeJobs::Max), Some(4)), VarValue::Str(MAX_MAKEJOBS.into()));
+
+        // Substituted into the default make command it yields a live expansion.
+        let mut vars = VarSet::new();
+        vars.set("MAKEJOBS", make_jobs_var(Some(MakeJobs::Max), None));
+        assert_eq!(
+            vars.substitute(DEFAULT_MAKE).unwrap(),
+            "make -j$(nproc 2>/dev/null || echo 1)"
+        );
     }
 
     #[test]

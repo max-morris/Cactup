@@ -35,10 +35,10 @@ fn detect_memory_mb() -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn detect_memory_mb() -> Option<u64> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("sysctl");
+    command.args(["-n", "hw.memsize"]);
+    crate::shell::trace_command(&command);
+    let output = command.output().ok()?;
     let bytes: u64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
     Some(bytes / (1024 * 1024))
 }

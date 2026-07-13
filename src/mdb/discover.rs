@@ -38,10 +38,10 @@ import runpy, sys
 mod = runpy.run_path(sys.argv[1])
 sys.stdout.write('1' if mod['is_machine'](sys.argv[2]) else '0')
 ";
-    let output = Command::new("python3")
-        .args(["-c", PROBE])
-        .arg(discover_py)
-        .arg(hostname)
+    let mut command = Command::new("python3");
+    command.args(["-c", PROBE]).arg(discover_py).arg(hostname);
+    crate::shell::trace_command(&command);
+    let output = command
         .output()
         .with_context(|| format!("Failed to run python3 for {}", discover_py.display()))?;
 

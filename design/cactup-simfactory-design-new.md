@@ -1345,6 +1345,16 @@ Carried over verbatim from `simfactory-docs.txt` §6.3 / §16, substituting
 "stored config metadata TOML" for "configs/<name>/properties.ini" and "machine
 `meta.toml`" for "machine ini". `MAKEJOBS` = `--make-jobs` > machine `make-jobs` >
 1; parallelism flows only through `@MAKEJOBS@` in the machine `make` command.
+When a machine omits `[build].make`, the default is `make -j@MAKEJOBS@` (not a
+bare `make`), so `make-jobs` is honored as the default `-j` without every
+machine having to hand-write the token. `--make-jobs max` (`-j max`) sets
+`@MAKEJOBS@` to a shell `$(nproc 2>/dev/null || echo 1)`, evaluated by the build
+shell inside the resolved universe — so it uses every thread available in that
+build context (an srun/singularity allocation, a container's cpuset, or the
+local host), not the login node's; the `|| echo 1` keeps a missing `nproc` from
+degenerating into a bare `make -j` (unbounded parallelism). It only takes effect
+where `@MAKEJOBS@` is referenced (the default make command and any machine that
+templates it).
 
 ### 7.7 Virtual / prebuilt executables
 

@@ -28,7 +28,8 @@ pub fn dispatch(ctx: &Ctx, cmd: SimCommand) -> Res<()> {
         SimCommand::Stop { sim, force } => sim::manage::stop(ctx, &sim, force),
         SimCommand::Clean { sim } => sim::manage::clean(ctx, &sim),
         SimCommand::Delete { sim, force } => sim::manage::delete(ctx, &sim, force),
-        SimCommand::Show { sim, long, all } => sim::manage::show(ctx, sim.as_deref(), long, all),
+        SimCommand::List { long, all } => sim::manage::list(ctx, long, all),
+        SimCommand::Show { sim, long } => sim::manage::show(ctx, &sim, long),
         SimCommand::OutputDir { sim, restart_id } => sim::manage::output_dir(ctx, &sim, restart_id),
         SimCommand::Log { sim } => sim::manage::log_cmd(ctx, &sim),
     }

@@ -1,5 +1,5 @@
-//! `test sim show` / `stop` / `delete` (§11.7): managing test runs. Coarser
-//! than the sim analogues — no restart chain, no clean, no reaper.
+//! `test sim list` / `show` / `stop` / `delete` (§11.7): managing test runs.
+//! Coarser than the sim analogues — no restart chain, no clean, no reaper.
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
@@ -32,14 +32,18 @@ fn state_line(run: &TestRun, sched: &Scheduler) -> colored::ColoredString {
     }
 }
 
-pub fn show(ctx: &Ctx, name: Option<&str>, long: bool, all: bool) -> Res<()> {
+/// `test sim show`: one test run in detail.
+pub fn show(ctx: &Ctx, name: &str) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let sched = Scheduler::new(&machine.meta);
+    let inst = Installation::resolve(ctx)?;
+    show_one(&inst, &sched, name)
+}
 
-    if let Some(name) = name {
-        let inst = Installation::resolve(ctx)?;
-        return show_one(&inst, &sched, name);
-    }
+/// `test sim list`: list test runs; `--all` unions every installation.
+pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
+    let machine = crate::commands::machine::resolve(ctx)?;
+    let sched = Scheduler::new(&machine.meta);
 
     let installations: Vec<Installation> = if all {
         let db = ctx.db.read()?;
@@ -157,7 +161,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
 
     let registry = inst.tests()?;
     let Some(entry) = registry.tests.get(name) else {
-        bail!("no test run named \"{name}\" (see `cactup test sim show`)");
+        bail!("no test run named \"{name}\" (see `cactup test sim list`)");
     };
     // A stale entry (dir vanished) is pruned rather than fataled.
     if !entry.dir.is_dir() {

@@ -7,6 +7,7 @@ pub mod install;
 pub mod knob;
 pub mod list;
 pub mod machine;
+pub mod releases;
 pub mod show;
 pub mod sim;
 pub mod test;

@@ -152,7 +152,7 @@ impl Simulation {
         let registry = inst.simulations()?;
         let entry = registry.simulations.get(name).ok_or_else(|| {
             anyhow!(
-                "no simulation named \"{name}\" in installation \"{}\" (see `cactup sim show`)",
+                "no simulation named \"{name}\" in installation \"{}\" (see `cactup sim list`)",
                 inst.alias
             )
         })?;
@@ -249,7 +249,7 @@ pub fn create(
         None => inst_meta.active_config()?.to_owned(),
     };
     let cfg = ConfigMeta::load(&cactus_root, &config)?
-        .ok_or_else(|| anyhow!("config \"{config}\" has never been built (see `cactup config show`)"))?;
+        .ok_or_else(|| anyhow!("config \"{config}\" has never been built (see `cactup config list`)"))?;
     let exe_src = build::executable_path(&cactus_root, &config);
     if !exe_src.is_file() {
         bail!(

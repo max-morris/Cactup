@@ -157,7 +157,7 @@ impl Installation {
         let entry = db
             .installations
             .get(&alias)
-            .ok_or_else(|| anyhow!("no installation named \"{alias}\" (see `cactup show`)"))?;
+            .ok_or_else(|| anyhow!("no installation named \"{alias}\" (see `cactup list`)"))?;
         Ok(Installation::new(alias, &entry.path))
     }
 
