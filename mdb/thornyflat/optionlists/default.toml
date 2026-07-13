@@ -1,0 +1,52 @@
+# Thorny Flat optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/thornyflat.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["comm_small_week"]
+
+[options]
+# Option list for the Einstein Toolkit
+
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "thornyflat-2021-02-19"
+
+CPP = "cpp"
+CC = "gcc"
+CXX = "g++"
+FPP = "cpp"
+F90 = "gfortran"
+
+CFLAGS = "-g -march=native -std=gnu11"
+CXXFLAGS = "-g -march=native -std=gnu++17"
+FPPFLAGS = "-traditional"
+F90FLAGS = "-g -march=native -fcray-pointer -ffixed-line-length-none"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-fbounds-check -fstack-protector-all -ftrapv"
+CXX_DEBUG_FLAGS = "-fbounds-check -fstack-protector-all -ftrapv"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+F90_DEBUG_FLAGS = "-fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan -fstack-protector-all -ftrapv"
+
+C_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+CXX_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+F90_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+
+WARN = "yes"
+
+VECTORISE = "yes"
+VECTORISE_INLINE = "yes"
+
+FFTW3_DIR = "/shared/software/libs/fftw/3.3.9_gcc93"
+HDF5_DIR = "/shared/software/libs/hdf5/1.12.2_gcc93"
+MPI_DIR = "/shared/software/parallel/openmpi/3.1.6_gcc93"
+OPENBLAS_DIR = "/shared/software/libs/openblas/0.3.20_gcc93"
+PTHREADS_DIR = "NO_BUILD"

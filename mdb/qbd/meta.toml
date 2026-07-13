@@ -1,0 +1,84 @@
+# qbd — LSU/LONI Queen Bee 4 cluster (qbd504.loni.org; PBS/Torque).
+# Ported from simfactory2 mdb/machines/qbd.ini (upstream regenerated it with
+# simfactory-configure.py on 2026-07-07). Two big upstream changes vs. the
+# previous port:
+#   - the scheduler flipped from SLURM to PBS (qsub/qstat/qdel);
+#   - the Singularity-image build is gone — this is now a native CUDA build
+#     against the prebuilt externals under /ddnB/project/sbrandt/externals-qbd.
+#
+# The upstream `queue` field is empty (the auto-configure left it blank), so
+# the single queue below is a placeholder with an empty scheduler-facing name:
+# @QUEUE@ resolves to "" and the PBS submitscript omits its `-q` directive
+# (matching upstream). Set a real partition before production use — either give
+# this queue a `name = "<partition>"` override or edit the submitscript.
+
+[machine]
+name        = "qbd504.loni.org"
+nickname    = "qbd"
+location    = "unknown"
+description = "Auto-configured"
+status      = "personal"
+hostname    = "qbd504.loni.org"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/scratch/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/scratch/@USER@/tests"
+
+[hardware]
+max-tasks-per-node = 64
+memory             = 514913    # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 64
+
+[environment]
+# Verbatim from the upstream heredoc (including its leading indentation and the
+# trailing `&&` on the module-purge line).
+env-setup = """
+  module purge &&
+  module load cuda/12.2.1
+  export PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/bin:$PATH"
+  export LD_LIBRARY_PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"""
+
+[scheduler]
+submit           = "qsub @SCRIPTFILE@"
+get-status       = "qstat @JOB_ID@"
+stop             = "qdel @JOB_ID@"
+submit-pattern   = '(\d+\.\S+|\d+)'
+status-pattern   = '@JOB_ID@'
+queued-pattern   = ' Q '
+running-pattern  = ' R '
+holding-pattern  = ' H '
+exec-host        = "hostname -s"
+exec-host-pattern = '(\S+)'
+stdout           = "cat @SIMULATION_NAME@.out"
+stderr           = "cat @SIMULATION_NAME@.err"
+stdout-follow    = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime     = "24:00:00"
+# historical default allocation; set the allocation knob instead
+allocation       = "NO_ALLOCATION"
+
+# Placeholder queue (upstream left `queue` blank). `name = ""` makes @QUEUE@
+# resolve to the empty string, so the PBS submitscript emits no `-q` directive
+# — override with a real partition (a `name` value here, or edit the script).
+[queues.default]
+gpu     = true    # native CUDA build (nvcc, AMREX_ENABLE_CUDA = yes)
+default = true
+name    = ""
+
+[variants.submitscript]
+"default" = { queues = ["default"], default = true }
+"test"    = { queues = ["default"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["default"], default = true }
+"test"    = { queues = ["default"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

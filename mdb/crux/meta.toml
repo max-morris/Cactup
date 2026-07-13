@@ -1,0 +1,94 @@
+# Crux — HPE Cray EX at ALCF (Argonne), AMD EPYC Rome CPUs; PBS Pro.
+# Ported from simfactory2 mdb/machines/crux.ini.
+#
+# Deviations from the old ini:
+#   - basedir (/lus/grand/projects/@ALLOCATION@/@USER@/simulations) cannot be
+#     expressed: meta.toml [paths] values substitute only @USER@ (design §4.2),
+#     not @ALLOCATION@. simulation-home/test-home are therefore omitted (see
+#     [paths]) and must be set per user.
+
+# last-tested-on: 2025-02-21
+# last-tested-by: Roland Haas
+
+[machine]
+name        = "Crux"
+nickname    = "crux"
+location    = "Argonne National Lab"
+description = "HPC system at ALCF"
+status      = "experimental"
+hostname    = "crux.alcf.anl.gov"
+
+[paths]
+# @USER@ is substituted at use time. Old key: sourcebasedir.
+install-home = "/home/@USER@"
+# The old basedir was
+#   /lus/grand/projects/@ALLOCATION@/@USER@/simulations
+# which embeds @ALLOCATION@ — not expressible in meta.toml paths (only @USER@
+# is substituted here). Set simulation-home explicitly in a per-user override;
+# until then the ~/.cactup/simulations fallback applies.
+#simulation-home = "/lus/grand/projects/<allocation>/@USER@/simulations"
+# Likewise for the NEW testsuite-output root (design §11.5), the sibling of
+# simulation-home:
+#test-home       = "/lus/grand/projects/<allocation>/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 128
+memory          = 262144        # MB per node
+threads-per-cpu         = 1
+
+[build]
+make      = "make -j @MAKEJOBS@"
+make-jobs = 8
+# The old ini's enabled-thorns / disabled-thorns blocks were empty.
+
+[environment]
+env-setup = """
+module purge
+module load craype-x86-rome \\
+       perftools-base/24.03.0 \\
+       cray-dsmml/0.3.0 \\
+       cray-pals/1.3.4 \\
+       libfabric/1.20.1 \\
+       gcc-native/13.2 \\
+       cray-mpich/8.1.29 \\
+       cray-libpals/1.3.4 \\
+       craype-network-ofi \\
+       craype/2.7.31.11 \\
+       cray-pmi/6.1.14 \\
+       cray-python/3.11.7 \\
+       PrgEnv-gnu/8.5.0
+"""
+
+[scheduler]
+submit          = "qsub @SCRIPTFILE@"
+get-status      = "qstat @JOB_ID@"
+stop            = "qdel @JOB_ID@"
+submit-pattern   = '(\d+)[.]crux-pbs-'
+status-pattern   = '^@JOB_ID@[. ]'
+queued-pattern   = ' Q '
+running-pattern  = ' R '
+holding-pattern  = ' H '
+exec-host        = "qstat -f @JOB_ID@"
+exec-host-pattern = 'exec_host = (\w+)/'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "24:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+[queues.workq]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["workq"], default = true }
+"test"    = { queues = ["workq"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["workq"], default = true }
+"test"    = { queues = ["workq"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

@@ -1,6 +1,6 @@
 //! Per-installation on-disk state (spec §7.4, §8.1, §11.8, D6):
 //! `<installation home>/.cactup/installation.toml` (active config,
-//! active test-config, resolved sim-home/test-home), the name→dir registries
+//! resolved sim-home/test-home), the name→dir registries
 //! `simulations.toml` and `tests.toml`, and the per-installation link-lock
 //! (§2.3 item 5) guarding all of their mutations.
 //!
@@ -37,9 +37,6 @@ pub struct InstallationMeta {
     /// The active config; absent = the §7.1 null-config state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_config: Option<String>,
-    /// The active test-config, independent of `active-config` (§11.8).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_test_config: Option<String>,
     /// Resolved at install time (§8.1); `sim` commands never re-derive it.
     #[serde(default)]
     pub sim_home: Option<PathBuf>,
@@ -53,7 +50,6 @@ impl Default for InstallationMeta {
         InstallationMeta {
             schema: SCHEMA,
             active_config: None,
-            active_test_config: None,
             sim_home: None,
             test_home: None,
         }
@@ -67,16 +63,6 @@ impl InstallationMeta {
             anyhow!(
                 "this installation has no active config (null-config state); \
                  build one with `cactup build <name>` or select one with `cactup config use <name>`"
-            )
-        })
-    }
-
-    /// The active test-config, failing fast when none exists (§11.3).
-    pub fn active_test_config(&self) -> Res<&str> {
-        self.active_test_config.as_deref().ok_or_else(|| {
-            anyhow!(
-                "this installation has no active test-config; \
-                 build one with `cactup test build` or select one with `cactup test use <name>`"
             )
         })
     }
@@ -109,7 +95,7 @@ pub struct SimEntry {
 #[serde(rename_all = "kebab-case")]
 pub struct TestEntry {
     pub dir: PathBuf,
-    pub test_config: String,
+    pub config: String,
     pub created: DateTime<Utc>,
 }
 
@@ -352,7 +338,6 @@ mod tests {
         assert!(meta.active_config.is_none());
         let err = format!("{:#}", meta.active_config().unwrap_err());
         assert!(err.contains("cactup build"), "guidance expected: {err}");
-        assert!(meta.active_test_config().is_err());
 
         {
             let locked = inst.locked().unwrap();
@@ -365,8 +350,6 @@ mod tests {
         assert_eq!(meta.active_config().unwrap(), "sim");
         assert_eq!(meta.sim_home().unwrap(), Path::new("/work/et-dev"));
         assert_eq!(meta.schema, SCHEMA);
-        // Test-config pointer is independent of the config pointer (§11.8).
-        assert!(meta.active_test_config().is_err());
     }
 
     #[test]
@@ -384,12 +367,12 @@ mod tests {
             let mut tests = locked.tests().unwrap();
             tests.tests.insert(
                 "et-tests".to_owned(),
-                TestEntry { dir: "/scratch/t".into(), test_config: "tc".to_owned(), created: Utc::now() },
+                TestEntry { dir: "/scratch/t".into(), config: "tc".to_owned(), created: Utc::now() },
             );
             locked.set_tests(&tests).unwrap();
         }
         assert_eq!(inst.simulations().unwrap().simulations["bbh"].config, "sim");
-        assert_eq!(inst.tests().unwrap().tests["et-tests"].test_config, "tc");
+        assert_eq!(inst.tests().unwrap().tests["et-tests"].config, "tc");
         // The lock is released with the guard.
         assert!(!inst.cactup_dir().join(".cactup-install.lock").exists());
         drop(inst.locked().unwrap());

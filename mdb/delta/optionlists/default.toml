@@ -1,0 +1,108 @@
+# delta optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/delta.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["cpu"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+
+VERSION = "delta-2026-05-04"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "cc"
+CXX = "CC"
+F90 = "ftn"
+CUCC = "nvcc"
+# keep nvcc specific options and libraries here instead of in LDFLAGS which are
+# used by ExternalLibraries
+LD = "nvcc --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir -ccbin CC -lcurand -lnvToolsExt"
+
+CPPFLAGS = "-DSIMD_CPU"
+FPPFLAGS = "-traditional -march=znver2"
+# do not add -std=gn99 or -std=c99 below since that causes nvcc to fail linking
+# HydroRNSID's utilities. GCC on Delta defaults to c17, so is "new enough"
+CFLAGS = "-pipe -g -m128bit-long-double -D_GNU_SOURCE -fomit-frame-pointer"
+CXXFLAGS = "-pipe -g -m128bit-long-double -std=c++17 -D_GNU_SOURCE -fomit-frame-pointer"
+F90FLAGS = "-pipe -g -m128bit-long-double -fcray-pointer -ffixed-line-length-none -fno-range-check -march=znver2 -fomit-frame-pointer"
+CUCCFLAGS = "-pipe -g --compiler-options -march=native -std=c++17 --compiler-options -std=gnu++17 --expt-relaxed-constexpr --extended-lambda --gpu-architecture sm_80 --forward-unknown-to-host-compiler --Werror ext-lambda-captures-this --relocatable-device-code=true --objdir-as-tempdir -x cu"
+
+LIBS = "gfortran"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "yes"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-g3 -DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-g3 -DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-g3 -ftrapv -fstack-protector-all -fbounds-check"
+CXX_DEBUG_FLAGS = "-g3 -ftrapv -fstack-protector-all -fbounds-check"
+CUCC_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3 -ftrapv -fstack-protector-all -fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan"
+LD_DEBUG_FLAGS = "-g3"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O3"
+CUCC_OPTIMISE_FLAGS = ""
+CXX_OPTIMISE_FLAGS = "-O3"
+F90_OPTIMISE_FLAGS = "-O3"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "no"
+CPP_WARN_FLAGS = "-Wall"
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+CUCC_WARN_FLAGS = "-Xcompiler -Wall"
+F90_WARN_FLAGS = "-Wall"
+
+# CUDA does not support these
+DISABLE_INT16 = "yes"
+DISABLE_REAL16 = "yes"
+
+# set to true to add CUDA support
+AMREX_ENABLE_CUDA = "no"
+
+BOOST_DIR = "BUILD"
+
+GSL_DIR = "${GSL_HOME}"
+
+HDF5_DIR = "${HDF5_ROOT}"
+HDF5_INC_DIRS = "${HDF5_ROOT}/include"
+HDF5_LIB_DIRS = "${HDF5_ROOT}/lib"
+HDF5_LIBS = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+
+FFTW3_DIR = "${FFTW_HOME}"
+
+BLAS_DIR = "${OPENBLAS_HOME}/lib"
+BLAS_LIBS = "openblas"
+
+LAPACK_DIR = "${OPENBLAS_HOME}/lib"
+LAPACK_LIBS = "openblas"
+
+LIBJPEG_DIR = "/sw/rh9.4/spack/v1.0.0/sw/linux-x86_64_v2/libjpeg-turbo-3.0.4-xkrxr34"
+
+OPENBLAS_DIR = "${OPENBLAS_HOME}/lib"

@@ -1,15 +1,14 @@
-# mel5 optionlist (variant "test") — the testsuite build.
+# mel5 optionlist (variant "test") — the DEBUG build.
 #
-# This is the TESTSUITE optionlist: it is marked `test = true` in the [cactup]
-# header (design §11.2), so it is a candidate only for `cactup test build`, never
-# for a normal `cactup config build`. Because mel5 also ships one normal
-# optionlist ("default"), the two are respective defaults: `config build` uses
-# "default" and `test build` uses this one, neither needing --variant (§11.2).
+# mel5 ships two optionlists: "default" (the implicit choice, marked
+# `default = true`) and this one. Pick it explicitly with
+# `cactup config build --variant test` — e.g. to run the testsuite against a
+# DEBUG binary (§4.4).
 #
-# Why a separate optionlist for tests: it enables DEBUG (assertions / bounds
-# checking) to catch errors the testsuite is meant to surface. OPTIMISE is left
-# on so numerical output still matches the thorns' reference data within
-# tolerance. Everything else mirrors optionlists/default.toml.
+# Why a separate optionlist: it enables DEBUG (assertions / bounds checking) to
+# catch errors the testsuite is meant to surface. OPTIMISE is left on so
+# numerical output still matches the thorns' reference data within tolerance.
+# Everything else mirrors optionlists/default.toml.
 #
 # The [options] table is rendered back to the native Cactus "NAME = value"
 # optionlist before `make <config>-config` (design §7.8).
@@ -17,7 +16,6 @@
 [cactup]
 gpu               = false
 compatible-queues = ["local"]
-test              = true          # testsuite variant (design §11.2)
 
 [options]
 # Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.

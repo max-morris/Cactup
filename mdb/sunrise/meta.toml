@@ -1,0 +1,82 @@
+# Sunrise — physics-department research cluster at Stockholm University
+# (SLURM).
+# Ported from simfactory2 mdb/machines/sunrise.ini.
+#
+# The old ini's `stop = scancel @JOB_ID@)` carried a stray trailing ")" that
+# would have broken the shell command; dropped here (the only deviation).
+
+[machine]
+name        = "Sunrise"
+nickname    = "sunrise"
+location    = "Stockholm University"
+# (sic — truncated upstream)
+description = "A small research cluster serving the physics department at the University of Stockhol"
+status      = "production"
+hostname    = "sol-login.fysik.su.se"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/cfs/home/@USER@/ET-Release-06-24"
+simulation-home = "/cfs/data/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/cfs/data/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 128
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 6
+
+[environment]
+# the configure scripts strip /usr/local from XXX_DIR to avoid chosing system
+# libraries, however not all compilers will search in there by default (upstream
+# comment).
+env-setup = """
+module load cmake/3.21.5
+module unload gsl/2.6
+module unload openmpi3
+module unload intel/mpi/2021.2.0
+module unload gnu8/8.3.0;
+export PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/bin:/cfs/home/pedi5492/OpenMPI/openmpi-4.1.5/bin:/cfs/home/pedi5492/HDF5/hdf5-1.14.2/bin:${PATH}
+export LD_LIBRARY_PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/lib64:/cfs/home/pedi5492/GNU/gmp-6.3.0/lib:/cfs/home/pedi5492/GNU/mpfr-4.2.1/lib:/cfs/home/pedi5492/GNU/mpc-1.3.1/lib:${LD_LIBRARY_PATH}
+#module load intel/2021.2
+#module load intel/compiler/2021.2.0
+#module unload intel/mpi/2021.2.0
+#module load openmpi3/3.1.4
+#export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+#export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 5"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '^ *@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+[queues.rossw]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["rossw"], default = true }
+"test"    = { queues = ["rossw"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["rossw"], default = true }
+"test"    = { queues = ["rossw"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

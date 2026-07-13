@@ -1,0 +1,74 @@
+# Tianhe-1A — National Supercomputing Center in Tianjin, China (SLURM-style
+# scripts; access only via special VPN connection).
+# Ported from simfactory2 mdb/machines/tianhe1a.ini.
+#
+# Deviations from the old ini:
+#   - rsynccmd dropped (remote subsystem is gone, D1/D2).
+#   - The old submit/getstatus/stop commands were EMPTY (and every pattern a
+#     bare "."): submission through simfactory was effectively disabled.
+#     Those keys are omitted here, faithfully leaving `sim submit` broken on
+#     this machine; the submitscript is still ported for reference.
+#   - The old ini declared no queue; the placeholder queue below only feeds
+#     the submitscript's `-p @QUEUE@` and must be overridden with a real
+#     partition name to be useful.
+
+[machine]
+name        = "tianhe"
+nickname    = "tianhe1a"
+location    = "National Supercomputing Center in Tianjin, China"
+description = "Tianhe One, access only via special VPN connection"
+status      = "experimental"
+hostname    = "th-1a-ln1"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/vol-th/home/@USER@"
+simulation-home = "/vol-th/home/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/vol-th/home/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 12
+memory          = 24576         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 12
+disabled-thorns = [
+    "CactusExternal/PETSc",
+    "CactusElliptic/EllPETSc",
+    "TAT/TATPETSc",
+    "LSUDevelopment/WaveToyNoGhostsPETSc",
+    "CarpetThorns/LSUPETSc",
+    "CarpetThorns/LSUPoisson",
+    "CarpetThorns/Lichnerowicz",
+]
+
+# No [environment]: the old ini had no envsetup.
+
+[scheduler]
+# Intentionally empty (see the header comment): the old ini's scheduler
+# commands were blank. The old ini also carried these commented-out keys:
+#exechost        =
+#exechostpattern =
+#stdout          = cat @SIMULATION_NAME@.out
+#stderr          = cat @SIMULATION_NAME@.err
+#stdout-follow   = tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+# Placeholder (the old ini declared no queue); override with a real partition.
+[queues.NO_QUEUE]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["NO_QUEUE"], default = true }
+"test"    = { queues = ["NO_QUEUE"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["NO_QUEUE"], default = true }
+"test"    = { queues = ["NO_QUEUE"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

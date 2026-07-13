@@ -1,0 +1,109 @@
+# MARCONIA1 optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/marconiA3.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["skl_usr_prod"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "intel-imtelmpi-intel17-2018-01-28"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "mpiicc"
+CXX = "mpiicpc"
+F90 = "mpiifort"
+
+CPPFLAGS = "-g -DMPICH_SKIP_MPICXX -DMPICH_IGNORE_CXX_SEEK"
+FPPFLAGS = "-g -traditional"
+#CFLAGS   =  -g -traceback -debug all  -align -std=c99 -ansi_alias -align -U__STRICT_ANSI__ -I/cineca/prod/opt/compilers/intel/pe-xe-2016/binary/impi/5.1.3.210/include64
+#CXXFLAGS =  -g -traceback -debug all  -align -restrict  -std=c++11 -I/cineca/prod/opt/compilers/intel/pe-xe-2016/binary/impi/5.1.3.210/include64 -I/cineca/prod/opt/libraries/gsl/2.1/intel--pe-xe-2016--binary/include
+#F90FLAGS =  -g -traceback -debug all  -align -pad -safe-cray-ptr
+
+CFLAGS = "-g -traceback -debug all -xCORE-AVX512 -mtune=skylake -align -std=gnu99"
+CXXFLAGS = "-g -traceback -debug all -xCORE-AVX512 -mtune=skylake -align -std=gnu++11"
+F77FLAGS = "-g -traceback -debug all -xCORE-AVX512 -mtune=skylake -align -pad -safe-cray-ptr"
+F90FLAGS = "-g -traceback -debug all -xCORE-AVX512 -mtune=skylake -align -pad -safe-cray-ptr"
+
+
+LDFLAGS = "-rdynamic -qopenmp -L/cineca/prod/opt/libraries/szip/2.1/gnu--6.1.0/lib -Wl,-rpath,/cineca/prod/opt/libraries/szip/2.1/gnu--6.1.0/lib"
+LIBDIRS = ""
+LIBS = "ifcore"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+VECTORISE_ALIGN_FOR_CACHE = "no"
+VECTORISE_ALIGN_INTERIOR = "no"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-O0"
+CXX_DEBUG_FLAGS = "-O0"
+F77_DEBUG_FLAGS = "-O0 -check bounds -check format"
+F90_DEBUG_FLAGS = "-O0 -check bounds -check format"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = ""
+FPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS = "-O3  -mkl=sequential"
+CXX_OPTIMISE_FLAGS = "-O3  -mkl=sequential"
+F90_OPTIMISE_FLAGS = "-O3  -mkl=sequential"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F77_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-qopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS = "-qopenmp"
+CXX_OPENMP_FLAGS = "-qopenmp"
+F77_OPENMP_FLAGS = "-qopenmp"
+F90_OPENMP_FLAGS = "-qopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = ""
+FPP_WARN_FLAGS = ""
+C_WARN_FLAGS = ""
+CXX_WARN_FLAGS = ""
+F77_WARN_FLAGS = ""
+F90_WARN_FLAGS = ""
+
+BOOST_DIR = "/cineca/prod/opt/libraries/boost/1.61.0/intelmpi--2017--binary"
+
+FFTW3_DIR = "/cineca/prod/opt/libraries/fftw/3.3.4/intelmpi--2017--binary"
+FFTW3_LIBS = "mkl_intel_lp64 mkl_core mkl_sequential"
+
+GSL_DIR = "/cineca/prod/opt/libraries/gsl/2.2.1/intel--pe-xe-2017--binary"
+GSL_INC_DIRS = "/cineca/prod/opt/libraries/gsl/2.2.1/intel--pe-xe-2017--binary/include"
+HDF5_DIR = "/cineca/prod/opt/libraries/hdf5/1.8.17/intelmpi--2017--binary"
+HDF5_ENABLE_FORTRAN = '"no"'
+
+HWLOC_EXTRA_LIBS = "hwloc numa"
+
+LIBSZ_DIR = "/cineca/prod/opt/libraries/szip/2.1/gnu--6.1.0"
+ZLIB_DIR = "/cineca/prod/opt/libraries/zlib/1.2.8/gnu--6.1.0"
+
+MPI_DIR = "/cineca/prod/opt/compilers/intel/pe-xe-2017/binary/impi/2017.1.132/"
+MPI_INC_DIR = "/cineca/prod/opt/compilers/intel/pe-xe-2017/binary/impi/2017.1.132/include64/"
+MPI_LIBS = "mpicxx mpifort mpi mpigi"
+
+OPENBLAS_DIR = "/cineca/prod/opt/libraries/blas/3.6.0/intel--pe-xe-2017--binary"
+OPENBLAS_LIBS = "mkl_intel_lp64 mkl_core mkl_sequential"
+LAPACK_DIR = "/cineca/prod/opt/libraries/lapack/3.6.1/intel--pe-xe-2017--binary"
+BLAS_DIR = "/cineca/prod/opt/libraries/blas/3.6.0/intel--pe-xe-2017--binary"
+BLAS_LIBS = "mkl_intel_lp64 mkl_core mkl_sequential"
+LAPACK_LIBS = "mkl_intel_lp64 mkl_core mkl_sequential"
+
+PTHREADS_DIR = "NO_BUILD"

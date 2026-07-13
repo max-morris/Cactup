@@ -1,0 +1,97 @@
+# Delta — GPU-centred cluster at NCSA (this definition drives the CPU
+# partition); SLURM.
+# Ported from simfactory2 mdb/machines/delta.ini.
+#
+# Deviations from the old ini:
+#   - basedir (/work/hdd/@("@ALLOCATION@"[0:4])@/@USER@ — the first four chars
+#     of the allocation) used a string-slicing template that meta.toml paths
+#     cannot express (only @USER@ is substituted, design §4.2).
+#     simulation-home/test-home are therefore omitted (see [paths]) and must
+#     be set per user.
+
+# last-tested-on: 2023-05-04
+# last-tested-by: Roland Haas <rhaas at illinois.edu>
+
+[machine]
+name        = "delta"
+nickname    = "delta"
+location    = "NCSA"
+description = "A GPU centred cluster at NCSA"
+webpage     = "https://wiki.ncsa.illinois.edu/display/DSC/Delta+User+Guide"
+status      = "production"
+hostname    = "login.delta.ncsa.illinois.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old key: sourcebasedir.
+install-home = "/u/@USER@"
+# The old basedir was
+#   /work/hdd/@("@ALLOCATION@"[0:4])@/@USER@
+# (each allocation XXXX-delta-{gpu,cpu} has its own scratch directory) — not
+# expressible in meta.toml paths. Set simulation-home explicitly in a per-user
+# override; until then the ~/.cactup/simulations fallback applies.
+#simulation-home = "/work/hdd/<alloc-prefix>/@USER@"
+# Likewise for the NEW testsuite-output root (design §11.5):
+#test-home       = "/work/hdd/<alloc-prefix>/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 128
+memory          = 262144        # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 8
+# The old ini's enabled-thorns / disabled-thorns blocks were empty.
+
+[environment]
+# cannot load boost as the module does not provide all libraries (upstream)
+env-setup = """
+module reset 2>/dev/null &&
+module load default &&
+module load cue-login-env/1.1 &&
+module load slurm-env/0.1 &&
+module load cudatoolkit/25.3_12.8 &&
+module load cmake/3.31.8 &&
+module load gcc-native/13.2 &&
+module load cray-mpich/8.1.32 &&
+module load gsl/2.8-gcc13.3.1 &&
+module load openblas/0.3.29-gcc13.3.1 &&
+module load fftw/3.3.10-gcc13.3.1 &&
+module load cray-hdf5-parallel/1.14.3.5 &&
+export MPICH_GPU_SUPPORT_ENABLED=1
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 5"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+max-queue-slots  = 132          # unknown (upstream comment)
+# Machine-level fallback ceiling (design §4.2). Upstream note: cpu-interactive
+# has 0:30:0.
+max-walltime    = "48:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+[queues.cpu]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["cpu"], default = true }
+"test"    = { queues = ["cpu"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["cpu"], default = true }
+"test"    = { queues = ["cpu"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

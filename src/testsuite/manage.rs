@@ -75,7 +75,7 @@ pub fn show(ctx: &Ctx, name: Option<&str>, long: bool, all: bool) -> Res<()> {
                 Ok(run) => {
                     let sets = list_results_ids(&run.dir).map(|v| v.len()).unwrap_or(0);
                     let mut extra =
-                        format!("test-config {}, {} result set(s)", entry.test_config, sets);
+                        format!("config {}, {} result set(s)", entry.config, sets);
                     if long {
                         extra.push_str(&format!(", job {}, {}", run.meta.job_id, run.dir.display()));
                     }
@@ -97,7 +97,7 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
     println!("{}", name.bold());
     println!("  state:       {}", state_line(&run, sched));
     println!("  directory:   {}", run.dir.display());
-    println!("  test-config: {} (build-id {})", run.meta.test_config, run.meta.build_id);
+    println!("  config:      {} (build-id {})", run.meta.config, run.meta.build_id);
     println!("  machine:     {}", run.meta.machine);
     println!("  selection:   {}", run.meta.select);
     println!("  job-id:      {}  queue: {}  walltime: {}", run.meta.job_id, run.meta.queue, run.meta.walltime.canonical());

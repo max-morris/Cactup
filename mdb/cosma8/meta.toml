@@ -1,0 +1,81 @@
+# COSMA8 — DiRAC Memory Intensive cluster at Durham/EPCC (SLURM).
+# Ported from simfactory2 mdb/machines/cosma8.ini.
+#
+# Deviations from the old ini:
+#   - sshcmd/sshopts dropped (remote subsystem is gone, D1/D2).
+#   - submit used @SUBMITSCRIPT@ (old name for the generated script) ->
+#     @SCRIPTFILE@.
+#   - The old source/simulation paths were one user's literal directories
+#     (dc-matu2); kept verbatim — override per user as needed.
+
+# last-tested-on: 2026-03-23
+# last-tested-by: Rahime Matur <rahime.matur at gmail.com>
+
+[machine]
+name        = "cosma8"
+nickname    = "cosma8"
+location    = "EPCC"
+description = "cosma8"
+webpage     = "https://cosma.readthedocs.io/en/latest/cosma8.html"
+status      = "production"
+hostname    = "cosma8"
+
+[paths]
+install-home    = "/cosma/home/dp411/dc-matu2/ET"
+simulation-home = "/cosma8/data/dp411/dc-matu2/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/cosma8/data/dp411/dc-matu2/tests"
+
+[hardware]
+max-tasks-per-node             = 128
+memory          = 1000000       # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 4
+# The old ini's enabled-thorns / disabled-thorns blocks were empty.
+
+[environment]
+env-setup = """
+module load gnu_comp/14.1.0
+module load openmpi/5.0.3
+module load fftw/3.3.10
+module load boost/1_85_0
+module load hdf5/1.14.4
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job (\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = ' S '
+# Carried verbatim from the old ini (PBS-style, likely stale on a SLURM
+# machine, but preserved).
+exec-host        = "qstat -f @JOB_ID@"
+exec-host-pattern = 'exec_host = (\w+)/'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "30:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+[queues.standard]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["standard"], default = true }
+"test"    = { queues = ["standard"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["standard"], default = true }
+"test"    = { queues = ["standard"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

@@ -1,0 +1,88 @@
+# FUCHS — CSC Frankfurt cluster (SLURM).
+# Ported from simfactory2 mdb/machines/fuchs.ini.
+
+[machine]
+name        = "FUCHS"
+nickname    = "fuchs"
+location    = "CSC"
+description = "The CSC Frankfurt cluster FUCHS"
+webpage     = "https://csc.uni-frankfurt.de/wiki/doku.php?id=public:usage:fuchs"
+status      = "production"
+hostname    = "login01.csc.uni-frankfurt.de"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir /
+# scratchbasedir.
+install-home    = "/home/agrezzolla/@USER@"
+simulation-home = "/scratch/agrezzolla/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/scratch/agrezzolla/@USER@/tests"
+scratch-home    = "/tmp"
+
+[hardware]
+max-tasks-per-node             = 12
+memory          = 32193         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 6
+disabled-thorns = [
+    "ExternalLibraries/git",
+    "ExternalLibraries/PETSc",
+    "CactusElliptic/EllPETSc",
+    "CarpetThorns/LSUPETSc",
+    "CarpetThorns/LSUPoisson",
+    "CarpetThorns/Lichnerowicz",
+    "LSUDevelopment/WaveToyNoGhostsPETSc",
+    "TAT/TATPETSc",
+]
+
+[environment]
+env-setup = """
+source /etc/profile
+#export INTEL_LICENSE_FILE=/cm/shared/licenses/intel
+module purge
+module load slurm/2.6.3
+module load gcc/4.8.2
+#module load python/2.7.3
+module load intel/compiler/64/14.0.3
+module load openmpi/intel-14.0.3/1.8.1
+module load hdf5/intel-14.0.3/1.8.13
+module load boost/1.52.0
+module load fftw3/intel/64/3.2.2
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 3"
+#getstatus (old alternative): squeue | awk '$1 == @JOB_ID@ {print $1,$5}'
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = '(\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+# The runscript saves the node list to .cactup/NODES (was SIMFACTORY/NODES,
+# metadata dir rename §9.3).
+exec-host        = "head -n 1 .cactup/NODES"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "72:00:00"
+
+[queues.parallel]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["parallel"], default = true }
+"test"    = { queues = ["parallel"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["parallel"], default = true }
+"test"    = { queues = ["parallel"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

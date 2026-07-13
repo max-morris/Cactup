@@ -1,0 +1,114 @@
+# Graham — Compute Canada cluster at the University of Waterloo (SLURM).
+# ONE Cactup machine for the whole cluster (see design/_mdb_porting_guide.md
+# "One machine per cluster"). Upstream simfactory splits Graham into two
+# machine defs — `graham` (CPU, g++) and `graham-gpu` (CUDA, nvcc) — because it
+# cannot express two build recipes on one machine. Cactup folds them back into
+# two optionlist variants:
+#
+#   flavor   optionlist   build compiler   queue   run/submit scripts
+#   -------  -----------  ---------------  ------  --------------------
+#   CPU      default      g++              cpu     default / default
+#   CUDA     gpu          nvcc             gpu     default / gpu (+--gres)
+#
+# The CPU and CUDA builds differ in which thorns compile — the CUDA build drops
+# CTThorns/CT_*, LORENE, and the Meudon initial-data thorns (nvcc can't build
+# them). That per-flavor difference lives in the `gpu` optionlist's
+# `[cactup].disabled-thorns` (§7.8), layered on top of the machine-level
+# BLAS/LAPACK toggles below. The two cactup queues (cpu/gpu) carry the D12 gpu
+# flag and route to the run/submit scripts; Compute Canada schedules by
+# account, not partition, so both keep the historical `-p NO_QUEUE` value via
+# `name = "NO_QUEUE"`.
+
+[machine]
+name        = "Graham"
+nickname    = "graham"
+location    = "Compute Canada"
+description = "Compute Canada system at the University of Waterloo"
+webpage     = "https://docs.computecanada.ca/wiki/Graham"
+status      = "production"
+hostname    = "graham.computecanada.ca"
+
+[paths]
+install-home    = "/home/@USER@"
+simulation-home = "/scratch/@USER@/simulations"
+test-home       = "/scratch/@USER@/tests"
+
+[hardware]
+max-tasks-per-node = 32
+memory             = 128000     # MB per node (131072 nominal; CPU nodes)
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 16
+# Shared by both flavors; the CUDA-only extra disables live in optionlists/
+# gpu.toml's [cactup].disabled-thorns (§7.8).
+enabled-thorns  = ["ExternalLibraries/OpenBLAS"]
+disabled-thorns = [
+    "ExternalLibraries/BLAS",
+    "ExternalLibraries/LAPACK",
+]
+
+[environment]
+# Both flavors share this. It includes cuda/11.0 (from the upstream graham-gpu
+# env-setup): loading it for the CPU build is harmless — the g++ build never
+# references it — and it keeps a single machine-level env-setup rather than a
+# per-flavor one (env-setup cannot be scoped per variant).
+env-setup = """
+module -q load StdEnv/2020 &&
+module -q load gcc/9.3.0 &&
+module -q unload imkl &&
+module -q load cuda/11.0 &&
+module -q load fftw/3.3.8 &&
+module -q load gsl/2.6 &&
+module -q load hdf5/1.10.6 &&
+module -q load openblas/0.3.9 &&
+module -q load openmpi/4.0.3
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 1"
+interactive-cmd = "srun -A @ALLOCATION@ -p @QUEUE@ -t @WALLTIME@ -N @NODES@ -n @TASKS@ --mem @MEMORY@MB -c @CPUS_PER_TASK@ -J interactive --pty /bin/bash -l"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+max-walltime    = "24:00:00"
+allocation      = "def-@USER@"
+
+# Two cactup queues over Compute Canada's account-scheduled (no-partition)
+# system. The keys carry the D12 gpu flag and route to the run/submit script
+# variants; `name = "NO_QUEUE"` keeps @QUEUE@ at the historical placeholder
+# (the submitscripts pass no -p anyway; only interactive-cmd references it).
+[queues.cpu]
+gpu     = false
+default = true
+name    = "NO_QUEUE"
+
+[queues.gpu]
+gpu    = true
+name   = "NO_QUEUE"
+memory = 127518    # GPU nodes report slightly less (matches upstream graham-gpu)
+
+# CPU builds use the "default" submitscript; CUDA builds use "gpu" (adds
+# --gres=gpu:p100). The runscript is identical for both flavors (one variant).
+[variants.submitscript]
+"default"  = { queues = ["cpu"], default = true }
+"gpu"      = { queues = ["gpu"] }
+"test"     = { queues = ["cpu"], test = true }
+"gpu-test" = { queues = ["gpu"], test = true }
+
+[variants.runscript]
+"default" = { queues = ["cpu", "gpu"], default = true }
+"test"    = { queues = ["cpu", "gpu"], test = true }
+
+[variants.optionlist]
+# Two build flavors; `config build` must pick one with --variant (§4.4).
+variants = ["default", "gpu"]

@@ -13,7 +13,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 /// The `[cactup]` header: cactup-only metadata, never emitted to the native
-/// file (§7.8, D12, §11.2, §4.8).
+/// file (§7.8, D12, §4.4, §4.8).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct OptionlistHeader {
@@ -23,15 +23,25 @@ pub struct OptionlistHeader {
     /// Queues this build may be submitted to (D12).
     #[serde(default)]
     pub compatible_queues: Vec<String>,
-    /// Marks a testsuite optionlist, considered only by `test build` (§11.2).
+    /// Marks the implicit choice when a machine lists several optionlist
+    /// variants (§4.4), mirroring the script variants' `default = true`.
     #[serde(default)]
-    pub test: bool,
+    pub default: bool,
     /// Build this variant inside this universe (§4.8 step 3).
     pub universe: Option<String>,
     /// Sims of this config default to running in `universe` too (§4.8 step 2);
     /// false opts out of the build-universe coercion.
     #[serde(default = "default_true")]
     pub coerce_run_universe: bool,
+    /// Per-variant thorn toggles (§7.5), applied ON TOP of the machine-level
+    /// `[build].enabled-thorns`/`disabled-thorns`. This is how one machine
+    /// carries build flavors that differ in which thorns compile — e.g. a CUDA
+    /// (nvcc) variant disabling thorns the CPU variant keeps. Merged with the
+    /// machine lists at build time (the variant augments the machine).
+    #[serde(default)]
+    pub enabled_thorns: Vec<String>,
+    #[serde(default)]
+    pub disabled_thorns: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -132,8 +142,9 @@ impl Optionlist {
     }
 }
 
-/// Parse only the `[cactup]` header — used to partition a machine's optionlist
-/// variants (§11.2) without demanding every listed file parses in full.
+/// Parse only the `[cactup]` header — used to pick among a machine's
+/// optionlist variants (§4.4) without demanding every listed file parses in
+/// full.
 pub fn load_header(path: &Path) -> Res<OptionlistHeader> {
     #[derive(Deserialize)]
     struct HeaderOnly {
@@ -171,9 +182,10 @@ mod tests {
         let ol = Optionlist::parse(BASIC).unwrap();
         assert!(ol.header.gpu);
         assert_eq!(ol.header.compatible_queues, ["gpu"]);
-        assert!(!ol.header.test);
+        assert!(!ol.header.default);
         assert_eq!(ol.header.universe.as_deref(), Some("et-sif"));
         assert!(ol.header.coerce_run_universe); // defaults true
+        assert!(ol.header.enabled_thorns.is_empty() && ol.header.disabled_thorns.is_empty());
 
         assert_eq!(
             ol.render(),
@@ -198,6 +210,26 @@ mod tests {
     }
 
     #[test]
+    fn header_carries_per_variant_thorn_toggles() {
+        // §7.8: an optionlist variant may disable/enable thorns on top of the
+        // machine lists (e.g. a CUDA variant dropping thorns nvcc can't build).
+        let ol = Optionlist::parse(
+            "[cactup]\ngpu = true\n\
+             disabled-thorns = [\"ExternalLibraries/LORENE\", \"EinsteinInitialData/Meudon_Bin_BH\"]\n\
+             enabled-thorns = [\"ExternalLibraries/OpenBLAS\"]\n\
+             [options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ol.header.disabled_thorns,
+            ["ExternalLibraries/LORENE", "EinsteinInitialData/Meudon_Bin_BH"]
+        );
+        assert_eq!(ol.header.enabled_thorns, ["ExternalLibraries/OpenBLAS"]);
+        // The toggles are not emitted to the native file.
+        assert!(!ol.render().contains("LORENE"));
+    }
+
+    #[test]
     fn rejects_floats_and_missing_version() {
         let err = Optionlist::parse("[options]\nVERSION = \"x\"\nBAD = 1.5\n").unwrap_err();
         assert!(format!("{err:#}").contains("float"), "{err:#}");
@@ -210,11 +242,12 @@ mod tests {
     fn parses_the_real_mel5_optionlists() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("mdb/mel5/optionlists");
         let default = Optionlist::load(&root.join("default.toml")).unwrap();
-        assert!(!default.header.test && !default.header.gpu);
+        assert!(default.header.default, "mel5 default.toml is the implicit choice (§4.4)");
+        assert!(!default.header.gpu);
         assert_eq!(default.header.compatible_queues, ["local"]);
         assert!(default.render().starts_with("VERSION = 2018-12-13\n"));
 
         let test = load_header(&root.join("test.toml")).unwrap();
-        assert!(test.test, "mel5 test.toml must be test-marked (§11.2)");
+        assert!(!test.default, "mel5 test.toml needs an explicit --variant");
     }
 }

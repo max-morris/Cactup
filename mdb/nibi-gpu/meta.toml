@@ -1,0 +1,82 @@
+# Nibi (GPU nodes) — Digital Research Alliance of Canada cluster at SHARCNET,
+# Waterloo (SLURM; H100 GPU nodes, one GPU per MPI rank, up to 8 per node).
+# Ported from simfactory2 mdb/machines/nibi-gpu.ini.
+
+[machine]
+name        = "nibi.sharcnet"
+nickname    = "nibi-gpu"
+location    = "Waterloo, ON"
+description = "General purpose cluster of 134,400 CPU cores and 288 H100 NVIDIA GPUs"
+webpage     = "https://docs.alliancecan.ca/wiki/Nibi/en"
+status      = "production"
+hostname    = "nibi.sharcnet.ca"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/home/@USER@/scratch/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/home/@USER@/scratch/tests"
+
+[hardware]
+max-tasks-per-node             = 112
+memory          = 2044000       # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 8
+
+[environment]
+# the configure scripts strip /usr/local from XXX_DIR to avoid chosing system
+# libraries, however not all compilers will search in there by default (upstream
+# comment).
+env-setup = """
+module reset &&
+module load cuda/12.6 &&
+module load boost/1.85.0 &&
+module load gsl/2.7 &&
+module load fftw/3.3.10 &&
+module load hdf5-mpi/1.14.2 &&
+module load hwloc/2.9.1
+# cuda 12.9 does not provide nvtx libraries
+# cannot load openssl since it removed hdf5-mpi
+# cannot load jpeg since it removed hdf5-mpi
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 5"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+max-queue-slots  = 132          # unknown (upstream comment)
+# Machine-level fallback ceiling (design §4.2). Upstream note: 72, 24, 12, 3
+# hours is likely more sensible.
+max-walltime    = "168:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+# The submitscript requests 1 GPU per MPI rank (up to 8 per node) and
+# 2T/112 of RAM per used core per node (upstream comments); CUDA build.
+[queues.default]
+gpu     = true
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["default"], default = true }
+"test"    = { queues = ["default"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["default"], default = true }
+"test"    = { queues = ["default"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

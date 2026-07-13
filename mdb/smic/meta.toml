@@ -1,0 +1,83 @@
+# SuperMIC — LSU HPC Linux cluster with Xeon Phi accelerators (PBS/Torque,
+# openmpi).
+# Ported from simfactory2 mdb/machines/smic.ini.
+#
+# Dropped remote-subsystem key (design D1/D2): rsynccmd.
+
+# last-tested-on: 2022-04-12
+# last-tested-by: Roland Haas <rhaas at illinois.edu>
+
+[machine]
+name        = "SuperMIC"
+nickname    = "smic"
+location    = "LSU"
+description = "The new LSU HPC Linux cluster with Xeon Phi accelerators"
+webpage     = "http://www.hpc.lsu.edu/resources/hpc/system.php?system=SuperMIC"
+status      = "experimental"
+hostname    = "smic.hpc.lsu.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir /
+# scratchbasedir.
+install-home    = "/home/@USER@"
+simulation-home = "/work/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/work/@USER@/tests"
+scratch-home    = "/var/scratch/@USER@"
+
+[hardware]
+max-tasks-per-node             = 20
+memory          = 65536         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 10
+disabled-thorns = [
+    "ExternalLibraries/PETSc",
+    "CactusElliptic/EllPETSc",
+    "TAT/TATPETSc",
+    "LSUDevelopment/WaveToyNoGhostsPETSc",
+    "CarpetThorns/LSUPETSc",
+    "CarpetThorns/LSUPoisson",
+    "CarpetThorns/Lichnerowicz",
+]
+
+[environment]
+env-setup = """
+export PATH=/project/sbrandt/cmake-3.28.0-rc5/bin:$PATH
+"""
+
+[scheduler]
+submit          = "( cd $(dirname @SCRIPTFILE@) && qsub $(basename @SCRIPTFILE@) )"
+interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_TASKS_PER_NODE@ -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
+get-status      = "qstat @JOB_ID@"
+stop            = "qdel @JOB_ID@"
+submit-pattern   = '(\d+)[.]smic3'
+status-pattern   = '^@JOB_ID@[. ]'
+queued-pattern   = ' Q '
+running-pattern  = ' R '
+holding-pattern  = ' H '
+exec-host        = "qstat -f @JOB_ID@"
+exec-host-pattern = 'exec_host = (\w+)/'
+stdout          = "ssh @EXECHOST@ cat /var/spool/torque/spool/@JOB_ID@.smic3.OU"
+stderr          = "ssh @EXECHOST@ cat /var/spool/torque/spool/@JOB_ID@.smic3.ER"
+stdout-follow   = "ssh @EXECHOST@ tail -n 100 -f /var/spool/torque/spool/@JOB_ID@.smic3.OU /var/spool/torque/spool/@JOB_ID@.smic3.ER"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "72:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+[queues.checkpt]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["checkpt"], default = true }
+"test"    = { queues = ["checkpt"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["checkpt"], default = true }
+"test"    = { queues = ["checkpt"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

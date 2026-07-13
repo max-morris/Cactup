@@ -1,0 +1,139 @@
+# SuperMUC-NG — Leibniz Supercomputing Centre (LRZ) supercomputer (SLURM;
+# this definition describes the Skylake "thin nodes").
+# Ported from simfactory2 mdb/machines/supermucng.ini (ini section name was
+# "supermuc-ng").
+#
+# The old entry spelled LRZ's project directory component as a literal
+# `<hash>` placeholder every user had to override by hand; [paths] now reads
+# the resolved roots from the machine environment via @ENV()@ (§6.1)
+# instead. Upstream also noted "there is also $WORK_<project>".
+
+# last-tested-on: 2022-04-19
+# last-tested-by: Roland Haas <rhaas at ncsa.illinois.edu>
+
+[machine]
+name        = "SuperMUC-NG"
+nickname    = "supermucng"
+location    = "LRZ"
+description = "A supercomputer of the Leibniz Supercomputing Centre (LRZ) of the Bavarian Academy of Sciences."
+webpage     = "https://doku.lrz.de/display/PUBLIC/SuperMUC-NG"
+status      = "experimental"
+hostname    = "skx.supermuc.lrz.de"
+
+[paths]
+# Resolved at use time on the machine itself: $HOME = /dss/dsshome1/<hash>/
+# $USER and $SCRATCH = /hppfs/scratch/<hash>/$USER at LRZ — both already
+# include the user component, so no @USER@ segment. Old keys: sourcebasedir /
+# basedir.
+install-home    = "@ENV(HOME)@"
+simulation-home = "@ENV(SCRATCH)@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "@ENV(SCRATCH)@/tests"
+
+[hardware]
+threads-per-cpu         = 1
+max-tasks-per-node             = 48
+memory          = 98304         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 2
+disabled-thorns = [
+    "ExternalLibraries/ADIOS2",
+    "ExternalLibraries/AMReX",
+    "ExternalLibraries/Silo",
+    "ExternalLibraries/NSIMD",
+    "ExternalLibraries/openPMD",
+    "ExternalLibraries/yaml_cpp",
+    "CarpetX/ADMBaseX",
+    "CarpetX/Algo",
+    "CarpetX/Arith",
+    "CarpetX/BoxInBox",
+    "CarpetX/CarpetX",
+    "CarpetX/CoordinatesX",
+    "CarpetX/Derivs",
+    "CarpetX/ErrorEstimator",
+    "CarpetX/FluxWaveToyX",
+    "CarpetX/HydroBaseX",
+    "CarpetX/Loop",
+    "CarpetX/ODESolvers",
+    "CarpetX/PDESolvers",
+    "CarpetX/PoissonX",
+    "CarpetX/SIMDWaveToyX",
+    "CarpetX/SpacetimeWaveToyX",
+    "CarpetX/StaggeredWaveToyX",
+    "CarpetX/TestArrayGroup",
+    "CarpetX/TestBoundaries",
+    "CarpetX/TestBoxInBox",
+    "CarpetX/TestDerivs",
+    "CarpetX/TestInterpolate",
+    "CarpetX/TestNorms",
+    "CarpetX/TestODESolvers",
+    "CarpetX/TestODESolvers2",
+    "CarpetX/TestOutput",
+    "CarpetX/TestProlongate",
+    "CarpetX/TestSymmetries",
+    "CarpetX/TmunuBaseX",
+    "CarpetX/WaveToyX",
+    "GRHayLET/GRHayLHDX",
+    "GRHayLET/GRHayLIDX",
+]
+
+[environment]
+env-setup = """
+module unload intel-mkl
+module unload intel-mpi
+module unload intel
+module unload gcc
+module load gmake/4.2.1 &&
+module load intel/21.4.0 &&
+module load intel-mkl/2022 &&
+module load gcc/11 &&
+module load intel-mpi/2021-intel &&
+module load libszip/2.1.1 &&
+module load numactl/2.0.14-intel21 &&
+module load hdf5/1.10.7-intel21 &&
+module load gsl/2.7-intel21 &&
+module load hwloc/2.6.0-gcc11 &&
+module load papi/6.0.0.1-intel21 &&
+module load fftw/3.3.10 &&
+module load libszip/2.1.1
+"""
+
+[scheduler]
+submit          = "sbatch --export=ALL @SCRIPTFILE@ && sleep 5"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2). Upstream note: test has
+# 0:30:0, large has 24:0:0.
+max-walltime    = "48:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+# Upstream noted the queues: test, micro, general, large
+# (https://doku.lrz.de/display/PUBLIC/Job+Processing+with+SLURM+on+SuperMUC-NG)
+# — only the default was modeled ("TODO: auto-choose it?").
+[queues.general]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["general"], default = true }
+"test"    = { queues = ["general"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["general"], default = true }
+"test"    = { queues = ["general"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

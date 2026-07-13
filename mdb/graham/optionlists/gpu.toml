@@ -1,0 +1,81 @@
+# Graham optionlist (variant "gpu" = the CUDA/nvcc flavor), ported from
+# simfactory2 mdb/optionlists/graham-gpu.cfg (upstream's separate "graham-gpu"
+# machine, folded in here — see meta.toml).
+
+[cactup]
+gpu               = true
+compatible-queues = ["gpu"]
+# Per-variant thorn toggles (§7.8): the CUDA build drops thorns nvcc can't
+# compile, on top of the machine-level BLAS/LAPACK disables. Verbatim from the
+# upstream graham-gpu machine's [build].disabled-thorns (minus BLAS/LAPACK,
+# which are already machine-level here).
+disabled-thorns = [
+    # CTThorns: code is CUDA-aware but lacks __host__ annotations
+    "CTThorns/CT_Analytic",
+    "CTThorns/CT_MultiLevel",
+    # LORENE does not link
+    "ExternalLibraries/LORENE",
+    "EinsteinInitialData/Meudon_Bin_BH",
+    "EinsteinInitialData/Meudon_Bin_NS",
+    "EinsteinInitialData/Meudon_Mag_NS",
+]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "graham-gpu-2021-03-11"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "gcc"
+CXX = "nvcc -x cu"
+F90 = "gfortran"
+LD = "nvcc"
+
+CFLAGS = "-pipe -g -march=native -std=gnu11"
+CXXFLAGS = "-pipe -g --compiler-options -march=native -std=c++17 --compiler-options -std=gnu++17 --expt-relaxed-constexpr --extended-lambda --gpu-architecture sm_60 --forward-unknown-to-host-compiler --Werror cross-execution-space-call --Werror ext-lambda-captures-this --relocatable-device-code=true --objdir-as-tempdir"
+FPPFLAGS = "-traditional"
+F90FLAGS = "-pipe -g -march=native -fcray-pointer -ffixed-line-length-none"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-fbounds-check -fsanitize=undefined -fstack-protector-all -ftrapv"
+CXX_DEBUG_FLAGS = "-fbounds-check -fsanitize=undefined -fstack-protector-all -ftrapv"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+F90_DEBUG_FLAGS = "-fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan -fsanitize=undefined -fstack-protector-all -ftrapv"
+
+C_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+CXX_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+F90_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+
+WARN = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = ""
+CXX_WARN_FLAGS = ""
+FPP_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall -Wshadow -Wsurprising"
+
+# CUDA does not support these
+DISABLE_INT16 = "yes"
+DISABLE_REAL16 = "yes"
+
+VECTORISE = "no"
+
+CUDA_DIR = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/Core/cudacore/11.0.2"
+CUDA_INC_DIRS = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/Core/cudacore/11.0.2/targets/x86_64-linux/include"
+CUDA_LIB_DIRS = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/Core/cudacore/11.0.2/targets/x86_64-linux/lib"
+FFTW3_DIR = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx2/Compiler/gcc9/fftw/3.3.8"
+GSL_DIR = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx2/Compiler/gcc9/gsl/2.6"
+HDF5_DIR = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx2/Compiler/gcc9/hdf5/1.10.6"
+HDF5_ENABLE_CXX = "yes"
+HWLOC_DIR = "/usr"
+MPI_DIR = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx2/Compiler/gcc9/openmpi/4.0.3"
+OPENBLAS_DIR = "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx2/Compiler/gcc9/openblas/0.3.9"
+PTHREADS_DIR = "NO_BUILD"
+ZLIB_DIR = "/cvmfs/soft.computecanada.ca/gentoo/2020/usr"

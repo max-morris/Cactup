@@ -1,0 +1,124 @@
+# Sciama optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/sciama.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["sciama2.q"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "sciama-2019-11-07"
+
+# last-tested-on: 2019-11-07
+# last-tested-by: Jascha Schewtschenko <jascha.schewtschenko at port.ac.uk>
+
+CPP = "cpp"
+FPP = "cpp"
+
+# the following variables are set by the compiler module
+CC = "${CC}"
+CXX = "${CXX}"
+F77 = "${F77}"
+F90 = "${F90}"
+
+# "-debug inline-debug-info" leads to ICEs in AHFinderDirect and
+# BAM_Elliptic with Intel 11.0
+CPPFLAGS = "-DCCTK_DISABLE_OMP_COLLAPSE -D__builtin_isnormal=::isnormal#${CPPFLAGS}"
+FPPFLAGS = "-DCCTK_DISABLE_OMP_COLLAPSE -traditional #${CPPFLAGS}"
+CFLAGS = "-g -debug all -traceback -align -std=c99 -ansi_alias -U__STRICT_ANSI__ #${CPPFLAGS}"
+CXXFLAGS = "-g -debug all -traceback -align -std=c++11 -restrict -D__builtin_isinf=::isinf -D__builtin_isnan=::isnan -D__builtin_isnormal=::isnormal -D__builtin_signbit=::signbit #${CPPFLAGS}"
+F77FLAGS = "-g -debug all -traceback -align -pad #${CPPFLAGS}"
+F90FLAGS = "-g -debug all -traceback -align -pad #${CPPFLAGS}"
+
+LDFLAGS = "-rdynamic ${LDFLAGS}"
+
+# -Wl,-rpath,/usr/lib64
+
+BEGIN_WHOLE_ARCHIVE_FLAGS = "-Wl,--whole-archive"
+END_WHOLE_ARCHIVE_FLAGS = "-Wl,--no-whole-archive"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-O0 # -check-uninit"
+CXX_DEBUG_FLAGS = "-O0 # -check-uninit"
+F77_DEBUG_FLAGS = "-O0 -check bounds -check format # -check all"
+F90_DEBUG_FLAGS = "-O0 -check bounds -check format # -check all"
+
+# architecture-specific optimization (e.g. vectorization extensions) is set in compiler wrappers (use system modules to get optimized versions for sciama-X nodes)
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O2 -qoverride-limits"
+CXX_OPTIMISE_FLAGS = "-O2 -qoverride-limits"
+F77_OPTIMISE_FLAGS = "-O2 -qoverride-limits"
+F90_OPTIMISE_FLAGS = "-O2 -qoverride-limits"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F77_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+# since we do not know which compiler is used, try both flags
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp -qopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp -qopenmp"
+F77_OPENMP_FLAGS = "-fopenmp -qopenmp"
+F90_OPENMP_FLAGS = "-fopenmp -qopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = ""
+FPP_WARN_FLAGS = ""
+C_WARN_FLAGS = ""
+CXX_WARN_FLAGS = ""
+F77_WARN_FLAGS = ""
+F90_WARN_FLAGS = ""
+
+
+BLAS_DIR = "${BLASDIR}"
+# if you use MKL, use the first line; if you use another BLAS implementation, use the second
+BLAS_LIBS = "-Wl,--start-group mkl_intel_lp64 mkl_intel_thread -Wl,--end-group   iomp5   pthread"
+#BLAS_LIBS = -lblasref
+
+FFTW3_DIR = "${FFTWDIR}"
+
+GSL_DIR = "${GSLDIR}"
+
+HDF5_DIR = "${HDF5DIR}"
+HDF5_LIB_DIRS = "${HDF5LIB}"
+HDF5_INC_DIRS = "${HDF5INCLUDE}"
+
+OPENSSL_DIR = "${OPENSSLDIR}"
+
+LIBJPEG_DIR = "${LIBJPEG_TURBODIR}"
+
+ZLIB_DIR = "${LIBZDIR}"
+
+HWLOC_DIR = "${HWLOCDIR}"
+
+LAPACK_DIR = "${LAPACKDIR}"
+# if you use MKL, use the first line; if you use another BLAS implementation, use the second
+LAPACK_LIBS = "-Wl,--start-group mkl_intel_lp64 mkl_intel_thread -lmkl_core -lmkl_blacs_openmpi_lp64 -lmkl_scalapack_lp64 -Wl,--end-group"
+#LAPACK_LIBS = -llapack
+
+MPI_DIR = "CUSTOM"
+MPI_INC_DIRS = "${MPIROOT}/include"
+MPI_LIB_DIRS = "${MPIROOT}/lib"
+MPI_LIBS = "mpi"
+
+PAPI = "no"
+
+PTHREADS_DIR = "NO_BUILD"

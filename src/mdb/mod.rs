@@ -218,46 +218,42 @@ impl Machine {
         }
     }
 
-    /// Select the optionlist variant for a build (§4.4, §11.2): explicit
-    /// `--variant` if given; otherwise the partition (test set for
-    /// `test build`, falling back to normal when empty; normal-only for
-    /// `config build`) must contain exactly one candidate.
-    pub fn select_optionlist(&self, explicit: Option<&str>, test_build: bool) -> Res<String> {
+    /// Select the optionlist variant for a build (§4.4): explicit `--variant`
+    /// if given; else the sole listed variant; else the sole `default = true`
+    /// variant.
+    pub fn select_optionlist(&self, explicit: Option<&str>) -> Res<String> {
         let listed = &self.meta.variants.optionlist.variants;
-        let mut flagged = Vec::new(); // (name, is_test)
-        for variant in listed {
-            let header = optionlist::load_header(&self.optionlist_path(variant))?;
-            flagged.push((variant.clone(), header.test));
-        }
-        let test_set_nonempty = flagged.iter().any(|(_, t)| *t);
 
         if let Some(name) = explicit {
-            let (name, is_test) = flagged
+            return listed
                 .iter()
-                .find(|(n, _)| n == name)
-                .ok_or_else(|| anyhow!("no optionlist variant named \"{name}\" (known: {})", listed.join(", ")))?;
-            if !test_build && *is_test {
-                bail!("optionlist variant \"{name}\" is test-marked and never used for a normal build (§11.2)");
-            }
-            if test_build && test_set_nonempty && !*is_test {
-                bail!("optionlist variant \"{name}\" is not test-marked, but this machine has test optionlists (§11.2)");
-            }
-            return Ok(name.clone());
+                .find(|n| *n == name)
+                .cloned()
+                .ok_or_else(|| anyhow!("no optionlist variant named \"{name}\" (known: {})", listed.join(", ")));
         }
 
-        let use_test = test_build && test_set_nonempty;
-        let candidates: Vec<&String> = flagged.iter().filter(|(_, t)| *t == use_test).map(|(n, _)| n).collect();
-        match candidates.as_slice() {
+        if let [single] = listed.as_slice() {
+            return Ok(single.clone());
+        }
+        let mut defaults = Vec::new();
+        for variant in listed {
+            if optionlist::load_header(&self.optionlist_path(variant))?.default {
+                defaults.push(variant);
+            }
+        }
+        match defaults.as_slice() {
             [single] => Ok((*single).clone()),
+            [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist variant", self.name),
             [] => bail!(
-                "machine \"{}\" has no {}optionlist variant",
+                "machine \"{}\" has several optionlist variants ({}) and none is marked \
+                 default = true; pick one with --variant (§4.4)",
                 self.name,
-                if use_test { "test " } else { "non-test " }
+                listed.join(", ")
             ),
             several => bail!(
-                "machine \"{}\" has several {}optionlist variants ({}); pick one with --variant (§4.4)",
+                "machine \"{}\" marks several optionlist variants default = true ({}); \
+                 pick one with --variant (§4.4)",
                 self.name,
-                if use_test { "test " } else { "" },
                 several.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             ),
         }
@@ -334,42 +330,69 @@ mod tests {
         assert!(mel5.meta.scheduler.submit.as_deref().unwrap().contains("@SCRIPTFILE@"));
         // env-setup lives in [environment] and spans all three phases.
         assert!(mel5.meta.environment.effective(Phase::Build).contains("MPI_DIR"));
-        // Optionlist partition: default for builds, test for test builds (§11.2).
-        assert_eq!(mel5.select_optionlist(None, false).unwrap(), "default");
-        assert_eq!(mel5.select_optionlist(None, true).unwrap(), "test");
-        assert!(mel5.select_optionlist(Some("test"), false).is_err());
+        // Optionlist selection (§4.4): with two variants, the default-marked
+        // one wins implicitly and the other stays reachable via --variant.
+        assert_eq!(mel5.select_optionlist(None).unwrap(), "default");
+        assert_eq!(mel5.select_optionlist(Some("test")).unwrap(), "test");
         // Script selection honors the test partition.
         let rs = mel5.meta.script_variants(ScriptKind::Run);
         assert_eq!(rs.select("local", false, None).unwrap().0, "default");
         assert_eq!(rs.select("local", true, None).unwrap().0, "test");
         assert!(!mel5.script_path(ScriptKind::Submit, "test").unwrap().python);
 
-        // db1.hpc.lsu.edu unifies the former db-sing-nv/db-sing-cpu synthetic
-        // machines: two optionlist flavors and two cactup queues (gpu/cpu)
-        // over Deep Bayou's single SLURM partition.
+        // db1.hpc.lsu.edu is ONE machine for the whole Deep Bayou cluster: the
+        // upstream fragmentation into db1 (native) + db-sing-nv + db-sing-cpu +
+        // etworkshop-db is unified here via universes + optionlist variants +
+        // name-overridden queues (self-named "db").
         let db1 = mdb.load("db1.hpc.lsu.edu").unwrap();
+        assert_eq!(db1.meta.machine.name.as_deref(), Some("db"));
         assert_eq!(db1.meta.default_queue(), Some("gpu"));
-        assert!(db1.meta.queues["gpu"].gpu && !db1.meta.queues["cpu"].gpu);
-        // Both queues face the scheduler as the one real partition, "gpu":
-        // the cpu queue carries a `name` override (@QUEUE@ resolves to it).
+        // Three build flavors → three cactup queues over the one real "gpu"
+        // partition (the sing-* keys carry name = "gpu").
+        assert!(db1.meta.queues["gpu"].gpu && db1.meta.queues["sing-nv"].gpu && !db1.meta.queues["sing-cpu"].gpu);
         assert_eq!(db1.meta.scheduler_queue_name("gpu").unwrap(), "gpu");
-        assert_eq!(db1.meta.scheduler_queue_name("cpu").unwrap(), "gpu");
-        // Two non-test optionlists: a build must pick one with --variant (§4.4)…
-        assert!(db1.select_optionlist(None, false).is_err());
-        // …and either flavor resolves explicitly.
-        assert_eq!(db1.select_optionlist(Some("nv"), false).unwrap(), "nv");
-        assert_eq!(db1.select_optionlist(Some("cpu"), false).unwrap(), "cpu");
-        // The cpu flavor names the non---nv universe (§4.8 step 3); the
-        // machine default et-sing keeps --nv for the CUDA build.
-        let cpu = optionlist::load_header(&db1.optionlist_path("cpu")).unwrap();
-        assert_eq!(cpu.universe.as_deref(), Some("et-sing-cpu"));
+        assert_eq!(db1.meta.scheduler_queue_name("sing-nv").unwrap(), "gpu");
+        assert_eq!(db1.meta.scheduler_queue_name("sing-cpu").unwrap(), "gpu");
+        // Three optionlists, none default-marked: a build must pick one with
+        // --variant (§4.4).
+        assert!(db1.select_optionlist(None).is_err());
+        for v in ["native", "sing-nv", "sing-cpu"] {
+            assert_eq!(db1.select_optionlist(Some(v)).unwrap(), v);
+        }
+        // The native flavor inherits the machine "host" build universe (a
+        // module-loading login-shell wrapper); the Singularity flavors name
+        // their own build universe in the optionlist header, --nv vs not.
+        assert_eq!(db1.meta.build.universe.as_deref(), Some("host"));
+        assert!(db1.meta.universe("host").unwrap().wrapper.is_some());
+        assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-nv")).unwrap().universe.as_deref(), Some("et-sing"));
+        assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-cpu")).unwrap().universe.as_deref(), Some("et-sing-cpu"));
         let argv = |u: &str| db1.meta.universe(u).unwrap().wrapper_argv.clone().unwrap();
-        assert!(!argv("et-sing-cpu").iter().any(|a| a == "--nv"));
         assert!(argv("et-sing").iter().any(|a| a == "--nv"));
-        // The single default/test script variants serve both queues.
+        assert!(!argv("et-sing-cpu").iter().any(|a| a == "--nv"));
+        // Native builds run with the "default" scripts on queue gpu; the
+        // Singularity flavors share the "sing" scripts on their queues.
         let rs = db1.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("cpu", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("gpu", true, None).unwrap().0, "test");
+        assert_eq!(rs.select("gpu", false, None).unwrap().0, "default");
+        assert_eq!(rs.select("sing-nv", false, None).unwrap().0, "sing");
+        assert_eq!(rs.select("sing-cpu", true, None).unwrap().0, "sing-test");
+
+        // qbd flipped SLURM->PBS with an empty upstream queue: its placeholder
+        // queue carries name = "" so @QUEUE@ resolves to the empty string (the
+        // remaining real-machine user of the per-queue `name` override).
+        let qbd = mdb.load("qbd").unwrap();
+        assert_eq!(qbd.meta.scheduler_queue_name("default").unwrap(), "");
+        assert!(qbd.meta.scheduler.submit.as_deref().unwrap().starts_with("qsub"));
+
+        // graham unifies one Compute Canada cluster's CPU (g++) and CUDA (nvcc)
+        // build flavors into two optionlist variants. The CUDA variant carries
+        // per-variant disabled-thorns (§7.8) — thorns nvcc can't compile — that
+        // the CPU variant keeps; this is what lets the two flavors coexist on
+        // one machine.
+        let graham = mdb.load("graham").unwrap();
+        assert!(!graham.meta.queues["cpu"].gpu && graham.meta.queues["gpu"].gpu);
+        let gpu_ol = optionlist::load_header(&graham.optionlist_path("gpu")).unwrap();
+        assert!(gpu_ol.disabled_thorns.iter().any(|t| t == "ExternalLibraries/LORENE"));
+        assert!(optionlist::load_header(&graham.optionlist_path("default")).unwrap().disabled_thorns.is_empty());
 
         // frontera's [paths] read TACC's hashed storage roots via @ENV()@
         // (§4.2): the entry loads anywhere; resolution needs the machine's
@@ -390,7 +413,7 @@ mod tests {
         assert!(generic.meta.hardware.memory.unwrap() > 0);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());
-        assert_eq!(generic.select_optionlist(None, true).unwrap(), "default"); // borrow normal set
+        assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole variant
     }
 
     #[test]

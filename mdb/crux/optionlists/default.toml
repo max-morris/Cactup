@@ -1,0 +1,74 @@
+# Crux optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/crux.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["workq"]
+
+[options]
+VERSION = "crux-2025-02-21"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "cc"
+CXX = "CC"
+F90 = "ftn"
+
+CPPFLAGS = "-g"
+FPPFLAGS = "-g -traditional"
+CFLAGS = "-g -std=gnu99"
+CXXFLAGS = "-g -std=c++17"
+F90FLAGS = "-g  -fcray-pointer -ffixed-line-length-none"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DISABLE_INT16 = "yes"
+DISABLE_REAL16 = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+VECTORISE_ALWAYS_USE_UNALIGNED_LOADS = "yes"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = ""
+CXX_DEBUG_FLAGS = ""
+F90_DEBUG_FLAGS = ""
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O3"
+CXX_OPTIMISE_FLAGS = "-O3"
+F90_OPTIMISE_FLAGS = "-O3"
+CUCC_OPTIMISE_FLAGS = "-O3"
+
+C_NO_OPTIMISE_FLAGS = "-O0"
+CXX_NO_OPTIMISE_FLAGS = "-O0"
+F90_NO_OPTIMISE_FLAGS = "-O0"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = ""
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+HWLOC_EXTRA_LIBS = "udev"

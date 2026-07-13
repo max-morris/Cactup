@@ -1,0 +1,107 @@
+# holodeck optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/holodeck.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["debug"]
+
+[options]
+
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "2017-04-18"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "/opt/intel/2017b/compilers_and_libraries_2017.2.174/linux/mpi/intel64/bin/mpiicc"
+CXX = "/opt/intel/2017b/compilers_and_libraries_2017.2.174/linux/mpi/intel64/bin/mpiicpc"
+F77 = "/opt/intel/2017b/compilers_and_libraries_2017.2.174/linux/mpi/intel64/bin/mpiifort"
+F90 = "/opt/intel/2017b/compilers_and_libraries_2017.2.174/linux/mpi/intel64/bin/mpiifort"
+
+CPPFLAGS = ""
+FPPFLAGS = "-traditional"
+CFLAGS = "-g -debug all -traceback -std=c99 -ansi_alias -U__STRICT_ANSI__ #-rdynamic"
+CXXFLAGS = "-g -debug all -traceback -std=c++11"
+F77FLAGS = "-g -debug all -traceback -assume underscore"
+F90FLAGS = "-g -debug all -traceback -assume underscore"
+
+#CUCC                =
+#CUCCFLAGS           =
+#CUCC_DEBUG_FLAGS    =
+#CUCC_OPTIMISE_FLAGS =
+#CUCC_WARN_FLAGS     =
+#CU_DEPEND =
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+LDFLAGS = "-qopenmp"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+#VECTORISE_STREAMING_STORES = no
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-O0 # -check-uninit"
+CXX_DEBUG_FLAGS = "-O0 # -check-uninit"
+F77_DEBUG_FLAGS = "-O0 -check bounds -check format # -check all"
+F90_DEBUG_FLAGS = "-O0 -check bounds -check format # -check all"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O3 -ip -xHost"
+CXX_OPTIMISE_FLAGS = "-O3 -ip -xHost"
+F77_OPTIMISE_FLAGS = "-O3 -ip -xHost"
+F90_OPTIMISE_FLAGS = "-O3 -ip -xHost"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F77_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "#-qopenmp"
+FPP_OPENMP_FLAGS = "#-qopenmp"
+C_OPENMP_FLAGS = "-qopenmp"
+CXX_OPENMP_FLAGS = "-qopenmp"
+F77_OPENMP_FLAGS = "-qopenmp"
+F90_OPENMP_FLAGS = "-qopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = ""
+FPP_WARN_FLAGS = ""
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F77_WARN_FLAGS = "-warn all"
+F90_WARN_FLAGS = "-warn all"
+
+BLAS_DIR = "/usr"
+
+GSL_DIR = "/usr"
+HDF5_DIR = "BUILD"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_ENABLE_CXX = "yes"
+
+HWLOC_LIB_DIRS = "/usr/lib/x86_64-linux-gnu/hwloc"
+HWLOC_INC_DIRS = "/usr/include"
+
+LAPACK_DIR = "/usr"
+MPI_DIR = "/opt/intel/2017b/impi/2017.2.174/"
+MPI_INC_DIRS = "/opt/intel/2017b/impi/2017.2.174/include64"
+MPI_LIB_DIRS = "/opt/intel/2017b/impi/2017.2.174/lib64"
+MPI_LIBS = ""
+
+BOOST_DIR = "/usr"
+BOOST_LIBS = "boost_filesystem boost_system"
+
+OPENSSL_DIR = "/usr"
+PAPI_DIR = "/usr"
+#PTHREADS = yes
+

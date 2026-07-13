@@ -1,0 +1,95 @@
+# hedges optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/generic.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["local"]
+
+[options]
+# generic
+
+# This option list is used internally by simfactory as a template during the
+# sim setup and sim setup-silent commands
+# Edit at your own risk
+
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "2018-12-13"
+
+CPP = "cpp"
+CC = "gcc"
+CXX = "g++"
+CUCC = "nvcc"
+
+FPP = "cpp"
+F90 = "gfortran"
+
+# for CarpetX GPU support
+# subset CUCCFLAGS without "-x cu" (must no be used here) and options used only to compile code
+# -fno-lto can avoid errors connected to fat binaries
+# LD = nvcc --compiler-bindir g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir
+
+# enable for CarpetX GPU suport
+# CPPFLAGS = -DSIMD_CPU
+FPPFLAGS = "-traditional"
+# use gnu99 and not c99 since FFTW3 relies on gcc's "asm" function
+CFLAGS = "-g -std=gnu99"
+# if compiler is old and you do not need AMReX, can change to c++11
+# leave as c++17 for easier CUDA support
+CXXFLAGS = "-g -std=c++17 -D_GNU_SOURCE"
+CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 -D_GNU_SOURCE --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --Werror cross-execution-space-call --Werror ext-lambda-captures-this --relocatable-device-code=true --objdir-as-tempdir"
+
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+
+LDFLAGS = "-rdynamic"
+
+# for CUDA support
+# LIBS = gfortran nvToolsExt curand
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = ""
+C_DEBUG_FLAGS = ""
+CXX_DEBUG_FLAGS = ""
+CUCC_DEBUG_FLAGS = ""
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+CUCC_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+CUCC_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+CUCC_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+CUCC_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS = "-fopenmp"
+
+# for CUDA support
+DISABLE_INT16 = "yes"
+DISABLE_REAL16 = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "yes"
+
+AMREX_ENABLE_CUDA = "no"
+
+PTHREADS_DIR = "NO_BUILD"

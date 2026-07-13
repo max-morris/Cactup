@@ -1,14 +1,13 @@
-//! Test-suite subsystem (spec §11, D3): first-class `cactup test …` tree,
-//! separate from `config`/`sim`, with its own output root (test-home §11.5),
-//! its own active pointer (`active-test-config` §11.1), and a simplified
-//! one-shot run model (no restarts/recovery/chaining — §11.6).
+//! Test-suite subsystem (spec §11, D3): first-class `cactup test …` tree
+//! with its own output root (test-home §11.5) and a simplified one-shot run
+//! model (no restarts/recovery/chaining — §11.6). Test runs target any built
+//! config (default: the active config) — there is no separate test-config
+//! kind.
 //!
-//! A test run is named after its test config (the CLI has no run-name
-//! argument — §11.3): one run dir per config under
-//! `<test-home>/<config>/<config>/`, and re-running allocates the next
-//! `results-%04d` set in the same dir.
+//! A test run is named after its config (the CLI has no run-name argument —
+//! §11.3): one run dir per config under `<test-home>/<config>/<config>/`,
+//! and re-running allocates the next `results-%04d` set in the same dir.
 
-pub mod config;
 pub mod manage;
 pub mod run;
 
@@ -57,7 +56,7 @@ pub struct TestMeta {
     #[serde(default = "default_schema")]
     pub schema: u32,
     pub name: String,
-    pub test_config: String,
+    pub config: String,
     pub config_id: String,
     pub build_id: String,
     pub machine: String,

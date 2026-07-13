@@ -746,6 +746,19 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_queue_name_honors_override() {
+        // @QUEUE@ resolves to the queue key by default…
+        assert_eq!(mike().scheduler_queue_name("gpu").unwrap(), "gpu");
+        // …and to the `name` override when set (e.g. several cactup queues
+        // over one real partition, or an intentionally-empty scheduler name).
+        let toml_text = MIKE.replace("[queues.gpu]\n        gpu = true", "[queues.gpu]\n        name = \"gpu-v100\"\n        gpu = true");
+        let meta: Meta = toml::from_str(&toml_text).unwrap();
+        meta.validate("mike").unwrap();
+        assert_eq!(meta.scheduler_queue_name("gpu").unwrap(), "gpu-v100");
+        assert!(meta.scheduler_queue_name("nope").is_err());
+    }
+
+    #[test]
     fn effective_hardware_inherits_and_overrides() {
         let meta = mike();
         // Queue with no overrides: pure inheritance from [hardware].

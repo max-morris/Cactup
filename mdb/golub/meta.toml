@@ -1,0 +1,92 @@
+# golub — Illinois Campus Cluster at NCSA/UIUC (PBS-style tooling submitted
+# through sbatch's compatibility mode).
+# Ported from simfactory2 mdb/machines/golub.ini.
+#
+# Queue-name convention carried from upstream: to ask for a particular node
+# "feature", append it to the queue name after a ":" (e.g. ncsa:E2670V2 to
+# restrict to only the 20-core nodes in the NCSA partition); the submitscript
+# splits it into `#PBS -q <name>` + `#SBATCH --constraint=<feature>`.
+
+[machine]
+name        = "golub"
+nickname    = "golub"
+location    = "NCSA"
+description = "An FDR based cluster at UIUC."
+webpage     = "https://campuscluster.illinois.edu"
+status      = "experimental"
+hostname    = "cc-login.campuscluster.illinois.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/scratch/users/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/scratch/users/@USER@/tests"
+
+[hardware]
+# Upstream notes: set max-tasks-per-node to 16/20/24 to select the golub nodes you want; you
+# may need the exact node type via a feature reported by
+# "sinfo -O features -N -n NODE" — a mismatched allocation (24-core node for a
+# 20-core request) confuses core binding.
+max-tasks-per-node             = 24
+memory          = 65536         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+# don't use more than 4 since the campus cluster kills processes if "they
+# accrue more than 30 minutes of CPU time or if more than 4 identical processes
+# owned by the same user are running concurrently."
+make-jobs = 4
+
+[environment]
+env-setup = """
+module unload cmake mpi openmpi cuda python gsl gcc intel papi hwloc
+module load openblas/0.3.7 &&
+module unload gcc || true &&
+module load fftw-3.3.8/gcc-7.2.0/mvapich2-2.3 &&
+module unload gcc mvapich2 || true &&
+module load cmake/3.26.3 &&
+module unload gcc || true &&
+module load openmpi/4.1.1-gcc-9.2.0 &&
+module unload gcc|| true  &&
+module load cuda/12.4 &&
+module load git &&
+module load gsl/2.5 &&
+module load papi/5.6.0 &&
+module unload gcc || true &&
+module load gcc/12.2.0 &&
+module load hwloc/1.7.2
+"""
+
+[scheduler]
+# use sbatch's compatibility mode. Using qsub adds extra (incorrect) -o and -e
+# options to the wrapped sbatch call
+submit          = "sbatch @SCRIPTFILE@ ; sleep 1"
+interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_TASKS_PER_NODE@:golub -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
+get-status      = "qstat @JOB_ID@"
+stop            = "qdel @JOB_ID@"
+submit-pattern   = '^Submitted batch job (\d+)$'
+status-pattern   = '^@JOB_ID@[. ]'
+queued-pattern   = ' Q '
+running-pattern  = ' R '
+holding-pattern  = ' H '
+exec-host        = "qstat -f @JOB_ID@"
+exec-host-pattern = 'exec_host = (\w+)/'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+
+[queues.secondary]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["secondary"], default = true }
+"test"    = { queues = ["secondary"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["secondary"], default = true }
+"test"    = { queues = ["secondary"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

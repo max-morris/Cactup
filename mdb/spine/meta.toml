@@ -1,0 +1,80 @@
+# spine — Cactus workstation at LSU CCT; generic-style single-node machine
+# with no batch system.
+# Ported from simfactory2 mdb/machines/spine.ini.
+#
+# Dropped remote-subsystem keys (design D1/D2): rsynccmd, sshcmd (ssh -p 2525).
+# The old ini's enabled-thorns block contained only commented-out entries
+# (OpenCL experiments); kept here for reference:
+#    ExternalLibraries/OpenCL
+#    CactusUtils/Accelerator
+#    CactusUtils/OpenCLRunTime
+#    CactusExamples/WaveToyOpenCL
+#    McLachlan/ML_WaveToy_CL
+
+[machine]
+name        = "spine"
+nickname    = "spine"
+location    = "LSU, CCT"
+description = "Cactus workstation"
+status      = "personal"
+hostname    = "spine.cct.lsu.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/home/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/home/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 16
+memory          = 65536         # MB
+
+[build]
+make      = "nice make -j@MAKEJOBS@"
+make-jobs = 32
+disabled-thorns = [
+    "CactusExternal/PETSc",
+    "CactusElliptic/EllPETSc",
+    "TAT/TATPETSc",
+    "LSUDevelopment/WaveToyNoGhostsPETSc",
+    "CarpetThorns/LSUPETSc",
+    "CarpetThorns/LSUPoisson",
+    "CarpetThorns/Lichnerowicz",
+]
+
+[scheduler]
+# No scheduler: background the script, echo its PID as the job id. The old
+# submit discarded stdout/stderr to /dev/null (kept verbatim — the runscript's
+# output was never captured on this machine); stop kills only the top process
+# (also verbatim).
+submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
+get-status      = "ps @JOB_ID@"
+stop            = "kill @JOB_ID@"
+submit-pattern   = "(.*)"
+status-pattern   = "^ *@JOB_ID@ "
+queued-pattern   = "$^"          # never "queued"
+running-pattern  = "^"           # in ps => running
+holding-pattern  = "$^"          # never "held"
+exec-host        = "echo localhost"
+exec-host-pattern = "(.*)"
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "336:00:00"
+
+[queues.local]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

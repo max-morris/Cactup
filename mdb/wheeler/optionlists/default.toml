@@ -1,0 +1,116 @@
+# Wheeler optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/wheeler-intel.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["NOQUEUE"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "wheeler-2018-08-30"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "icc"
+CXX = "icpc"
+F90 = "ifort"
+
+CPPFLAGS = "-D_XOPEN_SOURCE -D_XOPEN_SOURCE_EXTENDED"
+FPPFLAGS = "-traditional"
+CFLAGS = "-g3 -xHost -std=c99"
+CXXFLAGS = "-g3 -xHost -std=c++11"
+F90FLAGS = "-g3 -xHost -safe-cray-ptr"
+
+BEGIN_WHOLE_ARCHIVE_FLAGS = "-Wl,--whole-archive"
+END_WHOLE_ARCHIVE_FLAGS = "-Wl,--no-whole-archive"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = ""
+CXX_DEBUG_FLAGS = ""
+F90_DEBUG_FLAGS = "-check bounds -check format"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-Ofast"
+CXX_OPTIMISE_FLAGS = "-Ofast"
+F90_OPTIMISE_FLAGS = "-Ofast"
+
+CPP_NO_OPTIMISE_FLAGS = ""
+FPP_NO_OPTIMISE_FLAGS = ""
+C_NO_OPTIMISE_FLAGS = "-O0"
+CXX_NO_OPTIMISE_FLAGS = "-O0"
+CUCC_NO_OPTIMISE_FLAGS = ""
+F77_NO_OPTIMISE_FLAGS = "-O0"
+F90_NO_OPTIMISE_FLAGS = "-O0"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = "-Wall"
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall -wd810 -wd981 -wd1419"
+CXX_WARN_FLAGS = "-Wall -wd810 -wd981 -wd1419"
+F77_WARN_FLAGS = "-warn all -warn nointerfaces"
+F90_WARN_FLAGS = "-warn all -warn nointerfaces"
+
+BLAS_DIR = "NO_BUILD"
+BLAS_LIBS = "-mkl"
+
+BOOST_DIR = "BUILD"
+
+FFTW3_DIR = "NO_BUILD"
+FFTW3_INC_DIRS = "/usr/local/Intel/2016.3/compilers_and_libraries_2016.3.210/linux/mkl/include/fftw"
+FFTW3_LIBS = "-mkl"
+
+CURL_DIR = "/usr/local/python/anaconda2-4.1.1"
+
+FLICKCURL_DIR = "BUILD"
+
+JEMALLOC_DIR = "/usr/local/jemalloc/5.0.1"
+
+GSL_DIR = "/usr/local/gsl/2.1"
+
+# we need the Fortran bindings and the provided HDF5 modules do not have them
+HDF5_DIR = "BUILD"
+
+HWLOC_DIR = "BUILD"
+HWLOC_EXTRA_LIBS = "numa udev"
+
+LAPACK_DIR = "NO_BUILD"
+LAPACK_LIBS = "-mkl"
+
+MPI_DIR = "/usr/local/Intel/2016.3/compilers_and_libraries_2016.3.210/linux/mpi/intel64"
+
+OPENSSL_DIR = "/usr/local/python/anaconda2-4.1.1"
+
+PAPI_DIR = "/usr"
+
+PETSC_DIR = "/usr/local/petsc/3.7.3-intel-16.3/"
+PETSC_ARCH_LIBS = "petsc X11"
+
+PTHREADS_DIR = "NO_BUILD"
+
+ZLIB_DIR = "/usr"

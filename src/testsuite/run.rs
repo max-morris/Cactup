@@ -151,18 +151,16 @@ fn start_impl(
     let test_home = inst_meta.test_home()?.to_owned();
     let cactus_root = inst.cactus_root();
 
-    // 1. Test config: --test-config → active test-config (fatal when null).
-    let cfg_name = match &args.test_config {
+    // 1. Config: --config → the active config (fatal in the null-config
+    //    state — §7.1).
+    let cfg_name = match &args.config {
         Some(c) => c.clone(),
-        None => inst_meta.active_test_config()?.to_owned(),
+        None => inst_meta.active_config()?.to_owned(),
     };
     let cfg = ConfigMeta::load(&cactus_root, &cfg_name)?
-        .ok_or_else(|| anyhow!("test config \"{cfg_name}\" has never been built (`cactup test build`)"))?;
-    if !cfg.test {
-        bail!("\"{cfg_name}\" is a normal config, not a test config (§11.1); see `cactup test build`");
-    }
+        .ok_or_else(|| anyhow!("config \"{cfg_name}\" has never been built (`cactup config build {cfg_name}`)"))?;
     if !build::is_complete(&cactus_root, &cfg_name) {
-        bail!("test config \"{cfg_name}\" is incomplete; rebuild it (`cactup test build {cfg_name} -f`)");
+        bail!("config \"{cfg_name}\" is incomplete; rebuild it (`cactup config build {cfg_name} -f`)");
     }
 
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
@@ -205,7 +203,7 @@ fn start_impl(
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
     let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
 
-    // The run is named after its test config (§11.3 has no name argument);
+    // The run is named after its config (§11.3 has no name argument);
     // re-runs reuse the dir and allocate new result sets (§11.5).
     let name = cfg_name.clone();
     let run_dir = test_home.join(&cfg_name).join(&name);
@@ -220,7 +218,7 @@ fn start_impl(
         if !reg.tests.contains_key(&name) {
             reg.tests.insert(
                 name.clone(),
-                TestEntry { dir: run_dir.clone(), test_config: cfg_name.clone(), created: Utc::now() },
+                TestEntry { dir: run_dir.clone(), config: cfg_name.clone(), created: Utc::now() },
             );
             locked.set_tests(&reg)?;
         }
@@ -260,7 +258,7 @@ fn start_impl(
         meta: TestMeta {
             schema: SCHEMA,
             name: name.clone(),
-            test_config: cfg_name.clone(),
+            config: cfg_name.clone(),
             config_id: cfg.config_id.clone(),
             build_id: cfg.build_id.clone(),
             machine: machine.name.clone(),
@@ -383,7 +381,7 @@ fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
     run.meta.timestamps.finished = Some(Utc::now());
 
     // 7. Parse the harness's pass/fail summary (§11.6).
-    let summary = read_summary(&results_dir(&run.dir, results_id), &run.meta.test_config);
+    let summary = read_summary(&results_dir(&run.dir, results_id), &run.meta.config);
     if let Some((passed, failed)) = summary {
         run.meta.results = Some(ResultsSummary { passed, failed, results_id });
     }
@@ -514,7 +512,7 @@ mod tests {
         Machine { name: "fake".to_owned(), dir: dir.to_owned(), layer: Layer::System, meta }
     }
 
-    /// An installation with a COMPLETE test config named "tests".
+    /// An installation with a COMPLETE (normal) active config named "tests".
     fn fake_installation(root: &Path) -> Installation {
         let inst = Installation::new("et", root);
         let test_home = root.join("testhome");
@@ -522,7 +520,7 @@ mod tests {
         {
             let locked = inst.locked().unwrap();
             let mut meta = locked.meta().unwrap();
-            meta.active_test_config = Some("tests".to_owned());
+            meta.active_config = Some("tests".to_owned());
             meta.test_home = Some(test_home);
             locked.set_meta(&meta).unwrap();
         }
@@ -534,8 +532,7 @@ mod tests {
             cfg_dir.join("cactup-config.toml"),
             r#"
             name = "tests"
-            test = true
-            variant = "test"
+            variant = "default"
             thornlist = "einsteintoolkit.th"
             machine = "fake"
             config-id = "config-tests-1"
@@ -550,7 +547,7 @@ mod tests {
 
     fn test_args() -> TestStartArgs {
         TestStartArgs {
-            test_config: None,
+            config: None,
             variant: None,
             force: false,
             overwrite: false,
@@ -646,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn null_test_config_fails_fast() {
+    fn null_config_fails_fast() {
         let tmp = tempfile::tempdir().unwrap();
         let machine = fake_machine(&tmp.path().join("mdb-fake"));
         let inst = Installation::new("et", tmp.path().join("bare"));
@@ -660,7 +657,7 @@ mod tests {
         let err = start_impl(&inst, &machine, &db, &test_args(), false, false, None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("test build"), "guidance expected: {err}");
+        assert!(err.contains("active config"), "guidance expected: {err}");
     }
 
     #[test]

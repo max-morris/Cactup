@@ -1,0 +1,107 @@
+# SuperMUC-NG optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/supermucng.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["general"]
+
+[options]
+VERSION = "supermuc_ng_intel-2021-09-30"
+####################################################
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "icc"
+CXX = "icpc"
+F90 = "ifort"
+
+CPPFLAGS = "-g -D_XOPEN_SOURCE -D_XOPEN_SOURCE_EXTENDED"
+FPPFLAGS = "-g -traditional"
+CFLAGS = "-g -traceback -debug all -xCORE-AVX512 -qmkl -align -std=gnu99"
+CXXFLAGS = "-g -traceback -debug all -xCORE-AVX512 -qmkl -align -std=gnu++11 -wd3699"
+F90FLAGS = "-g -traceback -debug all -xCORE-AVX512 -qmkl -align -pad -safe-cray-ptr"
+
+LDFLAGS = "-rdynamic -Wl,--rpath,/usr/lib64/psm2-compat"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-O0"
+CXX_DEBUG_FLAGS = "-O0"
+F90_DEBUG_FLAGS = "-O0 -check bounds -check format"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-Ofast"
+CXX_OPTIMISE_FLAGS = "-Ofast"
+F90_OPTIMISE_FLAGS = "-Ofast"
+
+CPP_NO_OPTIMISE_FLAGS = ""
+FPP_NO_OPTIMISE_FLAGS = ""
+C_NO_OPTIMISE_FLAGS = "-O0"
+CXX_NO_OPTIMISE_FLAGS = "-O0"
+CUCC_NO_OPTIMISE_FLAGS = ""
+F90_NO_OPTIMISE_FLAGS = "-O0"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = ""
+FPP_WARN_FLAGS = ""
+C_WARN_FLAGS = ""
+CXX_WARN_FLAGS = ""
+F90_WARN_FLAGS = ""
+
+HDF5_DIR = "${HDF5_BASE}"
+# LRZ uses non-standard hame for hl_foratran
+HDF5_LIBS = "hdf5_hl_fortran hdf5_fortran hdf5_hl_cpp hdf5_cpp hdf5_hl hdf5"
+
+HDF5_INC_DIRS = "${HDF5_BASE}/include"
+HDF5_LIB_DIRS = "${HDF5_BASE}/lib ${LIBSZIP_BASE}/lib"
+
+GSL_DIR = "${GSL_BASE}"
+MPI_DIR = "${MPI_BASE}"
+
+BLAS_DIR = "NO_BUILD"
+BLAS_LIBS = "-qmkl"
+
+FFTW3_DIR = "${FFTW_BASE}"
+
+HWLOC_DIR = "${HWLOC_BASE}"
+
+LAPACK_DIR = "NO_BUILD"
+LAPACK_LIBS = "-qmkl"
+
+OPENBLAS_DIR = "NO_BUILD"
+OPENBLAS_LIBS = "-qmkl"
+
+PAPI_DIR = "${PAPI_BASE}"
+
+LIBSZ_DIR = "${LIBSZIP_BASE}"
+LIBZ_DIR = "/usr"
+
+LIBJPEG_DIR = "BUILD"
+
+ZLIB_DIR = "/usr"
+
+PTHREADS_DIR = "NO_BUILD"

@@ -1,0 +1,66 @@
+# slurmjupyter — CCT at LSU JupyterHub-fronted mini SLURM cluster.
+# Ported from simfactory2 mdb/machines/slurmjupyter.ini.
+#
+# The old submitscript passed no partition directive; the "checkpt" queue name
+# below is carried from the ini but never reaches sbatch.
+
+[machine]
+name        = "slurmjupyter"
+nickname    = "slurmjupyter"
+location    = "LSU"
+description = "CCT"
+status      = "production"
+hostname    = "slurmjupyter.cct.lsu.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/home/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/home/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 2
+memory          = 196608        # MB per node
+
+[build]
+make = "make -j@MAKEJOBS@"
+disabled-thorns = ["CactusUtils/SystemTopology"]
+
+# No [environment]: the old ini had no envsetup.
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -j @JOB_ID@"
+# need to kill the whole set of processes descending from @JOB_ID@, not just
+# the top-level process
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job (\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname -s"
+exec-host-pattern = '(.*)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -F -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# The old ini kept this alternative commented out:
+# stdout-follow = while ! scontrol >/dev/null wait_job @JOB_ID@ ; do sleep 5 ; done ; tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "72:00:00"
+
+[queues.checkpt]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["checkpt"], default = true }
+"test"    = { queues = ["checkpt"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["checkpt"], default = true }
+"test"    = { queues = ["checkpt"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

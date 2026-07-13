@@ -73,7 +73,7 @@ pub(crate) enum Commands {
     /// Manage simulations (§8)
     #[clap(subcommand)]
     Sim(SimCommand),
-    /// Build and run thorn test suites (§11)
+    /// Run thorn test suites against a built config (§11)
     #[clap(subcommand)]
     Test(TestCommand),
     /// Print or set machine-global default values (§5)
@@ -163,7 +163,7 @@ pub(crate) struct TopologyFlags {
     pub err: Option<String>,
 }
 
-/// Build flags shared by `config build` and `test build` (§7.1, §7.6, §7.7).
+/// Build flags for `config build` (§7.1, §7.6, §7.7).
 #[derive(clap::Args, Debug)]
 pub(crate) struct BuildOpts {
     /// Rebuild even if the config is already built.
@@ -351,23 +351,6 @@ pub(crate) struct SimRunArgs {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum TestCommand {
-    /// Build a test config (§11.4)
-    Build {
-        /// The test config name (defaulted per §11.4 when omitted).
-        name: Option<String>,
-        #[clap(flatten)]
-        opts: BuildOpts,
-    },
-    /// List test configs, or show one
-    Show { name: Option<String> },
-    /// Set the active test-config (separate from the active config)
-    Use { name: String },
-    /// Delete a test config (build + metadata)
-    Delete {
-        name: String,
-        #[clap(short, long)]
-        force: bool,
-    },
     /// Run the test suite interactively (§11.6)
     Run(TestStartArgs),
     /// Submit the test suite to the queue (§11.6)
@@ -383,9 +366,9 @@ pub(crate) enum TestCommand {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct TestStartArgs {
-    /// Test config to run (default: the active test-config).
+    /// Config whose testsuite to run (default: the active config).
     #[clap(long, value_name = "CONFIG")]
-    pub test_config: Option<String>,
+    pub config: Option<String>,
     /// Runscript variant override (§11.2).
     #[clap(long, value_name = "VARIANT")]
     pub variant: Option<String>,

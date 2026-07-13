@@ -1,0 +1,87 @@
+# cosma8 optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/cosma8.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["standard"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "gcc"
+
+CPP = "/usr/bin/cpp"
+FPP = "/usr/bin/cpp"
+CC = "/cosma/local/openmpi/gnu_14.1.0/5.0.3/bin/mpicc"
+CXX = "/cosma/local/openmpi/gnu_14.1.0/5.0.3/bin/mpicxx"
+F90 = "/usr/bin/gfortran"
+
+
+CPPFLAGS = ""
+FPPFLAGS = "-traditional"
+
+CFLAGS = "-g -std=gnu99"
+CXXFLAGS = "-g -std=gnu++17"
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+
+LDFLAGS = "-rdynamic"
+
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "yes"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = ""
+C_DEBUG_FLAGS = ""
+CXX_DEBUG_FLAGS = ""
+
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = ""
+FPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS = "-O3"
+CXX_OPTIMISE_FLAGS = "-O3"
+F90_OPTIMISE_FLAGS = "-O3"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = ""
+CXX_PROFILE_FLAGS = ""
+F77_PROFILE_FLAGS = ""
+F90_PROFILE_FLAGS = ""
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F77_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = "-Wall"
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F77_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+
+GSL_DIR = "/cosma/local/gsl/2.8"
+GSL_INC_DIRS = "/cosma/local/gsl/2.8/include"
+HDF5_DIR = "/cosma/local/hdf5/gnu_14.1.0/1.14.4"
+
+LIBSZ_DIR = "BUILD"
+ZLIB_DIR = "BUILD"
+
+MPI_DIR = "/cosma/local/openmpi/gnu_14.1.0/5.0.3"
+MPI_INC_DIR = "/cosma/local/openmpi/gnu_14.1.0/5.0.3/include"
+
+LAPACK_DIR = "BUILD"
+BLAS_DIR = "BUILD"
+
+PTHREADS_DIR = "NO_BUILD"
+
+BOOST_DIR = "/cosma/local/boost/gnu_14.1.0/1_85_0"

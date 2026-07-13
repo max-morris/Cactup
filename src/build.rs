@@ -1,4 +1,4 @@
-//! The build engine behind `cactup config build` / `test build` (spec §7):
+//! The build engine behind `cactup config build` (spec §7):
 //! optionlist selection + render + flag injection (§7.8), thornlist toggles
 //! (§7.5, D8), env-setup'd `make` driving (§7.2, §6.1), build universes
 //! (§4.8), the rebuild-decision snapshot diff (§7.8), the per-config build
@@ -34,9 +34,6 @@ pub struct ConfigMeta {
     #[serde(default = "default_schema")]
     pub schema: u32,
     pub name: String,
-    /// true iff built via `cactup test build` (§11.1).
-    #[serde(default)]
-    pub test: bool,
     /// Optionlist variant used.
     pub variant: String,
     /// Snapshotted from the optionlist `[cactup]` header at build time (D12).
@@ -227,7 +224,7 @@ pub struct BuildOutcome {
     pub rebuilt: bool,
 }
 
-/// Run `config build` / `test build` for `name` (§7). Returns the stored
+/// Run `config build` for `name` (§7). Returns the stored
 /// metadata. The global DB is never touched here (§2.3); the caller updates
 /// the active-config pointer afterwards.
 pub fn build(
@@ -235,7 +232,6 @@ pub fn build(
     machine: &Machine,
     name: &str,
     opts: &BuildOpts,
-    test_build: bool,
 ) -> Res<BuildOutcome> {
     let cactus_root = installation.cactus_root();
     if !cactus_root.is_dir() {
@@ -243,8 +239,8 @@ pub fn build(
     }
     let config_dir = cactus_root.join("configs").join(name);
 
-    // Selection & inputs (§4.4, §7.8, §11.2).
-    let variant = machine.select_optionlist(opts.variant.as_deref(), test_build)?;
+    // Selection & inputs (§4.4, §7.8).
+    let variant = machine.select_optionlist(opts.variant.as_deref())?;
     let optionlist = Optionlist::load(&machine.optionlist_path(&variant))?;
     let universe_name = resolve_build_universe(
         opts,
@@ -264,26 +260,39 @@ pub fn build(
     };
     let thornlist_text = fs::read_to_string(&thornlist_path)
         .with_context(|| format!("Failed to read thornlist {}", thornlist_path.display()))?;
-    let thornlist_processed = apply_thorn_toggles(
-        &thornlist_text,
-        &machine.meta.build.enabled_thorns,
-        &machine.meta.build.disabled_thorns,
-    );
+    // Machine-level thorn toggles (§7.5) plus this optionlist variant's own
+    // (§7.8): the variant augments the machine, so one machine can carry build
+    // flavors that disable different thorns (e.g. a CUDA variant dropping
+    // thorns that won't compile with nvcc). apply_thorn_toggles checks
+    // `disabled` before `enabled`, so a variant disable wins over a machine
+    // enable of the same thorn.
+    let enabled_thorns: Vec<String> = machine
+        .meta
+        .build
+        .enabled_thorns
+        .iter()
+        .chain(&optionlist.header.enabled_thorns)
+        .cloned()
+        .collect();
+    let disabled_thorns: Vec<String> = machine
+        .meta
+        .build
+        .disabled_thorns
+        .iter()
+        .chain(&optionlist.header.disabled_thorns)
+        .cloned()
+        .collect();
+    let thornlist_processed = apply_thorn_toggles(&thornlist_text, &enabled_thorns, &disabled_thorns);
 
     let stored_meta = ConfigMeta::load(&cactus_root, name)?;
-    if let Some(stored) = &stored_meta {
-        if stored.test != test_build {
-            bail!(
-                "config \"{name}\" exists as a {} config; pick another name",
-                if stored.test { "test" } else { "normal" }
-            );
-        }
-        if stored.variant != variant && opts.variant.is_none() {
-            bail!(
-                "config \"{name}\" was built with variant \"{}\"; pass --variant explicitly to change it",
-                stored.variant
-            );
-        }
+    if let Some(stored) = &stored_meta
+        && stored.variant != variant
+        && opts.variant.is_none()
+    {
+        bail!(
+            "config \"{name}\" was built with variant \"{}\"; pass --variant explicitly to change it",
+            stored.variant
+        );
     }
     let flags = effective_flags(opts, stored_meta.as_ref().map(|m| m.flags));
 
@@ -406,7 +415,6 @@ pub fn build(
     let meta = ConfigMeta {
         schema: SCHEMA,
         name: name.to_owned(),
-        test: test_build,
         variant: variant.clone(),
         gpu: optionlist.header.gpu,
         compatible_queues: optionlist.header.compatible_queues.clone(),
@@ -623,13 +631,13 @@ mod tests {
         let inst = Installation::new("et", root.join("inst"));
         let opts = BuildOpts::default_for_tests();
 
-        let outcome = build(&inst, &machine, "sim", &opts, false).unwrap();
+        let outcome = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(outcome.rebuilt);
         let meta = &outcome.meta;
         assert_eq!(meta.variant, "default");
         assert_eq!(meta.compatible_queues, ["local"]);
         assert_eq!(meta.machine, "fake");
-        assert!(!meta.test && meta.universe.is_none() && meta.coerce_run_universe);
+        assert!(meta.universe.is_none() && meta.coerce_run_universe);
         assert!(meta.flags.optimize && !meta.flags.debug);
 
         // make was driven with -j4 (machine make-jobs), config→build→utils.
@@ -646,7 +654,7 @@ mod tests {
         assert!(rendered.starts_with("VERSION = 1\n") && rendered.contains("OPTIMISE = yes"));
 
         // Second build with nothing changed: up-to-date short-circuit.
-        let again = build(&inst, &machine, "sim", &opts, false).unwrap();
+        let again = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(!again.rebuilt);
         assert_eq!(again.meta.build_id, outcome.meta.build_id);
 
@@ -658,7 +666,7 @@ mod tests {
         )
         .unwrap();
         let machine = mdb.load("fake").unwrap();
-        let rebuilt = build(&inst, &machine, "sim", &opts, false).unwrap();
+        let rebuilt = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(rebuilt.rebuilt);
         assert_ne!(rebuilt.meta.build_id, outcome.meta.build_id);
         assert_eq!(rebuilt.meta.config_id, outcome.meta.config_id);

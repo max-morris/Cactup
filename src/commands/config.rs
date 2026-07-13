@@ -16,7 +16,7 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
     match cmd {
         ConfigCommand::Build(args) => {
             let machine = machine::resolve(ctx)?;
-            let outcome = build::build(&installation, &machine, &args.name, &args.opts, false)?;
+            let outcome = build::build(&installation, &machine, &args.name, &args.opts)?;
             // First build becomes active; later builds keep the pointer (§7.1).
             let locked = installation.locked()?;
             let mut meta = locked.meta()?;
@@ -44,13 +44,8 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
         }
         ConfigCommand::Show { name } => show(&installation, name.as_deref()),
         ConfigCommand::Use { name } => {
-            match ConfigMeta::load(&installation.cactus_root(), &name)? {
-                None => bail!("no config named \"{name}\" in this installation (see `cactup config show`)"),
-                // The two namespaces never interfere (§11.1).
-                Some(meta) if meta.test => {
-                    bail!("\"{name}\" is a test config; use `cactup test use {name}` (§11.1)")
-                }
-                Some(_) => {}
+            if ConfigMeta::load(&installation.cactus_root(), &name)?.is_none() {
+                bail!("no config named \"{name}\" in this installation (see `cactup config show`)");
             }
             let locked = installation.locked()?;
             let mut meta = locked.meta()?;
@@ -64,9 +59,8 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
 }
 
 /// The config names in this installation, oldest-built first, with metadata
-/// when present. `test` filters to one §11.1 namespace: configs without
-/// metadata (half-built) are grouped with the normal kind.
-pub fn list_configs(cactus_root: &Path, test: bool) -> Res<Vec<(String, Option<ConfigMeta>)>> {
+/// when present (half-built configs have none).
+pub fn list_configs(cactus_root: &Path) -> Res<Vec<(String, Option<ConfigMeta>)>> {
     let configs_dir = cactus_root.join("configs");
     let mut out = Vec::new();
     let entries = match fs::read_dir(&configs_dir) {
@@ -80,9 +74,7 @@ pub fn list_configs(cactus_root: &Path, test: bool) -> Res<Vec<(String, Option<C
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let meta = ConfigMeta::load(cactus_root, &name)?;
-        if meta.as_ref().map(|m| m.test).unwrap_or(false) == test {
-            out.push((name, meta));
-        }
+        out.push((name, meta));
     }
     out.sort_by(|(an, a), (bn, b)| {
         let key = |m: &Option<ConfigMeta>| m.as_ref().and_then(|m| m.built);
@@ -95,9 +87,8 @@ fn show(installation: &Installation, name: Option<&str>) -> Res<()> {
     let cactus_root = installation.cactus_root();
 
     let Some(name) = name else {
-        // Port of list-configurations (§7.1); test configs have their own
-        // list under `cactup test show` (§11.1).
-        let configs = list_configs(&cactus_root, false)?;
+        // Port of list-configurations (§7.1).
+        let configs = list_configs(&cactus_root)?;
         if configs.is_empty() {
             println!("{}", "No configs in this installation.".bright_red());
             return Ok(());
@@ -154,11 +145,6 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
     if !config_dir.is_dir() {
         bail!("no config named \"{name}\" in this installation");
     }
-    // The two namespaces never interfere (§11.1).
-    if ConfigMeta::load(&cactus_root, name)?.is_some_and(|m| m.test) {
-        bail!("\"{name}\" is a test config; use `cactup test delete {name}` (§11.1)");
-    }
-
     // §7.1: warn+refuse when simulations were built from this config.
     let registry = installation.simulations()?;
     let dependents: Vec<&str> = registry
@@ -177,6 +163,24 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
         );
     }
 
+    // §11: same for test runs — and unlike sims they hold no frozen exe, so
+    // re-running their testsuite needs the config rebuilt.
+    let tests = installation.tests()?;
+    let test_dependents: Vec<&str> = tests
+        .tests
+        .iter()
+        .filter(|(_, e)| e.config == name)
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if !test_dependents.is_empty() && !force {
+        bail!(
+            "{} test run(s) reference config \"{name}\": {} — their results stay readable, \
+             but re-running them needs the config rebuilt. Pass -f to delete anyway.",
+            test_dependents.len(),
+            test_dependents.join(", ")
+        );
+    }
+
     fs::remove_dir_all(&config_dir)?;
     let exe = build::executable_path(&cactus_root, name);
     if exe.exists() {
@@ -188,7 +192,7 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
     let locked = installation.locked()?;
     let mut meta = locked.meta()?;
     if meta.active_config.as_deref() == Some(name) {
-        let remaining = list_configs(&cactus_root, false)?;
+        let remaining = list_configs(&cactus_root)?;
         meta.active_config = remaining
             .iter()
             .rev() // most-recently-built last in the sorted list
@@ -203,12 +207,16 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
     }
     drop(locked);
 
-    // GC the executable cache under sim-home: dropping the config's exe may
-    // have orphaned its CACHE/exe/<build-id> entry (§8.1). Best-effort — sims
-    // built from it keep their own frozen (hard-linked) exe either way.
+    // GC the executable caches: dropping the config's exe may have orphaned
+    // its CACHE/exe/<build-id> entry under sim-home (§8.1) or test-home
+    // (§11.4). Best-effort — sims built from it keep their own frozen
+    // (hard-linked) exe either way.
     if let Ok(inst_meta) = installation.meta() {
         if let Ok(sim_home) = inst_meta.sim_home() {
             let _ = cache::gc(sim_home, None);
+        }
+        if let Ok(test_home) = inst_meta.test_home() {
+            let _ = cache::gc(test_home, None);
         }
     }
     println!("{}", format!("Deleted config {}.", name.bold()).bright_green());

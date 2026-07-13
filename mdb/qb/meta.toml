@@ -1,0 +1,99 @@
+# QB2 — the large LONI Linux cluster at LSU (PBS/Torque, mvapich2).
+# Ported from simfactory2 mdb/machines/qb.ini.
+#
+# Dropped remote-subsystem key (design D1/D2): rsynccmd.
+
+# last-tested-on: 2021-05-19
+# last-tested-by: Roland Haas <rhaas at illinois.edu>
+
+[machine]
+name        = "QB2"
+nickname    = "qb"
+location    = "LONI, LSU"
+description = "The large LONI Linux cluster"
+webpage     = "http://hpc.loni.org/docs/guides.php?system=Qb2"
+status      = "production"
+hostname    = "qb.loni.org"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir /
+# scratchbasedir.
+install-home    = "/home/@USER@"
+simulation-home = "/scratch/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/scratch/@USER@/tests"
+scratch-home    = "/var/scratch/@USER@"
+
+[hardware]
+max-tasks-per-node             = 20
+memory          = 131072        # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 5
+enabled-thorns = [
+    "CactusExamples/HelloWorldCUDA",
+    "ExternalLibraries/OpenCL",
+    "CactusExamples/HelloWorldOpenCL",
+    "CactusExamples/WaveToyOpenCL",
+    "CactusUtils/OpenCLRunTime",
+    "CactusUtils/Accelerator",
+    "McLachlan/ML_BSSN_CL",
+    "McLachlan/ML_BSSN_CL_Helper",
+    "McLachlan/ML_WaveToy_CL",
+    "ExternalLibraries/pciutils",
+    "ExternalLibraries/PETSc",
+    "CactusElliptic/EllPETSc",
+    "CactusElliptic/TATelliptic",
+    "CactusElliptic/TATPETSc",
+]
+
+[environment]
+# not having either intel or INTEL loads the other as a requirement, though not
+# both should up in module list afterwards (upstream comment)
+env-setup = """
+module purge &&
+module load gcc/9.3.0 &&
+module load intel/19.0.5 &&
+module load mvapich2/2.3.3/intel-19.0.5 &&
+module load cuda/11.0.2 &&
+module load gsl/2.5/gcc-9.3.0 &&
+module load hdf5/1.10.6/intel-19.0.5-mvapich-2.3.3 &&
+module load petsc/3.12.3/intel-19.0.5-mvapich-2.3.3
+"""
+
+[scheduler]
+submit          = "qsub @SCRIPTFILE@"
+interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_TASKS_PER_NODE@ -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
+get-status      = "qstat @JOB_ID@"
+stop            = "qdel @JOB_ID@"
+submit-pattern   = '(\d+)[.]qb.'
+status-pattern   = '^@JOB_ID@[. ]'
+queued-pattern   = ' Q '
+running-pattern  = ' R '
+holding-pattern  = ' H '
+exec-host        = "qstat -f @JOB_ID@"
+exec-host-pattern = 'exec_host = (\w+)/'
+stdout          = "ssh @EXECHOST@ cat /var/spool/torque/spool/@JOB_ID@.qb?.OU"
+stderr          = "ssh @EXECHOST@ cat /var/spool/torque/spool/@JOB_ID@.qb?.ER"
+stdout-follow   = "ssh @EXECHOST@ tail -n 100 -f /var/spool/torque/spool/@JOB_ID@.qb?.OU /var/spool/torque/spool/@JOB_ID@.qb?.ER"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "72:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+# Upstream also listed (commented out) queues: run, run2.
+[queues.checkpt]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["checkpt"], default = true }
+"test"    = { queues = ["checkpt"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["checkpt"], default = true }
+"test"    = { queues = ["checkpt"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

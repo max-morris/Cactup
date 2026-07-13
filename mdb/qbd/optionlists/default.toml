@@ -1,0 +1,173 @@
+# qbd optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/qbd.cfg — regenerated upstream by simfactory-configure.py on
+# 2026-07-07 (native CUDA build: nvcc CUCC/LD, AMREX_ENABLE_CUDA = yes, built
+# against the prebuilt externals under /ddnB/project/sbrandt/externals-qbd).
+# The old Singularity-image build (and its universe) is gone.
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8); every value is kept
+# as a TOML string so the render is faithful to the original.
+
+[cactup]
+gpu               = true
+compatible-queues = ["default"]
+
+[options]
+VERSION = "qbd-2026-07-07"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "/usr/bin/gcc"
+CXX = "/usr/bin/g++"
+F90 = "/usr/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
+
+LIBS    = "stdc++fs gfortran cudart_static curand_static culibos dl rt pthread"
+LIBDIRS = "/home/packages/cuda/12.2.1/jd2fi7s/lib64"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+CUCC  = "nvcc"
+CUCCFLAGS = "--compiler-bindir /usr/bin/g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
+LD = "nvcc --compiler-bindir /usr/bin/g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
+CUCC_DEBUG_FLAGS    = "-g3"
+CUCC_OPTIMISE_FLAGS = "-O3"
+CUCC_WARN_FLAGS     = "-Xcompiler -Wall"
+CUCC_OPENMP_FLAGS   = "-Xcompiler -fopenmp"
+
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+AMREX_ENABLE_CUDA = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+CMAKE_DIR = "/usr"
+
+MPI_DIR      = "/ddnB/project/sbrandt/externals-qbd/install/mpi"
+MPI_INC_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/mpi/include"
+MPI_LIB_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/mpi/lib"
+MPI_LIBS     = "mpi_cxx mpi open-rte open-pal m pciaccess ucp uct ucm ucs osmcomp ibverbs rdmacm dl pmi pmi2 rt util"
+
+HDF5_DIR = "/ddnB/project/sbrandt/externals-qbd/install/hdf5"
+HDF5_INC_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/hdf5/include"
+HDF5_LIB_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/hdf5/lib"
+HDF5_LIBS = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+HDF5_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/hdf5"
+
+FFTW3_DIR     = "/home/packages/compilers/intel/mkl/2022.0.2"
+FFTW3_INC_DIRS = "/home/packages/compilers/intel/mkl/2022.0.2/include/fftw"
+FFTW3_LIB_DIRS = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
+FFTW3_LIBS    = "mkl_intel_lp64 mkl_sequential mkl_core"
+
+BLAS_DIR = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
+BLAS_LIBS = "mkl_intel_lp64 mkl_sequential mkl_core"
+OPENBLAS_DIR = "/home/packages/compilers/intel/mkl/2022.0.2"
+OPENBLAS_LIB_DIRS = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
+OPENBLAS_LIBS = "mkl_intel_lp64 mkl_sequential mkl_core"
+
+LAPACK_DIR      = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
+LAPACK_LIB_DIRS = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
+LAPACK_LIBS     = "mkl_intel_lp64 mkl_sequential mkl_core"
+
+HWLOC_DIR = "/usr/local/packages/hwloc/2.9.1/7ka44tz"
+HWLOC_INC_DIRS = "/usr/local/packages/hwloc/2.9.1/7ka44tz/include"
+HWLOC_LIB_DIRS = "/usr/local/packages/hwloc/2.9.1/7ka44tz/lib"
+HWLOC_LIBS = "hwloc"
+
+# GSL: found in system paths
+
+BOOST_DIR = "/ddnB/project/sbrandt/externals-qbd/install/boost"
+BOOST_INC_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/boost/include"
+BOOST_LIB_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/boost/lib"
+BOOST_LIBS = "boost_atomic boost_filesystem boost_math_c99 boost_math_c99f boost_math_c99l boost_math_tr1 boost_math_tr1f boost_math_tr1l boost_system"
+BOOST_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/boost"
+
+LIBJPEG_DIR         = "/ddnB/project/sbrandt/externals-qbd/install/jpeg"
+LIBJPEG_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/jpeg"
+
+ZLIB_DIR = "/usr"
+ZLIB_LIBS = "z"
+
+SILO_DIR         = "/ddnB/project/sbrandt/externals-qbd/install/silo"
+SILO_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/silo"
+SILO_INC_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/silo/include /ddnB/project/sbrandt/externals-qbd/install/silo/lib"
+SILO_LIB_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/silo/lib"
+SILO_LIBS        = "siloh5"
+
+NSIMD_DIR         = "/ddnB/project/sbrandt/externals-qbd/install/nsimd"
+NSIMD_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/nsimd"
+NSIMD_INC_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/nsimd/include /ddnB/project/sbrandt/externals-qbd/install/nsimd/lib"
+NSIMD_LIB_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/nsimd/lib"
+NSIMD_LIBS        = "nsimd_AVX512_SKYLAKE"
+NSIMD_SIMD        = "AVX512_SKYLAKE"
+
+ADIOS2_DIR         = "/ddnB/project/sbrandt/externals-qbd/install/adios2"
+ADIOS2_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/adios2"
+ADIOS2_INC_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/adios2/include /ddnB/project/sbrandt/externals-qbd/install/adios2/lib"
+ADIOS2_LIB_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/adios2/lib"
+ADIOS2_LIBS        = "adios2_cxx11_mpi adios2_c_mpi adios2_core_mpi adios2_cxx11 adios2_c adios2_core adios2_evpath adios2_atl adios2_enet adios2_ffs adios2_dill"
+
+OPENPMD_DIR         = "/ddnB/project/sbrandt/externals-qbd/install/openpmd"
+OPENPMD_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/openpmd"
+OPENPMD_INC_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/openpmd/lib /ddnB/project/sbrandt/externals-qbd/install/openpmd/include"
+OPENPMD_LIB_DIRS    = "/ddnB/project/sbrandt/externals-qbd/install/openpmd/lib"
+OPENPMD_LIBS        = "openPMD"
+
+AMREX_DIR                      = "/ddnB/project/sbrandt/externals-qbd/install/amrex"
+AMREX_INSTALL_DIR              = "/ddnB/project/sbrandt/externals-qbd/install/amrex"
+AMREX_INC_DIRS                 = "/ddnB/project/sbrandt/externals-qbd/install/amrex/include /ddnB/project/sbrandt/externals-qbd/install/amrex/lib"
+AMREX_LIB_DIRS                 = "/ddnB/project/sbrandt/externals-qbd/install/amrex/lib"
+AMREX_LIBS                     = "amrex"
+AMREX_ENABLE_FORTRAN           = "OFF"
+AMREX_ENABLE_HIP               = "no"
+AMREX_CMAKE_CUDA_ARCHITECTURES = "80"
+
+YAML_CPP_DIR = "/ddnB/project/sbrandt/externals-qbd/install/yaml_cpp"
+YAML_CPP_INC_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/yaml_cpp/include"
+YAML_CPP_LIB_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/yaml_cpp/lib"
+YAML_CPP_LIBS = "yaml-cpp"
+YAML_CPP_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/yaml_cpp"
+YAML_CPP_ENABLE_FORTRAN = "OFF"

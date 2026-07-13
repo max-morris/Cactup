@@ -1,0 +1,158 @@
+# mike optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/mike.cfg — regenerated upstream by simfactory-configure.py on
+# 2026-07-06 (native gcc-11.2.0 build against the prebuilt externals under
+# /ddnA/project/sbrandt/externals-mike; no CUDA).
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8); every value is kept
+# as a TOML string so the render is faithful to the original.
+
+[cactup]
+gpu               = false
+compatible-queues = ["single"]
+
+[options]
+VERSION = "mike-2026-07-06"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "/usr/local/packages/compilers/gcc/11.2.0/bmraeta/bin/gcc"
+CXX = "/usr/local/packages/compilers/gcc/11.2.0/bmraeta/bin/g++"
+F90 = "/usr/local/packages/compilers/gcc/11.2.0/bmraeta/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
+
+LIBS    = "gfortran"
+LIBDIRS = "/home/packages/compilers/gcc/11.2.0/bmraeta/bin/../lib/gcc/x86_64-pc-linux-gnu/11.2.0/../../../../lib64"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+# CUCC = nvcc  # uncomment and configure for CUDA
+AMREX_ENABLE_CUDA = "no"
+
+PTHREADS_DIR = "NO_BUILD"
+
+CMAKE_DIR = "/usr"
+
+MPI_DIR      = "/ddnA/project/sbrandt/externals-mike/install/mpi"
+MPI_INC_DIRS = "/ddnA/project/sbrandt/externals-mike/install/mpi/include"
+MPI_LIB_DIRS = "/ddnA/project/sbrandt/externals-mike/install/mpi/lib"
+MPI_LIBS     = "mpi_cxx mpi open-rte open-pal m pciaccess ucp uct ucm ucs osmcomp ibverbs rdmacm dl pmi pmi2 rt util"
+
+HDF5_DIR = "/ddnA/project/sbrandt/externals-mike/install/hdf5"
+HDF5_INC_DIRS = "/ddnA/project/sbrandt/externals-mike/install/hdf5/include"
+HDF5_LIB_DIRS = "/ddnA/project/sbrandt/externals-mike/install/hdf5/lib"
+HDF5_LIBS = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+HDF5_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/hdf5"
+
+# FFTW3: found in system paths
+FFTW3_LIBS = "fftw3"
+
+BLAS_DIR = "BUILD"
+OPENBLAS_DIR = "NO_BUILD"
+
+LAPACK_DIR         = "/ddnA/project/sbrandt/externals-mike/install/lapack"
+LAPACK_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/lapack"
+LAPACK_LIB_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/lapack/lib"
+LAPACK_LIBS        = "lapack"
+
+HWLOC_DIR = "/ddnA/project/sbrandt/externals-mike/install/hwloc"
+HWLOC_INC_DIRS = "/ddnA/project/sbrandt/externals-mike/install/hwloc/include"
+HWLOC_LIB_DIRS = "/ddnA/project/sbrandt/externals-mike/install/hwloc/lib"
+HWLOC_LIBS = "hwloc pciaccess"
+
+# GSL: found in system paths
+
+BOOST_DIR = "/ddnA/project/sbrandt/externals-mike/install/boost"
+BOOST_INC_DIRS = "/ddnA/project/sbrandt/externals-mike/install/boost/include"
+BOOST_LIB_DIRS = "/ddnA/project/sbrandt/externals-mike/install/boost/lib"
+BOOST_LIBS = "boost_atomic boost_filesystem boost_math_c99 boost_math_c99f boost_math_c99l boost_math_tr1 boost_math_tr1f boost_math_tr1l boost_system"
+BOOST_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/boost"
+
+LIBJPEG_DIR         = "/ddnA/project/sbrandt/externals-mike/install/jpeg"
+LIBJPEG_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/jpeg"
+
+ZLIB_DIR = "/usr"
+ZLIB_LIBS = "z"
+
+SILO_DIR         = "/ddnA/project/sbrandt/externals-mike/install/silo"
+SILO_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/silo"
+SILO_INC_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/silo/include /ddnA/project/sbrandt/externals-mike/install/silo/lib"
+SILO_LIB_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/silo/lib"
+SILO_LIBS        = "siloh5"
+
+NSIMD_DIR         = "/ddnA/project/sbrandt/externals-mike/install/nsimd"
+NSIMD_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/nsimd"
+NSIMD_INC_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/nsimd/include /ddnA/project/sbrandt/externals-mike/install/nsimd/lib"
+NSIMD_LIB_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/nsimd/lib"
+NSIMD_LIBS        = "nsimd_AVX512_SKYLAKE"
+NSIMD_SIMD        = "AVX512_SKYLAKE"
+
+ADIOS2_DIR         = "/ddnA/project/sbrandt/externals-mike/install/adios2"
+ADIOS2_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/adios2"
+ADIOS2_INC_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/adios2/include /ddnA/project/sbrandt/externals-mike/install/adios2/lib"
+ADIOS2_LIB_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/adios2/lib"
+ADIOS2_LIBS        = "adios2_cxx11_mpi adios2_c_mpi adios2_core_mpi adios2_cxx11 adios2_c adios2_core adios2_evpath adios2_atl adios2_enet adios2_ffs adios2_dill"
+
+OPENPMD_DIR         = "/ddnA/project/sbrandt/externals-mike/install/openpmd"
+OPENPMD_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/openpmd"
+OPENPMD_INC_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/openpmd/lib /ddnA/project/sbrandt/externals-mike/install/openpmd/include"
+OPENPMD_LIB_DIRS    = "/ddnA/project/sbrandt/externals-mike/install/openpmd/lib"
+OPENPMD_LIBS        = "openPMD"
+
+AMREX_DIR                      = "/ddnA/project/sbrandt/externals-mike/install/amrex"
+AMREX_INSTALL_DIR              = "/ddnA/project/sbrandt/externals-mike/install/amrex"
+AMREX_INC_DIRS                 = "/ddnA/project/sbrandt/externals-mike/install/amrex/include /ddnA/project/sbrandt/externals-mike/install/amrex/lib"
+AMREX_LIB_DIRS                 = "/ddnA/project/sbrandt/externals-mike/install/amrex/lib"
+AMREX_LIBS                     = "amrex"
+AMREX_ENABLE_FORTRAN           = "OFF"
+AMREX_ENABLE_HIP               = "no"
+AMREX_CMAKE_CUDA_ARCHITECTURES = "OFF"
+
+YAML_CPP_DIR = "/ddnA/project/sbrandt/externals-mike/install/yaml_cpp"
+YAML_CPP_INC_DIRS = "/ddnA/project/sbrandt/externals-mike/install/yaml_cpp/include"
+YAML_CPP_LIB_DIRS = "/ddnA/project/sbrandt/externals-mike/install/yaml_cpp/lib"
+YAML_CPP_LIBS = "yaml-cpp"
+YAML_CPP_INSTALL_DIR = "/ddnA/project/sbrandt/externals-mike/install/yaml_cpp"
+YAML_CPP_ENABLE_FORTRAN = "OFF"
