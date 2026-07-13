@@ -328,11 +328,13 @@ pub fn build(
     vars.set("USER", std::env::var("USER").unwrap_or_default());
     vars.set("SOURCEDIR", cactus_root.display().to_string());
     vars.set("CONFIGURATION", name);
-    if let Some(scratch) = &machine.meta.paths.scratch_home {
-        vars.set("SCRATCH_HOME", scratch.as_str());
-    } else {
-        vars.set("SCRATCH_HOME", "");
-    }
+    // Resolve @USER@/@ENV()@ in scratch-home (§4.2) — the raw template would
+    // otherwise leak `@USER@` literally, since substitution is single-pass and
+    // never re-scans a spliced value. Matches the sim path (sim/vars.rs).
+    vars.set(
+        "SCRATCH_HOME",
+        machine.meta.resolved_paths()?.scratch_home.unwrap_or_default(),
+    );
     // Several machines' make commands / build universes reference
     // @ALLOCATION@ (e.g. mike's and Deep Bayou's `srun … singularity exec`
     // build wrappers); bind it from the allocation knob the way the sim path

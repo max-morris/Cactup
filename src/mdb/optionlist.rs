@@ -247,7 +247,7 @@ mod tests {
         assert_eq!(default.header.compatible_queues, ["local"]);
         assert!(default.render().starts_with("VERSION = 2018-12-13\n"));
 
-        let test = load_header(&root.join("test.toml")).unwrap();
-        assert!(!test.default, "mel5 test.toml needs an explicit --variant");
+        let debug = load_header(&root.join("debug.toml")).unwrap();
+        assert!(!debug.default, "mel5 debug.toml needs an explicit --variant");
     }
 }

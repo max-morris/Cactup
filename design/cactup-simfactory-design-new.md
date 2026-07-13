@@ -727,7 +727,7 @@ mdb/
                                  #   test-home under [paths] (§11.5)
     discover.py                  # is_machine(): FQDN == melete05.cct.lsu.edu
     optionlists/default.toml     # ported from mel5.cfg; [cactup] gpu=false + [options]
-    optionlists/test.toml        # DEBUG optionlist; reached with config build --variant test (§4.4)
+    optionlists/debug.toml       # DEBUG optionlist; reached with config build --variant debug (§4.4)
     runscripts/default.sh        # @NUM_PROCS@→@TASKS@, @NUM_THREADS@→@CPUS_PER_TASK@
     runscripts/test.sh           # test=true; drives make <config>-testsuite → test-home (§11.6)
     submitscripts/default.sh     # @SIMFACTORY@→@CACTUP@, +--installation, PID-wait chaining
@@ -2209,9 +2209,9 @@ layout (§7.2), the make flow, the optionlist render (§7.8), and the metadata
 If you want the testsuite to run against a DEBUG binary (assertions / bounds
 checking, to surface errors the tests exist to catch), build the config with a
 DEBUG optionlist variant: `cactup config build <name> --variant <debug>` (§4.4).
-mel5, for example, ships `default` (OPTIMISE, the implicit pick) and `test`
-(DEBUG + OPTIMISE); the latter is now just a normal variant reached with
-`--variant test`.
+mel5, for example, ships `default` (OPTIMISE, the implicit pick) and `debug`
+(DEBUG + OPTIMISE); the latter is just a normal variant reached with
+`--variant debug`.
 
 Deleting a config that test runs reference: `config delete` (§7.1) warns and
 refuses without `-f` when registered test runs point at it — unlike simulations

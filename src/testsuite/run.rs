@@ -103,7 +103,9 @@ fn assemble_test_vars(
     v.set("EXECUTABLE", build::executable_path(cactus_root, &cfg.name).display().to_string());
     v.set("CONFIGURATION", cfg.name.as_str());
     v.set("SCRIPTFILE", run_dir.join("submit-script").display().to_string());
-    v.set("SCRATCH_HOME", machine.meta.paths.scratch_home.clone().unwrap_or_default());
+    // Resolve @USER@/@ENV()@ (§4.2); the raw template would leak `@USER@`
+    // literally (single-pass substitution). Matches the sim path.
+    v.set("SCRATCH_HOME", machine.meta.resolved_paths()?.scratch_home.unwrap_or_default());
     v.set("ALIAS", alias);
     let cactup = std::env::current_exe()
         .map(|p| p.display().to_string())

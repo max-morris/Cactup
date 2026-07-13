@@ -409,7 +409,7 @@ mod tests {
         // Optionlist selection (§4.4): with two variants, the default-marked
         // one wins implicitly and the other stays reachable via --variant.
         assert_eq!(mel5.select_optionlist(None).unwrap(), "default");
-        assert_eq!(mel5.select_optionlist(Some("test")).unwrap(), "test");
+        assert_eq!(mel5.select_optionlist(Some("debug")).unwrap(), "debug");
         // Script selection honors the test partition.
         let rs = mel5.meta.script_variants(ScriptKind::Run);
         assert_eq!(rs.select("local", false, None).unwrap().0, "default");

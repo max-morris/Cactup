@@ -37,9 +37,6 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
 
     let release_default = tags.first().unwrap().short_name.clone();
-    let install_prefix_default = |alias: &str|
-        p2s(cactup_root.join("cacti")
-                       .join(alias));
     let symlink_prefix_default = base_dirs.home_dir();
     let symlink_name_default = "Cactus";
 
@@ -94,6 +91,25 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
     };
 
+    // §4.7: an unrecognized host gets a machine persisted into the user MDB
+    // right here — the successor to simfactory's `sim setup-silent`. Resolved
+    // now (rather than after the prompts below) so the install-location default
+    // can honor this machine's [paths].install-home.
+    let machine = machine::ensure_local_machine(ctx)?;
+
+    // The install-location default honors the machine's [paths].install-home
+    // (§4.2) — @USER@/@ENV()@ resolved for this host — falling back to
+    // ~/.cactup/cacti when the machine omits it. Installs land under
+    // <install-home>/<alias>.
+    let install_home_base = machine
+        .meta
+        .resolved_paths()
+        .ok()
+        .and_then(|paths| paths.install_home)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cactup_root.join("cacti"));
+    let install_prefix_default = |alias: &str| p2s(install_home_base.join(alias));
+
     let install_prefix = match install_prefix {
         Some(install_prefix) => install_prefix,
         None if silent => install_prefix_default(&alias)?,
@@ -129,10 +145,6 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         },
         false => "".to_owned()
     };
-
-    // §4.7: an unrecognized host gets a machine persisted into the user MDB
-    // right here — the successor to simfactory's `sim setup-silent`.
-    let machine = machine::ensure_local_machine(ctx)?;
 
     // We can seed the user knob from the machine's user in basically any case.
     {
