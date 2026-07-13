@@ -1,8 +1,8 @@
-# mel5 optionlist (variant "test") — the DEBUG build.
+# mel5 optionlist (variant "debug") — the DEBUG build.
 #
 # mel5 ships two optionlists: "default" (the implicit choice, marked
 # `default = true`) and this one. Pick it explicitly with
-# `cactup config build --variant test` — e.g. to run the testsuite against a
+# `cactup config build --variant debug` — e.g. to run the testsuite against a
 # DEBUG binary (§4.4).
 #
 # Why a separate optionlist: it enables DEBUG (assertions / bounds checking) to

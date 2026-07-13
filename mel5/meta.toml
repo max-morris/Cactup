@@ -84,9 +84,9 @@ default      = true
 "default" = { queues = ["local"], default = true }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test run`
 
-# Two optionlists: the normal "default" and the testsuite "test" (whose
-# test.toml carries [cactup].test = true). They are respective defaults —
-# `config build` picks "default", `test build` picks "test" — neither needing
-# --variant, since each partition has exactly one candidate (design §11.2).
+# Two optionlists: the normal "default" (marked [cactup].default = true, the
+# implicit pick) and "debug" (DEBUG on). A bare `config build` uses "default";
+# `config build --variant debug` builds the DEBUG binary — e.g. to run the
+# testsuite against it (design §4.4).
 [variants.optionlist]
-variants = ["default", "test"]
+variants = ["default", "debug"]
