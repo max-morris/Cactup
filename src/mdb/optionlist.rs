@@ -27,6 +27,9 @@ pub struct OptionlistHeader {
     /// variants (§4.4), mirroring the script variants' `default = true`.
     #[serde(default)]
     pub default: bool,
+    /// Free-form, informational description of this variant. Purely
+    /// documentary — never emitted to the native file.
+    pub description: Option<String>,
     /// Build this variant inside this universe (§4.8 step 3).
     pub universe: Option<String>,
     /// Sims of this config default to running in `universe` too (§4.8 step 2);

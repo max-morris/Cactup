@@ -99,7 +99,7 @@ pub fn resolve_topology(
         tpn,
         cpus,
         gpu,
-        scheduler_queue: queue_def.name.clone().unwrap_or_else(|| queue.clone()),
+        scheduler_queue: machine.meta.scheduler_queue_name(&queue)?.to_owned(),
         queue,
         allocation: flags.allocation.clone().or_else(|| db.knob("allocation").map(str::to_owned)),
         mail: flags.mail.clone().or_else(|| db.knob("mail").map(str::to_owned)),
