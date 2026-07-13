@@ -15,8 +15,72 @@ pub use optionlist::Optionlist;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
+use include_dir::{include_dir, Dir};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The built-in `generic` machine, embedded in the binary so it is always
+/// available — even in a release build before the system MDB (`~/.cactup/mdb`)
+/// has been deployed. It is the zero-match fallback for unrecognized hosts and
+/// the base template for `cactup machine create` (§4.3/§4.6/§4.7), so it must
+/// never be able to go missing. Debug builds read the on-disk copy from the
+/// repo `mdb/` and never touch this.
+static GENERIC_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/mdb/generic");
+
+/// Materialize the embedded `generic` to `~/.cactup/mdb-builtin/<version>/generic`
+/// (once per process) and return its path, or `None` if extraction fails. It is
+/// written to disk rather than served from memory because the rest of the MDB
+/// machinery — running `discover.py`, `copy_dir` in `machine create` — expects a
+/// real directory. The path is version-scoped so a binary upgrade re-extracts.
+fn builtin_generic_dir() -> Option<PathBuf> {
+    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| match extract_builtin_generic() {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    format!("Warning: failed to materialize the built-in generic machine: {e:#}")
+                        .yellow()
+                );
+                None
+            }
+        })
+        .clone()
+}
+
+fn extract_builtin_generic() -> Res<PathBuf> {
+    let dir = crate::CACTUP_ROOT
+        .join("mdb-builtin")
+        .join(crate::VERSION)
+        .join("generic");
+    // Extract only when absent: identical embedded contents, so a leftover copy
+    // from an earlier run of this version is already correct.
+    if !dir.join("meta.toml").is_file() {
+        extract_embedded_dir(&GENERIC_DIR, &dir)?;
+    }
+    Ok(dir)
+}
+
+/// Recursively write an embedded `include_dir` tree to `dest`. Uses only the
+/// stable `files`/`dirs`/`contents` API, reconstructing the tree from each
+/// entry's file name (paths are relative to the embed root).
+fn extract_embedded_dir(dir: &Dir, dest: &Path) -> Res<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("Failed to create {}", dest.display()))?;
+    for file in dir.files() {
+        let name = file.path().file_name().expect("embedded file has a name");
+        let path = dest.join(name);
+        std::fs::write(&path, file.contents())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    for sub in dir.dirs() {
+        let name = sub.path().file_name().expect("embedded dir has a name");
+        extract_embedded_dir(sub, &dest.join(name))?;
+    }
+    Ok(())
+}
 
 /// Which MDB layer a machine resolved from (§4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +138,12 @@ impl Mdb {
                 out.insert(name, layer); // User is scanned second and wins
             }
         }
+        // The embedded built-in `generic` is always enumerable, even when the
+        // system MDB is not on disk. Guarded by `machine_dir` so a failed
+        // extraction never lists a machine that cannot then be loaded.
+        if !out.contains_key("generic") && self.machine_dir("generic").is_some() {
+            out.insert("generic".to_owned(), Layer::System);
+        }
         Ok(out)
     }
 
@@ -84,6 +154,12 @@ impl Mdb {
             if dir.join("meta.toml").is_file() {
                 return Some((dir, layer));
             }
+        }
+        // Fall back to the embedded built-in `generic` when it is absent from
+        // both real layers (a release build before the system MDB is deployed).
+        // Debug builds find it in `system_root` (the repo `mdb/`) above.
+        if name == "generic" {
+            return builtin_generic_dir().map(|dir| (dir, Layer::System));
         }
         None
     }
@@ -449,8 +525,11 @@ mod tests {
 
         let mdb = Mdb::with_roots(system.path().to_owned(), user.path().to_owned());
         let machines = mdb.machines().unwrap();
-        assert_eq!(machines.keys().cloned().collect::<Vec<_>>(), ["box", "solo"]);
+        // `generic` is always present via the embedded built-in fallback, even
+        // though neither temp root defines it.
+        assert_eq!(machines.keys().cloned().collect::<Vec<_>>(), ["box", "generic", "solo"]);
         assert_eq!(machines["box"], Layer::User);
+        assert_eq!(machines["generic"], Layer::System);
         assert_eq!(machines["solo"], Layer::System);
 
         let loaded = mdb.load("box").unwrap();
