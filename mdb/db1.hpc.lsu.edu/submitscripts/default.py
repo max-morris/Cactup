@@ -20,7 +20,6 @@
 #   mail directives guarded by `if EMAIL:` (the old script emitted them always)
 #   @SIMFACTORY@ run --basedir=… -> @CACTUP@ sim run --installation/--sim-dir/
 #     --machine (the compute-node re-invocation locator)
-# The GPU directive (--gpus-per-task 1) is kept verbatim.
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}".format(ALLOCATION))
@@ -29,6 +28,7 @@ lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
 lines.append("#SBATCH --gpus-per-task 1")
+lines.append("#SBATCH --gres=gpu:{0}".format(NODES * TASKS))
 if CHAINED_JOB_ID:
     lines.append("#SBATCH -d afterany:{0}".format(CHAINED_JOB_ID))
 lines.append("#SBATCH -J {0}".format(SHORT_SIMULATION_NAME))
