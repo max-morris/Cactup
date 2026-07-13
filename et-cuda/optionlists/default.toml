@@ -1,0 +1,128 @@
+# et-cuda optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/db-sing-nv.cfg — "Option list for the Einstein Toolkit".
+#
+# The "weird" options here should probably be made the default in the
+# ET instead of being set here.
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8); every value is kept
+# as a TOML string so the render is byte-identical to the original (only
+# insignificant trailing whitespace on CUCCFLAGS/ADIOS2_LIBS was dropped).
+
+[cactup]
+# CUDA build (nvcc CUCC/LD, AMREX_ENABLE_CUDA = yes).
+gpu               = true
+compatible-queues = ["gpu2"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "db-gpu-2023-26-28"
+
+CPP  = "/usr/bin/cpp"
+FPP  = "/usr/bin/cpp"
+CC   = "/usr/bin/gcc"
+CXX  = "/usr/bin/g++"
+CUCC = "/usr/cactus/cuda/bin/nvcc --compiler-bindir /usr/bin/g++"
+FC   = "/usr/bin/gfortran"
+F90  = "/usr/bin/gfortran"
+LD   = "/usr/cactus/cuda/bin/nvcc --compiler-bindir /usr/bin/g++ --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
+
+AMREX_ENABLE_CUDA = "yes"
+
+# - We use "--relocatable-device-code=true" to allow building with
+#   debug versions of AMReX
+#   <https://github.com/AMReX-Codes/amrex/issues/1829>
+# - We use "--objdir-as-tempdir" to prevent errors such as
+#   Call parameter type does not match function signature!
+#     %tmp = load double, double* %x.addr, align 8, !dbg !1483
+#     float  %1 = call i32 @__isnanf(double %tmp), !dbg !1483
+CPPFLAGS  = "-DSIMD_CPU"
+CFLAGS    = "-pipe -g -march=native"
+CUCCFLAGS = "-forward-unknown-to-host-compiler -std=c++17 --expt-relaxed-constexpr --extended-lambda -x cu --relocatable-device-code=true -Xcudafe --diag_suppress=20012 --keep --ptxas-options=-v"
+CXXFLAGS  = "-std=c++17 -I/usr/include/c++/10"
+FPPFLAGS  = "-traditional"
+F90FLAGS  = "-pipe -g -march=native -fcray-pointer -ffixed-line-length-none"
+LDFLAGS   = "-Wl,-rpath,/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/targets/x86_64-linux/lib -Wl,-rpath,/usr/local/lib -Wl,-rpath,/usr/local/nvidia/lib64"
+LIBS      = "gfortran"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-fbounds-check -fsanitize=undefined -fstack-protector-all -ftrapv"
+CXX_DEBUG_FLAGS = "-fbounds-check -fsanitize=undefined -fstack-protector-all -ftrapv -lineinfo"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+F90_DEBUG_FLAGS = "-fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan -fsanitize=undefined -fstack-protector-all -ftrapv"
+
+OPTIMISE           = "yes"
+C_OPTIMISE_FLAGS   = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+CXX_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+F90_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+WARN = "yes"
+
+# /usr does not support these
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+VECTORISE = "no"
+
+ADIOS2_DIR   = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+ADIOS2_LIBS  = "adios2_core adios2_c adios2_cxx adios2_fortran adios2_core_mpi adios2_fortran_mpi adios2_cxx_mpi"
+AMREX_DIR    = "/usr/cactus/spack-root/var/spack/environments/amrex/.spack-env/view/."
+ASDF_CXX_DIR = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+#BOOST_DIR = /usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/.
+FFTW3_DIR = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+GSL_DIR   = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+PAPI_DIR  = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+HDF5_DIR            = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+HDF5_ENABLE_CXX     = "yes"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_INC_DIRS       = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/include"
+HDF5_LIB_DIRS       = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/lib"
+HDF5_LIBS           = "hdf5_hl_cpp hdf5_cpp hdf5_hl_f90cstub hdf5_f90cstub hdf5_hl_fortran hdf5_fortran hdf5_hl hdf5"
+# (the original .cfg repeated HDF5_ENABLE_CXX = yes; deduplicated here — TOML
+#  forbids duplicate keys and the value is identical.)
+HPX_DIR         = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+BLAS_DIR        = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+LAPACK_DIR      = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+LAPACK_LIB_DIRS = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/lib"
+LAPACK_LIBS     = "lapack"
+HWLOC_DIR       = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+JEMALLOC_DIR    = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+#LORENE_DIR = /usr/cactus/spack-root/var/spack/environments/cpu/.spack-env/view
+#LORENE_INC_DIRS = /usr/cactus/spack-root/var/spack/environments/cpu/.spack-env/view/include
+#LORENE_LIB_DIRS = /usr/cactus/spack-root/var/spack/environments/cpu/.spack-env/view/lib
+MPI_DIR      = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+MPI_INC_DIRS = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/include"
+MPI_LIB_DIRS = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/lib"
+MPI_LIBS     = "mpi"
+NSIMD_DIR      = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+NSIMD_INC_DIRS = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/include"
+NSIMD_LIB_DIRS = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/lib"
+NSIMD_ARCH     = "AVX2"
+NSIMD_SIMD     = "AVX2"
+OPENBLAS_DIR    = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+OPENPMD_API_DIR = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+OPENPMD_DIR     = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+OPENSSL_DIR     = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+#PETSC_DIR = /usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/.
+#PETSC_ARCH_LIBS = m
+PTHREADS_DIR = "NO_BUILD"
+#REPRIMAND_DIR = /usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/.
+#REPRIMAND_LIBS = RePrimAnd
+RNPLETAL_DIR = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+SILO_DIR     = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+SSHT_DIR     = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+YAML_CPP_DIR = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."
+ZLIB_DIR     = "/usr/cactus/spack-root/var/spack/environments/gpu/.spack-env/view/."

@@ -1,0 +1,101 @@
+# golub optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/golub.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["secondary"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "golub-2024-10-29"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "gcc"
+CXX = "g++"
+F90 = "gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS = "-march=core-avx2 -m128bit-long-double -std=c99 -fomit-frame-pointer"
+CPPFLAGS = "-D_GNU_SOURCE"
+CXXFLAGS = "-march=core-avx2 -m128bit-long-double -std=c++17 -fomit-frame-pointer"
+F90FLAGS = "-march=core-avx2 -m128bit-long-double -fcray-pointer -ffixed-line-length-none -fno-range-check -fomit-frame-pointer"
+
+LDFLAGS = "-rdynamic"
+
+BEGIN_WHOLE_ARCHIVE_FLAGS = "-Wl,--whole-archive"
+END_WHOLE_ARCHIVE_FLAGS = "-Wl,--no-whole-archive"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-g -DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-g -DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-g -ftrapv -fstack-protector-all -fbounds-check"
+CXX_DEBUG_FLAGS = "-g -ftrapv -fstack-protector-all -fbounds-check"
+CUCC_DEBUG_FLAGS = ""
+F90_DEBUG_FLAGS = "-g -ftrapv -fstack-protector-all -fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O3"
+CXX_OPTIMISE_FLAGS = "-O3"
+F90_OPTIMISE_FLAGS = "-O3"
+
+C_NO_OPTIMISE_FLAGS = "-O0"
+CXX_NO_OPTIMISE_FLAGS = "-O0"
+CUCC_NO_OPTIMISE_FLAGS = ""
+F90_NO_OPTIMISE_FLAGS = "-O0"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-p"
+CXX_PROFILE_FLAGS = "-p"
+F90_PROFILE_FLAGS = "-p"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = "-Wall"
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+
+BLAS_DIR = "/usr/local/modulefiles/openblas/0.3.7/lib"
+BLAS_LIB = "openblas"
+
+FFTW3_DIR = "/usr/local/fftw/3.3.8/gcc-7.2.0/mvapich2-2.3"
+
+GSL_DIR = "/usr/local/src/gsl/2.5"
+
+# build hdf5 since login node and compute node versions are different so it
+# cannot be used
+HDF5_DIR = "BUILD"
+
+HWLOC_DIR = "/usr/local/hwloc/1.7.2"
+
+LAPACK_DIR = "/usr/local/modulefiles/openblas/0.3.7/lib"
+# (BLAS_LIB = openblas repeated in the original .cfg; deduplicated — TOML
+#  forbids duplicate keys and the value is identical.)
+
+MPI_DIR = "NO_BUILD"
+
+# needed since module does not set LIBRARY_PATH so linking fails otherwise
+PAPI_DIR = "/usr/local/papi/5.6.0"
+
+PTHREADS_DIR = "NO_BUILD"

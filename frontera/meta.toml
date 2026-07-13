@@ -1,0 +1,94 @@
+# Frontera — very large GNU/Linux cluster at TACC (SLURM, ibrun launcher).
+# Ported from simfactory2 mdb/machines/frontera.ini.
+#
+# The old entry spelled TACC's per-user directory hash as a literal `<hash>`
+# placeholder (e.g. /home1/01234/username) every user had to override by
+# hand; [paths] now reads the hashed roots from the machine environment via
+# @ENV()@ (§6.1) instead.
+
+# last-tested-on: 2021-04-06
+# last-tested-by: Roland Haas
+
+[machine]
+name        = "Frontera"
+nickname    = "frontera"
+location    = "TACC"
+description = "A very very large GNU/Linux cluster at TACC"
+webpage     = "https://portal.tacc.utexas.edu/user-guides/frontera"
+status      = "production"
+hostname    = "frontera.tacc.utexas.edu"
+
+[paths]
+# Resolved at use time on the machine itself: $HOME = /home1/<hash>/$USER and
+# $SCRATCH = /scratch1/<hash>/$USER at TACC — both already include the user
+# component, so no @USER@ segment. Old keys: sourcebasedir / basedir.
+install-home    = "@ENV(HOME)@/frontera"
+simulation-home = "@ENV(SCRATCH)@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "@ENV(SCRATCH)@/tests"
+
+[hardware]
+max-tasks-per-node             = 56
+memory          = 196608        # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 4
+# The old ini's enabled-thorns / disabled-thorns blocks were empty.
+
+[environment]
+env-setup = """
+module unload boost || true
+module unload petsc || true
+module unload gsl || true
+module unload hdf5 || true
+module unload phdf5 || true
+module unload papi || true
+module unload impi || true
+module unload intel || true
+module unload hwloc || true
+module unload python3 || true
+module load intel/23.1.0 &&
+module load impi/21.9.0 &&
+module load gsl/2.7.1 &&
+module load phdf5/1.14.4 &&
+module load boost/1.86.0 &&
+module load petsc/3.22 &&
+module load papi/5.7.0 &&
+module load hwloc/1.11.13 &&
+module load cmake/3.24.2
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 5"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+max-queue-slots  = 25           # there are 50, but jobs can take 2 slots
+# Machine-level fallback ceiling (design §4.2). Upstream note: development
+# has 2:0:0.
+max-walltime    = "48:00:00"
+
+[queues.normal]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["normal"], default = true }
+"test"    = { queues = ["normal"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["normal"], default = true }
+"test"    = { queues = ["normal"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

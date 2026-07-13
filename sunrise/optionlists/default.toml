@@ -1,0 +1,112 @@
+# Sunrise optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/sunrise-gnu.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["rossw"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "sunrise-2021-11-18"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "/cfs/home/pedi5492/GNU/gcc-13.2.0/bin/gcc"
+CXX = "/cfs/home/pedi5492/GNU/gcc-13.2.0/bin/g++"
+F90 = "/cfs/home/pedi5492/GNU/gcc-13.2.0/bin/gfortran"
+
+CPPFLAGS = "-DMPICH_IGNORE_CXX_SEEK"
+FPPFLAGS = "-traditional"
+
+CFLAGS = "-g"
+CXXFLAGS = "-std=gnu++17"
+F90FLAGS = "-pipe -g -fcray-pointer -ffixed-line-length-none"
+
+# do not export symbols from hwloc so that it is not used by libmpich
+LDFLAGS = ""
+LIBDIRS = ""
+LIBS = "gfortran"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+
+# -check-uninit fails for asm output operands
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-O0 # -check-uninit"
+CXX_DEBUG_FLAGS = "-O0 # -check-uninit"
+F90_DEBUG_FLAGS = "-O0 -check bounds -check format # -check all"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+CXX_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+F90_OPTIMISE_FLAGS = "-O3 -fcx-limited-range -fexcess-precision=fast -fno-math-errno -fno-rounding-math -fno-signaling-nans -funsafe-math-optimizations"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "yes"
+CPP_WARN_FLAGS = ""
+FPP_WARN_FLAGS = ""
+C_WARN_FLAGS = ""
+CXX_WARN_FLAGS = ""
+F90_WARN_FLAGS = ""
+
+ADIOS2_DIR = "BUILD"
+AMREX_DIR = "BUILD"
+ASDF_CXX = "BUILD"
+BOOST_DIR = "BUILD"
+FFTW3_DIR = "BUILD"
+#GSL_DIR = /opt/ohpc/pub/libs/gnu8/gsl/2.6
+GSL_DIR = "BUILD"
+PAPI_DIR = "BUILD"
+#HDF5_DIR = BUILD
+HDF5_DIR = "/cfs/home/pedi5492/HDF5/hdf5-1.14.2"
+HDF5_INC_DIRS = "/cfs/home/pedi5492/HDF5/hdf5-1.14.2/include"
+HDF5_LIB_DIRS = "/cfs/home/pedi5492/HDF5/hdf5-1.14.2/lib"
+HDF5_LIBS = "hdf5_hl_cpp hdf5_cpp hdf5_hl_fortran hdf5_fortran hdf5_hl hdf5"
+HDF5_ENABLE_CXX = "yes"
+HDF5_ENABLE_FORTRAN = "yes"
+BLAS_DIR = "BUILD"
+LAPACK_DIR = "BUILD"
+HWLOC_DIR = "BUILD"
+#HWLOC_DIR = /opt/ohpc/pub/libs/hwloc/2.1.0
+JEMALLOC_DIR = "BUILD"
+#MPI_DIR      = BUILD
+MPI_DIR = "/cfs/home/pedi5492/OpenMPI/openmpi-4.1.5"
+MPI_INC_DIRS = "/cfs/home/pedi5492/OpenMPI/openmpi-4.1.5/include"
+MPI_LIB_DIRS = "/cfs/home/pedi5492/OpenMPI/openmpi-4.1.5/lib"
+# list hwloc here before mpich so that out own, self-build hwloc gets used and
+# not the one embedded in libmpich
+MPI_LIBS = "hwloc mpi_cxx mpi"
+NSIMD_DIR = "BUILD"
+OPENBLAS_DIR = "BUILD"
+OPENPMD_API_DIR = "BUILD"
+OPENPMD_DIR = "BUILD"
+OPENSSL_DIR = "BUILD"
+RNPLETAL_DIR = "BUILD"
+SILO_DIR = "BUILD"
+YAML_CPP_DIR = "BUILD"
+ZLIB_DIR = "BUILD"
+
+
+PTHREADS_DIR = "NO_BUILD"

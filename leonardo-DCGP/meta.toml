@@ -1,0 +1,127 @@
+# LEONARDO DCGP — the data-centric general-purpose (CPU) partition of the
+# Italian Tier-1 system at CINECA (SLURM; Sapphire Rapids blades).
+# Ported from simfactory2 mdb/machines/leonardo-DCGP.ini.
+#
+# Deviations from the old ini:
+#   - rsynccmd/sshcmd dropped (remote subsystem is gone, D1/D2).
+#   - The old ini's `queue = @QUEUE@` was a placeholder (the submitscript
+#     hardcodes `-p dcgp_usr_prod`); that partition is declared as the sole
+#     queue below.
+#   - submit used @SUBMITSCRIPT@ (old name for the generated script) ->
+#     @SCRIPTFILE@.
+#
+# Upstream hardware notes:
+#   Model: Atos BullSequana X2140 three-node CPU blade
+#   Nodes: 1536; 2 x 56-core Intel Sapphire Rapids per node (112 cores/node,
+#   172032 cores in total); no accelerators; 512 (16 x 32) GB DDR5 4800 MHz;
+#   NVIDIA Mellanox HDR DragonFly++ 200Gb/s; peak 9 Pflops/s.
+
+[machine]
+name        = "LEONARDO"
+nickname    = "leonardo"
+location    = "CINECA, Casalecchio di Reno (BO), Italy"
+description = "The New Italian Tier-1 cluster  for industrial and public research"
+status      = "production"
+hostname    = "login.leonardo.cineca.it"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/leonardo/home/userexternal/@USER@"
+simulation-home = "/leonardo/home/userexternal/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/leonardo/home/userexternal/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 112
+memory          = 494000        # MB per node
+
+[build]
+# Old value was `"make -j2 "` (quoted, in the ini); the quotes/trailing space
+# were ini artifacts.
+make = "make -j2"
+disabled-thorns = [
+    "ExternalLibraries/ADIOS2",
+    "ExternalLibraries/AMReX",
+    "ExternalLibraries/Silo",
+    "GRHayLET/GRHayLHDX",
+    "GRHayLET/GRHayLIDX",
+    "CarpetX/Algo",
+    "CarpetX/PDESolvers",
+    "CarpetX/PoissonX",
+    "CarpetX/ADMBaseX",
+    "CarpetX/Arith",
+    "CarpetX/BoxInBox",
+    "CarpetX/CarpetX",
+    "CarpetX/CoordinatesX",
+    "CarpetX/Derivs",
+    "CarpetX/ErrorEstimator",
+    "CarpetX/FluxWaveToyX",
+    "CarpetX/HydroBaseX",
+    "CarpetX/Loop",
+    "CarpetX/ODESolvers",
+    "CarpetX/SIMDWaveToyX",
+    "CarpetX/SpacetimeWaveToyX",
+    "CarpetX/StaggeredWaveToyX",
+    "CarpetX/TestArrayGroup",
+    "CarpetX/TestBoundaries",
+    "CarpetX/TestBoxInBox",
+    "CarpetX/TestDerivs",
+    "CarpetX/TestInterpolate",
+    "CarpetX/TestNorms",
+    "CarpetX/TestODESolvers",
+    "CarpetX/TestODESolvers2",
+    "CarpetX/TestOutput",
+    "CarpetX/TestProlongate",
+    "CarpetX/TestSymmetries",
+    "CarpetX/TmunuBaseX",
+    "CarpetX/WaveToyX",
+    "ExternalLibraries/PAPI",
+    "THCExtra/WeakRates",
+]
+
+[environment]
+env-setup = """
+module load profile/base
+module load netlib-scalapack/2.2.0--openmpi--4.1.6--gcc--12.2.0
+module load gsl/2.7.1--gcc--12.2.0
+module load fftw/3.3.10--openmpi--4.1.6--gcc--12.2.0
+module load hdf5/1.14.3--openmpi--4.1.6--gcc--12.2.0
+module load boost/1.83.0--openmpi--4.1.6--gcc--12.2.0
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job (\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = ' S '
+# Carried verbatim from the old ini (PBS-style, likely stale on a SLURM
+# machine, but preserved).
+exec-host        = "qstat -f @JOB_ID@"
+exec-host-pattern = 'exec_host = (\w+)/'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "24:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+# The DCGP production partition (hardcoded in the old submitscript).
+[queues.dcgp_usr_prod]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["dcgp_usr_prod"], default = true }
+"test"    = { queues = ["dcgp_usr_prod"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["dcgp_usr_prod"], default = true }
+"test"    = { queues = ["dcgp_usr_prod"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

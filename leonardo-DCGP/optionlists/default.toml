@@ -1,0 +1,114 @@
+# LEONARDO optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/leonardo-DCGP.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["dcgp_usr_prod"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "gcc-12.2.0-Aug-2024-Bruno"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "gcc"
+CXX = "g++"
+F90 = "gfortran"
+
+
+CPPFLAGS = "-g -D_XOPEN_SOURCE -D_XOPEN_SOURCE_EXTENDED"
+FPPFLAGS = "-g -traditional"
+
+CFLAGS = "-g -std=gnu99 #-std=c11"
+CXXFLAGS = "-g -std=gnu++0x #-std=c++14"
+F77FLAGS = "-g -m128bit-long-double -fcray-pointer -ffixed-line-length-none -Wno-argument-mismatch"
+F90FLAGS = "-g -m128bit-long-double -fcray-pointer -ffixed-line-length-none -Wno-argument-mismatch"
+
+
+LDFLAGS = "-rdynamic -fopenmp"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "no"
+VECTORISE_ALIGN_FOR_CACHE = "no"
+VECTORISE_ALIGN_INTERIOR = "no"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-fbounds-check"
+CXX_DEBUG_FLAGS = "-fbounds-check"
+F77_DEBUG_FLAGS = "-fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan"
+F90_DEBUG_FLAGS = "-fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = ""
+FPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = ""
+CXX_PROFILE_FLAGS = ""
+F77_PROFILE_FLAGS = ""
+F90_PROFILE_FLAGS = ""
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F77_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "no"
+CPP_WARN_FLAGS = "-Wall"
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F77_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+FFTW3_DIR = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/fftw-3.3.10-kau3lmxr2fm72enmw3a42drdjvwexdsp"
+FFTW3_INC_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/fftw-3.3.10-kau3lmxr2fm72enmw3a42drdjvwexdsp/include"
+FFTW3_LIB_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/fftw-3.3.10-kau3lmxr2fm72enmw3a42drdjvwexdsp/lib"
+
+GSL_DIR = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/gsl-2.7.1-doz5bmiieigbyt5r3bkivtd4vkyaxegh"
+GSL_INC_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/gsl-2.7.1-doz5bmiieigbyt5r3bkivtd4vkyaxegh/include"
+GSL_LIB_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/gsl-2.7.1-doz5bmiieigbyt5r3bkivtd4vkyaxegh/lib"
+
+HDF5_DIR = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/hdf5-1.14.3-flr43qytzge67qvbmjx4mszcm23s4d3b"
+HDF5_INC_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/hdf5-1.14.3-flr43qytzge67qvbmjx4mszcm23s4d3b/include"
+HDF5_LIB_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/hdf5-1.14.3-flr43qytzge67qvbmjx4mszcm23s4d3b/lib"
+HDF5_LIBS = "hdf5 hdf5_hl hdf5_fortran hdf5_hl_fortran"
+
+BOOST_DIR = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/boost-1.83.0-ti6wkhbw4ddu6xbsaecjticlmxa3ihfw"
+BOOST_INC_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/boost-1.83.0-ti6wkhbw4ddu6xbsaecjticlmxa3ihfw/include"
+BOOST_LIB_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/boost-1.83.0-ti6wkhbw4ddu6xbsaecjticlmxa3ihfw/lib"
+BOOST_LIBS = "boost_mpi"
+
+HWLOC_EXTRA_LIBS = "hwloc #numa"
+
+MPI_DIR = "/leonardo/prod/opt/libraries/openmpi/4.1.6/gcc--12.2.0"
+
+PTHREADS_DIR = "NO_BUILD"
+
+LAPACK_DIR = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/netlib-scalapack-2.2.0-aw7g74ew6bk34b4vq6mbyzjpnmsu7hjq"
+LAPACK_INC_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/netlib-scalapack-2.2.0-aw7g74ew6bk34b4vq6mbyzjpnmsu7hjq/include"
+LAPACK_LIB_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/netlib-scalapack-2.2.0-aw7g74ew6bk34b4vq6mbyzjpnmsu7hjq/lib"
+LAPACK_LIBS = "scalapack"
+
+BLAS_DIR = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/openblas-0.3.24-kytrjfxkavk6fcucnujsdsfqqsjfv5t7"
+BLAS_INC_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/openblas-0.3.24-kytrjfxkavk6fcucnujsdsfqqsjfv5t7/include"
+BLAS_LIB_DIRS = "/leonardo/prod/spack/5.2/install/0.21/linux-rhel8-icelake/gcc-12.2.0/openblas-0.3.24-kytrjfxkavk6fcucnujsdsfqqsjfv5t7/lib"
+BLAS_LIBS = "openblas"
+
+LORENE_DIR = "/leonardo/home/userexternal/bgiacoma/Lorene"
+LORENE_EXTRA_LIBS = "fftw3"

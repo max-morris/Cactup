@@ -1,0 +1,89 @@
+# Wheeler — HPC cluster at Caltech (SLURM, Intel MPI; SXS group machine).
+# Ported from simfactory2 mdb/machines/wheeler.ini.
+#
+# Deviations from the old ini:
+#   - The old ini declared `queue = NOQUEUE` (a placeholder — the submitscript
+#     passes no -p directive, so jobs land on the cluster's default
+#     partition); kept as the single cactup queue name.
+#   - The old ini had no allocation key; the submitscript's -A directive is
+#     emitted only when an allocation is set.
+
+# last-tested-on: 2018-08-30
+# last-tested-by: Roland Haas <rhaas at illinois.edu>
+
+[machine]
+name        = "Wheeler"
+nickname    = "wheeler"
+location    = "Caltech"
+description = "HPC cluster at Caltech"
+status      = "experimental"
+hostname    = "wheeler.caltech.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/panfs/ds09/sxs/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/panfs/ds09/sxs/@USER@/tests"
+
+[hardware]
+threads-per-cpu         = 1
+max-tasks-per-node             = 24
+memory          = 65536         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 6
+enabled-thorns = [
+    "ExternalLibraries/PETSc",
+    "CactusElliptic/EllPETSc",
+    "CactusElliptic/TATelliptic",
+    "CactusElliptic/TATPETSc",
+]
+
+[environment]
+env-setup = """
+if ! module --version 2>/dev/null 1>/dev/null ; then
+  . /etc/profile.d/modules.sh
+fi
+module purge
+module add python/anaconda2-4.1.1 &&
+module add gcc/6.4.0 &&
+module add intel/16.3 &&
+module add gsl/2.1 &&
+module add petsc/3.7.3-intel-16.3
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2).
+max-walltime    = "24:00:00"
+
+# Placeholder (old ini: queue = NOQUEUE) — the submitscript passes no -p
+# directive; SLURM uses the cluster's default partition.
+[queues.NOQUEUE]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["NOQUEUE"], default = true }
+"test"    = { queues = ["NOQUEUE"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["NOQUEUE"], default = true }
+"test"    = { queues = ["NOQUEUE"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

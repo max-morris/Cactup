@@ -1,0 +1,124 @@
+# Frontier — OLCF (Oak Ridge) HPE Cray EX exascale system with AMD MI250X GPUs.
+# Ported from simfactory2 mdb/machines/frontier.ini.
+#
+# Deviations from the old ini:
+#   - sshopts dropped (remote subsystem is gone, D1/D2).
+#   - basedir (/lustre/orion/@ALLOCATION@/scratch/@USER@/simulations) cannot be
+#     expressed: meta.toml [paths] values substitute only @USER@ (design §4.2),
+#     not @ALLOCATION@. simulation-home/test-home are therefore omitted (see
+#     [paths]) and must be set per user.
+
+# last-tested-on: 06/12/2024
+# last-tested-by: Liwei Ji
+
+[machine]
+name        = "Frontier"
+nickname    = "frontier"
+location    = "Oak Ridge National Laboratory"
+description = "HPC system at ORNL"
+status      = "experimental"
+hostname    = "frontier.olcf.ornl.gov"
+
+[paths]
+# @USER@ is substituted at use time. Old key: sourcebasedir.
+install-home = "/autofs/nccs-svm1_home1/@USER@"
+# The old basedir was
+#   /lustre/orion/@ALLOCATION@/scratch/@USER@/simulations
+# which embeds @ALLOCATION@ — not expressible in meta.toml paths (only @USER@
+# is substituted here). Set simulation-home explicitly in a per-user override;
+# until then the ~/.cactup/simulations fallback applies.
+#simulation-home = "/lustre/orion/<allocation>/scratch/@USER@/simulations"
+# Likewise for the NEW testsuite-output root (design §11.5), the sibling of
+# simulation-home:
+#test-home       = "/lustre/orion/<allocation>/scratch/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 64
+memory          = 524288
+threads-per-cpu         = 1
+
+[build]
+make      = "make -j @MAKEJOBS@"
+make-jobs = 8
+disabled-thorns = [
+    # openPMD current does not compile
+    "ExternalLibraries/openPMD",
+
+    "CarpetXold/HydroInitial",
+    "CapyrX/MultiPatch",
+    "CapyrX/TestMultiPatch",
+    "ExternalLibraries/LORENE",
+    "EinsteinInitialData/Meudon_Bin_BH",
+    "EinsteinInitialData/Meudon_Bin_NS",
+    "EinsteinInitialData/Meudon_Mag_NS",
+    "ExternalLibraries/NSIMD",
+
+    # Don't know where this is installed on Frontier
+    "ExternalLibraries/PETSc",
+    "CarpetX/PDESolvers",
+    "CarpetX/Poisson",
+
+    # Cray pointers might be broken
+    "CactusTest/TestFortranCrayPointers",
+
+    # Function is too large
+    "CarpetXNRPy/Z4cNRPy",
+]
+
+[environment]
+env-setup = """
+module load craype-accel-amd-gfx90a
+module load rocm/5.3.0
+
+export MPICH_GPU_SUPPORT_ENABLED=1
+export PE_MPICH_GTL_DIR_amd_gfx90a="-L/opt/cray/pe/mpich/8.1.23/gtl/lib"
+export PE_MPICH_GTL_LIBS_amd_gfx90a="-lmpi_gtl_hsa"
+
+module load adios2/2.8.3
+module load amrex/22.11
+module load boost/1.79.0-cxx17
+module load cray-fftw/3.3.10.3
+module load cray-hdf5-parallel/1.12.2.1
+module load gsl/2.7.1
+module load hwloc/2.5.0
+module load libjpeg-turbo/2.1.0
+module load openblas/0.3.17
+module load openpmd-api/0.14.4
+module load zlib/1.2.11
+"""
+
+[scheduler]
+submit           = "sbatch @SCRIPTFILE@ && sleep 1"
+get-status       = "squeue -j @JOB_ID@"
+stop             = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = ' S '
+exec-host        = "hostname"
+# TODO (upstream): make this work using bpeek
+stdout           = "cat @SIMULATION_NAME@.out"
+stderr           = "cat @SIMULATION_NAME@.err"
+stdout-follow    = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); also depends on number of nodes.
+max-walltime     = "08:00:00"
+# historical default allocation; set the allocation knob instead
+allocation       = "NO_ALLOCATION"
+
+# Frontier is a GPU machine (one MPI rank per MI250X GCD); its single queue is
+# GPU-oriented.
+[queues.batch]
+gpu     = true
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["batch"], default = true }
+"test"    = { queues = ["batch"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["batch"], default = true }
+"test"    = { queues = ["batch"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

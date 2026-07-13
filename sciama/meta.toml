@@ -1,0 +1,77 @@
+# Sciama — SEP/ICG Portsmouth cluster (SLURM with PBS-era leftovers in the
+# scripts).
+# Ported from simfactory2 mdb/machines/sciama.ini.
+
+# last-tested-on: 2019-11-07
+# last-tested-by: Jascha Schewtschenko <jascha.schewtschenko at port.ac.uk>
+
+[machine]
+name        = "Sciama"
+nickname    = "sciama"
+location    = "ICG Portsmouth"
+description = "SEP/Portsmouth cluster"
+webpage     = "http://www.sciama.icg.port.ac.uk"
+status      = "production"
+hostname    = "login1.sciama.icg.port.ac.uk"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir /
+# scratchbasedir.
+install-home    = "/users/@USER@"
+simulation-home = "/mnt/lustre/@USER@/runs"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/mnt/lustre/@USER@/tests"
+scratch-home    = "/tmp"
+
+[hardware]
+max-tasks-per-node             = 16
+memory          = 65536         # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 16
+disabled-thorns = ["ExternalLibraries/PAPI"]
+
+[environment]
+env-setup = """
+module purge
+module load system/intel64
+module load intel_comp/2019.2
+module load openmpi/4.0.1
+module load subversion/1.12.2 automake/1.16 pkg-config/0.29 jpeg-turbo/2.0.3
+module load gsl/2.5 papi/5.7.0 hwloc/2.1.0 hdf5/1.8.17 openssl/1.1.1
+module load curl/7.54.0 libz/1.2.11 perl/5.26
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -u @USER@ | awk '$1 == @JOB_ID@ {print $1,$10}'"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = '(\d+)[.]hostname1'
+status-pattern   = '^@JOB_ID@[ \t]'
+queued-pattern   = ' PD '
+running-pattern  = ' R '
+holding-pattern  = ' H '
+# The runscript saves the node list to .cactup/NODES (was SIMFACTORY/NODES,
+# metadata dir rename §9.3).
+exec-host        = "head -n 1 .cactup/NODES"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
+
+[queues."sciama2.q"]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["sciama2.q"], default = true }
+"test"    = { queues = ["sciama2.q"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["sciama2.q"], default = true }
+"test"    = { queues = ["sciama2.q"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

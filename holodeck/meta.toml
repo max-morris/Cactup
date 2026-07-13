@@ -1,0 +1,56 @@
+# holodeck — cluster for Frank Ohme's research group at AEI Hannover (SLURM).
+# Ported from simfactory2 mdb/machines/holodeck.ini.
+#
+# Dropped remote-subsystem key (design D1/D2): sshcmd (gsissh).
+
+[machine]
+name        = "holodeck"
+nickname    = "holodeck"
+location    = "Hannover"
+description = "Cluster for Frank Ohme's research group"
+status      = "production"
+hostname    = "holodeck2.aei.uni-hannover.de"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/holohome/@USER@"
+simulation-home = "/holohome/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/holohome/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 40
+threads-per-cpu         = 1
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 2
+
+# No [environment]: the old ini had no envsetup (the runscript sources the
+# Intel environment itself).
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+# No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
+
+[queues.debug]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["debug"], default = true }
+"test"    = { queues = ["debug"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["debug"], default = true }
+"test"    = { queues = ["debug"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

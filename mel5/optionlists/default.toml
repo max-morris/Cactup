@@ -9,6 +9,7 @@
 [cactup]
 gpu               = false
 compatible-queues = ["local"]
+default           = true          # the implicit choice among mel5's variants (§4.4)
 
 [options]
 # Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.

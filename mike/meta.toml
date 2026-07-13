@@ -1,0 +1,73 @@
+# Mike — LSU HPC SuperMike cluster (mike2.hpc.lsu.edu; SLURM).
+# Ported from simfactory2 mdb/machines/mike.ini (upstream regenerated it with
+# simfactory-configure.py on 2026-07-06 — hence the "Auto-configured" strings
+# and "Review and adjust before use"). The former Singularity-image setup is
+# gone upstream: native build against the prebuilt externals under
+# /ddnA/project/sbrandt/externals-mike.
+
+[machine]
+name        = "mike2.hpc.lsu.edu"
+nickname    = "mike"
+location    = "unknown"
+description = "Auto-configured"
+status      = "personal"
+hostname    = "mike2.hpc.lsu.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/scratch/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/scratch/@USER@/tests"
+
+[hardware]
+max-tasks-per-node = 64
+memory             = 256867     # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 64
+
+[environment]
+# Verbatim from the upstream heredoc (including its uneven indentation).
+env-setup = """
+# No modules detected — adjust if needed.
+export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+  export PATH="/ddnA/project/sbrandt/externals-mike/install/mpi/bin:$PATH"
+  export LD_LIBRARY_PATH="/ddnA/project/sbrandt/externals-mike/install/mpi/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"""
+
+[scheduler]
+submit           = "sbatch @SCRIPTFILE@"
+get-status       = "squeue -j @JOB_ID@"
+stop             = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname -s"
+exec-host-pattern = '(\S+)'
+stdout           = "cat @SIMULATION_NAME@.out"
+stderr           = "cat @SIMULATION_NAME@.err"
+stdout-follow    = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime     = "24:00:00"
+# historical default allocation; set the allocation knob instead
+allocation       = "NO_ALLOCATION"
+
+[queues.single]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["single"], default = true }
+"test"    = { queues = ["single"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["single"], default = true }
+"test"    = { queues = ["single"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

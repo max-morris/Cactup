@@ -1,0 +1,89 @@
+# Expanse — XSEDE/ACCESS GNU/Linux cluster at SDSC (SLURM).
+# Ported from simfactory2 mdb/machines/expanse.ini.
+
+# last-tested-on: 2021-08-10
+# last-tested-by: Gabriele Bozzola <gabrielebozzola at arizona.edu>
+
+[machine]
+name        = "expanse"
+nickname    = "expanse"
+location    = "SDSC"
+description = "An XSEDE GNU/Linux cluster at SDSC"
+webpage     = "https://www.sdsc.edu/support/user_guides/expanse.html"
+status      = "production"
+hostname    = "login.expanse.sdsc.edu"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/expanse/lustre/scratch/@USER@/temp_project/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/expanse/lustre/scratch/@USER@/temp_project/tests"
+
+[hardware]
+max-tasks-per-node             = 128
+memory          = 249325        # MB per node
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 1
+# expanse does not provide cmake >=3.22 required by openPMD
+disabled-thorns = ["ExternalLibraries/openPMD"]
+
+[environment]
+# HWLOCHOME must match MPICC's hwloc
+# LIBSZHOME must match HDF5's libsz
+# LIBZDIR must match HDF5's libz
+env-setup = """
+module unload intel || true
+module unload aocc || true
+module load sdsc &&
+module load cpu/0.17.3b &&
+module load gcc/10.2.0 &&
+module load openmpi/4.1.1 &&
+module load cmake/3.21.4 &&
+module load gsl/2.7 &&
+module load boost/1.77.0 &&
+module load papi/6.0.0.1 &&
+module load fftw/3.3.10 &&
+module load hdf5/1.10.7 &&
+module load openblas/0.3.18 &&
+export HWLOCHOME=$(dirname $(dirname $(ldd $OPENMPIHOME/lib/libmpi.so | awk '/libhwloc.so/{print $(NF-1)}')))
+export LIBSZDIR=$(dirname $(ldd $HDF5HOME/lib/libhdf5.so | awk '/libsz.so/{print $(NF-1)}')) &&
+export LIBZHOME=$(dirname $(dirname $(ldd $HDF5HOME/lib/libhdf5.so | awk '/libz.so/{print $(NF-1)}')))
+"""
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@; sleep 5"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname"
+exec-host-pattern = '^(\S+)'
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+max-queue-slots  = 32
+# Machine-level fallback ceiling (design §4.2). Upstream note: debug has 0:30:0.
+max-walltime    = "48:00:00"
+# historical default allocation; set the allocation knob instead
+allocation      = "NO_ALLOCATION"
+
+[queues.compute]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["compute"], default = true }
+"test"    = { queues = ["compute"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["compute"], default = true }
+"test"    = { queues = ["compute"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

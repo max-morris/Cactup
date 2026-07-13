@@ -1,0 +1,85 @@
+# Minerva — AEI cluster (SLURM).
+# Ported from simfactory2 mdb/machines/minerva.ini.
+#
+# Dropped remote-subsystem key (design D1/D2): rsynccmd. The old ini's
+# exechost/stdout/stderr/stdout-follow entries were commented out (stale
+# Datura-era SGE commands); omitted here.
+
+[machine]
+name        = "Minerva"
+nickname    = "minerva"
+location    = "AEI"
+description = "The AEI cluster Minerva"
+webpage     = "none"
+status      = "production"
+hostname    = "minerva01.aei.mpg.de"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir /
+# scratchbasedir.
+install-home    = "/home/@USER@"
+simulation-home = "/scratch/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/scratch/@USER@/tests"
+scratch-home    = "/tmp"
+
+[hardware]
+max-tasks-per-node             = 16
+memory          = 24576         # MB per node
+
+[build]
+make      = "nice make -j@MAKEJOBS@"
+make-jobs = 32
+# NoExcision gives an internal compiler error
+disabled-thorns = [
+    "ExternalLibraries/BLAS",
+    "ExternalLibraries/git",
+    "ExternalLibraries/LAPACK",
+    "ExternalLibraries/PETSc",
+    "CactusElliptic/EllPETSc",
+    "CarpetThorns/LSUPETSc",
+    "CarpetThorns/LSUPoisson",
+    "CarpetThorns/Lichnerowicz",
+    "LSUDevelopment/WaveToyNoGhostsPETSc",
+    "TAT/TATPETSc",
+    "EinsteinInitialData/NoExcision",
+]
+enabled-thorns = [
+    "ExternalLibraries/OpenBLAS",
+    "ExternalLibraries/pciutils",
+]
+
+[environment]
+# For Intel 2017.4. The old ini kept the Intel 2016.1 line commented:
+#   source /etc/profile && module purge && module load intel/compiler/2016.1/64/2016 && module load gcc/4.9.3 && module load gsl/gcc-4.9.3/1.16 && module load intel/mkl/2016.1/64/11.3 && module load hdf5/gcc-4.9.3/1.8.18 && module load intel/mpi/2016.1/64/5.1.2 && module load fftw3/gcc-4.9.3/3.3.6-pl1 && module load hwloc/gcc-4.9.3/1.11.2
+# These modules are currently broken:
+#   module load gsl/gcc-4.9.3/1.16
+#   module load hwloc/gcc-4.9.3/1.11.2
+env-setup = "source /etc/profile && module purge && module load intel/compiler/2017.4/64/2017.4 && module load gcc/4.9.3 && module load intel/mkl/2017.4/64/2017.4 && module load hdf5/gcc-4.9.3/1.8.18 && module load intel/mpi/2017.4/64/2017.4 && module load fftw3/gcc-4.9.3/3.3.6-pl1"
+
+[scheduler]
+submit          = "sbatch @SCRIPTFILE@"
+get-status      = "squeue -j @JOB_ID@"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job ([0-9]+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+# Machine-level fallback ceiling (design §4.2); the single queue relies on it.
+max-walltime    = "24:00:00"
+
+[queues.devel1]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["devel1"], default = true }
+"test"    = { queues = ["devel1"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["devel1"], default = true }
+"test"    = { queues = ["devel1"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

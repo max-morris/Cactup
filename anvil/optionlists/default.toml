@@ -1,0 +1,87 @@
+# anvil optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/anvil.cfg.
+
+[cactup]
+gpu               = false
+compatible-queues = ["wholenode"]
+
+[options]
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+
+VERSION = "anvil-2023-10-15"
+
+CPP = "cpp"
+FPP = "cpp"
+CC = "gcc"
+CXX = "g++"
+F90 = "gfortran"
+
+CPPFLAGS = "-DSIMD_CPU"
+FPPFLAGS = "-traditional -march=znver2"
+CFLAGS = "-g -m128bit-long-double -std=gnu99 -fomit-frame-pointer"
+CXXFLAGS = "-g -m128bit-long-double -std=gnu++17 -fomit-frame-pointer"
+F90FLAGS = "-g -m128bit-long-double -fcray-pointer -ffixed-line-length-none -fno-range-check -march=znver2 -fomit-frame-pointer"
+
+LDFLAGS = "-g -ldl -lhdf5 -lhdf5_hl -lquadmath"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+VECTORISE = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE = "yes"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS = "-ftrapv -fstack-protector-all -fbounds-check"
+CXX_DEBUG_FLAGS = "-ftrapv -fstack-protector-all -fbounds-check"
+CUCC_DEBUG_FLAGS = ""
+F90_DEBUG_FLAGS = "-g -ftrapv -fstack-protector-all -fcheck=bounds,do,mem,pointer,recursion -finit-character=65 -finit-integer=42424242 -finit-real=nan"
+
+OPTIMISE = "yes"
+CPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+FPP_OPTIMISE_FLAGS = "# -DCARPET_OPTIMISE -DNDEBUG"
+C_OPTIMISE_FLAGS = "-O3"
+CUCC_OPTIMISE_FLAGS = ""
+CXX_OPTIMISE_FLAGS = "-O3"
+F90_OPTIMISE_FLAGS = "-O3"
+
+PROFILE = "no"
+CPP_PROFILE_FLAGS = ""
+FPP_PROFILE_FLAGS = ""
+C_PROFILE_FLAGS = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+OPENMP = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-fopenmp"
+C_OPENMP_FLAGS = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+
+WARN = "no"
+CPP_WARN_FLAGS = "-Wall"
+FPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+CUCC_WARN_FLAGS = "-Xcompiler -Wall"
+F90_WARN_FLAGS = "-Wall"
+
+HDF5_DIR = "/apps/spack/anvil/apps/hdf5/1.10.7-gcc-11.2.0-3hn56wr"
+HDF5_INC_DIRS = "/apps/spack/anvil/apps/hdf5/1.10.7-gcc-11.2.0-3hn56wr/include"
+HDF5_LIB_DIRS = "/apps/spack/anvil/apps/hdf5/1.10.7-gcc-11.2.0-3hn56wr/lib"
+HDF5_LIBS = "hdf5_tools hdf5_hl_cpp hdf5_hl_f90cstub hdf5_hl_fortran hdf5_hl hdf5_cpp hdf5_f90cstub hdf5_fortran hdf5"
+
+HWLOC_DIR = "BUILD"
+
+BLAS_DIR = "/apps/spack/anvil/apps/openblas/0.3.17-gcc-11.2.0-2qrsari/lib"
+OPENBLAS_DIR = "/apps/spack/anvil/apps/openblas/0.3.17-gcc-11.2.0-2qrsari/lib"
+BLAS_LIBS = "openblas"
+LAPACK_DIR = "/apps/spack/anvil/apps/openblas/0.3.17-gcc-11.2.0-2qrsari/lib"
+LAPACK_LIBS = "openblas"
+
+# Not a module
+LIBJPEG_DIR = "/apps/spack/anvil/apps/libjpeg-turbo/2.1.0-gcc-11.2.0-gapliy5/"

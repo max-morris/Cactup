@@ -1,0 +1,67 @@
+# et-juphub — Einstein Toolkit JupyterHub container; a generic-style
+# single-node "workstation" with no batch system.
+# Ported from simfactory2 mdb/machines/et-juphub.ini.
+
+[machine]
+name        = "et-juphub"
+nickname    = "et-juphub"
+location    = "somewhere"
+description = "Whatever"
+status      = "personal"
+hostname    = "et-juphub"
+
+[paths]
+# @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
+install-home    = "/home/@USER@"
+simulation-home = "/home/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/home/@USER@/tests"
+
+[hardware]
+max-tasks-per-node             = 4
+
+[build]
+make = "make -j@MAKEJOBS@"
+
+[environment]
+# The configure scripts strip /usr/local from XXX_DIR to avoid choosing system
+# libraries; not all compilers search there by default, so re-add the filtered
+# locations last (upstream comment).
+env-setup = """
+export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+"""
+
+[scheduler]
+# No scheduler: background the script, echo its PID as the job id; ps/pkill
+# for status/stop. The old submit redirected to @RUNDIR@/@SIMULATION_NAME@.{out,err};
+# @STDOUT_FILE@/@STDERR_FILE@ carry the same defaults but honor -o/-e (§8.3.1).
+submit          = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+get-status      = "ps @JOB_ID@"
+# Kill the whole process group descending from @JOB_ID@, not just the top process.
+stop            = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern   = "(.*)"
+status-pattern   = "^ *@JOB_ID@ "
+queued-pattern   = "$^"          # never "queued"
+running-pattern  = "^"           # in ps => running
+holding-pattern  = "$^"          # never "held"
+exec-host        = "echo localhost"
+exec-host-pattern = "(.*)"
+stdout          = "cat @SIMULATION_NAME@.out"
+stderr          = "cat @SIMULATION_NAME@.err"
+stdout-follow   = "tail --pid @JOB_ID@ -F -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
+
+[queues.local]
+gpu     = false
+default = true
+
+[variants.submitscript]
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]
