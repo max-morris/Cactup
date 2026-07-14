@@ -67,6 +67,8 @@ module -q load openmpi/4.0.3
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@; sleep 1"
+# set inside a SLURM allocation; gates `test run` (design §11.6)
+allocation-env  = "SLURM_JOB_ID"
 interactive-cmd = "srun -A @ALLOCATION@ -p @QUEUE@ -t @WALLTIME@ -N @NODES@ -n @TASKS@ --mem @MEMORY@MB -c @CPUS_PER_TASK@ -J interactive --pty /bin/bash -l"
 get-status      = "squeue -j @JOB_ID@"
 stop            = "scancel @JOB_ID@"

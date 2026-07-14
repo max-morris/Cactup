@@ -64,6 +64,8 @@ module load petsc/3.12.3/intel-19.0.5-mvapich-2.3.3
 
 [scheduler]
 submit          = "qsub @SCRIPTFILE@"
+# set inside a PBS allocation; gates `test run` (design §11.6)
+allocation-env  = "PBS_JOBID"
 interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_TASKS_PER_NODE@ -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
 get-status      = "qstat @JOB_ID@"
 stop            = "qdel @JOB_ID@"
