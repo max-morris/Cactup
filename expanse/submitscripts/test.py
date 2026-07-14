@@ -4,8 +4,10 @@
 # §11.6); the payload re-invokes `cactup test run` on the compute node with
 # the §11.6 locator flags (--test-dir + --results-id) instead of `sim run`.
 #
-# .py rather than .sh so the #SBATCH header stays above ENV_SETUP (cactup
-# auto-prepends env-setup to .sh submitscripts — design §6.1).
+# .py variant (design §6.1): the --mem directive is computed
+# (0 if QUEUE == "compute" else 249208M), and the mail directives are guarded
+# by `if EMAIL:` — cactup's @NAME@ engine is literal-only (D7), so both move
+# into Python.
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -t {0}".format(WALLTIME))

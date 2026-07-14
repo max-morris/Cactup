@@ -5,8 +5,7 @@
 # @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@ AND the
 # arithmetic expression -n @(@NUM_PROCS@*@NUM_THREADS@)@ (Wheeler allocates
 # one SLURM task per *core*, not per MPI rank) — cactup's @NAME@ engine is
-# literal-only (D7), so both move into Python; cactup would also auto-prepend
-# env-setup above the #SBATCH header of a .sh variant.
+# literal-only (D7), so both move into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   @NUM_PROCS@*@NUM_THREADS@ -> typed["TASKS"] * typed["CPUS_PER_TASK"]

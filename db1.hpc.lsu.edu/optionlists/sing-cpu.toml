@@ -4,11 +4,16 @@
 
 [cactup]
 gpu               = false
-compatible-queues = ["sing-cpu"]
+compatible-queues = ["gpu"]
 # CPU (non-CUDA) build: AMREX_ENABLE_CUDA = no, host g++ linker. Built inside
 # the et-sing-cpu universe (a non---nv Singularity wrapper). The run must NOT
 # be coerced into it: the sing runscript does its own per-rank
-# `srun … singularity exec` launch (§4.8's MPI boundary).
+# `srun … singularity exec` launch (§4.8's MPI boundary). This is a non-GPU
+# config that still runs on [queues.gpu] (Deep Bayou's only real partition);
+# D12's guard is one-directional so that's fine. Routing to the "sing" run/
+# submit scripts comes from this config's build universe ("et-sing-cpu"),
+# matched against the `universes` list on the meta.toml script variants
+# (§4.8 Feature 1), not from a dedicated queue.
 universe            = "et-sing-cpu"
 coerce-run-universe = false
 

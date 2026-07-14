@@ -5,8 +5,7 @@
 #   --mem=@("@QUEUE@" == "compute" ? "0" : "249208M")@
 #   @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
 # — and cactup's @NAME@ engine is literal-only (D7); both conditionals move
-# into Python. cactup would also auto-prepend env-setup above the #SBATCH
-# header of a .sh variant.
+# into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   @NODE_PROCS@/@NUM_THREADS@ -> TASKS_PER_NODE/CPUS_PER_TASK

@@ -3,9 +3,8 @@
 #
 # .py variant (design §6.1): the old script used the chained-job ternary
 # @('@CHAINED_JOB_ID@' != '' ? '-hold_jid @CHAINED_JOB_ID@' : '')@ — note the
-# SGE-style -hold_jid dependency type, kept — (literal-only @NAME@ engine,
-# D7), and cactup would auto-prepend env-setup above the #PBS header of a .sh
-# variant.
+# SGE-style -hold_jid dependency type, kept — cactup's @NAME@ engine is
+# literal-only (D7), so the conditional moves into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   -o/-e use STDOUT_FILE/STDERR_FILE (same @RUNDIR@/@SIMULATION_NAME@.{out,err}

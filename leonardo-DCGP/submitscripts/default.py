@@ -5,8 +5,7 @@
 #   --ntasks-per-node @(@NUM_PROCS@//@NODES@)@   (== TASKS_PER_NODE)
 #   @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
 # — cactup's @NAME@ engine is literal-only (D7); the first equals the
-# canonical TASKS_PER_NODE, the conditional moves into Python. cactup would
-# also auto-prepend env-setup above the #SBATCH header of a .sh variant.
+# canonical TASKS_PER_NODE, the conditional moves into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   @NUM_THREADS@ -> CPUS_PER_TASK

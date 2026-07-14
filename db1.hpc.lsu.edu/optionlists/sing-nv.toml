@@ -5,10 +5,14 @@
 
 [cactup]
 gpu               = true
-compatible-queues = ["sing-nv"]
+compatible-queues = ["gpu"]
 # CUDA build (nvcc CUCC/LD, AMREX_ENABLE_CUDA = yes); built inside the et-sing
 # universe (--nv). The run must NOT be coerced into it: the sing runscript does
 # its own per-rank `srun … singularity exec` launch (§4.8's MPI boundary).
+# Routing to the "sing" run/submit scripts is no longer via a dedicated queue
+# (there is only [queues.gpu] on this machine) — it comes from this config's
+# build universe ("et-sing"), matched against the `universes` list on the
+# meta.toml script variants (§4.8 Feature 1).
 universe            = "et-sing"
 coerce-run-universe = false
 

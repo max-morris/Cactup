@@ -1,17 +1,14 @@
 # db1.hpc.lsu.edu submitscript (variant "sing"), ported from simfactory2
 # mdb/submitscripts/db-sing-nv.sub. Serves the Singularity build flavors (the
-# sing-nv and sing-cpu queues; upstream db-sing-cpu reused db-sing-nv's
-# submitscript). The verbatim GPU directives (--gpus-per-task 1, --gres=gpu:2)
-# apply to both.
+# et-sing and et-sing-cpu build universes; upstream db-sing-cpu reused
+# db-sing-nv's submitscript). The verbatim GPU directives (--gpus-per-task 1,
+# --gres=gpu:2) apply to both.
 #
-# This is a .py variant (design §6.1) for two reasons:
-#   1. The old script used simfactory's ternary expression
-#      @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@ —
-#      cactup's @NAME@ engine is literal-only (D7), so the conditional moves
-#      into Python.
-#   2. cactup auto-prepends env-setup to .sh submitscripts, which would land
-#      above the #SBATCH header and stop sbatch from reading the directives;
-#      a .py variant places ENV_SETUP itself, after the header.
+# .py variant (design §6.1): the old script used simfactory's ternary
+# expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
+# — cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
+# Python, alongside the computed --gres=gpu:{typed["NODES"] * typed["TASKS"]}
+# directive and the `if EMAIL:` mail guard below.
 #
 # Calling convention: cactup binds every §6.3 variable as a module global and
 # this script prints the final submit script to stdout.

@@ -13,9 +13,13 @@
 [cactup]
 gpu               = true
 compatible-queues = ["gpu"]
-# Built in the machine-default "host" universe (§4.8 step 4: loads the host
-# gcc/cuda/mpich modules around make). The run must NOT be coerced into it —
-# the native runscript loads those modules itself.
+# Names no universe, so it falls back to the declared [universes.host] (§4.8
+# "implicit host universe": loads the host gcc/cuda/mpich modules, via
+# env-build-setup, around make). The run must NOT be coerced into it — the
+# native runscript loads those modules itself. Routing to the "default"
+# run/submit scripts comes from this config's build universe ("host"),
+# matched against the `universes` list on the meta.toml script variants
+# (§4.8 Feature 1), not from a dedicated queue.
 coerce-run-universe = false
 
 [options]

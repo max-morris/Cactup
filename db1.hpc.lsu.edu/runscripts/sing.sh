@@ -1,10 +1,10 @@
 #! /bin/bash
 # db1.hpc.lsu.edu runscript (variant "sing"), ported from simfactory2
 # mdb/runscripts/db-sing-nv.run. Serves the Singularity build flavors (the
-# sing-nv and sing-cpu queues; upstream db-sing-cpu reused db-sing-nv's
-# runscript, so the launcher keeps --nv either way). It does its OWN per-rank
-# `srun … singularity exec` launch (§4.8's MPI boundary), which is why the
-# sing-* optionlists set coerce-run-universe = false.
+# et-sing and et-sing-cpu build universes; upstream db-sing-cpu reused
+# db-sing-nv's runscript, so the launcher keeps --nv either way). It does its
+# OWN per-rank `srun … singularity exec` launch (§4.8's MPI boundary), which is
+# why the sing-* optionlists set coerce-run-universe = false.
 #
 # Variable renames vs. simfactory (design §6.3):
 #   NUM_PROCS   -> @TASKS@
@@ -49,14 +49,18 @@ export OMP_PLACES=cores # TODO: maybe use threads when smt is used?
 export TESTSUITE_NPROCS=@TASKS@
 env | sort > .cactup/ENVIRONMENT
 
-if [ $(((@TASKS@*@CPUS_PER_TASK@)%48)) != 0 -a $(((@TASKS@*@CPUS_PER_TASK@))) != 24 ]
+tasks=@TASKS@
+cpus_per_task=@CPUS_PER_TASK@
+cores=$((tasks * cpus_per_task))
+
+if [ $((cores % 48)) != 0 ] && [ "$cores" != 24 ]
 then
     echo "Deep Bayou requires you either use half a node (24 cores),"
     echo "or multiple whole nodes (multiples of 48 cores)."
-    echo "Please adjust your call to simfactory accordingly."
+    echo "Please adjust your call to Cactup accordingly."
     exit 2
 fi
-if [ $((@TASKS@*@CPUS_PER_TASK@)) -le 24 ]
+if [ "$cores" -le 24 ]
 then
    GRES=1
 else
@@ -64,7 +68,8 @@ else
 fi
 
 echo "Starting:"
-export CACTUS_STARTTIME=$(date +%s)
+CACTUS_STARTTIME=$(date +%s)
+export CACTUS_STARTTIME
 if which srun 2>/dev/null
 then
 time srun -u -A @ALLOCATION@ -p gpu \
