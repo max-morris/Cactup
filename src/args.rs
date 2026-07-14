@@ -325,15 +325,17 @@ pub(crate) enum SimCommand {
         sim: String,
         #[clap(long, help = "Show extended per-restart details.")]
         long: bool,
-    },
-    /// Print the active (or Nth) restart's output directory
-    OutputDir {
-        sim: String,
-        #[clap(long, value_name = "N")]
+        #[clap(long, help = "Print only the active (or Nth) restart's output directory.")]
+        output_dir: bool,
+        #[clap(long, value_name = "N", help = "With --output-dir, select the Nth restart instead of the active one.")]
         restart_id: Option<u32>,
     },
     /// Tail the simulation's stdout/stderr
-    Log { sim: String },
+    Log {
+        sim: String,
+        #[clap(short, long, help = "Keep streaming new output as it is written (like tail -f), until Ctrl-C.")]
+        follow: bool,
+    },
 }
 
 /// Shared surface of `sim submit` and `sim run` (§3, §8.3, §8.8).
@@ -394,9 +396,35 @@ pub(crate) enum TestCommand {
     /// source tree (TEST/ at the Cactus root, configs/<cfg>/TEST) — cactup
     /// runs redirect it to test-home (§11.5)
     Clean,
-    /// Manage test runs (§11.7)
-    #[clap(subcommand)]
-    Sim(TestSimCommand),
+    /// List test runs (§11.7)
+    List {
+        #[clap(long)]
+        long: bool,
+        #[clap(long, help = "List test runs across every installation.")]
+        all: bool,
+    },
+    /// Show one test run (§11.7)
+    Show { name: String },
+    /// Tail the test run's stdout/stderr
+    Log {
+        name: String,
+        #[clap(short, long, help = "Keep streaming new output as it is written (like tail -f), until Ctrl-C.")]
+        follow: bool,
+    },
+    /// Stop a queue-submitted test run (§11.7)
+    Stop {
+        name: String,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Move a test run to the test-home TRASH/ (§11.7)
+    Delete {
+        name: String,
+        #[clap(short, long)]
+        force: bool,
+        #[clap(long, help = "Permanently remove instead of moving to TRASH/.")]
+        purge: bool,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -430,33 +458,6 @@ pub(crate) struct TestStartArgs {
     /// Compute-node path: the results-%04d id to drive.
     #[clap(long, value_name = "N", requires = "test_dir")]
     pub results_id: Option<u32>,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum TestSimCommand {
-    /// List test runs
-    List {
-        #[clap(long)]
-        long: bool,
-        #[clap(long, help = "List test runs across every installation.")]
-        all: bool,
-    },
-    /// Show one test run
-    Show { name: String },
-    /// Stop a queue-submitted test run
-    Stop {
-        name: String,
-        #[clap(short, long)]
-        force: bool,
-    },
-    /// Move a test run to the test-home TRASH/
-    Delete {
-        name: String,
-        #[clap(short, long)]
-        force: bool,
-        #[clap(long, help = "Permanently remove instead of moving to TRASH/.")]
-        purge: bool,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -522,7 +523,7 @@ mod tests {
                 "cactup", "sim", "run", "bbh", "--restart-id", "3", "--sim-dir", "/scratch/bbh",
                 "--machine", "mel5", "--installation", "et", "--no-recover",
             ],
-            vec!["cactup", "sim", "output-dir", "bbh", "--restart-id", "2"],
+            vec!["cactup", "sim", "show", "bbh", "--output-dir", "--restart-id", "2"],
             vec!["cactup", "sim", "list", "--long", "--all"],
             vec!["cactup", "sim", "show", "bbh", "--long"],
             vec!["cactup", "test", "run", "-n", "1", "McLachlan/ML_BSSN", "TestArrangement"],
@@ -530,7 +531,8 @@ mod tests {
                 "cactup", "test", "run", "tests", "--test-dir", "/work/tests/sim-test/tests",
                 "--results-id", "0", "--installation", "et", "--machine", "mel5",
             ],
-            vec!["cactup", "test", "sim", "delete", "t1", "--purge"],
+            vec!["cactup", "test", "delete", "t1", "--purge"],
+            vec!["cactup", "test", "log", "sim", "--follow"],
             vec!["cactup", "knob", "allocation", "hpc_xxx"],
             vec!["cactup", "machine", "create", "mylaptop", "--from-existing", "--silent"],
             vec!["cactup", "machine", "list"],

@@ -1,5 +1,5 @@
-//! `sim stop` / `clean` (§8.6), `sim delete` (§8.7), `sim list` / `sim show`,
-//! `sim log`, and `sim output-dir`.
+//! `sim stop` / `clean` (§8.6), `sim delete` (§8.7), `sim list` / `sim show`
+//! (including `sim show --output-dir`), and `sim log`.
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
@@ -307,10 +307,13 @@ fn state_str(state: DisplayState) -> colored::ColoredString {
 }
 
 /// `sim show` (§8.6): one simulation in detail.
-pub fn show(ctx: &Ctx, name: &str, long: bool) -> Res<()> {
+pub fn show(ctx: &Ctx, name: &str, long: bool, output_dir: bool, restart_id: Option<u32>) -> Res<()> {
+    let inst = Installation::resolve(ctx)?;
+    if output_dir {
+        return print_output_dir(&inst, name, restart_id);
+    }
     let machine = crate::commands::machine::resolve(ctx)?;
     let sched = Scheduler::new(&machine.meta);
-    let inst = Installation::resolve(ctx)?;
     show_one(&inst, &sched, name, long)
 }
 
@@ -447,10 +450,9 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
     Ok(())
 }
 
-/// `sim output-dir`: print the active (or Nth) restart's directory.
-pub fn output_dir(ctx: &Ctx, name: &str, restart_id: Option<u32>) -> Res<()> {
-    let inst = Installation::resolve(ctx)?;
-    let sim = Simulation::locate(&inst, name)?;
+/// `sim show --output-dir`: print the active (or Nth) restart's directory.
+fn print_output_dir(inst: &Installation, name: &str, restart_id: Option<u32>) -> Res<()> {
+    let sim = Simulation::locate(inst, name)?;
     let id = match restart_id {
         Some(id) => id,
         None => match restart::active_id(&sim.dir)? {
@@ -470,7 +472,8 @@ pub fn output_dir(ctx: &Ctx, name: &str, restart_id: Option<u32>) -> Res<()> {
 
 /// `sim log`: print the tail of the active/latest restart's stdout/stderr
 /// (paths from the frozen `@STDOUT_FILE@`/`@STDERR_FILE@` vars when present).
-pub fn log_cmd(ctx: &Ctx, name: &str) -> Res<()> {
+/// With `follow`, keep streaming newly-appended bytes (`tail -f`) until Ctrl-C.
+pub fn log_cmd(ctx: &Ctx, name: &str, follow: bool) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let sim = Simulation::locate(&inst, name)?;
     let id = restart::active_id(&sim.dir)?
@@ -493,27 +496,9 @@ pub fn log_cmd(ctx: &Ctx, name: &str) -> Res<()> {
         }
     }
 
-    let mut shown = false;
-    for (label, path) in [("stdout", &out), ("stderr", &err)] {
-        let Ok(content) = fs::read_to_string(path) else { continue };
-        shown = true;
-        println!("{}", format!("==> {} ({}) <==", path.display(), label).bold());
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(100);
-        for line in &lines[start..] {
-            println!("{line}");
-        }
-    }
-    if !shown {
-        println!(
-            "No output files yet for {} {} (looked for {} and {})",
-            name.bold(),
-            restart::dir_name(id),
-            out.display(),
-            err.display()
-        );
-    }
-    Ok(())
+    let sources = [("stdout", out), ("stderr", err)];
+    let subject = format!("{} {}", name.bold(), restart::dir_name(id));
+    crate::tail::tail_log(&sources, follow, &subject)
 }
 
 #[cfg(test)]

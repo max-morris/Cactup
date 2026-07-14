@@ -9,6 +9,7 @@ mod mdb;
 mod scheduler;
 mod shell;
 mod sim;
+mod tail;
 mod template;
 mod testsuite;
 mod walltime;

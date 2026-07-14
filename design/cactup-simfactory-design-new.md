@@ -283,9 +283,10 @@ cactup sim log <sim>                              (tail stdout/err / formaline)
 
 cactup test run    [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]   (§11)
 cactup test submit [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
-cactup test sim show   [<name>] [--long] [--all]
-cactup test sim stop   <name> [-f]
-cactup test sim delete <name> [-f]
+cactup test list       [--long] [--all]
+cactup test show       <name>
+cactup test stop       <name> [-f]
+cactup test delete     <name> [-f] [--purge]
 
 cactup knob [<name> [<value>]]                    (§5)
 
@@ -2128,7 +2129,7 @@ test-config kind** and **no separate active pointer** — only two concepts:
   against a chosen topology and test selection. It is the analogue of a
   simulation but **much simpler**: one-shot, no restarts, no checkpoint recovery,
   no walltime chaining (§11.6). Test runs live under **test-home** (§11.5) and
-  are addressed by name via `cactup test sim …` (`test sim delete <name>` in the
+  are addressed by name via `cactup test …` (`test delete <name>` in the
   required surface).
 
 ### 11.2 Marking test scripts (`test = true`) and resolution
@@ -2188,9 +2189,10 @@ flags are the §8.5 set):
 cactup test run    [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
 cactup test submit [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
 
-cactup test sim show   [<name>] [--long] [--all]  # list test runs (--all: across installations)
-cactup test sim stop   <name> [-f]                # stop a queue-submitted test run
-cactup test sim delete <name> [-f]                # move a test run to test-home TRASH/ (--purge to remove)
+cactup test list       [--long] [--all]           # list test runs (--all: across installations)
+cactup test show       <name>                      # show one test run in detail
+cactup test stop       <name> [-f]                # stop a queue-submitted test run
+cactup test delete     <name> [-f] [--purge]      # move a test run to test-home TRASH/ (--purge to remove)
 ```
 (A config is built with `cactup config build` — there is no `test build`.)
 
@@ -2249,7 +2251,7 @@ exposed to scripts as `@TEST_HOME@` (§11.9).
 ```
 <test-home>/                                   = <machine test-home>/<alias>, or ~/.cactup/tests/<alias>
   CACHE/exe/<build-id>                         (shared-semantics executable cache — see below)
-  TRASH/<test-run-id>/                         trashed test runs (test sim delete, §11.7)
+  TRASH/<test-run-id>/                         trashed test runs (test delete, §11.7)
   <config>/<TestName>/                         one dir per test run (grouped by the config under test)
     log.txt                                    test-run log (same [LOG:…] format as §12)
     results-%04d/                              numbered result sets (newest is "active")
@@ -2329,7 +2331,7 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
    the built config — §11.10.)
 7. Parse the harness's pass/fail summary, record it in `test.toml`
    (`[results] passed/failed`, §11.8), print a one-line summary, and **exit
-   non-zero if any test failed** (so `test run` is CI-usable). `cactup test sim
+   non-zero if any test failed** (so `test run` is CI-usable). `cactup test
    show <name>` reprints the last run's results.
 
 **No chaining, no recovery, no restart bookkeeping.** A testsuite is a single
@@ -2359,16 +2361,17 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
 
 ### 11.7 Managing test runs
 
-- **`cactup test sim show [<name>] [--all]`** — lists the active installation's
+- **`cactup test list [--long] [--all]`** — lists the active installation's
   test runs from the `tests.toml` registry (§11.8), or unions every
   installation's with `--all` (the §8.1 cross-install discipline). Per-run display
   state is coarser than a sim's (no restart chain): `RUNNING`/`QUEUED`/`HOLDING`
   from the active result set's live job status, `DONE (passed/failed)` once the
   job is `U` and a summary was recorded, `ERROR` on `E`.
-- **`cactup test sim stop <name> [-f]`** — the §8.6 `stop` semantics for the
+- **`cactup test show <name>`** — one test run in detail.
+- **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs
   to dedup, no chain to deactivate beyond removing the active symlink).
-- **`cactup test sim delete <name> [-f]`** (the required surface) — the §8.7
+- **`cactup test delete <name> [-f]`** (the required surface) — the §8.7
   `sim delete` semantics against test-home: refuse a live run without `-f`
   (`-f` stops it first), `shutil.move` the run dir into
   `<test-home>/TRASH/<test-run-id>/`, remove its `tests.toml` entry, and run
@@ -2390,7 +2393,7 @@ reads), the test subsystem adds:
   separate active-config pointer — test runs use `active-config` (§7.4).
 - **Per-installation test-run registry** `<installation home>/.cactup/tests.toml`
   — the test analogue of `simulations.toml` (§8.1): `<TestName>` → `{ dir,
-  config, created }`. `test sim` subcommands locate a run by name through it;
+  config, created }`. The `test` management subcommands locate a run by name through it;
   mutations go under the per-installation lock (§2.3, item 5), which now also
   guards `tests.toml`.
 - **Per-test-run metadata** `<TestName>/.cactup/test.toml`:
@@ -2425,7 +2428,7 @@ reads), the test subsystem adds:
   finished = "…"
   ```
   Plus the liveness files under the same `.cactup/`: `running.lock` and
-  `heartbeat` (§9.3 semantics; consulted by `test sim stop`/`show`, not by any
+  `heartbeat` (§9.3 semantics; consulted by `test stop`/`show`, not by any
   reaper). There is **no** `exe` link (§11.5) and no `restart.toml` (a test run
   has result sets, not restarts).
 

@@ -242,7 +242,7 @@ fn start_impl(
             if !args.force {
                 bail!(
                     "test run \"{name}\" still has a live job ({}); \
-                     `cactup test sim stop {name}` first, or pass -f to stop it",
+                     `cactup test stop {name}` first, or pass -f to stop it",
                     old.meta.job_id
                 );
             }

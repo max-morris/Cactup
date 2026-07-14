@@ -1,4 +1,4 @@
-//! `test sim list` / `show` / `stop` / `delete` (§11.7): managing test runs.
+//! `test list` / `show` / `stop` / `delete` (§11.7): managing test runs.
 //! Coarser than the sim analogues — no restart chain, no clean, no reaper.
 
 use crate::commands::Ctx;
@@ -11,6 +11,7 @@ use crate::Res;
 use anyhow::{bail, Context};
 use colored::Colorize;
 use std::fs;
+use std::path::PathBuf;
 
 /// The §11.7 display state, coarser than a sim's.
 fn state_line(run: &TestRun, sched: &Scheduler) -> colored::ColoredString {
@@ -32,7 +33,7 @@ fn state_line(run: &TestRun, sched: &Scheduler) -> colored::ColoredString {
     }
 }
 
-/// `test sim show`: one test run in detail.
+/// `test show`: one test run in detail.
 pub fn show(ctx: &Ctx, name: &str) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let sched = Scheduler::new(&machine.meta);
@@ -40,7 +41,7 @@ pub fn show(ctx: &Ctx, name: &str) -> Res<()> {
     show_one(&inst, &sched, name)
 }
 
-/// `test sim list`: list test runs; `--all` unions every installation.
+/// `test list`: list test runs; `--all` unions every installation.
 pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let sched = Scheduler::new(&machine.meta);
@@ -68,7 +69,7 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
             any = true;
             if !entry.dir.is_dir() {
                 println!(
-                    "  {:24} {:12} {} (prune with `cactup test sim delete {name}`)",
+                    "  {:24} {:12} {} (prune with `cactup test delete {name}`)",
                     name.bold(),
                     "MISSING".red(),
                     entry.dir.display()
@@ -125,7 +126,34 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
     Ok(())
 }
 
-/// `test sim stop` (§11.7): the §8.6 stop semantics for the active result
+/// `test log`: print the tail of the run's stdout/stderr — paths from the
+/// frozen `@STDOUT_FILE@`/`@STDERR_FILE@` vars when present, else
+/// `<run-dir>/test.{out,err}` (§11.5). With `follow`, keep streaming
+/// newly-appended bytes (`tail -f`) until Ctrl-C. Mirrors `sim log` (§8), but
+/// against the single per-run output pair — there is no restart chain (§11.6).
+pub fn log_cmd(ctx: &Ctx, name: &str, follow: bool) -> Res<()> {
+    let inst = Installation::resolve(ctx)?;
+    let run = TestRun::locate(&inst, name)?;
+
+    let mut out = run.dir.join("test.out");
+    let mut err = run.dir.join("test.err");
+    if let Some(toml::Value::String(s)) = run.meta.vars.get("STDOUT_FILE") {
+        out = PathBuf::from(s);
+    }
+    if let Some(toml::Value::String(s)) = run.meta.vars.get("STDERR_FILE") {
+        err = PathBuf::from(s);
+    }
+
+    let sources = [("stdout", out), ("stderr", err)];
+    let id = active_results_id(&run.dir)?.or(list_results_ids(&run.dir)?.last().copied());
+    let subject = match id {
+        Some(id) => format!("{} {}", name.bold(), results_name(id)),
+        None => name.bold().to_string(),
+    };
+    crate::tail::tail_log(&sources, follow, &subject)
+}
+
+/// `test stop` (§11.7): the §8.6 stop semantics for the active result
 /// set's job; no clean beyond removing the active symlink.
 pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
@@ -151,7 +179,7 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
     Ok(())
 }
 
-/// `test sim delete` (§11.7): §8.7 semantics against test-home. `--purge`
+/// `test delete` (§11.7): §8.7 semantics against test-home. `--purge`
 /// (or `-f`) removes outright; the default trashes into
 /// `<test-home>/TRASH/<test-run-id>/`.
 pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
@@ -161,7 +189,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
 
     let registry = inst.tests()?;
     let Some(entry) = registry.tests.get(name) else {
-        bail!("no test run named \"{name}\" (see `cactup test sim list`)");
+        bail!("no test run named \"{name}\" (see `cactup test list`)");
     };
     // A stale entry (dir vanished) is pruned rather than fataled.
     if !entry.dir.is_dir() {
@@ -187,7 +215,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
     {
         if !force {
             bail!(
-                "test run \"{name}\" has a live job ({}); `cactup test sim stop {name}` first, \
+                "test run \"{name}\" has a live job ({}); `cactup test stop {name}` first, \
                  or use -f to stop and delete",
                 run.meta.job_id
             );

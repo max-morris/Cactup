@@ -54,7 +54,7 @@ pub fn dispatch(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         println!("  simulations:  {} (see `cactup sim list`)", sims.simulations.len());
     }
     if let Ok(tests) = inst.tests() {
-        println!("  test runs:    {} (see `cactup test sim list`)", tests.tests.len());
+        println!("  test runs:    {} (see `cactup test list`)", tests.tests.len());
     }
 
     Ok(())

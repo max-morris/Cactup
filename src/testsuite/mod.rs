@@ -141,14 +141,14 @@ impl TestRun {
         let registry = inst.tests()?;
         let entry = registry.tests.get(name).ok_or_else(|| {
             anyhow!(
-                "no test run named \"{name}\" in installation \"{}\" (see `cactup test sim list`)",
+                "no test run named \"{name}\" in installation \"{}\" (see `cactup test list`)",
                 inst.alias
             )
         })?;
         if !entry.dir.is_dir() {
             bail!(
                 "test run \"{name}\" is registered at {} but that directory is missing;\n\
-                 run `cactup test sim delete {name}` to drop the stale registry entry",
+                 run `cactup test delete {name}` to drop the stale registry entry",
                 entry.dir.display()
             );
         }
