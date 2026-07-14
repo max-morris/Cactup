@@ -402,6 +402,17 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   loads a debugger module only when building sets `env-build-setup`. §6.1
   specifies how each block is injected for `.sh` vs `.py` templates and for the
   build's `make` invocation.
+- **Universe-level env-setup overrides.** A `[universes.<name>]` table (§4.8)
+  may itself carry `env-setup` / `env-build-setup` / `env-submit-setup` /
+  `env-run-setup`, alongside its wrapper keys (or with no wrapper at all — an
+  identity universe, §4.8). Where set, a key in the universe table **replaces**
+  the machine `[environment]` key of the same name, **key-by-key**, for any
+  phase executed in that universe; a key the universe table omits still falls
+  back to the machine's `[environment]` value. The concatenation that produces
+  the effective per-phase block (`env-setup` then `env-<phase>-setup`, §6.1) is
+  otherwise unchanged — it is simply evaluated against whichever of the two
+  (universe or machine) key is in force. See §4.8 for the full resolution
+  story (including which universe is "in effect" for a given phase).
 - Scheduler keys carried over (semantics unchanged; names kebab-normalized —
   see the key-naming note below): `submit`, `interactive-cmd`, `get-status`,
   `stop`, `submit-pattern`, `status-pattern`, `queued-pattern`, `running-pattern`,
@@ -500,7 +511,9 @@ phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
 `*-pattern`s, `exec-host`, `stdout`/`stderr`), then `[queues.*]`, `[variants.*]`,
-and (optional) `[universes.*]` (§4.8).
+and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
+`env-*-setup` overrides; the always-available `"host"` universe needs no table
+at all unless it is being customized).
 
 ```toml
 [machine]
@@ -547,10 +560,15 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
 
 # Variant → queue association (§4.4). Every key names a variant; there are no
 # reserved keys. A variant is either the array shorthand (queues only) or the
-# inline-table form `{ queues = [...], universe = "…", test = …, default = …,
-# tasks = … }` when it carries a universe (§4.8), a test marker (§11.2), the
-# default flag, or a default task count (`tasks = N`: the TASKS used when no
-# -n/-T/-t flag is given, instead of filling the node — §8.5).
+# inline-table form `{ queues = [...], universe = "…", universes = […],
+# test = …, default = …, tasks = … }` when it carries a universe to run *in*
+# (§4.8 step 3), a build-universe COMPATIBILITY list for selection (below),
+# a test marker (§11.2), the default flag, or a default task count (`tasks =
+# N`: the TASKS used when no -n/-T/-t flag is given, instead of filling the
+# node — §8.5). `universe` and `universes` are independent and may both be
+# set: `universe` is what THIS variant's own execution is wrapped in;
+# `universes` is which configs' BUILD universes this variant is compatible
+# with (omitted = all — the common case).
 # `default = true` marks the fallback variant within its partition (see below).
 [variants.submitscript]
 "slurm-cpu" = { queues = ["checkpt", "single"], default = true }   # normal default: serves these queues + any queue with no explicit mapping
@@ -560,6 +578,12 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
 [variants.runscript]
 "cpu" = { queues = ["checkpt", "single"], default = true }
 "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }   # runs inside a universe (§4.8)
+"sing" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+                               # selected only for configs whose BUILD universe
+                               # (§7.4) is "et-sing" or "et-sing-cpu" (§4.4,
+                               # §4.8); replaces the old trick of minting a
+                               # synthetic queue per build flavor purely to
+                               # route script selection (see the db1 MDB port)
 "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true }   # drives make <config>-testsuite (§11.6)
 # default-universe = "et-sif"          # optional: universe for runscript variants that omit one
 
@@ -612,6 +636,30 @@ cryptically at submit time. When a machine defines any **test-marked** variants
 of a kind (`test = true`), the same coverage check is applied **within the test
 partition** (against the test-partition default); a kind with no test variants is
 fine — tests borrow the normal partition (§11.2).
+
+**Universe-compatibility list (`universes`).** The inline-table variant form
+may carry `universes = ["name", …]` — the set of build universes this variant
+is compatible with (§4.8). Omitted (the default) means compatible with every
+universe. An explicitly empty list (`universes = []`) is a validation error
+(omit the key instead). Every name listed must be a declared
+`[universes.<name>]` or the literal `"host"` (§4.8's always-available implicit
+universe). Selection filters on the **config's build universe** — `"host"`
+when the config records none — never on the run/submit universe context; this
+is the parity `universes` enforces: a config built in universe X gets
+X-compatible run/submit scripts (§4.4). Validation adds an **ambiguity check
+per universe context**: for each *u* in {`"host"`} ∪ the machine's declared
+universes, and separately within each partition (normal/test, §11.2), no queue
+may be served by more than one *u*-compatible variant (a variant with no
+`universes` list is compatible with every *u*, and so counts toward every *u*'s
+check). Queue **coverage** (every queue served-or-default, above) is enforced
+at MDB load time only for *u* = `"host"`, exactly as before; for any other
+declared universe, a queue left unserved by that universe's compatible
+variants is instead a **selection-time** error — "no `<kind>` variant
+compatible with universe \"X\" serves queue \"Y\" and none is a compatible
+default" — since exhaustively checking every declared universe against every
+queue at load time would reject machines that intentionally scope a universe
+to a subset of queues. A machine with no `universes` lists anywhere validates
+and selects **byte-identically to today**.
 
 The `@templating@` inside `meta.toml` values uses **literal `@NAME@`
 substitution only** (D7): the only variables meaningful here are the install-
@@ -689,22 +737,48 @@ them first-class within one machine.
   default. The chosen variant is recorded in the config metadata (§7.4).
 - **OptionList variant ↔ queue compatibility (D12).** Each optionlist TOML
   declares, in its `[cactup]` header (§7.8), a `compatible-queues` list and a
-  `gpu` flag. At `sim submit`/`sim run`, cactup checks that the chosen queue is
-  in the built config's `compatible-queues`; a mismatch is a **hard error**
-  (overridable with `--force` for experts). This is what prevents submitting a
-  GPU binary to a CPU queue (or vice versa). `-g/--gpu` defaults from the
-  *binary's* `gpu` flag, cross-checked against the queue's `gpu` flag.
+  `gpu` flag. At `sim submit`/`sim run`, cactup checks the chosen queue against
+  the built config's `compatible-queues`; a mismatch is a **hard error**
+  (overridable with `--force-queue`/`-f` for experts). This is what prevents
+  submitting a GPU binary to a CPU queue. The **gpu/binary cross-check is
+  one-directional**: refuse (absent `--force-queue`/`-f`) only when the
+  config's `gpu` flag is set and the effective context (`-g/--gpu`, or else the
+  chosen queue's `gpu` flag) is **not** — a GPU-built config on a non-GPU queue
+  is refused, but a non-GPU config on a GPU queue is **allowed**: nothing about
+  running a CPU-only binary on GPU hardware is wrong, and some machines' only
+  real partition is GPU-flagged (a cluster like this makes GPU flags on
+  otherwise-CPU queues a routing convenience rather than a hardware
+  distinction — the db1 MDB port, §4.8, is the worked example). cactup prints
+  an advisory note in that (allowed) case only when the machine has at least
+  one non-GPU queue the user could have used instead; a machine with no
+  non-GPU queue at all never sees it. `-g/--gpu` itself still defaults from
+  the chosen queue's `gpu` flag when not passed explicitly.
 - **SubmitScript and RunScript variants** are each associated with one or more
-  **queues** (the `[variants.*]` tables in §4.2). At submit/run time cactup
-  picks the variant mapped to the chosen `-q/--queue`; if the queue has no
-  explicit mapping, the variant marked `default = true` is used. (A machine with
-  a single variant makes it the implicit default, so the flag is optional there.)
-  The submit-script and run-script variant maps are independent of each other but
-  must each cover every queue (validated at load — §4.2). A variant entry is
-  written either as the **array shorthand** (`"<v>" = ["q1", "q2"]` — queues
-  only) or, when it must carry a field beyond its queues, the **inline-table
-  form** `"<v>" = { queues = ["q1", …], universe = "<name>", test = true, default = true }`
-  where `universe` (§4.8), `test` (§11.2), and `default` are each optional; a
+  **queues** (the `[variants.*]` tables in §4.2) and, optionally, a
+  **build-universe compatibility list** (`universes = […]`, §4.8) — a second,
+  orthogonal routing dimension alongside queue: queue narrows *which
+  partition* a variant serves; `universes` narrows *which build universe's*
+  configs it serves. At submit/run time cactup first filters the queue's
+  candidate variants to those compatible with the config's **build universe**
+  (§4.8 — `"host"` when the config records none), then picks among the
+  survivors exactly as before: the variant mapped to the chosen `-q/--queue`,
+  or (absent an explicit mapping) the variant marked `default = true`.
+  Omitting `universes` (the common case, and the only case before this
+  mechanism existed) means "compatible with every universe," so a machine with
+  no universe-routing need is unaffected. An explicit `--variant` naming a
+  variant incompatible with the build universe is a **hard error** naming the
+  universe. (A machine with a single variant makes it the implicit default, so
+  the `default` flag is optional there.) The submit-script and run-script
+  variant maps are independent of each other but must each cover every queue,
+  for every universe context in play — validated at MDB **load** time for
+  `"host"`; for any other declared universe, an uncovered queue is instead a
+  **selection-time** error (§4.2). A variant entry is written either as the
+  **array shorthand** (`"<v>" = ["q1", "q2"]` — queues only) or, when it must
+  carry a field beyond its queues, the **inline-table form**
+  `"<v>" = { queues = ["q1", …], universe = "<name>", universes = ["…"], test = true, default = true }`
+  where `universe` (the universe this variant's *own* execution runs inside,
+  §4.8), `universes` (the build-universe compatibility list, above), `test`
+  (§11.2), and `default` are each optional and independent of one another; a
   table entry with only `queues` is equivalent to the shorthand. Every key names
   a variant — there are no reserved keys — so a variant may be named `default`
   with no special meaning; defaultness is carried solely by `default = true`.
@@ -875,9 +949,20 @@ wrapper-argv = ["apptainer", "exec", "--bind", "@SOURCEDIR@", "/work/@USER@/et.s
 # Template power-form (mutually exclusive with wrapper-argv):
 # [universes.head-ssh]
 # wrapper = "ssh headnode 'cd @SOURCEDIR@ && @COMMAND@'"
+
+# A universe may ALSO (or ONLY) customize env-setup — see "env-setup runs
+# inside the universe" below. With no wrapper key at all it is an identity
+# universe: no wrapping happens, only the env override applies. This is the
+# shape a machine uses to customize the implicit "host" universe (below)
+# without introducing any wrapping:
+# [universes.host]
+# env-build-setup = """
+# module purge
+# module load gcc/9.3.0 cuda/12.4.0
+# """
 ```
 
-**Two representation forms** (exactly one per universe):
+**Two representation forms, or neither:**
 
 1. **`wrapper-argv` (prefix form — default, recommended).** An argv *prefix*.
    cactup runs `<wrapper-argv…> /bin/sh -c <inner>`, where `<inner>` is the
@@ -889,12 +974,34 @@ wrapper-argv = ["apptainer", "exec", "--bind", "@SOURCEDIR@", "/work/@USER@/et.s
    shell-quotes `<inner>` and substitutes it for `@COMMAND@`. Needed only when the
    command must not sit at the end (e.g. `ssh host 'cd … && @COMMAND@'`). The
    author owns any surrounding quoting.
+3. **Neither (identity universe).** A universe may declare **neither**
+   `wrapper-argv` nor `wrapper`. It then wraps nothing: cactup runs `<inner>`
+   via a plain `/bin/sh -c <inner>` — exactly what every no-universe path does
+   already. This is not a degenerate/error case; it is how a universe whose
+   only job is the env-setup override below (typically `[universes.host]`,
+   below) is declared. Declaring **both** `wrapper-argv` and `wrapper` remains
+   an error.
 
-Both forms are first `@NAME@`-substituted with the full §6.3 variable set (so
-`@SOURCEDIR@`, `@USER@`, `@SCRATCH_HOME@`, … resolve in bind specs); `@COMMAND@`
-is reserved, filled **last**, and meaningful only in the template form. It is an
-error for a universe to define both `wrapper-argv` and `wrapper`, or for
-`wrapper` to omit `@COMMAND@`.
+Both forms (when present) are first `@NAME@`-substituted with the full §6.3
+variable set (so `@SOURCEDIR@`, `@USER@`, `@SCRATCH_HOME@`, … resolve in bind
+specs); `@COMMAND@` is reserved, filled **last**, and meaningful only in the
+template form. It is an error for a universe to define both `wrapper-argv` and
+`wrapper`, or for `wrapper` to omit `@COMMAND@`.
+
+**The implicit `host` universe.** `"host"` always exists as a universe name —
+even on a machine whose `meta.toml` has no `[universes.host]` table at all —
+as cactup's name for "the invoking context, unwrapped." Any reference to a
+universe name (`[build].universe`, a variant's `universe`, `default-universe`,
+or a variant's `universes` compatibility list, §4.4) may say `"host"` and it is
+never an unknown-universe error, declared or not. A machine may *optionally*
+declare `[universes.host]` to **customize** host — almost always to attach the
+env-setup overrides below, since host is by definition the identity case and
+so has no reason to also carry a wrapper (though it legally could). When
+`[universes.host]` is undeclared, `Meta::universe("host")` resolves to a
+built-in identity universe (no wrapper, no env overrides) — i.e. bare
+execution, indistinguishable from "no universe at all" — which is why the
+resolution precedence below only changes *materially* for machines that do
+declare it (see step 5).
 
 **`env-setup` runs *inside* the universe.** The `<inner>` snippet cactup wraps is
 the phase's effective env-setup followed by the phase command — build:
@@ -905,7 +1012,33 @@ environment (e.g. the container's modules), which is almost always what a
 containerized phase wants. Authors needing host-then-universe ordering use a
 `.py`-emitted script as usual.
 
-**Resolution precedence.** highest first:
+**Universe-level env-setup overrides (§4.2).** A `[universes.<name>]` table
+may itself carry `env-setup` / `env-build-setup` / `env-submit-setup` /
+`env-run-setup`, on top of any wrapper keys — or, per the identity case above,
+with no wrapper at all. Where set, a universe's key **replaces** the machine
+`[environment]` key of the same name, **key-by-key**, for any phase executed
+in that universe; a key the universe table omits still falls back to the
+machine's `[environment]` value. The §6.1 concatenation that produces the
+effective per-phase block (`env-setup` then `env-<phase>-setup`) is otherwise
+unchanged — it simply reads whichever of the two (universe- or
+machine-scoped) key is in force for each half. Concretely, the effective
+env-setup for phase P in universe U is `(U.env-setup ?? machine.env-setup)`
+followed by `(U.env-<P>-setup ?? machine.env-<P>-setup)`. The env block used
+for a given phase always resolves against **the universe in effect for that
+phase** — the same universe the resolution chain below picks — so a
+build-phase env override, for instance, only ever applies while building.
+This is what lets a machine give its native build the modules it needs
+without a stray `module purge` in the machine-wide `env-setup` clobbering a
+*different* universe's own loads (a real problem for a machine whose
+container universes rely on the container's own module state): scope the
+purge-and-load sequence to `[universes.host].env-build-setup` instead of
+`[environment].env-setup`, and leave the machine-wide block minimal. See the
+MDB porting guide's db1 write-up for the full worked example.
+
+**Resolution precedence.** Each phase (build / run / submit) resolves its own
+chain independently, highest first. `--no-universe` is a **true bare escape
+hatch**: at any phase it always resolves to no universe at all, skipping every
+step below — **even when the machine declares `[universes.host]`**.
 
 1. CLI `--universe <name>` / `--no-universe` (on `config build`, `sim run`, or
    `sim submit`).
@@ -931,12 +1064,45 @@ containerized phase wants. Authors needing host-then-universe ordering use a
 4. **Machine phase default.** build: `[build].universe`; run/submit: the
    `default-universe` key of `[variants.runscript]` / `[variants.submitscript]`.
    Applies to any variant that does not name its own.
-5. None — run the phase in the invoking context (today's behavior).
+5. **The machine's declared `[universes.host]`, if present.** The final
+   fallback of every chain is now the machine's own customization of `host`
+   (above) — but only *materially* when the machine actually declares
+   `[universes.host]`; this step exists so that a machine which has opted into
+   a host override (e.g. build-phase env-setup scoping, above) gets it applied
+   whenever nothing more specific named a universe, without requiring every
+   optionlist/script/`[build]` entry to spell out `universe = "host"`. A
+   machine that has **not** declared `[universes.host]` falls straight through
+   to step 6 — on-disk metadata and behavior for every pre-existing machine
+   are therefore unchanged.
+6. None — run the phase in the invoking context, bare (today's behavior; and,
+   per the `--no-universe` escape hatch above, always the outcome of
+   `--no-universe` regardless of a declared host).
 
 An unknown universe name is a hard error at resolution time (listing the
-machine's known universes). The build-universe coercion (step 2) can therefore
-fail if the config's build universe no longer exists on this machine; the error
-names it and points at `--no-universe` / a rebuild as the escape.
+machine's known universes; `"host"` is always in that list, declared or not).
+The build-universe coercion (step 2) can therefore fail if the config's build
+universe no longer exists on this machine; the error names it and points at
+`--no-universe` / a rebuild as the escape.
+
+**Universe-compatibility routing is a separate mechanism from resolution.**
+Everything above answers "which universe does this phase run *in*." A
+different question — "which run/submit **script variant** does a config get
+routed to, given the universe it was *built* in" — is answered by each
+variant's optional `universes` compatibility list (§4.4), not by this
+precedence chain: `sim run`/`sim submit` filter the candidate script variants
+for the chosen queue down to those whose `universes` list (if set) includes
+the config's build universe (default `"host"`), before applying the usual
+queue → variant / `default = true` selection (§4.2). This is what lets one
+machine ship, say, a native run/submit script and a Singularity run/submit
+script over the **same** queue, distinguished purely by the build universe of
+the config being run/submitted — replacing the older trick of minting a
+synthetic queue per build flavor purely to multiplex script selection (the MDB
+porting guide's db1 write-up documents exactly this collapse). `universes` is
+orthogonal to the `universe` / `default-universe` keys used by this
+resolution chain: a variant's `universes` list says what build universes it is
+*compatible with* (a selection filter); its own `universe` key (if any, step
+3) says what universe *its execution runs inside* (a wrapper choice) — a
+variant may set either, both, or neither.
 
 **Where the resolved universe is recorded, and when it is applied.**
 
@@ -1079,10 +1245,30 @@ depends on the artifact:
   <config>-config` / `make <config>` / `make <config>-utils` invocations, so the
   compiler/MPI modules are loaded exactly as they will be at run time. (This is
   new relative to simfactory, which never applied `env-setup` to builds.)
-- **`.sh` submit/run templates:** cactup **auto-prepends** the effective env-setup
-  for that phase (`env-setup` + `env-submit-setup` or `env-run-setup`) to the
-  generated script before execution, exactly as simfactory did for the base
-  `env-setup` (`simfactory-docs.txt` §6.4, §18 `ExecuteCommand`).
+- **`.sh` run templates:** cactup **auto-prepends** the effective run env-setup
+  (`env-setup` + `env-run-setup`) to the generated script **right after the
+  shebang line**, exactly as simfactory did for the base `env-setup`
+  (`simfactory-docs.txt` §6.4, §18 `ExecuteCommand`) — a runscript carries no
+  scheduler directive block, so there is nothing ahead of the shebang that
+  insertion could disturb.
+- **`.sh` submit templates:** cactup **auto-prepends** the effective submit
+  env-setup (`env-setup` + `env-submit-setup`), but **not** necessarily right
+  after the shebang. The insertion point is **after the leading run of
+  `#`-comment and/or blank/whitespace-only lines** — i.e. immediately before
+  the first substantive (non-comment, non-blank) line — rather than
+  immediately after the shebang. That leading run is exactly the shebang plus
+  any `#SBATCH`/`#PBS`/… scheduler directive block, so this keeps the
+  directive block **intact and first in the file**: splicing an executable
+  env-setup block in front of or inside it would make the scheduler silently
+  ignore every directive after the split (schedulers require their directives
+  to be an unbroken run at the top of the script). A blank line **inside** the
+  directive block does not end the "header" — the header is the *longest*
+  leading run of comment-or-blank lines — so a directive block with a blank
+  line in the middle is not split by this rule. A script that is
+  comment/blank all the way through (no substantive line at all) gets the
+  env-setup block appended at the end instead. A scheduler-less submitscript
+  (no directive lines at all — `generic`, mel5) reduces to "right after the
+  shebang," identical to the runscript rule above.
 - **`.py` submit/run variants:** cactup does **not** auto-prepend — the `.py`
   author has full control over the emitted script and is responsible for placing
   env-setup where they want it. cactup makes the combined value available as the
@@ -1291,7 +1477,9 @@ variant = "gpu"                 # optionlist variant used
 gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
 compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
 thornlist = "thornlists/einsteintoolkit.th"
-universe = "et-sif"             # resolved build universe, or omitted for host context (§4.8)
+universe = "et-sif"             # resolved build universe; omitted when built bare/in host —
+                                 # treated as "host" wherever a build universe is consulted
+                                 # (script-variant `universes` filtering, §4.4; run coercion, §4.8)
 coerce-run-universe = true      # snapshotted from optionlist [cactup]; default true (§4.8, §7.8)
 config-id = "…"                 # replaces CONFIG-ID
 build-id = "…"                  # replaces BUILD-ID
@@ -1730,8 +1918,11 @@ Derivation (produces the canonical §6.3 names directly — no legacy aliases):
   the layout self-consistent); for a submit the submitscript entry is consulted
   first, then the runscript entry. Testsuite runs additionally fall back to
   `TASKS = 2` when no variant sets it (§11.6).
-- `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0`,
-  cross-checked against the built binary's `gpu` flag (§4.4 / D12).
+- `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0` — checked
+  **one-directionally** against the built binary's `gpu` flag (§4.4 / D12):
+  refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
+  set and this computed `GPU` is `0`; a non-GPU binary with `GPU = 1` is
+  allowed (advisory note only when a non-GPU queue exists on the machine).
 - A script that needs "total cores" or "cores requested" computes them from
   `TASKS`, `CPUS_PER_TASK`, `NODES`, and `MAX_TASKS_PER_NODE` — cactup no
   longer pre-derives `PROCS`/`PROCS_REQUESTED`/`PPN_USED`.
@@ -2152,7 +2343,7 @@ the marker goes on the `meta.toml` variant entry, using the inline-table form
 "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true } # test-partition default (see resolution below)
 ```
 (`test = true` and `default = true` compose with each other and with
-`universe = "…"` in the same inline table.)
+`universe = "…"` / `universes = […]` in the same inline table.)
 
 **Partitioning.** For each script kind (runscript / submitscript) cactup splits
 the machine's variants into a **normal** set (no marker) and a **test** set
@@ -2164,21 +2355,33 @@ out: *"if there is no testsuite script but there is a regular one, use that for
 tests, but not vice versa."*
 
 **Resolution within the chosen set** (selected at `test run`/`test submit` time,
-per the chosen queue): pick the test-set variant whose `queues` include the
-chosen queue; if none maps that queue, use the test-partition default (the `test
-= true`, `default = true` variant, or the sole test variant). If the test set is
-empty, resolve against the normal set exactly as a sim does (§4.4: queue →
-variant, else the `default = true` variant). `--variant V` on `test run`/`test
-submit` is the escape hatch that forces the entry named `V` in each map (it must
-be a test-marked variant when the test set is non-empty); the runscript and
-submitscript maps are resolved independently, and `V` names the entry in each.
+per the chosen queue **and** the config's build universe): the chosen set (test,
+or normal on fallback) is first filtered to variants compatible with the
+config's build universe — `"host"` when the config records none — using the
+same `universes` compatibility list and filtering rule that governs `sim
+run`/`sim submit` (§4.4, §4.8); then cactup picks, among the survivors, the
+variant whose `queues` include the chosen queue, or (absent a mapping) the
+test-partition default (the `test = true`, `default = true` variant, or the
+sole test variant). If the test set is empty, resolve against the normal set
+exactly as a sim does (§4.4: filter by universe, then queue → variant, else
+the `default = true` variant). `--variant V` on `test run`/`test submit` is
+the escape hatch that forces the entry named `V` in each map (it must be a
+test-marked variant when the test set is non-empty, and compatible with the
+build universe, or `V`'s resolution errors naming the universe); the
+runscript and submitscript maps are resolved independently, and `V` names the
+entry in each.
 
 **Validation at MDB load** extends §4.2's "every queue is served" check
-**per-partition**: if a machine defines *any* test runscript (or submitscript)
-variant, then every queue in `[queues.*]` must be served by some test variant of
-that kind or by the test-partition default; a machine that defines **no** test
-variants of a kind is fine (tests borrow the normal partition, already
-validated).
+**per-partition** — and, within each partition, per the same **per-universe-context**
+rules §4.2 defines for `universes` lists: if a machine defines *any* test
+runscript (or submitscript) variant, then every queue in `[queues.*]` must be
+served, for universe context `"host"`, by some test variant of that kind or by
+the test-partition default; a machine that defines **no** test variants of a
+kind is fine (tests borrow the normal partition, already validated). As with
+the normal partition, coverage for a declared non-host universe is *not*
+checked at load time — a gap there instead surfaces as the same
+selection-time error (§4.2) the first time a `test run`/`test submit` actually
+needs it.
 
 ### 11.3 CLI surface
 

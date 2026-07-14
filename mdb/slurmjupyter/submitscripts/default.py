@@ -2,9 +2,8 @@
 # mdb/submitscripts/slurmjupyter.sub.
 #
 # .py variant (design §6.1): the old script used the chained-job ternary
-# @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
-# (literal-only @NAME@ engine, D7), and cactup would auto-prepend env-setup
-# above the #SBATCH header of a .sh variant.
+# @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@ — cactup's
+# @NAME@ engine is literal-only (D7), so the conditional moves into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   @NUM_PROCS@/@NODE_PROCS@ -> TASKS/TASKS_PER_NODE

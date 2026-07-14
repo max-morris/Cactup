@@ -3,22 +3,30 @@
 # cluster"). Upstream simfactory fragments Deep Bayou into four machine defs —
 # db1.hpc.lsu.edu (native), db-sing-nv (Singularity+CUDA), db-sing-cpu
 # (Singularity CPU), etworkshop-db (workshop image) — an artifact of
-# simfactory having no build-variant/universe/queue-flavor concept. Cactup
-# folds them back into this single machine:
+# simfactory having no build-variant/universe concept. Cactup folds them back
+# into this single machine:
 #
-#   build flavor        optionlist   build universe   run/submit scripts   queue
-#   ------------------  -----------  ---------------  -------------------  --------
-#   native (db-new)     native       host             default (native)     gpu
-#   Singularity CUDA    sing-nv      et-sing (--nv)   sing                 sing-nv
-#   Singularity CPU     sing-cpu     et-sing-cpu      sing                 sing-cpu
+#   build flavor        optionlist   build universe   run/submit scripts
+#   ------------------  -----------  ---------------  -------------------
+#   native (db-new)     native       host             default (native)
+#   Singularity CUDA    sing-nv      et-sing (--nv)   sing
+#   Singularity CPU     sing-cpu     et-sing-cpu      sing
 #
-# All three queues are the one real "gpu" SLURM partition (the sing-* queues
-# carry `name = "gpu"`); the distinct cactup queue keys are what route a built
-# config to its matching run/submit scripts and enforce the D12 binary/queue
-# cross-check. The upstream "etworkshop-db" workflow (build from *inside* the
-# workshop container) is just the sing-nv flavor built with `--no-universe`
-# (its optionlist and run/submit scripts were byte-identical to db-sing-nv);
-# no separate variant is needed.
+# Deep Bayou has exactly ONE real SLURM partition ("gpu"), so there is exactly
+# one cactup queue too ([queues.gpu]); it is the sole queue and therefore the
+# implicit default (§4.2). What used to be three cactup queues (gpu, sing-nv,
+# sing-cpu) impersonating partition names purely to route a built config to
+# its matching run/submit scripts is now first-class: each submitscript/
+# runscript variant below carries a `universes` compatibility list, and
+# selection is filtered by the CONFIG's build universe (host / et-sing /
+# et-sing-cpu), defaulting to "host" when unset (§4.8, "implicit host
+# universe"). This relies on the one-directional D12 cross-check (§4.4): the
+# CPU-only et-sing-cpu build is allowed on the GPU-flagged queue — it is Deep
+# Bayou's only partition — while a GPU build on a non-GPU queue stays refused.
+# The upstream "etworkshop-db" workflow (build from
+# *inside* the workshop container) is still just the sing-nv flavor built with
+# `--no-universe` (its optionlist and run/submit scripts were byte-identical
+# to db-sing-nv); no separate variant is needed.
 #
 # The dir name stays "db1.hpc.lsu.edu" (the login-node ini filename) even
 # though the native config self-names "db".
@@ -48,11 +56,11 @@ memory             = 196608     # MB per node
 [build]
 make      = "make -j@MAKEJOBS@"
 make-jobs = 8
-# Machine default build universe (§4.8 step 4): the native flavor's optionlist
-# names no universe, so it inherits "host" (loads Deep Bayou's host modules
-# around make). The Singularity optionlists override this with their own
-# universe (§4.8 step 3).
-universe = "host"
+# No machine default build universe key here (§4.8 "implicit host universe"):
+# the native flavor's optionlist names no universe, so it falls back to the
+# declared [universes.host] below without needing `universe = "host"` spelled
+# out. The Singularity optionlists override this with their own universe
+# (§4.8 step 3).
 
 # --- Build universes (§4.8) ---
 # "host": the native (db-new) build. A universe is cactup's generic "run this
@@ -60,13 +68,24 @@ universe = "host"
 # gcc/cuda/mpich modules the frozen externals were built against. The RUN is
 # NOT coerced into it (native optionlist sets coerce-run-universe = false; the
 # runscript loads the same modules itself).
+#
+# This universe declares NEITHER wrapper NOR wrapper-argv — it is an identity
+# universe (§4.8 "implicit host universe": Universe::wrap runs the command
+# bare via `sh -c`, exactly like today's no-universe path). It exists only to
+# carry env-build-setup below: cactup's build shell is a non-login `/bin/sh
+# -c`, where the `module` function is undefined, so the old approach wrapped
+# the whole build command in `bash -lc 'module … && '@COMMAND@` just to get a
+# shell where `module` works. Sourcing the Modules init script directly in
+# env-build-setup gets the same modules loaded ahead of the build command
+# without wrapping it, and scopes the modules to the build phase only (§4.8
+# Feature 3: universe-level env-setup overrides).
 [universes.host]
-# @COMMAND@ is supplied already single-quoted by the universe wrapper (the
-# template author owns quoting; §4.8). It must sit OUTSIDE this string's quotes
-# — the leading `'` closes the module-loading prefix and the quoted @COMMAND@
-# concatenates onto it as the same `bash -lc` argument. Writing it inside the
-# quotes breaks quoting once the build snippet contains its own quotes.
-wrapper = "bash -lc 'module purge && module load gcc/9.3.0 && module load cuda/12.4.0 mpich/3.3.2/intel-19.1.3 && '@COMMAND@"
+env-build-setup = """
+. "${MODULESHOME:-/usr/local/packages/Modules/4.5.0}/init/bash"
+module purge
+module load gcc/9.3.0
+module load cuda/12.4.0 mpich/3.3.2/intel-19.1.3
+"""
 
 # "et-sing" / "et-sing-cpu": the Singularity builds, verbatim from the old
 # db-sing-nv / db-sing-cpu `make` wrappers (identical but for --nv). Upstream:
@@ -118,36 +137,31 @@ max-walltime    = "72:00:00"
 # historical default allocation; set the allocation knob instead
 allocation      = "NO_ALLOCATION"
 
-# Three cactup queues over Deep Bayou's single real "gpu" partition: the key
-# routes a built config to its run/submit scripts (via the variant maps below)
-# and pairs with the optionlist's compatible-queues + gpu flag (D12). The
-# sing-* queues carry name = "gpu" so @QUEUE@ / `-p` still name the real
-# partition.
+# Deep Bayou's one real SLURM partition. A sole queue is the implicit default
+# (design §4.2) — no `default = true` needed. Both GPU (native, et-sing) and
+# CPU-only (et-sing-cpu) builds run here (D12 is one-directional: a non-GPU
+# config on a GPU queue is fine; only a GPU config on a non-GPU queue is
+# refused).
 [queues.gpu]
-gpu     = true
-default = true
+gpu = true
 
-[queues.sing-nv]
-gpu  = true
-name = "gpu"
-
-[queues.sing-cpu]
-gpu  = false      # CPU (non-CUDA) Singularity build
-name = "gpu"
-
-# Native flavor uses the "default" scripts; both Singularity flavors share the
-# "sing" scripts (upstream db-sing-cpu reused db-sing-nv's run/submit).
+# Native flavor's scripts require host-compatibility (built in [universes.host]
+# or with no universe recorded, which resolves to "host"); both Singularity
+# flavors share the "sing" scripts, gated on the et-sing/et-sing-cpu build
+# universes (upstream db-sing-cpu reused db-sing-nv's run/submit). universes
+# on the "default"/"test" variants keep them from also matching Singularity
+# builds now that there is only one queue to filter on.
 [variants.submitscript]
-"default"   = { queues = ["gpu"], default = true }
-"sing"      = { queues = ["sing-nv", "sing-cpu"] }
-"test"      = { queues = ["gpu"], test = true }
-"sing-test" = { queues = ["sing-nv", "sing-cpu"], test = true }
+"default"   = { queues = ["gpu"], universes = ["host"] }
+"sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+"test"      = { queues = ["gpu"], universes = ["host"], test = true }
+"sing-test" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"], test = true }
 
 [variants.runscript]
-"default"   = { queues = ["gpu"], default = true }
-"sing"      = { queues = ["sing-nv", "sing-cpu"] }
-"test"      = { queues = ["gpu"], test = true }
-"sing-test" = { queues = ["sing-nv", "sing-cpu"], test = true }
+"default"   = { queues = ["gpu"], universes = ["host"] }
+"sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+"test"      = { queues = ["gpu"], universes = ["host"], test = true }
+"sing-test" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"], test = true }
 
 [variants.optionlist]
 # Three build flavors; `config build` must pick one with --variant (§4.4).

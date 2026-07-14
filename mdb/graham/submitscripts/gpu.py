@@ -6,8 +6,7 @@
 #   --cpus-per-task=@(int(32/@NODE_PROCS@))@   (== CPUS_PER_TASK)
 #   @("@CHAINED_JOB_ID@" != "" ? "--dependency=afterany:…" : "")@
 # — cactup's @NAME@ engine is literal-only (D7); the first equals the
-# canonical CPUS_PER_TASK, the conditional moves into Python. cactup would
-# also auto-prepend env-setup above the #SBATCH header of a .sh variant.
+# canonical CPUS_PER_TASK, the conditional moves into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   @NUM_PROCS@ -> TASKS

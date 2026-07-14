@@ -10,6 +10,7 @@ use crate::template::VarSet;
 use crate::walltime::Walltime;
 use crate::Res;
 use anyhow::{anyhow, bail};
+use colored::Colorize;
 
 /// The resolved §8.5 topology for one submit/run invocation.
 #[derive(Debug, Clone)]
@@ -68,15 +69,25 @@ pub fn resolve_topology(
         );
     }
 
-    // GPU: -g or the queue's gpu flag, cross-checked against the binary.
+    // GPU: -g or the queue's gpu flag, cross-checked one-directionally
+    // against the binary (D12): only a GPU config in a non-GPU context is
+    // refused. A non-GPU config on a GPU queue is allowed — some machines'
+    // only real partition is GPU-flagged — with an advisory when a non-GPU
+    // queue existed.
     let gpu = flags.gpu || queue_def.gpu;
-    if gpu != cfg.gpu && !force_queue {
+    if cfg.gpu && !gpu && !force_queue {
         bail!(
-            "config \"{}\" was built {} GPU support but this run is {} (queue \"{queue}\"); \
+            "config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
              use --force-queue to override (§8.5)",
             cfg.name,
-            if cfg.gpu { "with" } else { "without" },
-            if gpu { "GPU" } else { "non-GPU" },
+        );
+    }
+    if !cfg.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
+        eprintln!(
+            "{} config \"{}\" was built without GPU support but queue \"{queue}\" is GPU-flagged; \
+             this machine also has non-GPU queue(s) (D12)",
+            "note:".yellow(),
+            cfg.name,
         );
     }
 
@@ -190,6 +201,9 @@ pub struct RestartVarsInput<'a> {
     pub hostname: &'a str,
     pub user: &'a str,
     pub email: &'a str,
+    /// The resolved RUN universe name: its env keys override the machine's
+    /// for the run-phase `ENV_SETUP` (§6.1); `None` = bare / implicit host.
+    pub run_universe: Option<&'a str>,
     /// `sim run --debug` (§8.4): `@RUNDEBUG@` = 1.
     pub debug: bool,
 }
@@ -226,13 +240,14 @@ pub fn set_walltime_vars(v: &mut VarSet, wall: Walltime, buffer: Walltime) {
 
 /// The machine-derived block (§6.3): the queue-effective hardware facts
 /// (per-queue overrides falling back to [hardware] — §4.2) + the RUN-phase
-/// `ENV_SETUP` (submit-phase artifacts override it — §6.1).
-pub fn set_machine_vars(v: &mut VarSet, machine: &Machine, queue: &str) -> Res<()> {
+/// `ENV_SETUP` under the resolved run universe (§6.1; submit-phase artifacts
+/// override it).
+pub fn set_machine_vars(v: &mut VarSet, machine: &Machine, queue: &str, run_universe: Option<&str>) -> Res<()> {
     let hw = machine.meta.effective_hardware(queue)?;
     v.set("MAX_TASKS_PER_NODE", hw.max_tasks_per_node.unwrap_or(1) as u64);
     v.set("MEMORY", hw.memory.unwrap_or(0));
     v.set("THREADS_PER_CPU", hw.threads_per_cpu() as u64);
-    v.set("ENV_SETUP", machine.meta.environment.effective(Phase::Run));
+    v.set("ENV_SETUP", machine.meta.effective_env(run_universe, Phase::Run));
     Ok(())
 }
 
@@ -291,7 +306,7 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
     v.set("CHAINED_JOB_ID", input.chained_job_id);
     v.set("FROM_RESTART_COMMAND", input.from_restart_command);
 
-    set_machine_vars(&mut v, machine, &topo.queue)?;
+    set_machine_vars(&mut v, machine, &topo.queue, input.run_universe)?;
 
     // Debug (§8.4).
     v.set("RUNDEBUG", input.debug);
@@ -467,13 +482,19 @@ mod tests {
         // …unless forced.
         assert!(resolve_topology(&flags(), &machine, &db, &cfg, true).is_ok());
 
-        // GPU cross-check: non-gpu binary on a gpu queue refused.
-        let mut f = flags();
-        f.queue = Some("gpuq".to_owned());
-        let err = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false)
+        // GPU cross-check is one-directional (D12): a GPU binary in a non-GPU
+        // context (default queue batch) is refused…
+        let err = resolve_topology(&flags(), &machine, &db, &test_cfg(true, &[]), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("GPU"), "{err}");
+        // …unless forced.
+        assert!(resolve_topology(&flags(), &machine, &db, &test_cfg(true, &[]), true).is_ok());
+        // A non-GPU binary on a GPU queue is allowed (advisory only).
+        let mut f = flags();
+        f.queue = Some("gpuq".to_owned());
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert!(topo.gpu);
     }
 
     #[test]
@@ -501,6 +522,22 @@ mod tests {
         assert_eq!(short_sim_name("my sim", 0), "my_sim-0");
         assert_eq!(short_sim_name("0numeric", 1), "J0numeric-1");
         assert_eq!(short_sim_name("averylongsimulationname", 12).len(), 15);
+    }
+
+    #[test]
+    fn env_setup_follows_the_run_universe() {
+        let mut machine = test_machine();
+        machine.meta.environment.env_setup = Some("export M=1".to_owned());
+        // An identity universe carrying only a run-phase env override (§6.1).
+        let sing: crate::mdb::Universe = toml::from_str("env-run-setup = \"module load sing\"").unwrap();
+        machine.meta.universes.insert("sing".to_owned(), sing);
+
+        let mut v = VarSet::new();
+        set_machine_vars(&mut v, &machine, "batch", None).unwrap();
+        assert_eq!(v.get("ENV_SETUP").unwrap().canonical(), "export M=1");
+        let mut v = VarSet::new();
+        set_machine_vars(&mut v, &machine, "batch", Some("sing")).unwrap();
+        assert_eq!(v.get("ENV_SETUP").unwrap().canonical(), "export M=1\nmodule load sing");
     }
 
     #[test]
@@ -534,6 +571,7 @@ mod tests {
             hostname: "host.example",
             user: "alice",
             email: "a@example.org",
+            run_universe: None,
             debug: false,
         })
         .unwrap();

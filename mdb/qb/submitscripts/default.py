@@ -2,9 +2,9 @@
 # mdb/submitscripts/qb.sub (PBS/Torque).
 #
 # .py variant (design §6.1): the old script used the chained-job ternary
-# @('@CHAINED_JOB_ID@' != '' ? '-W depend=afterany:@CHAINED_JOB_ID@' : '')@
-# (literal-only @NAME@ engine, D7), and cactup would auto-prepend env-setup
-# above the #PBS header of a .sh variant.
+# @('@CHAINED_JOB_ID@' != '' ? '-W depend=afterany:@CHAINED_JOB_ID@' : '')@ —
+# cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
+# Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   -o/-e use STDOUT_FILE/STDERR_FILE (same @RUNDIR@/@SIMULATION_NAME@.{out,err}

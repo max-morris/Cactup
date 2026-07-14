@@ -228,11 +228,17 @@ pub fn rebuild_decision(
     }
 }
 
-/// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4).
+/// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4):
+/// CLI → optionlist → [build].universe → declared host → None.
+/// `--no-universe` stays the true bare escape hatch, bypassing even a
+/// declared host; `host_declared` only matters as the final fallback, so
+/// machines without `[universes.host]` keep resolving to None (implicit host
+/// ≡ identity ≡ bare execution).
 pub fn resolve_build_universe<'a>(
     opts: &'a BuildOpts,
     optionlist_universe: Option<&'a str>,
     machine_build_universe: Option<&'a str>,
+    host_declared: bool,
 ) -> Option<&'a str> {
     if opts.universe.no_universe {
         return None;
@@ -242,6 +248,7 @@ pub fn resolve_build_universe<'a>(
         .as_deref()
         .or(optionlist_universe)
         .or(machine_build_universe)
+        .or(host_declared.then_some(crate::mdb::HOST_UNIVERSE))
 }
 
 pub struct BuildOutcome {
@@ -271,6 +278,7 @@ pub fn build(
         opts,
         optionlist.header.universe.as_deref(),
         machine.meta.build.universe.as_deref(),
+        machine.meta.declared_host().is_some(),
     )
     .map(str::to_owned);
     // Unknown universe = hard error listing the known ones (§4.8).
@@ -421,7 +429,9 @@ pub fn build(
         steps.push(format!("{make} {name}"));
         steps.push(format!("{make} {name}-utils"));
 
-        let env = machine.meta.environment.effective(Phase::Build);
+        // Build-phase env for the resolved universe (§6.1): universe env keys
+        // override the machine [environment] key-by-key.
+        let env = machine.meta.effective_env(universe_name.as_deref(), Phase::Build);
         let snippet = format!(
             "set -e\ncd {}\n{}{}",
             sh_quote(&cactus_root),
@@ -599,6 +609,22 @@ mod tests {
             vars.substitute(DEFAULT_MAKE).unwrap(),
             "make -j$(nproc 2>/dev/null || echo 1)"
         );
+    }
+
+    #[test]
+    fn build_universe_precedence_and_host_fallback() {
+        let mut opts = BuildOpts::default_for_tests();
+        // §4.8: CLI → optionlist → [build].universe → declared host → None.
+        assert_eq!(resolve_build_universe(&opts, None, None, false), None);
+        assert_eq!(resolve_build_universe(&opts, None, None, true), Some("host"));
+        assert_eq!(resolve_build_universe(&opts, None, Some("m"), true), Some("m"));
+        assert_eq!(resolve_build_universe(&opts, Some("o"), Some("m"), true), Some("o"));
+        opts.universe.universe = Some("cli".to_owned());
+        assert_eq!(resolve_build_universe(&opts, Some("o"), Some("m"), true), Some("cli"));
+        // --no-universe is the true bare escape hatch: it bypasses everything,
+        // including a declared host.
+        opts.universe.no_universe = true;
+        assert_eq!(resolve_build_universe(&opts, Some("o"), Some("m"), true), None);
     }
 
     #[test]

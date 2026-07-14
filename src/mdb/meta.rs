@@ -15,6 +15,24 @@ use serde::Deserialize;
 /// one year (§4.2).
 const FALLBACK_MAX_WALLTIME: Walltime = Walltime(365 * 86400);
 
+/// The reserved universe name for bare host execution (§4.8): always a legal
+/// reference, resolving to `[universes.host]` when declared, else to the
+/// implicit identity universe.
+pub const HOST_UNIVERSE: &str = "host";
+
+/// The implicit `host` universe (§4.8): identity wrapping, machine-level env.
+static IMPLICIT_HOST: Universe = Universe {
+    kind: None,
+    wrapper_argv: None,
+    wrapper: None,
+    environment: Environment {
+        env_setup: None,
+        env_build_setup: None,
+        env_submit_setup: None,
+        env_run_setup: None,
+    },
+};
+
 /// The three execution phases an `env-<phase>-setup` can target (§4.2, §6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -140,7 +158,7 @@ pub struct Build {
     pub universe: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Environment {
     pub env_setup: Option<String>,
@@ -259,12 +277,26 @@ pub struct ScriptVariants {
 pub struct VariantEntry {
     pub queues: Vec<String>,
     pub universe: Option<String>,
+    /// Universe-compatibility list (§4.4): the variant only serves configs
+    /// whose build universe is listed. `None` = compatible with ALL universes;
+    /// an explicitly empty list is a validation error.
+    pub universes: Option<Vec<String>>,
     pub test: bool,
     pub default: bool,
     /// Default total task count for runs launched through this script when no
     /// process-layout flag (-n/-T/-t) is given; overrides the fill-the-node
     /// default of §8.5.
     pub tasks: Option<u32>,
+}
+
+impl VariantEntry {
+    /// Whether this variant may serve a config built in `universe` (§4.4).
+    pub fn compatible_with(&self, universe: &str) -> bool {
+        self.universes
+            .as_ref()
+            .map(|list| list.iter().any(|u| u == universe))
+            .unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize)]
@@ -274,6 +306,7 @@ enum VariantEntryRaw {
     Full {
         queues: Vec<String>,
         universe: Option<String>,
+        universes: Option<Vec<String>>,
         #[serde(default)]
         test: bool,
         #[serde(default)]
@@ -288,12 +321,13 @@ impl From<VariantEntryRaw> for VariantEntry {
             VariantEntryRaw::Queues(queues) => VariantEntry {
                 queues,
                 universe: None,
+                universes: None,
                 test: false,
                 default: false,
                 tasks: None,
             },
-            VariantEntryRaw::Full { queues, universe, test, default, tasks } => {
-                VariantEntry { queues, universe, test, default, tasks }
+            VariantEntryRaw::Full { queues, universe, universes, test, default, tasks } => {
+                VariantEntry { queues, universe, universes, test, default, tasks }
             }
         }
     }
@@ -317,7 +351,7 @@ impl<'de> Deserialize<'de> for ScriptVariants {
                 let entry: VariantEntryRaw = value.try_into().map_err(|e| {
                     D::Error::custom(format!(
                         "variant \"{key}\" must be a [\"queue\", …] array or a \
-                         {{ queues = […], universe = \"…\", test = …, default = …, tasks = … }} table: {e}"
+                         {{ queues = […], universe = \"…\", universes = […], test = …, default = …, tasks = … }} table: {e}"
                     ))
                 })?;
                 out.variants.insert(key, entry.into());
@@ -327,7 +361,9 @@ impl<'de> Deserialize<'de> for ScriptVariants {
     }
 }
 
-/// A universe declaration (§4.8): exactly one of the two wrapper forms.
+/// A universe declaration (§4.8): at most one of the two wrapper forms.
+/// Neither wrapper = an identity universe (bare `sh -c` execution) — useful
+/// purely as a carrier for env-setup overrides (§4.8/§6.1).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Universe {
@@ -338,6 +374,10 @@ pub struct Universe {
     pub wrapper_argv: Option<Vec<String>>,
     /// Template form: one shell command containing exactly one `@COMMAND@`.
     pub wrapper: Option<String>,
+    /// Per-universe env-setup overrides (§6.1): each set key replaces the
+    /// machine `[environment]` key of the same name (`Meta::effective_env`).
+    #[serde(flatten)]
+    pub environment: Environment,
 }
 
 /// A universe-wrapped command, ready to spawn.
@@ -419,8 +459,11 @@ impl Universe {
                         .context("Failed to substitute universe wrapper template")?,
                 ))
             }
-            // Both remaining shapes are rejected by Meta::validate.
-            _ => bail!("universe declares neither or both of wrapper-argv/wrapper"),
+            // Identity universe (§4.8): no wrapper — run the inner command
+            // bare, exactly like every caller's no-universe branch.
+            (None, None) => Ok(WrappedCommand::Shell(inner.to_owned())),
+            // Rejected by Meta::validate.
+            (Some(_), Some(_)) => bail!("universe declares both wrapper-argv and wrapper"),
         }
     }
 }
@@ -440,30 +483,42 @@ pub struct Origin {
 }
 
 impl ScriptVariants {
-    /// The variants of one partition: test-marked or normal (§11.2).
-    pub fn partition(&self, test: bool) -> impl Iterator<Item = (&str, &VariantEntry)> {
+    /// The variants of one partition — test-marked or normal (§11.2) —
+    /// regardless of universe compatibility (validation-side view).
+    fn partition_all(&self, test: bool) -> impl Iterator<Item = (&str, &VariantEntry)> {
         self.variants
             .iter()
             .filter(move |(_, e)| e.test == test)
             .map(|(n, e)| (n.as_str(), e))
     }
 
-    /// The default variant of a partition: the `default = true` entry, or the
-    /// sole variant of the partition (§4.2).
-    pub fn partition_default(&self, test: bool) -> Option<(&str, &VariantEntry)> {
-        let mut iter = self.partition(test);
+    /// The variants of one partition that are compatible with `universe`
+    /// (§4.4/§11.2) — every selection candidate set is filtered this way.
+    pub fn partition<'s>(
+        &'s self,
+        test: bool,
+        universe: &str,
+    ) -> impl Iterator<Item = (&'s str, &'s VariantEntry)> {
+        self.partition_all(test).filter(move |(_, e)| e.compatible_with(universe))
+    }
+
+    /// The default variant of a (universe-filtered) partition: the
+    /// `default = true` entry, or the sole variant of the partition (§4.2).
+    pub fn partition_default<'s>(&'s self, test: bool, universe: &str) -> Option<(&'s str, &'s VariantEntry)> {
+        let mut iter = self.partition(test, universe);
         let first = iter.next()?;
         if iter.next().is_none() {
             return Some(first);
         }
-        self.partition(test).find(|(_, e)| e.default)
+        self.partition(test, universe).find(|(_, e)| e.default)
     }
 
-    /// Select the variant serving `queue` (§4.4), honoring the §11.2 test
-    /// partitioning (`prefer_test` = this is a `test …` command) and the
-    /// `--variant` escape hatch.
-    pub fn select(&self, queue: &str, prefer_test: bool, explicit: Option<&str>) -> Res<(&str, &VariantEntry)> {
-        let test_set_nonempty = self.partition(true).next().is_some();
+    /// Select the variant serving `queue` for a config built in `universe`
+    /// (§4.4) — pass `HOST_UNIVERSE` when the config records none — honoring
+    /// the §11.2 test partitioning (`prefer_test` = this is a `test …`
+    /// command) and the `--variant` escape hatch.
+    pub fn select(&self, queue: &str, universe: &str, prefer_test: bool, explicit: Option<&str>) -> Res<(&str, &VariantEntry)> {
+        let test_set_nonempty = self.partition(true, universe).next().is_some();
         let use_test = prefer_test && test_set_nonempty;
 
         if let Some(name) = explicit {
@@ -482,15 +537,26 @@ impl ScriptVariants {
             if !prefer_test && entry.test {
                 bail!("variant \"{name}\" is test-only (test = true) and cannot serve a normal run (§11.2)");
             }
+            if !entry.compatible_with(universe) {
+                bail!(
+                    "variant \"{name}\" is not compatible with universe \"{universe}\" \
+                     (universes = [{}]) (§4.4)",
+                    entry.universes.as_deref().unwrap_or_default().join(", ")
+                );
+            }
             return Ok((name.as_str(), entry));
         }
 
-        if let Some(found) = self.partition(use_test).find(|(_, e)| e.queues.iter().any(|q| q == queue)) {
+        if let Some(found) = self
+            .partition(use_test, universe)
+            .find(|(_, e)| e.queues.iter().any(|q| q == queue))
+        {
             return Ok(found);
         }
-        self.partition_default(use_test).ok_or_else(|| {
+        self.partition_default(use_test, universe).ok_or_else(|| {
             anyhow!(
-                "no {}variant serves queue \"{queue}\" and none is marked default",
+                "no {}variant compatible with universe \"{universe}\" serves queue \"{queue}\" \
+                 and none is a compatible default",
                 if use_test { "test " } else { "" }
             )
         })
@@ -555,17 +621,52 @@ impl Meta {
             .unwrap_or(FALLBACK_MAX_WALLTIME))
     }
 
+    /// Resolve a universe name. `"host"` never errors (§4.8): the declared
+    /// `[universes.host]` when present, else the implicit identity universe.
     pub fn universe(&self, name: &str) -> Res<&Universe> {
-        self.universes.get(name).ok_or_else(|| {
-            anyhow!(
-                "no universe named \"{name}\" on this machine (known: {})",
-                if self.universes.is_empty() {
-                    "none".to_owned()
-                } else {
-                    self.universes.keys().cloned().collect::<Vec<_>>().join(", ")
+        if let Some(u) = self.universes.get(name) {
+            return Ok(u);
+        }
+        if name == HOST_UNIVERSE {
+            return Ok(&IMPLICIT_HOST);
+        }
+        let mut known: Vec<&str> = self.universes.keys().map(String::as_str).collect();
+        if !self.universes.contains_key(HOST_UNIVERSE) {
+            known.push(HOST_UNIVERSE);
+        }
+        Err(anyhow!(
+            "no universe named \"{name}\" on this machine (known: {})",
+            known.join(", ")
+        ))
+    }
+
+    /// The DECLARED `[universes.host]` table, when the machine has one (§4.8):
+    /// the resolution chains fall back to it — and only to it; an undeclared
+    /// host stays `None` (implicit host ≡ identity ≡ bare execution).
+    pub fn declared_host(&self) -> Option<&Universe> {
+        self.universes.get(HOST_UNIVERSE)
+    }
+
+    /// Effective env block for `phase` when executing in `universe` (§6.1):
+    /// the universe's set env keys replace the machine `[environment]` ones
+    /// KEY-BY-KEY; unset keys inherit. `None` (bare / --no-universe /
+    /// implicit host) and unknown names fall back to the machine env.
+    pub fn effective_env(&self, universe: Option<&str>, phase: Phase) -> String {
+        let base = &self.environment;
+        match universe.and_then(|u| self.universes.get(u)) {
+            None => base.effective(phase),
+            Some(u) => {
+                let over = &u.environment;
+                let pick = |o: &Option<String>, b: &Option<String>| o.clone().or_else(|| b.clone());
+                Environment {
+                    env_setup: pick(&over.env_setup, &base.env_setup),
+                    env_build_setup: pick(&over.env_build_setup, &base.env_build_setup),
+                    env_submit_setup: pick(&over.env_submit_setup, &base.env_submit_setup),
+                    env_run_setup: pick(&over.env_run_setup, &base.env_run_setup),
                 }
-            )
-        })
+                .effective(phase)
+            }
+        }
     }
 
     /// The §4.2/§11.2 load-time validation. `machine` names the machine in
@@ -596,7 +697,9 @@ impl Meta {
         for (name, universe) in &self.universes {
             match (&universe.wrapper_argv, &universe.wrapper) {
                 (Some(_), Some(_)) => bail!("universe \"{name}\" defines both wrapper-argv and wrapper; pick one (§4.8)"),
-                (None, None) => bail!("universe \"{name}\" defines neither wrapper-argv nor wrapper (§4.8)"),
+                // Neither wrapper = identity universe (§4.8): legal, e.g. as a
+                // pure env-setup override carrier.
+                (None, None) => {}
                 (None, Some(t)) => {
                     if !t.contains("@COMMAND@") {
                         bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@ (§4.8)")
@@ -614,7 +717,8 @@ impl Meta {
             }
         }
 
-        // Every universe referenced by name must exist.
+        // Every universe referenced by name must exist; "host" is always a
+        // legal reference (§4.8), declared or implicit.
         let mut refs: Vec<(String, &Option<String>)> = vec![("[build].universe".into(), &self.build.universe)];
         for kind in [ScriptKind::Submit, ScriptKind::Run] {
             let sv = self.script_variants(kind);
@@ -625,10 +729,10 @@ impl Meta {
         }
         for (what, reference) in refs {
             if let Some(name) = reference
-                && !self.universes.contains_key(name)
+                && !self.is_known_universe(name)
             {
                 bail!("{what} names unknown universe \"{name}\" (known: {})",
-                    if self.universes.is_empty() { "none".to_owned() }
+                    if self.universes.is_empty() { HOST_UNIVERSE.to_owned() }
                     else { self.universes.keys().cloned().collect::<Vec<_>>().join(", ") });
             }
         }
@@ -636,9 +740,18 @@ impl Meta {
         Ok(())
     }
 
-    /// Per-kind §4.2 checks, applied per §11.2 partition: sane queue refs, at
-    /// most one default, unambiguous queue mappings, and full queue coverage
-    /// (the test partition is only checked when it is non-empty).
+    /// A name is referenceable as a universe when declared, or when it is the
+    /// always-legal implicit "host" (§4.8).
+    fn is_known_universe(&self, name: &str) -> bool {
+        name == HOST_UNIVERSE || self.universes.contains_key(name)
+    }
+
+    /// Per-kind §4.2 checks, applied per §11.2 partition: sane queue and
+    /// universe refs, at most one default (GLOBAL per partition, not
+    /// per-universe), per-universe-unambiguous queue mappings, and full queue
+    /// coverage for the host context only — for other universes a miss is a
+    /// selection-time error (§4.4). The test partition is only checked when
+    /// it is non-empty.
     fn validate_script_kind(&self, kind: ScriptKind) -> Res<()> {
         let sv = self.script_variants(kind);
 
@@ -648,10 +761,28 @@ impl Meta {
                     bail!("variant \"{name}\" maps unknown queue \"{queue}\"");
                 }
             }
+            if let Some(universes) = &entry.universes {
+                if universes.is_empty() {
+                    bail!(
+                        "variant \"{name}\" declares an empty universes list; omit the key \
+                         to be compatible with all universes (§4.4)"
+                    );
+                }
+                for u in universes {
+                    if !self.is_known_universe(u) {
+                        bail!("variant \"{name}\" lists unknown universe \"{u}\"");
+                    }
+                }
+            }
         }
 
+        // The universe contexts selection can run under: host + declared.
+        let contexts: Vec<&str> = std::iter::once(HOST_UNIVERSE)
+            .chain(self.universes.keys().map(String::as_str).filter(|u| *u != HOST_UNIVERSE))
+            .collect();
+
         for test in [false, true] {
-            let partition: Vec<_> = sv.partition(test).collect();
+            let partition: Vec<_> = sv.partition_all(test).collect();
             if partition.is_empty() {
                 if !test && !self.queues.is_empty() {
                     bail!("no {} variants declared", if test { "test" } else { "normal" });
@@ -668,21 +799,29 @@ impl Meta {
                 );
             }
 
-            for (queue, _) in &self.queues {
-                let serving: Vec<_> = partition
-                    .iter()
-                    .filter(|(_, e)| e.queues.iter().any(|q| q == queue))
-                    .collect();
-                if serving.len() > 1 {
-                    bail!(
-                        "queue \"{queue}\" is mapped by more than one {label}variant: {}",
-                        serving.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
-                    );
-                }
-                if serving.is_empty() && sv.partition_default(test).is_none() {
-                    bail!(
-                        "queue \"{queue}\" is served by no {label}variant and none is marked default = true (§4.2)"
-                    );
+            for universe in &contexts {
+                for (queue, _) in &self.queues {
+                    let serving: Vec<_> = partition
+                        .iter()
+                        .filter(|(_, e)| e.compatible_with(universe) && e.queues.iter().any(|q| q == queue))
+                        .collect();
+                    if serving.len() > 1 {
+                        bail!(
+                            "queue \"{queue}\" is mapped by more than one {label}variant \
+                             compatible with universe \"{universe}\": {}",
+                            serving.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                        );
+                    }
+                    // Coverage is a load-time obligation only for the host
+                    // context (§4.4).
+                    if *universe == HOST_UNIVERSE
+                        && serving.is_empty()
+                        && sv.partition_default(test, universe).is_none()
+                    {
+                        bail!(
+                            "queue \"{queue}\" is served by no {label}variant and none is marked default = true (§4.2)"
+                        );
+                    }
                 }
             }
         }
@@ -861,19 +1000,19 @@ mod tests {
     fn script_selection_follows_queue_then_default() {
         let meta = mike();
         let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", false, None).unwrap().0, "gpu-sing");
-        assert_eq!(rs.select("single", false, None).unwrap().0, "cpu");
+        assert_eq!(rs.select("gpu", "host", false, None).unwrap().0, "gpu-sing");
+        assert_eq!(rs.select("single", "host", false, None).unwrap().0, "cpu");
         // Test commands get the test partition; normal never does (§11.2).
-        assert_eq!(rs.select("single", true, None).unwrap().0, "test-cpu");
-        assert!(rs.select("single", false, Some("test-cpu")).is_err());
+        assert_eq!(rs.select("single", "host", true, None).unwrap().0, "test-cpu");
+        assert!(rs.select("single", "host", false, Some("test-cpu")).is_err());
         // With a non-empty test set, --variant must name a test variant.
-        assert!(rs.select("single", true, Some("cpu")).is_err());
-        assert!(rs.select("single", false, Some("nope")).is_err());
+        assert!(rs.select("single", "host", true, Some("cpu")).is_err());
+        assert!(rs.select("single", "host", false, Some("nope")).is_err());
         // gpu-sing carries its universe association (§4.8 step 3).
-        assert_eq!(rs.select("gpu", false, None).unwrap().1.universe.as_deref(), Some("et-sif"));
+        assert_eq!(rs.select("gpu", "host", false, None).unwrap().1.universe.as_deref(), Some("et-sif"));
         // test-cpu carries its default-tasks setting (§4.2); cpu has none.
-        assert_eq!(rs.select("single", true, None).unwrap().1.tasks, Some(2));
-        assert_eq!(rs.select("single", false, None).unwrap().1.tasks, None);
+        assert_eq!(rs.select("single", "host", true, None).unwrap().1.tasks, Some(2));
+        assert_eq!(rs.select("single", "host", false, None).unwrap().1.tasks, None);
     }
 
     #[test]
@@ -881,9 +1020,9 @@ mod tests {
         let mut meta = mike();
         meta.variants.runscript.variants.shift_remove("test-cpu");
         let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("single", true, None).unwrap().0, "cpu");
+        assert_eq!(rs.select("single", "host", true, None).unwrap().0, "cpu");
         // And --variant may then name a normal variant.
-        assert_eq!(rs.select("gpu", true, Some("gpu-sing")).unwrap().0, "gpu-sing");
+        assert_eq!(rs.select("gpu", "host", true, Some("gpu-sing")).unwrap().0, "gpu-sing");
     }
 
     #[test]
@@ -993,6 +1132,7 @@ mod tests {
             kind: None,
             wrapper_argv: None,
             wrapper: Some("ssh headnode 'cd @SOURCEDIR@ && '@COMMAND@".to_owned()),
+            environment: Environment::default(),
         };
         let WrappedCommand::Shell(cmd) = ssh.wrap(&vars, "echo it's here").unwrap() else {
             panic!("expected shell form");
@@ -1026,6 +1166,177 @@ mod tests {
         assert_eq!(meta.paths.simulation_home.as_deref(), Some("/work/@USER@/simulations"));
         // …and scheduler templates keep theirs for use-time substitution.
         assert_eq!(meta.scheduler.submit.as_deref(), Some("sbatch @SCRIPTFILE@ 2>&1"));
+    }
+
+    /// A single-queue machine routing configs to scripts by build universe
+    /// via `universes` lists (§4.4; modeled on the reworked db1 entry).
+    const DB: &str = r#"
+        [machine]
+        name = "db"
+
+        [environment]
+        env-setup = "export BASE=1"
+        env-build-setup = "module load base-build"
+
+        [queues.gpu]
+        gpu = true
+
+        [variants.submitscript]
+        "default"   = { queues = ["gpu"], universes = ["host"] }
+        "sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+        "test"      = { queues = ["gpu"], universes = ["host"], test = true }
+        "sing-test" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"], test = true }
+
+        [variants.runscript]
+        "default"   = { queues = ["gpu"], universes = ["host"] }
+        "sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+
+        [variants.optionlist]
+        variants = ["native"]
+
+        # Identity universe (§4.8): no wrapper, just a build-env override.
+        [universes.host]
+        env-build-setup = "module load gcc/9"
+
+        [universes.et-sing]
+        wrapper-argv = ["apptainer", "exec", "--nv", "et.sif"]
+
+        [universes.et-sing-cpu]
+        wrapper-argv = ["apptainer", "exec", "et.sif"]
+    "#;
+
+    fn db() -> Meta {
+        let meta: Meta = toml::from_str(DB).unwrap();
+        meta.validate("db").unwrap();
+        meta
+    }
+
+    #[test]
+    fn universes_lists_filter_selection() {
+        let meta = db();
+        let sv = meta.script_variants(ScriptKind::Submit);
+        // One queue, four variants: the build universe picks the script (§4.4).
+        assert_eq!(sv.select("gpu", "host", false, None).unwrap().0, "default");
+        assert_eq!(sv.select("gpu", "et-sing", false, None).unwrap().0, "sing");
+        assert_eq!(sv.select("gpu", "et-sing-cpu", false, None).unwrap().0, "sing");
+        assert_eq!(sv.select("gpu", "host", true, None).unwrap().0, "test");
+        assert_eq!(sv.select("gpu", "et-sing", true, None).unwrap().0, "sing-test");
+        // Runscripts have no test partition: tests borrow normal (§11.2),
+        // still universe-filtered.
+        let rs = meta.script_variants(ScriptKind::Run);
+        assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing");
+    }
+
+    #[test]
+    fn universe_miss_is_a_selection_time_error() {
+        // A declared universe no variant lists: loads fine (coverage is a
+        // load-time obligation only for host — §4.4)…
+        let extra = format!("{DB}\n[universes.other]\nwrapper-argv = [\"env\"]\n");
+        let meta: Meta = toml::from_str(&extra).unwrap();
+        meta.validate("db").unwrap();
+        // …but selecting under it fails, naming universe and queue.
+        let err = format!(
+            "{:#}",
+            meta.script_variants(ScriptKind::Run).select("gpu", "other", false, None).unwrap_err()
+        );
+        assert!(err.contains("\"other\"") && err.contains("\"gpu\""), "{err}");
+
+        // Missing HOST coverage is still a load-time error.
+        let no_host = DB
+            .replace("\"default\"   = { queues = [\"gpu\"], universes = [\"host\"] }\n        \"sing\"      = { queues = [\"gpu\"], universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]",
+                     "\"sing\"      = { queues = [\"gpu\"], universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]");
+        let meta: Meta = toml::from_str(&no_host).unwrap();
+        let err = format!("{:#}", meta.validate("db").unwrap_err());
+        assert!(err.contains("served by no"), "{err}");
+    }
+
+    #[test]
+    fn explicit_variant_incompatible_with_universe_errors() {
+        let meta = db();
+        let sv = meta.script_variants(ScriptKind::Submit);
+        // --variant may pick any compatible variant…
+        assert_eq!(sv.select("gpu", "et-sing", false, Some("sing")).unwrap().0, "sing");
+        // …but naming an incompatible one is a hard error naming the universe.
+        let err = format!("{:#}", sv.select("gpu", "host", false, Some("sing")).unwrap_err());
+        assert!(err.contains("\"host\"") && err.contains("et-sing"), "{err}");
+    }
+
+    #[test]
+    fn per_universe_ambiguity_is_rejected() {
+        // Making the runscript "default" compatible with ALL universes (list
+        // omitted) makes queue gpu doubly served in the et-sing context.
+        let ambiguous = DB.replace(
+            "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"], universes = [\"host\"] }",
+            "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"] }",
+        );
+        let meta: Meta = toml::from_str(&ambiguous).unwrap();
+        let err = format!("{:#}", meta.validate("db").unwrap_err());
+        assert!(err.contains("more than one") && err.contains("et-sing"), "{err}");
+    }
+
+    #[test]
+    fn universes_list_names_are_validated() {
+        let empty = DB.replace("universes = [\"et-sing\", \"et-sing-cpu\"] }\n        \"test\"",
+                               "universes = [] }\n        \"test\"");
+        let meta: Meta = toml::from_str(&empty).unwrap();
+        let err = format!("{:#}", meta.validate("db").unwrap_err());
+        assert!(err.contains("empty universes list"), "{err}");
+
+        let unknown = DB.replace("universes = [\"et-sing\", \"et-sing-cpu\"] }\n        \"test\"",
+                                 "universes = [\"ghost\"] }\n        \"test\"");
+        let meta: Meta = toml::from_str(&unknown).unwrap();
+        let err = format!("{:#}", meta.validate("db").unwrap_err());
+        assert!(err.contains("\"ghost\""), "{err}");
+    }
+
+    #[test]
+    fn identity_universe_wraps_as_bare_shell() {
+        let meta = db();
+        // Declared host has no wrapper: identity wrapping (§4.8).
+        let host = meta.universe("host").unwrap();
+        assert!(host.wrapper.is_none() && host.wrapper_argv.is_none());
+        let vars = VarSet::new();
+        assert_eq!(
+            host.wrap(&vars, "make -j4").unwrap(),
+            WrappedCommand::Shell("make -j4".to_owned())
+        );
+    }
+
+    #[test]
+    fn host_universe_is_always_resolvable() {
+        // mike declares no host: `universe("host")` yields the implicit
+        // identity universe, and declared_host stays None (§4.8).
+        let meta = mike();
+        assert!(meta.declared_host().is_none());
+        let host = meta.universe("host").unwrap();
+        assert_eq!(
+            host.wrap(&VarSet::new(), "true").unwrap(),
+            WrappedCommand::Shell("true".to_owned())
+        );
+        // Unknown names still error, with host in the known list.
+        let err = format!("{:#}", meta.universe("ghost").unwrap_err());
+        assert!(err.contains("host") && err.contains("et-sif"), "{err}");
+        // "host" is a legal reference even when undeclared.
+        let with_ref = MIKE.replace("[variants.runscript]", "[variants.runscript]\ndefault-universe = \"host\"");
+        let meta: Meta = toml::from_str(&with_ref).unwrap();
+        meta.validate("mike").unwrap();
+        // A declared host is returned as-is.
+        assert!(db().declared_host().is_some());
+    }
+
+    #[test]
+    fn effective_env_overrides_key_by_key() {
+        let meta = db();
+        // No universe: the machine [environment] as before.
+        assert_eq!(meta.effective_env(None, Phase::Build), "export BASE=1\nmodule load base-build");
+        // host overrides env-build-setup only; env-setup is inherited (§6.1).
+        assert_eq!(meta.effective_env(Some("host"), Phase::Build), "export BASE=1\nmodule load gcc/9");
+        // Unset phase keys inherit, concatenation semantics unchanged.
+        assert_eq!(meta.effective_env(Some("host"), Phase::Run), "export BASE=1");
+        // A universe with no env keys inherits everything.
+        assert_eq!(meta.effective_env(Some("et-sing"), Phase::Build), "export BASE=1\nmodule load base-build");
+        // Unknown names fall back to the machine env (resolution errors first).
+        assert_eq!(meta.effective_env(Some("nope"), Phase::Build), "export BASE=1\nmodule load base-build");
     }
 
     #[test]

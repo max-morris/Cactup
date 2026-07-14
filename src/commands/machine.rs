@@ -306,9 +306,14 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
             .iter()
             .map(|(n, e)| {
                 format!(
-                    "{n}{}{}",
+                    "{n}{}{}{}",
                     if e.test { " [test]" } else { "" },
-                    if e.default { " (default)" } else { "" }
+                    if e.default { " (default)" } else { "" },
+                    // Universe-compatibility list (§4.4), shown when present.
+                    e.universes
+                        .as_ref()
+                        .map(|u| format!(" [universes: {}]", u.join(", ")))
+                        .unwrap_or_default()
                 )
             })
             .collect();

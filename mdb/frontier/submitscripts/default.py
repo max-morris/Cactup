@@ -3,8 +3,8 @@
 #
 # .py variant (design §6.1): the old script used the chained-job ternary
 # @("@CHAINED_JOB_ID@" != "" ? "--dependency=afterany:@CHAINED_JOB_ID@" : "")@
-# (literal-only @NAME@ engine, D7), and cactup would auto-prepend env-setup
-# above the #SBATCH header of a .sh variant.
+# — cactup's @NAME@ engine is literal-only (D7), so the conditional moves
+# into Python.
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):
 #   @NODE_PROCS@ -> TASKS_PER_NODE; @PPN_USED@ -> TASKS_PER_NODE*CPUS_PER_TASK

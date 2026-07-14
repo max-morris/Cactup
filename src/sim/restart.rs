@@ -49,11 +49,15 @@ impl UniverseSpec {
         }
     }
 
+    /// Env keys are deliberately absent (env is baked into the generated
+    /// scripts — §6.1); an identity spec (both wrappers None, §4.8) rebuilds
+    /// an identity universe.
     pub fn to_universe(&self) -> Universe {
         Universe {
             kind: None,
             wrapper_argv: self.wrapper_argv.clone(),
             wrapper: self.wrapper.clone(),
+            environment: Default::default(),
         }
     }
 }

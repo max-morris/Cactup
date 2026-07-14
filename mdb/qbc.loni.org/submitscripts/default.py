@@ -1,14 +1,10 @@
 # qbc.loni.org submitscript (variant "default"), ported from simfactory2
 # mdb/submitscripts/mike.sub.
 #
-# This is a .py variant (design §6.1) for two reasons:
-#   1. The old script used simfactory's ternary expression
-#      @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@ —
-#      cactup's @NAME@ engine is literal-only (D7), so the conditional moves
-#      into Python.
-#   2. cactup auto-prepends env-setup to .sh submitscripts, which would land
-#      above the #SBATCH header and stop sbatch from reading the directives;
-#      a .py variant places ENV_SETUP itself, after the header.
+# .py variant (design §6.1): the old script used simfactory's ternary
+# expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
+# — cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
+# Python, alongside the `if EMAIL:` mail guard below.
 #
 # Calling convention: cactup binds every §6.3 variable as a module global and
 # this script prints the final submit script to stdout.

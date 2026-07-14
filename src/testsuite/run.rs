@@ -9,12 +9,12 @@ use crate::commands::{machine, Ctx};
 use crate::database::{Database, SCHEMA};
 use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
-use crate::mdb::{Machine, Phase, ScriptKind, Universe};
+use crate::mdb::{Machine, Phase, ScriptKind, Universe, HOST_UNIVERSE};
 use crate::scheduler::{JobStatus, Scheduler};
 use crate::sim::restart::{freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{
-    generate_script, resolve_run_universe, script_command, spawn_and_wait, write_executable,
-    Identity,
+    generate_script, resolve_run_universe, resolve_submit_universe, script_command,
+    spawn_and_wait, write_executable, Identity,
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
@@ -76,6 +76,7 @@ fn assemble_test_vars(
     select: &str,
     identity: &Identity,
     alias: &str,
+    run_universe: Option<&str>,
 ) -> Res<VarSet> {
     let mut v = VarSet::new();
     set_topology_vars(&mut v, topo, name);
@@ -119,7 +120,7 @@ fn assemble_test_vars(
     v.set("EXECHOST", "");
     v.set("JOB_ID", "");
 
-    set_machine_vars(&mut v, machine, &topo.queue)?;
+    set_machine_vars(&mut v, machine, &topo.queue, run_universe)?;
     v.set("RUNDEBUG", false);
     v.set("DEBUGGER", "gdb");
     Ok(v)
@@ -171,11 +172,13 @@ fn start_impl(
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
 
     // 3. TEST script variants for the queue (§11.2: prefer the test
-    //    partition, fall back to normal) and the universes (§4.8).
+    //    partition, fall back to normal) and the universes (§4.8); selection
+    //    is driven by the config's BUILD universe (§4.4).
     let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
-    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, true, args.variant.as_deref())?;
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, true, args.variant.as_deref())?;
+    let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, cfg_universe, true, args.variant.as_deref())?;
+    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, true, args.variant.as_deref())?;
 
     // Testsuites run on a couple of ranks, not a full node: script-variant
     // `tasks` (§4.2, mode-relevant script first), else 2 (the ET convention;
@@ -186,14 +189,12 @@ fn start_impl(
         run_entry.tasks.or(sub_entry.tasks)
     };
     apply_tasks_default(&mut topo, &args.topology, script_tasks, Some(TESTSUITE_DEFAULT_TASKS));
-    let submit_uni = match sub_entry
-        .universe
-        .as_deref()
-        .or(submit_scripts.default_universe.as_deref())
-    {
-        Some(n) => Some(machine.meta.universe(n)?),
-        None => None,
-    };
+    let submit_uni = resolve_submit_universe(
+        machine,
+        sub_entry.universe.as_deref(),
+        submit_scripts.default_universe.as_deref(),
+    )?;
+    let submit_uni_name = submit_uni.as_ref().map(|(name, _)| name.as_str());
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
@@ -203,6 +204,7 @@ fn start_impl(
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
+    let run_uni_name = run_uni.as_ref().map(|(name, _)| name.as_str());
     let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
 
     // The run is named after its config (§11.3 has no name argument);
@@ -304,23 +306,25 @@ fn start_impl(
         &select,
         &identity,
         &inst.alias,
+        run_uni_name,
     )?;
     run.meta.vars = freeze_vars(&vset);
 
     // 5. Scripts at the run root (§11.5): run-script always (the compute node
     //    executes it), submit-script for `test submit`.
-    let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run)?;
+    let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run, run_uni_name)?;
     write_executable(&run_dir.join("run-script"), &run_script)?;
 
     if submit {
+        // Submit-phase ENV_SETUP under the submit universe (§6.1).
         let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.environment.effective(Phase::Submit));
+        submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
         let submit_script =
-            generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit)?;
+            generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
         run.store_meta()?;
 
-        let job_id = sched.submit(&submit_vars, submit_uni)?;
+        let job_id = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
         run.meta.job_id = job_id.clone();
         run.meta.timestamps.submitted = Some(Utc::now());
         run.store_meta()?;

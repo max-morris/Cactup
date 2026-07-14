@@ -8,7 +8,7 @@ use crate::commands::Ctx;
 use crate::database::{Database, SCHEMA};
 use crate::installation::Installation;
 use crate::lock::{LinkLock, HEARTBEAT_SECS};
-use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand};
+use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 use crate::scheduler::Scheduler;
 use crate::sim::restart::{self, Restart, RestartMeta, UniverseSpec, NO_JOB_ID};
 use crate::sim::{vars, Simulation};
@@ -62,7 +62,9 @@ fn obtain_sim(
 }
 
 /// Resolve the RUN universe per the §4.8 precedence:
-/// CLI → coerced build universe → runscript variant / default-universe → none.
+/// CLI → coerced build universe → runscript variant / default-universe →
+/// declared host → none (a machine without `[universes.host]` keeps
+/// resolving to none: implicit host ≡ identity ≡ bare execution).
 pub fn resolve_run_universe<'m>(
     machine: &'m Machine,
     cfg: &ConfigMeta,
@@ -103,47 +105,73 @@ pub fn resolve_run_universe<'m>(
     let name = variant_universe.or(default_universe);
     match name {
         Some(n) => Ok(Some((n.to_owned(), machine.meta.universe(n)?))),
-        None => Ok(None),
+        None => Ok(machine.meta.declared_host().map(|u| (HOST_UNIVERSE.to_owned(), u))),
     }
 }
 
 /// Resolve the SUBMIT universe: submitscript variant → `default-universe` →
-/// none (the CLI flag targets the run universe — §8.3).
-fn resolve_submit_universe<'m>(
+/// declared host → none (the CLI flag targets the run universe — §8.3).
+pub(crate) fn resolve_submit_universe<'m>(
     machine: &'m Machine,
     variant_universe: Option<&str>,
     default_universe: Option<&str>,
-) -> Res<Option<&'m Universe>> {
+) -> Res<Option<(String, &'m Universe)>> {
     match variant_universe.or(default_universe) {
-        Some(n) => Ok(Some(machine.meta.universe(n)?)),
-        None => Ok(None),
+        Some(n) => Ok(Some((n.to_owned(), machine.meta.universe(n)?))),
+        None => Ok(machine.meta.declared_host().map(|u| (HOST_UNIVERSE.to_owned(), u))),
     }
 }
 
-/// Insert the phase's effective env-setup into a substituted `.sh` script,
-/// after the shebang when present (§6.1 auto-prepend).
-fn prepend_env(script: &str, env: &str) -> String {
+/// Insert the phase's effective env-setup into a substituted `.sh` script
+/// (§6.1 auto-prepend). Runscripts: right after the shebang. Submitscripts:
+/// after the leading run of `#`-or-blank lines (shebang + #SBATCH/#PBS
+/// directives; blank lines count as header so a directive block with a blank
+/// line in it is not split — scheduler directives must not be preceded by
+/// executable lines), appending when the whole script is header.
+fn prepend_env(script: &str, env: &str, kind: ScriptKind) -> String {
     if env.is_empty() {
         return script.to_owned();
     }
-    match script.strip_prefix("#!") {
-        Some(rest) => match rest.split_once('\n') {
-            Some((shebang_rest, body)) => format!("#!{shebang_rest}\n{env}\n{body}"),
-            None => format!("{script}\n{env}\n"),
+    match kind {
+        ScriptKind::Run => match script.strip_prefix("#!") {
+            Some(rest) => match rest.split_once('\n') {
+                Some((shebang_rest, body)) => format!("#!{shebang_rest}\n{env}\n{body}"),
+                None => format!("{script}\n{env}\n"),
+            },
+            None => format!("{env}\n{script}"),
         },
-        None => format!("{env}\n{script}"),
+        ScriptKind::Submit => {
+            let mut idx = 0; // byte offset of the first substantive line
+            for line in script.split_inclusive('\n') {
+                let t = line.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    idx += line.len();
+                } else {
+                    break;
+                }
+            }
+            if idx == script.len() {
+                let sep = if script.is_empty() || script.ends_with('\n') { "" } else { "\n" };
+                format!("{script}{sep}{env}\n")
+            } else {
+                format!("{}{env}\n{}", &script[..idx], &script[idx..])
+            }
+        }
     }
 }
 
 /// Generate one script artifact for a restart or test run (§6.1/§6.2): `.sh`
-/// variants are `@NAME@`-substituted with the phase env auto-prepended; `.py`
-/// variants run per the calling convention and own their env placement.
+/// variants are `@NAME@`-substituted with the phase env — under the phase's
+/// resolved `universe`, whose env keys override the machine's (§6.1) —
+/// auto-prepended; `.py` variants run per the calling convention and own
+/// their env placement.
 pub(crate) fn generate_script(
     machine: &Machine,
     kind: ScriptKind,
     variant: &str,
     vars: &VarSet,
     phase: Phase,
+    universe: Option<&str>,
 ) -> Res<String> {
     let script = machine.script_path(kind, variant)?;
     if script.python {
@@ -154,7 +182,7 @@ pub(crate) fn generate_script(
         let substituted = vars
             .substitute(&template)
             .with_context(|| format!("substituting {}", script.path.display()))?;
-        Ok(prepend_env(&substituted, &machine.meta.environment.effective(phase)))
+        Ok(prepend_env(&substituted, &machine.meta.effective_env(universe, phase), kind))
     }
 }
 
@@ -274,11 +302,13 @@ fn submit_impl(
         restart::select_recovery_source(sim, args.restart_id)?
     };
 
-    // Script variants for the chosen queue (§4.4) and universes (§4.8).
+    // Script variants for the chosen queue (§4.4) and universes (§4.8);
+    // selection is driven by the config's BUILD universe (§4.4).
     let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
-    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, false, None)?;
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, false, None)?;
+    let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, cfg_universe, false, None)?;
+    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, false, None)?;
     // Script-variant default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
     let submit_uni = resolve_submit_universe(
@@ -295,6 +325,8 @@ fn submit_impl(
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
+    let run_uni_name = run_uni.as_ref().map(|(name, _)| name.as_str());
+    let submit_uni_name = submit_uni.as_ref().map(|(name, _)| name.as_str());
 
     // Automatic walltime chaining (§8.8).
     let ceiling = machine.meta.effective_max_walltime(&topo.queue)?;
@@ -336,18 +368,20 @@ fn submit_impl(
             hostname: &identity.hostname,
             user: &identity.user,
             email: &identity.email,
+            run_universe: run_uni_name,
             debug: false,
         })?;
 
-        // Submit-phase artifact: same vars, submit-phase ENV_SETUP (§6.1).
+        // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
+        // submit universe (§6.1).
         let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.environment.effective(Phase::Submit));
-        let submit_script = generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit)?;
+        submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
+        let submit_script = generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
 
         // Run-phase artifact, frozen now so the compute node never touches
         // the MDB (§8.3.1).
-        let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run)?;
+        let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run, run_uni_name)?;
         write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
         let mut r = Restart {
@@ -385,7 +419,7 @@ fn submit_impl(
         }
 
         let job_id = sched
-            .submit(&submit_vars, submit_uni)
+            .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
             .with_context(|| format!("submitting restart {}", restart::dir_name(id)))?;
         r.meta.job_id = job_id.clone();
         r.meta.status = None;
@@ -488,7 +522,9 @@ fn run_interactive(
     };
 
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, false, None)?;
+    // Selection is driven by the config's BUILD universe (§4.4).
+    let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, false, None)?;
     // Script-variant default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
     let run_uni = resolve_run_universe(
@@ -500,6 +536,7 @@ fn run_interactive(
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
+    let run_uni_name = run_uni.as_ref().map(|(name, _)| name.as_str());
 
     let job_wall = topo.total_wall.min(machine.meta.effective_max_walltime(&topo.queue)?);
     let buffer = args
@@ -526,10 +563,11 @@ fn run_interactive(
         hostname: &identity.hostname,
         user: &identity.user,
         email: &identity.email,
+        run_universe: run_uni_name,
         debug: args.debug,
     })?;
 
-    let run_script = generate_script(machine, ScriptKind::Run, run_variant, &vset, Phase::Run)?;
+    let run_script = generate_script(machine, ScriptKind::Run, run_variant, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
     let mut r = Restart {
@@ -974,7 +1012,12 @@ mod tests {
         assert!(script.contains("--restart-id=1"), "{script}");
         assert!(script.contains("--sim-dir="), "{script}");
         assert!(script.contains("# chained: JOB-0"), "{script}");
-        assert!(script.starts_with("#!/bin/sh\nexport CACTUP_TEST_ENV=1\n"), "env after shebang: {script}");
+        // Submit-script env goes after the whole '#' header block (§6.1), not
+        // right after the shebang, so scheduler directives stay on top.
+        assert!(
+            script.starts_with("#!/bin/sh\n# chained: JOB-0\nexport CACTUP_TEST_ENV=1\nexec"),
+            "env after the directive block: {script}"
+        );
 
         // Frozen vars allow full reconstruction (D11).
         let vars = restart::thaw_vars(&r2.meta.vars).unwrap();
@@ -1096,7 +1139,7 @@ mod tests {
         cfg_optout.coerce_run_universe = false;
         let got = resolve_run_universe(&machine, &cfg_optout, &no_flags, Some("other"), None, false).unwrap();
         assert_eq!(got.unwrap().0, "other");
-        // 3/4. Variant → default-universe → 5. none.
+        // 3/4. Variant → default-universe → 5. none (no declared host here).
         let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, Some("sif"), false).unwrap();
         assert_eq!(got.unwrap().0, "sif");
         assert!(resolve_run_universe(&machine, &cfg_plain, &no_flags, None, None, false).unwrap().is_none());
@@ -1104,15 +1147,45 @@ mod tests {
         let bad = UniverseFlags { universe: Some("ghost".to_owned()), no_universe: false };
         let err = resolve_run_universe(&machine, &cfg_plain, &bad, None, None, false).unwrap_err();
         assert!(format!("{err:#}").contains("sif"), "{err:#}");
+
+        // 5'. A DECLARED host becomes the final fallback of both chains
+        // (§4.8); --no-universe still bypasses it.
+        let host: Universe = toml::from_str("env-run-setup = \"module load x\"").unwrap();
+        machine.meta.universes.insert("host".to_owned(), host);
+        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, None, false).unwrap();
+        assert_eq!(got.unwrap().0, "host");
+        assert!(resolve_run_universe(&machine, &cfg_plain, &no_uni, None, None, false).unwrap().is_none());
+        let got = resolve_submit_universe(&machine, None, None).unwrap();
+        assert_eq!(got.unwrap().0, "host");
+        // With a variant/default-universe, host stays out of the way.
+        let got = resolve_submit_universe(&machine, Some("sif"), None).unwrap();
+        assert_eq!(got.unwrap().0, "sif");
     }
 
     #[test]
-    fn env_prepend_respects_shebang() {
+    fn env_prepend_placement_per_script_kind() {
+        // Runscripts: right after the shebang (§6.1).
         let script = "#!/bin/bash\necho hi\n";
-        let out = prepend_env(script, "module load x");
+        let out = prepend_env(script, "module load x", ScriptKind::Run);
         assert_eq!(out, "#!/bin/bash\nmodule load x\necho hi\n");
-        assert_eq!(prepend_env("echo hi\n", "E"), "E\necho hi\n");
-        assert_eq!(prepend_env(script, ""), script);
+        assert_eq!(prepend_env("echo hi\n", "E", ScriptKind::Run), "E\necho hi\n");
+        assert_eq!(prepend_env(script, "", ScriptKind::Run), script);
+        // Submitscripts: after the whole leading '#'-or-blank block, so
+        // scheduler directives are never preceded by executable lines (§6.1);
+        // an interior blank line does not split the header.
+        let sub = "#!/bin/bash\n#SBATCH -N 1\n\n#SBATCH -p gpu\necho go\n";
+        assert_eq!(
+            prepend_env(sub, "E", ScriptKind::Submit),
+            "#!/bin/bash\n#SBATCH -N 1\n\n#SBATCH -p gpu\nE\necho go\n"
+        );
+        assert_eq!(prepend_env(sub, "", ScriptKind::Submit), sub);
+        assert_eq!(prepend_env("echo go\n", "E", ScriptKind::Submit), "E\necho go\n");
+        // All-header script: env appended at the end.
+        assert_eq!(
+            prepend_env("#!/bin/sh\n# nothing else\n", "E", ScriptKind::Submit),
+            "#!/bin/sh\n# nothing else\nE\n"
+        );
+        assert_eq!(prepend_env("#c", "E", ScriptKind::Submit), "#c\nE\n");
     }
 
     #[test]

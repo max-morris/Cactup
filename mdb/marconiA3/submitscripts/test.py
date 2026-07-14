@@ -5,8 +5,9 @@
 # compute node with the §11.6 locator flags (--test-dir + --results-id)
 # instead of `sim run`.
 #
-# .py rather than .sh so the #SBATCH header stays above ENV_SETUP (cactup
-# auto-prepends env-setup to .sh submitscripts — design §6.1).
+# .py variant (design §6.1): the mail directives are guarded by `if EMAIL:`
+# (cactup's @NAME@ engine is literal-only, D7, so the conditional moves into
+# Python).
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}".format(ALLOCATION))

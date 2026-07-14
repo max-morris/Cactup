@@ -97,11 +97,17 @@ impl<'m> Scheduler<'m> {
 
     /// Submit a job: run the machine `submit` command (already carrying
     /// `@SCRIPTFILE@` etc. — substituted here with `vars`), optionally inside
-    /// a submit universe (§4.8), and parse the job id via `submit-pattern`
-    /// group 1.
-    pub fn submit(&self, vars: &VarSet, universe: Option<&Universe>) -> Res<String> {
-        let submit = self.command_for("submit", self.meta.scheduler.submit.as_deref(), vars)?;
-        let output = self.run(&submit, universe, vars)?;
+    /// a submit universe (§4.8) — `(name, universe)`, the name selecting the
+    /// universe's env-setup overrides (§6.1) — and parse the job id via
+    /// `submit-pattern` group 1.
+    pub fn submit(&self, vars: &VarSet, universe: Option<(&str, &Universe)>) -> Res<String> {
+        let submit = self.command_for(
+            "submit",
+            self.meta.scheduler.submit.as_deref(),
+            vars,
+            universe.map(|(name, _)| name),
+        )?;
+        let output = self.run(&submit, universe.map(|(_, u)| u), vars)?;
 
         let pattern = self.meta.scheduler.submit_pattern.as_deref().unwrap_or("(.*)");
         let regex = Regex::new(pattern).with_context(|| format!("invalid submit-pattern {pattern:?}"))?;
@@ -122,7 +128,7 @@ impl<'m> Scheduler<'m> {
     pub fn get_status(&self, job_id: &str) -> Res<JobStatus> {
         let mut vars = VarSet::new();
         vars.set("JOB_ID", job_id);
-        let cmd = self.command_for("get-status", self.meta.scheduler.get_status.as_deref(), &vars)?;
+        let cmd = self.command_for("get-status", self.meta.scheduler.get_status.as_deref(), &vars, None)?;
 
         let output = self.spawn_sh(&cmd, true)?;
         classify(&output, job_id, self.meta)
@@ -132,7 +138,7 @@ impl<'m> Scheduler<'m> {
     pub fn stop(&self, job_id: &str) -> Res<()> {
         let mut vars = VarSet::new();
         vars.set("JOB_ID", job_id);
-        let cmd = self.command_for("stop", self.meta.scheduler.stop.as_deref(), &vars)?;
+        let cmd = self.command_for("stop", self.meta.scheduler.stop.as_deref(), &vars, None)?;
         self.spawn_sh(&cmd, false)?;
         Ok(())
     }
@@ -145,7 +151,7 @@ impl<'m> Scheduler<'m> {
         };
         let mut vars = VarSet::new();
         vars.set("JOB_ID", job_id);
-        let cmd = self.command_for("exec-host", Some(exec_host), &vars)?;
+        let cmd = self.command_for("exec-host", Some(exec_host), &vars, None)?;
         let output = self.spawn_sh(&cmd, true)?;
 
         let pattern = self.meta.scheduler.exec_host_pattern.as_deref().unwrap_or("(.*)");
@@ -156,14 +162,22 @@ impl<'m> Scheduler<'m> {
             .map(|m| m.as_str().trim().to_owned()))
     }
 
-    /// Prepend the submit-phase env-setup (§4.2) and substitute `vars`.
-    fn command_for(&self, what: &str, template: Option<&str>, vars: &VarSet) -> Res<String> {
+    /// Prepend the submit-phase env-setup (§4.2) — under `env_universe`'s
+    /// overrides when given (§6.1; only `submit` passes one; get-status /
+    /// stop / exec-host keep the machine env) — and substitute `vars`.
+    fn command_for(
+        &self,
+        what: &str,
+        template: Option<&str>,
+        vars: &VarSet,
+        env_universe: Option<&str>,
+    ) -> Res<String> {
         let template = template
             .ok_or_else(|| anyhow!("this machine's meta.toml defines no [scheduler].{what} command"))?;
         let cmd = vars
             .substitute(template)
             .with_context(|| format!("substituting the [scheduler].{what} command"))?;
-        let env = self.meta.environment.effective(Phase::Submit);
+        let env = self.meta.effective_env(env_universe, Phase::Submit);
         Ok(if env.is_empty() { cmd } else { format!("{env}\n{cmd}") })
     }
 
@@ -286,7 +300,25 @@ mod tests {
         let mut vars = VarSet::new();
         vars.set("SCRIPTFILE", "s.sh");
         // submit-pattern defaults to (.*) over the trimmed output.
-        assert_eq!(Scheduler::new(&m).submit(&vars, Some(&universe)).unwrap(), "id=s.sh");
+        assert_eq!(Scheduler::new(&m).submit(&vars, Some(("sif", &universe))).unwrap(), "id=s.sh");
+    }
+
+    #[test]
+    fn submit_env_follows_the_submit_universe() {
+        // The submit universe's env-submit-setup override (§6.1) replaces the
+        // machine key for `submit` only; get-status/stop keep the machine env.
+        let mut m = meta(r#"submit = "echo id=@SCRIPTFILE@-$CACTUP_SUB_ENV""#);
+        m.environment.env_submit_setup = Some("CACTUP_SUB_ENV=base".to_owned());
+        let uni: Universe = toml::from_str(r#"env-submit-setup = "CACTUP_SUB_ENV=uni""#).unwrap();
+        m.universes.insert("u".to_owned(), uni);
+        let mut vars = VarSet::new();
+        vars.set("SCRIPTFILE", "s.sh");
+        let sched = Scheduler::new(&m);
+        assert_eq!(sched.submit(&vars, None).unwrap(), "id=s.sh-base");
+        assert_eq!(
+            sched.submit(&vars, Some(("u", &m.universes["u"]))).unwrap(),
+            "id=s.sh-uni"
+        );
     }
 
     #[test]

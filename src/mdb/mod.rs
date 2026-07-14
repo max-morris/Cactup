@@ -9,7 +9,7 @@ pub mod meta;
 pub mod optionlist;
 
 // Convenience re-exports for the consuming subsystems.
-pub use meta::{Meta, Phase, ScriptKind, Universe, WrappedCommand};
+pub use meta::{Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 pub use optionlist::Optionlist;
 
 use crate::Res;
@@ -412,45 +412,52 @@ mod tests {
         assert_eq!(mel5.select_optionlist(Some("debug")).unwrap(), "debug");
         // Script selection honors the test partition.
         let rs = mel5.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("local", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("local", true, None).unwrap().0, "test");
+        assert_eq!(rs.select("local", "host", false, None).unwrap().0, "default");
+        assert_eq!(rs.select("local", "host", true, None).unwrap().0, "test");
         assert!(!mel5.script_path(ScriptKind::Submit, "test").unwrap().python);
 
         // db1.hpc.lsu.edu is ONE machine for the whole Deep Bayou cluster: the
         // upstream fragmentation into db1 (native) + db-sing-nv + db-sing-cpu +
-        // etworkshop-db is unified here via universes + optionlist variants +
-        // name-overridden queues (self-named "db").
+        // etworkshop-db is unified here via ONE real queue plus per-variant
+        // `universes` compatibility lists routing each build flavor's configs
+        // to its scripts (§4.4; self-named "db").
         let db1 = mdb.load("db1.hpc.lsu.edu").unwrap();
         assert_eq!(db1.meta.machine.name.as_deref(), Some("db"));
         assert_eq!(db1.meta.default_queue(), Some("gpu"));
-        // Three build flavors → three cactup queues over the one real "gpu"
-        // partition (the sing-* keys carry name = "gpu").
-        assert!(db1.meta.queues["gpu"].gpu && db1.meta.queues["sing-nv"].gpu && !db1.meta.queues["sing-cpu"].gpu);
+        // The cluster's single real partition, GPU-flagged.
+        assert_eq!(db1.meta.queues.len(), 1);
+        assert!(db1.meta.queues["gpu"].gpu);
         assert_eq!(db1.meta.scheduler_queue_name("gpu").unwrap(), "gpu");
-        assert_eq!(db1.meta.scheduler_queue_name("sing-nv").unwrap(), "gpu");
-        assert_eq!(db1.meta.scheduler_queue_name("sing-cpu").unwrap(), "gpu");
         // Three optionlists, none default-marked: a build must pick one with
         // --variant (§4.4).
         assert!(db1.select_optionlist(None).is_err());
         for v in ["native", "sing-nv", "sing-cpu"] {
             assert_eq!(db1.select_optionlist(Some(v)).unwrap(), v);
         }
-        // The native flavor inherits the machine "host" build universe (a
-        // module-loading login-shell wrapper); the Singularity flavors name
-        // their own build universe in the optionlist header, --nv vs not.
-        assert_eq!(db1.meta.build.universe.as_deref(), Some("host"));
-        assert!(db1.meta.universe("host").unwrap().wrapper.is_some());
+        // The native flavor builds in the DECLARED host universe — an identity
+        // universe (§4.8) carrying only a module-loading env-build-setup
+        // override (§6.1) — reached via the declared-host fallback, so
+        // [build].universe is unset; the Singularity flavors name their own
+        // build universe in the optionlist header, --nv vs not.
+        assert!(db1.meta.build.universe.is_none());
+        let host = db1.meta.universe("host").unwrap();
+        assert!(host.wrapper.is_none() && host.wrapper_argv.is_none());
+        assert!(host.environment.env_build_setup.as_deref().unwrap().contains("module load gcc/9.3.0"));
         assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-nv")).unwrap().universe.as_deref(), Some("et-sing"));
         assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-cpu")).unwrap().universe.as_deref(), Some("et-sing-cpu"));
+        for v in ["sing-nv", "sing-cpu"] {
+            assert_eq!(optionlist::load_header(&db1.optionlist_path(v)).unwrap().compatible_queues, ["gpu"]);
+        }
         let argv = |u: &str| db1.meta.universe(u).unwrap().wrapper_argv.clone().unwrap();
         assert!(argv("et-sing").iter().any(|a| a == "--nv"));
         assert!(!argv("et-sing-cpu").iter().any(|a| a == "--nv"));
-        // Native builds run with the "default" scripts on queue gpu; the
-        // Singularity flavors share the "sing" scripts on their queues.
+        // Native builds run with the "default" scripts; the Singularity
+        // flavors share the "sing" scripts — same queue, routed by the
+        // config's build universe (§4.4).
         let rs = db1.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("sing-nv", false, None).unwrap().0, "sing");
-        assert_eq!(rs.select("sing-cpu", true, None).unwrap().0, "sing-test");
+        assert_eq!(rs.select("gpu", "host", false, None).unwrap().0, "default");
+        assert_eq!(rs.select("gpu", "et-sing", false, None).unwrap().0, "sing");
+        assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing-test");
 
         // qbd flipped SLURM->PBS with an empty upstream queue: its placeholder
         // queue carries name = "" so @QUEUE@ resolves to the empty string (the
