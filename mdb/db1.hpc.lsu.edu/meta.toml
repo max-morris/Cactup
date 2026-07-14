@@ -50,7 +50,7 @@ simulation-home = "/work/@USER@/simulations"
 test-home       = "/work/@USER@/tests"
 
 [hardware]
-max-tasks-per-node = 48
+max-tasks-per-node = 2
 memory             = 196608     # MB per node
 
 [build]
@@ -134,6 +134,11 @@ stderr          = "cat @SIMULATION_NAME@.err"
 stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 # Machine-level fallback ceiling (design §4.2); every queue relies on it.
 max-walltime    = "72:00:00"
+# Set inside every SLURM allocation (salloc + sbatch); unset on the login node.
+# `cactup test run` executes the suite in the foreground and the flesh harness
+# srun's each test, so it refuses when this is unset and points at `test submit`
+# (design §11.6). The compute-node re-entry and `test submit` are exempt.
+allocation-env  = "SLURM_JOB_ID"
 # historical default allocation; set the allocation knob instead
 allocation      = "NO_ALLOCATION"
 

@@ -46,6 +46,8 @@ module load hdf5/1.14.4
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@"
+# set inside a SLURM allocation; gates `test run` (design §11.6)
+allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
 stop            = "scancel @JOB_ID@"
 submit-pattern   = 'Submitted batch job (\d+)'

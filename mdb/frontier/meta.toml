@@ -89,6 +89,8 @@ module load zlib/1.2.11
 
 [scheduler]
 submit           = "sbatch @SCRIPTFILE@ && sleep 1"
+# set inside a SLURM allocation; gates `test run` (design §11.6)
+allocation-env  = "SLURM_JOB_ID"
 get-status       = "squeue -j @JOB_ID@"
 stop             = "scancel @JOB_ID@"
 submit-pattern   = 'Submitted batch job ([0-9]+)'

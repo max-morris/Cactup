@@ -43,29 +43,44 @@ fn parse_field(s: &str, what: &str, original: &str) -> Res<u64> {
 }
 
 impl Walltime {
-    /// Parse the canonical grammar `(DD-)?HH:MM:SS`. When `DD-` is absent,
-    /// `HH` may exceed 23 (`72:00:00` is 72 hours); when present, `HH` must be
-    /// `< 24`. `MM`/`SS` are always `< 60`.
+    /// Parse the grammar `(DD-)?HH:MM:SS`, allowing leading (more-significant)
+    /// fields to be elided when they would be zero: `SS`, `MM:SS`, and
+    /// `HH:MM:SS` are all accepted, so `10:00` is 10 minutes and `90` is 90
+    /// seconds. A `DD-` day prefix still requires the full `HH:MM:SS`. The
+    /// most-significant present field may overflow its usual bound (`72:00:00`
+    /// is 72 hours, `90:00` is 90 minutes); trailing fields are always `< 60`,
+    /// and `HH` must be `< 24` when a `DD-` prefix is present.
     pub fn parse(s: &str) -> Res<Walltime> {
         let trimmed = s.trim();
-        let (days, rest) = match trimmed.split_once('-') {
-            Some((d, rest)) => (parse_field(d, "the DD day prefix", s)?, rest),
-            None => (0, trimmed),
+        let (days, rest, has_day_prefix) = match trimmed.split_once('-') {
+            Some((d, rest)) => (parse_field(d, "the DD day prefix", s)?, rest, true),
+            None => (0, trimmed, false),
         };
 
         let fields: Vec<&str> = rest.split(':').collect();
-        let [hh, mm, ss] = fields.as_slice() else {
-            bail!("invalid walltime '{s}': expected (DD-)?HH:MM:SS");
+        // Elided leading fields default to zero; the trailing field is always SS.
+        let (hh, mm, ss) = match fields.as_slice() {
+            [hh, mm, ss] => (
+                parse_field(hh, "the HH field", s)?,
+                parse_field(mm, "the MM field", s)?,
+                parse_field(ss, "the SS field", s)?,
+            ),
+            [mm, ss] if !has_day_prefix => {
+                (0, parse_field(mm, "the MM field", s)?, parse_field(ss, "the SS field", s)?)
+            }
+            [ss] if !has_day_prefix => (0, 0, parse_field(ss, "the SS field", s)?),
+            _ => bail!("invalid walltime '{s}': expected (DD-)?HH:MM:SS"),
         };
-        let hh = parse_field(hh, "the HH field", s)?;
-        let mm = parse_field(mm, "the MM field", s)?;
-        let ss = parse_field(ss, "the SS field", s)?;
 
-        if trimmed.contains('-') && hh > 23 {
+        if has_day_prefix && hh > 23 {
             bail!("invalid walltime '{s}': HH must be < 24 when a DD- day prefix is present");
         }
-        if mm > 59 || ss > 59 {
-            bail!("invalid walltime '{s}': MM and SS must be < 60");
+        // Trailing fields are bounded; the most-significant present field may
+        // overflow (it absorbs the elided components' magnitude).
+        let ss_bounded = fields.len() >= 2;
+        let mm_bounded = fields.len() >= 3;
+        if (mm_bounded && mm > 59) || (ss_bounded && ss > 59) {
+            bail!("invalid walltime '{s}': trailing MM/SS fields must be < 60");
         }
 
         Ok(Walltime(days * 86400 + hh * 3600 + mm * 60 + ss))
@@ -143,8 +158,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_elided_leading_fields() {
+        // MM:SS and SS forms, with the most-significant field free to overflow.
+        assert_eq!(Walltime::parse("10:00").unwrap().0, 600);
+        assert_eq!(Walltime::parse("90").unwrap().0, 90);
+        assert_eq!(Walltime::parse("00:30").unwrap().0, 30);
+        assert_eq!(Walltime::parse("90:00").unwrap().0, 90 * 60);
+        assert_eq!(Walltime::parse("100").unwrap().0, 100);
+    }
+
+    #[test]
     fn rejects_malformed() {
-        for bad in ["", "72:00", "1:2:3:4", "aa:00:00", "1:60:00", "1:00:60", "1-25:00:00", "-1:00:00", "1-"] {
+        for bad in ["", ":00", "1:2:3:4", "aa:00:00", "1:60:00", "1:00:60", "10:60", "1-25:00:00", "-1:00:00", "1-", "3-30:00", "3-90"] {
             assert!(Walltime::parse(bad).is_err(), "should reject {bad:?}");
         }
     }

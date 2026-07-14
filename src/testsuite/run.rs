@@ -150,6 +150,28 @@ fn start_impl(
     verbose: bool,
     hostname_override: Option<&str>,
 ) -> Res<()> {
+    // §11.6: `test run` executes the suite HERE in the foreground, and the
+    // flesh harness launches each test through the machine's parallel launcher
+    // (e.g. `srun … $exe $parfile`), which needs a live job allocation. On a
+    // login/submit node there is none, so every test silently produces no
+    // output ("No files created in test directory"). Refuse up front when the
+    // machine declares how to tell (allocation-env) and we're outside one.
+    // `test submit` is exempt — it hands the suite to a compute node — and so
+    // is the compute-node re-entry (handled earlier in `start`).
+    if !submit && machine.meta.in_allocation() == Some(false) {
+        bail!(
+            "`cactup test run` executes the testsuite here in the foreground, and {}'s \
+             test harness launches each test through a job launcher (e.g. srun) that needs \
+             a live allocation — but none of [{}] is set, so this looks like a login/submit \
+             node and every test would produce no output.\n\
+             Run `cactup test submit` to execute the suite on a compute node, or grab an \
+             interactive allocation first (e.g. `salloc` / `srun --pty`) and re-run \
+             `cactup test run`.",
+            machine.name,
+            machine.meta.scheduler.allocation_env.join(", "),
+        );
+    }
+
     let inst_meta = inst.meta()?;
     let test_home = inst_meta.test_home()?.to_owned();
     let cactus_root = inst.cactus_root();
@@ -646,6 +668,28 @@ mod tests {
         assert_eq!(active_results_id(&run_dir).unwrap(), Some(1));
         assert_eq!(TestRun::open(&run_dir).unwrap().meta.tasks, 4);
         assert_eq!(list_results_ids(&run_dir).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn foreground_run_refuses_outside_allocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut machine = fake_machine(&tmp.path().join("mdb-fake"));
+        // Declare an allocation marker that is guaranteed unset in the test env,
+        // so `in_allocation()` reports Some(false) (a login/submit node).
+        machine.meta.scheduler.allocation_env = vec!["CACTUP_SURELY_UNSET_ALLOC".to_owned()];
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let db = Database::new();
+        fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
+
+        // Foreground `test run` is refused, with actionable guidance.
+        let err = start_impl(&inst, &machine, &db, &test_args(), false, false, Some("h"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("allocation") && err.contains("test submit"), "{err}");
+
+        // `test submit` hands the suite to a compute node, so it is exempt even
+        // outside an allocation.
+        start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap();
     }
 
     #[test]

@@ -50,6 +50,8 @@ export LD_LIBRARY_PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/lib64:/cfs/home/pedi549
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@; sleep 5"
+# set inside a SLURM allocation; gates `test run` (design §11.6)
+allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
 stop            = "scancel @JOB_ID@"
 submit-pattern   = 'Submitted batch job ([0-9]+)'

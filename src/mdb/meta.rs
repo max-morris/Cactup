@@ -216,6 +216,33 @@ pub struct Scheduler {
     pub max_queue_slots: Option<u32>,
     /// Machine-level fallback ceiling for queues that omit `max-walltime` (§4.2).
     pub max_walltime: Option<Walltime>,
+    /// Env var(s) the scheduler sets inside a job allocation — e.g.
+    /// `SLURM_JOB_ID` (both `salloc` and `sbatch` set it), `PBS_JOBID`. When
+    /// declared, `test run`'s foreground path (§11.6) refuses to launch unless
+    /// one is set: the flesh testsuite harness srun/mpirun's each test, which
+    /// needs an allocation, so running on a login node just produces no output.
+    /// Absent = no check (non-batch machines, or ones whose launcher
+    /// self-allocates from the head node). Accepts a string or a list.
+    #[serde(default, deserialize_with = "string_or_seq")]
+    pub allocation_env: Vec<String>,
+}
+
+/// Deserialize a TOML string OR array-of-strings into a `Vec<String>` — lets
+/// single-valued keys like `allocation-env` be written unquoted-list-free.
+fn string_or_seq<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,6 +694,26 @@ impl Meta {
                 .effective(phase)
             }
         }
+    }
+
+    /// Whether the current process is inside one of this machine's job
+    /// allocations (§11.6). `None` when the machine declares no
+    /// `[scheduler].allocation-env` (unknowable — no check applies); else
+    /// `Some(true)` iff at least one declared var is set and non-empty.
+    pub fn in_allocation(&self) -> Option<bool> {
+        self.allocation_status(|name| {
+            std::env::var_os(name).is_some_and(|v| !v.is_empty())
+        })
+    }
+
+    /// The `in_allocation` core, taking the env lookup as a closure so it can
+    /// be exercised without touching the process environment.
+    fn allocation_status(&self, is_set: impl Fn(&str) -> bool) -> Option<bool> {
+        let vars = &self.scheduler.allocation_env;
+        if vars.is_empty() {
+            return None;
+        }
+        Some(vars.iter().any(|name| is_set(name)))
     }
 
     /// The §4.2/§11.2 load-time validation. `machine` names the machine in
@@ -1337,6 +1384,35 @@ mod tests {
         assert_eq!(meta.effective_env(Some("et-sing"), Phase::Build), "export BASE=1\nmodule load base-build");
         // Unknown names fall back to the machine env (resolution errors first).
         assert_eq!(meta.effective_env(Some("nope"), Phase::Build), "export BASE=1\nmodule load base-build");
+    }
+
+    #[test]
+    fn allocation_env_parses_and_reports_status() {
+        // Undeclared: unknowable, no check applies.
+        assert_eq!(mike().in_allocation(), None);
+        assert!(mike().scheduler.allocation_env.is_empty());
+
+        // String form → single-element list.
+        let one = MIKE.replace(
+            "max-walltime = \"48:00:00\"",
+            "max-walltime = \"48:00:00\"\n        allocation-env = \"SLURM_JOB_ID\"",
+        );
+        let meta: Meta = toml::from_str(&one).unwrap();
+        meta.validate("mike").unwrap();
+        assert_eq!(meta.scheduler.allocation_env, ["SLURM_JOB_ID"]);
+        // Outside an allocation (no listed var set) → Some(false); inside → Some(true).
+        assert_eq!(meta.allocation_status(|_| false), Some(false));
+        assert_eq!(meta.allocation_status(|n| n == "SLURM_JOB_ID"), Some(true));
+
+        // List form → any-of semantics.
+        let many = MIKE.replace(
+            "max-walltime = \"48:00:00\"",
+            "max-walltime = \"48:00:00\"\n        allocation-env = [\"SLURM_JOB_ID\", \"PBS_JOBID\"]",
+        );
+        let meta: Meta = toml::from_str(&many).unwrap();
+        assert_eq!(meta.scheduler.allocation_env, ["SLURM_JOB_ID", "PBS_JOBID"]);
+        assert_eq!(meta.allocation_status(|n| n == "PBS_JOBID"), Some(true));
+        assert_eq!(meta.allocation_status(|_| false), Some(false));
     }
 
     #[test]
