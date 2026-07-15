@@ -226,12 +226,12 @@ impl Machine {
         // values always win, and a machine whose queues fully cover a key is
         // left alone even when the top-level key is absent.
         let incomplete = meta.queues.values().any(|q| {
-            q.max_tasks_per_node.or(meta.hardware.max_tasks_per_node).is_none() || q.memory.or(meta.hardware.memory).is_none()
+            q.max_cpus_per_node.or(meta.hardware.max_cpus_per_node).is_none() || q.memory.or(meta.hardware.memory).is_none()
         });
         if meta.hardware.autodetect || incomplete {
             let detected = autodetect::detect();
             let hw = &mut meta.hardware;
-            hw.max_tasks_per_node = hw.max_tasks_per_node.or(Some(detected.cores));
+            hw.max_cpus_per_node = hw.max_cpus_per_node.or(Some(detected.cores));
             hw.memory = hw.memory.or(detected.memory_mb);
         }
 
@@ -428,6 +428,12 @@ mod tests {
         assert_eq!(db1.meta.queues.len(), 1);
         assert!(db1.meta.queues["gpu"].gpu);
         assert_eq!(db1.meta.scheduler_queue_name("gpu").unwrap(), "gpu");
+        // Availability vs. request (§8.5): a Deep Bayou node HAS 48 CPUs/cores,
+        // and a no-`-c` job REQUESTS 24 CPUs/task — so the fill-the-node default
+        // lands on floor(48/24) = 2 tasks/node, one per GPU.
+        let hw = db1.meta.effective_hardware("gpu").unwrap();
+        assert_eq!(hw.max_cpus_per_node, Some(48));
+        assert_eq!(hw.default_cpus_per_task, Some(24));
         // Three optionlists, none default-marked: a build must pick one with
         // --variant (§4.4).
         assert!(db1.select_optionlist(None).is_err());
@@ -492,7 +498,7 @@ mod tests {
 
         let generic = mdb.load("generic").unwrap();
         // §4.6: autodetect filled the missing hardware.
-        assert!(generic.meta.hardware.max_tasks_per_node.unwrap() >= 1);
+        assert!(generic.meta.hardware.max_cpus_per_node.unwrap() >= 1);
         assert!(generic.meta.hardware.memory.unwrap() > 0);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());

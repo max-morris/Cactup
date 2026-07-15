@@ -3,7 +3,7 @@
 #
 # This is a .py variant (design §6.1): the old script used computed float
 # templates that the literal-only @NAME@ engine (D7) cannot express —
-#   @(1.0*(@NODE_PROCS@*@NUM_THREADS@)/@MAX_TASKS_PER_NODE@)@   (OpenMP threads per core)
+#   @(1.0*(@NODE_PROCS@*@NUM_THREADS@)/@MAX_CPUS_PER_NODE@)@   (OpenMP threads per core)
 #   @(@NODE_PROCS@*@NUM_THREADS@)@               (OpenMP threads per node)
 # Both are computed here in Python from the typed variables and interpolated
 # into the emitted bash script. Variable renames vs. simfactory (design §6.3):
@@ -16,7 +16,7 @@
 # .sh runscript.
 
 threads_per_core = (1.0 * typed["TASKS_PER_NODE"] * typed["CPUS_PER_TASK"]
-                    / typed["MAX_TASKS_PER_NODE"])
+                    / typed["MAX_CPUS_PER_NODE"])
 threads_per_node = typed["TASKS_PER_NODE"] * typed["CPUS_PER_TASK"]
 
 script = """#!/bin/bash
@@ -70,7 +70,7 @@ date
     cpus_per_task=CPUS_PER_TASK,
     tasks_per_node=TASKS_PER_NODE,
     nodes=NODES,
-    ppn=MAX_TASKS_PER_NODE,
+    ppn=MAX_CPUS_PER_NODE,
     threads_per_core=threads_per_core,
     threads_per_node=threads_per_node,
     rundebug=RUNDEBUG,

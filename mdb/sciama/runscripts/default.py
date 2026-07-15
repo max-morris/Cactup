@@ -4,7 +4,7 @@
 # This is a .py variant (design §6.1): the old script used computed float
 # templates that the literal-only @NAME@ engine (D7) cannot express —
 #   @(1.0*@NUM_PROCS@/@NODES@)@                       (MPI processes per node)
-#   @(1.0*(@NUM_PROCS@*@NUM_THREADS@)/(@NODES@*@MAX_TASKS_PER_NODE@))@ (OpenMP threads per core)
+#   @(1.0*(@NUM_PROCS@*@NUM_THREADS@)/(@NODES@*@MAX_CPUS_PER_NODE@))@ (OpenMP threads per core)
 # Those are computed here in Python from the typed variables. Other rewrites
 # (design §6.3): NUM_PROCS -> TASKS, NUM_THREADS -> CPUS_PER_TASK,
 # (PPN_USED/NUM_THREADS) -> TASKS_PER_NODE (equal by definition),
@@ -18,7 +18,7 @@
 
 mpi_procs_per_node = 1.0 * typed["TASKS"] / typed["NODES"]
 threads_per_core = (1.0 * (typed["TASKS"] * typed["CPUS_PER_TASK"])
-                    / (typed["NODES"] * typed["MAX_TASKS_PER_NODE"]))
+                    / (typed["NODES"] * typed["MAX_CPUS_PER_NODE"]))
 ppn_used = typed["TASKS_PER_NODE"] * typed["CPUS_PER_TASK"]
 
 script = """#! /bin/bash
@@ -85,7 +85,7 @@ echo "Done."
     cpus_per_task=CPUS_PER_TASK,
     tasks_per_node=TASKS_PER_NODE,
     nodes=NODES,
-    ppn=MAX_TASKS_PER_NODE,
+    ppn=MAX_CPUS_PER_NODE,
     mpi_procs_per_node=mpi_procs_per_node,
     threads_per_core=threads_per_core,
     ppn_used=ppn_used,

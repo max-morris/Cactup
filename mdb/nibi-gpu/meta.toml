@@ -19,7 +19,7 @@ simulation-home = "/home/@USER@/scratch/simulations"
 test-home       = "/home/@USER@/scratch/tests"
 
 [hardware]
-max-tasks-per-node             = 112
+max-cpus-per-node             = 112
 memory          = 2044000       # MB per node
 
 [build]

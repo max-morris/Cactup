@@ -866,7 +866,7 @@ mod tests {
             name = "fake"
 
             [hardware]
-            max-tasks-per-node = 8
+            max-cpus-per-node = 8
 
             [environment]
             env-setup = "export CACTUP_TEST_ENV=1"

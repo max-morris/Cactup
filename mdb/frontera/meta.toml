@@ -28,7 +28,7 @@ simulation-home = "@ENV(SCRATCH)@/simulations"
 test-home       = "@ENV(SCRATCH)@/tests"
 
 [hardware]
-max-tasks-per-node             = 56
+max-cpus-per-node             = 56
 memory          = 196608        # MB per node
 
 [build]

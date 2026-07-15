@@ -1,4 +1,4 @@
-//! Runtime hardware detection (spec §4.6): fills missing `max-tasks-per-node`/
+//! Runtime hardware detection (spec §4.6): fills missing `max-cpus-per-node`/
 //! `memory` for machines with `[hardware].autodetect = true` (or when some
 //! queue would otherwise resolve no value), so the built-in `generic` works on
 //! any laptop with zero configuration. Explicit `meta.toml` values always win.

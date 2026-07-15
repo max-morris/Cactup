@@ -260,8 +260,9 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
         println!("  created from: {} (hash {})", origin.from, origin.hash);
     }
     println!(
-        "  hardware: max-tasks-per-node={} threads-per-cpu={} memory={} MB",
-        meta.hardware.max_tasks_per_node.map_or("?".into(), |v| v.to_string()),
+        "  hardware: max-cpus-per-node={} default-cpus-per-task={} threads-per-cpu={} memory={} MB",
+        meta.hardware.max_cpus_per_node.map_or("?".into(), |v| v.to_string()),
+        meta.hardware.default_cpus_per_task.map_or("?".into(), |v| v.to_string()),
         meta.hardware.threads_per_cpu(),
         meta.hardware.memory.map_or("?".into(), |v| v.to_string()),
     );
@@ -284,7 +285,8 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
         // from the top-level [hardware] values.
         let mut overrides = String::new();
         for (label, value) in [
-            ("max-tasks-per-node", queue.max_tasks_per_node.map(|v| v.to_string())),
+            ("max-cpus-per-node", queue.max_cpus_per_node.map(|v| v.to_string())),
+            ("default-cpus-per-task", queue.default_cpus_per_task.map(|v| v.to_string())),
             ("threads-per-cpu", queue.threads_per_cpu.map(|v| v.to_string())),
             ("memory", queue.memory.map(|v| format!("{v} MB"))),
         ] {
@@ -439,7 +441,7 @@ fn create_machine(
     let hw = crate::mdb::autodetect::detect();
     let hardware_tbl = subtable(&mut table, "hardware");
     hardware_tbl.remove("autodetect");
-    hardware_tbl.insert("max-tasks-per-node".into(), (hw.cores as i64).into());
+    hardware_tbl.insert("max-cpus-per-node".into(), (hw.cores as i64).into());
     if let Some(memory) = hw.memory_mb {
         hardware_tbl.insert("memory".into(), (memory as i64).into());
     }
@@ -712,7 +714,7 @@ mod tests {
         assert_eq!(machine.layer, Layer::User);
         // Concrete autodetected hardware was persisted; autodetect flag gone.
         assert!(!machine.meta.hardware.autodetect);
-        assert!(machine.meta.hardware.max_tasks_per_node.unwrap() >= 1);
+        assert!(machine.meta.hardware.max_cpus_per_node.unwrap() >= 1);
         // Origin provenance recorded with the base's current hash.
         let origin = machine.meta.cactup.origin.as_ref().unwrap();
         assert_eq!(origin.from, "mel5");

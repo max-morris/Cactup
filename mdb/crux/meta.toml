@@ -32,7 +32,7 @@ install-home = "/home/@USER@"
 #test-home       = "/lus/grand/projects/<allocation>/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 128
+max-cpus-per-node             = 128
 memory          = 262144        # MB per node
 threads-per-cpu         = 1
 

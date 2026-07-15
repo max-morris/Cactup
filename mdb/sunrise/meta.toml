@@ -22,7 +22,7 @@ simulation-home = "/cfs/data/@USER@/simulations"
 test-home       = "/cfs/data/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 128
+max-cpus-per-node             = 128
 
 [build]
 make      = "make -j@MAKEJOBS@"

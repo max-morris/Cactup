@@ -24,11 +24,11 @@ simulation-home = "/scratch/users/@USER@/simulations"
 test-home       = "/scratch/users/@USER@/tests"
 
 [hardware]
-# Upstream notes: set max-tasks-per-node to 16/20/24 to select the golub nodes you want; you
+# Upstream notes: set max-cpus-per-node to 16/20/24 to select the golub nodes you want; you
 # may need the exact node type via a feature reported by
 # "sinfo -O features -N -n NODE" — a mismatched allocation (24-core node for a
 # 20-core request) confuses core binding.
-max-tasks-per-node             = 24
+max-cpus-per-node             = 24
 memory          = 65536         # MB per node
 
 [build]
@@ -64,7 +64,7 @@ module load hwloc/1.7.2
 submit          = "sbatch @SCRIPTFILE@ ; sleep 1"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
-interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_TASKS_PER_NODE@:golub -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
+interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_CPUS_PER_NODE@:golub -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
 get-status      = "qstat @JOB_ID@"
 stop            = "qdel @JOB_ID@"
 submit-pattern   = '^Submitted batch job (\d+)$'

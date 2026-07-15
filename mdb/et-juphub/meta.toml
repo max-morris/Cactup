@@ -18,7 +18,7 @@ simulation-home = "/home/@USER@/simulations"
 test-home       = "/home/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 4
+max-cpus-per-node             = 4
 
 [build]
 make = "make -j@MAKEJOBS@"

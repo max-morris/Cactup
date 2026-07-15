@@ -117,10 +117,19 @@ pub struct Paths {
 }
 
 /// §4.2 carries only the hardware keys cactup actually feeds to submit/run
-/// scripts: `max-tasks-per-node` (simfactory's `ppn`; §8.5 topology +
-/// @MAX_TASKS_PER_NODE@), `memory` (@MEMORY@), and `threads-per-cpu`
-/// (simfactory's `num-smt`; @THREADS_PER_CPU@). Simfactory's other capacity
-/// keys (`min-ppn`, `spn`, `mpn`, `nodes`, `num-threads`, `max-*`,
+/// scripts. These split along the **availability vs. request** axis (§8.5): the
+/// `max-` keys are *availability* facts (what a node/queue physically has),
+/// while the process-layout flags (`--tasks`, `--cpus`, …) are the *request*.
+///
+/// - `max-cpus-per-node` (simfactory's `ppn`; the CPUs/cores available per node
+///   — an availability fact, **not** MPI ranks; §8.5 topology +
+///   @MAX_CPUS_PER_NODE@),
+/// - `default-cpus-per-task` (simfactory's `num-threads`; the request-side
+///   default for `CPUS_PER_TASK` when `--cpus` is omitted — §8.5),
+/// - `memory` (@MEMORY@), and `threads-per-cpu` (simfactory's `num-smt`;
+///   @THREADS_PER_CPU@).
+///
+/// Simfactory's other capacity keys (`min-ppn`, `spn`, `mpn`, `nodes`, `max-*`,
 /// `cpu-freq`, `flop-per-cycle`, …) were dropped — nothing consumed them.
 ///
 /// The whole table is optional: each key may instead (or additionally) be set
@@ -132,7 +141,11 @@ pub struct Hardware {
     /// Fill missing core/memory values from the OS at load time (§4.6).
     #[serde(default)]
     pub autodetect: bool,
-    pub max_tasks_per_node: Option<u32>,
+    /// CPUs/cores available per node — the availability fact the fill-the-node
+    /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (§8.5).
+    pub max_cpus_per_node: Option<u32>,
+    /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted (§8.5).
+    pub default_cpus_per_task: Option<u32>,
     pub threads_per_cpu: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
@@ -260,7 +273,8 @@ pub struct Queue {
     pub name: Option<String>,
     /// Per-queue hardware overrides (§4.2): each falls back to the top-level
     /// `[hardware]` value when unset (`Meta::effective_hardware`).
-    pub max_tasks_per_node: Option<u32>,
+    pub max_cpus_per_node: Option<u32>,
+    pub default_cpus_per_task: Option<u32>,
     pub threads_per_cpu: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
@@ -626,13 +640,15 @@ impl Meta {
     }
 
     /// The hardware in effect on `queue` (§4.2): the queue's own
-    /// `max-tasks-per-node`/`threads-per-cpu`/`memory` where set, inheriting anything else from the
-    /// top-level `[hardware]` table (which is itself optional).
+    /// `max-cpus-per-node`/`default-cpus-per-task`/`threads-per-cpu`/`memory`
+    /// where set, inheriting anything else from the top-level `[hardware]`
+    /// table (which is itself optional).
     pub fn effective_hardware(&self, queue: &str) -> Res<Hardware> {
         let q = self.queue(queue)?;
         Ok(Hardware {
             autodetect: self.hardware.autodetect,
-            max_tasks_per_node: q.max_tasks_per_node.or(self.hardware.max_tasks_per_node),
+            max_cpus_per_node: q.max_cpus_per_node.or(self.hardware.max_cpus_per_node),
+            default_cpus_per_task: q.default_cpus_per_task.or(self.hardware.default_cpus_per_task),
             threads_per_cpu: q.threads_per_cpu.or(self.hardware.threads_per_cpu),
             memory: q.memory.or(self.hardware.memory),
         })
@@ -916,7 +932,7 @@ mod tests {
         simulation-home = "/work/@USER@/simulations"
 
         [hardware]
-        max-tasks-per-node = 16
+        max-cpus-per-node = 16
         memory = 64000
 
         [scheduler]
@@ -940,7 +956,7 @@ mod tests {
         gpu = true
         max-walltime = "24:00:00"
         # Per-queue hardware overrides (§4.2); unset keys inherit [hardware].
-        max-tasks-per-node = 64
+        max-cpus-per-node = 64
         threads-per-cpu = 2
 
         [variants.submitscript]
@@ -999,10 +1015,10 @@ mod tests {
         let meta = mike();
         // Queue with no overrides: pure inheritance from [hardware].
         let hw = meta.effective_hardware("checkpt").unwrap();
-        assert_eq!((hw.max_tasks_per_node, hw.memory, hw.threads_per_cpu()), (Some(16), Some(64000), 1));
+        assert_eq!((hw.max_cpus_per_node, hw.memory, hw.threads_per_cpu()), (Some(16), Some(64000), 1));
         // Queue overrides win key-by-key; unset keys still inherit.
         let hw = meta.effective_hardware("gpu").unwrap();
-        assert_eq!((hw.max_tasks_per_node, hw.memory, hw.threads_per_cpu()), (Some(64), Some(64000), 2));
+        assert_eq!((hw.max_cpus_per_node, hw.memory, hw.threads_per_cpu()), (Some(64), Some(64000), 2));
         assert!(meta.effective_hardware("nope").is_err());
     }
 
@@ -1010,15 +1026,15 @@ mod tests {
     fn hardware_table_is_optional_when_queues_define_it() {
         // No top-level [hardware] at all: queue-level keys carry the load.
         let toml_text = MIKE
-            .replace("[hardware]\n        max-tasks-per-node = 16\n        memory = 64000", "")
-            .replace("[queues.checkpt]", "[queues.checkpt]\nmax-tasks-per-node = 32\nmemory = 128000");
+            .replace("[hardware]\n        max-cpus-per-node = 16\n        memory = 64000", "")
+            .replace("[queues.checkpt]", "[queues.checkpt]\nmax-cpus-per-node = 32\nmemory = 128000");
         let meta: Meta = toml::from_str(&toml_text).unwrap();
         meta.validate("mike").unwrap();
         let hw = meta.effective_hardware("checkpt").unwrap();
-        assert_eq!((hw.max_tasks_per_node, hw.memory), (Some(32), Some(128000)));
+        assert_eq!((hw.max_cpus_per_node, hw.memory), (Some(32), Some(128000)));
         // A queue defining nothing gets the (empty) machine-wide values.
         let hw = meta.effective_hardware("single").unwrap();
-        assert_eq!((hw.max_tasks_per_node, hw.memory), (None, None));
+        assert_eq!((hw.max_cpus_per_node, hw.memory), (None, None));
     }
 
     #[test]

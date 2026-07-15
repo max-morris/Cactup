@@ -27,7 +27,7 @@ simulation-home = "/cosma8/data/dp411/dc-matu2/simulations"
 test-home       = "/cosma8/data/dp411/dc-matu2/tests"
 
 [hardware]
-max-tasks-per-node             = 128
+max-cpus-per-node             = 128
 memory          = 1000000       # MB per node
 
 [build]

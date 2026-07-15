@@ -93,9 +93,12 @@ pub fn resolve_topology(
 
     // Process layout (§8.5 derivation), from the queue-effective hardware
     // (per-queue overrides falling back to [hardware] — §4.2).
-    let max_tpn = machine.meta.effective_hardware(&queue)?.max_tasks_per_node.unwrap_or(1);
-    let cpus = flags.cpus.unwrap_or(1).max(1);
-    let tpn = flags.tpn.unwrap_or_else(|| (max_tpn / cpus).max(1));
+    let hw = machine.meta.effective_hardware(&queue)?;
+    let cpus_per_node = hw.max_cpus_per_node.unwrap_or(1);
+    // Request-side CPUS_PER_TASK: -c wins, else the machine/queue
+    // `default-cpus-per-task` (simfactory's num-threads), else 1.
+    let cpus = flags.cpus.or(hw.default_cpus_per_task).unwrap_or(1).max(1);
+    let tpn = flags.tpn.unwrap_or_else(|| (cpus_per_node / cpus).max(1));
     let nodes = flags.nodes.unwrap_or(1);
     let tasks = flags.tasks.unwrap_or(nodes * tpn);
 
@@ -244,7 +247,7 @@ pub fn set_walltime_vars(v: &mut VarSet, wall: Walltime, buffer: Walltime) {
 /// override it).
 pub fn set_machine_vars(v: &mut VarSet, machine: &Machine, queue: &str, run_universe: Option<&str>) -> Res<()> {
     let hw = machine.meta.effective_hardware(queue)?;
-    v.set("MAX_TASKS_PER_NODE", hw.max_tasks_per_node.unwrap_or(1) as u64);
+    v.set("MAX_CPUS_PER_NODE", hw.max_cpus_per_node.unwrap_or(1) as u64);
     v.set("MEMORY", hw.memory.unwrap_or(0));
     v.set("THREADS_PER_CPU", hw.threads_per_cpu() as u64);
     v.set("ENV_SETUP", machine.meta.effective_env(run_universe, Phase::Run));
@@ -329,7 +332,7 @@ mod tests {
             name = "testbox"
 
             [hardware]
-            max-tasks-per-node = 16
+            max-cpus-per-node = 16
             memory = 64000
             threads-per-cpu = 2
 
@@ -343,13 +346,20 @@ mod tests {
             # Real scheduler name override (§4.2): @QUEUE@ resolves to this.
             name = "gpu_part"
             # Per-queue hardware override (§4.2): the GPU nodes are fatter.
-            max-tasks-per-node = 32
+            max-cpus-per-node = 32
+
+            [queues.fillq]
+            max-walltime = "24:00:00"
+            # Deep-Bayou-style node: 48 CPUs, 24 CPUs/task by default → the
+            # no-`-c` fill resolves to 2 tasks/node × 24 CPUs (§8.5).
+            max-cpus-per-node = 48
+            default-cpus-per-task = 24
 
             [variants.submitscript]
-            "default" = { queues = ["batch", "gpuq"], default = true }
+            "default" = { queues = ["batch", "gpuq", "fillq"], default = true }
 
             [variants.runscript]
-            "default" = { queues = ["batch", "gpuq"], default = true }
+            "default" = { queues = ["batch", "gpuq", "fillq"], default = true }
 
             [variants.optionlist]
             variants = ["default"]
@@ -427,11 +437,32 @@ mod tests {
         // The queue's `name` override is what the scheduler (@QUEUE@) sees.
         assert_eq!(topo.scheduler_queue, "gpu_part");
         assert!(topo.gpu, "queue gpu flag infers GPU");
-        // The queue's max-tasks-per-node override (32) drives the layout, not [hardware]'s
+        // The queue's max-cpus-per-node override (32) drives the layout, not [hardware]'s
         // 16: tpn = floor(32/4) = 8; tasks = 4 nodes * 8.
         assert_eq!((topo.tpn, topo.tasks), (8, 32));
         assert_eq!(topo.allocation.as_deref(), Some("hpc_alloc"));
         assert_eq!(topo.mail_type, "all");
+    }
+
+    #[test]
+    fn topology_fills_node_via_default_cpus_per_task() {
+        // §8.5 availability-vs-request: a machine/queue `default-cpus-per-task`
+        // seeds CPUS_PER_TASK when `-c` is omitted, so the fill-the-node default
+        // divides max-cpus-per-node by it (Deep Bayou: 48 / 24 = 2 tasks/node).
+        let machine = test_machine();
+        let db = Database::new();
+        let mut f = flags();
+        f.queue = Some("fillq".to_owned());
+
+        // No `-c`: cpus defaults to the queue's 24 → tpn = floor(48/24) = 2.
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.nodes, topo.tasks, topo.tpn, topo.cpus), (1, 2, 2, 24));
+
+        // An explicit `-c 1` request overrides the machine default → full-node
+        // single-threaded fill: tpn = floor(48/1) = 48.
+        f.cpus = Some(1);
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.nodes, topo.tasks, topo.tpn, topo.cpus), (1, 48, 48, 1));
     }
 
     #[test]

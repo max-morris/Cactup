@@ -75,6 +75,14 @@ Non-goals (dropped per §0): remote/SSH execution, source-tree sync, archiving.
   active config); there is no separate test-config kind (§11.1).
 - **MDB (machine database)** — per-cluster scripts and metadata.
 - **knob** — a global default value (allocation, email, queue, …).
+- **task** — one MPI rank / process. Always. (`--tasks`, `TASKS`,
+  `TASKS_PER_NODE` count ranks.)
+- **CPU** — one core / hardware thread. Always. (`--cpus`, `CPUS_PER_TASK`,
+  `MAX_CPUS_PER_NODE` count cores.) A task uses `CPUS_PER_TASK` CPUs.
+- **availability vs. request** — hardware facts a node/queue *has* (the `max-`
+  `[hardware]` keys, e.g. `MAX_CPUS_PER_NODE`) are distinct from what a job
+  *asks for* (the §8.5 topology flags). The fill-the-node defaults bridge the
+  two: a request left unset is filled from availability.
 
 ---
 
@@ -430,14 +438,16 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   so comparisons and the chaining division are unit-consistent regardless of how
   the value was written.
 - Hardware/capacity keys **stripped to what submit/run scripts actually
-  consume**, and renamed for what they mean to cactup: `ppn` →
-  `max-tasks-per-node`, `num-smt` → `threads-per-cpu`, `memory` kept (plus the
-  `autodetect` control flag, §4.6). simfactory's informational keys (`spn`,
-  `mpn`, `nodes`, `num-threads`, `max-num-threads`, `max-num-smt`, `min-ppn`,
-  `cpu-freq`, `flop-per-cycle`, cache descriptors, `efficiency`, `quota`,
-  `cpu`) are dropped on port — nothing consumed them. Each kept key may be set
-  machine-wide in `[hardware]` and/or overridden per-queue in `[queues.<q>]`
-  (§4.2).
+  consume**, and renamed for what they mean to cactup (honouring the task=rank
+  / CPU=core terminology): `ppn` → `max-cpus-per-node` (it is CPUs/cores per
+  node, **not** ranks), `num-threads` → `default-cpus-per-task` (the default
+  `CPUS_PER_TASK` when `--cpus` is omitted), `num-smt` → `threads-per-cpu`,
+  `memory` kept (plus the `autodetect` control flag, §4.6). simfactory's
+  informational keys (`spn`, `mpn`, `nodes`, `max-num-threads`, `max-num-smt`,
+  `min-ppn`, `cpu-freq`, `flop-per-cycle`, cache descriptors, `efficiency`,
+  `quota`, `cpu`) are dropped on port — nothing consumed them. Each kept key
+  may be set machine-wide in `[hardware]` and/or overridden per-queue in
+  `[queues.<q>]` (§4.2).
 - **`[paths]` values resolve at use time, not at MDB load** — `@USER@` plus
   any `@ENV(NAME)@` reads (§6.1; unset or empty env var = hard error). Use-time
   resolution lets an entry whose paths need the machine's own environment
@@ -504,8 +514,8 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 **meta.toml table structure.** Scalar keys are grouped into tables for clarity
 (TOML requires top-level keys before any table, so grouping avoids ordering
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
-(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`max-tasks-per-node`,
-`threads-per-cpu`, `memory` — machine-wide defaults, each overridable per-queue; see below), `[build]` (`make`, `make-jobs`,
+(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`max-cpus-per-node`,
+`default-cpus-per-task`, `threads-per-cpu`, `memory` — machine-wide defaults, each overridable per-queue; see below), `[build]` (`make`, `make-jobs`,
 `enabled-thorns`, `disabled-thorns`), `[environment]` (`env-setup` and the
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
@@ -524,8 +534,9 @@ hostname = "mike.hpc.lsu.edu"
 # … location, description, etc …
 
 [hardware]                     # machine-wide defaults; OPTIONAL if every queue
-max-tasks-per-node = 16        # sets its own values (see [queues.*] overrides)
+max-cpus-per-node = 16         # CPUs/cores per node (see [queues.*] overrides)
 memory = 196608                # MB per node
+# default-cpus-per-task = 1    # optional; default CPUS_PER_TASK when -c omitted
 # threads-per-cpu = 1          # optional; defaults to 1 (§8.5)
 
 [scheduler]
@@ -548,7 +559,7 @@ default = true                 # the queue used when -q is omitted (one queue ma
 [queues.gpu]
 gpu = true
 max-walltime = "24:00:00"
-max-tasks-per-node = 64        # per-queue hardware override (heterogeneous
+max-cpus-per-node = 64         # per-queue hardware override (heterogeneous
 threads-per-cpu = 2            # partitions); any key not set here inherits
                                # the [hardware] value (memory, in this example)
 # name = "gpu_part"            # optional: the scheduler's REAL queue/partition
@@ -598,12 +609,15 @@ variants = ["cpu", "gpu", "cpu-debug"]   # selected at build time via --variant;
 ```
 
 **Hardware keys.** `[hardware]` carries **only** the keys cactup actually
-feeds to submit/run scripts, named for what they mean to cactup:
-`max-tasks-per-node` (simfactory's `ppn`; drives the §8.5 process-layout
-defaults and `@MAX_TASKS_PER_NODE@`), `memory` (`@MEMORY@`, per-node MB), and
+feeds to submit/run scripts, named for what they mean to cactup (task = MPI
+rank, CPU = core — §1.1): `max-cpus-per-node` (simfactory's `ppn`; the
+availability fact = CPUs/cores per node, **not** ranks; drives the §8.5
+process-layout defaults and `@MAX_CPUS_PER_NODE@`), `default-cpus-per-task`
+(simfactory's `num-threads`; the request-side default for `CPUS_PER_TASK` when
+`--cpus` is omitted — §8.5), `memory` (`@MEMORY@`, per-node MB), and
 `threads-per-cpu` (simfactory's `num-smt`; `@THREADS_PER_CPU@`, default 1) —
 plus the `autodetect` control flag (§4.6). simfactory's other
-capacity/documentation keys (`nodes`, `num-threads`, `min-ppn`, `spn`, `mpn`,
+capacity/documentation keys (`nodes`, `min-ppn`, `spn`, `mpn`,
 `max-num-threads`, `max-num-smt`, `cpu-freq`, `flop-per-cycle`, …) are dropped:
 nothing consumed them (`@CPUFREQ@` is likewise no longer produced — no script
 ever used it). Each hardware key may **also** be set inside a
@@ -837,13 +851,13 @@ It describes a single-node workstation with **no batch system**:
 
 **Hardware autodetection.** `generic` declares `[hardware].autodetect = true`
 instead of fixed core/RAM counts. When a machine has `autodetect = true` (or
-some queue would otherwise resolve no `max-tasks-per-node`/`memory` value —
+some queue would otherwise resolve no `max-cpus-per-node`/`memory` value —
 counting both the top-level `[hardware]` keys and the per-queue overrides,
 §4.2), cactup fills the missing top-level values at load time from the OS:
 
 | Var | Linux | macOS |
 |-----|-------|-------|
-| `max-tasks-per-node` | `nproc` (or `/proc/cpuinfo`) | `sysctl -n hw.ncpu` |
+| `max-cpus-per-node` | `nproc` (or `/proc/cpuinfo`) | `sysctl -n hw.ncpu` |
 | `memory` (MB) | `/proc/meminfo` `MemTotal` | `sysctl -n hw.memsize` |
 
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
@@ -880,7 +894,7 @@ cactup machine delete <name>
   the user may re-create to refresh). If the source no longer exists, the warning
   says so instead.
 - `<name>` defaults to the local hostname's short form.
-- **Autodetects and writes concrete hardware** (`max-tasks-per-node`, `memory`
+- **Autodetects and writes concrete hardware** (`max-cpus-per-node`, `memory`
   via §4.6) so the persisted machine is stable rather than re-detecting each run.
 - Sets `simulation-home`/`install-home` (prompted; defaults are the
   `~/.cactup/simulations` and `~/.cactup/cacti` fallbacks, §4.2) and prompts for
@@ -1314,8 +1328,9 @@ flags exactly** — this is the primary divergence from simfactory's names.
 > Porter's map:
 > `@NUM_PROCS@`→`@TASKS@`, `@NODE_PROCS@`→`@TASKS_PER_NODE@`,
 > `@NUM_THREADS@`→`@CPUS_PER_TASK@`, `@PROCS@`/`@PROCS_REQUESTED@`/`@PPN_USED@`→
-> removed (compute from `@TASKS@`/`@CPUS_PER_TASK@`/`@MAX_TASKS_PER_NODE@` if
-> needed), `@PPN@`→`@MAX_TASKS_PER_NODE@`, `@NUM_SMT@`→`@THREADS_PER_CPU@`,
+> removed (compute from `@TASKS@`/`@CPUS_PER_TASK@`/`@MAX_CPUS_PER_NODE@` if
+> needed), `@PPN@`→`@MAX_CPUS_PER_NODE@`, `@NUM_THREADS@` (machine default) →
+> `default-cpus-per-task`, `@NUM_SMT@`→`@THREADS_PER_CPU@`,
 > `@CPUFREQ@`→removed (no script used it), `@SIMFACTORY@`→`@CACTUP@`.
 
 **Topology (canonical — one variable per §8.5 flag):**
@@ -1363,7 +1378,8 @@ re-invoke `@CACTUP@ sim run …`; renamed from simfactory's `@SIMFACTORY@`).
 
 **Machine-derived** (read from `meta.toml` — the **queue-effective** hardware
 values for the job's queue (§4.2), available to scripts but not topology
-flags): `MAX_TASKS_PER_NODE` (logical cores/node, from `max-tasks-per-node`),
+flags): `MAX_CPUS_PER_NODE` (CPUs/cores available per node — an availability
+fact, **not** MPI ranks; from `max-cpus-per-node`),
 `MEMORY` (per-node MB), `THREADS_PER_CPU` (from `threads-per-cpu`, default 1;
 §8.5 assumption), `ENV_SETUP` (the **effective** env-setup
 block for the current phase — `env-setup` plus the phase's `env-<phase>-setup`,
@@ -1906,11 +1922,17 @@ representation — all comparisons (queue ceiling checks) and the chaining divis
 per-job seconds value. `--wall-time` is the **total** wall the user wants for the
 whole simulation; cactup splits it into per-job segments during chaining (§8.8).
 
-Derivation (produces the canonical §6.3 names directly — no legacy aliases):
-- `CPUS_PER_TASK` = `--cpus` (default 1).
+Derivation (produces the canonical §6.3 names directly — no legacy aliases).
+This is the availability→request bridge (§1.1): the `max-`/`default-` hardware
+facts fill any topology the user left unset.
+- `CPUS_PER_TASK` = `--cpus` if given, else the queue-effective
+  `default-cpus-per-task` (simfactory's `num-threads`), else 1. This is the
+  request-side default — e.g. Deep Bayou sets it to 24 so a no-`--cpus` job
+  fills its 48-CPU nodes as 2 tasks × 24 CPUs.
 - `TASKS_PER_NODE` = `--tpn` if given, else
-  `floor(MAX_TASKS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node) — using
-  the queue-effective `max-tasks-per-node` (§4.2).
+  `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node — divide the
+  node's available CPUs among ranks) — using the queue-effective
+  `max-cpus-per-node` (§4.2).
 - `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
 - **Script-variant default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the selected script variant's optional `tasks = N`
@@ -1924,7 +1946,7 @@ Derivation (produces the canonical §6.3 names directly — no legacy aliases):
   set and this computed `GPU` is `0`; a non-GPU binary with `GPU = 1` is
   allowed (advisory note only when a non-GPU queue exists on the machine).
 - A script that needs "total cores" or "cores requested" computes them from
-  `TASKS`, `CPUS_PER_TASK`, `NODES`, and `MAX_TASKS_PER_NODE` — cactup no
+  `TASKS`, `CPUS_PER_TASK`, `NODES`, and `MAX_CPUS_PER_NODE` — cactup no
   longer pre-derives `PROCS`/`PROCS_REQUESTED`/`PPN_USED`.
 
 **ASSUMPTION:** SMT (`THREADS_PER_CPU`) defaults to the machine (or queue)

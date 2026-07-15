@@ -508,7 +508,7 @@ mod tests {
             name = "fake"
 
             [hardware]
-            max-tasks-per-node = 4
+            max-cpus-per-node = 4
 
             [scheduler]
             submit = "echo [JOB-T@RESULTS_ID@]"

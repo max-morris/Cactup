@@ -33,7 +33,7 @@ install-home = "/autofs/nccs-svm1_home1/@USER@"
 #test-home       = "/lustre/orion/<allocation>/scratch/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 64
+max-cpus-per-node             = 64
 memory          = 524288
 threads-per-cpu         = 1
 
