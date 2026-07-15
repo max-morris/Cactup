@@ -39,9 +39,9 @@ lines.append("module load fftw/3.3.10")
 lines.append("module load gnu_comp/14.1.0")
 lines.append(
     "exec {0} sim run {1} --installation={2} --sim-dir={3} --machine={4}"
-    " --restart-id={5} {6}".format(
+    " --restart-id={5}".format(
         CACTUP, SIMULATION_NAME, ALIAS, SIMULATION_DIR, MACHINE,
-        RESTART_ID, FROM_RESTART_COMMAND,
+        RESTART_ID,
     )
 )
 

@@ -17,5 +17,5 @@
 #SBATCH -J @TEST_NAME@
 #SBATCH -o @STDOUT_FILE@
 #SBATCH -e @STDERR_FILE@
-cd @SOURCEDIR@
+cd @SOURCEDIR@ || exit 1
 exec @CACTUP@ test run @TEST_NAME@ --installation=@ALIAS@ --test-dir=@TEST_DIR@ --machine=@MACHINE@ --results-id=@RESULTS_ID@

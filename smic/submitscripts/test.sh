@@ -19,5 +19,5 @@
 #PBS -m abe
 #PBS -o @STDOUT_FILE@
 #PBS -e @STDERR_FILE@
-cd @SOURCEDIR@
+cd @SOURCEDIR@ || exit 1
 exec @CACTUP@ test run @TEST_NAME@ --installation=@ALIAS@ --test-dir=@TEST_DIR@ --machine=@MACHINE@ --results-id=@RESULTS_ID@
