@@ -295,11 +295,13 @@ fn submit_impl(
         activate_first = false;
     }
 
-    // Recovery source — login-node best-effort selection (§8.8).
+    // Recovery source — login-node best-effort selection (§8.8). `--resume-from`
+    // caps the backward scan so an older checkpoint can be chosen over newer
+    // restarts; without it the newest checkpoint-bearing restart wins.
     let recover_from = if args.no_recover {
         None
     } else {
-        restart::select_recovery_source(sim, args.restart_id)?
+        restart::select_recovery_source(sim, args.resume_from)?
     };
 
     // Script variants for the chosen queue (§4.4) and universes (§4.8);
@@ -347,6 +349,10 @@ fn submit_impl(
 
     let mut from = recover_from;
     for seg in 0..segments {
+        // Every restart gets a fresh id: the reaper (above) cleared the stale
+        // active restart, so `next_id` advances the chain. `--resume-from` only
+        // steers which checkpoints the new restart recovers (see above) — it
+        // never assigns the id.
         let id = restart::next_id(&sim.dir)?;
         let rdir = restart::restart_dir(&sim.dir, id);
         fs::create_dir_all(rdir.join(".cactup"))
@@ -462,7 +468,7 @@ fn submit_impl(
 pub fn run(ctx: &Ctx, args: SimRunArgs) -> Res<()> {
     if let Some(sim_dir) = args.sim_dir.clone() {
         // clap enforces `--sim-dir requires --restart-id`.
-        let id = args.start.restart_id.expect("clap: --sim-dir requires --restart-id");
+        let id = args.restart_id.expect("clap: --sim-dir requires --restart-id");
         return run_compute(&args, &sim_dir, id);
     }
     let machine = crate::commands::machine::resolve(ctx)?;
@@ -515,10 +521,12 @@ fn run_interactive(
         );
     }
 
+    // Same recovery-source selection as submit: `--resume-from` caps the
+    // backward scan (§8.8); no cap means the newest checkpoint-bearing restart.
     let recover_from = if args.start.no_recover {
         None
     } else {
-        restart::select_recovery_source(sim, args.start.restart_id)?
+        restart::select_recovery_source(sim, args.start.resume_from)?
     };
 
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
@@ -545,6 +553,8 @@ fn run_interactive(
         .unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
 
     let identity = Identity::resolve(db, hostname_override);
+    // A fresh interactive run always gets a new id; reaping (above) cleared any
+    // stale active restart. `--resume-from` steers recovery only, never the id.
     let id = restart::next_id(&sim.dir)?;
     let rdir = restart::restart_dir(&sim.dir, id);
     fs::create_dir_all(rdir.join(".cactup"))
@@ -962,7 +972,7 @@ mod tests {
                 err: None,
             },
             no_recover: false,
-            restart_id: None,
+            resume_from: None,
             checkpt_buffer: None,
         }
     }
@@ -1034,6 +1044,7 @@ mod tests {
         let run_args = SimRunArgs {
             start: start_args("bbh", "24:00:00"),
             debug: false,
+            restart_id: Some(1),
             sim_dir: Some(sim.dir.clone()),
         };
         run_compute(&run_args, &sim.dir, 1).unwrap();
@@ -1057,6 +1068,41 @@ mod tests {
         let log = fs::read_to_string(sim.log_path()).unwrap();
         assert!(log.contains("] create::"), "{log}");
         assert!(log.contains("] submit::submitted output-0000 as job JOB-0"), "{log}");
+    }
+
+    #[test]
+    fn resume_from_caps_the_recovery_source_but_not_the_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, false, "bbh", &parfile, None, None).unwrap();
+        let db = ctx.db.read().unwrap();
+
+        // Two earlier checkpoint-bearing restarts; output-0001 is the newer one
+        // the default scan would pick.
+        for id in [0u32, 1] {
+            let w = restart::workdir(&sim, id);
+            fs::create_dir_all(&w).unwrap();
+            fs::write(w.join(format!("bbh.chkpt.it_{id}0.h5")), b"ckpt").unwrap();
+        }
+
+        // --resume-from 0 recovers from output-0000, ignoring the newer 0001,
+        // yet the new restart still gets a fresh id (output-0002).
+        let mut args = start_args("bbh", "1:00:00");
+        args.resume_from = Some(0);
+        submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap();
+
+        assert_eq!(restart::list_ids(&sim.dir).unwrap(), vec![0, 1, 2]);
+        assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(2));
+        let r = Restart::load(&sim.dir, 2).unwrap();
+        assert_eq!(r.meta.from_restart_id, Some(0), "recovered from the capped restart, not 1");
+        assert!(r.meta.checkpointing);
+        // The id assigned to the new restart is next_id, never the cap.
+        assert_eq!(restart::thaw_vars(&r.meta.vars).unwrap().get("RESTART_ID").unwrap().canonical(), "2");
     }
 
     #[test]

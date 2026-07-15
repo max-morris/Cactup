@@ -364,9 +364,11 @@ pub(crate) struct SimStartArgs {
     /// Start the new restart cold, ignoring existing checkpoints (§8.8).
     #[clap(long)]
     pub no_recover: bool,
-    /// Operate on a specific output-%04d instead of the latest (§8.8).
+    /// Recover checkpoints from this restart instead of the newest
+    /// checkpoint-bearing one — ignore any restart newer than N (§8.8). The
+    /// new run still gets a fresh output-%04d id.
     #[clap(long, value_name = "N")]
-    pub restart_id: Option<u32>,
+    pub resume_from: Option<u32>,
     /// Override the checkpoint-hint buffer: @CHECKPOINT_WALLTIME@ = hard wall
     /// − buffer (default max(wall/24, 10 min) — §8.8).
     #[clap(long, value_name = "(DD-)?HH:MM:SS", value_parser = parse_walltime)]
@@ -380,6 +382,12 @@ pub(crate) struct SimRunArgs {
     /// Launch under the debugger (@RUNDEBUG@/@DEBUGGER@).
     #[clap(long)]
     pub debug: bool,
+    /// Compute-node locator (§8.3.1): load and run exactly this output-%04d.
+    /// Internal plumbing baked into the generated submit-script as
+    /// `--restart-id=@RESTART_ID@`; pairs with --sim-dir. Not a recovery knob —
+    /// see --resume-from for choosing a checkpoint source.
+    #[clap(long, value_name = "N")]
+    pub restart_id: Option<u32>,
     /// Compute-node path (§8.3.1): the absolute simulation directory, so the
     /// run needs neither the global DB nor the registry. Requires --restart-id.
     #[clap(long, value_name = "PATH", requires = "restart_id")]
