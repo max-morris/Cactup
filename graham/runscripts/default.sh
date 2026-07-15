@@ -18,7 +18,7 @@ cd @RUNDIR@-active
 echo "Job setup:"
 echo "   Allocated:"
 echo "      Nodes:                      @NODES@"
-echo "      Cores per node:             @MAX_TASKS_PER_NODE@"
+echo "      Cores per node:             @MAX_CPUS_PER_NODE@"
 echo "   Running:"
 echo "      MPI processes:              @TASKS@"
 echo "      OpenMP threads per process: @CPUS_PER_TASK@"

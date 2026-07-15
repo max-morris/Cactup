@@ -24,7 +24,7 @@ test-home       = "/mnt/lustre/@USER@/tests"
 scratch-home    = "/tmp"
 
 [hardware]
-max-tasks-per-node             = 16
+max-cpus-per-node             = 16
 memory          = 65536         # MB per node
 
 [build]

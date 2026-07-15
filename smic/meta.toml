@@ -26,7 +26,7 @@ test-home       = "/work/@USER@/tests"
 scratch-home    = "/var/scratch/@USER@"
 
 [hardware]
-max-tasks-per-node             = 20
+max-cpus-per-node             = 20
 memory          = 65536         # MB per node
 
 [build]
@@ -51,7 +51,7 @@ export PATH=/project/sbrandt/cmake-3.28.0-rc5/bin:$PATH
 submit          = "( cd $(dirname @SCRIPTFILE@) && qsub $(basename @SCRIPTFILE@) )"
 # set inside a PBS allocation; gates `test run` (design §11.6)
 allocation-env  = "PBS_JOBID"
-interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_TASKS_PER_NODE@ -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
+interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_CPUS_PER_NODE@ -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
 get-status      = "qstat @JOB_ID@"
 stop            = "qdel @JOB_ID@"
 submit-pattern   = '(\d+)[.]smic3'

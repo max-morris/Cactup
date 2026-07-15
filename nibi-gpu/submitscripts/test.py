@@ -11,7 +11,7 @@
 # @NAME@ engine is literal-only (D7), so both move into Python.
 
 ppn_used = typed["TASKS_PER_NODE"] * typed["CPUS_PER_TASK"]
-mem_mb = int((2044000 * ppn_used + ppn_used - 1) / typed["MAX_TASKS_PER_NODE"])
+mem_mb = int((2044000 * ppn_used + ppn_used - 1) / typed["MAX_CPUS_PER_NODE"])
 exclusive = "--exclusive " if ppn_used == 112 else " "
 
 lines = ["#! /bin/bash"]

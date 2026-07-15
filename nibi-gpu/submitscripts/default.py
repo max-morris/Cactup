@@ -3,7 +3,7 @@
 #
 # .py variant (design §6.1): the old script used FOUR expression templates —
 #   @(@PPN_USED@ == 112 ? "--exclusive" : "")@       (whole-node jobs)
-#   --mem=@(int((2044000*@PPN_USED@+@PPN_USED@-1)/@MAX_TASKS_PER_NODE@))@M
+#   --mem=@(int((2044000*@PPN_USED@+@PPN_USED@-1)/@MAX_CPUS_PER_NODE@))@M
 #                                    (2T/112 of RAM per used core, ceiling div)
 #   --gpus-per-node=@(min(8, @NODE_PROCS@))@         (1 GPU per rank, max 8)
 #   @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
@@ -20,7 +20,7 @@
 # The old script named the job -J @SIMULATION_NAME@ (the full name); kept.
 
 ppn_used = typed["TASKS_PER_NODE"] * typed["CPUS_PER_TASK"]
-mem_mb = int((2044000 * ppn_used + ppn_used - 1) / typed["MAX_TASKS_PER_NODE"])
+mem_mb = int((2044000 * ppn_used + ppn_used - 1) / typed["MAX_CPUS_PER_NODE"])
 exclusive = "--exclusive " if ppn_used == 112 else " "
 
 lines = ["#! /bin/bash"]

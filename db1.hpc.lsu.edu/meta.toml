@@ -50,8 +50,12 @@ simulation-home = "/work/@USER@/simulations"
 test-home       = "/work/@USER@/tests"
 
 [hardware]
-max-tasks-per-node = 2
-memory             = 196608     # MB per node
+# Availability vs. request (design §8.5): a Deep Bayou node has 48 CPUs/cores
+# and 2 GPUs. "Filling a node" = 2 tasks/node × 24 CPUs/task = 48 CPUs/node.
+max-cpus-per-node     = 48       # CPUs/cores available per node (NOT MPI ranks)
+default-cpus-per-task = 24       # request default when `-c` omitted → fills the
+                                 # node as 2 tasks × 24 CPUs (floor(48/24) = 2)
+memory                = 196608   # MB per node
 
 [build]
 make      = "make -j@MAKEJOBS@"

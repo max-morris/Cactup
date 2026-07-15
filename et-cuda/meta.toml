@@ -25,7 +25,7 @@ simulation-home = "/work/@USER@/simulations"
 test-home       = "/work/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 64
+max-cpus-per-node             = 64
 memory          = 196608        # MB per node
 
 [build]

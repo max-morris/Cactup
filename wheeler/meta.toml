@@ -28,7 +28,7 @@ test-home       = "/panfs/ds09/sxs/@USER@/tests"
 
 [hardware]
 threads-per-cpu         = 1
-max-tasks-per-node             = 24
+max-cpus-per-node             = 24
 memory          = 65536         # MB per node
 
 [build]

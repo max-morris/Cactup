@@ -20,7 +20,7 @@ test-home       = "/scratch/agrezzolla/@USER@/tests"
 scratch-home    = "/tmp"
 
 [hardware]
-max-tasks-per-node             = 12
+max-cpus-per-node             = 12
 memory          = 32193         # MB per node
 
 [build]

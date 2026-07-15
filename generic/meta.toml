@@ -20,7 +20,7 @@ hostname    = "generic.some.where"
 # §4.6/§4.2/§8.1), correct on both Linux (/home/...) and macOS (/Users/...).
 
 [hardware]
-# No fixed core/RAM counts: cactup autodetects max-tasks-per-node/memory from
+# No fixed core/RAM counts: cactup autodetects max-cpus-per-node/memory from
 # the OS at load time (design §4.6).
 autodetect = true
 

@@ -21,7 +21,7 @@ simulation-home = "/expanse/lustre/scratch/@USER@/temp_project/simulations"
 test-home       = "/expanse/lustre/scratch/@USER@/temp_project/tests"
 
 [hardware]
-max-tasks-per-node             = 128
+max-cpus-per-node             = 128
 memory          = 249325        # MB per node
 
 [build]

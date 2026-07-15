@@ -37,7 +37,7 @@ simulation-home = "/marconi/home/userexternal/@USER@/simulations"
 test-home       = "/marconi/home/userexternal/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 48
+max-cpus-per-node             = 48
 memory          = 193536        # MB per node
 
 [build]

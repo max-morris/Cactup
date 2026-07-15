@@ -34,7 +34,7 @@ install-home = "/u/@USER@"
 #test-home       = "/work/hdd/<alloc-prefix>/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 128
+max-cpus-per-node             = 128
 memory          = 262144        # MB per node
 
 [build]

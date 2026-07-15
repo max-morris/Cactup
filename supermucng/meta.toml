@@ -32,7 +32,7 @@ test-home       = "@ENV(SCRATCH)@/tests"
 
 [hardware]
 threads-per-cpu         = 1
-max-tasks-per-node             = 48
+max-cpus-per-node             = 48
 memory          = 98304         # MB per node
 
 [build]

@@ -19,7 +19,7 @@ simulation-home = "/holohome/@USER@/simulations"
 test-home       = "/holohome/@USER@/tests"
 
 [hardware]
-max-tasks-per-node             = 40
+max-cpus-per-node             = 40
 threads-per-cpu         = 1
 
 [build]
