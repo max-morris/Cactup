@@ -42,9 +42,9 @@ lines.append(ENV_SETUP)
 lines.append("cd {0}".format(SOURCEDIR))
 lines.append(
     "exec {0} sim run {1} --installation={2} --sim-dir={3} --machine={4}"
-    " --restart-id={5} {6}".format(
+    " --restart-id={5}".format(
         CACTUP, SIMULATION_NAME, ALIAS, SIMULATION_DIR, MACHINE,
-        RESTART_ID, FROM_RESTART_COMMAND,
+        RESTART_ID,
     )
 )
 

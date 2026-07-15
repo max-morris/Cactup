@@ -327,7 +327,7 @@ pub(crate) enum SimCommand {
         long: bool,
         #[clap(long, help = "Print only the active (or Nth) restart's output directory.")]
         output_dir: bool,
-        #[clap(long, value_name = "N", help = "With --output-dir, select the Nth restart instead of the active one.")]
+        #[clap(long, value_name = "N", requires = "output_dir", help = "With --output-dir, select the Nth restart instead of the active one.")]
         restart_id: Option<u32>,
     },
     /// Tail the simulation's stdout/stderr
@@ -361,14 +361,6 @@ pub(crate) struct SimStartArgs {
     pub universe: UniverseFlags,
     #[clap(flatten)]
     pub topology: TopologyFlags,
-    /// Start the new restart cold, ignoring existing checkpoints (§8.8).
-    #[clap(long)]
-    pub no_recover: bool,
-    /// Recover checkpoints from this restart instead of the newest
-    /// checkpoint-bearing one — ignore any restart newer than N (§8.8). The
-    /// new run still gets a fresh output-%04d id.
-    #[clap(long, value_name = "N")]
-    pub resume_from: Option<u32>,
     /// Override the checkpoint-hint buffer: @CHECKPOINT_WALLTIME@ = hard wall
     /// − buffer (default max(wall/24, 10 min) — §8.8).
     #[clap(long, value_name = "(DD-)?HH:MM:SS", value_parser = parse_walltime)]
@@ -384,9 +376,10 @@ pub(crate) struct SimRunArgs {
     pub debug: bool,
     /// Compute-node locator (§8.3.1): load and run exactly this output-%04d.
     /// Internal plumbing baked into the generated submit-script as
-    /// `--restart-id=@RESTART_ID@`; pairs with --sim-dir. Not a recovery knob —
-    /// see --resume-from for choosing a checkpoint source.
-    #[clap(long, value_name = "N")]
+    /// `--restart-id=@RESTART_ID@`; requires --sim-dir, which is the only path
+    /// that honors it. Not a recovery knob — cactup does not steer recovery at
+    /// all (§8.8).
+    #[clap(long, value_name = "N", requires = "sim_dir")]
     pub restart_id: Option<u32>,
     /// Compute-node path (§8.3.1): the absolute simulation directory, so the
     /// run needs neither the global DB nor the registry. Requires --restart-id.
@@ -529,7 +522,7 @@ mod tests {
             ],
             vec![
                 "cactup", "sim", "run", "bbh", "--restart-id", "3", "--sim-dir", "/scratch/bbh",
-                "--machine", "mel5", "--installation", "et", "--no-recover",
+                "--machine", "mel5", "--installation", "et",
             ],
             vec!["cactup", "sim", "show", "bbh", "--output-dir", "--restart-id", "2"],
             vec!["cactup", "sim", "list", "--long", "--all"],
@@ -568,8 +561,11 @@ mod tests {
     fn rejects_contradictory_flags() {
         // --universe and --no-universe are mutually exclusive (§4.8).
         assert!(Args::try_parse_from(["cactup", "build", "c", "--universe", "u", "--no-universe"]).is_err());
-        // The compute-node --sim-dir is only meaningful with --restart-id (§8.3.1).
+        // The compute-node pair is all-or-nothing (§8.3.1): --sim-dir needs a
+        // locator, and run_compute is the only path that reads --restart-id, so
+        // alone it would parse and then be ignored.
         assert!(Args::try_parse_from(["cactup", "sim", "run", "s", "--sim-dir", "/x"]).is_err());
+        assert!(Args::try_parse_from(["cactup", "sim", "run", "s", "--restart-id", "3"]).is_err());
         // Bad walltime grammar is rejected at parse time (§8.5).
         assert!(Args::try_parse_from(["cactup", "sim", "submit", "s", "-w", "1:99:00"]).is_err());
     }

@@ -7,7 +7,7 @@
 # No batch scheduler: cactup's "submit" backgrounds this script and echoes its
 # PID as the job id (meta.toml [scheduler].submit); status/stop use ps/kill.
 
-cd @SOURCEDIR@
+cd @SOURCEDIR@ || exit 1
 
 exec @CACTUP@ test run @TEST_NAME@ \
     --installation=@ALIAS@ --test-dir=@TEST_DIR@ --machine=@MACHINE@ \

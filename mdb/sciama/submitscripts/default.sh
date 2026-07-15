@@ -24,5 +24,5 @@
 #SBATCH --jobname=@SHORT_SIMULATION_NAME@
 #SBATCH --out @STDOUT_FILE@
 #SBATCH --error @STDERR_FILE@
-cd @SOURCEDIR@
-exec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@ @FROM_RESTART_COMMAND@
+cd @SOURCEDIR@ || exit 1
+exec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@

@@ -11,7 +11,7 @@
 # logic (the NAME engine does only literal substitution — design §6/§D7), so a
 # .sh variant suffices; no .py escape hatch is needed here.
 
-cd @SOURCEDIR@
+cd @SOURCEDIR@ || exit 1
 
 CHAINED_JOB_ID='@CHAINED_JOB_ID@'
 if [ "${CHAINED_JOB_ID}" != '' ]; then
@@ -22,4 +22,4 @@ fi
 
 exec @CACTUP@ sim run @SIMULATION_NAME@ \
     --installation=@ALIAS@ --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ \
-    --restart-id=@RESTART_ID@ @FROM_RESTART_COMMAND@
+    --restart-id=@RESTART_ID@

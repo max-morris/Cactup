@@ -295,15 +295,6 @@ fn submit_impl(
         activate_first = false;
     }
 
-    // Recovery source — login-node best-effort selection (§8.8). `--resume-from`
-    // caps the backward scan so an older checkpoint can be chosen over newer
-    // restarts; without it the newest checkpoint-bearing restart wins.
-    let recover_from = if args.no_recover {
-        None
-    } else {
-        restart::select_recovery_source(sim, args.resume_from)?
-    };
-
     // Script variants for the chosen queue (§4.4) and universes (§4.8);
     // selection is driven by the config's BUILD universe (§4.4).
     let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
@@ -347,19 +338,14 @@ fn submit_impl(
     let identity = Identity::resolve(db, hostname_override);
     let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
 
-    let mut from = recover_from;
     for seg in 0..segments {
         // Every restart gets a fresh id: the reaper (above) cleared the stale
-        // active restart, so `next_id` advances the chain. `--resume-from` only
-        // steers which checkpoints the new restart recovers (see above) — it
-        // never assigns the id.
+        // active restart, so `next_id` advances the chain.
         let id = restart::next_id(&sim.dir)?;
         let rdir = restart::restart_dir(&sim.dir, id);
         fs::create_dir_all(rdir.join(".cactup"))
             .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
-        let checkpointing = !args.no_recover && (from.is_some() || seg > 0);
-        let from_restart_command = if args.no_recover { "--no-recover" } else { "" };
         let chained = prev_job.clone();
         let vset = vars::assemble(&vars::RestartVarsInput {
             sim,
@@ -370,7 +356,6 @@ fn submit_impl(
             job_wall,
             checkpt_buffer: buffer,
             chained_job_id: chained.as_deref().unwrap_or(""),
-            from_restart_command,
             hostname: &identity.hostname,
             user: &identity.user,
             email: &identity.email,
@@ -408,8 +393,6 @@ fn submit_impl(
                 checkpt_buffer: buffer,
                 job_id: NO_JOB_ID.to_owned(),
                 chained_job_id: chained,
-                checkpointing,
-                from_restart_id: from,
                 status: None,
                 terminated: false,
                 universe: run_uni_spec.clone(),
@@ -458,7 +441,6 @@ fn submit_impl(
         );
 
         prev_job = Some(job_id);
-        from = Some(id);
     }
     Ok(())
 }
@@ -521,14 +503,6 @@ fn run_interactive(
         );
     }
 
-    // Same recovery-source selection as submit: `--resume-from` caps the
-    // backward scan (§8.8); no cap means the newest checkpoint-bearing restart.
-    let recover_from = if args.start.no_recover {
-        None
-    } else {
-        restart::select_recovery_source(sim, args.start.resume_from)?
-    };
-
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     // Selection is driven by the config's BUILD universe (§4.4).
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
@@ -554,7 +528,7 @@ fn run_interactive(
 
     let identity = Identity::resolve(db, hostname_override);
     // A fresh interactive run always gets a new id; reaping (above) cleared any
-    // stale active restart. `--resume-from` steers recovery only, never the id.
+    // stale active restart.
     let id = restart::next_id(&sim.dir)?;
     let rdir = restart::restart_dir(&sim.dir, id);
     fs::create_dir_all(rdir.join(".cactup"))
@@ -569,7 +543,6 @@ fn run_interactive(
         job_wall,
         checkpt_buffer: buffer,
         chained_job_id: "",
-        from_restart_command: if args.start.no_recover { "--no-recover" } else { "" },
         hostname: &identity.hostname,
         user: &identity.user,
         email: &identity.email,
@@ -600,8 +573,6 @@ fn run_interactive(
             // get-status commands can see (matches the generic machine).
             job_id: std::process::id().to_string(),
             chained_job_id: None,
-            checkpointing: recover_from.is_some(),
-            from_restart_id: recover_from,
             status: None,
             terminated: false,
             universe: run_uni_spec,
@@ -611,11 +582,6 @@ fn run_interactive(
     r.store()?;
     restart::make_active(&sim.dir, id)?;
     drop(lock);
-
-    if let Some(from) = recover_from {
-        let n = restart::link_checkpoints(sim, from, id)?;
-        println!("Recovering {n} checkpoint file(s) from {}", restart::dir_name(from));
-    }
 
     sim.log("run", &format!("running {} in the foreground", restart::dir_name(id)));
     println!("Running {} restart {}", sim.name.bold(), restart::dir_name(id));
@@ -635,24 +601,8 @@ fn run_compute(args: &SimRunArgs, sim_dir: &Path, id: u32) -> Res<()> {
         restart::handoff_active(&sim.dir, id)?;
     }
 
-    // Compute-node recovery re-scan (§8.8): the stored from-restart-id is a
-    // starting hint, not a hard target — walk back to the newest restart that
-    // actually has checkpoints. Deterministic, prompt-free.
-    if r.meta.checkpointing && !args.start.no_recover {
-        let hint = r.meta.from_restart_id;
-        if let Some(src) = restart::newest_with_checkpoints(&sim, hint)? {
-            let n = restart::link_checkpoints(&sim, src, id)?;
-            sim.log(
-                "run",
-                &format!("recovered {n} checkpoint file(s) from {}", restart::dir_name(src)),
-            );
-            if r.meta.from_restart_id != Some(src) {
-                r.meta.from_restart_id = Some(src);
-                r.store()?;
-            }
-        }
-    }
-
+    // No recovery step here: the parfile points Cactus at its recovery dir and
+    // Cactus loads the newest checkpoint itself (§8.8).
     sim.log("run", &format!("compute-node run of {}", restart::dir_name(id)));
     execute_restart(&sim, &mut r, false)
 }
@@ -710,7 +660,7 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     let vset = restart::thaw_vars(&r.meta.vars)?;
 
     let parfile = resolve_parfile(sim, &r.dir, &vset)?;
-    let workdir = r.dir.join(sim.parfile_stem());
+    let workdir = restart::workdir(sim, r.id);
     fs::create_dir_all(&workdir).with_context(|| format!("Failed to create {}", workdir.display()))?;
     let terminate = r.dir.join("TERMINATE");
     if !terminate.exists() {
@@ -849,8 +799,7 @@ mod tests {
             dir.join("submitscripts/default.sh"),
             "#!/bin/sh\n# chained: @CHAINED_JOB_ID@\n\
              exec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
-             --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@ \
-             @FROM_RESTART_COMMAND@\n",
+             --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@\n",
         )
         .unwrap();
         fs::write(
@@ -971,8 +920,6 @@ mod tests {
                 out: None,
                 err: None,
             },
-            no_recover: false,
-            resume_from: None,
             checkpt_buffer: None,
         }
     }
@@ -1005,13 +952,11 @@ mod tests {
         let r1 = Restart::load(&sim.dir, 1).unwrap();
         let r2 = Restart::load(&sim.dir, 2).unwrap();
         assert_eq!(r0.meta.job_id, "JOB-0");
-        assert_eq!((r0.meta.chained_job_id.as_deref(), r0.meta.from_restart_id), (None, None));
-        assert!(!r0.meta.checkpointing, "fresh start");
+        // The chain is wired by scheduler dependency alone — no recovery
+        // lineage is recorded, because cactup does not steer recovery (§8.8).
+        assert_eq!(r0.meta.chained_job_id.as_deref(), None);
         assert_eq!(r1.meta.chained_job_id.as_deref(), Some("JOB-0"));
-        assert_eq!(r1.meta.from_restart_id, Some(0));
-        assert!(r1.meta.checkpointing);
         assert_eq!(r2.meta.chained_job_id.as_deref(), Some("JOB-1"));
-        assert_eq!(r2.meta.from_restart_id, Some(1));
         // Each segment reserves the ceiling (§8.8).
         assert_eq!(r1.meta.walltime, Walltime::parse("24:00:00").unwrap());
         // Buffer default: 24 h / 24 = 1 h.
@@ -1036,7 +981,8 @@ mod tests {
         assert_eq!(vars.get("TASKS").unwrap().canonical(), "8", "fill-the-node default");
 
         // Fake a checkpoint in restart 0, then run restart 1 on the "compute
-        // node": handoff + re-scan recovery + run-script execution.
+        // node": handoff + run-script execution. cactup must leave the
+        // checkpoint exactly where it is (§8.8).
         let w0 = restart::workdir(&sim, 0);
         fs::create_dir_all(&w0).unwrap();
         fs::write(w0.join("bbh.chkpt.it_10.h5"), b"ckpt").unwrap();
@@ -1051,8 +997,10 @@ mod tests {
 
         // Handoff moved the active symlink 0 → 1 (§8.3.2).
         assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(1));
-        // The checkpoint was recovered into restart 1's working dir.
-        assert!(restart::workdir(&sim, 1).join("bbh.chkpt.it_10.h5").is_file());
+        // Recovery is the parfile's business (§8.8): restart 0's checkpoint
+        // stays put and nothing is linked into restart 1.
+        assert!(w0.join("bbh.chkpt.it_10.h5").is_file());
+        assert!(!restart::workdir(&sim, 1).join("bbh.chkpt.it_10.h5").exists());
         // The runscript ran in the restart dir via the -active symlink.
         let ran = fs::read_to_string(r1.dir.join("ran.txt")).unwrap();
         assert_eq!(ran.trim(), "ran bbh tasks=8");
@@ -1071,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_from_caps_the_recovery_source_but_not_the_id() {
+    fn resubmit_allocates_a_fresh_restart_and_leaves_checkpoints_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let machine = fake_machine(&tmp.path().join("mdb-fake"));
         let inst = fake_installation(&tmp.path().join("inst"));
@@ -1082,27 +1030,26 @@ mod tests {
         let sim = crate::sim::create(&ctx, &machine, &inst, false, "bbh", &parfile, None, None).unwrap();
         let db = ctx.db.read().unwrap();
 
-        // Two earlier checkpoint-bearing restarts; output-0001 is the newer one
-        // the default scan would pick.
+        // Two checkpoint-bearing restarts. Under the old model these drove a
+        // backward scan; now they are simply none of cactup's business (§8.8).
         for id in [0u32, 1] {
             let w = restart::workdir(&sim, id);
             fs::create_dir_all(&w).unwrap();
             fs::write(w.join(format!("bbh.chkpt.it_{id}0.h5")), b"ckpt").unwrap();
         }
 
-        // --resume-from 0 recovers from output-0000, ignoring the newer 0001,
-        // yet the new restart still gets a fresh id (output-0002).
-        let mut args = start_args("bbh", "1:00:00");
-        args.resume_from = Some(0);
+        let args = start_args("bbh", "1:00:00");
         submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap();
 
+        // Resubmit allocates the next id and activates it.
         assert_eq!(restart::list_ids(&sim.dir).unwrap(), vec![0, 1, 2]);
         assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(2));
         let r = Restart::load(&sim.dir, 2).unwrap();
-        assert_eq!(r.meta.from_restart_id, Some(0), "recovered from the capped restart, not 1");
-        assert!(r.meta.checkpointing);
-        // The id assigned to the new restart is next_id, never the cap.
         assert_eq!(restart::thaw_vars(&r.meta.vars).unwrap().get("RESTART_ID").unwrap().canonical(), "2");
+        // Nothing was copied or linked forward, and the originals are untouched.
+        assert!(!restart::workdir(&sim, 2).join("bbh.chkpt.it_10.h5").exists());
+        assert!(restart::workdir(&sim, 0).join("bbh.chkpt.it_00.h5").is_file());
+        assert!(restart::workdir(&sim, 1).join("bbh.chkpt.it_10.h5").is_file());
     }
 
     #[test]

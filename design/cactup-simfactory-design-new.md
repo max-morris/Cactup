@@ -23,7 +23,7 @@ These were settled during design review and are treated as fixed below.
 | D1 | Remote execution / source sync / `login` | **Dropped.** cactup is a local, per-machine tool. No `rsync` sync, no `--remote` SSH dispatch, no `login`, no trampoline/iomachine tunneling. You run cactup on the machine where the work happens. |
 | D2 | Archive subsystem (petashare/uberftp) | **Dropped entirely.** No archive command, no drivers. |
 | D3 | Cactus test-suite support | **Kept, as a first-class `cactup test run`/`test submit` command tree** separate from `sim` (§11). A testsuite runs against any built config — default the active config, or `--config C` — with **no separate test-config kind**. Test output lives under a dedicated, configurable **test-home** (`tests/`), *not* inside `simulations/`. Test run/submitscripts are marked `test = true` in the MDB and resolved by the §11.2 rules (this is the only test-marking; optionlists just use the §4.4 `default = true` picker). simfactory's overloading of `sim` (empty-parfile sentinel, monster `output-NNNN/exe/` copytree) is *not* ported. |
-| D4 | Restart / chaining / recovery & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, checkpoint recovery, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. |
+| D4 | Restart / chaining & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. Checkpoint recovery is **out of scope**: the parfile and Cactus own it end to end (§8.8). |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
 | D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus the one computed form `@ENV(NAME)@`** (the named environment variable, read at substitution time; unset or empty = hard error), everywhere (TOML and shell templates). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
@@ -53,7 +53,8 @@ Hard goals:
    contract).
 2. Subsume every *user-facing* capability of simfactory that survives the §0
    decisions: build configs, create/run/submit/manage simulations, restart
-   chaining, checkpoint recovery, test suites, scheduler abstraction.
+   chaining, test suites, scheduler abstraction. (Checkpoint recovery is
+   deliberately *not* on this list — it belongs to the parfile and Cactus, §8.8.)
 3. Replace simfactory's embedded-per-tree model with one global tool managing
    N installations, each with M configs, each producing simulations.
 
@@ -172,7 +173,7 @@ Required model (D11):
    read-modify-write under the held lock.
 2. **`cactup sim run --restart-id N` (the compute-node path) does not depend on
    the global DB at all.** Everything it needs — the Cactus root, the
-   executable, the config, the parfile, topology, recovery source — is read from
+   executable, the config, the parfile, topology — is read from
    the simulation's own on-disk metadata (§9.3) and the explicit flags the
    submit script passes (§8.3). This decouples compute-node execution from
    login-node state and from the lock.
@@ -280,8 +281,8 @@ cactup config use <name>
 cactup config delete <name>
 
 cactup sim create [-f] <sim> <parfile> [--config C] [--sim-dir P]
-cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--no-recover] [--restart-id N]
-cactup sim run    [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--debug] [--no-recover] [--restart-id N]
+cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--checkpt-buffer W]
+cactup sim run    [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--debug] [--checkpt-buffer W] [--restart-id N --sim-dir P]
 cactup sim stop   <sim> [-f]
 cactup sim clean <sim>
 cactup sim delete <sim> [-f]
@@ -505,7 +506,7 @@ spellings are normalized on port (`getstatus` → `get-status`, `submitpattern` 
 `envsetup` → `env-setup`, `makejobs` → `make-jobs`, `maxwalltime` →
 `max-walltime`, `scratchbasedir` → `scratch-home`, …), and cactup's own keys
 use hyphens too
-(`config-id`, `build-id`, `job-id`, `chained-job-id`, `from-restart-id`,
+(`config-id`, `build-id`, `job-id`, `chained-job-id`,
 `simulation-id`, `compatible-queues`). The **only** identifiers that keep
 underscores are **template substitution variables**, which stay `UPPER_SNAKE`
 inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME@`,
@@ -1373,8 +1374,7 @@ compute-node re-invocation as `--sim-dir`, §8.3.1), `SCRATCH_HOME`,
 re-invoke `@CACTUP@ sim run …`; renamed from simfactory's `@SIMFACTORY@`).
 
 **Identity / machine:**
-`MACHINE`, `HOSTNAME`, `USER`, `EMAIL`, `EXECHOST`, `JOB_ID`, `CHAINED_JOB_ID`,
-`FROM_RESTART_COMMAND`.
+`MACHINE`, `HOSTNAME`, `USER`, `EMAIL`, `EXECHOST`, `JOB_ID`, `CHAINED_JOB_ID`.
 
 **Machine-derived** (read from `meta.toml` — the **queue-effective** hardware
 values for the job's queue (§4.2), available to scripts but not topology
@@ -1787,14 +1787,14 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
 - Run the machine `submit` command (wrapped in the submit universe if one was
   resolved, §4.8); parse the job id with `submit-pattern`; store it in the restart
   metadata (`job-id`; `-1` ⇒ failed/unknown).
-- **Auto-recover + auto-chaining** (the simplified model — §8.8): if the
-  simulation already has restarts, the new restart recovers from the latest one
-  automatically (unless `--no-recover`). If requested walltime > the effective
-  walltime ceiling (§4.2), cactup transparently pre-submits
+- **Auto-chaining** (the simplified model — §8.8): if requested walltime > the
+  effective walltime ceiling (§4.2), cactup transparently pre-submits
   `ceil(walltime / ceiling)` chained restarts, each scheduler-dependent on the
-  prior job id and each recovering from the prior restart. There is no
-  user-facing chaining command; the dependency flag is emitted by the
-  submit-script variant (a `.py` variant, since this is conditional — §6).
+  prior job id. There is no user-facing chaining command; the dependency flag is
+  emitted by the submit-script variant (a `.py` variant, since this is
+  conditional — §6). Each segment continues from the prior one only insofar as
+  its **parfile** recovers the newest checkpoint — cactup does not arrange that
+  and takes no position on it (§8.8).
 
 #### 8.3.1 Compute-node re-invocation
 
@@ -1809,14 +1809,14 @@ global DB state:
 ```
 @CACTUP@ sim run @SIMULATION_NAME@ \
     --installation=@ALIAS@ --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ \
-    --restart-id=@RESTART_ID@ @FROM_RESTART_COMMAND@
+    --restart-id=@RESTART_ID@
 ```
 
 `--sim-dir` (the absolute simulation directory) + `--restart-id` fully identify
 the restart (`@SIMULATION_DIR@/output-<RESTART_ID>`) with no registry lookup;
 `--installation` and `--machine` supply the alias and machine name without
 touching the global DB. `cactup sim run --restart-id` reads everything else
-(config, executable path, recovery source, topology, **and the run universe**)
+(config, executable path, topology, **and the run universe**)
 from that restart's on-disk `.cactup/` metadata (§9.3) — satisfying the D11 rule
 that the compute-node path does not touch the global DB or the registry. The run
 universe was resolved and frozen into `restart.toml` at submit time (§8.3, §4.8),
@@ -1830,7 +1830,7 @@ code (preserving simfactory's design point).
 The exactly-one-active invariant (§9.2) is maintained across a pre-submitted
 chain as follows. At submit time, only the first restart of the chain is made
 active; restarts `K>first` are created with full metadata (including
-`from-restart-id = K-1` and `chained-job-id`) but **no** `-active` symlink. When
+`chained-job-id`) but **no** `-active` symlink. When
 a chained job actually starts on its compute node, its `cactup sim run
 --restart-id=K` performs the handoff atomically:
 
@@ -1864,8 +1864,8 @@ Port of `run()` / `userRun` / `submitRun` (`simfactory-docs.txt` §14.3): runs
 interactively, bypassing the queue. With `--restart-id` it runs that restart —
 this is the **compute-node path** the submit script takes (§8.3.1), and in that
 mode it accepts `--installation`/`--sim-dir`/`--machine` to locate the
-simulation without the global DB or the registry, performs the chain handoff
-(§8.3.2), and recovers checkpoints (§8.8). Throughout its run it holds the
+simulation without the global DB or the registry, and performs the chain handoff
+(§8.3.2). Throughout its run it holds the
 per-restart liveness marker and periodically touches the heartbeat file (§9.3)
 so the reaper (§8.3) never mistakes it for dead. Without `--restart-id`, it
 builds a fresh restart, makes it active, forks, and tees child stdout/stderr to
@@ -1959,15 +1959,23 @@ Ports of `simfactory-docs.txt` §14.8 / §14.5:
   (graceful termination trigger created by the running Cactus job), then finish.
   Otherwise run the machine `stop` command (forced) and finish.
 - `cactup sim clean <sim>`: deactivate the active restart (remove the
-  `-active` symlink), tighten `TERMINATE` perms, delete half-written checkpoints
-  (`*.chkpt.tmp.it_*.*`), and run the Formaline tarball **hard-link dedup** across
-  prior restarts. Dedup semantics are preserved verbatim from simfactory
+  `-active` symlink), tighten `TERMINATE` perms, and run the Formaline tarball
+  **hard-link dedup** across prior restarts. Dedup semantics are preserved verbatim from simfactory
   (`simfactory-docs.txt` §14.5): for each `*.tar.gz` ≥ 1000 bytes, scan prior
   `output-%04d` dirs (descending) for a file **of the same name whose contents
   are byte-identical** (`filecmp`-style full comparison — *not* name-only), and if
   found replace this copy with a hard link to it via a `.tmp` rename. Because the
   match requires identical content, dedup can never alias two different tarballs.
   All of this is preserved because it shapes on-disk output (§9).
+
+  **`clean` never deletes checkpoints** (a deliberate divergence from
+  simfactory's `cleanup`, which unlinked `*.chkpt.tmp.it_*.*`). Checkpoints may
+  be any format — HDF5 files, ADIOS2/BP5 *directories*, whatever a future driver
+  writes — in any location the parfile chose, very likely outside the restart dir
+  entirely (§8.8). cactup therefore cannot reliably tell a half-written
+  checkpoint from a finished one, or from an unrelated file, and a wrong guess
+  deletes real data. Reaping partial checkpoints belongs to whoever owns the
+  checkpoint dir: the parfile author and the driver.
 
 Job status is queried **live** (not stored): run machine `get-status`, match
 against the machine `*-pattern` regexes → `R`/`Q`/`H`/`U`/`E`
@@ -2005,41 +2013,73 @@ sim delete --purge` (also implied by `-f`) permanently removes instead of trashi
 created with a `--sim-dir` on a different filesystem than `<sim-home>`, the move
 degrades to copy-then-delete.)
 
-### 8.8 Checkpoint recovery & the simplified restart CLI (D4)
+### 8.8 Checkpoint recovery, walltime & the simplified restart CLI (D4)
 
-On-disk recovery is the verbatim port of `PrepareCheckpointing`
-(`simfactory-docs.txt` §14.6): locate checkpoint files (`*chkpt.it_*`) in the
-recovery-source restart's working dir and **hard-link** them into the current
-restart (fall back to copy), rewriting the path prefix. No checkpoints ⇒
-recovery is a no-op (fresh start).
+**Checkpoint recovery is out of cactup's scope (scope decision).** cactup does
+**not** choose, locate, copy, link, or otherwise steer which checkpoint a run
+recovers from. Recovery is driven entirely by the **parfile and the Cactus
+driver**: the parfile author points Cactus at a checkpoint/recovery directory and
+Cactus automatically loads the newest checkpoint it finds there. That directory
+is typically **shared across restarts and lives outside any `output-%04d`** — a
+parfile saying `IO::recover_dir = ../checkpoints_standing` resolves it against
+the run's cwd (the restart's working dir, per the runscript's `cd @RUNDIR@-active`),
+naming a single `<SimName>/checkpoints_standing` for the whole simulation. cactup
+never reads that directory, never parses checkpoint filenames, and sets no Cactus
+recovery parameter. Consequently there is **no recovery-source selection, no
+`from-restart-id`, and no on-disk checkpoint shuffling** anywhere in cactup.
 
-**Recovery-source selection (best effort, no silent data loss).** The
-recovery source is **not** blindly "the highest-numbered restart" — a restart
-that crashed before writing any checkpoint has none, and picking it would
-silently cold-start and discard the last good run. Instead cactup scans restarts
-**backward from the latest** and picks the newest one that actually contains
-recoverable `*chkpt.it_*` files. In the common linear case this is unambiguous
-and silent. If the history is **divergent** (e.g. multiple checkpoint-bearing
-branches after a manual `--restart-id` recovery, or the latest restart's
-checkpoints look older than an earlier restart's), cactup **prompts** the user to
-choose the source and records the choice as `from-restart-id`. The prompt only
-happens on the **interactive login-node path**; the **compute-node path**
-(`sim run --restart-id`, §8.3.1) **never prompts**.
+**What this replaces, and why.** Earlier drafts of this spec ported Carpet's
+`PrepareCheckpointing` (`simfactory-docs.txt` §14.6): cactup scanned restarts
+backward for `*chkpt.it_*` files, picked a "recovery source", prompted the user
+when the history looked divergent, hard-linked that restart's checkpoints into
+the new restart, and recorded `from-restart-id` / `checkpointing` in
+`restart.toml`. **This genuinely worked in simfactory**, and the reason cactup
+drops it is *not* that it was always broken — the honest reasons are narrower:
 
-**Compute-node re-scan for pre-submitted chains.** The compute-node path does
-**not** blindly trust the `from-restart-id` stored at submit time as a *hard*
-recovery target. In a pre-submitted chain, restart `K`'s `from-restart-id` is
-fixed to `K-1` at submit time (§8.3.2) — but segment `K-1` may have died before
-writing any checkpoint, so recovering from it verbatim would silently cold-start
-and discard the last good run (exactly the failure the login-node scan avoids). To
-close that gap, at recovery time the compute-node run performs the **same backward
-scan**: it starts from its stored `from-restart-id` and, if that restart has no
-`*chkpt.it_*` files, walks further back to the newest restart that does. This
-preserves the no-silent-data-loss guarantee for chains while staying **fully
-deterministic and prompt-free** — the scan is data-driven, and the stored
-`from-restart-id` is a *starting hint*, not a hard target. (A queued/chained job
-therefore recovers from the newest checkpoint-bearing restart at or before its
-hint, regardless of how many predecessors crashed checkpoint-less.)
+1. **cactup cannot know where the checkpoints are.** The location is
+   `IO::checkpoint_dir`, set **inside the parfile** in Cactus's own config
+   language: resolved against the run's cwd, subject to Cactus's `$parfile`
+   substitution, and — for a `.py` parfile (§6.1) — not even existing as text
+   until the script is *executed at run time*. There is nothing cactup can
+   reliably parse. Every scan cactup could write is a guess about someone else's
+   configuration language.
+2. **A `*chkpt.it_*` glob is a guess that already lost.** It matches Carpet's
+   `standing.chkpt.it_100.file_0.h5` but not CarpetX/openPMD's
+   `checkpoint.chkpt.it00001888.bp5`. Widening the pattern only moves the guess;
+   the next driver names them something else again. (Note the file **format** was
+   never the obstacle: a BP5 checkpoint is a *directory*, but recursive
+   hard-linking — `cp -al` semantics — handles that fine. Format is a red
+   herring; **location** is the blocker.)
+3. **When the parfile is written sensibly, there is nothing to do.** A shared
+   checkpoint dir outside the restarts plus `IO::recover = "autoprobe"` — e.g.
+   `IO::checkpoint_dir = "../checkpoints_$parfile"`, which resolves one level
+   above the restart dir to a single `<SimName>/checkpoints_<par>/` — gives
+   continuity across restarts for free: Cactus finds the newest checkpoint
+   itself, with no copying, no per-restart duplication, and no scan. This is
+   strictly better than linking N generations forward, and it is what the
+   reference parfile does.
+
+The `--resume-from` and `--no-recover` flags go with it: neither could reach
+`IO::recover`, so neither did what its name promised.
+
+**Consequences accepted — including one real loss.** The convention simfactory
+served — a parfile that leaves checkpoints **inside** the restart (no `../`, so
+they land in `output-%04d/…`) — needs *somebody* to carry them forward, and
+cactup no longer will. Such a parfile **silently cold-starts** on resubmit where
+simfactory would have continued. The fix is one line in the parfile: point
+`checkpoint_dir`/`recover_dir` at a shared directory outside the restarts (item 3
+above). This is a deliberate trade: cactup declines to support the inferior
+pattern rather than guess at parfile semantics to prop it up. Beyond that, cactup
+cannot distinguish a cold start from a continuation and does not try;
+`restart.toml` records no recovery lineage and `sim show` displays none; a chain
+whose parfile fails to checkpoint before the wall loses that segment's tail
+(already the parfile author's responsibility — see the walltime paragraph below).
+
+If cactup ever needs to participate in recovery, the shape is **templating, not
+file-moving**: expose a `@CHECKPOINT_DIR@`/`@RECOVER_DIR@` variable that the
+parfile consumes, so cactup *owns* the location instead of guessing it — and the
+parfile stays the single source of truth. That, not a smarter scan, is the door
+left open.
 
 **Walltime is a scheduler reservation only — cactup does not manage Cactus
 termination.** cactup's sole walltime responsibility is *reserving* wall with the
@@ -2077,29 +2117,31 @@ again to extend it", not restart bookkeeping.
 
 **Default behavior (no restart flags):**
 
-1. **Auto-recover on resubmit.** `cactup sim submit <sim>` (or `sim run`) on a
-   simulation that already has restarts automatically allocates the next
-   `output-%04d` and recovers from the newest checkpoint-bearing restart (the
-   best-effort selection above). The first submit of a fresh simulation starts
-   from `output-0000` with no recovery. Recovery is silent when there's nothing
-   to recover — there is no "is this a fresh run or a continuation?" decision for
-   the user to make.
+1. **Next restart on resubmit.** `cactup sim submit <sim>` (or `sim run`) on a
+   simulation that already has restarts allocates the next `output-%04d` and runs
+   it; the first submit of a fresh simulation starts from `output-0000`. Whether
+   that run continues from a checkpoint or starts from scratch is decided by the
+   parfile + Cactus (above), never by cactup — so there is no "is this a fresh run
+   or a continuation?" decision for the user to make on the cactup CLI, because
+   cactup is not the one making it.
 2. **Automatic walltime chaining.** If the requested total `--wall-time` (in
    seconds, §8.5) exceeds the effective per-job walltime ceiling (§4.2), cactup
    transparently pre-submits `ceil(total-walltime / ceiling)` chained restarts,
-   each scheduler-dependent on the previous job, each *reserving* the ceiling as
-   its scheduler wall, and each recovering from the prior restart's checkpoints
-   (§8.3). The user asks for "100 hours" on a 24-hour-max queue; cactup figures
-   out it needs 5 chained jobs. No manual chaining command exists. (Whether each
-   segment actually checkpoints before its wall so the next can resume is the
-   parfile author's responsibility — cactup only reserves the wall; see above.)
+   each scheduler-dependent on the previous job and each *reserving* the ceiling
+   as its scheduler wall (§8.3). The user asks for "100 hours" on a 24-hour-max
+   queue; cactup figures out it needs 5 chained jobs. No manual chaining command
+   exists. Continuity across segments is the **parfile's** doing, not cactup's:
+   each segment picks up the newest checkpoint in the shared recovery dir because
+   its parfile says so (above). Whether a segment actually checkpoints before its
+   wall so the next has something to continue from is likewise the parfile
+   author's responsibility — cactup only reserves the wall.
 
    **No-op tail jobs after early completion (accepted).** The chain is a fixed
    set of dependency-gated jobs sized from `--wall-time`. If the simulation reaches
    its termination condition partway through (say segment 2 of 5), the remaining
    pre-submitted segments still launch when their scheduler dependency clears; each
-   recovers the final checkpoint, sees the run already terminated, and exits
-   quickly. cactup does **not** cancel the tail — doing so would require it to
+   starts Cactus, which recovers the final checkpoint, sees the run already
+   terminated, and exits quickly. cactup does **not** cancel the tail — doing so would require it to
    inspect Cactus termination state, which it deliberately does not model
    (see the walltime paragraph above). These tail jobs are harmless (no data
    change) but do consume a queue slot and startup each. **Sizing the chain
@@ -2110,18 +2152,15 @@ again to extend it", not restart bookkeeping.
 
 | Flag | On | Effect |
 |------|-----|--------|
-| `--no-recover` | submit, run | Start the new restart cold even though prior restarts exist (ignore checkpoints). |
-| `--restart-id N` | submit, run | Operate on/restart from a specific `output-%04d` instead of the latest. Primarily for the submit-script's own re-invocation on the compute node and for recovering a non-latest segment. |
+| `--restart-id N` | run (with `--sim-dir`) | **Locator, not a recovery knob.** Load and run exactly this `output-%04d`. This is the submit-script's own re-invocation on the compute node (§8.3.1) and nothing else: it is meaningless without `--sim-dir` and the two are required together. |
 | `--checkpt-buffer W` | submit, run | Override the checkpoint buffer (default `max(reserved-walltime/24, 10 min)`) that sets the `@CHECKPOINT_WALLTIME@` hint = hard wall − buffer (§8.8 above). Affects only the exposed hint variables; cactup still reserves the full hard wall and injects nothing into Cactus. |
 
-That's the entire manual surface. simfactory's `--from-restart-id` collapses
-into `--restart-id` (the recovery source is the newest checkpoint-bearing restart
-at or before the named one — or before the latest, if none is named — per the
-best-effort scan above); `--recover`/its inverse collapse into the default +
-`--no-recover`;
-and there is no user-facing chaining flag at all. Internally, cactup still
-tracks `from-restart-id` and `chained-job-id` in `restart.toml` (§9.3) — they're
-just computed, not asked for.
+That's the entire manual surface — two flags, neither of which touches recovery.
+simfactory's `--recover`, `--from-restart-id`, and cactup's own short-lived
+`--resume-from` all have **no** equivalent: recovery is not cactup's decision to
+make (above), so there is no knob to expose. There is no user-facing chaining
+flag either; internally cactup still tracks `chained-job-id` in `restart.toml`
+(§9.3) to wire up scheduler dependencies — computed, not asked for.
 
 ---
 
@@ -2254,7 +2293,7 @@ a simulation is never a testsuite — testsuite state lives in the `cactup test`
 subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carries
 `schema` plus the submit/run keys
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
-`checkpt-buffer`, `job-id`, `chained-job-id`, `checkpointing`, `from-restart-id`,
+`checkpt-buffer`, `job-id`, `chained-job-id`,
 the last observed `status`, the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
 without re-reading the MDB), and the creation/marking timestamps that simfactory
@@ -2340,7 +2379,7 @@ test-config kind** and **no separate active pointer** — only two concepts:
   partition is gone.
 - **test run** (a.k.a. **test-sim**) — one execution of a config's testsuite
   against a chosen topology and test selection. It is the analogue of a
-  simulation but **much simpler**: one-shot, no restarts, no checkpoint recovery,
+  simulation but **much simpler**: one-shot, no restarts,
   no walltime chaining (§11.6). Test runs live under **test-home** (§11.5) and
   are addressed by name via `cactup test …` (`test delete <name>` in the
   required surface).
@@ -2559,9 +2598,10 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
    non-zero if any test failed** (so `test run` is CI-usable). `cactup test
    show <name>` reprints the last run's results.
 
-**No chaining, no recovery, no restart bookkeeping.** A testsuite is a single
-job: §8.8's auto-chaining, checkpoint recovery, `from-restart-id`, and the
-stale-restart reaper **do not apply**. `--wall-time` is a single scheduler
+**No chaining, no restart bookkeeping.** A testsuite is a single
+job: §8.8's auto-chaining and the stale-restart reaper **do not apply** (nor does
+checkpoint recovery, but that is nobody's business in cactup now — §8.8).
+`--wall-time` is a single scheduler
 reservation for the one job (no splitting). This is the largest simplification
 versus the simulation path and the reason tests get their own, thinner code path
 instead of a `--testsuite` flag bolted onto `sim`.

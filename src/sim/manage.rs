@@ -55,8 +55,8 @@ pub fn stop(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     Ok(())
 }
 
-/// `sim clean` (§8.6): deactivate + tighten TERMINATE + delete half-written
-/// checkpoints + Formaline tarball hard-link dedup.
+/// `sim clean` (§8.6): deactivate + tighten TERMINATE + Formaline tarball
+/// hard-link dedup. Checkpoints are never touched (§8.8).
 pub fn clean(ctx: &Ctx, name: &str) -> Res<()> {
     let (_machine, inst) = machine_and_inst(ctx)?;
     let sim = Simulation::locate(&inst, name)?;
@@ -92,16 +92,9 @@ pub fn clean_active(sim: &Simulation) -> Res<()> {
         let _ = fs::set_permissions(&terminate, fs::Permissions::from_mode(0o400));
     }
 
-    // Delete half-written checkpoints (`*.chkpt.tmp.it_*.*`).
-    let workdir = restart::workdir(sim, id);
-    if let Ok(entries) = fs::read_dir(&workdir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name.to_str().map(|n| n.contains(".chkpt.tmp.it_")).unwrap_or(false) {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
+    // Checkpoints are left strictly alone (§8.6/§8.8): they may be any format,
+    // in any location the parfile chose, so cactup cannot reliably recognize one
+    // — and a wrong guess deletes real data.
 
     dedup_formaline(sim, id)?;
     sim.log("clean", &format!("cleaned {}", restart::dir_name(id)));
@@ -422,9 +415,6 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
                     r.meta.walltime.canonical(),
                 );
                 if long {
-                    if let Some(from) = r.meta.from_restart_id {
-                        line.push_str(&format!(", recovers from {}", restart::dir_name(from)));
-                    }
                     if let Some(chained) = &r.meta.chained_job_id {
                         line.push_str(&format!(", after job {chained}"));
                     }
@@ -548,6 +538,8 @@ mod tests {
         fs::create_dir_all(&w).unwrap();
         fs::create_dir_all(restart::restart_dir(&sim.dir, 0).join(".cactup")).unwrap();
         fs::write(restart::restart_dir(&sim.dir, 0).join("TERMINATE"), b"0\n").unwrap();
+        // Anything checkpoint-shaped, half-written or not, must survive: cactup
+        // does not know what a checkpoint looks like and never guesses (§8.8).
         fs::write(w.join("bbh.chkpt.tmp.it_10.h5"), b"half").unwrap();
         fs::write(w.join("bbh.chkpt.it_5.h5"), b"good").unwrap();
         restart::make_active(&sim.dir, 0).unwrap();
@@ -555,8 +547,8 @@ mod tests {
         clean_active(&sim).unwrap();
 
         assert_eq!(restart::active_id(&sim.dir).unwrap(), None, "deactivated");
-        assert!(!w.join("bbh.chkpt.tmp.it_10.h5").exists(), "half-written checkpoint deleted");
-        assert!(w.join("bbh.chkpt.it_5.h5").exists(), "good checkpoint kept");
+        assert!(w.join("bbh.chkpt.tmp.it_10.h5").exists(), "checkpoints left alone");
+        assert!(w.join("bbh.chkpt.it_5.h5").exists(), "checkpoints left alone");
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(restart::restart_dir(&sim.dir, 0).join("TERMINATE"))
             .unwrap()

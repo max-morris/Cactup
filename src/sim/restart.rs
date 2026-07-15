@@ -1,6 +1,6 @@
 //! Restarts: the numbered `output-%04d` dirs, the active symlink (§9.2), the
-//! per-restart `.cactup/restart.toml` metadata (§9.3), checkpoint recovery
-//! (§8.8), and the stale-restart reaper (§8.3).
+//! per-restart `.cactup/restart.toml` metadata (§9.3), and the stale-restart
+//! reaper (§8.3).
 
 use crate::database::SCHEMA;
 use crate::installation::write_toml;
@@ -11,7 +11,7 @@ use crate::sim::Simulation;
 use crate::template::{VarSet, VarValue};
 use crate::walltime::Walltime;
 use crate::Res;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use indexmap::IndexMap;
@@ -91,12 +91,6 @@ pub struct RestartMeta {
     /// The job id this restart's job depends on (pre-submitted chain, §8.3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chained_job_id: Option<String>,
-    /// Whether this restart recovers checkpoints (§8.8).
-    pub checkpointing: bool,
-    /// Recovery hint: newest checkpoint-bearing restart at submit time; the
-    /// compute node re-scans backward from it (§8.8).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_restart_id: Option<u32>,
     /// Last observed status letter (display cache only; the live query is
     /// the source of truth — §8.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,127 +328,11 @@ pub fn workdir(sim: &Simulation, id: u32) -> PathBuf {
     restart_dir(&sim.dir, id).join(sim.parfile_stem())
 }
 
-/// Recoverable checkpoint files (`*chkpt.it_*`) in a working dir (§8.8).
-pub fn checkpoint_files(workdir: &Path) -> Res<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let entries = match fs::read_dir(workdir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(files),
-        other => other.with_context(|| format!("Failed to read {}", workdir.display()))?,
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        // Skip half-written checkpoints (they are `clean`'s to delete, §8.6).
-        if name.contains("chkpt.it_") && !name.contains("chkpt.tmp.it_") && entry.file_type()?.is_file() {
-            files.push(entry.path());
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-/// The newest checkpoint mtime in a restart's working dir, if any.
-fn newest_checkpoint_mtime(sim: &Simulation, id: u32) -> Res<Option<SystemTime>> {
-    let mut newest = None;
-    for f in checkpoint_files(&workdir(sim, id))? {
-        let mtime = fs::metadata(&f)?.modified()?;
-        if newest.map(|n| mtime > n).unwrap_or(true) {
-            newest = Some(mtime);
-        }
-    }
-    Ok(newest)
-}
-
-/// The §8.8 backward scan: the newest restart at or before `upto` (or the
-/// latest) that actually contains recoverable checkpoints. Deterministic and
-/// prompt-free — used verbatim by the compute-node re-scan.
-pub fn newest_with_checkpoints(sim: &Simulation, upto: Option<u32>) -> Res<Option<u32>> {
-    for id in list_ids(&sim.dir)?
-        .into_iter()
-        .rev()
-        .filter(|id| upto.map(|u| *id <= u).unwrap_or(true))
-    {
-        if !checkpoint_files(&workdir(sim, id))?.is_empty() {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
-}
-
-/// Login-node recovery-source selection (§8.8): the backward scan, plus the
-/// divergence prompt when id-order and checkpoint-mtime-order disagree (e.g.
-/// after a manual `--restart-id` recovery created a newer branch in an older
-/// restart). Never called on the compute-node path.
-pub fn select_recovery_source(sim: &Simulation, upto: Option<u32>) -> Res<Option<u32>> {
-    let mut bearing: Vec<(u32, SystemTime)> = Vec::new();
-    for id in list_ids(&sim.dir)?
-        .into_iter()
-        .filter(|id| upto.map(|u| *id <= u).unwrap_or(true))
-    {
-        if let Some(mtime) = newest_checkpoint_mtime(sim, id)? {
-            bearing.push((id, mtime));
-        }
-    }
-    let Some(&(candidate, cand_mtime)) = bearing.last() else { return Ok(None) };
-
-    let divergent = bearing[..bearing.len() - 1].iter().any(|&(_, m)| m > cand_mtime);
-    if !divergent {
-        return Ok(Some(candidate));
-    }
-
-    let ids: Vec<String> = bearing.iter().map(|(id, _)| id.to_string()).collect();
-    eprintln!(
-        "{} restart history is divergent: checkpoint-bearing restarts {} disagree with their \
-         checkpoint timestamps (§8.8)",
-        "warning:".yellow().bold(),
-        ids.join(", ")
-    );
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        bail!(
-            "cannot choose a recovery source non-interactively; rerun with --restart-id <N> \
-             (checkpoint-bearing restarts: {})",
-            ids.join(", ")
-        );
-    }
-    let answer = crate::commands::prompt_with_default(
-        "Recover from which restart?",
-        &candidate.to_string(),
-    )?;
-    let chosen: u32 = answer
-        .trim()
-        .parse()
-        .map_err(|_| anyhow!("\"{answer}\" is not a restart id"))?;
-    if !bearing.iter().any(|(id, _)| *id == chosen) {
-        bail!("restart {chosen} has no recoverable checkpoints (candidates: {})", ids.join(", "));
-    }
-    Ok(Some(chosen))
-}
-
-/// Port of `PrepareCheckpointing` (§8.8): hard-link (fall back to copy) every
-/// checkpoint from the source restart's working dir into the current one.
-/// No checkpoints ⇒ no-op (fresh start). Returns the number of files linked.
-pub fn link_checkpoints(sim: &Simulation, from: u32, into: u32) -> Res<usize> {
-    let src_dir = workdir(sim, from);
-    let dst_dir = workdir(sim, into);
-    let files = checkpoint_files(&src_dir)?;
-    if files.is_empty() {
-        return Ok(0);
-    }
-    fs::create_dir_all(&dst_dir)
-        .with_context(|| format!("Failed to create working dir {}", dst_dir.display()))?;
-    for src in &files {
-        let dst = dst_dir.join(src.file_name().expect("checkpoint files have names"));
-        if dst.exists() {
-            continue;
-        }
-        if fs::hard_link(src, &dst).is_err() {
-            fs::copy(src, &dst)
-                .with_context(|| format!("Failed to copy checkpoint {}", src.display()))?;
-        }
-    }
-    Ok(files.len())
-}
+// Checkpoint recovery is deliberately absent (§8.8): the parfile points Cactus
+// at a recovery dir — typically one shared across restarts, outside every
+// output-%04d — and Cactus loads the newest checkpoint there itself. cactup
+// neither selects nor moves checkpoints, so there is no scan, no recovery
+// source, and no PrepareCheckpointing port here.
 
 /// Reaper throttles (§9.3): simfactory's "skip sims < 60 s old, re-clean
 /// every 30 s", kept since the reaper runs on every submit.
@@ -526,12 +404,6 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 mod tests {
     use super::*;
 
-    fn sim_at(dir: &Path) -> Simulation {
-        let mut meta = crate::sim::SimulationMeta::default();
-        meta.parfile = "bbh.par".to_owned();
-        Simulation { name: "bbh".to_owned(), dir: dir.to_owned(), meta }
-    }
-
     #[test]
     fn dir_names_and_discovery() {
         assert_eq!(dir_name(0), "output-0000");
@@ -584,43 +456,6 @@ mod tests {
         deactivate(dir).unwrap();
         handoff_active(dir, 4).unwrap();
         assert_eq!(active_id(dir).unwrap(), Some(4));
-    }
-
-    #[test]
-    fn backward_checkpoint_scan() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sim = sim_at(tmp.path());
-        for id in 0..4 {
-            fs::create_dir_all(workdir(&sim, id)).unwrap();
-        }
-        // 1 has checkpoints; 2 has only a half-written one; 3 has none.
-        fs::write(workdir(&sim, 1).join("bbh.chkpt.it_100.h5"), b"c").unwrap();
-        fs::write(workdir(&sim, 2).join("bbh.chkpt.tmp.it_200.h5"), b"c").unwrap();
-
-        assert_eq!(newest_with_checkpoints(&sim, None).unwrap(), Some(1));
-        assert_eq!(newest_with_checkpoints(&sim, Some(0)).unwrap(), None);
-        // Linear history → silent selection, no divergence.
-        assert_eq!(select_recovery_source(&sim, None).unwrap(), Some(1));
-    }
-
-    #[test]
-    fn checkpoint_linking() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sim = sim_at(tmp.path());
-        fs::create_dir_all(workdir(&sim, 0)).unwrap();
-        fs::create_dir_all(restart_dir(&sim.dir, 1)).unwrap();
-        fs::write(workdir(&sim, 0).join("bbh.chkpt.it_50.h5"), b"data").unwrap();
-        fs::write(workdir(&sim, 0).join("other.txt"), b"x").unwrap();
-
-        assert_eq!(link_checkpoints(&sim, 0, 1).unwrap(), 1);
-        let linked = workdir(&sim, 1).join("bbh.chkpt.it_50.h5");
-        assert!(linked.is_file());
-        assert!(!workdir(&sim, 1).join("other.txt").exists());
-        // Hard link, not a copy (same filesystem).
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(fs::metadata(&linked).unwrap().nlink(), 2);
-        // No checkpoints ⇒ no-op.
-        assert_eq!(link_checkpoints(&sim, 1, 0).unwrap(), 1); // 1 now has the link
     }
 
     #[test]

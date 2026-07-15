@@ -199,8 +199,6 @@ pub struct RestartVarsInput<'a> {
     pub checkpt_buffer: Walltime,
     /// The job id this job depends on ("" = unchained).
     pub chained_job_id: &'a str,
-    /// `@FROM_RESTART_COMMAND@` for the submit template (§8.3.1).
-    pub from_restart_command: &'a str,
     pub hostname: &'a str,
     pub user: &'a str,
     pub email: &'a str,
@@ -307,7 +305,6 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
     v.set("EXECHOST", "");
     v.set("JOB_ID", "");
     v.set("CHAINED_JOB_ID", input.chained_job_id);
-    v.set("FROM_RESTART_COMMAND", input.from_restart_command);
 
     set_machine_vars(&mut v, machine, &topo.queue, input.run_universe)?;
 
@@ -598,7 +595,6 @@ mod tests {
             job_wall: wall,
             checkpt_buffer: Walltime(3600),
             chained_job_id: "1234",
-            from_restart_command: "",
             hostname: "host.example",
             user: "alice",
             email: "a@example.org",
@@ -612,7 +608,7 @@ mod tests {
             .substitute(
                 "@CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
                  --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@ \
-                 @FROM_RESTART_COMMAND@ # @WALLTIME@ @CHECKPOINT_WALLTIME@ w=@WALLTIME_HH@:@WALLTIME_MM@ \
+                 # @WALLTIME@ @CHECKPOINT_WALLTIME@ w=@WALLTIME_HH@:@WALLTIME_MM@ \
                  q=@QUEUE@ n=@NODES@ t=@TASKS@ chained=@CHAINED_JOB_ID@ smt=@THREADS_PER_CPU@ mem=@MEMORY@",
             )
             .unwrap();
