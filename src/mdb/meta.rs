@@ -271,6 +271,12 @@ pub struct Queue {
     /// cactup queue key — several cactup queues (e.g. cpu/gpu build flavors)
     /// may map onto one real partition. `@QUEUE@` resolves to this.
     pub name: Option<String>,
+    /// Build-universe compatibility list (§4.4): the queue only serves configs
+    /// whose build universe is listed. `None` = compatible with ALL universes;
+    /// an explicitly empty list is a validation error. Gates purely on the
+    /// config's *build* universe, exactly like the same-named script-variant
+    /// key — hence the `build-` prefix.
+    pub build_universes: Option<Vec<String>>,
     /// Per-queue hardware overrides (§4.2): each falls back to the top-level
     /// `[hardware]` value when unset (`Meta::effective_hardware`).
     pub max_cpus_per_node: Option<u32>,
@@ -278,6 +284,16 @@ pub struct Queue {
     pub threads_per_cpu: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
+}
+
+impl Queue {
+    /// Whether this queue may serve a config built in `universe` (§4.4).
+    pub fn compatible_with(&self, universe: &str) -> bool {
+        self.build_universes
+            .as_ref()
+            .map(|list| list.iter().any(|u| u == universe))
+            .unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,10 +334,12 @@ pub struct ScriptVariants {
 pub struct VariantEntry {
     pub queues: Vec<String>,
     pub universe: Option<String>,
-    /// Universe-compatibility list (§4.4): the variant only serves configs
+    /// Build-universe compatibility list (§4.4): the variant only serves configs
     /// whose build universe is listed. `None` = compatible with ALL universes;
-    /// an explicitly empty list is a validation error.
-    pub universes: Option<Vec<String>>,
+    /// an explicitly empty list is a validation error. Gates purely on the
+    /// config's *build* universe (never the run/submit universe) — hence the
+    /// `build-` prefix on the TOML key.
+    pub build_universes: Option<Vec<String>>,
     pub test: bool,
     pub default: bool,
     /// Default total task count for runs launched through this script when no
@@ -333,7 +351,7 @@ pub struct VariantEntry {
 impl VariantEntry {
     /// Whether this variant may serve a config built in `universe` (§4.4).
     pub fn compatible_with(&self, universe: &str) -> bool {
-        self.universes
+        self.build_universes
             .as_ref()
             .map(|list| list.iter().any(|u| u == universe))
             .unwrap_or(true)
@@ -347,7 +365,8 @@ enum VariantEntryRaw {
     Full {
         queues: Vec<String>,
         universe: Option<String>,
-        universes: Option<Vec<String>>,
+        #[serde(rename = "build-universes")]
+        build_universes: Option<Vec<String>>,
         #[serde(default)]
         test: bool,
         #[serde(default)]
@@ -362,13 +381,13 @@ impl From<VariantEntryRaw> for VariantEntry {
             VariantEntryRaw::Queues(queues) => VariantEntry {
                 queues,
                 universe: None,
-                universes: None,
+                build_universes: None,
                 test: false,
                 default: false,
                 tasks: None,
             },
-            VariantEntryRaw::Full { queues, universe, universes, test, default, tasks } => {
-                VariantEntry { queues, universe, universes, test, default, tasks }
+            VariantEntryRaw::Full { queues, universe, build_universes, test, default, tasks } => {
+                VariantEntry { queues, universe, build_universes, test, default, tasks }
             }
         }
     }
@@ -392,7 +411,7 @@ impl<'de> Deserialize<'de> for ScriptVariants {
                 let entry: VariantEntryRaw = value.try_into().map_err(|e| {
                     D::Error::custom(format!(
                         "variant \"{key}\" must be a [\"queue\", …] array or a \
-                         {{ queues = […], universe = \"…\", universes = […], test = …, default = …, tasks = … }} table: {e}"
+                         {{ queues = […], universe = \"…\", build-universes = […], test = …, default = …, tasks = … }} table: {e}"
                     ))
                 })?;
                 out.variants.insert(key, entry.into());
@@ -580,9 +599,9 @@ impl ScriptVariants {
             }
             if !entry.compatible_with(universe) {
                 bail!(
-                    "variant \"{name}\" is not compatible with universe \"{universe}\" \
-                     (universes = [{}]) (§4.4)",
-                    entry.universes.as_deref().unwrap_or_default().join(", ")
+                    "variant \"{name}\" is not compatible with build universe \"{universe}\" \
+                     (build-universes = [{}]) (§4.4)",
+                    entry.build_universes.as_deref().unwrap_or_default().join(", ")
                 );
             }
             return Ok((name.as_str(), entry));
@@ -612,15 +631,18 @@ impl Meta {
         }
     }
 
-    /// The queue used when -q is omitted: the `default = true` queue, or the
-    /// sole queue.
-    pub fn default_queue(&self) -> Option<&str> {
-        if self.queues.len() == 1 {
-            return self.queues.keys().next().map(String::as_str);
+    /// The queue used when -q is omitted, restricted to queues compatible with
+    /// the config's build `universe` (§4.4): the `default = true` queue among
+    /// them, or the sole compatible queue.
+    pub fn default_queue(&self, universe: &str) -> Option<&str> {
+        let mut compatible = self.queues.iter().filter(|(_, q)| q.compatible_with(universe));
+        let first = compatible.next()?;
+        if compatible.next().is_none() {
+            return Some(first.0.as_str());
         }
         self.queues
             .iter()
-            .find(|(_, q)| q.default)
+            .find(|(_, q)| q.default && q.compatible_with(universe))
             .map(|(n, _)| n.as_str())
     }
 
@@ -748,6 +770,24 @@ impl Meta {
             bail!("more than one queue is marked default = true: {}", defaults.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         }
 
+        // Queue build-universe gates (§4.4), mirroring the script-variant lists:
+        // non-empty and naming known universes.
+        for (name, queue) in &self.queues {
+            if let Some(universes) = &queue.build_universes {
+                if universes.is_empty() {
+                    bail!(
+                        "queue \"{name}\" declares an empty build-universes list; omit the key \
+                         to be compatible with all universes (§4.4)"
+                    );
+                }
+                for u in universes {
+                    if !self.is_known_universe(u) {
+                        bail!("queue \"{name}\" lists unknown build universe \"{u}\"");
+                    }
+                }
+            }
+        }
+
         if self.variants.optionlist.variants.is_empty() {
             bail!("[variants.optionlist] lists no variants; at least one optionlist is required");
         }
@@ -824,16 +864,16 @@ impl Meta {
                     bail!("variant \"{name}\" maps unknown queue \"{queue}\"");
                 }
             }
-            if let Some(universes) = &entry.universes {
+            if let Some(universes) = &entry.build_universes {
                 if universes.is_empty() {
                     bail!(
-                        "variant \"{name}\" declares an empty universes list; omit the key \
+                        "variant \"{name}\" declares an empty build-universes list; omit the key \
                          to be compatible with all universes (§4.4)"
                     );
                 }
                 for u in universes {
                     if !self.is_known_universe(u) {
-                        bail!("variant \"{name}\" lists unknown universe \"{u}\"");
+                        bail!("variant \"{name}\" lists unknown build universe \"{u}\"");
                     }
                 }
             }
@@ -863,7 +903,12 @@ impl Meta {
             }
 
             for universe in &contexts {
-                for (queue, _) in &self.queues {
+                for (queue, qdef) in &self.queues {
+                    // A queue gated to other build universes cannot be reached
+                    // in this context — no variant coverage is owed for it.
+                    if !qdef.compatible_with(universe) {
+                        continue;
+                    }
                     let serving: Vec<_> = partition
                         .iter()
                         .filter(|(_, e)| e.compatible_with(universe) && e.queues.iter().any(|q| q == queue))
@@ -987,7 +1032,7 @@ mod tests {
     fn parses_and_validates_the_spec_example() {
         let meta = mike();
         assert_eq!(meta.machine.name.as_deref(), Some("mike"));
-        assert_eq!(meta.default_queue(), Some("checkpt"));
+        assert_eq!(meta.default_queue(HOST_UNIVERSE), Some("checkpt"));
         assert!(meta.queues["gpu"].gpu);
         assert_eq!(meta.variants.optionlist.variants, ["cpu", "gpu", "test-cpu"]);
         // Array shorthand and inline-table forms normalize identically.
@@ -1232,7 +1277,7 @@ mod tests {
     }
 
     /// A single-queue machine routing configs to scripts by build universe
-    /// via `universes` lists (§4.4; modeled on the reworked db1 entry).
+    /// via `build-universes` lists (§4.4; modeled on the reworked db1 entry).
     const DB: &str = r#"
         [machine]
         name = "db"
@@ -1245,14 +1290,14 @@ mod tests {
         gpu = true
 
         [variants.submitscript]
-        "default"   = { queues = ["gpu"], universes = ["host"] }
-        "sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
-        "test"      = { queues = ["gpu"], universes = ["host"], test = true }
-        "sing-test" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"], test = true }
+        "default"   = { queues = ["gpu"], build-universes = ["host"] }
+        "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
+        "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
+        "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
 
         [variants.runscript]
-        "default"   = { queues = ["gpu"], universes = ["host"] }
-        "sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+        "default"   = { queues = ["gpu"], build-universes = ["host"] }
+        "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
 
         [variants.optionlist]
         variants = ["native"]
@@ -1306,8 +1351,8 @@ mod tests {
 
         // Missing HOST coverage is still a load-time error.
         let no_host = DB
-            .replace("\"default\"   = { queues = [\"gpu\"], universes = [\"host\"] }\n        \"sing\"      = { queues = [\"gpu\"], universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]",
-                     "\"sing\"      = { queues = [\"gpu\"], universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]");
+            .replace("\"default\"   = { queues = [\"gpu\"], build-universes = [\"host\"] }\n        \"sing\"      = { queues = [\"gpu\"], build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]",
+                     "\"sing\"      = { queues = [\"gpu\"], build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]");
         let meta: Meta = toml::from_str(&no_host).unwrap();
         let err = format!("{:#}", meta.validate("db").unwrap_err());
         assert!(err.contains("served by no"), "{err}");
@@ -1329,7 +1374,7 @@ mod tests {
         // Making the runscript "default" compatible with ALL universes (list
         // omitted) makes queue gpu doubly served in the et-sing context.
         let ambiguous = DB.replace(
-            "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"], universes = [\"host\"] }",
+            "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"], build-universes = [\"host\"] }",
             "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"] }",
         );
         let meta: Meta = toml::from_str(&ambiguous).unwrap();
@@ -1339,17 +1384,73 @@ mod tests {
 
     #[test]
     fn universes_list_names_are_validated() {
-        let empty = DB.replace("universes = [\"et-sing\", \"et-sing-cpu\"] }\n        \"test\"",
-                               "universes = [] }\n        \"test\"");
+        let empty = DB.replace("build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n        \"test\"",
+                               "build-universes = [] }\n        \"test\"");
         let meta: Meta = toml::from_str(&empty).unwrap();
         let err = format!("{:#}", meta.validate("db").unwrap_err());
-        assert!(err.contains("empty universes list"), "{err}");
+        assert!(err.contains("empty build-universes list"), "{err}");
 
-        let unknown = DB.replace("universes = [\"et-sing\", \"et-sing-cpu\"] }\n        \"test\"",
-                                 "universes = [\"ghost\"] }\n        \"test\"");
+        let unknown = DB.replace("build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n        \"test\"",
+                                 "build-universes = [\"ghost\"] }\n        \"test\"");
         let meta: Meta = toml::from_str(&unknown).unwrap();
         let err = format!("{:#}", meta.validate("db").unwrap_err());
         assert!(err.contains("\"ghost\""), "{err}");
+    }
+
+    /// A two-queue machine whose queues are gated by build universe the same
+    /// way scripts are (§4.4): `host-only` serves host builds, `sing` serves
+    /// the Singularity flavors.
+    const GATED_QUEUES: &str = r#"
+        [machine]
+        name = "gq"
+
+        [queues.host-only]
+        build-universes = ["host"]
+        default = true
+
+        [queues.sing]
+        gpu = true
+        build-universes = ["et-sing"]
+
+        [variants.submitscript]
+        "s" = { queues = ["host-only", "sing"] }
+
+        [variants.runscript]
+        "r" = { queues = ["host-only", "sing"] }
+
+        [variants.optionlist]
+        variants = ["native"]
+
+        [universes.et-sing]
+        wrapper-argv = ["apptainer", "exec", "et.sif"]
+    "#;
+
+    #[test]
+    fn queue_build_universes_gate_selection() {
+        let meta: Meta = toml::from_str(GATED_QUEUES).unwrap();
+        meta.validate("gq").unwrap();
+
+        let host = &meta.queues["host-only"];
+        let sing = &meta.queues["sing"];
+        assert!(host.compatible_with("host") && !host.compatible_with("et-sing"));
+        assert!(sing.compatible_with("et-sing") && !sing.compatible_with("host"));
+
+        // The default queue is chosen among the universe-compatible queues:
+        // "host-only" for host builds, and (as the sole compatible one) "sing"
+        // for et-sing builds even though it is not marked default.
+        assert_eq!(meta.default_queue("host"), Some("host-only"));
+        assert_eq!(meta.default_queue("et-sing"), Some("sing"));
+    }
+
+    #[test]
+    fn queue_build_universes_lists_are_validated() {
+        let empty = GATED_QUEUES.replace("build-universes = [\"host\"]", "build-universes = []");
+        let err = format!("{:#}", toml::from_str::<Meta>(&empty).unwrap().validate("gq").unwrap_err());
+        assert!(err.contains("empty build-universes list"), "{err}");
+
+        let unknown = GATED_QUEUES.replace("build-universes = [\"host\"]", "build-universes = [\"ghost\"]");
+        let err = format!("{:#}", toml::from_str::<Meta>(&unknown).unwrap().validate("gq").unwrap_err());
+        assert!(err.contains("\"ghost\"") && err.contains("host-only"), "{err}");
     }
 
     #[test]

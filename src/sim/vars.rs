@@ -4,7 +4,7 @@
 use crate::args::TopologyFlags;
 use crate::build::ConfigMeta;
 use crate::database::Database;
-use crate::mdb::{Machine, Phase};
+use crate::mdb::{Machine, Phase, HOST_UNIVERSE};
 use crate::sim::{restart, Simulation};
 use crate::template::VarSet;
 use crate::walltime::Walltime;
@@ -48,16 +48,32 @@ pub fn resolve_topology(
 ) -> Res<Topology> {
     let m = &machine.name;
 
-    // Queue: -q → knob → machine default queue.
+    // The config's build universe gates which queues (and script variants) are
+    // reachable (§4.4); configs recording none run in the implicit host.
+    let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+
+    // Queue: -q → knob → machine default queue (the default is chosen among the
+    // queues compatible with the build universe).
     let queue = flags
         .queue
         .clone()
         .or_else(|| db.knob("queue").map(str::to_owned))
-        .or_else(|| machine.meta.default_queue().map(str::to_owned))
+        .or_else(|| machine.meta.default_queue(cfg_universe).map(str::to_owned))
         .ok_or_else(|| {
-            anyhow!("no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue")
+            anyhow!("no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue compatible with build universe \"{cfg_universe}\"")
         })?;
     let queue_def = machine.meta.queue(&queue)?;
+
+    // Build-universe gate (§4.4): a queue restricted to other build universes
+    // cannot serve this config. Structural like variant compatibility — no
+    // --force-queue escape (unlike the compatible-queues/GPU guards below).
+    if !queue_def.compatible_with(cfg_universe) {
+        bail!(
+            "queue \"{queue}\" is not compatible with build universe \"{cfg_universe}\" \
+             (build-universes = [{}]) (§4.4)",
+            queue_def.build_universes.as_deref().unwrap_or_default().join(", ")
+        );
+    }
 
     // compatible-queues guard (§4.4 / D12).
     if !cfg.compatible_queues.is_empty() && !cfg.compatible_queues.contains(&queue) && !force_queue {
@@ -523,6 +539,68 @@ mod tests {
         f.queue = Some("gpuq".to_owned());
         let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
         assert!(topo.gpu);
+    }
+
+    #[test]
+    fn queue_build_universe_gate() {
+        // A machine whose two queues are gated by build universe (§4.4):
+        // "host-only" serves host builds, "sing" serves et-sing builds.
+        let meta: Meta = toml::from_str(
+            r#"
+            [machine]
+            name = "gq"
+
+            [queues.host-only]
+            default = true
+            build-universes = ["host"]
+
+            [queues.sing]
+            build-universes = ["et-sing"]
+
+            [variants.submitscript]
+            "s" = { queues = ["host-only", "sing"] }
+
+            [variants.runscript]
+            "r" = { queues = ["host-only", "sing"] }
+
+            [variants.optionlist]
+            variants = ["default"]
+
+            [universes.et-sing]
+            wrapper-argv = ["apptainer", "exec", "et.sif"]
+            "#,
+        )
+        .unwrap();
+        meta.validate("gq").unwrap();
+        let machine =
+            Machine { name: "gq".to_owned(), dir: PathBuf::from("/nonexistent"), layer: Layer::System, meta };
+        let db = Database::new();
+
+        let cfg_in = |universe: &str| -> ConfigMeta {
+            toml::from_str(&format!(
+                r#"
+                name = "sim"
+                variant = "default"
+                thornlist = "einsteintoolkit.th"
+                machine = "gq"
+                universe = "{universe}"
+                config-id = "c1"
+                build-id = "b1"
+                "#
+            ))
+            .unwrap()
+        };
+
+        // A host build cannot be routed to the et-sing-gated queue — a hard
+        // error even with --force-queue (unlike the compatible-queues guard).
+        let mut f = flags();
+        f.queue = Some("sing".to_owned());
+        let err = resolve_topology(&f, &machine, &db, &cfg_in("host"), true).unwrap_err().to_string();
+        assert!(err.contains("build universe") && err.contains("\"sing\""), "{err}");
+
+        // Each build flavor's default resolves to its sole compatible queue.
+        assert_eq!(resolve_topology(&flags(), &machine, &db, &cfg_in("host"), false).unwrap().queue, "host-only");
+        assert_eq!(resolve_topology(&flags(), &machine, &db, &cfg_in("et-sing"), false).unwrap().queue, "sing");
     }
 
     #[test]

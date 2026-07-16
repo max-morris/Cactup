@@ -1,0 +1,71 @@
+site_title = "cactup"
+tagline = "Install & manage the Einstein Toolkit"
+repo_url = "https://github.com/mmor115/cactup"
+
+[[sections]]
+title = "Introduction"
+
+  [[sections.pages]]
+  title = "Home"
+  file = "index.md"
+
+[[sections]]
+title = "User Guide"
+
+  [[sections.pages]]
+  title = "Getting Started"
+  file = "users/getting-started.md"
+
+  [[sections.pages]]
+  title = "Installing Releases"
+  file = "users/installing-releases.md"
+
+  [[sections.pages]]
+  title = "Building Configs"
+  file = "users/building-configs.md"
+
+  [[sections.pages]]
+  title = "Running Simulations"
+  file = "users/running-simulations.md"
+
+  [[sections.pages]]
+  title = "Monitoring & Logs"
+  file = "users/monitoring.md"
+
+  [[sections.pages]]
+  title = "Test Suites"
+  file = "users/test-suites.md"
+
+[[sections]]
+title = "Cluster Authors"
+
+  [[sections.pages]]
+  title = "MDB Overview"
+  file = "authors/mdb-overview.md"
+
+  [[sections.pages]]
+  title = "meta.toml Reference"
+  file = "authors/meta-toml.md"
+
+  [[sections.pages]]
+  title = "Optionlists"
+  file = "authors/optionlists.md"
+
+  [[sections.pages]]
+  title = "Scripts & Variables"
+  file = "authors/scripts-and-variables.md"
+
+  [[sections.pages]]
+  title = "Machine Discovery"
+  file = "authors/machine-discovery.md"
+
+  [[sections.pages]]
+  title = "Porting a Cluster"
+  file = "authors/porting-a-cluster.md"
+
+[[sections]]
+title = "Reference"
+
+  [[sections.pages]]
+  title = "CLI"
+  file = "reference/cli.md"

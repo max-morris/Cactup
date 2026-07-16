@@ -393,7 +393,7 @@ mod tests {
         let mdb = dev_mdb();
 
         let mel5 = mdb.load("mel5").unwrap();
-        assert_eq!(mel5.meta.default_queue(), Some("local"));
+        assert_eq!(mel5.meta.default_queue(HOST_UNIVERSE), Some("local"));
         // [paths] keep their tokens at load (resolution is a use-time
         // concern — §4.2)…
         assert_eq!(mel5.meta.paths.simulation_home.as_deref(), Some("/home/@USER@/simulations"));
@@ -419,11 +419,11 @@ mod tests {
         // db1.hpc.lsu.edu is ONE machine for the whole Deep Bayou cluster: the
         // upstream fragmentation into db1 (native) + db-sing-nv + db-sing-cpu +
         // etworkshop-db is unified here via ONE real queue plus per-variant
-        // `universes` compatibility lists routing each build flavor's configs
-        // to its scripts (§4.4; self-named "db").
+        // `build-universes` compatibility lists routing each build flavor's
+        // configs to its scripts (§4.4; self-named "db").
         let db1 = mdb.load("db1.hpc.lsu.edu").unwrap();
         assert_eq!(db1.meta.machine.name.as_deref(), Some("db"));
-        assert_eq!(db1.meta.default_queue(), Some("gpu"));
+        assert_eq!(db1.meta.default_queue(HOST_UNIVERSE), Some("gpu"));
         // The cluster's single real partition, GPU-flagged.
         assert_eq!(db1.meta.queues.len(), 1);
         assert!(db1.meta.queues["gpu"].gpu);

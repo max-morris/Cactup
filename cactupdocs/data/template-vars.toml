@@ -1,0 +1,170 @@
+[ALIAS]
+description = "Installation alias"
+
+[ALLOCATION]
+description = "Account/allocation to charge"
+
+[CHAINED_JOB_ID]
+description = "Job id of the previous segment in a chained multi-segment walltime run"
+
+[CHECKPOINT_WALLTIME]
+description = "Checkpoint-hint deadline (hard walltime minus buffer)"
+
+[CHECKPOINT_WALLTIME_HOURS]
+description = "Checkpoint-hint deadline hours component"
+
+[CHECKPOINT_WALLTIME_SECONDS]
+description = "Checkpoint-hint deadline seconds component"
+
+[COMMAND]
+description = "Reserved: inner command a universe wrapper wraps"
+
+[CONFIGURATION]
+description = "Cactus configuration name"
+
+[CACTUP]
+description = "Path to the cactup installation"
+
+[CPUS_PER_TASK]
+description = "Threads (CPUs) per MPI task"
+
+[DEBUGGER]
+description = "Debugger launch command"
+
+[EMAIL]
+description = "Notification email address"
+
+[ENV_SETUP]
+description = "Resolved environment-setup shell block for the phase"
+
+[EXECHOST]
+description = "Execution host"
+
+[EXECUTABLE]
+description = "Path to built cactus executable"
+
+[GPU]
+description = "Whether the run uses GPUs (1/0)"
+
+[HOSTNAME]
+description = "Machine hostname"
+
+[JOB_ID]
+description = "Scheduler job id"
+
+[JOB_NAME]
+description = "Scheduler job name"
+
+[MACHINE]
+description = "Machine name"
+
+[MAIL]
+description = "Notification email address"
+
+[MAIL_TYPE]
+description = "Notification type"
+
+[MAKEJOBS]
+description = "Parallel make jobs"
+
+[MAX_CPUS_PER_NODE]
+description = "CPU cores available per node"
+
+[MEMORY]
+description = "Memory (MB) per node"
+
+[NODES]
+description = "Node count"
+
+[QUEUE]
+description = "Scheduler queue/partition name"
+
+[RESTART_ID]
+description = "The output-%04d restart index to run"
+
+[RESULTS_ID]
+description = "The results-%04d test-run index"
+
+[RUNDEBUG]
+description = "Debug-run launch wrapper"
+
+[RUNDIR]
+description = "Run directory"
+
+[SCRATCH_HOME]
+description = "Scratch storage root"
+
+[SCRIPTFILE]
+description = "Path to generated submit script"
+
+[SHORT_SIMULATION_NAME]
+description = "Truncated simulation name"
+
+[SIM_HOME]
+description = "Simulation-output root"
+
+[SIMULATION_DIR]
+description = "This simulation's directory"
+
+[SIMULATION_ID]
+description = "Restart/segment index"
+
+[SIMULATION_NAME]
+description = "Simulation name"
+
+[SOURCEDIR]
+description = "Cactus source-tree root"
+
+[STDERR_FILE]
+description = "Stderr filename"
+
+[STDOUT_FILE]
+description = "Stdout filename"
+
+[TASKS]
+description = "Total MPI tasks (ranks)"
+
+[TASKS_PER_NODE]
+description = "MPI tasks per node"
+
+[TEST_DIR]
+description = "Test-run directory"
+
+[TEST_HOME]
+description = "Testsuite-output root"
+
+[TEST_NAME]
+description = "Test-run name"
+
+[TESTSUITE_RESULTS_DIR]
+description = "Testsuite results directory"
+
+[TESTSUITE_SELECT]
+description = "Selected tests/thorns/arrangements"
+
+[THREADS_PER_CPU]
+description = "SMT threads per core"
+
+[USER]
+description = "Username"
+
+[WALLTIME]
+description = "Per-job segment walltime"
+
+[WALLTIME_HH]
+description = "Walltime HH component"
+
+[WALLTIME_MM]
+description = "Walltime MM component"
+
+[WALLTIME_SS]
+description = "Walltime SS component"
+
+[WALLTIME_HOURS]
+description = "Walltime total hours form"
+
+[WALLTIME_MINUTES]
+description = "Walltime total minutes form"
+
+[WALLTIME_SECONDS]
+description = "Walltime total seconds form"

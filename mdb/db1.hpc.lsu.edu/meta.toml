@@ -157,20 +157,20 @@ gpu = true
 # Native flavor's scripts require host-compatibility (built in [universes.host]
 # or with no universe recorded, which resolves to "host"); both Singularity
 # flavors share the "sing" scripts, gated on the et-sing/et-sing-cpu build
-# universes (upstream db-sing-cpu reused db-sing-nv's run/submit). universes
+# universes (upstream db-sing-cpu reused db-sing-nv's run/submit). build-universes
 # on the "default"/"test" variants keep them from also matching Singularity
 # builds now that there is only one queue to filter on.
 [variants.submitscript]
-"default"   = { queues = ["gpu"], universes = ["host"] }
-"sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
-"test"      = { queues = ["gpu"], universes = ["host"], test = true }
-"sing-test" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"], test = true }
+"default"   = { queues = ["gpu"], build-universes = ["host"] }
+"sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
+"test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
+"sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
 
 [variants.runscript]
-"default"   = { queues = ["gpu"], universes = ["host"] }
-"sing"      = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
-"test"      = { queues = ["gpu"], universes = ["host"], test = true }
-"sing-test" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"], test = true }
+"default"   = { queues = ["gpu"], build-universes = ["host"] }
+"sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
+"test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
+"sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
 
 [variants.optionlist]
 # Three build flavors; `config build` must pick one with --variant (§4.4).

@@ -295,10 +295,16 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
             }
         }
         println!(
-            "    {name}{}{}{}{overrides}",
+            "    {name}{}{}{}{}{overrides}",
             if queue.default { " (default)" } else { "" },
             if queue.gpu { " [gpu]" } else { "" },
             queue.max_walltime.map_or(String::new(), |w| format!("  max-walltime {}", w.canonical())),
+            // Build-universe compatibility list (§4.4), shown when present.
+            queue
+                .build_universes
+                .as_ref()
+                .map(|u| format!(" [build-universes: {}]", u.join(", ")))
+                .unwrap_or_default(),
         );
     }
     for (label, kind) in [("submitscripts", ScriptKind::Submit), ("runscripts", ScriptKind::Run)] {
@@ -311,10 +317,10 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
                     "{n}{}{}{}",
                     if e.test { " [test]" } else { "" },
                     if e.default { " (default)" } else { "" },
-                    // Universe-compatibility list (§4.4), shown when present.
-                    e.universes
+                    // Build-universe compatibility list (§4.4), shown when present.
+                    e.build_universes
                         .as_ref()
-                        .map(|u| format!(" [universes: {}]", u.join(", ")))
+                        .map(|u| format!(" [build-universes: {}]", u.join(", ")))
                         .unwrap_or_default()
                 )
             })

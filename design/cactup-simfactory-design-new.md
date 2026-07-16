@@ -572,14 +572,14 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
 
 # Variant → queue association (§4.4). Every key names a variant; there are no
 # reserved keys. A variant is either the array shorthand (queues only) or the
-# inline-table form `{ queues = [...], universe = "…", universes = […],
+# inline-table form `{ queues = [...], universe = "…", build-universes = […],
 # test = …, default = …, tasks = … }` when it carries a universe to run *in*
 # (§4.8 step 3), a build-universe COMPATIBILITY list for selection (below),
 # a test marker (§11.2), the default flag, or a default task count (`tasks =
 # N`: the TASKS used when no -n/-T/-t flag is given, instead of filling the
-# node — §8.5). `universe` and `universes` are independent and may both be
+# node — §8.5). `universe` and `build-universes` are independent and may both be
 # set: `universe` is what THIS variant's own execution is wrapped in;
-# `universes` is which configs' BUILD universes this variant is compatible
+# `build-universes` is which configs' BUILD universes this variant is compatible
 # with (omitted = all — the common case).
 # `default = true` marks the fallback variant within its partition (see below).
 [variants.submitscript]
@@ -590,7 +590,7 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
 [variants.runscript]
 "cpu" = { queues = ["checkpt", "single"], default = true }
 "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }   # runs inside a universe (§4.8)
-"sing" = { queues = ["gpu"], universes = ["et-sing", "et-sing-cpu"] }
+"sing" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
                                # selected only for configs whose BUILD universe
                                # (§7.4) is "et-sing" or "et-sing-cpu" (§4.4,
                                # §4.8); replaces the old trick of minting a
@@ -652,29 +652,45 @@ of a kind (`test = true`), the same coverage check is applied **within the test
 partition** (against the test-partition default); a kind with no test variants is
 fine — tests borrow the normal partition (§11.2).
 
-**Universe-compatibility list (`universes`).** The inline-table variant form
-may carry `universes = ["name", …]` — the set of build universes this variant
-is compatible with (§4.8). Omitted (the default) means compatible with every
-universe. An explicitly empty list (`universes = []`) is a validation error
-(omit the key instead). Every name listed must be a declared
-`[universes.<name>]` or the literal `"host"` (§4.8's always-available implicit
-universe). Selection filters on the **config's build universe** — `"host"`
-when the config records none — never on the run/submit universe context; this
-is the parity `universes` enforces: a config built in universe X gets
-X-compatible run/submit scripts (§4.4). Validation adds an **ambiguity check
-per universe context**: for each *u* in {`"host"`} ∪ the machine's declared
-universes, and separately within each partition (normal/test, §11.2), no queue
-may be served by more than one *u*-compatible variant (a variant with no
-`universes` list is compatible with every *u*, and so counts toward every *u*'s
-check). Queue **coverage** (every queue served-or-default, above) is enforced
-at MDB load time only for *u* = `"host"`, exactly as before; for any other
-declared universe, a queue left unserved by that universe's compatible
+**Build-universe compatibility list (`build-universes`).** The inline-table
+variant form may carry `build-universes = ["name", …]` — the set of build
+universes this variant is compatible with (§4.8). Omitted (the default) means
+compatible with every universe. An explicitly empty list (`build-universes =
+[]`) is a validation error (omit the key instead). Every name listed must be a
+declared `[universes.<name>]` or the literal `"host"` (§4.8's always-available
+implicit universe). Selection filters on the **config's build universe** —
+`"host"` when the config records none — never on the run/submit universe
+context; this is the parity `build-universes` enforces: a config built in
+universe X gets X-compatible run/submit scripts (§4.4). The `build-` prefix on
+the key name records exactly this: the gate is on the universe a config was
+*built* in, not the one it is run or submitted in.
+
+**Queues carry the same key.** A `[queues.<name>]` table may likewise declare
+`build-universes = ["name", …]` (same semantics, same validation), so a machine
+that unifies several upstream clusters behind one set of scheduler queues can
+restrict a queue to the build flavors it serves. When `-q` is omitted, the
+default-queue pick is restricted to the queues compatible with the config's
+build universe; naming an incompatible queue explicitly (via `-q`, the `queue`
+knob, or a config's compatible-queues) is a **hard error** naming the universe
+— there is no `--force-queue` escape, since the gate is structural (like
+variant compatibility) rather than advisory (like the GPU / compatible-queues
+guards). A queue with no `build-universes` list serves every build universe.
+
+Validation adds an **ambiguity check per universe context**: for each *u* in
+{`"host"`} ∪ the machine's declared universes, and separately within each
+partition (normal/test, §11.2), no queue *compatible with u* may be served by
+more than one *u*-compatible variant (a variant with no `build-universes` list
+is compatible with every *u*, and so counts toward every *u*'s check; a queue
+gated away from *u* is skipped in that context). Queue **coverage** (every
+queue served-or-default, above) is enforced at MDB load time only for *u* =
+`"host"`, exactly as before, and only for the queues compatible with host; for
+any other declared universe, a queue left unserved by that universe's compatible
 variants is instead a **selection-time** error — "no `<kind>` variant
 compatible with universe \"X\" serves queue \"Y\" and none is a compatible
 default" — since exhaustively checking every declared universe against every
 queue at load time would reject machines that intentionally scope a universe
-to a subset of queues. A machine with no `universes` lists anywhere validates
-and selects **byte-identically to today**.
+to a subset of queues. A machine with no `build-universes` lists anywhere
+validates and selects **byte-identically to today**.
 
 The `@templating@` inside `meta.toml` values uses **literal `@NAME@`
 substitution only** (D7): the only variables meaningful here are the install-
@@ -770,29 +786,31 @@ them first-class within one machine.
   the chosen queue's `gpu` flag when not passed explicitly.
 - **SubmitScript and RunScript variants** are each associated with one or more
   **queues** (the `[variants.*]` tables in §4.2) and, optionally, a
-  **build-universe compatibility list** (`universes = […]`, §4.8) — a second,
-  orthogonal routing dimension alongside queue: queue narrows *which
-  partition* a variant serves; `universes` narrows *which build universe's*
-  configs it serves. At submit/run time cactup first filters the queue's
-  candidate variants to those compatible with the config's **build universe**
-  (§4.8 — `"host"` when the config records none), then picks among the
+  **build-universe compatibility list** (`build-universes = […]`, §4.8) — a
+  second, orthogonal routing dimension alongside queue: queue narrows *which
+  partition* a variant serves; `build-universes` narrows *which build
+  universe's* configs it serves. At submit/run time cactup first filters the
+  queue's candidate variants to those compatible with the config's **build
+  universe** (§4.8 — `"host"` when the config records none), then picks among the
   survivors exactly as before: the variant mapped to the chosen `-q/--queue`,
   or (absent an explicit mapping) the variant marked `default = true`.
-  Omitting `universes` (the common case, and the only case before this
+  Omitting `build-universes` (the common case, and the only case before this
   mechanism existed) means "compatible with every universe," so a machine with
   no universe-routing need is unaffected. An explicit `--variant` naming a
   variant incompatible with the build universe is a **hard error** naming the
-  universe. (A machine with a single variant makes it the implicit default, so
-  the `default` flag is optional there.) The submit-script and run-script
-  variant maps are independent of each other but must each cover every queue,
-  for every universe context in play — validated at MDB **load** time for
-  `"host"`; for any other declared universe, an uncovered queue is instead a
-  **selection-time** error (§4.2). A variant entry is written either as the
-  **array shorthand** (`"<v>" = ["q1", "q2"]` — queues only) or, when it must
-  carry a field beyond its queues, the **inline-table form**
-  `"<v>" = { queues = ["q1", …], universe = "<name>", universes = ["…"], test = true, default = true }`
+  universe. The **queues** themselves (`[queues.*]`, §4.2) accept the same
+  `build-universes` key with identical semantics, gating which build flavors may
+  target a queue at all. (A machine with a single variant makes it the implicit
+  default, so the `default` flag is optional there.) The submit-script and
+  run-script variant maps are independent of each other but must each cover
+  every queue, for every universe context in play — validated at MDB **load**
+  time for `"host"`; for any other declared universe, an uncovered queue is
+  instead a **selection-time** error (§4.2). A variant entry is written either
+  as the **array shorthand** (`"<v>" = ["q1", "q2"]` — queues only) or, when it
+  must carry a field beyond its queues, the **inline-table form**
+  `"<v>" = { queues = ["q1", …], universe = "<name>", build-universes = ["…"], test = true, default = true }`
   where `universe` (the universe this variant's *own* execution runs inside,
-  §4.8), `universes` (the build-universe compatibility list, above), `test`
+  §4.8), `build-universes` (the build-universe compatibility list, above), `test`
   (§11.2), and `default` are each optional and independent of one another; a
   table entry with only `queues` is equivalent to the shorthand. Every key names
   a variant — there are no reserved keys — so a variant may be named `default`
@@ -1007,7 +1025,7 @@ template form. It is an error for a universe to define both `wrapper-argv` and
 even on a machine whose `meta.toml` has no `[universes.host]` table at all —
 as cactup's name for "the invoking context, unwrapped." Any reference to a
 universe name (`[build].universe`, a variant's `universe`, `default-universe`,
-or a variant's `universes` compatibility list, §4.4) may say `"host"` and it is
+or a variant's `build-universes` compatibility list, §4.4) may say `"host"` and it is
 never an unknown-universe error, declared or not. A machine may *optionally*
 declare `[universes.host]` to **customize** host — almost always to attach the
 env-setup overrides below, since host is by definition the identity case and
@@ -1103,18 +1121,18 @@ universe no longer exists on this machine; the error names it and points at
 Everything above answers "which universe does this phase run *in*." A
 different question — "which run/submit **script variant** does a config get
 routed to, given the universe it was *built* in" — is answered by each
-variant's optional `universes` compatibility list (§4.4), not by this
+variant's optional `build-universes` compatibility list (§4.4), not by this
 precedence chain: `sim run`/`sim submit` filter the candidate script variants
-for the chosen queue down to those whose `universes` list (if set) includes
+for the chosen queue down to those whose `build-universes` list (if set) includes
 the config's build universe (default `"host"`), before applying the usual
 queue → variant / `default = true` selection (§4.2). This is what lets one
 machine ship, say, a native run/submit script and a Singularity run/submit
 script over the **same** queue, distinguished purely by the build universe of
 the config being run/submitted — replacing the older trick of minting a
 synthetic queue per build flavor purely to multiplex script selection (the MDB
-porting guide's db1 write-up documents exactly this collapse). `universes` is
+porting guide's db1 write-up documents exactly this collapse). `build-universes` is
 orthogonal to the `universe` / `default-universe` keys used by this
-resolution chain: a variant's `universes` list says what build universes it is
+resolution chain: a variant's `build-universes` list says what build universes it is
 *compatible with* (a selection filter); its own `universe` key (if any, step
 3) says what universe *its execution runs inside* (a wrapper choice) — a
 variant may set either, both, or neither.
@@ -1495,7 +1513,7 @@ compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible
 thornlist = "thornlists/einsteintoolkit.th"
 universe = "et-sif"             # resolved build universe; omitted when built bare/in host —
                                  # treated as "host" wherever a build universe is consulted
-                                 # (script-variant `universes` filtering, §4.4; run coercion, §4.8)
+                                 # (script-variant `build-universes` filtering, §4.4; run coercion, §4.8)
 coerce-run-universe = true      # snapshotted from optionlist [cactup]; default true (§4.8, §7.8)
 config-id = "…"                 # replaces CONFIG-ID
 build-id = "…"                  # replaces BUILD-ID
@@ -2404,7 +2422,7 @@ the marker goes on the `meta.toml` variant entry, using the inline-table form
 "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true } # test-partition default (see resolution below)
 ```
 (`test = true` and `default = true` compose with each other and with
-`universe = "…"` / `universes = […]` in the same inline table.)
+`universe = "…"` / `build-universes = […]` in the same inline table.)
 
 **Partitioning.** For each script kind (runscript / submitscript) cactup splits
 the machine's variants into a **normal** set (no marker) and a **test** set
@@ -2419,7 +2437,7 @@ tests, but not vice versa."*
 per the chosen queue **and** the config's build universe): the chosen set (test,
 or normal on fallback) is first filtered to variants compatible with the
 config's build universe — `"host"` when the config records none — using the
-same `universes` compatibility list and filtering rule that governs `sim
+same `build-universes` compatibility list and filtering rule that governs `sim
 run`/`sim submit` (§4.4, §4.8); then cactup picks, among the survivors, the
 variant whose `queues` include the chosen queue, or (absent a mapping) the
 test-partition default (the `test = true`, `default = true` variant, or the
@@ -2434,7 +2452,7 @@ entry in each.
 
 **Validation at MDB load** extends §4.2's "every queue is served" check
 **per-partition** — and, within each partition, per the same **per-universe-context**
-rules §4.2 defines for `universes` lists: if a machine defines *any* test
+rules §4.2 defines for `build-universes` lists: if a machine defines *any* test
 runscript (or submitscript) variant, then every queue in `[queues.*]` must be
 served, for universe context `"host"`, by some test variant of that kind or by
 the test-partition default; a machine that defines **no** test variants of a

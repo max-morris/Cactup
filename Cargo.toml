@@ -1,3 +1,11 @@
+[workspace]
+# The Cactup package lives at the repo root (kept here so its
+# `include_dir!("$CARGO_MANIFEST_DIR/mdb/generic")` and `CARGO_MANIFEST_DIR`
+# joins against `mdb/` keep resolving unchanged); it is a workspace member
+# automatically. CactupDocs is the sibling documentation-site generator.
+members = ["cactupdocs"]
+resolver = "2"
+
 [package]
 name = "Cactup"
 version = "0.1.0"

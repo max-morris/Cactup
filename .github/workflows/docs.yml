@@ -1,0 +1,68 @@
+# Build and deploy documentation to GitHub Pages.
+# Note: Ensure GitHub Pages is enabled in repository settings with "GitHub Actions" as the source.
+
+name: Docs
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - cactupdocs/**
+      - src/**
+      - mdb/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build docs
+        run: |
+          BASE_PATH="${{ steps.pages.outputs.base_path }}"
+          BASE_URL="${BASE_PATH}/"
+          if [ -z "$BASE_PATH" ]; then BASE_URL="/"; fi
+          cargo run -p CactupDocs --release -- build --out ./_site --base-url "$BASE_URL"
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page.title }} · {{ site_title }}</title>
+    {% if page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
+    <link rel="stylesheet" href="{{ base_url }}assets/style.css">
+</head>
+<body data-search-index="{{ search_index }}">
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>{{ site_title }}</h1>
+                <p class="tagline">{{ tagline }}</p>
+            </div>
+
+            <nav class="sidebar-nav">
+                {% for section in nav %}
+                <section class="nav-section">
+                    <h2>{{ section.title }}</h2>
+                    <ul>
+                        {% for page in section.pages %}
+                        <li>
+                            <a href="{{ page.url }}"{% if page.active %} class="active"{% endif %}>
+                                {{ page.title }}
+                            </a>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </section>
+                {% endfor %}
+            </nav>
+
+            {% if repo_url %}
+            <div class="sidebar-footer">
+                <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer">
+                    Repository
+                </a>
+            </div>
+            {% endif %}
+        </aside>
+
+        <div class="main-wrapper">
+            <header class="page-header">
+                <button id="nav-toggle" class="nav-toggle" aria-label="Toggle navigation">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+
+                <div class="header-content">
+                    <div class="search-box">
+                        <input
+                            id="search-input"
+                            type="text"
+                            placeholder="Search documentation…"
+                            aria-label="Search"
+                        >
+                        <div id="search-results" class="search-results"></div>
+                    </div>
+                </div>
+
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+                    <span class="theme-icon">🌙</span>
+                </button>
+            </header>
+
+            <main class="content">
+                {{ page.content_html|safe }}
+            </main>
+
+            <footer class="page-footer">
+                <p>&copy; {{ year }} {{ site_title }}. All rights reserved.</p>
+            </footer>
+        </div>
+    </div>
+
+    <script defer src="{{ base_url }}assets/docs.js"></script>
+</body>
+</html>
