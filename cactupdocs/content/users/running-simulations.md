@@ -86,8 +86,8 @@ cactup sim submit mysim -t 32       # 32 tasks per node
 ```
 
 If you don't specify:
-- Tasks per node (`-t`) defaults to filling the node with one task per CPU
-- Total tasks (`-T`) defaults to nodes × tasks-per-node
+- Tasks per node (`-t`) defaults to filling the node: `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)` (one task per CPU when `-c` is 1)
+- Total tasks (`-T`) defaults to nodes × tasks-per-node (or the script variant's `tasks` setting when it declares one)
 
 For example, a 4-node submission with 32 CPUs per node and no `-T` or `-t` creates 4 × 32 = 128 tasks.
 
@@ -122,7 +122,9 @@ cactup sim submit mysim -w 10:00:00        # 10 hours
 cactup sim submit mysim -w 2-12:00:00      # 2 days, 12 hours
 ```
 
-The walltime format is `(DD-)?HH:MM:SS`. Fields must be 2-digit zero-padded: use `06:00:00`, not `6:00:00`.
+The walltime format is `(DD-)?HH:MM:SS`. Leading fields may be elided, so `SS`,
+`MM:SS`, and `HH:MM:SS` are all valid (`30:00` = 30 minutes). Fields do **not**
+need zero-padding — `6:00:00` and `06:00:00` are equivalent.
 
 If the simulation needs more time than a single queue job allows, cactup **chains** jobs: it automatically submits follow-up jobs at configured checkpoints, with restart data from the previous job. You only specify the total walltime; cactup handles the rest.
 
@@ -154,8 +156,10 @@ If not specified, cactup uses the machine's default queue.
 Specify an account or allocation to charge:
 
 ```sh
-cactup sim submit mysim -A my_project
+cactup sim submit mysim -a my_project
 ```
+
+(The default allocation comes from the `allocation` knob if you've set one.)
 
 ### Job name
 

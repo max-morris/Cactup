@@ -149,11 +149,13 @@ If a test fails:
    cactup test log mytest
    ```
 
-2. **Look for specific test failures**:
+2. **Look for specific test failures** in the results directory. Test output
+   lives under the machine's `test-home` at `<test-home>/mytest/results-NNNN/`
+   (run `cactup machine show` to print `test-home`):
    ```sh
-   TESTDIR=$(cactup test show mytest --output-dir)
-   grep -r FAIL $TESTDIR
+   grep -r FAIL <test-home>/mytest/results-0000
    ```
+   The flesh harness writes each test's pass/fail summary there.
 
 3. **Re-run with verbose output**:
    ```sh
@@ -269,7 +271,7 @@ cactup test run --variant cuda --gpu
 
 **"Cannot allocate job"**: `test submit` requires running inside an allocation. Try `test run` instead, or request an interactive allocation first.
 
-**"Test not found"**: List available tests with `cactup test run --help`. Check the exact test/arrangement/thorn name.
+**"Test not found"**: test/arrangement/thorn names come from the built config's thorns; double-check the exact `Arrangement`, `Arrangement/Thorn`, or test name (they are case-sensitive).
 
 **"Permission denied on test-home"**: Check that you have write access to your machine's `test-home` directory (see `cactup machine show`).
 

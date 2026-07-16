@@ -18,17 +18,21 @@ cactup build myconfig
 This creates a config named `myconfig` using:
 - The active Einstein Toolkit installation
 - The machine's default optionlist variant
-- Default compiler flags (no optimization, no debugging)
+- Default compiler flags: **optimized** (optimization is the one build flag that is on by default), no debugging, no profiling
 
 ## Build options
 
 ### Optimization and debugging
 
+These flags set Cactus's own build switches in the rendered optionlist
+(`OPTIMISE`, `DEBUG`, `PROFILE`, `UNSAFE`); the concrete compiler flags each one
+implies come from the machine's optionlist:
+
 ```sh
-cactup build myconfig --optimize   # -O2 optimization
-cactup build myconfig --debug      # Debug symbols and checks
-cactup build myconfig --profile    # Profiling support
-cactup build myconfig --unsafe     # Fast-math style (-Ofast) — use with care
+cactup build myconfig --optimize   # OPTIMISE=yes (on by default already)
+cactup build myconfig --debug      # DEBUG=yes — debug symbols and checks
+cactup build myconfig --profile    # PROFILE=yes — profiling support
+cactup build myconfig --unsafe     # UNSAFE=yes — unsafe optimizations; use with care
 ```
 
 ### Parallel builds

@@ -12,10 +12,9 @@ description = "Write discover.py scripts to auto-detect your machine"
 When you run a cactup command:
 
 1. If you specify `--machine myclu`, use that machine (skip discovery)
-2. If you've cached a detected machine (run recently), use the cache
-3. Run all `discover.py` scripts (system MDB + user MDB) in order
-4. Use the first script that returns `True`
-5. If no script returns `True`, use `generic` (the fallback)
+2. If a detected machine is already cached, use it
+3. Otherwise run every machine's `discover.py` (both MDB layers) against the hostname
+4. If exactly one machine matches, use it (and cache it); if **several** match, cactup asks you to choose; if **none** match, fall back to `generic` (not cached)
 
 The discovered machine is cached in cactup's database under `~/.cactup`. It persists until you clear it — there is no time-based expiry. Clear the cache to force re-discovery:
 
@@ -148,14 +147,19 @@ def is_machine(hostname):
 
 ## Discovery order and priority
 
-Discovery runs in this order:
+Discovery is a single sweep over all machines **sorted alphabetically by name**,
+across both MDB layers together — not "system layer first, then user layer".
+Name-shadowing is applied before the sweep: a user machine that shares a system
+machine's **name** completely replaces it, so only one `discover.py` runs for
+that name (the user one).
 
-1. System MDB machines (in alphabetical order)
-2. User MDB machines (in alphabetical order)
+Because cactup collects *all* matches rather than stopping at the first, having
+two differently-named machines match the same host is not a silent
+first-wins — cactup prompts you to pick. Keep each `discover.py` specific enough
+that only one machine claims a given host.
 
-The first to return `True` is used. So if you have both a system and user machine with the same `discover.py`, the system version runs first.
-
-To override: define your machine in the user MDB with the same name. It will shadow the system machine.
+To override a system machine: define your machine in the user MDB with the **same
+name**. It shadows the system machine entirely.
 
 ## Debugging discovery
 
@@ -271,7 +275,10 @@ To clear it:
 cactup machine forget
 ```
 
-The cache is per-machine (per entry in the MDB). If you port your machine definition, the cache is preserved until expiration or manual clearing.
+The cache is a **single** detected-machine record for this `~/.cactup` (one
+string, not one entry per MDB machine) — a `~/.cactup` lives on exactly one host,
+so only one machine is ever the detected one. It persists until you run `cactup
+machine forget` (or select a different machine); it never expires on its own.
 
 ## Performance considerations
 

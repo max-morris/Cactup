@@ -98,7 +98,7 @@ status-pattern = "@JOB_ID@ "
 queued-pattern = " PD "
 running-pattern = " R "
 exec-host = "hostname -s"
-exec-host-pattern = "(\S+)"
+exec-host-pattern = '(\S+)'
 stdout = "cat @SIMULATION_NAME@.out"
 stderr = "cat @SIMULATION_NAME@.err"
 stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
@@ -251,40 +251,44 @@ Define optional build wrappers:
 
 ```toml
 [universes.et-sif]
+kind = "apptainer"   # informational only; cactup does not switch on it
 wrapper-argv = ["singularity", "exec", "-B", "/scratch", "/path/to/et.sif"]
-description = "Singularity container with Einstein Toolkit dependencies"
 
 [universes.host]
 # Identity universe: no wrapper, just environment setup
-description = "Native host build"
 ```
 
-Universes can override environment setup:
+A universe declares at most one wrapper form — `wrapper-argv` (a prefix argv, run as
+`<wrapper-argv…> /bin/sh -c <command>`) or `wrapper` (a single shell template
+containing exactly one `@COMMAND@` token, which must sit **outside** the template's
+own quotes). Declaring neither gives an identity universe, useful purely as a carrier
+for env-setup overrides.
+
+Universes can override environment setup key-by-key (each set `env-*` key replaces the
+machine's; unset keys inherit):
 
 ```toml
 [universes.intel]
 env-build-setup = """
 module load intel
 """
-description = "Intel compiler environment"
 ```
 
-## Knobs (machine defaults)
+## Knobs (user defaults)
 
-Machines can provide default knob values (cluster-level settings for allocation, queue, etc.):
-
-```toml
-[knobs]
-allocation = "my_project"
-queue = "default"
-mail-type = "all"
-```
-
-Users can override or set knobs with `cactup knob`:
+Knobs are **not** part of meta.toml. They are per-user default values (allocation,
+queue, mail settings) stored in cactup's global database under `~/.cactup`, not in
+the machine definition. A `~/.cactup` lives on exactly one machine, so knobs need no
+machine keying. Set them with `cactup knob`:
 
 ```sh
-cactup knob allocation my_other_project
+cactup knob allocation my_project
+cactup knob queue default
 ```
+
+The known knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, and `email`
+(`mail-type`, `user`, and `email` fall back to derived defaults when unset). See the
+[CLI reference](../reference/cli.html) for `cactup knob`.
 
 ## Validation tips
 

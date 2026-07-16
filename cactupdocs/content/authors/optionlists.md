@@ -5,21 +5,25 @@ description = "Define compiler flags, optimizations, and enabled thorns for your
 
 # Optionlists
 
-An **optionlist** is a TOML file that specifies how to build Cactus on your machine. It includes:
+An **optionlist** is a TOML file that specifies how to build Cactus on your machine.
+It has two parts:
 
-- Compiler command and flags
-- Optimization levels (e.g., `-O2`, `-O3`, debug symbols)
-- Enabled/disabled thorns and their options
-- Build-time configuration like CCTK variables
+- A `[cactup]` header — cactup-only metadata (GPU capability, compatible queues,
+  default flag, build universe, per-variant thorn toggles). This is **never** written
+  to the native Cactus optionlist.
+- An `[options]` table — the raw Cactus optionlist `NAME = value` entries (compilers,
+  flags, feature switches). cactup renders these back to Cactus's native
+  `NAME = value` format before building, then substitutes any `@NAME@` tokens.
 
-Each machine can have multiple optionlist **variants** (e.g., `default`, `cuda`, `intel`). Users choose which variant when building.
+Each machine can have multiple optionlist **variants** (e.g., `default`, `cuda`,
+`debug`). Users choose which variant when building with `--variant`.
 
 ## File structure
 
-Optionlists are TOML files in `optionlists/` directory of your machine:
+Optionlists are TOML files in the `optionlists/` directory of your machine:
 
 ```
-<mdb>/machines/<machine>/optionlists/
+~/.cactup/machines/<machine>/optionlists/
   default.toml
   cuda.toml
   debug.toml
@@ -27,139 +31,105 @@ Optionlists are TOML files in `optionlists/` directory of your machine:
 
 ## Header: [cactup]
 
-Every optionlist must start with a `[cactup]` section:
+The optional `[cactup]` header carries cactup-only metadata. It may be omitted
+entirely (all fields default):
 
 ```toml
 [cactup]
-version = 2
+gpu = false                       # binary GPU capability; cross-checked vs the queue's gpu flag
+compatible-queues = ["cpu"]       # queues this build may be submitted to
+default = true                    # the implicit choice among this machine's variants
 description = "Default optimized build for my cluster"
-enabled-thorns = ["CactusBase", "CactusEinstein"]
+universe = "et-sif"               # build this variant inside this universe (optional)
+enabled-thorns = ["ExternalLibraries/OpenBLAS"]   # per-variant thorn toggles, on top of [build]
+disabled-thorns = ["ExternalLibraries/LORENE"]
 ```
 
-- `version` — required, must be `2`
-- `description` — optional, human-readable description
-- `enabled-thorns` — optional, list of thorn arrangements/names to enable
-- `disabled-thorns` — optional, thorns to explicitly disable
-- `universe` — optional, default build universe for this variant
-- `build-type` — optional: `debug`, `optimize`, `profile`, `unsafe` (not typically needed; users control via `cactup build --debug`, etc.)
-
-## Compiler configuration: [build.*]
-
-Specify the C, C++, and Fortran compilers and flags:
-
-```toml
-[build.c]
-command = "gcc"
-flags = "-Wall -std=c99"
-
-[build.cxx]
-command = "g++"
-flags = "-Wall -std=c++11"
-
-[build.fortran]
-command = "gfortran"
-flags = "-Wall"
-```
-
-## Optional compiler variants
-
-Users can request build variants via `--debug`, `--optimize`, etc. Define variant-specific flags:
-
-```toml
-[build.c.debug]
-flags = "-g -O0 -Wall"
-
-[build.c.optimize]
-flags = "-O2 -Wall"
-
-[build.c.unsafe]
-flags = "-Ofast -march=native"
-```
-
-When a user runs `cactup build myconfig --optimize`, cactup uses `[build.c.optimize]` flags instead of the base flags.
-
-## Thorn configuration: [thorns.*]
-
-Configure individual thorns or arrangements:
-
-```toml
-[thorns."CactusEinstein/ADMBase"]
-config-file = "configurations/my_admbase_config"
-
-[thorns."McLachlan/ML_BSSN"]
-enabled = true
-```
-
-## Macros and options: [options.*]
-
-Set Cactus build macros:
-
-```toml
-[options.CCTK_BUILD_SYSTEM]
-value = "inet"
-
-[options.MPI]
-value = "yes"
-```
+None of these keys are emitted to the native optionlist. The header fields are
+documented in full below:
 
 ## Generated reference
 
 {{cactup:mdb-optionlist}}
 
+## Options: [options]
+
+The `[options]` table holds the raw Cactus optionlist entries as `NAME = value` pairs.
+Values must be strings, booleans, or integers — **floats are rejected** (quote a
+dotted value as a string if you really need one). `VERSION` is required and is always
+emitted first; whenever it changes, the config is reconfigured and rebuilt from
+scratch.
+
+```toml
+[options]
+VERSION = "2018-12-13"
+
+CPP = "cpp"
+CC  = "gcc"
+CXX = "g++"
+
+FPP = "cpp"
+F90 = "gfortran"
+
+CFLAGS   = "-g -std=gnu99"
+CXXFLAGS = "-g -std=gnu++17"
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+LDFLAGS  = "-rdynamic"
+
+OPTIMISE           = "yes"
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+DEBUG   = "no"
+WARN    = "yes"
+OPENMP  = "yes"
+MPI     = "MPICH"
+```
+
+These are standard Cactus optionlist names — the same ones you would put in a
+hand-written Einstein Toolkit `.cfg` optionlist. cactup does not invent its own
+compiler-flag schema; it renders `[options]` straight back to the native format.
+Booleans render as Cactus's `yes`/`no`, integers as plain decimals, strings verbatim.
+
+> **Tip:** Keeping `yes`/`no` values as TOML strings (`OPTIMISE = "yes"`) makes the
+> render byte-identical to the original Cactus optionlist. Writing them as TOML
+> booleans (`OPTIMISE = true`) also works and renders to `yes`/`no`.
+
 ## Complete example optionlist
 
 ```toml
 [cactup]
-version = 2
+gpu = false
+compatible-queues = ["cpu", "long"]
+default = true
 description = "Optimized build for SLURM cluster with GCC"
-enabled-thorns = [
-  "CactusBase",
-  "CactusEinstein",
-  "EinsteinEOS",
-  "EinsteinUtils",
-  "CactusNumerical",
-]
-disabled-thorns = ["CactusTest"]
 
-[build.c]
-command = "gcc"
-flags = "-Wall -std=c99"
+[options]
+VERSION = "2024-06-01"
 
-[build.c.debug]
-flags = "-g -O0 -Wall"
+CPP = "cpp"
+CC  = "gcc"
+CXX = "g++"
+FPP = "cpp"
+F90 = "gfortran"
 
-[build.c.optimize]
-flags = "-O2 -march=native -Wall"
+CFLAGS   = "-g -std=gnu99"
+CXXFLAGS = "-g -std=gnu++17"
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
 
-[build.c.profile]
-flags = "-O2 -g -Wall -fno-omit-frame-pointer"
+OPTIMISE           = "yes"
+C_OPTIMISE_FLAGS   = "-O2 -march=native"
+CXX_OPTIMISE_FLAGS = "-O2 -march=native"
+F90_OPTIMISE_FLAGS = "-O2 -march=native"
 
-[build.cxx]
-command = "g++"
-flags = "-Wall -std=c++11"
+WARN         = "yes"
+C_WARN_FLAGS = "-Wall"
 
-[build.cxx.optimize]
-flags = "-O2 -march=native -Wall"
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
 
-[build.fortran]
-command = "gfortran"
-flags = "-Wall -ffree-line-length-none"
-
-[build.fortran.optimize]
-flags = "-O2 -march=native -ffree-line-length-none"
-
-[options.MPI]
-value = "yes"
-
-[options.PTHREADS]
-value = "yes"
-
-[thorns."CactusEinstein/ADMBase"]
-enabled = true
-
-[thorns."McLachlan/ML_BSSN"]
-enabled = true
-enabled-options = ["BSSN_DRIVE_SHIFT=yes"]
+MPI = "MPICH"
 ```
 
 ## Multiple variants on one machine
@@ -170,15 +140,14 @@ A machine can offer variants for different build environments:
 optionlists/
   default.toml          # CPU, native build
   cuda.toml             # GPU/CUDA
-  intel.toml            # Intel compiler
   debug.toml            # Debug symbols
 ```
 
-In meta.toml, declare them:
+Declare them in meta.toml:
 
 ```toml
 [variants.optionlist]
-variants = ["default", "cuda", "intel", "debug"]
+variants = ["default", "cuda", "debug"]
 ```
 
 Users choose with:
@@ -187,88 +156,105 @@ Users choose with:
 cactup build myconfig --variant cuda
 ```
 
+Exactly one variant should be marked `default = true` in its `[cactup]` header; that
+is the implicit choice when `--variant` is omitted.
+
 ## GPU optionlists
 
-For GPU builds, include GPU-specific compiler flags and thorns:
+For GPU builds, mark the header `gpu = true` (so it is only offered on GPU queues) and
+add the CUDA-specific options:
 
 ```toml
 [cactup]
-version = 2
+gpu = true
+compatible-queues = ["gpu"]
 description = "CUDA GPU build"
 
-[build.c]
-command = "gcc"
-flags = "-Wall -std=c99 -I/usr/local/cuda/include"
+[options]
+VERSION = "2024-06-01"
 
-[build.cxx]
-command = "g++"
-flags = "-Wall -std=c++11 -I/usr/local/cuda/include"
+CC  = "gcc"
+CXX = "g++"
+F90 = "gfortran"
 
-[build.fortran]
-command = "gfortran"
-flags = "-Wall -ffree-line-length-none"
+CUCC       = "nvcc"
+CUCCFLAGS  = "-std=c++17 -arch=sm_80"
 
-[options.CUDA]
-value = "yes"
+OPTIMISE = "yes"
+OPENMP   = "yes"
+MPI      = "MPICH"
+```
 
-[options.CUDA_PATH]
-value = "/usr/local/cuda"
+## Per-variant thorn toggles
+
+Different build flavors sometimes compile different thorns — e.g. a CUDA variant that
+drops a thorn nvcc cannot build. Put those toggles in the `[cactup]` header; they are
+merged on top of the machine-level `[build].enabled-thorns`/`disabled-thorns`:
+
+```toml
+[cactup]
+gpu = true
+disabled-thorns = ["ExternalLibraries/LORENE", "EinsteinInitialData/Meudon_Bin_BH"]
+enabled-thorns  = ["ExternalLibraries/OpenBLAS"]
 ```
 
 ## Container vs native
 
-If your machine supports both Singularity containers and native builds, create separate optionlists:
+If your machine supports both a container and native builds, create separate
+optionlists and point each at its build universe:
 
 ```toml
 # optionlists/native.toml
 [cactup]
-version = 2
+default = true
 description = "Native build on host"
 universe = "host"
 
+[options]
+VERSION = "2024-06-01"
+CC = "gcc"
+# ...
+```
+
+```toml
 # optionlists/container.toml
 [cactup]
-version = 2
-description = "Build inside Singularity container"
+description = "Build inside the Einstein Toolkit container"
 universe = "et-sif"
+
+[options]
+VERSION = "2024-06-01"
+CC = "gcc"
+# ...
 ```
+
+Users can override the build universe with `--universe` or `--no-universe`:
+
+```sh
+cactup build myconfig --no-universe    # ignore the universe, build natively
+cactup build myconfig --universe host  # use a different universe
+```
+
+The build universe is recorded with the config and (unless `coerce-run-universe` is
+set false in the header) also becomes the default universe its simulations run in.
 
 ## Validating optionlists
 
-Test that an optionlist is valid and compatible:
-
 ```sh
-cactup machine show --variants     # List variants and their details
-cactup build myconfig --variant <name>  # Try building with it
+cactup machine show --variants          # list variants and their headers
+cactup build myconfig --variant <name>  # try building with it
 ```
 
 ## Common issues
 
-**Unknown thorn**: Misspell a thorn name and the build will fail. Check the Einstein Toolkit repository.
+**Missing `VERSION`**: every `[options]` table must declare `VERSION`; it is emitted
+first and a change forces a full rebuild.
 
-**Missing compiler**: If `gcc` is in a module, load it in the machine's `[environment]` section before the build runs.
+**Floats**: `[options]` values may only be strings, booleans, or integers. Quote a
+dotted value as a string if you need it.
 
-**Flag conflicts**: Different compilers have different flag meanings. Test flags on your system before committing them.
-
-**Unicode in TOML**: Keep optionlist files in UTF-8 encoding, no BOM.
-
-## Integration with universes
-
-Optionlists can specify a default build universe:
-
-```toml
-[cactup]
-universe = "et-sif"  # Build inside this Singularity container
-```
-
-Users can override with `--universe` or `--no-universe`:
-
-```sh
-cactup build myconfig --no-universe    # Ignore the universe, build natively
-cactup build myconfig --universe host  # Use a different universe
-```
-
-The build universe is recorded with the config and affects how it runs.
+**Missing compiler**: if `gcc`/`nvcc` lives in a module, load it in the machine's
+`[environment]` section so it is on `PATH` when the build runs.
 
 ## Next steps
 

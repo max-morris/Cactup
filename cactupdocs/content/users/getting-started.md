@@ -77,13 +77,15 @@ cactup build myconfig \
 Other build options:
 
 ```sh
-cactup build myconfig --debug       # Debug build
-cactup build myconfig --profile     # With profiling symbols
-cactup build myconfig --unsafe      # Fast-math style (-Ofast)
+cactup build myconfig --debug       # DEBUG=yes (debug build)
+cactup build myconfig --profile     # PROFILE=yes (profiling support)
+cactup build myconfig --unsafe      # UNSAFE=yes (unsafe optimizations; use with care)
 cactup build myconfig --reconfig    # Reconfigure before building
 cactup build myconfig --clean       # Clean before building
 cactup build myconfig --force       # Rebuild even if already built
 ```
+
+(Optimization is already on by default, so `--optimize` is rarely needed.)
 
 See [Building Configs](building-configs.html) for more details on variants, universes, and advanced options.
 

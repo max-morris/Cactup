@@ -41,8 +41,8 @@ Example SLURM submit script:
 #SBATCH --job-name=@JOB_NAME@
 #SBATCH --nodes=@NODES@
 #SBATCH --ntasks=@TASKS@
-#SBATCH --ntasks-per-node=@TPN@
-#SBATCH --cpus-per-task=@CPUS@
+#SBATCH --ntasks-per-node=@TASKS_PER_NODE@
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
 #SBATCH --time=@WALLTIME@
 #SBATCH --output=@SIMULATION_NAME@.out
 #SBATCH --error=@SIMULATION_NAME@.err
@@ -52,9 +52,8 @@ Example SLURM submit script:
 @ENV_SETUP@
 
 # Run the simulation
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
-srun ./cactus_@CONFIG_NAME@ @PARFILE@
+cd @RUNDIR@-active
+srun @EXECUTABLE@ @PARFILE@
 ```
 
 ### Run scripts (for interactive execution)
@@ -67,12 +66,15 @@ A run script is executed directly (not submitted to a queue). It sets up the env
 set -e
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-# For interactive runs, optionally load a debugger
-@RUNDEBUG_PREFIX@
-./cactus_@CONFIG_NAME@ @PARFILE@
+# @RUNDEBUG@ is 1 when the run was launched with --debug, 0 otherwise;
+# @DEBUGGER@ is the debugger launch command (e.g. `gdb`).
+if [ @RUNDEBUG@ -eq 0 ]; then
+    @EXECUTABLE@ @PARFILE@
+else
+    @DEBUGGER@ --args @EXECUTABLE@ @PARFILE@
+fi
 ```
 
 ## Template variables
@@ -101,11 +103,16 @@ Given:
 These expansions occur:
 
 ```bash
-#SBATCH --job-name=@JOB_NAME@        →  #SBATCH --job-name=mysim
-#SBATCH --nodes=@NODES@              →  #SBATCH --nodes=4
-#SBATCH --cpus-per-task=@CPUS@       →  #SBATCH --cpus-per-task=2
-singularity exec @UNIVERSE_WRAPPER@  →  singularity exec -B /scratch /path/to/et.sif
+#SBATCH --job-name=@JOB_NAME@              →  #SBATCH --job-name=mysim
+#SBATCH --nodes=@NODES@                    →  #SBATCH --nodes=4
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@    →  #SBATCH --cpus-per-task=2
+mpirun -np @TASKS@ @EXECUTABLE@ @PARFILE@  →  mpirun -np 8 /path/to/cactus_sim /path/to/sim.par
 ```
+
+> **Note:** there is no `@UNIVERSE_WRAPPER@` token. When a config's build/run
+> universe declares a wrapper, cactup wraps the *entire* command your script
+> runs (see [Universes](meta-toml.html#universes)) — the script itself just
+> invokes `@EXECUTABLE@` and cactup applies the wrapper around it.
 
 ## Variants in scripts
 
@@ -142,17 +149,16 @@ Example test-specific script:
 #!/bin/bash
 # runscripts/test.sh — optimized for quick test validation
 
-#SBATCH --job-name=test-@CONFIG_NAME@
+#SBATCH --job-name=test-@CONFIGURATION@
 #SBATCH --nodes=1
 #SBATCH --ntasks=2           # Small test, low task count
 #SBATCH --time=00:30:00       # 30 minutes for tests
 
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-srun ./cactus_@CONFIG_NAME@ @PARFILE@
+srun @EXECUTABLE@ @PARFILE@
 ```
 
 ## Script variants with different universes
@@ -203,36 +209,44 @@ is structural like script-variant compatibility).
 
 ## Shell vs Python scripts
 
-Scripts can be shell (`.sh`) or Python (`.py`). The extension determines the interpreter:
+A variant file is either shell (`.sh`) or Python (`.py`), and the two use
+**different calling conventions**:
 
 ```
 submitscripts/
-  default.sh    # Executed with /bin/bash
-  advanced.py   # Executed with /usr/bin/python3
+  default.sh    # @VAR@-substituted, then env-setup auto-prepended after the header
+  advanced.py   # run with python3; variables arrive as globals; STDOUT is the script
 ```
 
-### Python scripts
+### Shell (`.sh`)
 
-Python scripts receive variables as global variables and a typed dict:
+cactup substitutes every `@NAME@` token in the file, auto-prepends the phase's
+env-setup (after the shebang for runscripts, after the leading `#`-directive
+block for submitscripts), and that expanded text *is* the script.
+
+### Python (`.py`)
+
+`.py` variants are **not** `@VAR@`-substituted. cactup runs the file with
+`python3`, handing it the variable set as JSON on stdin; a prelude binds every
+variable as a **module global in canonical string form** (named exactly like the
+tokens — `JOB_NAME`, `NODES`, `TASKS`, uppercase), plus a `typed` dict carrying
+native ints/bools under the **same uppercase keys**. Whatever the script writes
+to **stdout** becomes the produced script — you don't open or write files
+yourself, and you own where env-setup goes.
 
 ```python
-#!/usr/bin/env python3
+import sys
 
-# @VAR@ tokens are available as globals
-job_name = "@JOB_NAME@"
-nodes = "@NODES@"
-tasks = "@TASKS@"
-
-# Also available: a 'typed' dict with structured data
-print(f"Job: {job_name}, Nodes: {nodes}")
-print(f"Typed info: {typed['nodes']}")  # 'typed' has structured metadata
-
-# Generate the scheduler script
-with open(job_name + ".slurm", "w") as f:
-    f.write(f"#!/bin/bash\n")
-    f.write(f"#SBATCH --job-name={job_name}\n")
-    f.write(f"#SBATCH --nodes={nodes}\n")
-    # ... etc
+# Variables are already globals (strings); `typed` has native ints/bools.
+lines = [
+    "#!/bin/bash",
+    f"#SBATCH --job-name={JOB_NAME}",
+    f"#SBATCH --nodes={NODES}",
+    f"#SBATCH --ntasks={typed['TASKS']}",   # an int, not a string
+    ENV_SETUP,                               # the resolved env-setup block
+    f"srun {EXECUTABLE} {PARFILE}",
+]
+sys.stdout.write("\n".join(lines) + "\n")    # stdout is the generated script
 ```
 
 Python is useful for complex script generation, but shell is simpler for most machines.
@@ -272,13 +286,18 @@ Users can override with `-o FILE` / `-e FILE` flags.
 For long simulations that chain across multiple jobs, the checkpoint walltime tells Cactus when to stop and write a checkpoint:
 
 ```bash
-#SBATCH --time=@WALLTIME@                    # Hard job limit
-@RUNDIR_INIT@ checkpoint_walltime=@CHECKPOINT_WALLTIME@  # When to checkpoint
+#SBATCH --time=@WALLTIME@                            # Hard job limit
+@EXECUTABLE@ @PARFILE@ --walltime @CHECKPOINT_WALLTIME_HOURS@   # Stop & checkpoint before the hard limit
 ```
 
-Cactus reads `checkpoint_walltime` from the environment and gracefully stops before the hard wall-clock limit.
+`@CHECKPOINT_WALLTIME@` is the deadline in canonical `HH:MM:SS` form; the
+companion tokens `@CHECKPOINT_WALLTIME_HOURS@` and
+`@CHECKPOINT_WALLTIME_SECONDS@` give the same deadline as a number, for whatever
+form your Cactus invocation expects. Pass it so the run stops gracefully before
+the hard wall-clock limit.
 
-The checkpoint buffer is configured per-submission with `--checkpt-buffer` (default: `max(walltime/24, 10 min)`).
+The checkpoint deadline is the hard walltime minus a buffer, set per-submission
+with `--checkpt-buffer` (default: `max(walltime/24, 10 min)`).
 
 ## Debugging scripts
 
@@ -300,8 +319,8 @@ Here's a minimal SLURM submit script that handles most use cases:
 #SBATCH --job-name=@JOB_NAME@
 #SBATCH --nodes=@NODES@
 #SBATCH --ntasks=@TASKS@
-#SBATCH --ntasks-per-node=@TPN@
-#SBATCH --cpus-per-task=@CPUS@
+#SBATCH --ntasks-per-node=@TASKS_PER_NODE@
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
 #SBATCH --time=@WALLTIME@
 #SBATCH --output=@STDOUT_FILE@
 #SBATCH --error=@STDERR_FILE@
@@ -309,10 +328,9 @@ Here's a minimal SLURM submit script that handles most use cases:
 
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-srun ./cactus_@CONFIG_NAME@ @PARFILE@
+srun @EXECUTABLE@ @PARFILE@
 ```
 
 And a minimal run script:
@@ -323,10 +341,9 @@ And a minimal run script:
 set -e
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-./cactus_@CONFIG_NAME@ @PARFILE@
+@EXECUTABLE@ @PARFILE@
 ```
 
 ## Script validation
@@ -344,23 +361,32 @@ If the script has errors, cactup will show them.
 
 ### SLURM with GPU
 
+`@GPU@` is `true`/`false` for the selected queue's GPU flag; there is no
+per-task GPU-count token, so hard-code the `--gres` count your queue provides
+(one per node here):
+
 ```bash
-#SBATCH --gres=gpu:@GPUS_PER_TASK@
-#SBATCH --cpus-per-task=@CPUS@
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
 ```
 
 ### PBS/Torque
 
 ```bash
 #PBS -N @JOB_NAME@
-#PBS -l nodes=@NODES@:ppn=@TPN@
+#PBS -l nodes=@NODES@:ppn=@TASKS_PER_NODE@
 #PBS -l walltime=@WALLTIME@
 ```
 
-### Singularity wrapper (in run/submit scripts)
+### Running under a container
+
+Your script does **not** wrap the executable in `singularity`/`apptainer`
+itself. Declare a `[universes.*]` entry with a `wrapper-argv` (or `wrapper`) in
+meta.toml and point the build/run at it; cactup wraps the whole command your
+script runs. The script stays container-agnostic:
 
 ```bash
-srun singularity exec @UNIVERSE_WRAPPER@ ./cactus_@CONFIG_NAME@ @PARFILE@
+srun @EXECUTABLE@ @PARFILE@
 ```
 
 ## Next steps

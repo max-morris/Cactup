@@ -144,7 +144,7 @@ This removes the installation directory and any symlinks, but preserves simulati
 By default, cactup uses:
 
 - **Install prefix**: `~/.cactup/cacti/` (can be overridden with `--install-prefix`)
-- **Symlink**: `~/.cactup/current` (can be customized with `--symlink-prefix` and `--symlink-name`)
+- **Symlink**: `~/Cactus` — i.e. prefix `~` (home) and name `Cactus` by default (customize with `--symlink-prefix` and `--symlink-name`, or skip with `--no-symlink`)
 - **Simulation home**: `~/.cactup/simulations/` (can be configured in your machine definition)
 - **Test-suite home**: `~/.cactup/tests/` (can be configured in your machine definition)
 

@@ -120,15 +120,18 @@ submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
 queued-pattern = " PD "
 running-pattern = " R "
-holding-pattern = "\(JobHeldUser\)"
+holding-pattern = '\(JobHeldUser\)'
 exec-host = "hostname -s"
-exec-host-pattern = "(\S+)"
+exec-host-pattern = '(\S+)'
 stdout = "cat @SIMULATION_NAME@.out"
 stderr = "cat @SIMULATION_NAME@.err"
 stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 max-walltime = "24:00:00"
-allocation = "myproject"
 ```
+
+> **Note:** `allocation` is **not** a `[scheduler]` key — the account to charge
+> is a per-user *knob* (`cactup knob allocation my_project`), not part of the
+> machine definition. Any unknown key here is silently ignored.
 
 Test each pattern against real scheduler output:
 
@@ -162,7 +165,7 @@ queued-pattern = " Q "
 running-pattern = " R "
 holding-pattern = " H "
 exec-host = "hostname -s"
-exec-host-pattern = "(\S+)"
+exec-host-pattern = '(\S+)'
 stdout = "cat @SIMULATION_NAME@.out"
 stderr = "cat @SIMULATION_NAME@.err"
 stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
@@ -228,67 +231,64 @@ variants = ["default", "cuda"]
 
 ## Step 3: Create optionlists
 
+An optionlist is a `[cactup]` header (cactup-only metadata) plus an `[options]`
+table of raw Cactus `NAME = value` pairs — the same names you'd put in a
+hand-written Einstein Toolkit `.cfg` optionlist. Values are strings, booleans, or
+integers (floats are rejected); `VERSION` is required and is always emitted
+first. See [Optionlists](optionlists.html) for the full reference.
+
 Edit `optionlists/default.toml` with your cluster's compilers and flags:
 
 ```toml
 [cactup]
-version = 2
+compatible-queues = ["default", "long"]
+default = true
 description = "Default build on myclu"
 
-[build.c]
-command = "gcc"
-flags = "-Wall -std=c99"
+[options]
+VERSION = "2024-06-01"
 
-[build.c.optimize]
-flags = "-O2 -march=native -Wall"
+CPP = "cpp"
+CC  = "gcc"
+CXX = "g++"
+FPP = "cpp"
+F90 = "gfortran"
 
-[build.cxx]
-command = "g++"
-flags = "-Wall -std=c++11"
+CFLAGS   = "-g -std=gnu99"
+CXXFLAGS = "-g -std=gnu++17"
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
 
-[build.cxx.optimize]
-flags = "-O2 -march=native -Wall"
+OPTIMISE           = "yes"
+C_OPTIMISE_FLAGS   = "-O2 -march=native"
+CXX_OPTIMISE_FLAGS = "-O2 -march=native"
+F90_OPTIMISE_FLAGS = "-O2 -march=native"
 
-[build.fortran]
-command = "gfortran"
-flags = "-Wall -ffree-line-length-none"
-
-[build.fortran.optimize]
-flags = "-O2 -march=native -ffree-line-length-none"
-
-[options.MPI]
-value = "yes"
+OPENMP = "yes"
+MPI    = "MPICH"
 ```
 
-If your cluster has CUDA:
-
-Create `optionlists/cuda.toml`:
+If your cluster has CUDA, create `optionlists/cuda.toml` and mark it `gpu = true`
+so it is only offered on GPU queues:
 
 ```toml
 [cactup]
-version = 2
+gpu = true
+compatible-queues = ["gpu"]
 description = "CUDA GPU build on myclu"
 
-[build.c]
-command = "gcc"
-flags = "-Wall -std=c99 -I/usr/local/cuda/include"
+[options]
+VERSION = "2024-06-01"
 
-[build.cxx]
-command = "g++"
-flags = "-Wall -std=c++11 -I/usr/local/cuda/include"
+CC  = "gcc"
+CXX = "g++"
+F90 = "gfortran"
 
-[build.fortran]
-command = "gfortran"
-flags = "-Wall -ffree-line-length-none"
+CUCC      = "nvcc"
+CUCCFLAGS = "-std=c++17 -arch=sm_80"
 
-[options.MPI]
-value = "yes"
-
-[options.CUDA]
-value = "yes"
-
-[options.CUDA_PATH]
-value = "/usr/local/cuda"
+OPTIMISE = "yes"
+OPENMP   = "yes"
+MPI      = "MPICH"
 ```
 
 ## Step 4: Update submit scripts
@@ -301,8 +301,8 @@ Edit `submitscripts/default.sh`. Here's a complete SLURM example:
 #SBATCH --job-name=@JOB_NAME@
 #SBATCH --nodes=@NODES@
 #SBATCH --ntasks=@TASKS@
-#SBATCH --ntasks-per-node=@TPN@
-#SBATCH --cpus-per-task=@CPUS@
+#SBATCH --ntasks-per-node=@TASKS_PER_NODE@
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
 #SBATCH --time=@WALLTIME@
 #SBATCH --output=@STDOUT_FILE@
 #SBATCH --error=@STDERR_FILE@
@@ -314,10 +314,9 @@ Edit `submitscripts/default.sh`. Here's a complete SLURM example:
 # Set up checkpoint walltime
 export CHECKPOINT_WALLTIME=@CHECKPOINT_WALLTIME@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-srun ./cactus_@CONFIG_NAME@ @PARFILE@
+srun @EXECUTABLE@ @PARFILE@
 ```
 
 If your cluster uses modules or special configurations, adjust accordingly.
@@ -325,8 +324,8 @@ If your cluster uses modules or special configurations, adjust accordingly.
 For GPU jobs, you may need:
 
 ```bash
-#SBATCH --gres=gpu:@GPUS_PER_TASK@
-#SBATCH --cpus-per-task=@CPUS@
+#SBATCH --gres=gpu:1                     # no per-task GPU-count token; hard-code it
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
 ```
 
 Create `submitscripts/test.sh` for test submissions (smaller, faster):
@@ -334,7 +333,7 @@ Create `submitscripts/test.sh` for test submissions (smaller, faster):
 ```bash
 #!/bin/bash
 
-#SBATCH --job-name=test-@CONFIG_NAME@
+#SBATCH --job-name=test-@CONFIGURATION@
 #SBATCH --nodes=1
 #SBATCH --ntasks=2
 #SBATCH --time=00:30:00
@@ -344,10 +343,9 @@ Create `submitscripts/test.sh` for test submissions (smaller, faster):
 
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-srun ./cactus_@CONFIG_NAME@ @PARFILE@
+srun @EXECUTABLE@ @PARFILE@
 ```
 
 ## Step 5: Update run scripts
@@ -361,11 +359,13 @@ set -e
 
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-@RUNDEBUG_PREFIX@
-./cactus_@CONFIG_NAME@ @PARFILE@
+if [ @RUNDEBUG@ -eq 0 ]; then
+    @EXECUTABLE@ @PARFILE@
+else
+    @DEBUGGER@ --args @EXECUTABLE@ @PARFILE@   # launched with --debug
+fi
 ```
 
 Edit `runscripts/test.sh` for interactive test runs:
@@ -377,10 +377,9 @@ set -e
 
 @ENV_SETUP@
 
-cd @SIMULATION_DIR@
-@RUNDIR_INIT@
+cd @RUNDIR@-active
 
-./cactus_@CONFIG_NAME@ @PARFILE@
+@EXECUTABLE@ @PARFILE@
 ```
 
 ## Step 6: Write discover.py

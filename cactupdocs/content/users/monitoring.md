@@ -99,12 +99,13 @@ Press Ctrl-C to stop streaming. This is useful for watching a running simulation
 
 ## Output files
 
-Simulation output is written to a directory per restart. Common output files:
+Simulation output is written to a directory per restart. What you'll find there:
 
-- `output.txt` — merged stdout and stderr
-- `output-*.txt` — thorn-specific output files
-- `cactus_*.out` / `.err` — raw scheduler output
-- Checkpoint files (HDF5, etc.)
+- The scheduler's stdout/stderr — by default `<simulation-name>.out` / `.err`
+  in the run directory (overridable per-submission with `-o` / `-e`)
+- The Cactus run output — subdirectories and files named by your **parfile's**
+  IO settings (Cactus decides these, not cactup)
+- Checkpoint files (HDF5, etc.) written by the checkpointing thorns
 
 The `--output-dir` flag tells you where to look:
 
@@ -188,9 +189,9 @@ If a simulation fails:
    squeue -j <JOB_ID>         # (SLURM example)
    ```
 
-3. **Check the scheduler's error log**:
+3. **Check the scheduler's error log** (default `<simulation-name>.err`):
    ```sh
-   cat $OUTDIR/cactus_0000.err
+   cat "$OUTDIR"/*.err
    ```
 
 4. **Re-run with verbose output** (if the issue is reproducible):
@@ -216,7 +217,8 @@ Under your machine's `simulation-home` (e.g., `~/.cactup/simulations/`), simulat
 ```
 simulation-home/
   mysim/
-    metadata.toml       # Simulation metadata (parfile path, config, etc.)
+    .cactup/            # cactup's per-sim metadata dir
+      simulation.toml   #   metadata (parfile, config, universe, restart state, …)
     output-0000/        # Restart 0 output files
     output-0001/        # Restart 1 output files
     ...

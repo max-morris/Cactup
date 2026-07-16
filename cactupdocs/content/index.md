@@ -34,8 +34,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://cct.lsu.edu/~mmorris/cactup/cactup-
 Then:
 
 ```sh
-cactup list          # See available Einstein Toolkit releases
+cactup releases      # See available Einstein Toolkit releases
 cactup install       # Install the latest release (or choose a version)
+cactup list          # List the releases you've installed
 ```
 
 Once installed, explore the user guide to build configs and run simulations.
