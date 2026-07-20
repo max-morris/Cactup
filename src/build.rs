@@ -14,10 +14,13 @@ use crate::template::{VarSet, VarValue};
 use crate::Res;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 /// Make command used when a machine's `meta.toml` omits `[build].make`. It
 /// templates `@MAKEJOBS@` so `[build].make-jobs` (§7.6) is honored as the
@@ -394,6 +397,9 @@ pub fn build(
     fs::write(&rendered_path, &rendered)?;
     let thornlist_out = config_dir.join("cactup-thornlist.th");
     fs::write(&thornlist_out, &thornlist_processed)?;
+    // Every build's combined output is teed here so a failure leaves something
+    // to read once the terminal scrollback is gone (§7.2).
+    let build_log = config_dir.join("cactup-build.log");
 
     // Per-config build lock, heartbeat-kept across the (long) make (§2.3 #4).
     let _build_lock = LinkLock::acquire(&config_dir.join(".cactup-build.lock"))?.with_heartbeat();
@@ -438,13 +444,26 @@ pub fn build(
             if env.is_empty() { String::new() } else { format!("{env}\n") },
             steps.join("\n")
         );
-        run_build_snippet(&snippet, universe, &vars)?;
+        run_build_snippet(&snippet, universe, &vars, &build_log)?;
     }
 
     if !is_complete(&cactus_root, name) {
+        let marker = completeness_marker(&cactus_root, name);
+        let log_hint = if build_log.exists() {
+            eprintln!(
+                "\n{} the build finished but {} is missing — the config is incomplete\n{} {}",
+                "✗".red().bold(),
+                marker.display(),
+                "→ build log:".red().bold(),
+                build_log.display(),
+            );
+            format!("; see {}", build_log.display())
+        } else {
+            String::new()
+        };
         bail!(
-            "the build finished but {} is missing — the config is incomplete",
-            completeness_marker(&cactus_root, name).display()
+            "the build finished but {} is missing — the config is incomplete{log_hint}",
+            marker.display(),
         );
     }
 
@@ -514,11 +533,15 @@ fn sh_quote(path: &Path) -> String {
 }
 
 /// Run the env-setup'd make snippet, wrapped in the build universe when one
-/// is resolved (§7.2, §4.8). Build output streams to the terminal.
+/// is resolved (§7.2, §4.8). Build output streams to the terminal *and* is
+/// teed (stdout+stderr, combined) to `log_path`, so a failed build leaves a
+/// persistent record to read after the terminal scrollback is gone. On
+/// failure we point the user at that log loudly, on stderr, before bailing.
 fn run_build_snippet(
     snippet: &str,
     universe: Option<&crate::mdb::Universe>,
     vars: &VarSet,
+    log_path: &Path,
 ) -> Res<()> {
     let mut cmd = match universe {
         None => {
@@ -539,10 +562,63 @@ fn run_build_snippet(
             }
         },
     };
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::shell::trace_command(&cmd);
-    let status = cmd.status().context("Failed to spawn the build shell")?;
+
+    // One combined log per build; File::create truncates any prior attempt.
+    let log = Arc::new(Mutex::new(
+        fs::File::create(log_path)
+            .with_context(|| format!("Failed to create build log {}", log_path.display()))?,
+    ));
+    let mut child = cmd.spawn().context("Failed to spawn the build shell")?;
+
+    // Mirror one child stream to a terminal fd and the shared log. stdout and
+    // stderr keep their own destinations on-screen; both interleave into the
+    // single log file (ordering approximate across the two streams, as in a
+    // shell `2>&1`-style tee).
+    fn tee(
+        mut src: impl std::io::Read + Send + 'static,
+        log: Arc<Mutex<fs::File>>,
+        to_stderr: bool,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = &buf[..n];
+                        if to_stderr {
+                            let _ = std::io::stderr().write_all(chunk);
+                        } else {
+                            let _ = std::io::stdout().write_all(chunk);
+                        }
+                        if let Ok(mut f) = log.lock() {
+                            let _ = f.write_all(chunk);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    let copiers = [
+        tee(child.stdout.take().expect("stdout piped"), Arc::clone(&log), false),
+        tee(child.stderr.take().expect("stderr piped"), Arc::clone(&log), true),
+    ];
+    let status = child.wait().context("Failed to wait on the build shell")?;
+    for t in copiers {
+        let _ = t.join();
+    }
+
     if !status.success() {
-        bail!("the build failed ({status})");
+        eprintln!(
+            "\n{} the build failed ({status})\n{} {}",
+            "✗".red().bold(),
+            "→ build log:".red().bold(),
+            log_path.display(),
+        );
+        bail!("the build failed ({status}); see {}", log_path.display());
     }
     Ok(())
 }
@@ -664,7 +740,7 @@ mod tests {
         fs::write(
             &fake_make,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {}/make.log\ncase \"$2\" in\n\
+                "#!/bin/sh\necho \"$@\" >> {}/make.log\necho \"fake-make: $@\"\ncase \"$2\" in\n\
                  sim-config) cd {}/configs/sim/config-data || \
                  {{ echo \"Internal error - couldn't enter config-data\"; exit 1; }}; \
                  touch cctk_Config.h ;;\n\
@@ -745,6 +821,12 @@ mod tests {
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.starts_with("VERSION = 1\n") && rendered.contains("OPTIMISE = yes"));
 
+        // Combined build output was teed to the per-config log.
+        let build_log =
+            fs::read_to_string(cactus.join("configs/sim/cactup-build.log")).unwrap();
+        assert!(build_log.contains("fake-make: -j4 sim-config"), "{build_log}");
+        assert!(build_log.contains("fake-make: -j4 sim\n"), "{build_log}");
+
         // Second build with nothing changed: up-to-date short-circuit.
         let again = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(!again.rebuilt);
@@ -764,5 +846,88 @@ mod tests {
         assert_eq!(rebuilt.meta.config_id, outcome.meta.config_id);
         let log = fs::read_to_string(root.join("make.log")).unwrap();
         assert!(log.contains("sim-realclean"), "{log}");
+    }
+
+    /// A failing `make` must still leave a readable build log, and the error
+    /// must point the user at it.
+    #[test]
+    fn failed_build_writes_log_and_points_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists/einsteintoolkit.th"), "A/B\n").unwrap();
+
+        // Fake make: emit a diagnostic and fail on the compile step (`sim`),
+        // after the config step fabricated the marker.
+        let fake_make = root.join("fakemake");
+        fs::write(
+            &fake_make,
+            format!(
+                "#!/bin/sh\ncase \"$2\" in\n\
+                 sim-config) cd {}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) echo 'gcc: fatal error: no input files' 1>&2; exit 2 ;;\nesac\n",
+                cactus.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let machine_dir = root.join("mdb/fake");
+        fs::create_dir_all(machine_dir.join("optionlists")).unwrap();
+        fs::create_dir_all(machine_dir.join("runscripts")).unwrap();
+        fs::create_dir_all(machine_dir.join("submitscripts")).unwrap();
+        fs::write(
+            machine_dir.join("meta.toml"),
+            format!(
+                r#"
+                [machine]
+                nickname = "fake"
+                [build]
+                make = "{} -j@MAKEJOBS@"
+                [queues.local]
+                default = true
+                [variants.submitscript]
+                "default" = ["local"]
+                [variants.runscript]
+                "default" = ["local"]
+                [variants.optionlist]
+                variants = ["default"]
+                "#,
+                fake_make.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            machine_dir.join("optionlists/default.toml"),
+            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+        )
+        .unwrap();
+        for s in ["runscripts/default.sh", "submitscripts/default.sh"] {
+            fs::write(machine_dir.join(s), "#!/bin/sh\n").unwrap();
+        }
+
+        let mdb = Mdb::with_roots(root.join("mdb"), PathBuf::from("/nonexistent"));
+        let machine = mdb.load("fake").unwrap();
+        let inst = Installation::new("et", root.join("inst"));
+        let opts = BuildOpts::default_for_tests();
+
+        let err = match build(&inst, &machine, "sim", &opts) {
+            Ok(_) => panic!("build should have failed"),
+            Err(e) => e,
+        };
+        let build_log = cactus.join("configs/sim/cactup-build.log");
+        // The error names the log path...
+        assert!(
+            err.to_string().contains(&build_log.display().to_string()),
+            "error should point at the log: {err}"
+        );
+        // ...and the log captured make's stderr diagnostic.
+        let captured = fs::read_to_string(&build_log).unwrap();
+        assert!(captured.contains("no input files"), "{captured}");
     }
 }
