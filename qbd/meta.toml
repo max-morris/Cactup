@@ -1,16 +1,19 @@
-# qbd — LSU/LONI Queen Bee 4 cluster (qbd504.loni.org; PBS/Torque).
+# qbd — LSU/LONI Queen Bee 4 cluster (qbd504.loni.org; SLURM).
 # Ported from simfactory2 mdb/machines/qbd.ini (upstream regenerated it with
-# simfactory-configure.py on 2026-07-07). Two big upstream changes vs. the
-# previous port:
-#   - the scheduler flipped from SLURM to PBS (qsub/qstat/qdel);
-#   - the Singularity-image build is gone — this is now a native CUDA build
-#     against the prebuilt externals under /ddnB/project/sbrandt/externals-qbd.
+# simfactory-configure.py on 2026-07-07).
+#
+# NOTE: that upstream regeneration flipped the scheduler SLURM->PBS
+# (qsub/qstat/qdel). We do not follow that flip — qbd runs SLURM
+# (sbatch/squeue/scancel), matching its sibling LONI machine qbc.loni.org.
+# One other upstream change we do keep: the Singularity-image build is gone —
+# this is now a native CUDA build against the prebuilt externals under
+# /ddnB/project/sbrandt/externals-qbd.
 #
 # The upstream `queue` field is empty (the auto-configure left it blank), so
 # the single queue below is a placeholder with an empty scheduler-facing name:
-# @QUEUE@ resolves to "" and the PBS submitscript omits its `-q` directive
-# (matching upstream). Set a real partition before production use — either give
-# this queue a `name = "<partition>"` override or edit the submitscript.
+# @QUEUE@ resolves to "" and the SLURM submitscript omits its `-p` directive.
+# Set a real partition before production use — either give this queue a
+# `name = "<partition>"` override or edit the submitscript.
 
 [machine]
 name        = "qbd504.loni.org"
@@ -46,16 +49,17 @@ env-setup = """
 """
 
 [scheduler]
-submit           = "qsub @SCRIPTFILE@"
-# set inside a PBS allocation; gates `test run` (design §11.6)
-allocation-env  = "PBS_JOBID"
-get-status       = "qstat @JOB_ID@"
-stop             = "qdel @JOB_ID@"
-submit-pattern   = '(\d+\.\S+|\d+)'
-status-pattern   = '@JOB_ID@'
-queued-pattern   = ' Q '
-running-pattern  = ' R '
-holding-pattern  = ' H '
+# Grab stderr so we can see submit problems in the log.
+submit           = "sbatch @SCRIPTFILE@ 2>&1"
+# set inside a SLURM allocation; gates `test run` (design §11.6)
+allocation-env  = "SLURM_JOB_ID"
+get-status       = "squeue -j @JOB_ID@"
+stop             = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job (\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname -s"
 exec-host-pattern = '(\S+)'
 stdout           = "cat @SIMULATION_NAME@.out"
@@ -67,7 +71,7 @@ max-walltime     = "24:00:00"
 allocation       = "NO_ALLOCATION"
 
 # Placeholder queue (upstream left `queue` blank). `name = ""` makes @QUEUE@
-# resolve to the empty string, so the PBS submitscript emits no `-q` directive
+# resolve to the empty string, so the SLURM submitscript emits no `-p` directive
 # — override with a real partition (a `name` value here, or edit the script).
 [queues.default]
 gpu     = true    # native CUDA build (nvcc, AMREX_ENABLE_CUDA = yes)

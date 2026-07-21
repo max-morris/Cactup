@@ -1,25 +1,29 @@
 # qbd TEST submitscript (variant "test") — marked test = true in meta.toml
-# (design §11.2). Same #PBS header as submitscripts/default.py but WITHOUT
+# (design §11.2). Same #SBATCH header as submitscripts/default.py but WITHOUT
 # restart chaining (a testsuite is one-shot — no recovery, no chain, design
 # §11.6); the payload re-invokes `cactup test run` on the compute node with
 # the §11.6 locator flags (--test-dir + --results-id) instead of `sim run`.
 #
-# .py variant (design §6.1): the `-q @QUEUE@` and mail directives are guarded
+# See submitscripts/default.py for why qbd stays on SLURM (#SBATCH) rather
+# than following the upstream 2026-07-07 SLURM->PBS flip.
+#
+# .py variant (design §6.1): the `-p @QUEUE@` and mail directives are guarded
 # by `if QUEUE:` and `if EMAIL:` — cactup's @NAME@ engine is literal-only
 # (D7), so both conditionals move into Python.
 
 lines = ["#! /bin/bash"]
-lines.append("#PBS -l walltime={0}".format(WALLTIME))
-lines.append("#PBS -l nodes={0}:ppn={1}".format(NODES, TASKS_PER_NODE))
+lines.append("#SBATCH -A {0}".format(ALLOCATION))
 if QUEUE:
-    lines.append("#PBS -q {0}".format(QUEUE))
-lines.append("#PBS -A {0}".format(ALLOCATION))
-lines.append("#PBS -N {0}".format(TEST_NAME))
-lines.append("#PBS -j oe")
+    lines.append("#SBATCH -p {0}".format(QUEUE))
+lines.append("#SBATCH -t {0}".format(WALLTIME))
+lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
+lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
+lines.append("#SBATCH -J {0}".format(TEST_NAME))
 if EMAIL:
-    lines.append("#PBS -m abe")
-    lines.append("#PBS -M {0}".format(EMAIL))
-lines.append("#PBS -o {0}".format(STDOUT_FILE))
+    lines.append("#SBATCH --mail-type=ALL")
+    lines.append("#SBATCH --mail-user={0}".format(EMAIL))
+lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
+lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
 # env-setup is NOT auto-prepended for .py variants (design §6.1).
 lines.append(ENV_SETUP)
