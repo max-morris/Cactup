@@ -54,7 +54,9 @@ universe  = "compute"
 # arithmetic collapses at build time: one task, and cpus-per-task tracks
 # @MAKEJOBS@ (the effective `make -j`, default 64 = a full node). gpu2
 # enforces a 32-CPUs-per-GPU cap, so the full-node build must request both of
-# the node's GPUs (`--gpus-per-task 2`) even though compiling needs none.
+# the node's GPUs even though compiling needs none — and the request must use
+# `--gres=gpu:2` (the old wrapper's form): the partition's CPU-per-GPU check
+# does not count GPUs asked for via `--gpus-per-task`.
 #   - `-p gpu2` matches the old make wrapper. The [queues.default] placeholder
 #     below has no real partition name yet — keep the two in sync if you set
 #     one.
@@ -68,7 +70,7 @@ universe  = "compute"
 [universes.compute]
 wrapper-argv = [
     "srun", "-u", "-A", "@ALLOCATION@", "-p", "gpu2",
-    "--gpus-per-task", "2",
+    "--gres=gpu:2",
     "-N", "1", "-n", "1", "--cpus-per-task", "@MAKEJOBS@",
 ]
 
