@@ -435,6 +435,18 @@ pub fn build(
         steps.push(format!("{make} {name}"));
         steps.push(format!("{make} {name}-utils"));
 
+        // A wrapper universe may hand the build to the scheduler (e.g. an
+        // srun prefix), which sits silently in the queue until it gets an
+        // allocation — say so up front, or the wait looks like a hang.
+        if let (Some(uname), Some(u)) = (universe_name.as_deref(), universe) {
+            if u.wrapper.is_some() || u.wrapper_argv.is_some() {
+                println!(
+                    "Building inside universe \"{uname}\"; if its wrapper goes through the \
+                     scheduler, output stays silent until the job is allocated (check the queue)."
+                );
+            }
+        }
+
         // Build-phase env for the resolved universe (§6.1): universe env keys
         // override the machine [environment] key-by-key.
         let env = machine.meta.effective_env(universe_name.as_deref(), Phase::Build);
