@@ -12,11 +12,10 @@
 # requires building on the compute nodes, so that behavior is restored as the
 # [universes.compute] build universe below (§4.8).
 #
-# The upstream `queue` field is empty (the auto-configure left it blank), so
-# the single queue below is a placeholder with an empty scheduler-facing name:
-# @QUEUE@ resolves to "" and the SLURM submitscript omits its `-p` directive.
-# Set a real partition before production use — either give this queue a
-# `name = "<partition>"` override or edit the submitscript.
+# The upstream `queue` field was blank after the regeneration (an earlier
+# port carried that as a placeholder queue with an empty scheduler-facing
+# name). The queues below are QB4's real GPU partitions — gpu2 (default) and
+# gpu4 — the same ones the old ini's scripts branched on.
 
 [machine]
 name        = "QueenBee4"
@@ -35,6 +34,10 @@ test-home       = "/scratch/@USER@/tests"
 
 [hardware]
 max-cpus-per-node = 64
+# Request default when `-c` is omitted (design §8.5): 2 tasks × 32 CPUs fills
+# a 64-core node and matches gpu2's 2 GPUs at exactly the 32-CPUs-per-GPU cap
+# (the same shape as db1's 2 × 24 on 48-core/2-GPU nodes).
+default-cpus-per-task = 32
 memory             = 514913    # MB per node
 
 [build]
@@ -57,9 +60,7 @@ universe  = "compute"
 # the node's GPUs even though compiling needs none — and the request must use
 # `--gres=gpu:2` (the old wrapper's form): the partition's CPU-per-GPU check
 # does not count GPUs asked for via `--gpus-per-task`.
-#   - `-p gpu2` matches the old make wrapper. The [queues.default] placeholder
-#     below has no real partition name yet — keep the two in sync if you set
-#     one.
+#   - `-p gpu2` matches the old make wrapper and the default queue below.
 #   - `-A @ALLOCATION@` binds from the allocation knob (`cactup knob
 #     allocation <acct>`), required on LONI just like the submitscript's
 #     unconditional `#SBATCH -A`.
@@ -104,21 +105,25 @@ stdout-follow    = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 # Machine-level fallback ceiling (design §4.2); the single queue relies on it.
 max-walltime     = "24:00:00"
 
-# Placeholder queue (upstream left `queue` blank). `name = ""` makes @QUEUE@
-# resolve to the empty string, so the SLURM submitscript emits no `-p` directive
-# — override with a real partition (a `name` value here, or edit the script).
-[queues.default]
+# QB4's GPU partitions (the old ini's scripts branched on exactly these two).
+# gpu2: 2 GPUs/node; gpu4: 4 GPUs/node. QB4 enforces db1-style gres rules —
+# CPUs per GPU are capped (32 on gpu2) and only GPUs requested via `--gres`
+# count — so the submitscripts emit `--gres=gpu:{4,2}` per queue and the
+# build universe above requests `--gres=gpu:2`.
+[queues.gpu2]
 gpu     = true    # native CUDA build (nvcc, AMREX_ENABLE_CUDA = yes)
 default = true
-name    = ""
+
+[queues.gpu4]
+gpu = true
 
 [variants.submitscript]
-"default" = { queues = ["default"], default = true }
-"test"    = { queues = ["default"], test = true }   # used by `cactup test submit`
+"default" = { queues = ["gpu2", "gpu4"], default = true }
+"test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test submit`
 
 [variants.runscript]
-"default" = { queues = ["default"], default = true }
-"test"    = { queues = ["default"], test = true }   # used by `cactup test run`
+"default" = { queues = ["gpu2", "gpu4"], default = true }
+"test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test run`
 
 [variants.optionlist]
 variants = ["default"]
