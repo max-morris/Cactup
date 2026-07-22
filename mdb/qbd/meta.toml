@@ -51,8 +51,10 @@ universe  = "compute"
 # The upstream regeneration dropped that along with the Singularity image, but
 # qbd still requires builds to run on a compute node, so the srun prefix is
 # restored here (minus the image — the build is native now). The sim-time
-# arithmetic collapses at build time: one task, one GPU, and cpus-per-task
-# tracks @MAKEJOBS@ (the effective `make -j`, default 64 = a full node).
+# arithmetic collapses at build time: one task, and cpus-per-task tracks
+# @MAKEJOBS@ (the effective `make -j`, default 64 = a full node). gpu2
+# enforces a 32-CPUs-per-GPU cap, so the full-node build must request both of
+# the node's GPUs (`--gpus-per-task 2`) even though compiling needs none.
 #   - `-p gpu2` matches the old make wrapper. The [queues.default] placeholder
 #     below has no real partition name yet — keep the two in sync if you set
 #     one.
@@ -66,7 +68,7 @@ universe  = "compute"
 [universes.compute]
 wrapper-argv = [
     "srun", "-u", "-A", "@ALLOCATION@", "-p", "gpu2",
-    "--gpus-per-task", "1",
+    "--gpus-per-task", "2",
     "-N", "1", "-n", "1", "--cpus-per-task", "@MAKEJOBS@",
 ]
 
