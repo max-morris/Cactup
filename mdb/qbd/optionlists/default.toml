@@ -12,7 +12,7 @@
 
 [cactup]
 gpu               = true
-compatible-queues = ["default"]
+compatible-queues = ["gpu2", "gpu4"]
 # Builds run inside the machine's "compute" universe (srun onto a compute
 # node — §4.8), but the run must NOT be coerced into it: the submitscript
 # sbatch'es its own job and the runscript does its own launching.

@@ -15,6 +15,9 @@ lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}".format(ALLOCATION))
 if QUEUE:
     lines.append("#SBATCH -p {0}".format(QUEUE))
+# --gres restored from the old qbd.sub — see submitscripts/default.py for
+# QB4's CPUs-per-gres-GPU rules.
+lines.append("#SBATCH --gres=gpu:{0}".format(4 if QUEUE == "gpu4" else 2))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))

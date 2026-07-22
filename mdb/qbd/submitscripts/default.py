@@ -15,9 +15,12 @@
 #   -o/-e use STDOUT_FILE/STDERR_FILE (same @RUNDIR@/@SIMULATION_NAME@.{out,err}
 #     defaults, but they honor cactup's -o/-e flags)
 #   mail directives guarded by `if EMAIL:` (the old script emitted them always)
-#   `-p @QUEUE@` guarded by `if QUEUE:` — the upstream `queue` field is empty,
-#     so @QUEUE@/QUEUE resolves to "" and no `-p` directive is emitted (see the
-#     placeholder queue in meta.toml)
+#   `-p @QUEUE@` kept guarded by `if QUEUE:` (belt-and-braces; meta.toml now
+#     defines the real gpu2/gpu4 partitions, so QUEUE is always set)
+#   --gres=gpu:{4,2} restored from the old qbd.sub (the upstream regeneration
+#     dropped it): QB4 caps CPUs per gres-requested GPU (32 on gpu2) and only
+#     counts GPUs asked for via --gres, so every job must request the node's
+#     full GPU complement — 4 on gpu4, else 2
 #   @SIMFACTORY@ run --basedir=… -> @CACTUP@ sim run --installation/--sim-dir/
 #     --machine (the compute-node re-invocation locator)
 
@@ -25,6 +28,7 @@ lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}".format(ALLOCATION))
 if QUEUE:
     lines.append("#SBATCH -p {0}".format(QUEUE))
+lines.append("#SBATCH --gres=gpu:{0}".format(4 if QUEUE == "gpu4" else 2))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
