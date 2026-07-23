@@ -460,22 +460,43 @@ pub fn build(
     }
 
     if !is_complete(&cactus_root, name) {
-        let marker = completeness_marker(&cactus_root, name);
+        // Report the component that is actually absent (§7.2). The two states
+        // point the operator at opposite ends of the log:
+        //   - configure never completed  → the marker is missing; look near
+        //     the TOP of the log (a CST/configure error).
+        //   - configure done, no exe     → the compile/link failed; look near
+        //     the END of the log. run_build_snippet did NOT see a failure, so
+        //     the build command reported success while the build failed —
+        //     usually a scheduler wrapper swallowing the job's exit status.
+        let (missing, hint) = if !is_configured(&cactus_root, name) {
+            (
+                completeness_marker(&cactus_root, name),
+                "the configure step did not complete — look near the top of the build log",
+            )
+        } else {
+            (
+                executable_path(&cactus_root, name),
+                "the compile/link step did not complete — look near the end of the build log; \
+                 note the build command reported success, so if this machine's build universe \
+                 goes through a scheduler its wrapper may be swallowing the job's exit status",
+            )
+        };
         let log_hint = if build_log.exists() {
             eprintln!(
-                "\n{} the build finished but {} is missing — the config is incomplete\n{} {}",
+                "\n{} the build command finished but {} is missing — the config is incomplete\n  {}\n{} {}",
                 "✗".red().bold(),
-                marker.display(),
+                missing.display(),
+                hint,
                 "→ build log:".red().bold(),
                 build_log.display(),
             );
-            format!("; see {}", build_log.display())
+            format!("; {hint}; see {}", build_log.display())
         } else {
-            String::new()
+            format!("; {hint}")
         };
         bail!(
-            "the build finished but {} is missing — the config is incomplete{log_hint}",
-            marker.display(),
+            "the build command finished but {} is missing — the config is incomplete{log_hint}",
+            missing.display(),
         );
     }
 
@@ -941,5 +962,109 @@ mod tests {
         // ...and the log captured make's stderr diagnostic.
         let captured = fs::read_to_string(&build_log).unwrap();
         assert!(captured.contains("no input files"), "{captured}");
+    }
+
+    /// Stage a fake Cactus tree whose machine `make` is `make_body` (a `case
+    /// "$2" in … esac` over the make target). Returns the pieces `build()`
+    /// needs. Shared by the incompleteness-message tests below.
+    fn fake_tree(root: &Path, make_body: &str) -> (Mdb, Machine, Installation, BuildOpts) {
+        let cactus = root.join("inst/Cactus");
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists/einsteintoolkit.th"), "A/B\n").unwrap();
+
+        let fake_make = root.join("fakemake");
+        fs::write(&fake_make, format!("#!/bin/sh\ncase \"$2\" in\n{make_body}\nesac\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let machine_dir = root.join("mdb/fake");
+        fs::create_dir_all(machine_dir.join("optionlists")).unwrap();
+        fs::create_dir_all(machine_dir.join("runscripts")).unwrap();
+        fs::create_dir_all(machine_dir.join("submitscripts")).unwrap();
+        fs::write(
+            machine_dir.join("meta.toml"),
+            format!(
+                r#"
+                [machine]
+                nickname = "fake"
+                [build]
+                make = "{} -j@MAKEJOBS@"
+                [queues.local]
+                default = true
+                [variants.submitscript]
+                "default" = ["local"]
+                [variants.runscript]
+                "default" = ["local"]
+                [variants.optionlist]
+                variants = ["default"]
+                "#,
+                fake_make.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            machine_dir.join("optionlists/default.toml"),
+            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+        )
+        .unwrap();
+        for s in ["runscripts/default.sh", "submitscripts/default.sh"] {
+            fs::write(machine_dir.join(s), "#!/bin/sh\n").unwrap();
+        }
+
+        let mdb = Mdb::with_roots(root.join("mdb"), PathBuf::from("/nonexistent"));
+        let machine = mdb.load("fake").unwrap();
+        let inst = Installation::new("et", root.join("inst"));
+        (mdb, machine, inst, BuildOpts::default_for_tests())
+    }
+
+    /// Defect A, compile-failure branch: configure produced the marker but the
+    /// make exited 0 without producing the executable (a scheduler wrapper
+    /// swallowed the inner make's real exit status). The incompleteness error
+    /// must name the missing *executable* and flag the swallowed-status case —
+    /// not blame the configure marker, which is present.
+    #[test]
+    fn incomplete_after_configure_names_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        // config step fabricates the marker; compile step prints a lua-shim
+        // banner and "succeeds" without ever linking the exe.
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) echo 'sbatch: lua: Submitted job 999'; exit 0 ;;",
+                cactus.display()
+            ),
+        );
+
+        let err = match build(&inst, &machine, "sim", &opts) {
+            Ok(_) => panic!("build should have failed as incomplete"),
+            Err(e) => e.to_string(),
+        };
+        let exe = executable_path(&cactus, "sim");
+        assert!(err.contains(&exe.display().to_string()), "should name the exe: {err}");
+        assert!(!err.contains("cctk_Config.h"), "must not blame the configure marker: {err}");
+        assert!(err.contains("exit status"), "should flag the swallowed-status case: {err}");
+    }
+
+    /// Defect A, configure-failure branch: the marker is absent (configure
+    /// never completed). The message still names `cctk_Config.h`.
+    #[test]
+    fn incomplete_without_configure_names_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Neither step produces anything; both "succeed".
+        let (_mdb, machine, inst, opts) =
+            fake_tree(root, "sim-config) exit 0 ;;\nsim) exit 0 ;;");
+
+        let err = match build(&inst, &machine, "sim", &opts) {
+            Ok(_) => panic!("build should have failed as incomplete"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("cctk_Config.h"), "should name the configure marker: {err}");
     }
 }

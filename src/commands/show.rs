@@ -33,7 +33,7 @@ pub fn dispatch(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     println!();
     match &entry.release {
         Some(release) => println!("  release:      {release}"),
-        None => println!("  release:      (manual installation)"),
+        None => println!("  release:      (custom installation)"),
     }
     println!("  path:         {}", entry.path);
 

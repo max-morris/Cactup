@@ -1021,6 +1021,20 @@ specs); `@COMMAND@` is reserved, filled **last**, and meaningful only in the
 template form. It is an error for a universe to define both `wrapper-argv` and
 `wrapper`, or for `wrapper` to omit `@COMMAND@`.
 
+**A wrapper MUST propagate the wrapped command's exit status.** cactup decides a
+build failed by the wrapper's exit code; a wrapper that exits 0 while the wrapped
+command failed makes a failed build look successful, and only the §7.2
+completeness backstop then catches it (and only for builds — a lying run wrapper
+is not caught at all). This is a real hazard for **scheduler-fronting `wrapper`
+scripts**: a site may replace `sbatch` with a shim that returns 0 even when
+submission fails or the job dies (observed on LONI QB4, whose lua shim swallowed
+both a submission error and a failed job's exit code). Do **not** trust such a
+shim's rc — derive the outcome yourself: require a `Submitted batch job <id>`
+match (no id ⇒ submission failed), and after `sbatch --wait` returns query the
+scheduler for the job's real result (`sacct -j <id> --format=State,ExitCode`,
+falling back to `scontrol show job <id>`) rather than the shim's exit code. The
+`[universes.compute]` wrapper in `mdb/qbd/meta.toml` is the worked example.
+
 **The implicit `host` universe.** `"host"` always exists as a universe name —
 even on a machine whose `meta.toml` has no `[universes.host]` table at all —
 as cactup's name for "the invoking context, unwrapped." Any reference to a

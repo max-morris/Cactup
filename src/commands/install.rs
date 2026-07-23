@@ -8,11 +8,21 @@ use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use directories::BaseDirs;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// A `cactup install` gets its thornlist either from a release tag in the
+/// manifest, or (with `--thornlist`) directly from a file — a "custom
+/// installation". Everything past thornlist resolution (alias, machine,
+/// prefixes, GetComponents, symlink, DB registration) is shared.
+enum InstallSource<'repo> {
+    Release(&'repo manifest::Tag<'repo>),
+    Custom { path: PathBuf, content: String },
+}
 
 pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let InstallArgs {
         release,
+        thornlist,
         alias,
         silent,
         install_prefix,
@@ -21,48 +31,83 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         symlink_name,
     } = args;
 
+    let custom = thornlist.is_some();
+
     let base_dirs = BaseDirs::new().ok_or(anyhow!("Failed to determine base directories"))?;
     let cactup_root = &crate::CACTUP_ROOT;
 
-    let repo = manifest::ensure_manifest_repo(cactup_root, &ctx.globals.manifest_url)?;
-    let tags = manifest::get_tags(&repo)?;
+    // Custom installs need no manifest at all; validate the thornlist file up
+    // front, before any prompting, so a missing/unreadable file fails fast.
+    let custom_thornlist = match &thornlist {
+        Some(path) => {
+            let expanded = shell::expand_path(&p2s(path.clone())?, &base_dirs);
+            let content = fs::read_to_string(&expanded)
+                .with_context(|| format!("Failed to read thornlist {expanded}"))?;
+            Some((path.clone(), content))
+        }
+        None => None,
+    };
+
+    let repo = if custom {
+        None
+    } else {
+        Some(manifest::ensure_manifest_repo(cactup_root, &ctx.globals.manifest_url)?)
+    };
+    let tags = repo.as_ref().map(manifest::get_tags).transpose()?;
+
     // §2.3: a snapshot for the prompt-time checks; the lock is NOT held across
     // the download/build below. The final registration re-checks under the
     // lock in `ctx.db.update`.
     let database = ctx.db.read()?;
 
-    if tags.is_empty() {
-        println!("No releases found.");
-        return Ok(());
+    if let Some(tags) = &tags {
+        if tags.is_empty() {
+            println!("No releases found.");
+            return Ok(());
+        }
     }
 
-    let release_default = tags.first().unwrap().short_name.clone();
     let symlink_prefix_default = base_dirs.home_dir();
     let symlink_name_default = "Cactus";
 
-    let release_tag = match release {
-        Some(release) => {
-            match tags.iter().position(|tag| tag.short_name == release) {
-                Some(pos) => &tags[pos],
-                None => {
-                    println!("{}", format!("{} is not a valid release.", release.bold()).bright_red());
-                    return Ok(());
+    let source = match custom_thornlist {
+        Some((path, content)) => InstallSource::Custom { path, content },
+        None => {
+            let tags = tags.as_ref().unwrap();
+            let release_default = tags.first().unwrap().short_name.clone();
+
+            let release_tag = match release {
+                Some(release) => {
+                    match tags.iter().position(|tag| tag.short_name == release) {
+                        Some(pos) => &tags[pos],
+                        None => {
+                            println!("{}", format!("{} is not a valid release.", release.bold()).bright_red());
+                            return Ok(());
+                        }
+                    }
                 }
-            }
-        }
-        None if silent => &tags[0],
-        None => loop {
-            let release_sel = prompt_with_default("Which release do you want to install?", &release_default)?;
-            match tags.iter().position(|tag| tag.short_name == release_sel) {
-                Some(pos) => break &tags[pos],
-                None => {
-                    println!("{}", format!("{} is not a valid release.", release_sel.bold()).bright_red());
+                None if silent => &tags[0],
+                None => loop {
+                    let release_sel = prompt_with_default("Which release do you want to install?", &release_default)?;
+                    match tags.iter().position(|tag| tag.short_name == release_sel) {
+                        Some(pos) => break &tags[pos],
+                        None => {
+                            println!("{}", format!("{} is not a valid release.", release_sel.bold()).bright_red());
+                        }
+                    }
                 }
-            }
+            };
+
+            InstallSource::Release(release_tag)
         }
     };
 
-    let release = &release_tag.short_name;
+    let (alias_default, alias_default_source) = match &source {
+        InstallSource::Release(release_tag) => (release_tag.short_name.clone(), "the release name"),
+        InstallSource::Custom { path, .. } => {
+            (path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), "the thornlist file name")
+        }
+    };
 
     let alias = match alias {
         Some(alias) if database.installations.contains_key(&alias) => {
@@ -74,13 +119,17 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             return Ok(());
         }
         Some(alias) => alias,
-        None if silent && database.installations.contains_key(release) => {
-            println!("{}", format!("An installation with the alias {} (derived from the release name) already exists. Please choose a different alias by passing {}.", release.bold(), "--alias".bold()).bright_red());
+        None if silent && !valid_alias(&alias_default) => {
+            println!("{}", format!("{} (derived from {}) is not a valid alias: use only letters, digits, '-', '_', and '.'. Please choose one by passing {}.", alias_default.bold(), alias_default_source, "--alias".bold()).bright_red());
             return Ok(());
         }
-        None if silent => release.to_owned(),
+        None if silent && database.installations.contains_key(&alias_default) => {
+            println!("{}", format!("An installation with the alias {} (derived from {}) already exists. Please choose a different alias by passing {}.", alias_default.bold(), alias_default_source, "--alias".bold()).bright_red());
+            return Ok(());
+        }
+        None if silent => alias_default.clone(),
         None => loop {
-            let alias_sel = prompt_with_default("What should the installation's alias be? This unique name will be used to identify the installation in the future.", release)?;
+            let alias_sel = prompt_with_default("What should the installation's alias be? This unique name will be used to identify the installation in the future.", &alias_default)?;
             if database.installations.contains_key(&alias_sel) {
                 println!("{}", format!("An installation with the alias {} already exists. Please choose another.", alias_sel.bold()).bright_red());
             } else if !valid_alias(&alias_sel) {
@@ -194,9 +243,13 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let install_dir = fs::canonicalize(install_dir)
        .with_context(|| format!("Failed to resolve installation directory {}", install_dir.display()))?;
 
-    let thorn_list =
-        release_tag.read_file("einsteintoolkit.th")
-                   .with_context(|| format!("Failed to read einsteintoolkit.th from release {}", release_tag.short_name))?;
+    let thorn_list: Vec<u8> = match &source {
+        InstallSource::Release(release_tag) => {
+            release_tag.read_file("einsteintoolkit.th")
+                       .with_context(|| format!("Failed to read einsteintoolkit.th from release {}", release_tag.short_name))?
+        }
+        InstallSource::Custom { content, .. } => content.clone().into_bytes(),
+    };
 
     fs::write(install_dir.join("einsteintoolkit.th"), &thorn_list)
        .with_context(|| format!("Failed to write einsteintoolkit.th to {}", install_dir.display()))?;
@@ -276,6 +329,11 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // these, and they are set exactly once, at install time.
     crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine)?;
 
+    let release_name = match &source {
+        InstallSource::Release(release_tag) => Some(release_tag.short_name.clone()),
+        InstallSource::Custom { .. } => None,
+    };
+
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {
             bail!(
@@ -286,7 +344,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
         database.installations.insert(alias.clone(), CactusInstallation {
             alias: alias.clone(),
-            release: Some(release.clone()),
+            release: release_name.clone(),
             path: install_dir.to_string_lossy().to_string(),
         });
         if database.active_installation.is_none() {
@@ -297,7 +355,15 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
     })?;
 
-    println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, install_dir.join("Cactus").display()).bold().bright_green());
+    match &source {
+        InstallSource::Release(release_tag) => {
+            println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, install_dir.join("Cactus").display()).bold().bright_green());
+        }
+        InstallSource::Custom { path, .. } => {
+            let file_name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            println!("{}", format!("Success! Installed custom thornlist {} into {}", file_name, install_dir.join("Cactus").display()).bold().bright_green());
+        }
+    }
     if do_symlink {
         println!("{}", format!("Created a symlink at {}/{}", symlink_prefix, symlink_name).bold().bright_green());
     }

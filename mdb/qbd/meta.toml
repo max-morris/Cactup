@@ -80,18 +80,45 @@ universe  = "compute"
 # the module loads) becomes the batch script and runs on the compute node.
 # The RUN is not coerced into this universe (the submitscript sbatch'es its
 # own job); the optionlist sets coerce-run-universe = false accordingly.
+# Exit status: we do NOT trust sbatch's own rc. On qbd2 the site fronts sbatch
+# with a lua shim (its banners: `sbatch: lua: Submitted job N`, SU estimates)
+# that returns 0 even when submission fails OR the wrapped job dies — a build
+# whose inner `make` failed would otherwise be reported as a success, and
+# cactup's completeness check would then misdiagnose it. So the wrapper derives
+# its own status: submission must yield a `Submitted batch job <id>` (no id ⇒
+# submission failed), and after `--wait` returns we ask the scheduler for the
+# job's real outcome (sacct, or scontrol as a fallback) rather than believing
+# the shim. Only State==COMPLETED with ExitCode 0:0 exits 0.
 [universes.compute]
 wrapper = """
 out="$HOME/.cactup-build-@CONFIGURATION@.log"
+subout="$HOME/.cactup-build-@CONFIGURATION@.submit.log"
 : > "$out"
 tail -f "$out" &
 tailpid=$!
-rc=0
-sbatch --wait -A @ALLOCATION@ -p gpu2 --gres=gpu:2 -N 1 -n 1 --cpus-per-task @MAKEJOBS@ -J build-@CONFIGURATION@ -o "$out" -e "$out" --wrap @COMMAND@ || rc=$?
+# --wait blocks until the job ends; sbatch's stdout (the "Submitted batch job N"
+# line and any shim banners) is teed so it stays visible live and parseable
+# after. The pipeline's exit status is tee's, not sbatch's — deliberately, see
+# the note above.
+sbatch --wait -A @ALLOCATION@ -p gpu2 --gres=gpu:2 -N 1 -n 1 --cpus-per-task @MAKEJOBS@ -J build-@CONFIGURATION@ -o "$out" -e "$out" --wrap @COMMAND@ 2>&1 | tee "$subout"
 sleep 5
 kill "$tailpid" 2>/dev/null || true
 echo "cactup: full sbatch log: $out"
-exit "$rc"
+jobid=$(sed -n 's/.*Submitted batch job \\([0-9][0-9]*\\).*/\\1/p' "$subout" | head -n1)
+if [ -z "$jobid" ]; then
+  echo "cactup: sbatch reported no job id — submission failed (see above)" 1>&2
+  exit 1
+fi
+info=$(sacct -j "$jobid" --format=State,ExitCode -n -P 2>/dev/null | head -n1)
+if [ -z "$info" ]; then
+  info=$(scontrol show job "$jobid" 2>/dev/null | tr ' ' '\\n' \\
+         | awk -F= '/^JobState=/{s=$2} /^ExitCode=/{e=$2} END{if(s!="")print s"|"e}')
+fi
+echo "cactup: job $jobid outcome: ${info:-unknown}" 1>&2
+case "$info" in
+  COMPLETED'|'0:0*) exit 0 ;;
+  *) echo "cactup: build job did not complete cleanly (see $out)" 1>&2; exit 1 ;;
+esac
 """
 
 [environment]

@@ -119,6 +119,8 @@ pub(crate) enum Commands {
 pub(crate) struct InstallArgs {
     #[clap(help = "The release to install. If unspecified, the most recent release will be installed.")]
     pub release: Option<String>,
+    #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release (a \"custom installation\").")]
+    pub thornlist: Option<PathBuf>,
     #[clap(short, long, help = "The unique name of the installation. If unspecified, the release name will be used.")]
     pub alias: Option<String>,
     #[clap(short, long, help = "Assume default answers to all unspecified flags instead of prompting.")]
@@ -512,6 +514,7 @@ mod tests {
             vec!["cactup", "list"],
             vec!["cactup", "show", "et"],
             vec!["cactup", "install", "ET_2025_05", "--silent"],
+            vec!["cactup", "install", "--thornlist", "my/list.th", "--silent"],
             vec!["cactup", "uninstall", "old", "-f"],
             vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
             vec!["cactup", "config", "build", "sim", "--universe", "et-sif"],
@@ -568,5 +571,8 @@ mod tests {
         assert!(Args::try_parse_from(["cactup", "sim", "run", "s", "--restart-id", "3"]).is_err());
         // Bad walltime grammar is rejected at parse time (§8.5).
         assert!(Args::try_parse_from(["cactup", "sim", "submit", "s", "-w", "1:99:00"]).is_err());
+        // --thornlist and a positional release are mutually exclusive (custom
+        // vs. release installations).
+        assert!(Args::try_parse_from(["cactup", "install", "ET_2025_05", "--thornlist", "x.th"]).is_err());
     }
 }

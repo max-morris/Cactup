@@ -17,7 +17,7 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
         if let Some(release) = &installation.release {
             print!(" (release {})", release.bold());
         } else {
-            print!(" (manual installation)");
+            print!(" (custom)");
         }
         if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
             print!("{}", " (active)".bold().bright_green());
