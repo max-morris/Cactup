@@ -54,6 +54,11 @@ pub struct SimulationMeta {
     pub executable: PathBuf,
     /// Master-copy file name under `.cactup/cfg/`.
     pub optionlist: String,
+    /// Master-copy file name under `.cactup/cfg/`: the thorn set this
+    /// simulation's frozen binary was built with. Empty for simulations created
+    /// before this was recorded, and for configs built by an older cactup.
+    #[serde(default)]
+    pub thornlist: String,
     /// Master-copy file name under `.cactup/par/` (`<basename>.par` or `.py`).
     pub parfile: String,
     /// Installation alias (needed by the compute-node re-invocation, §8.3).
@@ -74,6 +79,7 @@ impl Default for SimulationMeta {
             build_id: String::new(),
             executable: PathBuf::new(),
             optionlist: String::new(),
+            thornlist: String::new(),
             parfile: String::new(),
             alias: String::new(),
         }
@@ -302,20 +308,31 @@ pub fn create(
         .and_then(|()| fs::create_dir_all(cactup_dir.join("par")))
         .with_context(|| format!("Failed to create {}", cactup_dir.display()))?;
 
-    // 6. Master copies: the parfile, and the config's optionlist snapshot.
+    // 6. Master copies: the parfile, and the config's optionlist and thornlist
+    //    snapshots. Each pair is ordered fed-to-Cactus copy first, source
+    //    second; the name recorded in the metadata is the first that exists.
     fs::copy(parfile, cactup_dir.join("par").join(&par_basename))
         .with_context(|| format!("Failed to copy {} into the simulation", parfile.display()))?;
-    let mut optionlist = String::new();
-    for cfg_file in ["cactup-optionlist.cfg", "cactup-optionlist.toml"] {
-        let src = cactus_root.join("configs").join(&config).join(cfg_file);
-        if src.is_file() {
-            fs::copy(&src, cactup_dir.join("cfg").join(cfg_file))
-                .with_context(|| format!("Failed to copy {}", src.display()))?;
-            if optionlist.is_empty() {
-                optionlist = cfg_file.to_owned();
+    let copy_cfg = |files: &[&str]| -> Res<String> {
+        let mut primary = String::new();
+        for cfg_file in files {
+            let src = cactus_root.join("configs").join(&config).join(cfg_file);
+            if src.is_file() {
+                fs::copy(&src, cactup_dir.join("cfg").join(cfg_file))
+                    .with_context(|| format!("Failed to copy {}", src.display()))?;
+                if primary.is_empty() {
+                    primary = (*cfg_file).to_owned();
+                }
             }
         }
-    }
+        Ok(primary)
+    };
+    let optionlist = copy_cfg(&["cactup-optionlist.cfg", "cactup-optionlist.toml"])?;
+    // Which thorns the frozen binary actually contains. The processed list is
+    // the authoritative answer — it is what Cactus was handed — and the source
+    // snapshot rides along to record what it was derived from. Both may be
+    // absent for a config built by an older cactup, hence no hard requirement.
+    let thornlist = copy_cfg(&[build::THORNLIST_PROCESSED, build::THORNLIST_SNAPSHOT])?;
 
     // 5. Freeze the binary: populate CACHE/exe/<build-id> and hard-link it in
     //    (port of CopyFileWithCaching, §8.1), GC-ing orphans opportunistically.
@@ -334,6 +351,7 @@ pub fn create(
         build_id: cfg.build_id.clone(),
         executable: cactup_dir.join("exe"),
         optionlist,
+        thornlist,
         parfile: par_basename,
         alias: inst.alias.clone(),
     };

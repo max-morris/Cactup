@@ -31,9 +31,14 @@ pub fn dispatch(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         print!("{}", " (active)".bold().bright_green());
     }
     println!();
-    match &entry.release {
-        Some(release) => println!("  release:      {release}"),
-        None => println!("  release:      (custom installation)"),
+    match (&entry.release, &entry.thornlist) {
+        (Some(release), _) => println!("  release:      {release}"),
+        // A custom installation is identified by the thornlist it was built
+        // from — that is the only thing distinguishing it from any other.
+        (None, Some(thornlist)) => {
+            println!("  release:      (custom installation from {thornlist})")
+        }
+        (None, None) => println!("  release:      (custom installation)"),
     }
     println!("  path:         {}", entry.path);
 

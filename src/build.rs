@@ -136,6 +136,99 @@ impl ConfigMeta {
     }
 }
 
+/// The two thornlist artifacts kept in a config directory (§7.5). The
+/// *processed* copy (toggles applied) is what Cactus is handed as `THORNLIST=`,
+/// and it is what the rebuild decision diffs. The *snapshot* is the source file
+/// byte for byte, so a config stays rebuildable after the file it was built
+/// from moves or is deleted — the same role `cactup-optionlist.toml` plays for
+/// the optionlist.
+/// Public because `sim create` copies both into a simulation's `.cactup/cfg/`
+/// for provenance (§8.2) — a rename here must not silently break that.
+pub const THORNLIST_PROCESSED: &str = "cactup-thornlist.th";
+pub const THORNLIST_SNAPSHOT: &str = "cactup-thornlist.src.th";
+
+fn config_file(cactus_root: &Path, name: &str, file: &str) -> PathBuf {
+    cactus_root.join("configs").join(name).join(file)
+}
+
+/// The source thornlist a build will use, and where it came from (§7.5).
+pub struct ResolvedThornlist {
+    /// Recorded in `cactup-config.toml`'s `thornlist` key: the original source
+    /// path, preserved even when the snapshot had to stand in for it.
+    pub recorded: String,
+    /// Verbatim source text, before thorn toggles.
+    pub text: String,
+    /// Set when `recorded` was unreadable and the config's snapshot was used.
+    pub from_snapshot: bool,
+}
+
+/// Resolve the source thornlist for a build (§7.5):
+///
+///   1. `--thornlist PATH` — explicit; a hard error if unreadable.
+///   2. the path this config was last built from (stored metadata).
+///   3. that config's verbatim snapshot, when the stored path has since moved
+///      or been deleted.
+///   4. `<Cactus root>/thornlists/einsteintoolkit.th` — the fresh-config default.
+///
+/// Steps 2-3 are why a rebuild no longer silently reverts a config built from a
+/// custom thornlist to the stock Einstein Toolkit list: the flag need not be
+/// repeated on every rebuild, and the snapshot means the original file going
+/// away cannot quietly change what gets built. Step 2 preferring the live file
+/// over the snapshot is deliberate — editing the thornlist in place is the
+/// normal way to add a thorn, and that edit must be picked up.
+pub fn resolve_thornlist(
+    cactus_root: &Path,
+    name: &str,
+    stored: Option<&ConfigMeta>,
+    cli: Option<&Path>,
+) -> Res<ResolvedThornlist> {
+    if let Some(path) = cli {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read thornlist {}", path.display()))?;
+        // Canonicalize what we record: a relative path would resolve against
+        // whatever directory a later rebuild happened to run from.
+        let recorded = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        return Ok(ResolvedThornlist {
+            recorded: recorded.display().to_string(),
+            text,
+            from_snapshot: false,
+        });
+    }
+
+    if let Some(stored_path) = stored.map(|m| m.thornlist.as_str()) {
+        if let Ok(text) = fs::read_to_string(stored_path) {
+            return Ok(ResolvedThornlist {
+                recorded: stored_path.to_owned(),
+                text,
+                from_snapshot: false,
+            });
+        }
+        let snapshot = config_file(cactus_root, name, THORNLIST_SNAPSHOT);
+        let text = fs::read_to_string(&snapshot).with_context(|| {
+            format!(
+                "config \"{name}\" was built from thornlist {stored_path}, which is no longer \
+                 readable, and there is no snapshot at {} to fall back on — pass --thornlist to \
+                 say which thornlist to build from",
+                snapshot.display()
+            )
+        })?;
+        return Ok(ResolvedThornlist {
+            recorded: stored_path.to_owned(),
+            text,
+            from_snapshot: true,
+        });
+    }
+
+    let default = cactus_root.join("thornlists/einsteintoolkit.th");
+    let text = fs::read_to_string(&default)
+        .with_context(|| format!("Failed to read thornlist {}", default.display()))?;
+    Ok(ResolvedThornlist {
+        recorded: default.display().to_string(),
+        text,
+        from_snapshot: false,
+    })
+}
+
 /// Apply the §7.5 (D8) machine thorn toggles to a thornlist's contents:
 /// `disabled-thorns` entries get a `#DISABLED ` prefix, `enabled-thorns`
 /// entries get it removed. Entries match a thorn line's `arrangement/Thorn`
@@ -202,22 +295,38 @@ pub fn effective_flags(opts: &BuildOpts, stored: Option<BuildFlags>) -> BuildFla
     }
 }
 
-/// Why (or whether) a rebuild must run from scratch (§7.8).
+/// Whether a build must run, and how much of it (§7.8).
 #[derive(Debug, PartialEq)]
 pub enum RebuildDecision {
     /// No config on disk yet.
     Fresh,
-    /// Optionlist TOML or universe unchanged: plain incremental `make`.
-    Incremental,
-    /// Any optionlist diff or universe change: realclean + reconfigure + build.
+    /// Nothing cactup tracks changed: a complete config can short-circuit.
+    UpToDate,
+    /// The thorn set changed: reconfigure + `make`, but no `realclean`. Unlike
+    /// an optionlist edit this does not invalidate already-compiled objects —
+    /// it changes *which* thorns are in the build, not how the code compiles —
+    /// and Cactus regenerates the bindings itself off the
+    /// `configs/<name>/ThornList` that the reconfigure step copies into place.
+    /// Adding a thorn is routine, so paying a from-scratch rebuild for it would
+    /// be a poor trade; `-f` is still there when one is wanted.
+    Incremental(&'static str),
+    /// Optionlist or universe changed: realclean + reconfigure + build. Both
+    /// change *how* the sources compile, so every existing object is suspect.
     Full(&'static str),
 }
 
+/// `stored_thornlist`/`fresh_thornlist` are the *processed* (toggles-applied)
+/// texts, so this one comparison covers a source-thornlist edit, a switch to a
+/// different thornlist file, and a change to the machine's or variant's
+/// `enabled-thorns`/`disabled-thorns` — none of which the optionlist TOML diff
+/// can see.
 pub fn rebuild_decision(
     stored_optionlist: Option<&str>,
     fresh_optionlist: &str,
     stored_universe: Option<&str>,
     resolved_universe: Option<&str>,
+    stored_thornlist: Option<&str>,
+    fresh_thornlist: &str,
 ) -> RebuildDecision {
     match stored_optionlist {
         None => RebuildDecision::Fresh,
@@ -227,7 +336,13 @@ pub fn rebuild_decision(
         Some(_) if stored_universe != resolved_universe => {
             RebuildDecision::Full("the build universe changed")
         }
-        Some(_) => RebuildDecision::Incremental,
+        // An absent processed thornlist (hand-deleted from the config dir)
+        // gives nothing to compare against, so it reads as unchanged; the
+        // build rewrites it either way.
+        Some(_) if stored_thornlist.is_some_and(|s| s != fresh_thornlist) => {
+            RebuildDecision::Incremental("the thornlist changed")
+        }
+        Some(_) => RebuildDecision::UpToDate,
     }
 }
 
@@ -273,6 +388,9 @@ pub fn build(
         bail!("no Cactus tree at {}", cactus_root.display());
     }
     let config_dir = cactus_root.join("configs").join(name);
+    // Loaded up front: it carries the thornlist this config was last built
+    // from, which feeds thornlist resolution below (§7.5).
+    let stored_meta = ConfigMeta::load(&cactus_root, name)?;
 
     // Selection & inputs (§4.4, §7.8).
     let variant = machine.select_optionlist(opts.variant.as_deref())?;
@@ -290,12 +408,17 @@ pub fn build(
         .map(|u| machine.meta.universe(u))
         .transpose()?;
 
-    let thornlist_path = match &opts.thornlist {
-        Some(path) => path.clone(),
-        None => cactus_root.join("thornlists/einsteintoolkit.th"),
-    };
-    let thornlist_text = fs::read_to_string(&thornlist_path)
-        .with_context(|| format!("Failed to read thornlist {}", thornlist_path.display()))?;
+    let thornlist =
+        resolve_thornlist(&cactus_root, name, stored_meta.as_ref(), opts.thornlist.as_deref())?;
+    if thornlist.from_snapshot {
+        println!(
+            "{} thornlist {} is no longer readable; building from the copy snapshotted in the \
+             config ({}).",
+            "warning:".yellow().bold(),
+            thornlist.recorded,
+            THORNLIST_SNAPSHOT,
+        );
+    }
     // Machine-level thorn toggles (§7.5) plus this optionlist variant's own
     // (§7.8): the variant augments the machine, so one machine can carry build
     // flavors that disable different thorns (e.g. a CUDA variant dropping
@@ -318,9 +441,9 @@ pub fn build(
         .chain(&optionlist.header.disabled_thorns)
         .cloned()
         .collect();
-    let thornlist_processed = apply_thorn_toggles(&thornlist_text, &enabled_thorns, &disabled_thorns);
+    let thornlist_processed =
+        apply_thorn_toggles(&thornlist.text, &enabled_thorns, &disabled_thorns);
 
-    let stored_meta = ConfigMeta::load(&cactus_root, name)?;
     if let Some(stored) = &stored_meta
         && stored.variant != variant
         && opts.variant.is_none()
@@ -332,26 +455,41 @@ pub fn build(
     }
     let flags = effective_flags(opts, stored_meta.as_ref().map(|m| m.flags));
 
-    // Rebuild decision (§7.8): diff the SOURCE TOML snapshot + the universe.
+    // Rebuild decision (§7.8): diff the SOURCE TOML snapshot, the universe, and
+    // the processed thornlist.
     let snapshot_path = config_dir.join("cactup-optionlist.toml");
     let stored_optionlist = fs::read_to_string(&snapshot_path).ok();
+    let stored_thornlist =
+        fs::read_to_string(config_file(&cactus_root, name, THORNLIST_PROCESSED)).ok();
     let mut decision = rebuild_decision(
         stored_optionlist.as_deref(),
         &optionlist.source,
         stored_meta.as_ref().and_then(|m| m.universe.as_deref()),
         universe_name.as_deref(),
+        stored_thornlist.as_deref(),
+        &thornlist_processed,
     );
     if opts.force || opts.reconfig {
         decision = RebuildDecision::Full("-f/--reconfig given");
-    } else if decision == RebuildDecision::Incremental
+    } else if decision == RebuildDecision::UpToDate
         && is_complete(&cactus_root, name)
         && let Some(stored) = stored_meta.clone()
     {
         println!(
-            "Config {} is up to date (same optionlist, same universe); pass -f to rebuild.",
+            "Config {} is up to date (same optionlist, same universe, same thornlist); pass -f to \
+             rebuild.",
             name
         );
         return Ok(BuildOutcome { meta: stored, rebuilt: false });
+    }
+    // Say which cheaper path is being taken, so a thornlist edit does not look
+    // like it was ignored (it used to be) and a *reconfigure* is not mistaken
+    // for the from-scratch rebuild that `-f` gives.
+    if let RebuildDecision::Incremental(why) = decision {
+        println!(
+            "Rebuilding config {name}: {why} — reconfiguring and rebuilding what that affects \
+             (pass -f for a from-scratch rebuild)."
+        );
     }
 
     // Build-context variables (§6.3, build-time set).
@@ -395,8 +533,15 @@ pub fn build(
     }
     let rendered_path = config_dir.join("cactup-optionlist.cfg");
     fs::write(&rendered_path, &rendered)?;
-    let thornlist_out = config_dir.join("cactup-thornlist.th");
+    let thornlist_out = config_dir.join(THORNLIST_PROCESSED);
     fs::write(&thornlist_out, &thornlist_processed)?;
+    // Snapshot the source verbatim, so a rebuild survives the file it came from
+    // moving or being deleted (resolve_thornlist step 3). Written from
+    // `thornlist.text`, not the processed copy: a rebuild must re-apply
+    // whatever the machine's thorn toggles say *then*, not replay old ones.
+    let thornlist_snapshot = config_dir.join(THORNLIST_SNAPSHOT);
+    fs::write(&thornlist_snapshot, &thornlist.text)
+        .with_context(|| format!("Failed to write {}", thornlist_snapshot.display()))?;
     // Every build's combined output is teed here so a failure leaves something
     // to read once the terminal scrollback is gone (§7.2).
     let build_log = config_dir.join("cactup-build.log");
@@ -508,7 +653,7 @@ pub fn build(
         variant: variant.clone(),
         gpu: optionlist.header.gpu,
         compatible_queues: optionlist.header.compatible_queues.clone(),
-        thornlist: thornlist_path.display().to_string(),
+        thornlist: thornlist.recorded.clone(),
         machine: machine.name.clone(),
         universe: universe_name,
         coerce_run_universe: optionlist.header.coerce_run_universe,
@@ -739,17 +884,35 @@ mod tests {
     #[test]
     fn rebuild_decisions() {
         use RebuildDecision as R;
-        assert_eq!(rebuild_decision(None, "x", None, None), R::Fresh);
-        assert_eq!(rebuild_decision(Some("x"), "x", None, None), R::Incremental);
-        assert!(matches!(rebuild_decision(Some("x"), "y", None, None), R::Full(_)));
+        // No stored optionlist at all ⇒ nothing has been built here yet.
+        assert_eq!(rebuild_decision(None, "x", None, None, None, "t"), R::Fresh);
+        assert_eq!(rebuild_decision(Some("x"), "x", None, None, Some("t"), "t"), R::UpToDate);
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", Some("et-sif"), None),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t"),
+            R::Full(_)
+        ));
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t"),
             R::Full(_)
         ));
         assert_eq!(
-            rebuild_decision(Some("x"), "x", Some("u"), Some("u")),
-            R::Incremental
+            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t"),
+            R::UpToDate
         );
+
+        // A thornlist edit is a rebuild — the bug this fixes was it reading as
+        // up-to-date — but a reconfigure, not a realclean.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2"),
+            R::Incremental(_)
+        ));
+        // An optionlist change outranks it: realclean wins over reconfigure.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2"),
+            R::Full(_)
+        ));
+        // No processed thornlist on disk ⇒ nothing to compare, not an edit.
+        assert_eq!(rebuild_decision(Some("x"), "x", None, None, None, "t"), R::UpToDate);
     }
 
     /// End-to-end against a fake Cactus tree whose machine `make` is a shell
@@ -1049,6 +1212,89 @@ mod tests {
         assert!(err.contains(&exe.display().to_string()), "should name the exe: {err}");
         assert!(!err.contains("cctk_Config.h"), "must not blame the configure marker: {err}");
         assert!(err.contains("exit status"), "should flag the swallowed-status case: {err}");
+    }
+
+    /// The thornlist is a real rebuild input (§7.8), is remembered across
+    /// rebuilds, and is snapshotted so a config survives its source file going
+    /// away (§7.5). Previously an edited thornlist read as "up to date" and a
+    /// rebuild without `--thornlist` silently reverted to einsteintoolkit.th.
+    #[test]
+    fn thornlist_is_a_rebuild_input_and_survives_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+        let processed = || fs::read_to_string(cactus.join("configs/sim/cactup-thornlist.th")).unwrap();
+
+        // Build from a custom thornlist (the stock list here is just "A/B").
+        let custom = root.join("my.th");
+        fs::write(&custom, "A/B\nC/D\n").unwrap();
+        let mut custom_opts = BuildOpts::default_for_tests();
+        custom_opts.thornlist = Some(custom.clone());
+        let first = build(&inst, &machine, "sim", &custom_opts).unwrap();
+        assert!(first.rebuilt);
+        let canonical = fs::canonicalize(&custom).unwrap().display().to_string();
+        assert_eq!(first.meta.thornlist, canonical);
+        // The source is snapshotted verbatim, beside the processed copy.
+        assert_eq!(
+            fs::read_to_string(cactus.join("configs/sim/cactup-thornlist.src.th")).unwrap(),
+            "A/B\nC/D\n"
+        );
+
+        // A plain rebuild reuses the recorded thornlist rather than reverting to
+        // the stock list — and with nothing changed still short-circuits.
+        let again = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!again.rebuilt, "nothing changed, so it must short-circuit");
+        assert_eq!(again.meta.thornlist, canonical);
+        assert!(processed().contains("C/D"), "must not revert to the stock list: {}", processed());
+
+        // Editing that thornlist in place is picked up with no --thornlist and
+        // no -f, and reconfigures without paying for a realclean.
+        clear_log();
+        fs::write(&custom, "A/B\nC/D\nE/F\n").unwrap();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(edited.rebuilt, "a thornlist edit must rebuild");
+        assert!(log().contains("sim-config"), "must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "a thorn change needs no realclean: {}", log());
+        assert!(processed().contains("E/F"), "the edit must reach the build: {}", processed());
+
+        // With the source deleted, a forced rebuild falls back to the snapshot
+        // instead of silently building the stock list, and still records the
+        // original path.
+        fs::remove_file(&custom).unwrap();
+        let mut forced = BuildOpts::default_for_tests();
+        forced.force = true;
+        let orphaned = build(&inst, &machine, "sim", &forced).unwrap();
+        assert!(orphaned.rebuilt);
+        assert_eq!(orphaned.meta.thornlist, canonical);
+        assert!(
+            processed().contains("E/F"),
+            "the snapshot, not einsteintoolkit.th, must be what got built: {}",
+            processed()
+        );
+
+        // Source *and* snapshot gone: refuse to guess, and say what to pass.
+        fs::remove_file(cactus.join("configs/sim/cactup-thornlist.src.th")).unwrap();
+        let err = match build(&inst, &machine, "sim", &forced) {
+            Ok(_) => panic!("should refuse to fall back to the stock thornlist"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("--thornlist"), "should say how to recover: {err}");
     }
 
     /// Defect A, configure-failure branch: the marker is absent (configure

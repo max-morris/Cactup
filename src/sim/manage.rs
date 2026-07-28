@@ -383,6 +383,24 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
     println!("  machine:       {}", sim.meta.machine);
     println!("  parfile:       {}", sim.meta.parfile);
     println!("  simulation-id: {}", sim.meta.simulation_id);
+    if long {
+        // Build provenance snapshotted into `.cactup/cfg/` at create time
+        // (§8.2): what this sim's frozen binary was compiled from, which
+        // outlives a rebuild or deletion of the config itself. Empty for
+        // simulations created before cactup recorded the artifact.
+        let cfg = sim.dir.join(".cactup/cfg");
+        for (label, file) in
+            [("optionlist", &sim.meta.optionlist), ("thornlist", &sim.meta.thornlist)]
+        {
+            // Padded to the width of the longest label above ("simulation-id").
+            let label = format!("{label}:");
+            if file.is_empty() {
+                println!("  {label:<14} {}", "(not recorded)".yellow());
+            } else {
+                println!("  {label:<14} {}", cfg.join(file).display());
+            }
+        }
+    }
 
     let active = restart::active_id(&sim.dir)?;
     let ids = restart::list_ids(&sim.dir)?;

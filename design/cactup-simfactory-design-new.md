@@ -95,7 +95,11 @@ Already implemented (`src/database.rs`). It is the **only** global mutable state
 and is concerned **exclusively** with global cactup state:
 
 - `cactup-version`
-- `installations`: alias → `{ alias, release, path }`
+- `installations`: alias → `{ alias, release, path, thornlist? }`. `release` is
+  `null` for a **custom installation** (`install --thornlist`), in which case
+  `thornlist` records the absolute path it was installed from — the only thing
+  that identifies such an installation, and what `show`/`list` name in place of
+  a release. Omitted entirely for release installs.
 - `active-installation`
 - **knobs** (new; see §5) — global defaults, one flat map (a `~/.cactup` lives
   on exactly one machine).
@@ -1448,8 +1452,9 @@ cactup config delete <name>
 ```
 
 - `build`: builds (or rebuilds with `-f`) config `<name>` in the active
-  installation. `--thornlist` defaults to
-  `<Cactus root>/thornlists/einsteintoolkit.th`. `--variant` selects the
+  installation. `--thornlist` defaults to the thornlist the config was last
+  built from (§7.5), falling back to
+  `<Cactus root>/thornlists/einsteintoolkit.th` for a fresh config. `--variant` selects the
   optionlist variant (required iff the machine has >1 optionlist variant — §4.4).
   `--universe <U>` runs the build inside a declared universe (e.g. an Apptainer
   image), `--no-universe` forces the host context; both override the
@@ -1552,7 +1557,9 @@ governs that coercion. Only the universe **name** is inherited for the run — t
 run-time wrapper is re-resolved and re-expanded from the current MDB (§4.8).
 
 **Rebuild-decision snapshot.** At build time cactup also copies the chosen
-**source optionlist TOML** verbatim to `configs/<name>/cactup-optionlist.toml`.
+**source optionlist TOML** verbatim to `configs/<name>/cactup-optionlist.toml`,
+and the chosen **source thornlist** verbatim to
+`configs/<name>/cactup-thornlist.src.th` (§7.5).
 The rebuild decision (§7.8 rule 5) diffs the freshly-selected source TOML against
 this stored copy; *any* difference triggers a full realclean + reconfigure +
 rebuild. This is the source-of-truth for "did the optionlist change?" — the
@@ -1575,6 +1582,29 @@ is processed at build time: each thorn named in the machine's
 `disabled-thorns` gets a `#DISABLED ` prefix; `enabled-thorns` removes such a
 prefix. The machine arrays come from `meta.toml` (§4.2). This lets a cluster
 that can't build a given thorn opt it out without editing the shared thornlist.
+
+**Two artifacts per config.** The processed text is written to
+`configs/<name>/cactup-thornlist.th` and handed to Cactus as `THORNLIST=`, which
+Cactus copies to its own `configs/<name>/ThornList` — the file its make rules
+actually consume. Both are *derived*: they are rewritten on every build, so the
+file to edit is always the **source** thornlist. Alongside the processed copy,
+the source is snapshotted verbatim to `configs/<name>/cactup-thornlist.src.th`.
+
+**Source resolution**, in order:
+
+1. `--thornlist PATH` — explicit; unreadable is a hard error.
+2. the path recorded in the config's metadata (`thornlist`), when still readable.
+3. that config's `cactup-thornlist.src.th` snapshot, when the recorded path has
+   moved or been deleted — with a warning, and the original path stays recorded.
+4. `<Cactus root>/thornlists/einsteintoolkit.th`, for a fresh config only.
+
+Step 2 means `--thornlist` does not have to be repeated on every rebuild: a
+config built from a custom thornlist never silently reverts to the stock
+Einstein Toolkit list. It prefers the live file over the snapshot deliberately —
+editing the thornlist in place is the normal way to add a thorn, and that edit
+must be picked up. Step 3 makes the snapshot the safety net rather than a
+second source of truth. If both are gone, the build refuses to guess and says
+to pass `--thornlist`.
 
 ### 7.6 Build precedence & flags
 
@@ -1657,17 +1687,36 @@ it is never diffed for the rebuild decision):**
    identifiers and are emitted **verbatim** — cactup maps `optimize` → `OPTIMISE`
    at render. Never Americanize keys inside `[options]`.
 
-**Rebuild trigger (one rule).** The decision to rebuild is made by diffing
-the freshly-selected **source optionlist TOML** against the copy stored at build
-time (`configs/<name>/cactup-optionlist.toml`, §7.4). *Any* difference — a
-changed flag, a new key, or a bumped `VERSION` — triggers a full
-`make <config>-realclean` + reconfigure + rebuild. (So a `VERSION` bump forces a
-rebuild only *because* it is a diff; there is no separate VERSION-only path.) The
-rendered native file plays no part in this comparison and its comments — which
-TOML drops on parse — are irrelevant, since nothing diffs it. This collapses
-simfactory's finer "VERSION → realclean vs. other change → reconfigure-only"
-distinction into "any change → full rebuild": simpler and always safe, at the
-cost of a from-scratch rebuild on every optionlist edit.
+**Rebuild trigger.** The decision to rebuild diffs three inputs against what the
+config was last built with:
+
+1. the freshly-selected **source optionlist TOML** against the copy stored at
+   build time (`configs/<name>/cactup-optionlist.toml`, §7.4);
+2. the resolved build **universe** against the recorded one (§7.4);
+3. the **processed thornlist** against the stored
+   `configs/<name>/cactup-thornlist.th` (§7.5).
+
+An optionlist or universe difference — a changed flag, a new key, a bumped
+`VERSION` — triggers a full `make <config>-realclean` + reconfigure + rebuild.
+(So a `VERSION` bump forces a rebuild only *because* it is a diff; there is no
+separate VERSION-only path.) The rendered native file plays no part in the
+optionlist comparison and its comments — which TOML drops on parse — are
+irrelevant, since nothing diffs it. This collapses simfactory's finer "VERSION →
+realclean vs. other change → reconfigure-only" distinction into "any change →
+full rebuild": simpler and always safe, at the cost of a from-scratch rebuild on
+every optionlist edit.
+
+A thornlist difference triggers a **reconfigure + `make`, without the
+realclean**. Unlike an optionlist edit it does not invalidate already-compiled
+objects — it changes *which* thorns are in the build, not how the code compiles —
+and Cactus regenerates the bindings itself from the `configs/<name>/ThornList`
+the reconfigure step copies into place. Adding a thorn is routine, so charging a
+from-scratch rebuild for it would be a poor trade; `-f` still forces one.
+Diffing the *processed* text (not the source) makes this one comparison cover a
+source-thornlist edit, a switch to a different thornlist file, and a change to
+the machine's or variant's `enabled-thorns`/`disabled-thorns` — none of which the
+optionlist diff can see. Only when all three inputs match does a complete config
+short-circuit as up to date.
 
 ---
 
@@ -1770,8 +1819,15 @@ Port of `create()` (`simfactory-docs.txt` §14.1):
    cache entry for this `build-id` first if it isn't cached yet, and
    opportunistically GC-ing orphaned `build-id` entries — port of
    `CopyFileWithCaching`, §8.1).
-6. Copy the source optionlist and the parfile into the simulation metadata
-   (`.cactup/cfg`, `.cactup/par`).
+6. Copy the parfile into `.cactup/par`, and the config's build provenance into
+   `.cactup/cfg`: the optionlist pair (`cactup-optionlist.cfg` rendered +
+   `cactup-optionlist.toml` source) and the thornlist pair
+   (`cactup-thornlist.th` processed + `cactup-thornlist.src.th` source, §7.5).
+   The processed thornlist is what records *which thorns the frozen binary
+   contains*, so a simulation stays self-describing after its config is
+   rebuilt or deleted. `simulation.toml`'s `optionlist`/`thornlist` keys name
+   the fed-to-Cactus copy of each pair; both are empty strings when the config
+   was built by a cactup old enough not to have written the artifact.
 
 No restart is created yet (matches simfactory).
 
@@ -2026,6 +2082,13 @@ Display-state derivation for `cactup sim show`:
   active restart whose job is `U` and that has reached termination; ERROR = `E`;
   INACTIVE = no active restart.
 
+`--long` additionally prints the build provenance snapshotted into
+`.cactup/cfg/` at create time (§8.2) — the paths of the simulation's optionlist
+and thornlist — so "what was this binary compiled from?" is answerable from the
+simulation alone, after the config has been rebuilt or deleted. Either reads
+`(not recorded)` for a simulation created before cactup snapshotted that
+artifact.
+
 ### 8.7 `sim delete`
 
 Port of `purge`/`trash()` (`simfactory-docs.txt` §14.10): **fatal if any restart
@@ -2278,7 +2341,8 @@ format. External tools do not read this metadata, so changing it is safe.
   exe                              hard link → CACHE/exe/<build-id> (the frozen
                                    binary for this sim's config; a plain copy only
                                    if CACHE is on a different filesystem — §8.1)
-  cfg/  par/                       master copies of the optionlist + parfile (§8.2)
+  cfg/  par/                       master copies of the optionlist + thornlist, and
+                                   of the parfile (§8.2)
 output-%04d/.cactup/               restart-level metadata              [cactup-owned]
   restart.toml                     (replaces restart properties.ini; absorbs the
                                     old timestamp/simulation mark files)

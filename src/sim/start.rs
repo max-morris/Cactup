@@ -875,6 +875,16 @@ mod tests {
             "#,
         )
         .unwrap();
+        // The build artifacts `sim create` snapshots into a simulation for
+        // provenance (§8.2): the optionlist pair and the thornlist pair.
+        for (file, body) in [
+            ("cactup-optionlist.cfg", "VERSION = 1\nCC = gcc\n"),
+            ("cactup-optionlist.toml", "[options]\nVERSION = \"1\"\n"),
+            ("cactup-thornlist.th", "A/B\n#DISABLED C/D\n"),
+            ("cactup-thornlist.src.th", "A/B\nC/D\n"),
+        ] {
+            fs::write(cfg_dir.join(file), body).unwrap();
+        }
         let exe_dir = inst.cactus_root().join("exe");
         fs::create_dir_all(&exe_dir).unwrap();
         fs::write(exe_dir.join("cactus_sim"), "#!/bin/sh\necho cactus\n").unwrap();
@@ -937,6 +947,21 @@ mod tests {
         let sim = crate::sim::create(&ctx, &machine, &inst, false, "bbh", &parfile, None, None).unwrap();
         assert!(sim.exe().is_file(), "frozen executable linked");
         assert!(inst.simulations().unwrap().simulations.contains_key("bbh"));
+
+        // Build provenance travels with the simulation (§8.2): both the
+        // optionlist and the thornlist pair are copied in, and the metadata
+        // names the fed-to-Cactus copy of each.
+        let cfg = sim.dir.join(".cactup/cfg");
+        assert_eq!(sim.meta.optionlist, "cactup-optionlist.cfg");
+        assert_eq!(sim.meta.thornlist, "cactup-thornlist.th");
+        assert_eq!(
+            fs::read_to_string(cfg.join("cactup-thornlist.th")).unwrap(),
+            "A/B\n#DISABLED C/D\n",
+            "the processed thornlist records which thorns the frozen binary has"
+        );
+        for f in ["cactup-optionlist.cfg", "cactup-optionlist.toml", "cactup-thornlist.src.th"] {
+            assert!(cfg.join(f).is_file(), "{f} should be snapshotted into the sim");
+        }
 
         // 50 h on a 24 h ceiling → 3 chained segments (§8.8).
         let db = ctx.db.read().unwrap();

@@ -252,6 +252,12 @@ cactup sim show mysim --output-dir          # Print the current output directory
 cactup sim show mysim --output-dir --restart-id 2  # Print the 3rd restart output dir
 ```
 
+`--long` also prints the paths of the optionlist and thornlist this simulation's
+executable was built from. Those are copies taken when the simulation was
+created, so they still answer "which thorns and compiler flags produced this
+run?" long after the config itself has been rebuilt or deleted. Simulations
+created by an older cactup show `(not recorded)`.
+
 ## Viewing output
 
 Stream simulation output:

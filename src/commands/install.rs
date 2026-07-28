@@ -43,7 +43,13 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             let expanded = shell::expand_path(&p2s(path.clone())?, &base_dirs);
             let content = fs::read_to_string(&expanded)
                 .with_context(|| format!("Failed to read thornlist {expanded}"))?;
-            Some((path.clone(), content))
+            // Carry the *expanded*, absolute path onward: it is what the alias
+            // default, the success message, and the recorded provenance all
+            // want, and a `~`-relative or cwd-relative path would be
+            // meaningless once stored in the global DB.
+            let expanded = PathBuf::from(&expanded);
+            let resolved = fs::canonicalize(&expanded).unwrap_or(expanded);
+            Some((resolved, content))
         }
         None => None,
     };
@@ -333,6 +339,12 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         InstallSource::Release(release_tag) => Some(release_tag.short_name.clone()),
         InstallSource::Custom { .. } => None,
     };
+    // A custom installation has no release name to show, so record the
+    // thornlist it came from and let `show`/`list` name that instead.
+    let source_thornlist = match &source {
+        InstallSource::Release(_) => None,
+        InstallSource::Custom { path, .. } => Some(path.display().to_string()),
+    };
 
     let became_active = ctx.db.update(|database| {
         if database.installations.contains_key(&alias) {
@@ -346,6 +358,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             alias: alias.clone(),
             release: release_name.clone(),
             path: install_dir.to_string_lossy().to_string(),
+            thornlist: source_thornlist.clone(),
         });
         if database.active_installation.is_none() {
             database.active_installation = Some(alias.clone());
@@ -360,8 +373,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, install_dir.join("Cactus").display()).bold().bright_green());
         }
         InstallSource::Custom { path, .. } => {
-            let file_name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            println!("{}", format!("Success! Installed custom thornlist {} into {}", file_name, install_dir.join("Cactus").display()).bold().bright_green());
+            println!("{}", format!("Success! Installed custom thornlist {} into {}", path.display(), install_dir.join("Cactus").display()).bold().bright_green());
         }
     }
     if do_symlink {

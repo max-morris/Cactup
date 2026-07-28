@@ -67,7 +67,42 @@ Use a custom thornlist:
 cactup build myconfig --thornlist /path/to/custom.th
 ```
 
-By default, cactup uses the installation's built-in thornlist.
+For a brand-new config, cactup defaults to the installation's built-in thornlist
+(`<Cactus root>/thornlists/einsteintoolkit.th`). After that, the config remembers
+the thornlist it was built from, so you don't have to repeat `--thornlist` on
+every rebuild — pass it again only to switch to a different file.
+
+#### Editing a thornlist and rebuilding
+
+Edit the **source** thornlist — the file you passed to `--thornlist`, or the
+installation's `thornlists/einsteintoolkit.th`. Then rebuild:
+
+```sh
+cactup build myconfig
+```
+
+cactup notices the change and reconfigures. Adding or removing a thorn does
+*not* force a from-scratch rebuild, so this is usually quick; use `--force` if
+you want everything recompiled anyway.
+
+Do **not** edit the two thornlists inside `configs/<name>/`. Both are derived
+copies, rewritten on every build, so your edits there would be overwritten:
+
+- `cactup-thornlist.th` — cactup's processed copy, with the machine's
+  `disabled-thorns`/`enabled-thorns` toggles applied. This is what cactup hands
+  to Cactus.
+- `ThornList` — Cactus's own copy of that file, made by its build system. This
+  is the one Cactus compiles from.
+
+A third file, `cactup-thornlist.src.th`, is a verbatim snapshot of the source
+thornlist. It exists so the config stays rebuildable if the original file is
+later moved or deleted: cactup falls back to the snapshot (with a warning) rather
+than silently building the stock thornlist instead. It is a safety net, not an
+edit target — edits to it are picked up only while the original is missing.
+
+Creating a simulation copies both thornlists into the simulation's
+`.cactup/cfg/`, so you can always tell which thorns a given run's executable was
+built with — even after the config has been rebuilt or deleted.
 
 ### Virtual executables
 

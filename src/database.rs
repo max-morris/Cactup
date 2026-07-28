@@ -41,6 +41,13 @@ pub struct CactusInstallation {
     pub alias: String,
     pub release: Option<String>,
     pub path: String,
+    /// For a **custom installation** (`install --thornlist`, where `release` is
+    /// `None`): the thornlist file it was installed from. Without it "(custom
+    /// installation)" is all we can say about where the tree came from. `None`
+    /// for release installs, and for custom ones registered before this was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thornlist: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -257,6 +264,40 @@ mod tests {
         assert_eq!(snapshot.schema, SCHEMA);
         assert_eq!(snapshot.installations["et"].path, "/x");
         assert!(snapshot.knobs.is_empty());
+        // A custom installation registered before cactup recorded the thornlist
+        // it came from still reads; `show`/`list` just cannot name the source.
+        assert_eq!(snapshot.installations["et"].thornlist, None);
+    }
+
+    /// A custom installation's thornlist provenance survives a write/read
+    /// round-trip — it is the only thing that identifies such an installation,
+    /// since it has no release name.
+    #[test]
+    fn custom_installation_records_its_thornlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        db.update(|d| {
+            d.installations.insert(
+                "custom".to_owned(),
+                CactusInstallation {
+                    alias: "custom".to_owned(),
+                    release: None,
+                    path: "/x".to_owned(),
+                    thornlist: Some("/home/u/lists/mine.th".to_owned()),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let snapshot = db.read().unwrap();
+        let entry = &snapshot.installations["custom"];
+        assert_eq!(entry.release, None);
+        assert_eq!(entry.thornlist.as_deref(), Some("/home/u/lists/mine.th"));
+        // Release installs stay clean: the key is skipped when unset, so
+        // existing database.json files gain nothing.
+        let raw = fs::read_to_string(dir.path().join("database.json")).unwrap();
+        assert!(raw.contains("mine.th"), "{raw}");
     }
 
     #[test]

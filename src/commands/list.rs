@@ -14,10 +14,11 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
 
     for installation in database.installations.values() {
         print!("- {}", installation.alias.bold());
-        if let Some(release) = &installation.release {
-            print!(" (release {})", release.bold());
-        } else {
-            print!(" (custom)");
+        match (&installation.release, &installation.thornlist) {
+            (Some(release), _) => print!(" (release {})", release.bold()),
+            // Symmetric with the release case: name what it was built from.
+            (None, Some(thornlist)) => print!(" (custom thornlist {})", thornlist.bold()),
+            (None, None) => print!(" (custom)"),
         }
         if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
             print!("{}", " (active)".bold().bright_green());
