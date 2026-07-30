@@ -2021,7 +2021,12 @@ facts fill any topology the user left unset.
   `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node — divide the
   node's available CPUs among ranks) — using the queue-effective
   `max-cpus-per-node` (§4.2).
-- `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`.
+- `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`. An explicit
+  `--tasks` replaces the fill-the-node total, so a *derived* `TASKS_PER_NODE` is
+  then capped to `ceil(TASKS / NODES)` to keep the layout self-consistent
+  (`--tasks=1` is 1 rank on 1 node, not `TASKS = 1, TASKS_PER_NODE = 2`); an
+  explicit `--tpn` is authoritative and never capped. This is a no-op in the
+  default case, where `TASKS == NODES * TASKS_PER_NODE` already.
 - **Script-variant default tasks (§4.2).** When *no* process-layout flag
   (`-n`/`-T`/`-t`) was given, the selected script variant's optional `tasks = N`
   setting replaces the fill-the-node `TASKS` (capping `TASKS_PER_NODE` to keep

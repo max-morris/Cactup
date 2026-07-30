@@ -114,9 +114,18 @@ pub fn resolve_topology(
     // Request-side CPUS_PER_TASK: -c wins, else the machine/queue
     // `default-cpus-per-task` (simfactory's num-threads), else 1.
     let cpus = flags.cpus.or(hw.default_cpus_per_task).unwrap_or(1).max(1);
-    let tpn = flags.tpn.unwrap_or_else(|| (cpus_per_node / cpus).max(1));
+    let mut tpn = flags.tpn.unwrap_or_else(|| (cpus_per_node / cpus).max(1));
     let nodes = flags.nodes.unwrap_or(1);
     let tasks = flags.tasks.unwrap_or(nodes * tpn);
+    // An explicit `--tasks` overrides the fill-the-node `TASKS`, so the derived
+    // fill-the-node `TASKS_PER_NODE` has to be capped to keep the layout
+    // self-consistent (`--tasks=1` must not report 2 tasks/node) — the same
+    // capping `apply_tasks_default` does for the script-variant default. A
+    // user-given `--tpn` stays authoritative. No-op in the default case, where
+    // `tasks == nodes * tpn`.
+    if flags.tpn.is_none() {
+        tpn = tpn.min(tasks.div_ceil(nodes).max(1));
+    }
 
     let total_wall = match flags.wall_time {
         Some(w) => w,
@@ -476,6 +485,44 @@ mod tests {
         f.cpus = Some(1);
         let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn, topo.cpus), (1, 48, 48, 1));
+    }
+
+    #[test]
+    fn explicit_tasks_caps_tasks_per_node() {
+        // An explicit `--tasks` replaces the fill-the-node TASKS, so the derived
+        // TASKS_PER_NODE must be capped with it: `--tasks=1` is 1 task on 1 node,
+        // never `TASKS=1, TASKS_PER_NODE=16`.
+        let machine = test_machine();
+        let db = Database::new();
+
+        let mut f = flags();
+        f.tasks = Some(1);
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.nodes, topo.tasks, topo.tpn), (1, 1, 1));
+
+        // Below the fill-the-node value but above 1.
+        f.tasks = Some(3);
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.nodes, topo.tasks, topo.tpn), (1, 3, 3));
+
+        // Multi-node: the cap is per node, and never below the ranks a node holds.
+        f.nodes = Some(2);
+        f.tasks = Some(3);
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.nodes, topo.tasks, topo.tpn), (2, 3, 2));
+
+        // The fill-the-node default is untouched (tasks == nodes * tpn).
+        f.nodes = Some(2);
+        f.tasks = None;
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.nodes, topo.tasks, topo.tpn), (2, 32, 16));
+
+        // An explicit `--tpn` stays authoritative even when it exceeds `--tasks`.
+        f.nodes = None;
+        f.tasks = Some(1);
+        f.tpn = Some(4);
+        let topo = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap();
+        assert_eq!((topo.tasks, topo.tpn), (1, 4));
     }
 
     #[test]

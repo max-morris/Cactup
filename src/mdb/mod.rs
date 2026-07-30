@@ -465,12 +465,24 @@ mod tests {
         assert_eq!(rs.select("gpu", "et-sing", false, None).unwrap().0, "sing");
         assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing-test");
 
-        // qbd flipped SLURM->PBS with an empty upstream queue: its placeholder
-        // queue carries name = "" so @QUEUE@ resolves to the empty string (the
-        // remaining real-machine user of the per-queue `name` override).
+        // qbd (LSU/LONI Queen Bee 4) runs SLURM, though upstream's 2026-07-07
+        // regeneration flipped it to PBS with a blank queue: the port keeps
+        // #SBATCH/sbatch, matching its sibling LONI machine qbc, and replaces the
+        // placeholder queue with QB4's two real GPU partitions.
         let qbd = mdb.load("qbd").unwrap();
-        assert_eq!(qbd.meta.scheduler_queue_name("default").unwrap(), "");
-        assert!(qbd.meta.scheduler.submit.as_deref().unwrap().starts_with("qsub"));
+        assert!(qbd.meta.scheduler.submit.as_deref().unwrap().starts_with("sbatch"));
+        assert_eq!(qbd.meta.default_queue(HOST_UNIVERSE), Some("gpu2"));
+        assert!(qbd.meta.queues["gpu2"].gpu && qbd.meta.queues["gpu4"].gpu);
+        // No per-queue `name` override any more: @QUEUE@ is the key itself, so
+        // the submitscripts' `-p` directive and their `QUEUE == "gpu4"` gres
+        // branch both see the real partition names.
+        for q in ["gpu2", "gpu4"] {
+            assert_eq!(qbd.meta.scheduler_queue_name(q).unwrap(), q);
+        }
+        // The hardware behind the §8.5 fill-the-node layout: a 64-CPU node and a
+        // 32-CPU default request = 2 tasks/node, gpu2's 32-CPUs-per-GPU cap.
+        let hw = qbd.meta.effective_hardware("gpu2").unwrap();
+        assert_eq!((hw.max_cpus_per_node, hw.default_cpus_per_task), (Some(64), Some(32)));
 
         // graham unifies one Compute Canada cluster's CPU (g++) and CUDA (nvcc)
         // build flavors into two optionlist variants. The CUDA variant carries
@@ -479,6 +491,12 @@ mod tests {
         // one machine.
         let graham = mdb.load("graham").unwrap();
         assert!(!graham.meta.queues["cpu"].gpu && graham.meta.queues["gpu"].gpu);
+        // Compute Canada schedules by account, not partition, so both queues keep
+        // the historical `-p NO_QUEUE` value — the remaining real-machine user of
+        // the per-queue `name` override (§4.2).
+        for q in ["cpu", "gpu"] {
+            assert_eq!(graham.meta.scheduler_queue_name(q).unwrap(), "NO_QUEUE");
+        }
         let gpu_ol = optionlist::load_header(&graham.optionlist_path("gpu")).unwrap();
         assert!(gpu_ol.disabled_thorns.iter().any(|t| t == "ExternalLibraries/LORENE"));
         assert!(optionlist::load_header(&graham.optionlist_path("default")).unwrap().disabled_thorns.is_empty());
