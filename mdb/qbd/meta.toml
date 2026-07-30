@@ -27,10 +27,10 @@ hostname    = "qbd504.loni.org"
 
 [paths]
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
-install-home    = "/home/@USER@"
-simulation-home = "/scratch/@USER@/simulations"
+install-home    = "/work/@USER@"
+simulation-home = "/work/@USER@/simulations"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
-test-home       = "/scratch/@USER@/tests"
+test-home       = "/work/@USER@/tests"
 
 [hardware]
 max-cpus-per-node = 64
