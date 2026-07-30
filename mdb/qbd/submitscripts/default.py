@@ -30,7 +30,7 @@ if QUEUE:
     lines.append("#SBATCH -p {0}".format(QUEUE))
 if QUEUE == "gpu4":
     g_res = 4  # On gpu4, we always want the entire node
-else if typed['CPUS_PER_TASK'] * typed['TASKS_PER_NODE'] == 32:
+elif typed['CPUS_PER_TASK'] * typed['TASKS_PER_NODE'] == 32:
     g_res = 1  # We can request half-nodes on gpu2 if we only use a total of 32 cpus per node
 else:
     g_res = 2  # Requesting full nodes on gpu2
