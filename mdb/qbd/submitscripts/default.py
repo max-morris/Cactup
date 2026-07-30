@@ -47,6 +47,8 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
+lines.append(f"# INFO: CPUS_PER_TASK={CPUS_PER_TASK}, TASKS_PER_NODE={TASKS_PER_NODE}")
+
 # env-setup is NOT auto-prepended for .py variants (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
