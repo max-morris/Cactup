@@ -56,6 +56,9 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
             Ok(())
         }
         ConfigCommand::Delete { name, force } => delete(&installation, &name, force),
+        ConfigCommand::Delta { name } => {
+            super::delta::config_delta(&installation, name, ctx.globals.verbose)
+        }
     }
 }
 
@@ -113,7 +116,7 @@ fn list(installation: &Installation) -> Res<()> {
 }
 
 /// `cactup config show [name]`: the active config, or a named one, in detail.
-fn show(installation: &Installation, name: Option<&str>) -> Res<()> {
+pub(crate) fn show(installation: &Installation, name: Option<&str>) -> Res<()> {
     let cactus_root = installation.cactus_root();
 
     // No name → the contextually-relevant config: the active one.

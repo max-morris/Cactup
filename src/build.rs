@@ -6,6 +6,7 @@
 
 use crate::args::{BuildOpts, MakeJobs};
 use crate::database::SCHEMA;
+use crate::fetch::SourceHeads;
 use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
@@ -16,6 +17,7 @@ use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,6 +85,15 @@ pub struct ConfigMeta {
     pub built: Option<DateTime<Utc>>,
     #[serde(default)]
     pub flags: BuildFlags,
+    /// Per-repo HEADs (from `fetch-state.toml`) of the repos this config's
+    /// thorns came from, as of this build — the §7.4 source-tracking input
+    /// that makes a refetch invalidate the builds it actually reaches.
+    /// Absent for configs built before source tracking landed and for
+    /// installations with no fetch record; absent reads as "no information",
+    /// never as "unchanged". Serialized last: it is a TOML table, and a table
+    /// may not precede scalar keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -315,11 +326,94 @@ pub enum RebuildDecision {
     Full(&'static str),
 }
 
+/// How the source trees under a config differ from what it was built with
+/// (§7.4). A refetch is only one of the ways this happens — editing a thorn in
+/// place, or `git checkout` inside a repo, are ordinary workflows too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceDelta {
+    /// Nothing inspectable, or nothing stored on the config — behave exactly
+    /// as cactup did before source tracking.
+    Unknown,
+    Unchanged,
+    /// Tracked files differ from what was built: someone is editing sources in
+    /// place. `make`'s own dependency tracking decides what that costs, so
+    /// this never escalates past a reconfigure — including for the flesh,
+    /// where a from-scratch rebuild would punish anyone iterating on it.
+    Edited,
+    /// One or more thorn repos are on a different commit: recompile what that
+    /// affects.
+    Thorns,
+    /// The Cactus flesh is on a different commit. That is the make system and
+    /// everything `config-data/cctk_Config.h` is generated from, so every
+    /// existing object is suspect — the one source change earning a realclean.
+    Flesh,
+}
+
+/// What changed under a config, and which repos are responsible.
+#[derive(Debug, Default)]
+pub struct SourceChange {
+    /// Repos now on a different commit than the build used.
+    pub moved: Vec<String>,
+    /// Repos whose worktree differs from what the build used.
+    pub edited: Vec<String>,
+}
+
+impl SourceChange {
+    fn is_empty(&self) -> bool {
+        self.moved.is_empty() && self.edited.is_empty()
+    }
+}
+
+/// Compare the source state recorded at the last build against the tree as it
+/// stands now, returning the delta and the repos responsible.
+///
+/// A repo *missing* from the stored record is not a change on its own: the
+/// first build after source tracking landed, and any config whose thornlist
+/// just gained a thorn, would otherwise report every repo as new. A thornlist
+/// that gained or dropped a thorn is already caught by the processed-thornlist
+/// diff, so nothing is lost by only comparing repos both sides know about.
+pub fn source_delta(
+    stored: Option<&BTreeMap<String, String>>,
+    fresh: Option<&SourceHeads>,
+) -> (SourceDelta, SourceChange) {
+    let (Some(stored), Some(fresh)) = (stored, fresh) else {
+        return (SourceDelta::Unknown, SourceChange::default());
+    };
+    let mut change = SourceChange::default();
+    for (repo, state) in &fresh.heads {
+        let Some(was) = stored.get(repo.as_str()) else { continue };
+        if was == state {
+            continue;
+        }
+        // Split by *why* it differs: the commit moved (a refetch or a manual
+        // checkout) or only the worktree did (a hand edit).
+        if crate::fetch::committed(was) == crate::fetch::committed(state) {
+            change.edited.push(repo.clone());
+        } else {
+            change.moved.push(repo.clone());
+        }
+    }
+    if change.is_empty() {
+        return (SourceDelta::Unchanged, change);
+    }
+    let delta = if fresh.flesh.as_deref().is_some_and(|f| change.moved.iter().any(|m| m == f)) {
+        SourceDelta::Flesh
+    } else if !change.moved.is_empty() {
+        SourceDelta::Thorns
+    } else {
+        SourceDelta::Edited
+    };
+    (delta, change)
+}
+
 /// `stored_thornlist`/`fresh_thornlist` are the *processed* (toggles-applied)
 /// texts, so this one comparison covers a source-thornlist edit, a switch to a
 /// different thornlist file, and a change to the machine's or variant's
 /// `enabled-thorns`/`disabled-thorns` — none of which the optionlist TOML diff
 /// can see.
+///
+/// `sources` covers the case none of the text diffs can see at all: a refetch
+/// that leaves the thornlist byte-identical and moves the repos underneath it.
 pub fn rebuild_decision(
     stored_optionlist: Option<&str>,
     fresh_optionlist: &str,
@@ -327,6 +421,7 @@ pub fn rebuild_decision(
     resolved_universe: Option<&str>,
     stored_thornlist: Option<&str>,
     fresh_thornlist: &str,
+    sources: SourceDelta,
 ) -> RebuildDecision {
     match stored_optionlist {
         None => RebuildDecision::Fresh,
@@ -336,11 +431,22 @@ pub fn rebuild_decision(
         Some(_) if stored_universe != resolved_universe => {
             RebuildDecision::Full("the build universe changed")
         }
+        // Ranked above the thornlist diff because it is the strictly stronger
+        // response: a release bump usually changes both at once.
+        Some(_) if sources == SourceDelta::Flesh => {
+            RebuildDecision::Full("the Cactus flesh moved to a different commit")
+        }
         // An absent processed thornlist (hand-deleted from the config dir)
         // gives nothing to compare against, so it reads as unchanged; the
         // build rewrites it either way.
         Some(_) if stored_thornlist.is_some_and(|s| s != fresh_thornlist) => {
             RebuildDecision::Incremental("the thornlist changed")
+        }
+        Some(_) if sources == SourceDelta::Thorns => {
+            RebuildDecision::Incremental("the thorn sources moved to a different commit")
+        }
+        Some(_) if sources == SourceDelta::Edited => {
+            RebuildDecision::Incremental("the source tree has local edits")
         }
         Some(_) => RebuildDecision::UpToDate,
     }
@@ -372,6 +478,28 @@ pub fn resolve_build_universe<'a>(
 pub struct BuildOutcome {
     pub meta: ConfigMeta,
     pub rebuilt: bool,
+}
+
+/// Read the live state of every source repo this config builds from.
+///
+/// Best-effort by design: a thornlist cactup cannot parse, or a tree with no
+/// inspectable repo, yields `None` — which `source_delta` reads as "no
+/// information" and which therefore leaves the rebuild decision exactly as it
+/// was before source tracking. A build must never fail over this.
+fn live_sources(installation: &Installation, processed_thornlist: &str) -> Option<SourceHeads> {
+    let list = crate::thornlist::parse(processed_thornlist).ok()?;
+    crate::fetch::source_heads(&installation.root, &list).ok().flatten()
+}
+
+/// Join names for a one-line message, capping the tail: a release bump moves
+/// every repo in the list, and 81 names is not a message.
+fn summarize(names: &[String]) -> String {
+    const SHOWN: usize = 8;
+    let head = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    match names.len().checked_sub(SHOWN) {
+        Some(rest) if rest > 0 => format!("{head}, +{rest} more"),
+        _ => head,
+    }
 }
 
 /// Run `config build` for `name` (§7). Returns the stored
@@ -461,6 +589,13 @@ pub fn build(
     let stored_optionlist = fs::read_to_string(&snapshot_path).ok();
     let stored_thornlist =
         fs::read_to_string(config_file(&cactus_root, name, THORNLIST_PROCESSED)).ok();
+    // How the source trees now differ from what this config was built with
+    // (§7.4) — a refetch, a manual checkout, or a hand-edited thorn. None of
+    // the text diffs above can see any of it: they all leave the thornlist
+    // byte-identical.
+    let fresh_sources = live_sources(installation, &thornlist_processed);
+    let (sources, source_change) =
+        source_delta(stored_meta.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
     let mut decision = rebuild_decision(
         stored_optionlist.as_deref(),
         &optionlist.source,
@@ -468,6 +603,7 @@ pub fn build(
         universe_name.as_deref(),
         stored_thornlist.as_deref(),
         &thornlist_processed,
+        sources,
     );
     if opts.force || opts.reconfig {
         decision = RebuildDecision::Full("-f/--reconfig given");
@@ -476,10 +612,22 @@ pub fn build(
         && let Some(stored) = stored_meta.clone()
     {
         println!(
-            "Config {} is up to date (same optionlist, same universe, same thornlist); pass -f to \
-             rebuild.",
+            "Config {} is up to date (same optionlist, same universe, same thornlist, same \
+             sources); pass -f to rebuild.",
             name
         );
+        // Record the source baseline even though nothing was built. A config
+        // last built by a cactup without source tracking has none, and without
+        // this it could never acquire one: every future build would short-
+        // circuit here and the next refetch or edit would go unnoticed. This
+        // writes metadata only — no build, and build-id/built are preserved.
+        let mut stored = stored;
+        if let Some(live) = fresh_sources
+            && stored.sources.as_ref() != Some(&live.heads)
+        {
+            stored.sources = Some(live.heads);
+            stored.store(&cactus_root)?;
+        }
         return Ok(BuildOutcome { meta: stored, rebuilt: false });
     }
     // Say which cheaper path is being taken, so a thornlist edit does not look
@@ -490,6 +638,22 @@ pub fn build(
             "Rebuilding config {name}: {why} — reconfiguring and rebuilding what that affects \
              (pass -f for a from-scratch rebuild)."
         );
+    }
+    if let RebuildDecision::Full("the Cactus flesh moved to a different commit") = decision {
+        println!(
+            "Rebuilding config {name} from scratch: the Cactus flesh moved, so the make system \
+             and config-data are regenerated and every existing object is stale."
+        );
+    }
+    // Name the repos, so a source-driven rebuild is actionable rather than
+    // mysterious — especially the edited ones, which are the user's own work.
+    if decision != RebuildDecision::UpToDate {
+        if !source_change.moved.is_empty() {
+            println!("  now on a different commit: {}", summarize(&source_change.moved));
+        }
+        if !source_change.edited.is_empty() {
+            println!("  locally edited: {}", summarize(&source_change.edited));
+        }
     }
 
     // Build-context variables (§6.3, build-time set).
@@ -664,6 +828,7 @@ pub fn build(
         build_id: generate_id("build", name, &machine.name, now),
         built: Some(now),
         flags,
+        sources: fresh_sources.map(|s| s.heads),
     };
     meta.store(&cactus_root)?;
     fs::write(&snapshot_path, &optionlist.source)
@@ -884,35 +1049,154 @@ mod tests {
     #[test]
     fn rebuild_decisions() {
         use RebuildDecision as R;
+        use SourceDelta as S;
+        // Nothing refetched under the config: the pre-source-tracking matrix,
+        // which must be unchanged.
+        let n = S::Unchanged;
         // No stored optionlist at all ⇒ nothing has been built here yet.
-        assert_eq!(rebuild_decision(None, "x", None, None, None, "t"), R::Fresh);
-        assert_eq!(rebuild_decision(Some("x"), "x", None, None, Some("t"), "t"), R::UpToDate);
+        assert_eq!(rebuild_decision(None, "x", None, None, None, "t", n), R::Fresh);
+        assert_eq!(rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n), R::UpToDate);
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t"),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n),
             R::Full(_)
         ));
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t"),
+            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t", n),
             R::Full(_)
         ));
         assert_eq!(
-            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t"),
+            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t", n),
             R::UpToDate
         );
 
         // A thornlist edit is a rebuild — the bug this fixes was it reading as
         // up-to-date — but a reconfigure, not a realclean.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2"),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", n),
             R::Incremental(_)
         ));
         // An optionlist change outranks it: realclean wins over reconfigure.
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2"),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2", n),
             R::Full(_)
         ));
         // No processed thornlist on disk ⇒ nothing to compare, not an edit.
-        assert_eq!(rebuild_decision(Some("x"), "x", None, None, None, "t"), R::UpToDate);
+        assert_eq!(rebuild_decision(Some("x"), "x", None, None, None, "t", n), R::UpToDate);
+
+        // Source tracking: a refetch with an untouched thornlist used to read
+        // as UpToDate and silently never compile the new sources.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Thorns),
+            R::Incremental(_)
+        ));
+        // The flesh earns a realclean, and outranks a simultaneous thornlist
+        // edit — a release bump changes both at once.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Flesh),
+            R::Full(_)
+        ));
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", S::Flesh),
+            R::Full(_)
+        ));
+        // No fetch record / unparseable thornlist ⇒ exactly the old behavior.
+        assert_eq!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Unknown),
+            R::UpToDate
+        );
+    }
+
+    fn heads(pairs: &[(&str, &str)], flesh: Option<&str>) -> SourceHeads {
+        SourceHeads {
+            heads: pairs.iter().map(|(r, h)| (r.to_string(), h.to_string())).collect(),
+            dirty: pairs
+                .iter()
+                .filter(|(_, h)| h.contains('+'))
+                .map(|(r, _)| r.to_string())
+                .collect(),
+            flesh: flesh.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn source_deltas() {
+        let stored: BTreeMap<String, String> = [("cactusbase", "aaa"), ("flesh", "fff")]
+            .iter()
+            .map(|(r, h)| (r.to_string(), h.to_string()))
+            .collect();
+
+        // Either side absent ⇒ no information, never "unchanged".
+        assert_eq!(
+            source_delta(None, Some(&heads(&[("cactusbase", "bbb")], None))).0,
+            SourceDelta::Unknown
+        );
+        assert_eq!(source_delta(Some(&stored), None).0, SourceDelta::Unknown);
+
+        let same = heads(&[("cactusbase", "aaa"), ("flesh", "fff")], Some("flesh"));
+        assert_eq!(source_delta(Some(&stored), Some(&same)).0, SourceDelta::Unchanged);
+
+        // A thorn repo moved to another commit.
+        let moved = heads(&[("cactusbase", "bbb"), ("flesh", "fff")], Some("flesh"));
+        let (delta, change) = source_delta(Some(&stored), Some(&moved));
+        assert_eq!(delta, SourceDelta::Thorns);
+        assert_eq!(change.moved, vec!["cactusbase".to_string()]);
+        assert!(change.edited.is_empty());
+
+        // The flesh moved: outranks the thorns that moved alongside it.
+        let release_bump = heads(&[("cactusbase", "bbb"), ("flesh", "ggg")], Some("flesh"));
+        let (delta, change) = source_delta(Some(&stored), Some(&release_bump));
+        assert_eq!(delta, SourceDelta::Flesh);
+        assert_eq!(change.moved, vec!["cactusbase".to_string(), "flesh".to_string()]);
+
+        // A hand-edited thorn: same commit, different worktree. This is the
+        // edit-in-place workflow, and it must rebuild.
+        let edited = heads(&[("cactusbase", "aaa+1mod@99"), ("flesh", "fff")], Some("flesh"));
+        let (delta, change) = source_delta(Some(&stored), Some(&edited));
+        assert_eq!(delta, SourceDelta::Edited);
+        assert_eq!(change.edited, vec!["cactusbase".to_string()]);
+        assert!(change.moved.is_empty());
+
+        // Editing a *second* file must still register against a build made
+        // with the first already edited — the mtime/count summary is what
+        // makes repeated edits distinguishable.
+        let one_edit: BTreeMap<String, String> =
+            [("cactusbase", "aaa+1mod@99")].iter().map(|(r, h)| (r.to_string(), h.to_string())).collect();
+        let two_edits = heads(&[("cactusbase", "aaa+2mod@120")], None);
+        assert_eq!(source_delta(Some(&one_edit), Some(&two_edits)).0, SourceDelta::Edited);
+        // …and reverting back to clean is also a change.
+        let reverted = heads(&[("cactusbase", "aaa")], None);
+        assert_eq!(source_delta(Some(&one_edit), Some(&reverted)).0, SourceDelta::Edited);
+
+        // Editing the FLESH in place stays incremental: make recompiles what
+        // the edit affects, and a realclean would punish iterating on it.
+        let flesh_edit = heads(&[("cactusbase", "aaa"), ("flesh", "fff+1mod@99")], Some("flesh"));
+        assert_eq!(source_delta(Some(&stored), Some(&flesh_edit)).0, SourceDelta::Edited);
+
+        // A moved commit outranks a hand edit elsewhere.
+        let both = heads(&[("cactusbase", "bbb"), ("flesh", "fff+1mod@99")], Some("flesh"));
+        let (delta, change) = source_delta(Some(&stored), Some(&both));
+        assert_eq!(delta, SourceDelta::Thorns);
+        assert_eq!(change.moved, vec!["cactusbase".to_string()]);
+        assert_eq!(change.edited, vec!["flesh".to_string()]);
+
+        // A repo the stored record never knew about is NOT a change: the first
+        // build after source tracking landed would otherwise realclean.
+        let newly_tracked =
+            heads(&[("cactusbase", "aaa"), ("flesh", "fff"), ("llama", "zzz")], Some("flesh"));
+        assert_eq!(source_delta(Some(&stored), Some(&newly_tracked)).0, SourceDelta::Unchanged);
+
+        // A flesh repo that moved but is not identified as the flesh stays
+        // Incremental — is_flesh is what promotes it.
+        let unnamed = heads(&[("cactusbase", "aaa"), ("flesh", "ggg")], None);
+        assert_eq!(source_delta(Some(&stored), Some(&unnamed)).0, SourceDelta::Thorns);
+    }
+
+    #[test]
+    fn summarize_caps_the_tail() {
+        let few: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(summarize(&few), "a, b");
+        let many: Vec<String> = (0..11).map(|i| format!("r{i}")).collect();
+        assert_eq!(summarize(&many), "r0, r1, r2, r3, r4, r5, r6, r7, +3 more");
     }
 
     /// End-to-end against a fake Cactus tree whose machine `make` is a shell
@@ -1218,6 +1502,130 @@ mod tests {
     /// rebuilds, and is snapshotted so a config survives its source file going
     /// away (§7.5). Previously an edited thornlist read as "up to date" and a
     /// rebuild without `--thornlist` silently reverted to einsteintoolkit.th.
+    /// End-to-end for the §7.4 source-tracking hookup: a refetch that leaves
+    /// the thornlist byte-identical must still rebuild, and moving the flesh
+    /// must escalate that to a realclean. Before this wiring, every case here
+    /// short-circuited as "up to date" and silently never compiled the new
+    /// sources.
+    #[test]
+    fn source_tree_changes_are_a_rebuild_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        // A real CRL list, so the processed copy parses and maps thorns→repos.
+        // `core` is the flesh: it checks Makefile/lib/src into the Cactus root.
+        let list = root.join("crl.th");
+        fs::write(
+            &list,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET   = $ROOT\n!TYPE = git\n!URL = https://e.invalid/cactus.git\n\
+             !NAME = core\n!CHECKOUT = Makefile lib src\n\n\
+             !TARGET   = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/cactusbase.git\n\
+             !CHECKOUT = CactusBase/Boundary\n",
+        )
+        .unwrap();
+
+        // Real repos, because source tracking reads the live tree — not a
+        // replay of fetch-state.toml. Editing a thorn in place and rebuilding
+        // is an ordinary workflow and must be caught the same way a refetch is.
+        let repos = cactus.join("repos");
+        for name in ["core", "cactusbase"] {
+            crate::fetch::git::testrepo::init(&repos.join(name));
+            crate::fetch::git::testrepo::commit_file(&repos.join(name), "thorn.cc", "int a;\n");
+        }
+
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list.clone());
+        let first = build(&inst, &machine, "sim", &first_opts).unwrap();
+        assert!(first.rebuilt);
+        // The live state is recorded, keyed by repo, only for repos this list
+        // names.
+        let recorded = first.meta.sources.clone().expect("sources must be recorded");
+        assert_eq!(recorded.len(), 2, "core + cactusbase: {recorded:?}");
+        assert!(recorded.contains_key("core") && recorded.contains_key("cactusbase"));
+
+        // Nothing moved ⇒ still short-circuits.
+        let again = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!again.rebuilt, "nothing moved, so it must short-circuit");
+
+        // A thorn repo moves to a new commit (a refetch, or a manual checkout):
+        // rebuild and reconfigure, but no realclean. The thornlist file is
+        // untouched — exactly the case the text diffs cannot see.
+        clear_log();
+        crate::fetch::git::testrepo::commit(&repos.join("cactusbase"), "new thorn work");
+        let thorns = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(thorns.rebuilt, "a moved thorn repo must rebuild");
+        assert!(log().contains("sim-config"), "must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "a thorn source change needs no realclean: {}", log());
+        // The new state is recorded, so the next build short-circuits again.
+        let settled = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!settled.rebuilt, "the new state must become the baseline");
+
+        // The flesh moves: realclean, because config-data and every object
+        // built against the old make system are stale.
+        clear_log();
+        crate::fetch::git::testrepo::commit(&repos.join("core"), "flesh work");
+        let flesh = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(flesh.rebuilt, "a moved flesh must rebuild");
+        assert!(log().contains("realclean"), "a flesh change must realclean: {}", log());
+
+        // Editing a thorn in place — no commit, no thornlist change. This is a
+        // first-class workflow, not just a consequence of refetching, and it
+        // must rebuild incrementally: `make` decides what the edit costs.
+        clear_log();
+        let _settled = build(&inst, &machine, "sim", &opts).unwrap();
+        clear_log();
+        fs::write(repos.join("cactusbase/thorn.cc"), "int a; int b;\n").unwrap();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(edited.rebuilt, "a hand-edited thorn must rebuild");
+        assert!(!log().contains("realclean"), "an edit needs no realclean: {}", log());
+
+        // `cactup config delta` reports this same state read-only. Smoke-test
+        // it against a real baseline and real divergence.
+        crate::commands::delta::config_delta(&inst, Some("sim".into()), true).unwrap();
+
+        // Editing the FLESH in place stays incremental too — a realclean would
+        // punish anyone iterating on flesh code.
+        clear_log();
+        let _settled = build(&inst, &machine, "sim", &opts).unwrap();
+        clear_log();
+        fs::write(repos.join("core/thorn.cc"), "int a; int c;\n").unwrap();
+        let flesh_edit = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(flesh_edit.rebuilt, "an edited flesh must rebuild");
+        assert!(
+            !log().contains("realclean"),
+            "editing the flesh must NOT realclean (only a moved commit does): {}",
+            log()
+        );
+
+        // No inspectable repo at all (a tree cactup cannot read) ⇒ exactly the
+        // pre-source-tracking behavior: no baseline, no rebuild.
+        clear_log();
+        fs::rename(&repos, cactus.join("repos-away")).unwrap();
+        let unknown = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!unknown.rebuilt, "without inspectable sources nothing is claimed to have changed");
+        assert!(log().is_empty(), "no make at all: {}", log());
+    }
+
     #[test]
     fn thornlist_is_a_rebuild_input_and_survives_its_source() {
         let dir = tempfile::tempdir().unwrap();

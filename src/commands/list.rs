@@ -20,6 +20,18 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
             (None, Some(thornlist)) => print!(" (custom thornlist {})", thornlist.bold()),
             (None, None) => print!(" (custom)"),
         }
+        // A refetch with an explicit source moved the tree off its
+        // install-time provenance (§2.1). Shown only when it actually
+        // differs — refetching the same release back is not news.
+        match (&installation.current_release, &installation.current_thornlist) {
+            (Some(current), _) if Some(current) != installation.release.as_ref() => {
+                print!(", now on {}", current.bold())
+            }
+            (None, Some(current)) if Some(current) != installation.thornlist.as_ref() => {
+                print!(", now on thornlist {}", current.bold())
+            }
+            _ => {}
+        }
         if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
             print!("{}", " (active)".bold().bright_green());
         }

@@ -1,5 +1,4 @@
 use colored::Colorize;
-use directories::BaseDirs;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -109,9 +108,12 @@ pub fn expand_env_vars(input: &str) -> String {
 /// without this a literal `~` directory would be created in the current
 /// working directory. Values passed as flags are already shell-expanded, so
 /// running them through this again is a harmless no-op.
-pub fn expand_path(input: &str, base_dirs: &BaseDirs) -> String {
+pub fn expand_path(input: &str) -> String {
     let expanded = expand_env_vars(input);
-    let home = base_dirs.home_dir();
+    let Some(home) = std::env::home_dir() else {
+        return expanded;
+    };
+    let home = home.as_path();
 
     if expanded == "~" {
         home.to_string_lossy().into_owned()

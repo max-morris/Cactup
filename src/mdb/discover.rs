@@ -7,7 +7,6 @@
 
 use crate::Res;
 use anyhow::{bail, Context};
-use directories::BaseDirs;
 use std::path::Path;
 use std::process::Command;
 
@@ -17,8 +16,8 @@ pub fn resolve_hostname(override_: Option<&str>) -> String {
     if let Some(h) = override_ {
         return h.to_owned();
     }
-    if let Some(base_dirs) = BaseDirs::new()
-        && let Ok(contents) = std::fs::read_to_string(base_dirs.home_dir().join(".hostname"))
+    if let Some(home_dir) = std::env::home_dir()
+        && let Ok(contents) = std::fs::read_to_string(home_dir.join(".hostname"))
     {
         let trimmed = contents.trim();
         if !trimmed.is_empty() {

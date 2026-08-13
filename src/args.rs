@@ -74,11 +74,13 @@ pub(crate) enum Commands {
         #[clap(short, long, help = "List all releases instead of only the few most recent.")]
         all: bool,
     },
-    /// List Einstein Toolkit installations on this machine
+    /// List Einstein Toolkit installations on this machine (top-level
+    /// equivalent of `installation list`)
     List,
-    /// Show the active installation, or a named one, in detail
-    Show { alias: Option<String> },
-    /// Set the active Einstein Toolkit installation
+    /// Show cactup's current state: active installation, active config, and machine
+    Show,
+    /// Set the active Einstein Toolkit installation (top-level equivalent of
+    /// `installation use`)
     Use {
         #[clap(help = "The alias of the installation to activate.")]
         alias: String,
@@ -92,6 +94,12 @@ pub(crate) enum Commands {
         #[clap(short, long, help = "Do not ask for confirmation.")]
         force: bool,
     },
+    /// Manage Einstein Toolkit installations
+    #[clap(subcommand)]
+    Installation(InstallationCommand),
+    /// Short for `installation`
+    #[clap(subcommand)]
+    Inst(InstallationCommand),
     /// Manage Cactus configurations in the active installation (§7)
     #[clap(subcommand)]
     Config(ConfigCommand),
@@ -113,6 +121,50 @@ pub(crate) enum Commands {
     /// Inspect and manage machine definitions (§4)
     #[clap(subcommand)]
     Machine(MachineCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum InstallationCommand {
+    /// List Einstein Toolkit installations on this machine
+    List,
+    /// Show the active installation, or a named one, in detail
+    Show { alias: Option<String> },
+    /// Set the active Einstein Toolkit installation
+    Use { alias: String },
+    /// Re-run the component fetch: update repos, adopt a new thornlist or release
+    Refetch(RefetchArgs),
+    /// Show how the source trees have diverged from the last fetch
+    Delta {
+        /// Installation to inspect (default: the active one).
+        alias: Option<String>,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct RefetchArgs {
+    /// Thornlist file to adopt and fetch (default: the installation's live thornlist).
+    pub thornlist: Option<PathBuf>,
+    /// Refetch to this Einstein Toolkit release tag (see `cactup releases`).
+    #[clap(long, value_name = "TAG", conflicts_with = "thornlist")]
+    pub release: Option<String>,
+    /// Bypass all nagging (implies --overwrite-modified and --replace-thornlist; also skips the --prune confirmation).
+    #[clap(short, long)]
+    pub force: bool,
+    /// Fetch over repos with local modifications (they are backed up first).
+    #[clap(long)]
+    pub overwrite_modified: bool,
+    /// Replace a hand-edited live thornlist with the newly adopted one.
+    #[clap(long)]
+    pub replace_thornlist: bool,
+    /// Remove repos and thorn symlinks the thornlist no longer mentions (asks once; -f skips the confirmation).
+    #[clap(long)]
+    pub prune: bool,
+    /// Suppress the skipped-repos warning block (a one-line count is still printed). Unlike `install -s` this never assumes answers to prompts and never authorizes deletion.
+    #[clap(short, long)]
+    pub silent: bool,
+    /// Print the full classification of what would happen and touch nothing.
+    #[clap(short = 'n', long, conflicts_with = "silent")]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -279,6 +331,11 @@ pub(crate) enum ConfigCommand {
         #[clap(short, long, help = "Delete even if simulations were built from this config.")]
         force: bool,
     },
+    /// Show how the source trees have diverged since this config was built
+    Delta {
+        /// Config to inspect (default: the active config).
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -360,6 +417,11 @@ pub(crate) struct SimStartArgs {
     /// Bypass the optionlist↔queue compatibility check (§4.4).
     #[clap(long)]
     pub force_queue: bool,
+    /// Suppress the notice that the source tree has moved since this config
+    /// was built. Never affects what runs — a run always uses the executable
+    /// as it was built.
+    #[clap(short, long)]
+    pub silent: bool,
     #[clap(flatten)]
     pub universe: UniverseFlags,
     #[clap(flatten)]
@@ -448,6 +510,11 @@ pub(crate) struct TestStartArgs {
     /// Bypass the optionlist↔queue compatibility check (§4.4).
     #[clap(long)]
     pub force_queue: bool,
+    /// Suppress the notice that the source tree has moved since this config
+    /// was built. Never affects what runs — a run always uses the executable
+    /// as it was built.
+    #[clap(short, long)]
+    pub silent: bool,
     #[clap(flatten)]
     pub universe: UniverseFlags,
     #[clap(flatten)]
@@ -513,7 +580,18 @@ mod tests {
         for argv in [
             vec!["cactup", "releases", "--all"],
             vec!["cactup", "list"],
-            vec!["cactup", "show", "et"],
+            vec!["cactup", "show"],
+            vec!["cactup", "installation", "show", "et"],
+            vec!["cactup", "inst", "show", "et"],
+            vec!["cactup", "inst", "list"],
+            vec!["cactup", "installation", "use", "et"],
+            vec!["cactup", "inst", "refetch"],
+            vec!["cactup", "inst", "refetch", "--release", "ET_2026_11", "-f"],
+            vec!["cactup", "installation", "refetch", "new.th", "--overwrite-modified", "--prune", "-n"],
+            vec!["cactup", "inst", "delta"],
+            vec!["cactup", "installation", "delta", "et"],
+            vec!["cactup", "config", "delta"],
+            vec!["cactup", "config", "delta", "sim"],
             vec!["cactup", "install", "ET_2025_05", "--silent"],
             vec!["cactup", "install", "--thornlist", "my/list.th", "--silent"],
             vec!["cactup", "uninstall", "old", "-f"],
@@ -528,6 +606,9 @@ mod tests {
                 "cactup", "sim", "run", "bbh", "--restart-id", "3", "--sim-dir", "/scratch/bbh",
                 "--machine", "mel5", "--installation", "et",
             ],
+            // -s silences the source-divergence notice on both start paths.
+            vec!["cactup", "sim", "submit", "bbh", "-s"],
+            vec!["cactup", "test", "run", "-s"],
             vec!["cactup", "sim", "show", "bbh", "--output-dir", "--restart-id", "2"],
             vec!["cactup", "sim", "list", "--long", "--all"],
             vec!["cactup", "sim", "show", "bbh", "--long"],
@@ -575,5 +656,12 @@ mod tests {
         // --thornlist and a positional release are mutually exclusive (custom
         // vs. release installations).
         assert!(Args::try_parse_from(["cactup", "install", "ET_2025_05", "--thornlist", "x.th"]).is_err());
+        // `refetch`'s --release and a positional thornlist are mutually
+        // exclusive, same as `install`.
+        assert!(
+            Args::try_parse_from(["cactup", "inst", "refetch", "x.th", "--release", "ET_2026_11"]).is_err()
+        );
+        // --dry-run and --silent are mutually exclusive (§ RefetchArgs).
+        assert!(Args::try_parse_from(["cactup", "inst", "refetch", "-n", "-s"]).is_err());
     }
 }

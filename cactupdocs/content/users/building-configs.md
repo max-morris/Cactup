@@ -93,6 +93,10 @@ copies, rewritten on every build, so your edits there would be overwritten:
   to Cactus.
 - `ThornList` — Cactus's own copy of that file, made by its build system. This
   is the one Cactus compiles from.
+- `<installation root>/einsteintoolkit.th` — the pristine as-fetched copy of
+  the thornlist, written at install time and updated by `cactup installation
+  refetch`. It's the baseline cactup diffs the live thornlist against to
+  detect hand edits; don't edit it directly.
 
 A third file, `cactup-thornlist.src.th`, is a verbatim snapshot of the source
 thornlist. It exists so the config stays rebuildable if the original file is
@@ -103,6 +107,74 @@ edit target — edits to it are picked up only while the original is missing.
 Creating a simulation copies both thornlists into the simulation's
 `.cactup/cfg/`, so you can always tell which thorns a given run's executable was
 built with — even after the config has been rebuilt or deleted.
+
+#### Refetching and rebuilding
+
+A config is built from two things, and cactup tracks changes to both:
+
+- **Which thorns get built** comes from the thornlist. A config with no
+  `--thornlist` override builds from the installation's live
+  `Cactus/thornlists/einsteintoolkit.th`; a config built with an explicit
+  `--thornlist` keeps building from that same file, wherever it lives.
+- **What those thorns are built from** comes from the source repos under
+  `Cactus/repos/`. At every build, cactup records the commit each of that
+  config's repos was on and whether its worktree had local modifications, then
+  compares that against the tree at the next build.
+
+The second half is what makes ordinary source work visible. All of these are
+picked up by a plain `cactup build <name>`, with no `-f`:
+
+- **You edited a thorn in place.** Same commit, changed files — the everyday
+  workflow of hacking on a thorn and rebuilding.
+- **You checked out a different branch or commit inside a repo.**
+- **A refetch moved the repos** (see
+  [Installing Releases](installing-releases.html)), even though it usually
+  leaves the thornlist byte-for-byte identical.
+
+What each costs:
+
+| What changed | What `cactup build <name>` does |
+|---|---|
+| Nothing under this config | short-circuits: "up to date" |
+| A thorn edited in place | reconfigure + rebuild what the edit affects |
+| A thorn repo on a different commit | reconfigure + rebuild what that affects |
+| The **Cactus flesh** on a different commit | a from-scratch rebuild — the make system and everything `config-data` is generated from have changed |
+
+Editing the flesh *in place* is deliberately **not** escalated to a
+from-scratch rebuild: `make` recompiles what the edit affects, and a realclean
+would be a brutal price for iterating on flesh code. Pass `-f` when you want
+one anyway.
+
+Untracked files are ignored throughout — the test harness leaves output inside
+the source tree, and that must never read as a source change.
+
+#### Seeing what diverged
+
+```sh
+cactup config delta            # the active config
+cactup config delta mp         # a named one
+```
+
+`cactup config delta` reports how the source trees differ from what that config
+was last built with — repos now on another commit, repos edited in place, the
+files involved (`--verbose` for all of them) — and what a rebuild would do
+about it. It only reads; it never builds.
+
+Its sibling `cactup installation delta` uses a different baseline: the last
+**fetch** rather than the last build. Use that one to answer "what have I
+changed since cactup put these sources here", including untracked files, which
+builds ignore but `refetch --prune` does not.
+
+> [!NOTE]
+> A config built by a cactup older than source tracking has no recorded
+> baseline. The first `cactup build` establishes one — including when it
+> short-circuits as up to date — after which every later change is detected.
+> `cactup config delta` says so explicitly when a config is in that state.
+
+An explicit-source refetch (`--release` or a thornlist path) also refuses to
+overwrite a hand-edited live thornlist unless you pass `--replace-thornlist`
+(or `-f`) — see [Installing Releases](installing-releases.html) for the full
+refetch contract.
 
 ### Virtual executables
 
@@ -251,6 +323,8 @@ cactup build native-build --no-universe
 {{cactup:cli command="config use"}}
 
 {{cactup:cli command="config delete"}}
+
+{{cactup:cli command="config delta"}}
 
 ## Troubleshooting
 

@@ -47,8 +47,8 @@ After installation, you'll see:
 
 ```sh
 cactup list          # List all your installations
-cactup show          # Show the active installation
-cactup show myrelease  # Show a specific one
+cactup show          # Show cactup's overall state: installation, config, machine
+cactup inst show myrelease  # Show one installation in detail
 cactup use myrelease   # Set the active installation
 ```
 
@@ -152,3 +152,5 @@ See [Monitoring & Logs](monitoring.html) for more details.
 **Build fails**: Check the build log in your installation directory. Run `cactup show` to see where things are installed.
 
 **Simulation won't start**: Verify the parfile exists and the config is built. Use `cactup config list` and `cactup config show`.
+
+**"N repo(s) skipped (local state preserved)"**: `cactup installation refetch` (or `inst refetch`) leaves alone any repo that has local modifications, local commits, a switched branch, a detached HEAD, or an in-progress rebase/merge, and reports which thorns are affected. Re-run with `--overwrite-modified` (or `-f`, which also implies it) to fetch over them anyway — the affected files are backed up first, to `~/.cactup/refetch-backups/<alias>/<timestamp>/`. Add `-s/--silent` to hide the detailed skip list and keep just the one-line count. See [Installing Releases](installing-releases.html) for the full refetch contract.

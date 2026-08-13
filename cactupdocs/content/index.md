@@ -12,6 +12,7 @@ description = "Install and manage Einstein Toolkit releases on HPC clusters and 
 cactup handles:
 
 - **Installing releases** — download and install Einstein Toolkit versions with a single command
+- **Refreshing installations** — refetch an existing installation to pick up thornlist edits or move to a new release
 - **Managing configurations** — build Cactus configs with custom thornlists and compiler options
 - **Running simulations** — create, submit, and monitor simulations on batch systems or interactively
 - **Running test suites** — validate built configs against the thorn test suite
@@ -40,6 +41,9 @@ cactup list          # List the releases you've installed
 ```
 
 Once installed, explore the user guide to build configs and run simulations.
+To refresh an existing installation — pick up a thornlist edit or move it to
+a newer release — see [Installing Releases](users/installing-releases.html)
+for `cactup installation refetch`.
 
 ## For cluster authors
 

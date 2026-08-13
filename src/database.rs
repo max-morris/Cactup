@@ -48,6 +48,15 @@ pub struct CactusInstallation {
     /// recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thornlist: Option<String>,
+    /// What the tree is on *now*, when an `installation refetch` with an
+    /// explicit source moved it away from its install-time provenance
+    /// (§2.1). `release`/`thornlist` above are never rewritten — they record
+    /// how the installation was created; this pair records where a refetch
+    /// took it. Absent until the first explicit-source refetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_thornlist: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,6 +293,8 @@ mod tests {
                     release: None,
                     path: "/x".to_owned(),
                     thornlist: Some("/home/u/lists/mine.th".to_owned()),
+                    current_release: None,
+                    current_thornlist: None,
                 },
             );
             Ok(())

@@ -187,6 +187,10 @@ fn start_impl(
     if !build::is_complete(&cactus_root, &cfg_name) {
         bail!("config \"{cfg_name}\" is incomplete; rebuild it (`cactup config build {cfg_name} -f`)");
     }
+    // §11.5: a test run reads reference data straight from the live source
+    // tree, so a tree that moved since the build matters here even more than
+    // for a sim. Still only a notice — never a refusal, never a rebuild.
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
 
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
@@ -575,6 +579,7 @@ mod tests {
 
     fn test_args() -> TestStartArgs {
         TestStartArgs {
+            silent: false,
             config: None,
             variant: None,
             force: false,

@@ -2,6 +2,7 @@ mod args;
 mod build;
 mod commands;
 mod database;
+mod fetch;
 mod installation;
 mod lock;
 mod manifest;
@@ -12,13 +13,13 @@ mod sim;
 mod tail;
 mod template;
 mod testsuite;
+mod thornlist;
 mod walltime;
 
 use crate::args::{Args, Commands, ConfigCommand};
 use crate::commands::Ctx;
 use crate::database::Db;
 use clap::Parser;
-use directories::BaseDirs;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -26,8 +27,7 @@ type Res<T> = anyhow::Result<T>;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
-    let base_dirs = BaseDirs::new().expect("Failed to get base directories");
-    let home_dir = base_dirs.home_dir().to_path_buf();
+    let home_dir = std::env::home_dir().expect("Failed to get home directory");
     home_dir.join(".cactup")
 });
 
@@ -49,10 +49,11 @@ fn main() -> Res<()> {
     match args.command {
         Commands::Releases { all } => commands::releases::dispatch(&ctx, all),
         Commands::List => commands::list::dispatch(&ctx),
-        Commands::Show { alias } => commands::show::dispatch(&ctx, alias),
+        Commands::Show => commands::show::dispatch(&ctx),
         Commands::Use { alias } => commands::use_cmd::dispatch(&ctx, alias),
         Commands::Install(install) => commands::install::dispatch(&ctx, install),
         Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),
+        Commands::Installation(cmd) | Commands::Inst(cmd) => commands::installation::dispatch(&ctx, cmd),
         Commands::Config(cmd) => commands::config::dispatch(&ctx, cmd),
         // `cactup build …` is an alias for `cactup config build …` (§3).
         Commands::Build(build) => commands::config::dispatch(&ctx, ConfigCommand::Build(build)),

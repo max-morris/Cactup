@@ -242,6 +242,28 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
     if variants {
         return show_variants(&machine);
     }
+    print_summary(&machine)
+}
+
+/// Read-only machine section for the aggregate `cactup show` (§3): honors the
+/// `--machine` override, otherwise uses only the **cached** `detected-machine`
+/// — never discovery — so it cannot prompt, block on stdin, or write the DB.
+pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
+    let name = match ctx.globals.machine.clone() {
+        Some(name) => Some(name),
+        None => ctx.db.read()?.detected_machine,
+    };
+    let Some(name) = name else {
+        println!("{}", "(machine not yet detected — run `cactup machine show`)".yellow());
+        return Ok(());
+    };
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
+    let machine = load_checked(&mdb, &name)?;
+    print_summary(&machine)
+}
+
+/// The `machine show` summary block for an already-loaded machine.
+fn print_summary(machine: &Machine) -> Res<()> {
     let meta = &machine.meta;
     println!("{} ({:?} MDB, {})", machine.name.bold(), machine.layer, machine.dir.display());
     for (label, value) in [

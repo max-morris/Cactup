@@ -95,11 +95,19 @@ Already implemented (`src/database.rs`). It is the **only** global mutable state
 and is concerned **exclusively** with global cactup state:
 
 - `cactup-version`
-- `installations`: alias → `{ alias, release, path, thornlist? }`. `release` is
+- `installations`: alias → `{ alias, release, path, thornlist?,
+  current-release?, current-thornlist? }`. `release` is
   `null` for a **custom installation** (`install --thornlist`), in which case
   `thornlist` records the absolute path it was installed from — the only thing
   that identifies such an installation, and what `show`/`list` name in place of
   a release. Omitted entirely for release installs.
+  `release`/`thornlist` are **install-time provenance and are never rewritten**.
+  `installation refetch --release TAG` / `refetch THORNLIST` instead record the
+  optional `current-release` / `current-thornlist` keys (absent until the first
+  explicit-source refetch; serde `default` + `skip_serializing_if`, so no
+  `schema` bump), and `list`/`show` render both, e.g. "ET_2026_05, now on
+  ET_2026_11". They are recorded only when no repo was skipped (or `-f` forced
+  the full fetch) — the DB must not assert a tree state that does not exist.
 - `active-installation`
 - **knobs** (new; see §5) — global defaults, one flat map (a `~/.cactup` lives
   on exactly one machine).
@@ -198,6 +206,16 @@ Required model (D11):
    active-config pointer; different installations never contend. These
    per-installation writes are **not** covered by the global DB lock (the global
    DB does not hold per-installation state — D6).
+6. **Per-installation fetch lock.** `install`'s checkout and `installation
+   refetch` mutate `Cactus/repos/` and the arrangement symlinks for
+   minutes-to-an-hour. That is *not* a mutation of the item-5 TOML files, so it
+   does not hold the per-installation lock (which would block `sim create`
+   etc. for the whole fetch, against this section's premise). Instead a
+   `link()`-based lock at `<root>/.cactup/.cactup-fetch.lock`, held **with a
+   heartbeat** (like the item-4 build lock) for the duration of the fetch,
+   serializes concurrent fetches of one installation. If a refetch ultimately
+   changes a TOML or the DB, it acquires those locks briefly at the end, in the
+   item-1 field-scoped style.
 
 **NFS-safe locking (required).** `~/.cactup` and the sim-home are frequently on
 NFS/Lustre, where `flock`/POSIX advisory locks are unreliable or silently a
@@ -273,10 +291,23 @@ path flag.
 
 ```
 cactup install [release] [--alias …] [--silent] [--install-prefix …] …   (existing)
-cactup list [--all]                                                       (existing)
-cactup show                                                               (existing; lists installations)
-cactup use <alias>                                                        (existing; set active installation)
 cactup uninstall <alias> [-f]                                             (new; see §3.1)
+cactup show                        (aggregate state view: active installation +
+                                    active config + resolved machine; read-only,
+                                    never prompts, never writes the DB)
+
+cactup installation list [--all]                  (list installations)
+cactup installation show [<alias>]                (details of one installation)
+cactup installation use <alias>                   (set active installation)
+cactup installation refetch [THORNLIST | --release TAG] [-f]
+       [--overwrite-modified] [--replace-thornlist] [--prune] [-s|--silent]
+       [-n|--dry-run]                             (re-run the component fetch —
+                                                   see §3.2)
+cactup inst …                      (short form of `installation`, a duplicate
+                                    clap variant routed identically, so the docs
+                                    generator renders both)
+cactup list [--all]                (top-level equivalent of `installation list`)
+cactup use <alias>                 (top-level equivalent of `installation use`)
 
 cactup config build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [build flags…]
 cactup build …                       (alias for `config build`)
@@ -333,12 +364,44 @@ installation is active.
 | `sim create --testsuite` / `--select-tests` / test-suite run | `cactup test run`/`test submit [--config C] [<test>…]` | Own command tree, not a `sim` flag (§11). Runs any built config (default active); selection is the positional `[<test>…]` (default all); no empty-parfile sentinel. |
 | `list-machines` / `print-mdb*` / `whoami` | `cactup machine show` / `whoami` | §4 |
 | `interactive` | *dropped* | **ASSUMPTION**: rarely used; reintroduce later if needed. |
-| `sync`, `--remote`, `login`, `checkout`, `execute` | *dropped* (D1) | `checkout` is replaced by `GetComponents` at install time (already in `install`). |
+| `sync`, `--remote`, `login`, `execute` | *dropped* (D1) | |
+| `checkout` | `cactup installation refetch` | Native CRL fetcher (§3.2); the Perl `GetComponents` is no longer downloaded or invoked anywhere. `install` uses the same fetch path. |
 | `get-archived-simulation`, `list-archived-simulations` | *dropped* (D2) | |
 | `setup` / `setup-silent` | `cactup machine create [--silent]` (§4.7); `install` calls the silent form on an unrecognized host | Creates a local machine in the user MDB from `generic` with autodetected hardware. No per-tree `defs.local.ini`. |
 | `remove-submitscript` | *dropped* | Submit/run scripts are resolved at submit time from the MDB, not baked into the config (§7.6), so there is nothing to remove. |
 
----
+### 3.2 `installation refetch` and the native fetcher
+
+cactup owns the component fetch natively (`src/thornlist.rs` CRL 1.0 parser +
+`src/fetch/`): git via gix, http/https/ftp via reqwest, svn/cvs/hg/darcs by
+invoking the system tool. The Perl `GetComponents` is neither downloaded nor
+invoked; `install` and `installation refetch` share this one fetch path.
+
+Refetch decisions come from **live git state only** (per-repo probe), never a
+diff against the previously recorded thornlist. Classification per repo:
+absent → clone; clean on the thornlist branch → fetch + fast-forward; clean
+with the desired branch absent locally → fetch + create + check out. Everything
+else — modified/staged/deleted tracked files, local commits, detached HEAD or
+mid-rebase/merge, HEAD on another branch, changed remote URL, or a failed
+probe — is **skipped and reported**, and fetched only under
+`--overwrite-modified` (modified files are first backed up to
+`~/.cactup/refetch-backups/<alias>/<ts>/<repo>/`). Untracked files never block
+a fetch but do block `--prune`.
+
+Flags follow the §3 umbrella rule: `-f` implies `--overwrite-modified`,
+`--replace-thornlist`, and the prune confirmation, but not `--prune` itself
+(a mode, not a nag). `-s/--silent` silences the skip-warning block only — it
+never authorizes deletion. `-n/--dry-run` prints the full classification and
+touches nothing.
+
+A refetched thornlist (from `--release TAG` or a positional `THORNLIST`) is
+written verbatim to `Cactus/thornlists/einsteintoolkit.th` and
+`<root>/einsteintoolkit.th`; the latter is the **pristine as-fetched copy**,
+and divergence of the live copy from it (compared as parsed component sets,
+not text) means a hand edit → refetch refuses to replace it without
+`--replace-thornlist`/`-f`. The DB records `current-release`/
+`current-thornlist` (§2.1) without touching install-time provenance. A refetch
+does not rebuild configs; it warns per config (§7.4).
 
 ## 4. The machine database (MDB)
 
@@ -1605,6 +1668,19 @@ editing the thornlist in place is the normal way to add a thorn, and that edit
 must be picked up. Step 3 makes the snapshot the safety net rather than a
 second source of truth. If both are gone, the build refuses to guess and says
 to pass `--thornlist`.
+
+**Interaction with `installation refetch` (§3.2).** A refetch updates *source
+trees*, which the rebuild decision (§7.8 rule 5) never inspects — it diffs only
+optionlist text, universe, and processed-thornlist text. So a refetch alone
+leaves every config `UpToDate` and a plain `cactup build` runs no `make`.
+Refetch therefore warns per existing config, naming `cactup build <name> -f` as
+the follow-up (after `--release`, `-f` outright — a release bump likely stales
+`config-data/`, and §7.4 reserves realclean for optionlist/universe changes).
+Configs recorded against a custom `--thornlist` path additionally keep building
+their own list — refetch never touches that file; the warning says so. The
+refetch post-pass records per-repo fetched HEADs in
+`<root>/.cactup/fetch-state.toml`; wiring those into the rebuild decision is a
+planned follow-up (TODO in `_impl_fetch.md`), which will retire the warning.
 
 ### 7.6 Build precedence & flags
 
@@ -2873,7 +2949,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` + `@ENV(NAME)@`** (unset/empty env = hard error); `.py` for logic (JSON-on-stdin convention, §6.1) |
 | cactup binary var | `@SIMFACTORY@` | `@CACTUP@` |
 | Machine detection | `aliaspattern` regex on hostname | `discover.py`; result cached in DB as a single `detected-machine` string (not per-hostname — §4.3) |
-| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) |
+| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<root>/einsteintoolkit.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
 | Test-suite command | `sim create --testsuite` (overloads `sim`) | `cactup test run`/`submit` against any built config (own command tree — §11) |
 | Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |
@@ -2881,7 +2957,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Test run metadata | sim `properties.ini` + `output-NNNN/exe/` copytree | `<test-home>/…/<name>/.cactup/test.toml` + `tests.toml` registry (§11.8); no copytree (§11.10) |
 | Test-script marking | separate faked machine defs | `test = true` on the meta.toml run/submitscript variant entry (§11.2) |
 | Install root key | machine `sourcebasedir` (source base; also sync/disambiguation) | machine `install-home` (optional default install prefix; falls back to `~/.cactup/cacti`; `--install-prefix` overrides) — §4.2 |
-| Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock (D11, §2.3) |
+| Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock + per-installation lock + per-installation fetch lock (heartbeat) (D11, §2.3) |
 | Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `config build`, `sim run`, and `sim submit` (§4.8) |
 
 ---

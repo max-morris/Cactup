@@ -3,10 +3,13 @@
 //! subcommand to it.
 
 pub mod config;
+pub mod delta;
 pub mod install;
+pub mod installation;
 pub mod knob;
 pub mod list;
 pub mod machine;
+pub mod refetch;
 pub mod releases;
 pub mod show;
 pub mod sim;

@@ -12,7 +12,7 @@ use crate::Res;
 
 type ProgressHandle = Arc<prodash::tree::Root>;
 
-fn setup_prodash() -> (ProgressHandle, JoinHandle) {
+pub(crate) fn setup_prodash() -> (ProgressHandle, JoinHandle) {
     let progress = prodash::tree::Root::new();
 
     let progress_renderer_options = prodash::render::line::Options {
@@ -105,6 +105,12 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
         progress_renderer.shutdown_and_wait();
         Ok(repo)
     }
+}
+
+/// Look a release tag up by its short name (e.g. `ET_2026_05`). Shared by
+/// `install` (interactive selection) and `installation refetch --release`.
+pub fn find_tag<'t, 'repo>(tags: &'t [Tag<'repo>], short_name: &str) -> Option<&'t Tag<'repo>> {
+    tags.iter().find(|tag| tag.short_name == short_name)
 }
 
 pub fn get_tags(repo: &Repository) -> Res<Vec<Tag<'_>>> {

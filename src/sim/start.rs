@@ -264,6 +264,7 @@ fn submit_impl(
             sim.meta.configuration
         )
     })?;
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
     let force_queue = args.force_queue || args.force;
     let mut topo = vars::resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
@@ -486,6 +487,7 @@ fn run_interactive(
             sim.meta.configuration
         )
     })?;
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent);
     let force_queue = args.start.force_queue || args.start.force;
     let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &cfg, force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
@@ -908,6 +910,7 @@ mod tests {
 
     fn start_args(sim: &str, wall: &str) -> SimStartArgs {
         SimStartArgs {
+            silent: false,
             sim: sim.to_owned(),
             parfile: None,
             config: None,

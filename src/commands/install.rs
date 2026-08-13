@@ -6,7 +6,6 @@ use crate::database::CactusInstallation;
 use crate::{manifest, shell, Res};
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
-use directories::BaseDirs;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,14 +32,14 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let custom = thornlist.is_some();
 
-    let base_dirs = BaseDirs::new().ok_or(anyhow!("Failed to determine base directories"))?;
+    let home_dir = std::env::home_dir().ok_or(anyhow!("Failed to determine home directory"))?;
     let cactup_root = &crate::CACTUP_ROOT;
 
     // Custom installs need no manifest at all; validate the thornlist file up
     // front, before any prompting, so a missing/unreadable file fails fast.
     let custom_thornlist = match &thornlist {
         Some(path) => {
-            let expanded = shell::expand_path(&p2s(path.clone())?, &base_dirs);
+            let expanded = shell::expand_path(&p2s(path.clone())?);
             let content = fs::read_to_string(&expanded)
                 .with_context(|| format!("Failed to read thornlist {expanded}"))?;
             // Carry the *expanded*, absolute path onward: it is what the alias
@@ -73,7 +72,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
     }
 
-    let symlink_prefix_default = base_dirs.home_dir();
+    let symlink_prefix_default = home_dir.as_path();
     let symlink_name_default = "Cactus";
 
     let source = match custom_thornlist {
@@ -83,25 +82,23 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             let release_default = tags.first().unwrap().short_name.clone();
 
             let release_tag = match release {
-                Some(release) => {
-                    match tags.iter().position(|tag| tag.short_name == release) {
-                        Some(pos) => &tags[pos],
-                        None => {
-                            println!("{}", format!("{} is not a valid release.", release.bold()).bright_red());
-                            return Ok(());
-                        }
+                Some(release) => match manifest::find_tag(tags, &release) {
+                    Some(tag) => tag,
+                    None => {
+                        println!("{}", format!("{} is not a valid release.", release.bold()).bright_red());
+                        return Ok(());
                     }
-                }
+                },
                 None if silent => &tags[0],
                 None => loop {
                     let release_sel = prompt_with_default("Which release do you want to install?", &release_default)?;
-                    match tags.iter().position(|tag| tag.short_name == release_sel) {
-                        Some(pos) => break &tags[pos],
+                    match manifest::find_tag(tags, &release_sel) {
+                        Some(tag) => break tag,
                         None => {
                             println!("{}", format!("{} is not a valid release.", release_sel.bold()).bright_red());
                         }
                     }
-                }
+                },
             };
 
             InstallSource::Release(release_tag)
@@ -170,7 +167,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         None if silent => install_prefix_default(&alias)?,
         None => prompt_with_default("Where should the installation live? The Cactus directory will be created here.", &install_prefix_default(&alias)?)?
     };
-    let install_prefix = shell::expand_path(&install_prefix, &base_dirs);
+    let install_prefix = shell::expand_path(&install_prefix);
 
     let do_symlink = match no_symlink {
         true => false,
@@ -188,7 +185,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         },
         false => "".to_owned()
     };
-    let symlink_prefix = shell::expand_path(&symlink_prefix, &base_dirs);
+    let symlink_prefix = shell::expand_path(&symlink_prefix);
 
     let symlink_name = match do_symlink {
         true => {
@@ -257,45 +254,36 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         InstallSource::Custom { content, .. } => content.clone().into_bytes(),
     };
 
+    // The pristine as-fetched copy (§3.2): the baseline `installation
+    // refetch`'s hand-edit guard compares against.
     fs::write(install_dir.join("einsteintoolkit.th"), &thorn_list)
        .with_context(|| format!("Failed to write einsteintoolkit.th to {}", install_dir.display()))?;
 
-    // --- Fetch GetComponents ---
-    const GET_COMPONENTS_URL: &str =
-        "https://raw.githubusercontent.com/gridaphobe/CRL/ET_2025_05/GetComponents";
-
-    let script_bytes =
-        reqwest::blocking::get(GET_COMPONENTS_URL)
-                          .and_then(|r| r.error_for_status())   // turn 404/5xx into an error
-                          .with_context(|| format!("Failed to download {GET_COMPONENTS_URL}"))?
-                          .bytes()
-                          .with_context(|| "Failed to read GetComponents response body")?;
-
-    let script_path = install_dir.join("GetComponents");
-    fs::write(&script_path, &script_bytes)
-       .with_context(|| format!("Failed to write {}", script_path.display()))?;
-
-    // --- Make it executable (Unix only; no-op concept on Windows) ---
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path)?.permissions();
-        perms.set_mode(0o755); // rwxr-xr-x
-        fs::set_permissions(&script_path, perms)
-           .with_context(|| format!("Failed to chmod {}", script_path.display()))?;
+    // --- Native component fetch (§3.2; GetComponents is gone) ---
+    let thorn_list_text = String::from_utf8(thorn_list.clone())
+        .with_context(|| "einsteintoolkit.th is not UTF-8")?;
+    let list = crate::thornlist::parse(&thorn_list_text)
+        .with_context(|| "Failed to parse einsteintoolkit.th")?;
+    for w in list.warnings() {
+        println!("{}", format!("thornlist warning: {w}").yellow());
     }
-
-    // --- Run it on the user's behalf ---
-    let mut command = std::process::Command::new(&script_path);
-    command.current_dir(&install_dir).arg("einsteintoolkit.th");
-    crate::shell::trace_command(&command);
-    let status = command
-        .status()
-        .with_context(|| format!("Failed to execute {}", script_path.display()))?;
-
-    if !status.success() {
-        return Err(anyhow!("GetComponents exited unsuccessfully: {status}"));
+    let plan = crate::fetch::plan(&list, &install_dir)?;
+    let report = crate::fetch::execute(&plan, &install_dir)?;
+    if !report.failures.is_empty() {
+        for f in &report.failures {
+            println!("{}", format!("  {}: {}", f.what, f.error).bright_red());
+        }
+        return Err(anyhow!("component fetch failed for {} item(s)", report.failures.len()));
     }
+    crate::fetch::FetchState::record(&install_dir, &report.records())?;
+
+    // GetComponents used to deposit the live thornlist via its
+    // COMPONENTLIST_TARGET; build.rs::resolve_thornlist depends on it.
+    let live_dir = install_dir.join("Cactus").join("thornlists");
+    fs::create_dir_all(&live_dir)
+        .with_context(|| format!("Failed to create {}", live_dir.display()))?;
+    fs::write(live_dir.join("einsteintoolkit.th"), &thorn_list)
+        .with_context(|| format!("Failed to write {}", live_dir.join("einsteintoolkit.th").display()))?;
 
     if do_symlink {
         fs::create_dir_all(Path::new(&symlink_prefix))
@@ -359,6 +347,8 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             release: release_name.clone(),
             path: install_dir.to_string_lossy().to_string(),
             thornlist: source_thornlist.clone(),
+            current_release: None,
+            current_thornlist: None,
         });
         if database.active_installation.is_none() {
             database.active_installation = Some(alias.clone());

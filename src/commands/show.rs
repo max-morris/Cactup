@@ -1,66 +1,57 @@
-//! `cactup show` — show the active Einstein Toolkit installation (or a named
-//! one) in detail. Listing every installation is `cactup list`.
+//! `cactup show` — the aggregate state view (spec §3): active installation,
+//! active config, and machine, each best-effort so one missing piece doesn't
+//! hide the rest. Per-subsystem detail lives in `installation show` /
+//! `config show` / `machine show`.
 
-use super::Ctx;
+use super::{installation, Ctx};
 use crate::installation::Installation;
 use crate::Res;
-use anyhow::{anyhow, bail};
 use colored::Colorize;
 
-pub fn dispatch(ctx: &Ctx, alias: Option<String>) -> Res<()> {
-    let database = ctx.db.read()?;
-
-    // No alias → the contextually-relevant installation: the active one.
-    let alias = match alias {
-        Some(alias) => alias,
-        None => database.active_installation.clone().ok_or_else(|| {
-            anyhow!(
-                "no active installation; run `cactup install`, or `cactup use <alias>` \
-                 to activate an existing one (see `cactup list`)"
-            )
-        })?,
-    };
-
-    let Some(entry) = database.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup list`)");
-    };
-    let active = database.active_installation.as_deref() == Some(&alias);
-
-    print!("{}", entry.alias.bold());
-    if active {
-        print!("{}", " (active)".bold().bright_green());
+pub fn dispatch(ctx: &Ctx) -> Res<()> {
+    println!("{}", "Installation".bold());
+    match installation::show_installation(ctx, None) {
+        Ok(()) => {}
+        Err(e) => println!("{}", format!("{e}").yellow()),
     }
+
     println!();
-    match (&entry.release, &entry.thornlist) {
-        (Some(release), _) => println!("  release:      {release}"),
-        // A custom installation is identified by the thornlist it was built
-        // from — that is the only thing distinguishing it from any other.
-        (None, Some(thornlist)) => {
-            println!("  release:      (custom installation from {thornlist})")
-        }
-        (None, None) => println!("  release:      (custom installation)"),
+    println!("{}", "Active config".bold());
+    match Installation::resolve(ctx).and_then(|inst| super::config::show(&inst, None)) {
+        Ok(()) => {}
+        Err(e) => println!("{}", format!("{e}").yellow()),
     }
-    println!("  path:         {}", entry.path);
 
-    let inst = Installation::new(entry.alias.clone(), &entry.path);
-    if let Ok(meta) = inst.meta() {
-        match &meta.active_config {
-            Some(config) => println!("  active-config: {config}"),
-            None => println!("  active-config: {}", "(null-config)".yellow()),
-        }
-        if let Some(sim_home) = &meta.sim_home {
-            println!("  sim-home:     {}", sim_home.display());
-        }
-        if let Some(test_home) = &meta.test_home {
-            println!("  test-home:    {}", test_home.display());
-        }
-    }
-    if let Ok(sims) = inst.simulations() {
-        println!("  simulations:  {} (see `cactup sim list`)", sims.simulations.len());
-    }
-    if let Ok(tests) = inst.tests() {
-        println!("  test runs:    {} (see `cactup test list`)", tests.tests.len());
+    println!();
+    println!("{}", "Machine".bold());
+    if let Err(e) = super::machine::show_cached_summary(ctx) {
+        println!("{}", format!("{e}").yellow());
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Db;
+
+    #[test]
+    fn dispatch_never_fails_with_nothing_configured() {
+        let dbdir = tempfile::tempdir().unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: None,
+                hostname: None,
+            },
+            db: Db::in_dir(dbdir.path()),
+        };
+        // Every section degrades to a yellow note instead of erroring out.
+        dispatch(&ctx).unwrap();
+    }
 }
