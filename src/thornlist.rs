@@ -21,7 +21,7 @@
 
 use anyhow::{anyhow, bail, Context};
 use regex::{Captures, Regex};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// A fully parsed CRL 1.0 thornlist.
@@ -42,8 +42,9 @@ pub struct Thornlist {
 }
 
 /// The `!TYPE` a component is fetched with. `Ignore` components are parsed
-/// and validated (so they still participate in duplicate-checkout
-/// detection) but dropped from [`Thornlist::components`] (rule 13).
+/// and validated but dropped from [`Thornlist::components`] (rule 13), and
+/// take no part in duplicate-checkout detection (see
+/// [`detect_duplicates`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentType {
     Cvs,
@@ -139,7 +140,12 @@ pub fn parse_with_base(src: &str, include_base: Option<&Path>) -> crate::Res<Tho
     pieces.next(); // discard text before the first !TARGET (mirrors `shift @sections`)
 
     let mut all_components: Vec<Component> = Vec::new();
-    for section_body in pieces {
+    // Which section each component came from, parallel to `all_components`.
+    // Only used to phrase the duplicate-checkout error (a duplicate within
+    // one `!CHECKOUT` list is a different mistake from two sections
+    // fighting over a path); not worth a field on `Component`.
+    let mut section_of: Vec<usize> = Vec::new();
+    for (section_idx, section_body) in pieces.enumerate() {
         if section_body.is_empty() {
             // Only possible when two !TARGET markers are adjacent.
             continue;
@@ -147,10 +153,11 @@ pub fn parse_with_base(src: &str, include_base: Option<&Path>) -> crate::Res<Tho
         let full_section = format!("!TARGET = {section_body}");
         let map = build_kv_map(&full_section);
         build_section(&map, &mut all_components, &mut warnings)?;
+        section_of.resize(all_components.len(), section_idx);
     }
 
     // 14. Duplicate-checkout detection, lexical only, no filesystem access.
-    detect_duplicates(&all_components, &root)?;
+    detect_duplicates(&all_components, &section_of, &root)?;
 
     let components: Vec<Component> = all_components
         .into_iter()
@@ -586,32 +593,74 @@ fn lexical_canonicalize(path: &str) -> String {
 
 /// Rule 14: duplicate detection over lexically-canonicalized
 /// `$TARGET/$CHECKOUT` paths relative to `$ROOT` (GetComponents lines
-/// 778-792). Runs over every parsed component, `ignore` included — a
-/// deliberate strengthening (see rule 13's "still validates the section"):
-/// GetComponents itself never reaches this check for `ignore` sections at
-/// all, since it `next`s out of the section loop before ever building an
-/// `ignore` component.
-fn detect_duplicates(components: &[Component], root: &str) -> crate::Res<()> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut dupes: Vec<String> = Vec::new();
+/// 778-792). `ignore` components are excluded, exactly as in
+/// GetComponents: `@all_components` (the list the check runs over) is only
+/// ever appended to after two `next`s that skip `ignore` — one per section
+/// (line 457), one per checkout token (line 733). So an `ignore` section
+/// naming a path that some other section also checks out is legal, and a
+/// common way to write a thornlist that overrides one thorn of a shared
+/// repo. cactup still parses and validates those sections (rule 13); they
+/// just don't collide here.
+///
+/// Beyond GetComponents: the error explains where each duplicate came
+/// from, so it is fixable without hand-diffing the thornlist. The two
+/// realistic mistakes read differently — one `!CHECKOUT` list naming a
+/// thorn twice (usually from enabling a `#DISABLED` thorn by *both*
+/// un-disabling its line and appending it to the `!CHECKOUT =` line), vs.
+/// two sections claiming the same path from different repos.
+///
+/// `section_of` is parallel to `components` (see the caller).
+fn detect_duplicates(components: &[Component], section_of: &[usize], root: &str) -> crate::Res<()> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut dupes: Vec<(String, usize, usize)> = Vec::new();
     let root_prefix = format!("{root}/");
-    for c in components {
+    for (i, c) in components.iter().enumerate() {
+        if c.ty == ComponentType::Ignore {
+            continue;
+        }
         let joined = format!("{}/{}", c.target, c.checkout);
         let canon = lexical_canonicalize(&joined);
         let canon = canon.strip_prefix(&root_prefix).unwrap_or(&canon).to_owned();
-        if !seen.insert(canon.clone()) {
-            dupes.push(canon);
+        match seen.get(&canon) {
+            Some(&first) => dupes.push((canon, first, i)),
+            None => {
+                seen.insert(canon, i);
+            }
         }
     }
     if !dupes.is_empty() {
-        bail!("Duplicate checkouts: {}", dupes.join(" "));
+        let paths: Vec<&str> = dupes.iter().map(|(p, _, _)| p.as_str()).collect();
+        let detail: String = dupes
+            .iter()
+            .map(|&(ref p, first, second)| {
+                let (a, b) = (&components[first], &components[second]);
+                if section_of.get(first) == section_of.get(second) {
+                    format!("\n  {p}: listed twice in one !CHECKOUT ({})", source_desc(a))
+                } else {
+                    format!("\n  {p}: from {} and from {}", source_desc(a), source_desc(b))
+                }
+            })
+            .collect();
+        bail!("Duplicate checkouts: {}{detail}", paths.join(" "));
     }
     Ok(())
+}
+
+/// Shortest thing that identifies which section a component came from, for
+/// the duplicate-checkout error: its `!URL` (with `!REPO_BRANCH`, since two
+/// sections can differ only by branch), else its `!TARGET`.
+fn source_desc(c: &Component) -> String {
+    match (&c.url, &c.branch) {
+        (Some(url), Some(branch)) => format!("{url}, branch {branch}"),
+        (Some(url), None) => url.clone(),
+        (None, _) => format!("target {}", c.target),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn ok(src: &str) -> Thornlist {
         match parse(src) {
@@ -844,6 +893,97 @@ tokenB
 ";
         let message = err(src);
         assert!(message.contains("Duplicate checkouts"), "{message}");
+        // The two colliding sections are named, not just the path.
+        assert!(message.contains("https://example.com/a.git"), "{message}");
+        assert!(message.contains("https://example.com/b.git"), "{message}");
+    }
+
+    /// The mistake real thornlists actually make: one `!CHECKOUT` list
+    /// naming a thorn twice, once on the `!CHECKOUT =` line and once in the
+    /// body. Naming the URL twice would read like a cactup bug, so this
+    /// case gets its own phrasing.
+    #[test]
+    fn duplicate_within_one_section_says_so() {
+        let src = "\
+!CRL_VERSION = 1.0
+!TARGET = arrangements
+!TYPE = git
+!URL = https://example.com/CarpetX.git
+!REPO_BRANCH = mixed-precision
+!REPO_PATH = $2
+!CHECKOUT = CarpetX/Algo CarpetX/PDESolvers
+CarpetX/ADMBaseX
+CarpetX/Algo
+CarpetX/Arith
+";
+        let message = err(src);
+        assert!(message.contains("arrangements/CarpetX/Algo"), "{message}");
+        assert!(message.contains("listed twice in one !CHECKOUT"), "{message}");
+        assert!(message.contains("https://example.com/CarpetX.git"), "{message}");
+        // Only the one repeat, not every thorn in the section.
+        assert!(!message.contains("PDESolvers"), "{message}");
+    }
+
+    /// An `ignore` section may name a path that another section checks out
+    /// — GetComponents never lets `ignore` entries reach the duplicate
+    /// check (it `next`s out at lines 457 and 733), and real fork
+    /// thornlists rely on that.
+    #[test]
+    fn ignore_section_may_shadow_a_real_checkout() {
+        let src = "\
+!CRL_VERSION = 1.0
+!TARGET = arrangements
+!TYPE = git
+!URL = https://example.com/upstream.git
+!REPO_PATH = $2
+!CHECKOUT = CarpetX/Algo CarpetX/CarpetX
+
+!TARGET = arrangements
+!TYPE = ignore
+!CHECKOUT = CarpetX/Algo
+";
+        let t = ok(src);
+        let checkouts: Vec<&str> = t.components().iter().map(|c| c.checkout.as_str()).collect();
+        assert_eq!(checkouts, vec!["CarpetX/Algo", "CarpetX/CarpetX"]);
+    }
+
+    /// Two `ignore` sections naming the same path don't collide either.
+    #[test]
+    fn duplicate_ignore_checkouts_are_not_an_error() {
+        let src = "\
+!CRL_VERSION = 1.0
+!TARGET = arrangements
+!TYPE = ignore
+!CHECKOUT = CarpetX/Algo
+
+!TARGET = arrangements
+!TYPE = ignore
+!CHECKOUT = CarpetX/Algo
+";
+        assert!(ok(src).components().is_empty());
+    }
+
+    /// Sections differing only by `!REPO_BRANCH` still collide, and the
+    /// error says so (both sides would land in the same directory).
+    #[test]
+    fn duplicate_checkout_error_names_branches() {
+        let src = "\
+!CRL_VERSION = 1.0
+!TARGET = arrangements
+!TYPE = git
+!URL = https://example.com/repo.git
+!REPO_BRANCH = main
+!CHECKOUT = CarpetX/Algo
+
+!TARGET = arrangements
+!TYPE = git
+!URL = https://example.com/repo.git
+!REPO_BRANCH = my-fork
+!CHECKOUT = CarpetX/Algo
+";
+        let message = err(src);
+        assert!(message.contains("branch main"), "{message}");
+        assert!(message.contains("branch my-fork"), "{message}");
     }
 
     #[test]
