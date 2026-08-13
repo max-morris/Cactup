@@ -125,6 +125,9 @@ wrapper-argv = [
 # Grab stderr so we can see submit problems in the log.
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
+# One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
+# is what keeps the patterns below matching.
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
 stop            = "scancel @JOB_ID@"
 submit-pattern   = 'Submitted batch job (\d+)'
 status-pattern   = '@JOB_ID@ '
