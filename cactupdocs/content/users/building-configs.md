@@ -72,6 +72,14 @@ For a brand-new config, cactup defaults to the installation's built-in thornlist
 the thornlist it was built from, so you don't have to repeat `--thornlist` on
 every rebuild — pass it again only to switch to a different file.
 
+That built-in file is named `einsteintoolkit.th` whatever it holds — for a
+custom installation it contains the custom list's thorns under that
+stock-looking name. So `cactup config show` annotates the `thornlist:` line
+with its provenance: whether the path is the installation's live list (and
+what that list actually is — a release, or a custom file), was recorded from
+an explicit `--thornlist`, or points at a file that has since disappeared
+(in which case rebuilds fall back to the config's snapshot).
+
 #### Editing a thornlist and rebuilding
 
 Edit the **source** thornlist — the file you passed to `--thornlist`, or the

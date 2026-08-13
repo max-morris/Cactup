@@ -100,7 +100,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // as-fetched copy, that is a hand edit (e.g. a hand-added thorn) and we
     // refuse to destroy it silently. Compared as parsed component sets, not
     // text — generated headers differ on every pre-existing installation.
-    let live_path = inst.cactus_root().join("thornlists/einsteintoolkit.th");
+    let live_path = inst.live_thornlist();
     let pristine_path = inst.root.join("einsteintoolkit.th");
     let divergence = if source.is_explicit() { live_divergence(&live_path, &pristine_path)? } else { Vec::new() };
     if !divergence.is_empty() && !replace_thornlist && !args.dry_run {
@@ -320,7 +320,7 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
             fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
         return Ok(Source::File { path, bytes });
     }
-    let live = inst.cactus_root().join("thornlists/einsteintoolkit.th");
+    let live = inst.live_thornlist();
     let path = if live.exists() { live } else { inst.root.join("einsteintoolkit.th") };
     let bytes =
         fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
@@ -788,11 +788,6 @@ fn report_configs(
     configs: &[(String, Option<crate::build::ConfigMeta>)],
     release_bump: bool,
 ) {
-    let default_live = inst.cactus_root().join("thornlists/einsteintoolkit.th");
-    let default_forms: Vec<String> = vec![
-        default_live.display().to_string(),
-        fs::canonicalize(&default_live).map(|p| p.display().to_string()).unwrap_or_default(),
-    ];
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {
         // No recorded HEADs = built before source tracking landed, so there is
@@ -809,9 +804,7 @@ fn report_configs(
             );
             continue;
         }
-        let custom = meta
-            .as_ref()
-            .is_some_and(|m| !default_forms.iter().any(|d| d == &m.thornlist));
+        let custom = meta.as_ref().is_some_and(|m| !inst.is_live_thornlist(&m.thornlist));
         if custom {
             println!(
                 "  {} — `cactup build {name}` recompiles the refetched sources. Note its thorn \

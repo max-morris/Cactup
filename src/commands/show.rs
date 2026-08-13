@@ -17,7 +17,7 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
 
     println!();
     println!("{}", "Active config".bold());
-    match Installation::resolve(ctx).and_then(|inst| super::config::show(&inst, None)) {
+    match Installation::resolve(ctx).and_then(|inst| super::config::show(ctx, &inst, None)) {
         Ok(()) => {}
         Err(e) => println!("{}", format!("{e}").yellow()),
     }

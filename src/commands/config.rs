@@ -43,7 +43,7 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
             Ok(())
         }
         ConfigCommand::List => list(&installation),
-        ConfigCommand::Show { name } => show(&installation, name.as_deref()),
+        ConfigCommand::Show { name } => show(ctx, &installation, name.as_deref()),
         ConfigCommand::Use { name } => {
             if ConfigMeta::load(&installation.cactus_root(), &name)?.is_none() {
                 bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
@@ -115,8 +115,25 @@ fn list(installation: &Installation) -> Res<()> {
     Ok(())
 }
 
+/// What the installation's live thornlist currently holds, from the DB
+/// entry's provenance fields: an explicit-source refetch (which records
+/// `current_*`) outranks install-time provenance, which is never rewritten.
+fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String {
+    let (release, from_list) = if entry.current_release.is_some() || entry.current_thornlist.is_some()
+    {
+        (entry.current_release.as_deref(), entry.current_thornlist.as_deref())
+    } else {
+        (entry.release.as_deref(), entry.thornlist.as_deref())
+    };
+    match (release, from_list) {
+        (Some(release), _) => format!("release {release}"),
+        (None, Some(list)) => format!("custom, from {list}"),
+        (None, None) => "custom installation".to_owned(),
+    }
+}
+
 /// `cactup config show [name]`: the active config, or a named one, in detail.
-pub(crate) fn show(installation: &Installation, name: Option<&str>) -> Res<()> {
+pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -> Res<()> {
     let cactus_root = installation.cactus_root();
 
     // No name → the contextually-relevant config: the active one.
@@ -136,7 +153,31 @@ pub(crate) fn show(installation: &Installation, name: Option<&str>) -> Res<()> {
     };
     println!("{}", meta.name.bold());
     println!("  variant: {}", meta.variant);
-    println!("  thornlist: {}", meta.thornlist);
+    // The bare path misleads on a custom installation: the live thornlist's
+    // fixed filename is `einsteintoolkit.th` whatever content it holds, so a
+    // config built from a custom install looks stock. Say which resolution
+    // rule produced the path and, for the live list, what it actually holds.
+    let provenance = if installation.is_live_thornlist(&meta.thornlist) {
+        let source = ctx
+            .db
+            .read()
+            .ok()
+            .and_then(|db| db.installations.get(&installation.alias).map(live_thornlist_source));
+        match source {
+            Some(source) => format!("the installation's live list — {source}"),
+            None => "the installation's live list".to_owned(),
+        }
+    } else if Path::new(&meta.thornlist).is_file() {
+        "recorded from --thornlist".to_owned()
+    } else {
+        // resolve_thornlist rule 3: the recorded file is gone, so a rebuild
+        // silently uses the config's snapshot — worth surfacing here.
+        format!(
+            "recorded from --thornlist; {}",
+            "no longer readable — builds fall back to this config's snapshot".yellow()
+        )
+    };
+    println!("  thornlist: {} ({provenance})", meta.thornlist);
     println!("  machine: {}", meta.machine);
     println!("  gpu: {}  compatible-queues: {}", meta.gpu, meta.compatible_queues.join(", "));
     if let Some(universe) = &meta.universe {
@@ -246,6 +287,41 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn live_thornlist_source_prefers_refetch_provenance() {
+        let entry = |release: Option<&str>,
+                     thornlist: Option<&str>,
+                     current_release: Option<&str>,
+                     current_thornlist: Option<&str>| {
+            crate::database::CactusInstallation {
+                alias: "et".into(),
+                release: release.map(str::to_owned),
+                path: "/inst".into(),
+                thornlist: thornlist.map(str::to_owned),
+                current_release: current_release.map(str::to_owned),
+                current_thornlist: current_thornlist.map(str::to_owned),
+            }
+        };
+        // Install-time provenance, never refetched.
+        assert_eq!(live_thornlist_source(&entry(Some("ET_2026_05"), None, None, None)), "release ET_2026_05");
+        assert_eq!(
+            live_thornlist_source(&entry(None, Some("/p/forks.th"), None, None)),
+            "custom, from /p/forks.th"
+        );
+        assert_eq!(live_thornlist_source(&entry(None, None, None, None)), "custom installation");
+        // An explicit-source refetch outranks install-time provenance — in
+        // both directions (release install refetched to a custom list, and
+        // custom install refetched to a release).
+        assert_eq!(
+            live_thornlist_source(&entry(Some("ET_2026_05"), None, None, Some("/p/forks.th"))),
+            "custom, from /p/forks.th"
+        );
+        assert_eq!(
+            live_thornlist_source(&entry(None, Some("/p/forks.th"), Some("ET_2026_11"), None)),
+            "release ET_2026_11"
+        );
+    }
 
     #[test]
     fn delete_gcs_orphaned_cache_entry_only() {

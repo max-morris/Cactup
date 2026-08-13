@@ -295,7 +295,7 @@ fn short(id: &str) -> String {
 /// The installation's live thornlist — the same file `build::resolve_thornlist`
 /// treats as the default, falling back to the pristine as-fetched copy.
 fn read_live_thornlist(inst: &Installation) -> Res<crate::thornlist::Thornlist> {
-    let live = inst.cactus_root().join("thornlists/einsteintoolkit.th");
+    let live = inst.live_thornlist();
     let pristine = inst.root.join("einsteintoolkit.th");
     let path: &Path = if live.is_file() { &live } else { &pristine };
     let text = std::fs::read_to_string(path)

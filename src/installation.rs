@@ -166,6 +166,27 @@ impl Installation {
         self.root.join("Cactus")
     }
 
+    /// The installation's live thornlist. The filename is fixed (inherited
+    /// from GetComponents' COMPONENTLIST_TARGET) regardless of what was
+    /// installed, so for a custom installation this file holds the custom
+    /// list's content under a stock-looking name.
+    pub fn live_thornlist(&self) -> PathBuf {
+        self.cactus_root().join("thornlists/einsteintoolkit.th")
+    }
+
+    /// Whether a config's recorded thornlist path is this installation's live
+    /// thornlist (as opposed to an explicit `--thornlist` file). Tolerates
+    /// both forms `resolve_thornlist` records: a plain `display()` string for
+    /// the default, and a canonicalized path when the same file was named via
+    /// `--thornlist`.
+    pub fn is_live_thornlist(&self, recorded: &str) -> bool {
+        let live = self.live_thornlist();
+        if recorded == live.display().to_string() {
+            return true;
+        }
+        std::fs::canonicalize(&live).is_ok_and(|c| recorded == c.display().to_string())
+    }
+
     pub fn cactup_dir(&self) -> PathBuf {
         self.root.join(".cactup")
     }
@@ -376,6 +397,26 @@ mod tests {
         // The lock is released with the guard.
         assert!(!inst.cactup_dir().join(".cactup-install.lock").exists());
         drop(inst.locked().unwrap());
+    }
+
+    #[test]
+    fn is_live_thornlist_tolerates_both_recorded_forms() {
+        let (_dir, inst) = inst();
+        let live = inst.live_thornlist();
+
+        // The default-rule form: a plain display() string, file need not exist.
+        assert!(inst.is_live_thornlist(&live.display().to_string()));
+        // Never a match: an explicit custom path, or an empty recorded string
+        // (which the old unwrap_or_default() form could spuriously match when
+        // canonicalize failed).
+        assert!(!inst.is_live_thornlist("/somewhere/else/my-forks.th"));
+        assert!(!inst.is_live_thornlist(""));
+
+        // The --thornlist form: the same file, but recorded canonicalized.
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, "!CRL_VERSION = 1.0\n").unwrap();
+        let canonical = std::fs::canonicalize(&live).unwrap();
+        assert!(inst.is_live_thornlist(&canonical.display().to_string()));
     }
 
     #[test]
