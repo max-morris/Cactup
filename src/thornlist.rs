@@ -1243,5 +1243,29 @@ Numerical/PrivateThorn
         assert_eq!(repos, vec!["ML_BSSN", "ML_ADMConstraints"]);
         assert_eq!(t.disabled_thorns(), &["McLachlan/ML_BSSN".to_string()]);
     }
+
+    /// A prose header may *mention* `#DISABLED` mid-sentence. Only a line that
+    /// starts with the directive counts — real-world trigger: a custom
+    /// thornlist whose header documents "comment out X below (#DISABLED X)".
+    /// The native fetcher copies `--thornlist` input verbatim, header and all,
+    /// where GetComponents used to strip it, so this reaches the parser now.
+    #[test]
+    fn disabled_directive_must_start_the_line() {
+        let src = "!CRL_VERSION = 1.0\n\
+                   # comment out CarpetX/TestReal2 below (#DISABLED CarpetX/TestReal2). Nothing\n\
+                   # else in this list needs it.\n\
+                   !TARGET = Cactus/arrangements\n\
+                   !TYPE = git\n\
+                   !URL = https://e.invalid/carpetx.git\n\
+                   !CHECKOUT = CarpetX/CarpetX\n\
+                   #DISABLED ExternalLibraries/PETSc\n";
+        let list = parse(src).unwrap();
+        assert_eq!(
+            list.disabled_thorns(),
+            ["ExternalLibraries/PETSc"],
+            "only the column-0 directive counts, not the prose mention"
+        );
+    }
+
 }
 

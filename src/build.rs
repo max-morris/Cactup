@@ -971,6 +971,26 @@ mod tests {
     use super::*;
     use crate::mdb::Mdb;
 
+    /// A comment that merely mentions a thorn name must never be toggled —
+    /// a custom thornlist's prose header documents thorns by name, and the
+    /// native fetcher now copies that header into the live list verbatim.
+    #[test]
+    fn toggles_ignore_comment_lines_that_name_thorns() {
+        let list = "# comment out CarpetX/TestReal2 below (#DISABLED CarpetX/TestReal2).\n\
+                    #   CarpetX/TestReal2 carries the REAL2 layer\n\
+                    CarpetX/TestReal2\n";
+        let out = apply_thorn_toggles(&list, &["CarpetX/TestReal2".into()], &[]);
+        assert_eq!(out, list, "enabling must not rewrite prose that names the thorn");
+        let off = apply_thorn_toggles(&list, &[], &["CarpetX/TestReal2".into()]);
+        assert_eq!(
+            off,
+            "# comment out CarpetX/TestReal2 below (#DISABLED CarpetX/TestReal2).\n\
+             #   CarpetX/TestReal2 carries the REAL2 layer\n\
+             #DISABLED CarpetX/TestReal2\n",
+            "only the real thorn line is toggled"
+        );
+    }
+
     #[test]
     fn thorn_toggles() {
         let list = "# comment\nCactusBase/IOUtil\n#DISABLED McLachlan/ML_BSSN\nCarpetX/CarpetX\n";
