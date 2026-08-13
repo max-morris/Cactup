@@ -260,8 +260,13 @@ pub fn clone(
 /// out the tree, deleting files the old checkout tracked that the new one
 /// doesn't. Returns the commit the repo ends on.
 pub fn align(repo_dir: &Path, branch: &str, progress: &mut prodash::tree::Item) -> Res<ObjectId> {
-    let repo = gix::open(repo_dir)
+    let mut repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
+    // Every ref the fetch below moves gets a reflog entry, and gix refuses
+    // to write one without a committer identity — which an account with no
+    // ~/.gitconfig doesn't have. Fall back to gix's generic in-memory
+    // identity (never written to disk; a configured identity always wins).
+    let _ = repo.committer_or_set_generic_fallback();
 
     // Fetch the wanted branch explicitly.
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");

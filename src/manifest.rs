@@ -117,9 +117,13 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
         let fetch_progress_1 = headline.add_child("Checking for updates");
         let fetch_progress_2 = headline.add_child("Fetching updates");
 
-        let repo =
+        let mut repo =
             gix::open(&manifest_dir)
                 .with_context(|| "Failed to open manifest repository")?;
+        // The ref edits and fetch below write reflog entries, which gix
+        // refuses without a committer identity — fall back to its generic
+        // in-memory one so a HOME with no ~/.gitconfig still works.
+        let _ = repo.committer_or_set_generic_fallback();
 
         // Fetching tags won't delete old ones. To keep it simple, we'll just annihilate
         // whatever tags are already there before fetching.
