@@ -21,6 +21,16 @@ use std::path::{Path, PathBuf};
 /// `process_components` pool.
 const WORKERS: usize = 4;
 
+/// How deep [`execute`]'s renderer draws into the progress tree. Levels:
+///  1. the overall "fetch components" bar
+///  2. our own per-component headline ("clone foo", "download bar", ...)
+///  3. gix's phase status line ("negotiate (round N)", "receiving pack", ...)
+///  4. gix's per-phase bars (remote, read pack, create index file, checkout,
+///     writing) — the actually-informative detail (byte counts, server
+///     "remote" counts)
+///  5+. per-thread delta-resolution/decoding noise — not useful, hidden
+const PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 4;
+
 /// A pure, read-only classification of everything the fetch would do.
 /// Produced by [`plan`]; nothing on disk changes until [`execute`].
 #[derive(Debug)]
@@ -151,15 +161,29 @@ impl ExecReport {
 /// Run the plan: git repos and downloads on a [`WORKERS`]-wide pool keyed by
 /// repo (one repo is only ever touched by one worker), externals
 /// sequentially, then the symlink pass. Progress renders via the crate's
-/// prodash line renderer. Errors are collected per item, never fatal to the
-/// rest of the fetch.
+/// prodash line renderer, four levels deep (see [`PROGRESS_MAX_LEVEL`]): an
+/// overall "fetch components" bar (level 1) counts finished items; each
+/// in-flight git work item gets a stable headline naming it (level 2, e.g.
+/// "clone foo") plus a child gix actually writes to (level 3/4 — see the
+/// worker loop for why those are split); downloads get one child (level 2)
+/// with bytes progress. Errors are collected per item, never fatal to the
+/// rest of the fetch, but a failing item's headline is left as a permanent
+/// red line before it's dropped, so a failure is visible live and not just
+/// in the final report.
 pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     enum Work<'p> {
         Git(&'p GitRepoPlan),
         Download(&'p Component),
     }
 
-    let (progress, renderer) = crate::manifest::setup_prodash();
+    let (progress, renderer) = crate::manifest::setup_prodash_with(
+        Some(crate::manifest::progress_level_filter(PROGRESS_MAX_LEVEL)),
+        true,
+    );
+
+    let top = progress.add_child("fetch components");
+    top.init(Some(plan.git.len() + plan.downloads.len()), Some(prodash::unit::label("components")));
+    let top = std::sync::Mutex::new(top);
 
     let queue: std::sync::Mutex<std::collections::VecDeque<Work>> = std::sync::Mutex::new(
         plan.git
@@ -182,17 +206,33 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                 };
                 match work {
                     Work::Git(item) => {
-                        let mut child = progress.add_child(item.repo.clone());
+                        let name = match (&item.action, item.branch.as_deref()) {
+                            (GitAction::Clone, _) => format!("clone {}", item.repo),
+                            (GitAction::Update, _) => format!("update {}", item.repo),
+                            (GitAction::Align, Some(branch)) => {
+                                format!("switch {} to {branch}", item.repo)
+                            }
+                            (GitAction::Align, None) => format!("switch {}", item.repo),
+                        };
+                        let mut header =
+                            top.lock().expect("fetch progress poisoned").add_child(name);
+                        // gix renames whatever item it's given as the fetch
+                        // moves through phases ("negotiate (round N)",
+                        // "receiving pack", ...) — it cannot carry our own
+                        // "clone/update/switch <repo>" headline, so that
+                        // headline lives one level above the item we hand
+                        // gix, which is never displayed directly.
+                        let mut gix_item = header.add_child("connecting");
                         let before = match item.action {
                             GitAction::Clone => None,
                             _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
                         };
                         let outcome = match (&item.action, item.branch.as_deref()) {
                             (GitAction::Clone, branch) => {
-                                git::clone(&item.url, branch, &item.dir, &mut child)
+                                git::clone(&item.url, branch, &item.dir, &mut gix_item)
                                     .and_then(|()| git::head_of(&item.dir).map(|(_, id)| id))
                             }
-                            (_, Some(branch)) => git::align(&item.dir, branch, &mut child),
+                            (_, Some(branch)) => git::align(&item.dir, branch, &mut gix_item),
                             (_, None) => {
                                 // plan() always fills in the probed head
                                 // branch for existing repos; this is a bug
@@ -210,27 +250,50 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 changed: before != Some(head),
                                 forced: item.forced.clone(),
                             }),
-                            Err(e) => report.failures.push(Failure {
-                                what: item.repo.clone(),
-                                error: format!("{e:#}"),
-                            }),
+                            Err(e) => {
+                                header.fail(format!("{}: {e:#}", item.repo));
+                                report.failures.push(Failure {
+                                    what: item.repo.clone(),
+                                    error: format!("{e:#}"),
+                                });
+                            }
                         }
+                        drop(report);
+                        drop(gix_item);
+                        drop(header);
+                        top.lock().expect("fetch progress poisoned").inc();
                     }
                     Work::Download(c) => {
-                        let outcome = download::download_component(install_root, c);
+                        let mut child = top
+                            .lock()
+                            .expect("fetch progress poisoned")
+                            .add_child(format!("download {}", c.checkout));
+                        let outcome = download::download_component(install_root, c, &mut child);
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
                             Ok(path) => report.downloads.push(path),
-                            Err(e) => report.failures.push(Failure {
-                                what: c.checkout.clone(),
-                                error: format!("{e:#}"),
-                            }),
+                            Err(e) => {
+                                child.fail(format!("{}: {e:#}", c.checkout));
+                                report.failures.push(Failure {
+                                    what: c.checkout.clone(),
+                                    error: format!("{e:#}"),
+                                });
+                            }
                         }
+                        drop(report);
+                        drop(child);
+                        top.lock().expect("fetch progress poisoned").inc();
                     }
                 }
             });
         }
     });
+
+    // External tools (svn/cvs) talk to the terminal directly, so the
+    // renderer must be gone before they run — shut it down here rather than
+    // at the end of the function.
+    drop(top);
+    renderer.shutdown_and_wait();
 
     let mut report = report.into_inner().expect("fetch report poisoned");
 
@@ -269,7 +332,6 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         }
     }
 
-    renderer.shutdown_and_wait();
     Ok(report)
 }
 
@@ -417,8 +479,11 @@ fn is_flesh(root: &str, c: &Component) -> bool {
 
 /// Classify every component of `list` against the tree at `install_root`
 /// (the directory that contains `<root>/`, i.e. the installation root).
-/// Read-only; the network is never touched.
-pub fn plan(list: &Thornlist, install_root: &Path) -> Res<Plan> {
+/// Read-only; the network is never touched. `progress` is init'ed to the
+/// repo count once the group map is built, then incremented as each repo is
+/// probed — a plain gix status walk per repo, which on ~80 repos takes long
+/// enough that without this the command looks hung before anything appears.
+pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree::Item) -> Res<Plan> {
     let root = list.root().to_owned();
     let repos_dir = install_root.join(&root).join("repos");
 
@@ -503,7 +568,10 @@ pub fn plan(list: &Thornlist, install_root: &Path) -> Res<Plan> {
     // user branch switch and must not demand a force flag.
     let fetch_state = FetchState::read(install_root)?;
 
+    progress.init(Some(git_groups.len()), Some(prodash::unit::label("repos")));
+
     for (repo, group) in git_groups {
+        let _current = progress.add_child(repo.clone());
         let dir = repos_dir.join(&repo);
         let mut probe = git::probe(&dir, &group.url, group.branch.as_deref().unwrap_or(""));
         if let RepoState::Dirty(DirtyReason::BranchSwitched { head, .. }) = &probe.state
@@ -562,6 +630,7 @@ pub fn plan(list: &Thornlist, install_root: &Path) -> Res<Plan> {
                 });
             }
         }
+        progress.inc();
     }
 
     Ok(plan)

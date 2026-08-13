@@ -124,8 +124,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         );
     }
 
-    // Pure, read-only classification.
-    let mut plan = fetch::plan(&list, &inst.root)?;
+    // Pure, read-only classification. Phase-scoped renderer: probing every
+    // repo (a gix status walk each) can take a while on ~80 repos, and
+    // without a bar that looks like a hang before anything else appears.
+    // The renderer draws on stderr while the rest of this command prints to
+    // stdout, so it must be shut down before any of that printing starts.
+    let (progress, renderer) = manifest::setup_prodash();
+    let mut classify = progress.add_child("classify repos");
+    let mut plan = fetch::plan(&list, &inst.root, &mut classify)?;
+    drop(classify);
+    renderer.shutdown_and_wait();
 
     // The skip warning block: before fetching, so it is seen up front, and
     // the same lines again in the summary. Under -s only the one-line count

@@ -267,7 +267,16 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     for w in list.warnings() {
         println!("{}", format!("thornlist warning: {w}").yellow());
     }
-    let plan = crate::fetch::plan(&list, &install_dir)?;
+    // Phase-scoped renderer: probing every repo (a gix status walk each) can
+    // take a while, and without a bar that looks like a hang before
+    // anything else appears. Shut down before any subsequent stdout print —
+    // the renderer draws on stderr and must not fight it.
+    let (progress, renderer) = manifest::setup_prodash();
+    let mut classify = progress.add_child("classify repos");
+    let plan = crate::fetch::plan(&list, &install_dir, &mut classify)?;
+    drop(classify);
+    renderer.shutdown_and_wait();
+
     let report = crate::fetch::execute(&plan, &install_dir)?;
     if !report.failures.is_empty() {
         for f in &report.failures {

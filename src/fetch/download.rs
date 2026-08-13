@@ -28,8 +28,14 @@ use std::path::{Path, PathBuf};
 /// overwriting whatever is already there (refetch semantics: downloads are
 /// always refreshed, matching GetComponents' `update` method never skipping
 /// a re-fetch). Returns the final file path. Never extracts an archive —
-/// neither does `handle_wget`.
-pub fn download_component(install_root: &Path, component: &Component) -> crate::Res<PathBuf> {
+/// neither does `handle_wget`. Streams the body in 64 KiB chunks rather than
+/// buffering it whole, reporting bytes (with a percentage and throughput,
+/// when the server sends `Content-Length`) via `progress`.
+pub fn download_component(
+    install_root: &Path,
+    component: &Component,
+    progress: &mut prodash::tree::Item,
+) -> crate::Res<PathBuf> {
     if component.ty == ComponentType::Ftp {
         let dest_dir = install_root.join(&component.target);
         bail!(
@@ -63,17 +69,39 @@ pub fn download_component(install_root: &Path, component: &Component) -> crate::
     let dest_path = dest_dir.join(&filename);
     let tmp_path = dest_dir.join(format!("{filename}.part"));
 
-    let response = reqwest::blocking::get(&fetch_url)
+    let mut response = reqwest::blocking::get(&fetch_url)
         .and_then(|r| r.error_for_status())
         .with_context(|| format!("Failed to download {fetch_url}"))?;
-    let bytes = response
-        .bytes()
-        .with_context(|| format!("Failed to read response body for {fetch_url}"))?;
+    progress.init(
+        response.content_length().map(|l| l as usize),
+        Some(prodash::unit::dynamic_and_mode(
+            prodash::unit::Bytes,
+            prodash::unit::display::Mode::with_throughput().and_percentage(),
+        )),
+    );
 
     // Write to a same-directory temp file, then rename into place, so a
-    // reader never observes a partially-written destination file.
-    std::fs::write(&tmp_path, &bytes)
-        .with_context(|| format!("Failed to write {}", tmp_path.display()))?;
+    // reader never observes a partially-written destination file. Streamed
+    // rather than buffered whole, so progress (and memory use) tracks the
+    // download as it happens rather than jumping to 100% at the end.
+    {
+        let mut tmp_file = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            if gix::interrupt::is_triggered() {
+                bail!("interrupted");
+            }
+            let n = std::io::Read::read(&mut response, &mut buf)
+                .with_context(|| format!("Failed to read response body for {fetch_url}"))?;
+            if n == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut tmp_file, &buf[..n])
+                .with_context(|| format!("Failed to write {}", tmp_path.display()))?;
+            progress.inc_by(n);
+        }
+    }
     std::fs::rename(&tmp_path, &dest_path).with_context(|| {
         format!("Failed to move {} into place at {}", tmp_path.display(), dest_path.display())
     })?;
@@ -112,6 +140,12 @@ fn derive_filename(name: Option<&str>, checkout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A standalone progress item — no renderer, just the in-memory counters
+    /// `download_component` writes to.
+    fn test_progress() -> prodash::tree::Item {
+        prodash::tree::Root::new().add_child("test")
+    }
 
     fn http_component(checkout: &str, name: Option<&str>) -> Component {
         Component {
@@ -158,7 +192,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.tar.gz", None);
         c.ty = ComponentType::Ftp;
-        let err = download_component(dir.path(), &c).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("ftp"), "{message}");
         assert!(message.contains("file.tar.gz"), "{message}");
@@ -169,7 +203,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.tar.gz", None);
         c.ty = ComponentType::Git;
-        let err = download_component(dir.path(), &c).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
         assert!(format!("{err:#}").contains("caller bug"));
     }
 
@@ -178,7 +212,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = http_component("file.tar.gz", None);
         c.url = None;
-        let err = download_component(dir.path(), &c).unwrap_err();
+        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
         assert!(format!("{err:#}").contains("!URL"));
     }
 }
