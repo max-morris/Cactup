@@ -13,13 +13,11 @@ use colored::Colorize;
 use std::fs;
 use std::path::PathBuf;
 
-/// The §11.7 display state, coarser than a sim's.
-fn state_line(run: &TestRun, sched: &Scheduler) -> colored::ColoredString {
-    let status = if run.meta.job_id == NO_JOB_ID {
-        None
-    } else {
-        sched.get_status(&run.meta.job_id).ok()
-    };
+/// The §11.7 display state, coarser than a sim's. `status` is the
+/// already-resolved live status (`None` for no job / a failed query) —
+/// callers resolve it themselves so `list` can batch the query across every
+/// row instead of round-tripping the scheduler once per row.
+fn state_line(run: &TestRun, status: Option<JobStatus>) -> colored::ColoredString {
     match status {
         Some(JobStatus::Running) => "RUNNING".green().bold(),
         Some(JobStatus::Queued) => "QUEUED".cyan(),
@@ -41,6 +39,13 @@ pub fn show(ctx: &Ctx, name: &str) -> Res<()> {
     show_one(&inst, &sched, name)
 }
 
+/// One registry entry, resolved from disk ahead of printing.
+enum Row {
+    Missing(PathBuf),
+    Broken(String),
+    Listed { run: TestRun, sets: usize, config: String },
+}
+
 /// `test list`: list test runs; `--all` unions every installation.
 pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
@@ -56,37 +61,71 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
         vec![Installation::resolve(ctx)?]
     };
 
+    let registries = installations
+        .iter()
+        .map(|inst| inst.tests())
+        .collect::<Res<Vec<_>>>()?;
+
+    let rows: Vec<Row> = registries
+        .iter()
+        .flat_map(|reg| reg.tests.values())
+        .map(|entry| {
+            if !entry.dir.is_dir() {
+                return Row::Missing(entry.dir.clone());
+            }
+            match TestRun::open(&entry.dir) {
+                Ok(run) => {
+                    let sets = list_results_ids(&run.dir).map(|v| v.len()).unwrap_or(0);
+                    Row::Listed { run, sets, config: entry.config.clone() }
+                }
+                Err(e) => Row::Broken(format!("{e:#}")),
+            }
+        })
+        .collect();
+
+    // One batched query for every row's job, instead of the scheduler
+    // round-trip per row this used to cost (each `get_status` is its own
+    // `squeue`/`qstat` call) — the same fix as `sim list`.
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Listed { run, .. } if run.meta.job_id != NO_JOB_ID => Some(run.meta.job_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let statuses = sched.get_statuses(&ids);
+
     let mut any = false;
-    for inst in &installations {
-        let registry = inst.tests()?;
+    let mut rows = rows.into_iter();
+    for (inst, registry) in installations.iter().zip(&registries) {
         if registry.tests.is_empty() {
             continue;
         }
         if all {
             println!("{}", format!("[{}]", inst.alias).bold());
         }
-        for (name, entry) in &registry.tests {
+        for name in registry.tests.keys() {
             any = true;
-            if !entry.dir.is_dir() {
-                println!(
+            match rows.next().expect("one row per registry entry") {
+                Row::Missing(dir) => println!(
                     "  {:24} {:12} {} (prune with `cactup test delete {name}`)",
                     name.bold(),
                     "MISSING".red(),
-                    entry.dir.display()
-                );
-                continue;
-            }
-            match TestRun::open(&entry.dir) {
-                Ok(run) => {
-                    let sets = list_results_ids(&run.dir).map(|v| v.len()).unwrap_or(0);
-                    let mut extra =
-                        format!("config {}, {} result set(s)", entry.config, sets);
+                    dir.display()
+                ),
+                Row::Broken(e) => println!("  {:24} {:12} {e}", name.bold(), "BROKEN".red()),
+                Row::Listed { run, sets, config } => {
+                    let mut extra = format!("config {config}, {sets} result set(s)");
                     if long {
                         extra.push_str(&format!(", job {}, {}", run.meta.job_id, run.dir.display()));
                     }
-                    println!("  {:24} {:24} {}", name.bold(), state_line(&run, &sched), extra);
+                    let status = if run.meta.job_id != NO_JOB_ID {
+                        statuses.get(&run.meta.job_id).copied()
+                    } else {
+                        None
+                    };
+                    println!("  {:24} {:24} {}", name.bold(), state_line(&run, status), extra);
                 }
-                Err(e) => println!("  {:24} {:12} {e:#}", name.bold(), "BROKEN".red()),
             }
         }
     }
@@ -99,8 +138,13 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
 /// Reprint the last run's results (§11.6 step 7) and the result-set history.
 fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
     let run = TestRun::locate(inst, name)?;
+    let status = if run.meta.job_id != NO_JOB_ID {
+        sched.get_status(&run.meta.job_id).ok()
+    } else {
+        None
+    };
     println!("{}", name.bold());
-    println!("  state:       {}", state_line(&run, sched));
+    println!("  state:       {}", state_line(&run, status));
     println!("  directory:   {}", run.dir.display());
     println!("  config:      {} (build-id {})", run.meta.config, run.meta.build_id);
     println!("  machine:     {}", run.meta.machine);
@@ -304,7 +348,45 @@ fn clean_tree(cactus_root: &std::path::Path) -> Res<Vec<std::path::PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mdb::meta::Meta;
     use std::path::Path;
+
+    /// `list`'s whole point is one `get_statuses` call instead of one
+    /// `get_status` per row (§10); pin that a duplicate job id in the batch
+    /// still only invokes the `get-status` command once per distinct id.
+    #[test]
+    fn get_statuses_queries_each_distinct_job_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("calls.log");
+        let meta: Meta = toml::from_str(&format!(
+            r#"
+            [machine]
+            nickname = "fake"
+            [scheduler]
+            get-status = "echo @JOB_ID@ >> {}; echo '@JOB_ID@ R'"
+            status-pattern = "^@JOB_ID@ "
+            running-pattern = " R"
+            [queues.local]
+            default = true
+            [variants.submitscript]
+            "default" = ["local"]
+            [variants.runscript]
+            "default" = ["local"]
+            [variants.optionlist]
+            variants = ["default"]
+            "#,
+            log.display()
+        ))
+        .unwrap();
+
+        // "1" appears twice; batching must still resolve it to one call.
+        let statuses = Scheduler::new(&meta).get_statuses(&["1", "2", "1"]);
+        assert_eq!(statuses.len(), 2);
+
+        let mut calls: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(str::to_owned).collect();
+        calls.sort();
+        assert_eq!(calls, vec!["1", "2"]);
+    }
 
     #[test]
     fn clean_tree_removes_in_tree_test_output_only() {
