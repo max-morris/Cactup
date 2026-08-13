@@ -62,6 +62,9 @@ submit          = "sbatch @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
+# One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
+# is what keeps the patterns below matching.
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
 stop            = "scancel @JOB_ID@"
 submit-pattern   = 'Submitted batch job ([0-9]+)'
 status-pattern   = '@JOB_ID@ '

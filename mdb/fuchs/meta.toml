@@ -58,6 +58,9 @@ submit          = "sbatch @SCRIPTFILE@; sleep 3"
 allocation-env  = "SLURM_JOB_ID"
 #getstatus (old alternative): squeue | awk '$1 == @JOB_ID@ {print $1,$5}'
 get-status      = "squeue -j @JOB_ID@"
+# One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
+# is what keeps the patterns below matching.
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
 stop            = "scancel @JOB_ID@"
 submit-pattern   = '(\d+)'
 status-pattern   = '@JOB_ID@ '

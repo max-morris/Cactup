@@ -214,9 +214,43 @@ fn parse_dir_name(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// All restart ids, sorted ascending.
-pub fn list_ids(sim_dir: &Path) -> Res<Vec<u32>> {
+/// The result of one directory scan of a simulation: which restarts exist and
+/// which carry the `-active` marker (§9.2).
+pub struct Scan {
+    /// Restart ids present as `output-%04d` directories, ascending.
+    pub ids: Vec<u32>,
+    /// Ids carrying an `output-%04d-active` marker; more than one is a fault
+    /// surfaced by [`Scan::active_id`].
+    actives: Vec<u32>,
+}
+
+impl Scan {
+    /// The active restart id, or the §9.2 hand-repair error when the
+    /// simulation carries more than one active marker.
+    pub fn active_id(&self, sim_dir: &Path) -> Res<Option<u32>> {
+        match self.actives.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(*one)),
+            several => bail!(
+                "simulation at {} has more than one active restart ({}) — this must be repaired by hand",
+                sim_dir.display(),
+                several.iter().map(|id| dir_name(*id)).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// The newest restart id, if any.
+    pub fn latest(&self) -> Option<u32> {
+        self.ids.last().copied()
+    }
+}
+
+/// Scan `sim_dir` once for both the restart ids and the active marker —
+/// `list_ids` + `active_id` in a single `read_dir`, which matters on a
+/// networked filesystem when a command walks every simulation.
+pub fn scan(sim_dir: &Path) -> Res<Scan> {
     let mut ids = Vec::new();
+    let mut actives = Vec::new();
     for entry in fs::read_dir(sim_dir)
         .with_context(|| format!("Failed to read simulation directory {}", sim_dir.display()))?
     {
@@ -227,10 +261,19 @@ pub fn list_ids(sim_dir: &Path) -> Res<Vec<u32>> {
             if entry.file_type()?.is_dir() {
                 ids.push(id);
             }
+        } else if let Some(base) = name.strip_suffix("-active") {
+            if let Some(id) = parse_dir_name(base) {
+                actives.push(id);
+            }
         }
     }
     ids.sort_unstable();
-    Ok(ids)
+    Ok(Scan { ids, actives })
+}
+
+/// All restart ids, sorted ascending.
+pub fn list_ids(sim_dir: &Path) -> Res<Vec<u32>> {
+    Ok(scan(sim_dir)?.ids)
 }
 
 /// The next restart id; ids `0..9999`, `>9999 ⇒` the preserved error (§9.1).
@@ -248,27 +291,7 @@ pub fn next_id(sim_dir: &Path) -> Res<u32> {
 /// Read the active restart via the symlink scan (§9.2): zero ⇒ none, more
 /// than one ⇒ fatal. The symlink — never a stored field — is the truth.
 pub fn active_id(sim_dir: &Path) -> Res<Option<u32>> {
-    let mut found = Vec::new();
-    for entry in fs::read_dir(sim_dir)
-        .with_context(|| format!("Failed to read simulation directory {}", sim_dir.display()))?
-    {
-        let name = entry?.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if let Some(base) = name.strip_suffix("-active") {
-            if let Some(id) = parse_dir_name(base) {
-                found.push(id);
-            }
-        }
-    }
-    match found.as_slice() {
-        [] => Ok(None),
-        [one] => Ok(Some(*one)),
-        several => bail!(
-            "simulation at {} has more than one active restart ({}) — this must be repaired by hand",
-            sim_dir.display(),
-            several.iter().map(|id| dir_name(*id)).collect::<Vec<_>>().join(", ")
-        ),
-    }
+    scan(sim_dir)?.active_id(sim_dir)
 }
 
 fn active_link(sim_dir: &Path, id: u32) -> PathBuf {
@@ -456,6 +479,36 @@ mod tests {
         deactivate(dir).unwrap();
         handoff_active(dir, 4).unwrap();
         assert_eq!(active_id(dir).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn scan_reports_ids_and_active_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir(restart_dir(dir, 2)).unwrap();
+        fs::create_dir(restart_dir(dir, 0)).unwrap();
+        // A non-directory entry named like a restart is ignored.
+        fs::write(restart_dir(dir, 1), b"not a dir").unwrap();
+        make_active(dir, 0).unwrap();
+
+        let scan = scan(dir).unwrap();
+        assert_eq!(scan.ids, vec![0, 2]);
+        assert_eq!(scan.latest(), Some(2));
+        assert_eq!(scan.active_id(dir).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn scan_active_id_errors_on_two_actives_but_list_ids_still_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir(restart_dir(dir, 0)).unwrap();
+        fs::create_dir(restart_dir(dir, 1)).unwrap();
+        make_active(dir, 0).unwrap();
+        // Force a second active marker directly (make_active refuses this).
+        std::os::unix::fs::symlink(dir_name(1), dir.join("output-0001-active")).unwrap();
+
+        assert!(scan(dir).unwrap().active_id(dir).is_err());
+        assert_eq!(list_ids(dir).unwrap(), vec![0, 1]);
     }
 
     #[test]

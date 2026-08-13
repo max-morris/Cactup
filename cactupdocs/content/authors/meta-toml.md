@@ -92,6 +92,7 @@ memory = 256000
 submit = "sbatch @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -195,12 +196,18 @@ The `[scheduler]` section defines how cactup interacts with your batch system. H
 submit = "sbatch @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
 queued-pattern = " PD "
 running-pattern = " R "
 ```
+
+`get-status-many` is optional: one call instead of one per job. It must list every
+live job of `@USER@`, one per line, with the job id as the first field; the rest of
+the line is classified by the same `status`/`queued`/`running`/`holding` patterns
+used for `get-status`. A job id absent from the listing is treated as not queued.
 
 ### PBS/Torque (qsub)
 

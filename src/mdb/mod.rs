@@ -344,7 +344,8 @@ pub struct ScriptFile {
     pub python: bool,
 }
 
-fn whoami() -> String {
+/// The invoking user, for `@USER@` substitution (§4.2, §10).
+pub fn whoami() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "unknown".to_owned())

@@ -2,13 +2,14 @@
 //! (including `sim show --output-dir`), and `sim log`.
 
 use crate::commands::Ctx;
-use crate::installation::Installation;
+use crate::installation::{Installation, SimEntry};
 use crate::scheduler::{display_state, DisplayState, JobStatus, Scheduler};
 use crate::sim::restart::{self, Restart, NO_JOB_ID};
 use crate::sim::{cache, Simulation};
 use crate::Res;
 use anyhow::{bail, Context};
 use colored::Colorize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -257,33 +258,86 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     Ok(())
 }
 
-/// One simulation's derived display state (§8.6, §10).
-fn sim_state(sim: &Simulation, sched: &Scheduler) -> (DisplayState, Option<u32>, Option<String>) {
-    let Ok(ids) = restart::list_ids(&sim.dir) else {
+/// One simulation's derived display state (§8.6, §10) with the live scheduler
+/// query held back: [`SimState::state`] is exact once the queried status is
+/// folded in, and [`SimState::job_to_query`] names the only job whose status
+/// can still change the answer. Splitting the query out is what lets `sim list`
+/// resolve a whole registry in one batched round of scheduler calls instead of
+/// one call per simulation.
+struct SimState {
+    /// The restart the state is derived from: the active one, else the latest.
+    subject: Option<u32>,
+    job: Option<String>,
+    active: bool,
+    chained: bool,
+    terminated: bool,
+    /// Set when the state is decided whatever the queue says: no restart at
+    /// all, or unreadable restart metadata.
+    forced: Option<DisplayState>,
+}
+
+impl SimState {
+    /// A simulation with nothing to derive a state from.
+    fn nothing() -> SimState {
+        SimState {
+            subject: None,
+            job: None,
+            active: false,
+            chained: false,
+            terminated: false,
+            forced: Some(DisplayState::Inactive),
+        }
+    }
+
+    /// The job whose live status still has to be queried, if any. Only an
+    /// active restart — or a non-active one holding a pre-submitted chain
+    /// (§8.6) — is sensitive to it; anything else is INACTIVE whatever the
+    /// queue says, so a long finished history costs no scheduler calls.
+    fn job_to_query(&self) -> Option<&str> {
+        if self.forced.is_some() || !(self.active || self.chained) {
+            return None;
+        }
+        self.job.as_deref()
+    }
+
+    /// The derived state, given the live status of [`SimState::job_to_query`]
+    /// (`None` when there was nothing to query, or the query failed).
+    fn state(&self, status: Option<JobStatus>) -> DisplayState {
+        self.forced
+            .unwrap_or_else(|| display_state(self.active, status, self.chained, self.terminated))
+    }
+}
+
+/// One simulation's display state from a directory scan already taken, minus
+/// the live query (§8.6, §10) — see [`SimState`].
+fn sim_state(sim: &Simulation, scan: &restart::Scan) -> SimState {
+    let active = scan.active_id(&sim.dir).ok().flatten();
+    // The restart that determines the state: the active one, else the latest.
+    let Some(subject) = active.or_else(|| scan.latest()) else { return SimState::nothing() };
+    let Ok(r) = Restart::load(&sim.dir, subject) else {
+        return SimState { subject: Some(subject), ..SimState::nothing() };
+    };
+    SimState {
+        subject: Some(subject),
+        job: (r.meta.job_id != NO_JOB_ID).then(|| r.meta.job_id.clone()),
+        active: active.is_some(),
+        chained: r.meta.chained_job_id.is_some(),
+        terminated: r.meta.terminated,
+        forced: None,
+    }
+}
+
+/// [`sim_state`] for a single simulation: scan and query it on the spot.
+fn sim_state_now(
+    sim: &Simulation,
+    sched: &Scheduler,
+) -> (DisplayState, Option<u32>, Option<String>) {
+    let Ok(scan) = restart::scan(&sim.dir) else {
         return (DisplayState::Inactive, None, None);
     };
-    let active = restart::active_id(&sim.dir).ok().flatten();
-
-    // The restart that determines the state: the active one, else the latest.
-    let subject = active.or_else(|| ids.last().copied());
-    let Some(subject) = subject else { return (DisplayState::Inactive, None, None) };
-    let Ok(r) = Restart::load(&sim.dir, subject) else {
-        return (DisplayState::Inactive, Some(subject), None);
-    };
-
-    let status = if r.meta.job_id == NO_JOB_ID {
-        None
-    } else {
-        sched.get_status(&r.meta.job_id).ok()
-    };
-    let state = display_state(
-        active.is_some(),
-        status,
-        r.meta.chained_job_id.is_some(),
-        r.meta.terminated,
-    );
-    let job = (r.meta.job_id != NO_JOB_ID).then(|| r.meta.job_id.clone());
-    (state, Some(subject), job)
+    let st = sim_state(sim, &scan);
+    let status = st.job_to_query().and_then(|job| sched.get_status(job).ok());
+    (st.state(status), st.subject, st.job)
 }
 
 fn state_str(state: DisplayState) -> colored::ColoredString {
@@ -310,8 +364,105 @@ pub fn show(ctx: &Ctx, name: &str, long: bool, output_dir: bool, restart_id: Opt
     show_one(&inst, &sched, name, long)
 }
 
+/// How wide the row-gathering pool runs. Each row is a handful of stats and
+/// small reads on what is usually a networked filesystem, so a long history is
+/// spent waiting rather than working — but stay bounded, since the thing being
+/// waited on is one shared metadata server.
+const ROW_WORKERS: usize = 8;
+
+/// One `sim list` row, gathered from disk before any scheduler query.
+enum Row {
+    /// A registry entry whose directory is gone (§8.1).
+    Missing(PathBuf),
+    /// The directory is there but is not a readable cactup simulation.
+    Broken(String),
+    Listed { config: String, restarts: usize, dir: PathBuf, state: SimState },
+}
+
+impl Row {
+    fn job_to_query(&self) -> Option<&str> {
+        match self {
+            Row::Listed { state, .. } => state.job_to_query(),
+            _ => None,
+        }
+    }
+}
+
+/// Everything one row needs from disk: the registry entry's directory, the
+/// simulation metadata, and a single scan of the restart directories.
+fn gather_row(name: &str, entry: &SimEntry) -> Row {
+    if !entry.dir.is_dir() {
+        return Row::Missing(entry.dir.clone());
+    }
+    let sim = match Simulation::open(name, &entry.dir) {
+        Ok(sim) => sim,
+        Err(e) => return Row::Broken(format!("{e:#}")),
+    };
+    // One scan feeds both the restart count and the state; an unreadable
+    // simulation directory leaves the row restart-less, as it always has.
+    let scan = restart::scan(&sim.dir).ok();
+    Row::Listed {
+        config: entry.config.clone(),
+        restarts: scan.as_ref().map_or(0, |s| s.ids.len()),
+        state: scan.as_ref().map_or_else(SimState::nothing, |scan| sim_state(&sim, scan)),
+        dir: sim.dir,
+    }
+}
+
+/// Gather every row on the [`ROW_WORKERS`] pool, back in registry order.
+fn gather_rows(entries: &[(&String, &SimEntry)]) -> Vec<Row> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let next = AtomicUsize::new(0);
+    let rows: std::sync::Mutex<Vec<(usize, Row)>> = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..ROW_WORKERS.min(entries.len()).max(1) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((name, entry)) = entries.get(i) else { return };
+                let row = gather_row(name, entry);
+                rows.lock().expect("sim list rows poisoned").push((i, row));
+            });
+        }
+    });
+    let mut rows = rows.into_inner().expect("sim list rows poisoned");
+    rows.sort_unstable_by_key(|(i, _)| *i);
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+fn print_row(name: &str, row: &Row, statuses: &HashMap<String, JobStatus>, long: bool) {
+    match row {
+        Row::Missing(dir) => println!(
+            "  {:24} {:12} {}",
+            name.bold(),
+            "MISSING".red(),
+            format!("{} (prune with `cactup sim delete {name}`)", dir.display())
+        ),
+        Row::Broken(e) => println!("  {:24} {:12} {e}", name.bold(), "BROKEN".red()),
+        Row::Listed { config, restarts, dir, state } => {
+            let status = state.job_to_query().and_then(|job| statuses.get(job).copied());
+            let mut extra = format!("config {config}, {restarts} restart(s)");
+            if let Some(job) = &state.job {
+                extra.push_str(&format!(", job {job}"));
+            }
+            if long {
+                if let Some(s) = state.subject {
+                    extra.push_str(&format!(", latest {}", restart::dir_name(s)));
+                }
+                extra.push_str(&format!(", {}", dir.display()));
+            }
+            println!("  {:24} {:12} {}", name.bold(), state_str(state.state(status)), extra);
+        }
+    }
+}
+
 /// `sim list` (§8.1, §8.6): list the registry; `--all` unions every
 /// installation's registry.
+///
+/// Done in three passes rather than one simulation at a time, because both the
+/// per-simulation directory scans and the scheduler status queries are
+/// latency-bound: a cluster with a long history spent one `squeue` round-trip
+/// per simulation, serially, which is what made this crawl (§10).
 pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let sched = Scheduler::new(&machine.meta);
@@ -326,55 +477,42 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
         vec![Installation::resolve(ctx)?]
     };
 
-    let mut any = false;
-    for inst in &installations {
-        let registry = inst.simulations()?;
+    let registries = installations
+        .iter()
+        .map(|inst| inst.simulations())
+        .collect::<Res<Vec<_>>>()?;
+    let entries: Vec<(&String, &SimEntry)> =
+        registries.iter().flat_map(|reg| reg.simulations.iter()).collect();
+    if entries.is_empty() {
+        println!("No simulations (create one with `cactup sim create <name> <parfile>`)");
+        return Ok(());
+    }
+
+    let rows = gather_rows(&entries);
+    // One batched query for the simulations whose state the queue can still
+    // change; the rest of the history needs no scheduler round-trip at all.
+    let pending: Vec<&str> = rows.iter().filter_map(Row::job_to_query).collect();
+    let statuses = sched.get_statuses(&pending);
+
+    let mut rows = rows.iter();
+    for (inst, registry) in installations.iter().zip(&registries) {
         if registry.simulations.is_empty() {
             continue;
         }
         if all {
             println!("{}", format!("[{}]", inst.alias).bold());
         }
-        for (name, entry) in &registry.simulations {
-            any = true;
-            if !entry.dir.is_dir() {
-                println!(
-                    "  {:24} {:12} {}",
-                    name.bold(),
-                    "MISSING".red(),
-                    format!("{} (prune with `cactup sim delete {name}`)", entry.dir.display())
-                );
-                continue;
-            }
-            match Simulation::open(name, &entry.dir) {
-                Ok(sim) => {
-                    let (state, subject, job) = sim_state(&sim, &sched);
-                    let restarts = restart::list_ids(&sim.dir).map(|v| v.len()).unwrap_or(0);
-                    let mut extra = format!("config {}, {} restart(s)", entry.config, restarts);
-                    if let Some(job) = job {
-                        extra.push_str(&format!(", job {job}"));
-                    }
-                    if long {
-                        if let Some(s) = subject {
-                            extra.push_str(&format!(", latest {}", restart::dir_name(s)));
-                        }
-                        extra.push_str(&format!(", {}", sim.dir.display()));
-                    }
-                    println!("  {:24} {:12} {}", name.bold(), state_str(state), extra);
-                }
-                Err(e) => println!("  {:24} {:12} {e:#}", name.bold(), "BROKEN".red()),
-            }
+        for name in registry.simulations.keys() {
+            let row = rows.next().expect("one row per registry entry");
+            print_row(name, row, &statuses, long);
         }
-    }
-    if !any {
-        println!("No simulations (create one with `cactup sim create <name> <parfile>`)");
     }
     Ok(())
 }
 
 fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> Res<()> {
     let sim = Simulation::locate(inst, name)?;
-    let (state, _, _) = sim_state(&sim, sched);
+    let (state, _, _) = sim_state_now(&sim, sched);
 
     println!("{}", name.bold());
     println!("  state:         {}", state_str(state));
@@ -402,22 +540,30 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
         }
     }
 
-    let active = restart::active_id(&sim.dir)?;
-    let ids = restart::list_ids(&sim.dir)?;
-    if ids.is_empty() {
+    let scan = restart::scan(&sim.dir)?;
+    let active = scan.active_id(&sim.dir)?;
+    if scan.ids.is_empty() {
         println!("  restarts:      none");
         return Ok(());
     }
     println!("  restarts:");
-    for id in ids {
+    // Load the whole chain first, so every restart's live status comes out of
+    // one batched query instead of a scheduler round-trip each (§10).
+    let loaded: Vec<Res<Restart>> =
+        scan.ids.iter().map(|&id| Restart::load(&sim.dir, id)).collect();
+    let queries: Vec<&str> = loaded
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .map(|r| r.meta.job_id.as_str())
+        .filter(|job| *job != NO_JOB_ID)
+        .collect();
+    let statuses = sched.get_statuses(&queries);
+
+    for (&id, loaded) in scan.ids.iter().zip(&loaded) {
         let marker = if active == Some(id) { " (active)" } else { "" };
-        match Restart::load(&sim.dir, id) {
+        match loaded {
             Ok(r) => {
-                let status = if r.meta.job_id == NO_JOB_ID {
-                    None
-                } else {
-                    sched.get_status(&r.meta.job_id).ok()
-                };
+                let status = statuses.get(&r.meta.job_id).copied();
                 let state = display_state(
                     active == Some(id),
                     status,
@@ -573,5 +719,201 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o400, "TERMINATE perms tightened");
+    }
+
+    /// One simulation on disk under `root`: a `simulation.toml` plus a single
+    /// `output-0000` restart — just enough for `gather_row`/`sim_state`.
+    fn fake_sim(
+        root: &Path,
+        name: &str,
+        job_id: &str,
+        active: bool,
+        chained: Option<&str>,
+        terminated: bool,
+    ) -> SimEntry {
+        let dir = root.join(name);
+        let mut meta = SimulationMeta::default();
+        meta.parfile = "bbh.par".to_owned();
+        crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
+
+        let rdir = restart::restart_dir(&dir, 0);
+        fs::create_dir_all(rdir.join(".cactup")).unwrap();
+        let mut toml_text = format!(
+            "created = \"2024-01-01T00:00:00Z\"\n\
+             nodes = 1\n\
+             tasks = 1\n\
+             tpn = 1\n\
+             cpus = 1\n\
+             queue = \"debug\"\n\
+             walltime = \"24:00:00\"\n\
+             checkpt-buffer = \"00:10:00\"\n\
+             job-id = \"{job_id}\"\n"
+        );
+        if let Some(chain) = chained {
+            toml_text.push_str(&format!("chained-job-id = \"{chain}\"\n"));
+        }
+        if terminated {
+            toml_text.push_str("terminated = true\n");
+        }
+        fs::write(rdir.join(".cactup").join("restart.toml"), toml_text).unwrap();
+
+        if active {
+            restart::make_active(&dir, 0).unwrap();
+        }
+
+        SimEntry { dir, config: "sim".to_owned(), created: chrono::Utc::now() }
+    }
+
+    /// The `SimState` behind a `Row::Listed`; panics on anything else.
+    fn listed_state(row: &Row) -> &SimState {
+        match row {
+            Row::Listed { state, .. } => state,
+            _ => panic!("expected Row::Listed"),
+        }
+    }
+
+    #[test]
+    fn list_rows_query_only_the_live_simulations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Two finished-history sims — the case that dominates a real cluster
+        // history — then one live sim, one pre-submitted chain, one NO_JOB_ID
+        // active sim, one missing directory, one broken (no simulation.toml).
+        let hist1 = fake_sim(root, "hist1", "100", false, None, true);
+        let hist2 = fake_sim(root, "hist2", "101", false, None, true);
+        let live = fake_sim(root, "live", "200", true, None, false);
+        let chain = fake_sim(root, "chain", "300", false, Some("301"), false);
+        let nojob = fake_sim(root, "nojob", NO_JOB_ID, true, None, false);
+        let missing = SimEntry {
+            dir: root.join("ghost"),
+            config: "sim".to_owned(),
+            created: chrono::Utc::now(),
+        };
+        let broken_dir = root.join("broken");
+        fs::create_dir_all(&broken_dir).unwrap();
+        let broken =
+            SimEntry { dir: broken_dir, config: "sim".to_owned(), created: chrono::Utc::now() };
+
+        let names: Vec<String> = ["hist1", "hist2", "live", "chain", "nojob", "missing", "broken"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let values = [hist1, hist2, live, chain, nojob, missing, broken];
+        let entries: Vec<(&String, &SimEntry)> = names.iter().zip(values.iter()).collect();
+
+        let rows = gather_rows(&entries);
+        assert_eq!(rows.len(), 7, "one row per registry entry");
+
+        for (i, row) in rows.iter().enumerate().take(5) {
+            match row {
+                Row::Listed { restarts, config, .. } => {
+                    assert_eq!(*restarts, 1, "entry {i}");
+                    assert_eq!(config, "sim", "entry {i}");
+                }
+                _ => panic!("entry {i}: expected Row::Listed"),
+            }
+        }
+        assert!(matches!(&rows[5], Row::Missing(_)), "missing directory");
+        assert!(matches!(&rows[6], Row::Broken(_)), "no simulation.toml");
+
+        let pending: Vec<&str> = rows.iter().filter_map(Row::job_to_query).collect();
+        assert_eq!(
+            pending,
+            vec!["200", "300"],
+            "a finished history must cost zero scheduler round-trips"
+        );
+    }
+
+    #[test]
+    fn deferred_states_match_the_derivation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let live = fake_sim(root, "live", "200", true, None, false);
+        let hist = fake_sim(root, "hist", "100", false, None, true);
+        let chain = fake_sim(root, "chain", "300", false, Some("301"), false);
+        let nojob = fake_sim(root, "nojob", NO_JOB_ID, true, None, false);
+
+        let names: Vec<String> =
+            ["live", "hist", "chain", "nojob"].into_iter().map(String::from).collect();
+        let values = [live, hist, chain, nojob];
+        let entries: Vec<(&String, &SimEntry)> = names.iter().zip(values.iter()).collect();
+        let rows = gather_rows(&entries);
+
+        let live_state = listed_state(&rows[0]);
+        assert_eq!(live_state.state(Some(JobStatus::Running)), DisplayState::Running);
+        assert_eq!(
+            live_state.state(None),
+            DisplayState::Active,
+            "query failed or never ran, but the restart is still active"
+        );
+
+        let hist_state = listed_state(&rows[1]);
+        assert_eq!(
+            hist_state.state(None),
+            DisplayState::Inactive,
+            "finished history is INACTIVE whatever the queue says"
+        );
+
+        let chain_state = listed_state(&rows[2]);
+        assert_eq!(chain_state.state(Some(JobStatus::Queued)), DisplayState::Presubmitted);
+
+        let nojob_state = listed_state(&rows[3]);
+        assert_eq!(nojob_state.state(None), display_state(true, None, false, false));
+    }
+
+    #[test]
+    fn batched_status_query_runs_one_command_per_pending_job() {
+        use crate::mdb::meta::Meta;
+
+        fn meta(scheduler_toml: &str) -> Meta {
+            toml::from_str(&format!(
+                r#"
+                [machine]
+                nickname = "fake"
+                [scheduler]
+                {scheduler_toml}
+                [queues.local]
+                default = true
+                [variants.submitscript]
+                "default" = ["local"]
+                [variants.runscript]
+                "default" = ["local"]
+                [variants.optionlist]
+                variants = ["default"]
+                "#
+            ))
+            .unwrap()
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let calls = tmp.path().join("calls.txt");
+        let m = meta(&format!(
+            r#"
+            get-status = "echo @JOB_ID@ >> {}"
+            status-pattern = "^@JOB_ID@ "
+            running-pattern = "^"
+            "#,
+            calls.display()
+        ));
+        let sched = Scheduler::new(&m);
+
+        // "10" appears twice among the pending jobs.
+        let pending = ["10", "20", "10", "30"];
+        let statuses = sched.get_statuses(&pending);
+        assert_eq!(statuses.len(), 3, "distinct pending ids resolved");
+
+        let mut lines: Vec<String> =
+            fs::read_to_string(&calls).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines.len(), 3, "one invocation per distinct pending id");
+        lines.sort();
+        assert_eq!(lines, vec!["10", "20", "30"]);
+
+        // No pending jobs at all: the command must never run.
+        let untouched = tmp.path().join("never.txt");
+        let m2 = meta(&format!(r#"get-status = "echo x >> {}""#, untouched.display()));
+        Scheduler::new(&m2).get_statuses(&[]);
+        assert!(!untouched.exists(), "empty pending list runs the command zero times");
     }
 }

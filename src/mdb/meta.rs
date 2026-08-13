@@ -211,6 +211,15 @@ pub struct Scheduler {
     #[allow(dead_code)]
     pub interactive_cmd: Option<String>,
     pub get_status: Option<String>,
+    /// Optional one-call form of `get-status` (§10, a cactup addition): lists
+    /// every live job of `@USER@`, one per line, the job id as the first
+    /// whitespace-separated field — e.g. `squeue -h -u @USER@ -o '%i %t (%r)'`.
+    /// It lets `sim list` resolve a whole history with a single scheduler
+    /// round-trip instead of one per simulation; machines that omit it are
+    /// queried per job as before. The rest of each line is classified by the
+    /// same `queued`/`running`/`holding` patterns, so the format a machine
+    /// chooses has to keep those matching.
+    pub get_status_many: Option<String>,
     pub stop: Option<String>,
     pub submit_pattern: Option<String>,
     pub status_pattern: Option<String>,
