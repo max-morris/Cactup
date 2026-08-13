@@ -94,6 +94,22 @@ pub struct ConfigMeta {
     /// may not precede scalar keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<BTreeMap<String, String>>,
+    /// Thorn name -> providing directory (from the processed thornlist,
+    /// `Thornlist::thorn_providers`), as of this build — the §7.4 input that
+    /// lets a rebuild notice a thorn name changing provider. The motivating
+    /// incident: Cactus keys `configs/<cfg>/build/<Thorn>/` and
+    /// `libthorn_<Thorn>.a` by thorn *name* only, so swapping which
+    /// arrangement provides a name (e.g. disabling `EinsteinAnalysis/Foo` and
+    /// enabling `SpacetimeX/Foo`) silently reuses build state compiled from
+    /// the other source tree — a stale `.d` file can name a bindings header
+    /// the reconfigure correctly deleted (a hard make error), and `ar`
+    /// updates an existing `libthorn_*.a` in place, so stale members from the
+    /// old provider can survive into the link without so much as a warning.
+    /// Absent reads as "no information", never "unchanged" — same convention
+    /// as `sources`. Serialized last, alongside `sources`: it is a TOML
+    /// table, and a table may not precede scalar keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thorn_providers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -320,6 +336,16 @@ pub enum RebuildDecision {
     /// `configs/<name>/ThornList` that the reconfigure step copies into place.
     /// Adding a thorn is routine, so paying a from-scratch rebuild for it would
     /// be a poor trade; `-f` is still there when one is wanted.
+    ///
+    /// One exception, discovered the hard way: a thorn *name* that persists
+    /// across the change while the directory providing it changes (a
+    /// `#DISABLED`/enable swap between two arrangements, e.g.
+    /// `EinsteinAnalysis/WeylScal4` for `SpacetimeX/WeylScal4`) really does
+    /// change how that name's code compiles, because Cactus keys
+    /// `build/<Thorn>/` and `libthorn_<Thorn>.a` by name only. The build path
+    /// keeps this variant safe by deleting the affected per-thorn state
+    /// before invoking make — see `provider_delta` and its call site in
+    /// `build()`.
     Incremental(&'static str),
     /// Optionlist or universe changed: realclean + reconfigure + build. Both
     /// change *how* the sources compile, so every existing object is suspect.
@@ -406,6 +432,37 @@ pub fn source_delta(
     (delta, change)
 }
 
+/// The §7.4 provenance counterpart to `source_delta`: which thorn *names*
+/// need their per-thorn build state (`build/<Thorn>/`, `libthorn_<Thorn>.a`)
+/// invalidated because the directory providing that name changed. Returns
+/// names present in `stored` whose `fresh` provider differs, plus names
+/// present in `stored` but absent from `fresh` (sorted, free via `BTreeMap`
+/// iteration order).
+///
+/// A dropped thorn is included deliberately: its `build/<Thorn>/` must be
+/// removed too, or re-adding the name later from a *different* provider finds
+/// no baseline to diff against and the stale state silently survives. Names
+/// only in `fresh` (newly added thorns) are not a change — there is nothing
+/// built yet to invalidate — mirroring `source_delta`'s bootstrap tolerance
+/// for repos the stored record never knew about.
+///
+/// Either side `None` means no information (a build predating provenance
+/// tracking, or a thornlist cactup could not parse), never "unchanged" — so
+/// this returns empty rather than guessing.
+pub fn provider_delta(
+    stored: Option<&BTreeMap<String, String>>,
+    fresh: Option<&BTreeMap<String, String>>,
+) -> Vec<String> {
+    let (Some(stored), Some(fresh)) = (stored, fresh) else {
+        return Vec::new();
+    };
+    stored
+        .iter()
+        .filter(|(name, provider)| fresh.get(name.as_str()) != Some(provider))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// `stored_thornlist`/`fresh_thornlist` are the *processed* (toggles-applied)
 /// texts, so this one comparison covers a source-thornlist edit, a switch to a
 /// different thornlist file, and a change to the machine's or variant's
@@ -414,6 +471,7 @@ pub fn source_delta(
 ///
 /// `sources` covers the case none of the text diffs can see at all: a refetch
 /// that leaves the thornlist byte-identical and moves the repos underneath it.
+#[allow(clippy::too_many_arguments)]
 pub fn rebuild_decision(
     stored_optionlist: Option<&str>,
     fresh_optionlist: &str,
@@ -422,6 +480,7 @@ pub fn rebuild_decision(
     stored_thornlist: Option<&str>,
     fresh_thornlist: &str,
     sources: SourceDelta,
+    changed_providers: &[String],
 ) -> RebuildDecision {
     match stored_optionlist {
         None => RebuildDecision::Fresh,
@@ -441,6 +500,14 @@ pub fn rebuild_decision(
         // build rewrites it either way.
         Some(_) if stored_thornlist.is_some_and(|s| s != fresh_thornlist) => {
             RebuildDecision::Incremental("the thornlist changed")
+        }
+        // Normally a provider change implies the thornlist text changed too,
+        // so the arm above already fired. This one catches the edge where the
+        // processed thornlist was hand-deleted (the text diff above reads as
+        // unchanged, since there's nothing to compare against) while the
+        // provenance map still shows the swap.
+        Some(_) if !changed_providers.is_empty() => {
+            RebuildDecision::Incremental("thorn names changed provider")
         }
         Some(_) if sources == SourceDelta::Thorns => {
             RebuildDecision::Incremental("the thorn sources moved to a different commit")
@@ -478,17 +545,6 @@ pub fn resolve_build_universe<'a>(
 pub struct BuildOutcome {
     pub meta: ConfigMeta,
     pub rebuilt: bool,
-}
-
-/// Read the live state of every source repo this config builds from.
-///
-/// Best-effort by design: a thornlist cactup cannot parse, or a tree with no
-/// inspectable repo, yields `None` — which `source_delta` reads as "no
-/// information" and which therefore leaves the rebuild decision exactly as it
-/// was before source tracking. A build must never fail over this.
-fn live_sources(installation: &Installation, processed_thornlist: &str) -> Option<SourceHeads> {
-    let list = crate::thornlist::parse(processed_thornlist).ok()?;
-    crate::fetch::source_heads(&installation.root, &list).ok().flatten()
 }
 
 /// Join names for a one-line message, capping the tail: a release bump moves
@@ -589,13 +645,32 @@ pub fn build(
     let stored_optionlist = fs::read_to_string(&snapshot_path).ok();
     let stored_thornlist =
         fs::read_to_string(config_file(&cactus_root, name, THORNLIST_PROCESSED)).ok();
+    // Parse the processed thornlist ONCE and derive both the live source
+    // state and the per-thorn provenance map from it.
+    //
+    // Best-effort by design: a thornlist cactup cannot parse, or a tree with
+    // no inspectable repo, yields `None` for either — which `source_delta`/
+    // `provider_delta` read as "no information" and which therefore leaves
+    // the rebuild decision exactly as it was before source/provenance
+    // tracking. A build must never fail over this.
+    let parsed_list = crate::thornlist::parse(&thornlist_processed).ok();
     // How the source trees now differ from what this config was built with
     // (§7.4) — a refetch, a manual checkout, or a hand-edited thorn. None of
     // the text diffs above can see any of it: they all leave the thornlist
     // byte-identical.
-    let fresh_sources = live_sources(installation, &thornlist_processed);
+    let fresh_sources = parsed_list
+        .as_ref()
+        .and_then(|l| crate::fetch::source_heads(&installation.root, l).ok().flatten());
+    let fresh_providers = parsed_list.as_ref().map(|l| l.thorn_providers());
     let (sources, source_change) =
         source_delta(stored_meta.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
+    // Which thorn names changed which directory provides them (§7.4) — the
+    // provider-swap incident this exists for: same name, different source
+    // tree, and Cactus's per-thorn build state is keyed by name alone.
+    let changed_providers = provider_delta(
+        stored_meta.as_ref().and_then(|m| m.thorn_providers.as_ref()),
+        fresh_providers.as_ref(),
+    );
     let mut decision = rebuild_decision(
         stored_optionlist.as_deref(),
         &optionlist.source,
@@ -604,6 +679,7 @@ pub fn build(
         stored_thornlist.as_deref(),
         &thornlist_processed,
         sources,
+        &changed_providers,
     );
     if opts.force || opts.reconfig {
         decision = RebuildDecision::Full("-f/--reconfig given");
@@ -616,16 +692,24 @@ pub fn build(
              sources); pass -f to rebuild.",
             name
         );
-        // Record the source baseline even though nothing was built. A config
-        // last built by a cactup without source tracking has none, and without
-        // this it could never acquire one: every future build would short-
-        // circuit here and the next refetch or edit would go unnoticed. This
-        // writes metadata only — no build, and build-id/built are preserved.
+        // Record the source/provider baseline even though nothing was built.
+        // A config last built by a cactup without source or provenance
+        // tracking has neither, and without this it could never acquire
+        // either: every future build would short-circuit here and the next
+        // refetch, edit, or provider swap would go unnoticed. This writes
+        // metadata only — no build, and build-id/built are preserved.
         let mut stored = stored;
-        if let Some(live) = fresh_sources
-            && stored.sources.as_ref() != Some(&live.heads)
-        {
-            stored.sources = Some(live.heads);
+        let sources_changed =
+            fresh_sources.as_ref().is_some_and(|live| stored.sources.as_ref() != Some(&live.heads));
+        let providers_changed =
+            fresh_providers.as_ref().is_some_and(|live| stored.thorn_providers.as_ref() != Some(live));
+        if sources_changed || providers_changed {
+            if let Some(live) = fresh_sources {
+                stored.sources = Some(live.heads);
+            }
+            if let Some(live) = fresh_providers {
+                stored.thorn_providers = Some(live);
+            }
             stored.store(&cactus_root)?;
         }
         return Ok(BuildOutcome { meta: stored, rebuilt: false });
@@ -653,6 +737,38 @@ pub fn build(
         }
         if !source_change.edited.is_empty() {
             println!("  locally edited: {}", summarize(&source_change.edited));
+        }
+    }
+
+    // The provider-swap incident this exists for: a same-named build/<Thorn>/
+    // left over from the old provider carries stale `.d` files naming
+    // bindings headers the reconfigure below is about to delete (a hard make
+    // error), and Cactus updates an existing libthorn_<Thorn>.a in place with
+    // `ar`, so stale members from the old provider can otherwise survive into
+    // the link without so much as a warning. Both must go before make runs.
+    // `Full` is excluded on purpose: `realclean` already wipes every config's
+    // build state, so this would just be redundant there.
+    if matches!(decision, RebuildDecision::Incremental(_)) && !changed_providers.is_empty() {
+        fn remove_stale(path: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) -> Res<()> {
+            match remove(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e).with_context(|| {
+                    format!(
+                        "Failed to remove stale per-thorn build state {} — proceeding would risk \
+                         compiling or linking against a thorn's old provider",
+                        path.display()
+                    )
+                }),
+            }
+        }
+        println!(
+            "  changed provider (removing their stale per-thorn build state): {}",
+            summarize(&changed_providers)
+        );
+        for thorn in &changed_providers {
+            remove_stale(&config_dir.join("build").join(thorn), |p| fs::remove_dir_all(p))?;
+            remove_stale(&config_dir.join("lib").join(format!("libthorn_{thorn}.a")), |p| fs::remove_file(p))?;
         }
     }
 
@@ -829,6 +945,7 @@ pub fn build(
         built: Some(now),
         flags,
         sources: fresh_sources.map(|s| s.heads),
+        thorn_providers: fresh_providers,
     };
     meta.store(&cactus_root)?;
     fs::write(&snapshot_path, &optionlist.source)
@@ -1073,57 +1190,82 @@ mod tests {
         // Nothing refetched under the config: the pre-source-tracking matrix,
         // which must be unchanged.
         let n = S::Unchanged;
+        let no_prov: &[String] = &[];
+        let swapped: &[String] = &["WeylScal4".to_owned()];
         // No stored optionlist at all ⇒ nothing has been built here yet.
-        assert_eq!(rebuild_decision(None, "x", None, None, None, "t", n), R::Fresh);
-        assert_eq!(rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n), R::UpToDate);
+        assert_eq!(rebuild_decision(None, "x", None, None, None, "t", n, no_prov), R::Fresh);
+        assert_eq!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, no_prov),
+            R::UpToDate
+        );
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, no_prov),
             R::Full(_)
         ));
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t", n),
+            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t", n, no_prov),
             R::Full(_)
         ));
         assert_eq!(
-            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t", n),
+            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t", n, no_prov),
             R::UpToDate
         );
 
         // A thornlist edit is a rebuild — the bug this fixes was it reading as
         // up-to-date — but a reconfigure, not a realclean.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", n),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", n, no_prov),
             R::Incremental(_)
         ));
         // An optionlist change outranks it: realclean wins over reconfigure.
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2", n),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2", n, no_prov),
             R::Full(_)
         ));
         // No processed thornlist on disk ⇒ nothing to compare, not an edit.
-        assert_eq!(rebuild_decision(Some("x"), "x", None, None, None, "t", n), R::UpToDate);
+        assert_eq!(
+            rebuild_decision(Some("x"), "x", None, None, None, "t", n, no_prov),
+            R::UpToDate
+        );
 
         // Source tracking: a refetch with an untouched thornlist used to read
         // as UpToDate and silently never compile the new sources.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Thorns),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Thorns, no_prov),
             R::Incremental(_)
         ));
         // The flesh earns a realclean, and outranks a simultaneous thornlist
         // edit — a release bump changes both at once.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Flesh),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Flesh, no_prov),
             R::Full(_)
         ));
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", S::Flesh),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", S::Flesh, no_prov),
             R::Full(_)
         ));
         // No fetch record / unparseable thornlist ⇒ exactly the old behavior.
         assert_eq!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Unknown),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Unknown, no_prov),
             R::UpToDate
         );
+
+        // A provider swap with byte-identical thornlist text (the edge case
+        // this exists for: the processed thornlist was hand-deleted, so the
+        // text diff reads as unchanged) still triggers a reconfigure.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, swapped),
+            R::Incremental(_)
+        ));
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, None, "t", n, swapped),
+            R::Incremental(_)
+        ));
+        // An optionlist change still outranks a provider swap: realclean wins.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, swapped),
+            R::Full(_)
+        ));
     }
 
     fn heads(pairs: &[(&str, &str)], flesh: Option<&str>) -> SourceHeads {
@@ -1209,6 +1351,48 @@ mod tests {
         // Incremental — is_flesh is what promotes it.
         let unnamed = heads(&[("cactusbase", "aaa"), ("flesh", "ggg")], None);
         assert_eq!(source_delta(Some(&stored), Some(&unnamed)).0, SourceDelta::Thorns);
+    }
+
+    fn provider_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn provider_deltas() {
+        let stored = provider_map(&[
+            ("WeylScal4", "arrangements/EinsteinAnalysis/WeylScal4"),
+            ("Boundary", "arrangements/CactusBase/Boundary"),
+        ]);
+
+        // Either side (or both) absent ⇒ no information, never "unchanged".
+        assert!(provider_delta(None, None).is_empty());
+        assert!(provider_delta(Some(&stored), None).is_empty());
+        assert!(provider_delta(None, Some(&stored)).is_empty());
+
+        // Identical ⇒ nothing to invalidate.
+        assert!(provider_delta(Some(&stored), Some(&stored)).is_empty());
+
+        // A swapped provider is reported.
+        let swapped = provider_map(&[
+            ("WeylScal4", "arrangements/SpacetimeX/WeylScal4"),
+            ("Boundary", "arrangements/CactusBase/Boundary"),
+        ]);
+        assert_eq!(provider_delta(Some(&stored), Some(&swapped)), vec!["WeylScal4".to_string()]);
+
+        // A dropped thorn is reported too — its stale build state must go, or
+        // re-adding the name later from a different provider would find no
+        // baseline to diff against.
+        let dropped = provider_map(&[("Boundary", "arrangements/CactusBase/Boundary")]);
+        assert_eq!(provider_delta(Some(&stored), Some(&dropped)), vec!["WeylScal4".to_string()]);
+
+        // An added-only thorn is not a change: nothing exists yet to
+        // invalidate.
+        let added = provider_map(&[
+            ("WeylScal4", "arrangements/EinsteinAnalysis/WeylScal4"),
+            ("Boundary", "arrangements/CactusBase/Boundary"),
+            ("ML_BSSN", "arrangements/McLachlan/ML_BSSN"),
+        ]);
+        assert!(provider_delta(Some(&stored), Some(&added)).is_empty());
     }
 
     #[test]
@@ -1723,6 +1907,159 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert!(err.contains("--thornlist"), "should say how to recover: {err}");
+    }
+
+    /// The motivating incident, end to end: a thornlist edit that swaps which
+    /// arrangement provides a thorn *name* (here, `WeylScal4` moving from
+    /// `EinsteinAnalysis` to `SpacetimeX`) must delete that name's stale
+    /// per-thorn build state before make runs — but leave an unrelated
+    /// thorn's state (`Boundary`, whose provider didn't change) alone.
+    /// Real repos are not needed: without them source tracking simply reads
+    /// as Unknown, while `thorn_providers()` still parses fine off the
+    /// thornlist text alone.
+    #[test]
+    fn provider_swap_invalidates_per_thorn_build_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        let list = root.join("crl.th");
+        fs::write(
+            &list,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/einsteinanalysis.git\n\
+             !CHECKOUT = EinsteinAnalysis/WeylScal4 CactusBase/Boundary\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/spacetimex.git\n\
+             !CHECKOUT = SpacetimeX/Dummy\n\
+             #DISABLED SpacetimeX/WeylScal4\n",
+        )
+        .unwrap();
+
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list.clone());
+        let first = build(&inst, &machine, "sim", &first_opts).unwrap();
+        assert!(first.rebuilt);
+        let providers = first.meta.thorn_providers.clone().expect("providers must be recorded");
+        assert_eq!(providers["WeylScal4"], "arrangements/EinsteinAnalysis/WeylScal4");
+        assert!(providers.contains_key("Boundary"));
+
+        // Fabricate stale per-thorn build state, as a real prior build would
+        // have left behind: a build/<Thorn>/ directory with a stale .d file,
+        // and an archive `ar` would otherwise update in place.
+        let config_dir = cactus.join("configs/sim");
+        fs::create_dir_all(config_dir.join("build/WeylScal4")).unwrap();
+        fs::write(config_dir.join("build/WeylScal4/Kranc.cc.d"), "stale\n").unwrap();
+        fs::create_dir_all(config_dir.join("build/Boundary")).unwrap();
+        fs::write(config_dir.join("build/Boundary/some.o"), "stale\n").unwrap();
+        fs::write(config_dir.join("lib/libthorn_WeylScal4.a"), "stale\n").unwrap();
+        fs::write(config_dir.join("lib/libthorn_Boundary.a"), "stale\n").unwrap();
+
+        // Overwrite the old list file in place with the swap, and rebuild
+        // with no --thornlist — the stored path is picked up, exactly the
+        // "edit the thornlist" workflow.
+        fs::write(
+            &list,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/einsteinanalysis.git\n\
+             !CHECKOUT = CactusBase/Boundary\n\
+             #DISABLED EinsteinAnalysis/WeylScal4\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/spacetimex.git\n\
+             !CHECKOUT = SpacetimeX/Dummy SpacetimeX/WeylScal4\n",
+        )
+        .unwrap();
+        clear_log();
+        let swapped = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(swapped.rebuilt, "a provider swap must rebuild");
+        assert!(log().contains("sim-config"), "must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "a provider swap needs no realclean: {}", log());
+
+        assert!(
+            !config_dir.join("build/WeylScal4").exists(),
+            "the old provider's build state must be gone"
+        );
+        assert!(
+            !config_dir.join("lib/libthorn_WeylScal4.a").exists(),
+            "the old provider's archive must be gone"
+        );
+        assert!(
+            config_dir.join("build/Boundary").is_dir(),
+            "an unrelated thorn's build state must survive untouched"
+        );
+        assert!(
+            config_dir.join("lib/libthorn_Boundary.a").is_file(),
+            "an unrelated thorn's archive must survive untouched"
+        );
+
+        let new_providers = swapped.meta.thorn_providers.clone().expect("providers must be recorded");
+        assert_eq!(new_providers["WeylScal4"], "arrangements/SpacetimeX/WeylScal4");
+    }
+
+    /// The up-to-date short-circuit must also adopt a missing
+    /// `thorn_providers` baseline (mirroring what it already does for
+    /// `sources`), or a config built before provenance tracking landed could
+    /// never acquire one: every future build would short-circuit here and a
+    /// later provider swap would go unnoticed.
+    #[test]
+    fn build_adopts_missing_thorn_providers_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;",
+                c = cactus.display()
+            ),
+        );
+
+        let list = root.join("crl.th");
+        fs::write(
+            &list,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://e.invalid/repo.git\n\
+             !CHECKOUT = CactusBase/Boundary\n",
+        )
+        .unwrap();
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list.clone());
+        let first = build(&inst, &machine, "sim", &first_opts).unwrap();
+        assert!(first.rebuilt);
+        assert!(first.meta.thorn_providers.is_some());
+
+        // Simulate a config built before provenance tracking landed: the
+        // field is simply absent (no schema bump, no migration).
+        let mut stale = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        stale.thorn_providers = None;
+        stale.store(&cactus).unwrap();
+
+        let again = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!again.rebuilt, "nothing changed besides the missing baseline");
+        let reloaded = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        assert!(reloaded.thorn_providers.is_some(), "the baseline must be adopted on disk");
     }
 
     /// Defect A, configure-failure branch: the marker is absent (configure

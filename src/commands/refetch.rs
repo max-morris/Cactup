@@ -280,7 +280,11 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     }
 
     // Config interaction (§7.5): a refetch does not, by itself, cause any
-    // config to rebuild — rebuild_decision never looks at source trees.
+    // config to rebuild — it defers to build-time detection
+    // (`rebuild_decision`), which now sees both the per-repo source HEADs
+    // (§7.4) and each thorn's recorded provider, so `report_configs`'s claim
+    // that a plain `cactup build` does the right thing holds even when the
+    // refetched thornlist re-points a thorn *name* at a different provider.
     if changed > 0 && !configs.is_empty() {
         report_configs(&inst, &configs, matches!(source, Source::Release { .. }));
     }
@@ -787,6 +791,18 @@ fn snapshot_live(inst: &Installation, live: &Path) -> Res<()> {
     Ok(())
 }
 
+/// Join names for a one-line message, capping the tail. Mirrors
+/// `build::summarize` (private to that module) — kept in sync by hand since
+/// there is no shared, public helper to call instead.
+fn summarize_names(names: &[String]) -> String {
+    const SHOWN: usize = 8;
+    let head = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    match names.len().checked_sub(SHOWN) {
+        Some(rest) if rest > 0 => format!("{head}, +{rest} more"),
+        _ => head,
+    }
+}
+
 /// §7.4: `rebuild_decision` now diffs the per-repo HEADs `fetch-state.toml`
 /// records against the ones each config stored at its last build, so a plain
 /// `cactup build` after a refetch does the right thing on its own. Report what
@@ -796,6 +812,18 @@ fn report_configs(
     configs: &[(String, Option<crate::build::ConfigMeta>)],
     release_bump: bool,
 ) {
+    // Best-effort provider map for the just-refetched live thornlist. This is
+    // the RAW list — machine thorn toggles are applied at build time and no
+    // machine is known here, so this is only an approximation; the build
+    // itself makes the authoritative call via `provider_delta`. Any parse
+    // failure silently disables the note below — a report must never fail
+    // the refetch.
+    let live_path = inst.live_thornlist();
+    let fresh_providers = fs::read_to_string(&live_path)
+        .ok()
+        .and_then(|text| thornlist::parse_with_base(&text, live_path.parent()).ok())
+        .map(|list| list.thorn_providers());
+
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {
         // No recorded HEADs = built before source tracking landed, so there is
@@ -823,6 +851,18 @@ fn report_configs(
             );
         } else {
             println!("  {} — run `cactup build {name}`.", name.bold());
+            if let Some(m) = meta {
+                let changed =
+                    crate::build::provider_delta(m.thorn_providers.as_ref(), fresh_providers.as_ref());
+                if !changed.is_empty() {
+                    println!(
+                        "      note: thorn name(s) {} now come from a different provider; \
+                         `cactup build {name}` removes their stale per-thorn build state \
+                         before compiling.",
+                        summarize_names(&changed)
+                    );
+                }
+            }
         }
     }
     if release_bump {

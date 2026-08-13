@@ -21,7 +21,7 @@
 
 use anyhow::{anyhow, bail, Context};
 use regex::{Captures, Regex};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// A fully parsed CRL 1.0 thornlist.
@@ -198,6 +198,33 @@ impl Thornlist {
     /// `!DEFINE ROOT`, or `"."` if the list never defined it.
     pub fn root(&self) -> &str {
         &self.root
+    }
+
+    /// Per-thorn provenance: thorn name -> providing directory relative to
+    /// the checkout root, e.g. `"WeylScal4"` ->
+    /// `"arrangements/EinsteinAnalysis/WeylScal4"`. This is the §7.4 build-
+    /// invalidation input (see `build.rs::provider_delta`): Cactus keys
+    /// per-thorn build state — `configs/<cfg>/build/<Thorn>/`,
+    /// `libthorn_<Thorn>.a` — by thorn *name* only, so a name that changes
+    /// provider across builds silently poisons that state (a stale `.d` file
+    /// can reference a bindings header the reconfigure correctly deleted, and
+    /// `ar` updates an existing archive in place, so stale members from the
+    /// old provider can survive into the link). `#DISABLED` entries are
+    /// comments to the parser and thus absent from `self.components` — which
+    /// is exactly right here too, since only enabled thorns get built.
+    pub fn thorn_providers(&self) -> BTreeMap<String, String> {
+        self.components
+            .iter()
+            .filter_map(|c| {
+                if !c.checkout.contains('/') {
+                    // Flesh checkouts (`Makefile lib src`), simfactory, etc.
+                    // — not thorns.
+                    return None;
+                }
+                let (_, name) = split_checkout(&c.checkout);
+                Some((name, canonical_checkout(&c.target, &c.checkout, &self.root)))
+            })
+            .collect()
     }
 }
 
@@ -591,6 +618,17 @@ fn lexical_canonicalize(path: &str) -> String {
     if absolute { format!("/{joined}") } else { joined }
 }
 
+/// Rule 14: `$TARGET/$CHECKOUT`, lexically canonicalized and stripped of the
+/// `$ROOT/` prefix. Shared by `detect_duplicates` and
+/// `Thornlist::thorn_providers`, which needs the identical path for the same
+/// checkout token (its providing directory).
+fn canonical_checkout(target: &str, checkout: &str, root: &str) -> String {
+    let joined = format!("{target}/{checkout}");
+    let canon = lexical_canonicalize(&joined);
+    let root_prefix = format!("{root}/");
+    canon.strip_prefix(&root_prefix).unwrap_or(&canon).to_owned()
+}
+
 /// Rule 14: duplicate detection over lexically-canonicalized
 /// `$TARGET/$CHECKOUT` paths relative to `$ROOT` (GetComponents lines
 /// 778-792). `ignore` components are excluded, exactly as in
@@ -613,14 +651,11 @@ fn lexical_canonicalize(path: &str) -> String {
 fn detect_duplicates(components: &[Component], section_of: &[usize], root: &str) -> crate::Res<()> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut dupes: Vec<(String, usize, usize)> = Vec::new();
-    let root_prefix = format!("{root}/");
     for (i, c) in components.iter().enumerate() {
         if c.ty == ComponentType::Ignore {
             continue;
         }
-        let joined = format!("{}/{}", c.target, c.checkout);
-        let canon = lexical_canonicalize(&joined);
-        let canon = canon.strip_prefix(&root_prefix).unwrap_or(&canon).to_owned();
+        let canon = canonical_checkout(&c.target, &c.checkout, root);
         match seen.get(&canon) {
             Some(&first) => dupes.push((canon, first, i)),
             None => {
@@ -1265,6 +1300,78 @@ Numerical/PrivateThorn
             ["ExternalLibraries/PETSc"],
             "only the column-0 directive counts, not the prose mention"
         );
+    }
+
+    /// `thorn_providers()` keys on the bare thorn name, values the
+    /// root-stripped canonical providing directory; a flesh-style section
+    /// (slash-free checkout tokens) contributes nothing.
+    #[test]
+    fn thorn_providers_maps_names_to_providers() {
+        let src = "\
+!CRL_VERSION = 1.0
+!DEFINE ROOT = Cactus
+
+!TARGET = $ROOT/arrangements
+!TYPE = git
+!URL = https://example.com/foo.git
+!CHECKOUT = Foo/Alpha
+
+!TARGET = $ROOT
+!TYPE = git
+!URL = https://example.com/core.git
+!CHECKOUT = Makefile lib src
+";
+        let t = ok(src);
+        let providers = t.thorn_providers();
+        assert_eq!(
+            providers.keys().collect::<Vec<_>>(),
+            vec!["Alpha"],
+            "flesh checkout tokens (no '/') must be absent: {providers:?}"
+        );
+        assert_eq!(providers["Alpha"], "arrangements/Foo/Alpha");
+    }
+
+    /// The motivating incident: the same thorn *name* provided by two
+    /// different arrangements across an old/new thornlist pair.
+    /// `thorn_providers()` must report the actual providing directory for
+    /// each, so `build.rs` can notice the swap and invalidate the stale
+    /// per-thorn build state.
+    #[test]
+    fn thorn_providers_tracks_a_provider_swap() {
+        let old = "\
+!CRL_VERSION = 1.0
+!DEFINE ROOT = Cactus
+
+!TARGET = $ROOT/arrangements
+!TYPE = git
+!URL = https://example.com/einsteinanalysis.git
+!CHECKOUT = EinsteinAnalysis/WeylScal4
+
+!TARGET = $ROOT/arrangements
+!TYPE = git
+!URL = https://example.com/spacetimex.git
+!CHECKOUT =
+#DISABLED SpacetimeX/WeylScal4
+";
+        let new = "\
+!CRL_VERSION = 1.0
+!DEFINE ROOT = Cactus
+
+!TARGET = $ROOT/arrangements
+!TYPE = git
+!URL = https://example.com/einsteinanalysis.git
+!CHECKOUT =
+#DISABLED EinsteinAnalysis/WeylScal4
+
+!TARGET = $ROOT/arrangements
+!TYPE = git
+!URL = https://example.com/spacetimex.git
+!CHECKOUT = SpacetimeX/WeylScal4
+";
+        let old_t = ok(old);
+        let new_t = ok(new);
+        assert_eq!(old_t.thorn_providers()["WeylScal4"], "arrangements/EinsteinAnalysis/WeylScal4");
+        assert_eq!(new_t.thorn_providers()["WeylScal4"], "arrangements/SpacetimeX/WeylScal4");
     }
 
 }
