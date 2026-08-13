@@ -153,7 +153,7 @@ pub(crate) struct RefetchArgs {
     /// Fetch over repos with local modifications (they are backed up first).
     #[clap(long)]
     pub overwrite_modified: bool,
-    /// Replace a hand-edited live thornlist with the newly adopted one.
+    /// Proceed even when the live thornlist has hand edits, discarding them (a snapshot is kept).
     #[clap(long)]
     pub replace_thornlist: bool,
     /// Remove repos and thorn symlinks the thornlist no longer mentions (asks once; -f skips the confirmation).
