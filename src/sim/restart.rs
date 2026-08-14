@@ -18,7 +18,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 fn default_schema() -> u32 {
     SCHEMA
@@ -154,16 +153,11 @@ impl Restart {
     }
 
     /// Touch the heartbeat file's mtime (§9.3); called every HEARTBEAT_SECS
-    /// by a live run. Best-effort.
+    /// by a live run. Best-effort. A plain write stamps the mtime with the
+    /// *fileserver's* clock — the same domain `age_secs` measures against —
+    /// where set_modified(now) would inject this node's local clock.
     pub fn touch_heartbeat(&self) {
-        let path = self.heartbeat_path();
-        let done = fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .and_then(|f| f.set_modified(SystemTime::now()));
-        if done.is_err() {
-            let _ = fs::write(&path, b"");
-        }
+        let _ = fs::write(self.heartbeat_path(), b"");
     }
 }
 
@@ -362,9 +356,16 @@ pub fn workdir(sim: &Simulation, id: u32) -> PathBuf {
 const REAP_MIN_SIM_AGE_SECS: u64 = 60;
 const REAP_RECLEAN_SECS: u64 = 30;
 
+/// Age of `path`'s mtime, measured against the *fileserver's* clock: "now"
+/// is minted as the mtime of a fresh temp file next to `path` — the same
+/// trick lock.rs uses — because the node running the reaper and the NFS
+/// server that stamped the file can disagree by more than the staleness
+/// thresholds. A future mtime (writer's clock ahead) reads as age 0.
 fn age_secs(path: &Path) -> Option<u64> {
     let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()?;
-    SystemTime::now().duration_since(mtime).ok().map(|d| d.as_secs())
+    let temp = tempfile::Builder::new().prefix(".cactup-age.").tempfile_in(path.parent()?).ok()?;
+    let fs_now = temp.as_file().metadata().and_then(|m| m.modified()).ok()?;
+    Some(fs_now.duration_since(mtime).map(|d| d.as_secs()).unwrap_or(0))
 }
 
 /// The §8.3 stale-active-restart reaper (port of simfactory `initRestart`).

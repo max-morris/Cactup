@@ -5,12 +5,17 @@
 //! link succeeding is the atomic acquire — atomic on POSIX including over
 //! NFS, where `flock` is unreliable. Release is unlink-on-drop.
 //!
-//! Stale locks: same-host holders are probed via `/proc/<pid>` (no libc);
-//! cross-host holders are judged solely by the lock file's mtime, compared
-//! against the mtime of a freshly-created sibling file so both timestamps
-//! come from the same (fileserver) clock domain. Breaking a stale lock is
-//! rename-then-unlink, so of two concurrent breakers only one succeeds and
-//! the other retries instead of unlinking a freshly re-acquired lock.
+//! Stale locks: same-host holders are probed via `/proc/<pid>` (no libc),
+//! with the recorded process start time distinguishing a recycled pid from
+//! the original holder; cross-host holders are judged solely by the lock
+//! file's mtime, compared against the mtime of a freshly-created sibling
+//! file so both timestamps come from the same (fileserver) clock domain.
+//! Breaking a stale lock happens under a `<path>.breaker` side-lock (taken
+//! with the same link() protocol) and re-verifies the staleness verdict
+//! there, so a breaker delayed between judging and breaking can never
+//! rename away a lock that was freshly re-acquired in the meantime; the
+//! rename-then-unlink inside still serializes any breakers that race the
+//! side-lock's crash recovery.
 
 // Consumed by the Phase-2/3 streams (DB, INST, CFG, SIM); unused until then.
 
@@ -36,9 +41,23 @@ fn our_hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 
-/// The lock-file payload identifying a holder: `<hostname>\n<pid>\n`.
+/// The lock-file payload identifying a holder:
+/// `<hostname>\n<pid>\n[<pid-start-time>\n]`. The start time pins the stamp
+/// to one incarnation of the pid, so a recycled pid does not read as a live
+/// holder; the line is absent when /proc has no answer (dead pid, non-Linux).
 fn stamp_for(hostname: &str, pid: u32) -> String {
-    format!("{hostname}\n{pid}\n")
+    match proc_starttime(pid) {
+        Some(start) => format!("{hostname}\n{pid}\n{start}\n"),
+        None => format!("{hostname}\n{pid}\n"),
+    }
+}
+
+/// The process start time (clock ticks since boot) from `/proc/<pid>/stat`
+/// field 22 — the standard pid-reuse discriminator. `comm` (field 2) may
+/// contain spaces and parentheses, so fields are counted after the last `)`.
+fn proc_starttime(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
 }
 
 /// What we concluded about the current holder of a lock file.
@@ -97,7 +116,12 @@ impl LinkLock {
             .with_context(|| format!("Failed to create lock directory {}", dir.display()))?;
         let stamp = stamp_for(&our_hostname(), std::process::id());
 
-        for _ in 0..ACQUIRE_ATTEMPTS {
+        for attempt in 0..ACQUIRE_ATTEMPTS {
+            if attempt > 0 {
+                // Brief backoff so contending acquirers don't spin the full
+                // link/assess/break cycle against each other in lockstep.
+                std::thread::sleep(Duration::from_millis(25 * u64::from(attempt)));
+            }
             let temp = tempfile::Builder::new()
                 .prefix(".cactup-lock.")
                 .tempfile_in(dir)
@@ -134,7 +158,7 @@ impl LinkLock {
                         Holder::Vanished => continue, // released under us; retry
                         Holder::Live(holder) => return Ok(Err(holder)),
                         Holder::Stale => {
-                            break_stale(path)?;
+                            break_stale(path, fs_now)?;
                             continue;
                         }
                     }
@@ -155,13 +179,12 @@ impl LinkLock {
     }
 
     /// Re-stamp the lock's mtime; long-running holders call this every
-    /// [`HEARTBEAT_SECS`] so cross-host staleness detection sees them as live.
+    /// [`HEARTBEAT_SECS`] so cross-host staleness detection sees them as
+    /// live. Rewriting the stamp (rather than set_modified(now)) stamps the
+    /// mtime with the *fileserver's* clock — the same domain assess_holder
+    /// measures staleness in; the local clock may be skewed from it.
     pub fn restamp(&self) -> Res<()> {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .open(&self.path)
-            .with_context(|| format!("Failed to open lock file {} to re-stamp it", self.path.display()))?;
-        file.set_modified(SystemTime::now())
+        fs::write(&self.path, &self.stamp)
             .with_context(|| format!("Failed to re-stamp lock file {}", self.path.display()))
     }
 
@@ -269,11 +292,18 @@ fn assess_holder(path: &Path, fs_now: SystemTime) -> Res<Holder> {
 
     let holder = parse_stamp(&content);
 
-    if let Some((host, pid)) = &holder
+    if let Some((host, pid, start)) = &holder
         && *host == our_hostname()
     {
-        // Same host: /proc/<pid> existing is the liveness oracle.
-        return Ok(if Path::new(&format!("/proc/{pid}")).exists() {
+        // Same host: /proc/<pid> existing is the liveness oracle, refined by
+        // the recorded start time — a pid whose current occupant started at
+        // a different tick is a recycled pid, and the holder is dead.
+        let live = Path::new(&format!("/proc/{pid}")).exists()
+            && match start {
+                Some(start) => proc_starttime(*pid) == Some(*start),
+                None => true, // old-style stamp: pid existence is all we have
+            };
+        return Ok(if live {
             Holder::Live(format!("pid {pid} on this host ({host})"))
         } else {
             Holder::Stale
@@ -290,42 +320,103 @@ fn assess_holder(path: &Path, fs_now: SystemTime) -> Res<Holder> {
         Ok(Holder::Stale)
     } else {
         Ok(Holder::Live(match holder {
-            Some((host, pid)) => format!("pid {pid} on host {host}"),
+            Some((host, pid, _)) => format!("pid {pid} on host {host}"),
             None => "an unidentified holder".to_owned(),
         }))
     }
 }
 
-fn parse_stamp(content: &str) -> Option<(String, u32)> {
+fn parse_stamp(content: &str) -> Option<(String, u32, Option<u64>)> {
     let mut lines = content.lines();
     let host = lines.next()?.to_owned();
     let pid = lines.next()?.trim().parse().ok()?;
-    Some((host, pid))
+    let start = lines.next().and_then(|l| l.trim().parse().ok());
+    Some((host, pid, start))
 }
 
-/// Break a lock we judged stale. Rename-then-unlink makes breaking atomic
-/// between competing breakers: the loser's rename fails with NotFound and it
-/// simply retries the acquire loop.
-fn break_stale(path: &Path) -> Res<()> {
-    let mut broken = path.as_os_str().to_owned();
-    broken.push(format!(
-        ".breaking.{}.{}.{}",
-        our_hostname(),
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos()
-    ));
-    let broken = PathBuf::from(broken);
-    match fs::rename(path, &broken) {
-        Ok(()) => {
-            let _ = fs::remove_file(&broken);
-            Ok(())
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()), // beaten to it
-        Err(e) => Err(e).with_context(|| format!("Failed to break stale lock {}", path.display())),
+/// A breaker side-lock older than this is a corpse (breaking takes
+/// milliseconds) and is swept aside so stale-breaking cannot deadlock on a
+/// crashed breaker.
+const BREAKER_STALE_SECS: u64 = 60;
+
+/// Break a lock we judged stale. Breaking is itself mutually exclusive, via
+/// a `<path>.breaker` side-lock taken with the same link() protocol, and the
+/// staleness verdict is re-checked *under* that side-lock: without this, a
+/// breaker delayed between judging and renaming could rename away a lock
+/// that a faster breaker had already broken and freshly re-acquired — two
+/// holders at once, the one hole rename-then-unlink alone leaves open.
+/// Losing the side-lock is not an error: the acquire loop re-assesses from
+/// scratch on its next attempt. The rename-then-unlink is kept so that even
+/// breakers racing the corpse sweep-aside can never unlink a re-acquired
+/// lock directly.
+fn break_stale(path: &Path, fs_now: SystemTime) -> Res<()> {
+    let breaker = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".breaker");
+        PathBuf::from(p)
+    };
+    let dir = lock_dir(path)?;
+    let temp = tempfile::Builder::new()
+        .prefix(".cactup-lock.")
+        .tempfile_in(dir)
+        .with_context(|| format!("Failed to create breaker temp file in {}", dir.display()))?;
+    temp.as_file()
+        .write_all(stamp_for(&our_hostname(), std::process::id()).as_bytes())
+        .with_context(|| format!("Failed to write breaker temp file {}", temp.path().display()))?;
+    let link_result = fs::hard_link(temp.path(), &breaker);
+    let nlink = {
+        use std::os::unix::fs::MetadataExt;
+        temp.as_file().metadata().map(|m| m.nlink()).unwrap_or(1)
+    };
+    if !(link_result.is_ok() || nlink == 2) {
+        return match link_result {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // Another breaker is at work; sweep its side-lock aside only
+                // if it is a corpse. Either way this attempt yields — by the
+                // next acquire attempt the lock is fresh, gone, or still
+                // stale and breakable.
+                if let Ok(mtime) = fs::symlink_metadata(&breaker).and_then(|m| m.modified())
+                    && fs_now.duration_since(mtime).unwrap_or(Duration::ZERO)
+                        >= Duration::from_secs(BREAKER_STALE_SECS)
+                {
+                    let _ = fs::remove_file(&breaker);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                Err(e).with_context(|| format!("Failed to link breaker {}", breaker.display()))
+            }
+            Ok(()) => unreachable!(),
+        };
     }
+
+    // Under the breaker: re-judge, and only then break. A verdict other than
+    // Stale means the lock changed hands (or vanished) since we judged it —
+    // exactly the case the side-lock exists to catch.
+    let result = match assess_holder(path, fs_now) {
+        Ok(Holder::Stale) => {
+            let mut broken = path.as_os_str().to_owned();
+            broken.push(format!(
+                ".breaking.{}.{}",
+                our_hostname(),
+                std::process::id(),
+            ));
+            let broken = PathBuf::from(broken);
+            match fs::rename(path, &broken) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&broken);
+                    Ok(())
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()), // beaten to it
+                Err(e) => Err(e)
+                    .with_context(|| format!("Failed to break stale lock {}", path.display())),
+            }
+        }
+        Ok(_) => Ok(()), // vanished or freshly re-acquired: nothing to break
+        Err(e) => Err(e),
+    };
+    let _ = fs::remove_file(&breaker);
+    result
 }
 
 #[cfg(test)]
@@ -384,6 +475,68 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             stamp_for(&our_hostname(), std::process::id())
         );
+    }
+
+    #[test]
+    fn breaks_recycled_pid_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+
+        // Our own (live) pid, but a start time that cannot be this
+        // incarnation's: the recorded holder is a previous occupant of the
+        // pid, i.e. dead.
+        fs::write(&path, format!("{}\n{}\n1\n", our_hostname(), std::process::id())).unwrap();
+        assert!(!LinkLock::is_held_live(&path).unwrap());
+        assert!(LinkLock::try_acquire(&path).unwrap().is_some(), "recycled pid must be breakable");
+    }
+
+    #[test]
+    fn stamp_records_a_verifiable_start_time() {
+        let stamp = stamp_for(&our_hostname(), std::process::id());
+        let (host, pid, start) = parse_stamp(&stamp).unwrap();
+        assert_eq!(host, our_hostname());
+        assert_eq!(pid, std::process::id());
+        assert!(start.is_some(), "/proc must yield our own start time");
+        assert_eq!(start, proc_starttime(std::process::id()));
+        // An old-style two-line stamp still parses (start unknown).
+        assert_eq!(parse_stamp("h\n42\n"), Some(("h".to_owned(), 42, None)));
+    }
+
+    fn breaker_path(path: &Path) -> PathBuf {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".breaker");
+        PathBuf::from(p)
+    }
+
+    #[test]
+    fn a_live_breaker_blocks_stale_breaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+
+        fs::write(&path, stamp_for(&our_hostname(), DEAD_PID)).unwrap();
+        // A fresh side-lock: someone is mid-break right now. Every break
+        // attempt must yield to it, so the acquire eventually gives up.
+        fs::write(breaker_path(&path), "x").unwrap();
+        let err = LinkLock::acquire(&path).unwrap_err().to_string();
+        assert!(err.contains("Gave up"), "{err}");
+        assert!(path.exists(), "the stale lock must not be broken past a live breaker");
+    }
+
+    #[test]
+    fn a_crashed_breaker_is_swept_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+
+        fs::write(&path, stamp_for(&our_hostname(), DEAD_PID)).unwrap();
+        let breaker = breaker_path(&path);
+        fs::write(&breaker, "x").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(BREAKER_STALE_SECS + 60);
+        fs::OpenOptions::new().write(true).open(&breaker).unwrap().set_modified(old).unwrap();
+
+        // The corpse is removed and the stale lock then broken and taken.
+        let lock = LinkLock::try_acquire(&path).unwrap();
+        assert!(lock.is_some(), "a crashed breaker must not block stale-breaking forever");
+        assert!(!breaker.exists(), "the break released its side-lock");
     }
 
     #[test]

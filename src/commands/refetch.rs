@@ -232,6 +232,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     if !report.repos.is_empty() {
         fetch::FetchState::record(&inst.root, &report.records())?;
     }
+    // Ctrl-C during the fetch: what completed is recorded above; everything
+    // else (the summary, thornlist adoption, config reports) belongs to a
+    // finished refetch, not an aborted one.
+    if gix::interrupt::is_triggered() {
+        bail!(
+            "interrupted after fetching {} repo(s) and {} download(s); the remaining \
+             component(s) were not fetched",
+            report.repos.len(),
+            report.downloads.len()
+        );
+    }
     let changed = report.repos.iter().filter(|r| r.changed).count();
     let up_to_date = report.repos.len() - changed;
     println!(

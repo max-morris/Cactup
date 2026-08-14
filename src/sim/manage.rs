@@ -200,6 +200,11 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     let sim = Simulation::locate(&inst, name)?;
     let sched = Scheduler::new(&machine.meta);
 
+    // The lock comes BEFORE the live-job guard: submit holds it for the whole
+    // submission (§2.3 item 3), so taking it first closes the window where a
+    // concurrent submit queues a job between our scan and the removal.
+    let _lock = sim.lock()?;
+
     // Live-job guard (§8.7).
     let mut live: Vec<(u32, String)> = Vec::new();
     for id in restart::list_ids(&sim.dir)? {
@@ -230,7 +235,6 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
         }
     }
 
-    let _lock = sim.lock()?;
     sim.log("delete", if force { "purging simulation" } else { "moving simulation to TRASH" });
 
     if force {

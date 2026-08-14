@@ -75,7 +75,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let probing = progress.add_child("probe sources");
     probing.init(Some(names.len()), Some(prodash::unit::label("repos")));
     let probing = std::sync::Mutex::new(probing);
-    let diffs: Vec<Option<Res<SourceDiff>>> = crate::par::parallel_map(&names, |repo| {
+    let diffs: Res<Vec<Option<Res<SourceDiff>>>> = crate::par::parallel_map(&names, |repo| {
         let dir = repos_dir.join(repo);
         let diff = dir.is_dir().then(|| {
             let current =
@@ -91,6 +91,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
     }
+    let diffs = diffs?;
 
     let mut clean = 0usize;
     let mut reported = 0usize;
@@ -219,7 +220,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     let details: std::collections::BTreeMap<String, SourceDiff> =
         crate::par::parallel_map(&changed, |repo| {
             fetch::git::source_diff(&repos_dir.join(repo)).ok().map(|d| (repo.clone(), d))
-        })
+        })?
         .into_iter()
         .flatten()
         .collect();

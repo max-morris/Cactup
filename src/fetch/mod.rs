@@ -374,9 +374,35 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
 
     let mut report = report.into_inner().expect("fetch report poisoned");
 
+    // Interrupted (§ Ctrl-C): the workers drained out with items still
+    // queued. Those were never fetched — record each as a failure so the
+    // caller's report and exit code see them (in-flight items already failed
+    // with gix's own abort error), and skip the externals and the symlink
+    // pass: nothing further should run, and returning a success-shaped
+    // report here is what once let an interrupted fetch masquerade as
+    // complete.
+    if gix::interrupt::is_triggered() {
+        for work in queue.into_inner().expect("fetch queue poisoned") {
+            let what = match work {
+                Work::Git(item) => item.repo.clone(),
+                Work::Download(c) => c.checkout.clone(),
+            };
+            report
+                .failures
+                .push(Failure { what, error: "interrupted before this component was fetched".into() });
+        }
+        return Ok(report);
+    }
+
     // Externals sequentially: they spawn system tools that may talk to the
     // terminal, and none occur in the real ET list anyway.
     for c in &plan.external {
+        if gix::interrupt::is_triggered() {
+            report
+                .failures
+                .push(Failure { what: c.checkout.clone(), error: "interrupted".into() });
+            continue;
+        }
         if let Err(e) = external::fetch_external(install_root, c) {
             report.failures.push(Failure { what: c.checkout.clone(), error: format!("{e:#}") });
         }
@@ -544,7 +570,7 @@ pub fn source_heads(
         drop(current);
         progress.lock().expect("source_heads progress poisoned").inc();
         state
-    });
+    })?;
     for (repo, state) in repos.into_iter().zip(states) {
         let Some(state) = state else { continue };
         if state.contains("+") {
@@ -711,7 +737,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
         drop(current);
         progress.lock().expect("plan progress poisoned").inc();
         probe
-    });
+    })?;
 
     for ((repo, group), probe) in groups.into_iter().zip(probes) {
         let dir = repos_dir.join(&repo);

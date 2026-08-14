@@ -33,10 +33,26 @@ pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 fn main() -> Res<()> {
+    // Grace count 1: the FIRST Ctrl-C sets the interrupt flag — which every
+    // long-running path polls, so cactup winds down within moments (locks
+    // released, tempfiles cleaned) — and the SECOND aborts on the spot. Both
+    // facts are announced immediately, because a grace period the user
+    // cannot see just reads as a hung process.
+    //
+    // SAFETY: the handler runs in signal context, so it may not lock,
+    // allocate, or block. A raw write(2) to fd 2 through a File that never
+    // owns the fd (mem::forget skips the close) is async-signal-safe; std's
+    // Stderr handle is not (it locks and may allocate).
+    let announce = || {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        let mut stderr = unsafe { std::fs::File::from_raw_fd(2) };
+        let _ =
+            stderr.write_all(b"\ncactup: interrupted, stopping (Ctrl-C again aborts instantly)\n");
+        std::mem::forget(stderr);
+    };
     unsafe {
-        // SAFETY: This method is unsafe because the signal handler we pass in has a certain contract.
-        //         We satisfy the contract by virtue of doing nothing.
-        gix::interrupt::init_handler(0, || {})?;
+        gix::interrupt::init_handler(1, announce)?;
     }
 
     let args = Args::parse();

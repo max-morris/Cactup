@@ -1453,9 +1453,12 @@ fn run_build_snippet(
         tee(child.stderr.take().expect("stderr piped"), Arc::clone(&log), true),
     ];
     let status = child.wait().context("Failed to wait on the build shell")?;
-    for t in copiers {
-        let _ = t.join();
-    }
+    crate::par::join_with_deadline(
+        copiers,
+        std::time::Duration::from_secs(2),
+        "note: a background process from the build still holds the output pipe; \
+         not waiting for it (its further output is not logged)",
+    );
 
     if !status.success() {
         eprintln!(

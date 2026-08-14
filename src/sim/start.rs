@@ -583,6 +583,12 @@ fn run_interactive(
     };
     r.store()?;
     restart::make_active(&sim.dir, id)?;
+    // A fresh heartbeat before the sim lock drops: between here and
+    // execute_restart acquiring running.lock there is a window where a
+    // concurrent submit's reaper would otherwise see an active restart with
+    // no job, no lock, and no heartbeat — i.e. "never started = dead" —
+    // and reap the restart that is about to run.
+    r.touch_heartbeat();
     drop(lock);
 
     sim.log("run", &format!("running {} in the foreground", restart::dir_name(id)));
@@ -764,24 +770,38 @@ pub(crate) fn spawn_and_wait(
     // Wait, touching the heartbeat file each HEARTBEAT_SECS (§9.3).
     let started = std::time::Instant::now();
     let mut last_beat = 0u64;
+    let mut interrupted_at: Option<std::time::Instant> = None;
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break st;
         }
+        // Ctrl-C: a foreground child gets the terminal's SIGINT itself; a
+        // child that has not exited a couple of seconds later (it ignores
+        // SIGINT, or the signal came as a lone SIGTERM to cactup) is killed,
+        // so the interrupt always resolves promptly.
+        if gix::interrupt::is_triggered() {
+            let since = interrupted_at.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() > std::time::Duration::from_secs(2) {
+                let _ = child.kill();
+            }
+        }
         let elapsed = started.elapsed().as_secs();
         if elapsed / HEARTBEAT_SECS > last_beat {
             last_beat = elapsed / HEARTBEAT_SECS;
-            let _ = fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&heartbeat)
-                .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+            // A plain write stamps the mtime with the *fileserver's* clock —
+            // the same domain the reaper's age check reads — where
+            // set_modified(now) would inject this compute node's local
+            // clock, skewed on NFS.
+            let _ = fs::write(heartbeat, b"");
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
-    for t in copiers {
-        let _ = t.join();
-    }
+    crate::par::join_with_deadline(
+        copiers,
+        std::time::Duration::from_secs(2),
+        "note: a background process from the run-script still holds the output pipe; \
+         not waiting for it (its further output is not captured)",
+    );
     Ok(status)
 }
 
