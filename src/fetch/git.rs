@@ -38,7 +38,12 @@ pub enum DirtyReason {
     MidOperation(&'static str),
     /// The wanted branch exists locally but HEAD is deliberately elsewhere.
     BranchSwitched { head: String, expected: String },
-    RemoteUrlChanged { on_disk: String, wanted: String },
+    /// `modified` is the worktree's tracked-file changes (repo-relative
+    /// paths), gathered eagerly here rather than left for a later dirty
+    /// classification: this is the one `DirtyReason` a forced refetch can
+    /// override (via [`set_origin_url`] + a normal align), so it is also the
+    /// one whose backup pass needs to know what to save *before* that happens.
+    RemoteUrlChanged { on_disk: String, wanted: String, modified: Vec<String> },
     /// Any probe failure. Never silently "clean".
     Unknown(String),
 }
@@ -59,8 +64,12 @@ impl DirtyReason {
             DirtyReason::BranchSwitched { head, expected } => {
                 format!("checked out on branch {head} instead of {expected}")
             }
-            DirtyReason::RemoteUrlChanged { on_disk, wanted } => {
-                format!("remote URL is {on_disk}, thornlist wants {wanted}")
+            DirtyReason::RemoteUrlChanged { on_disk, wanted, modified } => {
+                let mut s = format!("remote URL is {on_disk}, thornlist wants {wanted}");
+                if !modified.is_empty() {
+                    s.push_str(&format!(" ({} local modification(s))", modified.len()));
+                }
+                s
             }
             DirtyReason::Unknown(err) => format!("could not inspect the repo ({err})"),
         }
@@ -117,10 +126,22 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
         .map(|u| u.to_bstring().to_string())
         .ok_or_else(|| anyhow!("origin has no fetch URL"))?;
     if normalize_url(&on_disk_url) != normalize_url(wanted_url) {
-        return Ok(dirty(
-            DirtyReason::RemoteUrlChanged { on_disk: on_disk_url, wanted: wanted_url.to_owned() },
-            Vec::new(),
-        ));
+        // A retargeted repo can *also* carry local edits — e.g. the fork
+        // adoption workflow above is exactly "edit a thorn, then repoint
+        // origin at your fork" — and the refetch backup pass (src/fetch/mod.rs)
+        // needs `modified` to know what to save before a forced refetch
+        // clobbers the worktree. So pay for the status walk here too, even
+        // though a bare URL mismatch is the rare case: skipping it would
+        // silently drop edits that were never backed up.
+        let (modified, untracked) = status_paths(&repo).unwrap_or_default();
+        return Ok(Probe {
+            state: RepoState::Dirty(DirtyReason::RemoteUrlChanged {
+                on_disk: on_disk_url,
+                wanted: wanted_url.to_owned(),
+                modified,
+            }),
+            untracked,
+        });
     }
 
     let head = repo.head().with_context(|| "failed to read HEAD")?;
@@ -210,10 +231,98 @@ fn dirty(reason: DirtyReason, untracked: Vec<String>) -> Probe {
     Probe { state: RepoState::Dirty(reason), untracked }
 }
 
-/// URL comparison tolerance: trailing `/` and `.git` are cosmetic.
-fn normalize_url(url: &str) -> &str {
-    let url = url.trim_end_matches('/');
-    url.strip_suffix(".git").unwrap_or(url)
+/// Canonical comparison key for a remote URL, so that the fork-adoption
+/// workflow — a thornlist re-pointing a repo at an `ssh://` fork of the same
+/// project — doesn't read as a different repo just because of URL spelling.
+/// `git@host:user/repo.git`, `https://host/user/repo`, and
+/// `ssh://git@host:22/user/repo/` must all compare equal, or the probe
+/// reports `RemoteUrlChanged` for a repo that is, upstream-identity-wise,
+/// unchanged.
+///
+/// Rules: strip a leading scheme (`ssh://`, `git://`, `git+ssh://`,
+/// `ssh+git://`, `https://`, `http://`, case-insensitive) or recognize
+/// scp-style `[user@]host:path` (no `://`, first `:` before first `/`); drop
+/// `user[:password]@` userinfo and a trailing `:<port>` from the authority;
+/// lowercase the host (DNS is case-insensitive; hosting providers don't
+/// distinguish `GitHub.com` from `github.com`); leave path case alone (POSIX
+/// paths are case-sensitive, and repo/owner names on some forges are too, so
+/// lowercasing here would conflate genuinely different repos); strip the
+/// path's leading `/`, trailing `/`, and trailing `.git`. `file://` URLs and
+/// bare local paths (`/…`, `./…`, `../…`, `~…`) have no authority: the result
+/// is just the cleaned path. Empty input stays empty (the planner passes
+/// `""` for "no wanted URL" in some code paths).
+pub(crate) fn normalize_url(url: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
+
+    // Local path forms have no authority to split off. A leading char alone
+    // tells absolute from relative from home-relative apart, so — unlike the
+    // host+path case below — the leading character is never stripped here.
+    if let Some(rest) = url.strip_prefix("file://") {
+        return clean_path(rest);
+    }
+    if url.starts_with('/') || url.starts_with("./") || url.starts_with("../") || url.starts_with('~') {
+        return clean_path(url);
+    }
+
+    const SCHEMES: [&str; 6] = ["ssh://", "git://", "git+ssh://", "ssh+git://", "https://", "http://"];
+    let schemeless = SCHEMES.iter().find_map(|scheme| {
+        (url.len() >= scheme.len() && url[..scheme.len()].eq_ignore_ascii_case(scheme))
+            .then(|| &url[scheme.len()..])
+    });
+
+    let (authority, path) = if let Some(rest) = schemeless {
+        // URL-style: `[user[:password]@]host[:port][/path]`.
+        rest.split_once('/').unwrap_or((rest, ""))
+    } else {
+        let colon = url.find(':');
+        let slash = url.find('/');
+        match colon {
+            // scp-style `[user@]host:path` — no scheme, and the `:` precedes
+            // any `/` (so e.g. a Windows path with a slash before its drive
+            // colon, which can't happen, or any path-then-colon shape, isn't
+            // misread as scp-style).
+            Some(c) if slash.map_or(true, |s| c < s) => (&url[..c], &url[c + 1..]),
+            // No recognized scheme and no scp form: opaque, treat as a path.
+            _ => return clean_path(url),
+        }
+    };
+
+    // Userinfo (`user[:password]@`) is login material, not repo identity.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_userinfo, host)| host);
+    // A trailing `:<port>` only exists in URL-style authorities — scp-style's
+    // only `:` was already consumed as the host/path separator above, so
+    // this is a no-op for that branch (no further `:` remains to match).
+    let host = host_port
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(host_port, |(host, _port)| host)
+        .to_ascii_lowercase();
+
+    // Host+path form: unlike a bare local path, a leading `/` here is just
+    // URL syntax (separating authority from path), not part of repo
+    // identity, so it's stripped along with the trailing `/` and `.git`.
+    // Case is left alone past this point — some forges have case-sensitive
+    // owner/repo names, so lowercasing the path could conflate two distinct
+    // repos (`/repo` vs `/Repo`) that the host treats as different.
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let path = path.strip_suffix(".git").unwrap_or(path);
+
+    if path.is_empty() {
+        host
+    } else {
+        format!("{host}/{path}")
+    }
+}
+
+/// Trailing-slash/`.git` cleanup for a bare local path (no host). See
+/// [`normalize_url`] for why the leading character is untouched here.
+fn clean_path(path: &str) -> String {
+    let path = path.strip_suffix('/').unwrap_or(path);
+    path.strip_suffix(".git").unwrap_or(path).to_owned()
 }
 
 /// Depth-1 single-branch clone of `url` at `branch` into `dest`, with a full
@@ -420,6 +529,46 @@ pub fn align(repo_dir: &Path, branch: &str, progress: &mut prodash::tree::Item) 
     Ok(target_id)
 }
 
+/// Rewrite `origin`'s fetch URL to `url`, persistently, in `<git_dir>/config`.
+///
+/// This is the heal path for `DirtyReason::RemoteUrlChanged` under a forced
+/// refetch: [`align`] fetches from whatever `origin` names, and the plan
+/// item's wanted URL is otherwise used only for [`clone`]. Without this, a
+/// forced refetch of a re-pointed repo fetches the *old* upstream and dies
+/// the moment the wanted branch is missing there. Persisting the change
+/// (rather than fetching from an anonymous, one-off remote) is what stops
+/// the very next probe from flagging the repo again.
+///
+/// `gix`'s `Repository::config_snapshot_mut` is in-memory only and never
+/// reaches disk, so this edits `config` directly and writes it back with the
+/// same temp-file-then-persist pattern as `FetchState::record`
+/// (src/fetch/mod.rs) — a git config is a file every other git-aware tool
+/// reads too, so a crash here must never leave a half-written one behind.
+pub fn set_origin_url(repo_dir: &Path, url: &str) -> Res<()> {
+    let repo = gix::open(repo_dir)
+        .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
+    let git_dir = repo.git_dir().to_owned();
+    let config_path = git_dir.join("config");
+
+    let mut file =
+        gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+    file.set_raw_value_by("remote", Some("origin".into()), "url", gix::bstr::BStr::new(url.as_bytes()))
+        .with_context(|| format!("Failed to set remote.origin.url in {}", config_path.display()))?;
+
+    let tmp = tempfile::NamedTempFile::new_in(&git_dir)
+        .with_context(|| format!("Failed to create temp file in {}", git_dir.display()))?;
+    {
+        let mut writer = std::io::BufWriter::new(tmp.as_file());
+        file.write_to(&mut writer)
+            .with_context(|| "Failed to render updated git config")?;
+        std::io::Write::flush(&mut writer).with_context(|| "Failed to flush git config temp file")?;
+    }
+    tmp.persist(&config_path)
+        .with_context(|| format!("Failed to replace {}", config_path.display()))?;
+    Ok(())
+}
+
 /// The branch and commit a repo is currently on, for post-pass assertions and
 /// `fetch-state.toml`.
 /// `(modified, untracked)` for a repo. Modified = tracked files differing from
@@ -572,6 +721,38 @@ mod tests {
         assert_ne!(normalize_url("https://x.org/repo"), normalize_url("https://x.org/other"));
     }
 
+    /// The fork-adoption workflow: a thornlist re-pointing a repo at an
+    /// `ssh://` fork of the same project must not read as a different repo
+    /// just because of URL spelling (scheme, userinfo, port, `.git`, trailing
+    /// slash, host case all vary across the forms people paste).
+    #[test]
+    fn url_normalization_treats_scp_and_url_forms_as_the_same_repo() {
+        let scp = normalize_url("git@github.com:max-morris/SpacetimeX.git");
+        let https = normalize_url("https://github.com/max-morris/SpacetimeX");
+        let ssh_with_port = normalize_url("ssh://git@github.com:22/max-morris/SpacetimeX/");
+        let https_upper_host = normalize_url("https://GitHub.com/max-morris/SpacetimeX.git");
+        assert_eq!(scp, https);
+        assert_eq!(https, ssh_with_port);
+        assert_eq!(ssh_with_port, https_upper_host);
+
+        // Different owner is a genuinely different repo, not a spelling
+        // variant — the path is compared verbatim past the host.
+        assert_ne!(
+            normalize_url("https://github.com/max-morris/SpacetimeX"),
+            normalize_url("https://github.com/EinsteinToolkit/SpacetimeX"),
+        );
+
+        // Path case is left alone (only the host is lowercased): some forges
+        // have case-sensitive repo/owner names, so folding case here could
+        // conflate two distinct repos.
+        assert_ne!(normalize_url("https://x.org/repo"), normalize_url("https://x.org/Repo"));
+
+        // Local paths compare by path alone, with no host to normalize.
+        assert_eq!(normalize_url("/srv/mirrors/repo.git"), normalize_url("/srv/mirrors/repo"));
+
+        assert_eq!(normalize_url(""), "");
+    }
+
     #[test]
     fn probe_absent_and_non_repo() {
         let dir = tempfile::tempdir().unwrap();
@@ -585,6 +766,73 @@ mod tests {
             probe(&plain, "u", "b").state,
             RepoState::Dirty(DirtyReason::Unknown(_))
         ));
+    }
+
+    /// A repo that is both retargeted (thornlist wants a different origin)
+    /// and locally edited must report the edit — the refetch backup pass
+    /// needs `modified` to save it before a forced refetch clobbers the
+    /// worktree. Before this fix `probe_inner` returned on the URL mismatch
+    /// before ever walking the worktree, so `modified` was always empty.
+    #[test]
+    fn remote_url_changed_carries_modified_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        testrepo::init(&dir);
+        testrepo::commit_file(&dir, "thorn.cc", "int a;\n");
+        set_origin_url(&dir, "https://old.example.com/owner/repo.git").unwrap();
+        std::fs::write(dir.join("thorn.cc"), "int a; int b;\n").unwrap();
+
+        let probe = probe(&dir, "https://new.example.com/owner/repo.git", "");
+        match probe.state {
+            RepoState::Dirty(DirtyReason::RemoteUrlChanged { on_disk, wanted, modified }) => {
+                assert_eq!(on_disk, "https://old.example.com/owner/repo.git");
+                assert_eq!(wanted, "https://new.example.com/owner/repo.git");
+                assert_eq!(modified, vec!["thorn.cc".to_owned()]);
+            }
+            other => panic!("expected RemoteUrlChanged with a modification, got {other:?}"),
+        }
+    }
+
+    /// The heal path: rewriting `origin` persists, is visible to a fresh
+    /// `gix::open`, and setting it twice never leaves a duplicate `url` key
+    /// behind (which would otherwise make the "current" URL ambiguous to
+    /// every other git-aware tool reading the same config).
+    #[test]
+    fn set_origin_url_persists_and_does_not_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        testrepo::init(&dir);
+
+        set_origin_url(&dir, "https://first.example.com/a/b.git").unwrap();
+        let repo = gix::open(&dir).expect("reopen after first set_origin_url");
+        let url = repo
+            .find_remote("origin")
+            .expect("origin exists after set_origin_url")
+            .url(Direction::Fetch)
+            .expect("origin has a fetch url")
+            .to_bstring()
+            .to_string();
+        assert_eq!(url, "https://first.example.com/a/b.git");
+
+        set_origin_url(&dir, "https://second.example.com/c/d.git").unwrap();
+        let repo = gix::open(&dir).expect("reopen after second set_origin_url");
+        let url = repo
+            .find_remote("origin")
+            .expect("origin exists after second set_origin_url")
+            .url(Direction::Fetch)
+            .expect("origin has a fetch url")
+            .to_bstring()
+            .to_string();
+        assert_eq!(url, "https://second.example.com/c/d.git");
+
+        // No duplicate `url` line left behind by the first write.
+        let config_text = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+        assert_eq!(
+            config_text.matches("url =").count(),
+            1,
+            "expected exactly one url entry, got:\n{config_text}"
+        );
+        assert!(!config_text.contains("first.example.com"));
     }
 }
 

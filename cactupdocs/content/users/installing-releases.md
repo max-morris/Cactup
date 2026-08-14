@@ -170,8 +170,9 @@ cactup inst refetch path/to/custom.th
 ### The skip contract
 
 A repo with local modifications, local commits, a switched branch, a
-detached HEAD, or an in-progress rebase/merge is left alone and reported by
-name (naming the affected thorns) rather than silently overwritten:
+detached HEAD, an in-progress rebase/merge, or a changed remote URL is left
+alone and reported by name (naming the affected thorns) rather than
+silently overwritten:
 
 ```sh
 cactup inst refetch
@@ -182,7 +183,18 @@ cactup inst refetch
 
 - `--overwrite-modified` (or `-f`) fetches over skipped repos anyway, after
   backing their modified files up to
-  `~/.cactup/refetch-backups/<alias>/<timestamp>/`.
+  `~/.cactup/refetch-backups/<alias>/<timestamp>/`. `--overwrite <NAMES>`
+  does the same for just the named repos — a repo directory under
+  `Cactus/repos/`, a full thorn checkout it provides, or a bare thorn name
+  (case-insensitive; space- or comma-separated, repeatable) — leaving every
+  other skipped repo's local state untouched.
+- A repo skipped for a changed remote URL is compared canonically, so
+  spelling alone (`git@github.com:user/repo.git` vs.
+  `https://github.com/user/repo`) never trips it — only a genuinely
+  different upstream does. Forcing that repo (`-f`/`--overwrite-modified`,
+  or naming it in `--overwrite`) rewrites its `origin` to the thornlist's
+  URL before fetching, which is how you adopt a fork: point the thornlist
+  at your own fork of a component, then `refetch --overwrite <that repo>`.
 - `-s`/`--silent` hides the detailed skip list; a one-line count still
   prints.
 - `-f` is the "bypass all nagging" umbrella: it implies

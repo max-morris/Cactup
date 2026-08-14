@@ -39,7 +39,9 @@ pub struct Plan {
     /// alone backs ~15 thorns), fetchable now.
     pub git: Vec<GitRepoPlan>,
     /// Dirty repos, skipped. `refetch --overwrite-modified` backs their
-    /// modified files up and moves them into `git` via [`Plan::force`].
+    /// modified files up and moves them into `git` via [`Plan::force`];
+    /// `refetch --overwrite <names>` does the same for a subset, via
+    /// [`Plan::force_where`].
     pub skipped: Vec<SkippedRepo>,
     /// http/https/ftp components (plain downloads, always refreshed).
     pub downloads: Vec<Component>,
@@ -75,6 +77,13 @@ pub struct GitRepoPlan {
     pub checkouts: Vec<String>,
     /// `Some(description)` when a dirty repo was forced into the plan.
     pub forced: Option<String>,
+    /// `Some(url)` when this repo's `origin` must be re-pointed at `url` before
+    /// it is fetched — the forced heal for `DirtyReason::RemoteUrlChanged`.
+    /// `align` fetches from whatever `origin` names, so without this a forced
+    /// refetch of a re-pointed repo silently fetches the old upstream;
+    /// persisting the URL (in `execute`, via `git::set_origin_url`) is also
+    /// what stops the next probe from re-flagging it.
+    pub retarget: Option<String>,
 }
 
 #[derive(Debug)]
@@ -89,25 +98,61 @@ pub struct SkippedRepo {
 }
 
 impl Plan {
-    /// Move every skipped repo into the fetchable set (after the caller has
-    /// backed up its modified files). Clean-vs-wanted state decides the
-    /// action the same way `plan` does for clean repos.
-    pub fn force(&mut self) {
-        for s in self.skipped.drain(..) {
-            let action = match &s.branch {
-                Some(b) if git::at_local_origin_tip(&s.dir, b) => GitAction::Update,
-                _ => GitAction::Align,
+    /// Move every skipped repo into the fetchable set. See [`Plan::force_where`].
+    pub fn force(&mut self) -> Vec<String> {
+        self.force_where(|_| true)
+    }
+
+    /// Move the skipped repos `select` accepts into the fetchable set (after
+    /// the caller has backed up their modified files), leaving the rest
+    /// skipped. Returns the names moved, in plan order.
+    pub fn force_where(&mut self, select: impl Fn(&SkippedRepo) -> bool) -> Vec<String> {
+        let mut moved = Vec::new();
+        // `drain` with a filter would leave the remaining `skipped` reordered
+        // (retain-while-draining semantics); take the whole vec instead and
+        // rebuild both parts in their original relative order.
+        let taken = std::mem::take(&mut self.skipped);
+        for s in taken {
+            if !select(&s) {
+                self.skipped.push(s);
+                continue;
+            }
+            // A `RemoteUrlChanged` repo's `origin` still names the *old*
+            // upstream until `execute` calls `set_origin_url`; against that,
+            // `at_local_origin_tip`'s "already at the tip" reading is
+            // meaningless (the local `refs/remotes/origin/<branch>` it
+            // consults points at the old remote too), and `Update` would
+            // fetch from the wrong remote entirely. Always Align, and always
+            // carry the URL to retarget to before this item is ever fetched.
+            let retarget =
+                matches!(&s.reason, DirtyReason::RemoteUrlChanged { .. }).then(|| s.url.clone());
+            let action = if retarget.is_some() {
+                GitAction::Align
+            } else {
+                match &s.branch {
+                    Some(b) if git::at_local_origin_tip(&s.dir, b) => GitAction::Update,
+                    _ => GitAction::Align,
+                }
             };
+            // A skipped repo with no !REPO_BRANCH has `branch: None`; unlike
+            // `plan()`'s clean-repo path, nothing has resolved it to the
+            // repo's actual head branch yet. Do that here too, or `execute`
+            // errors out with "no branch resolved for existing repo" for any
+            // dirty repo that was never given an explicit branch.
+            let branch = s.branch.or_else(|| git::head_of(&s.dir).ok().map(|(b, _)| b));
+            moved.push(s.repo.clone());
             self.git.push(GitRepoPlan {
                 repo: s.repo,
                 dir: s.dir,
                 url: s.url,
-                branch: s.branch,
+                branch,
                 action,
                 checkouts: s.checkouts,
                 forced: Some(s.reason.describe()),
+                retarget,
             });
         }
+        moved
     }
 }
 
@@ -134,6 +179,10 @@ pub struct RepoResult {
     pub changed: bool,
     /// Carried through from the plan: why this repo needed forcing, if it did.
     pub forced: Option<String>,
+    /// `Some(url)` when this fetch re-pointed the repo's `origin` at the
+    /// thornlist URL — a persistent change to the user's repo, so it is
+    /// reported unconditionally, not only under `--verbose`.
+    pub retargeted: Option<String>,
 }
 
 #[derive(Debug)]
@@ -206,13 +255,20 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                 };
                 match work {
                     Work::Git(item) => {
-                        let name = match (&item.action, item.branch.as_deref()) {
-                            (GitAction::Clone, _) => format!("clone {}", item.repo),
-                            (GitAction::Update, _) => format!("update {}", item.repo),
-                            (GitAction::Align, Some(branch)) => {
-                                format!("switch {} to {branch}", item.repo)
+                        let name = if let Some(url) = &item.retarget {
+                            // Distinct headline: this item's `origin` is about
+                            // to be rewritten before anything is fetched, not
+                            // a normal clone/update/switch.
+                            format!("repoint {} at {url}", item.repo)
+                        } else {
+                            match (&item.action, item.branch.as_deref()) {
+                                (GitAction::Clone, _) => format!("clone {}", item.repo),
+                                (GitAction::Update, _) => format!("update {}", item.repo),
+                                (GitAction::Align, Some(branch)) => {
+                                    format!("switch {} to {branch}", item.repo)
+                                }
+                                (GitAction::Align, None) => format!("switch {}", item.repo),
                             }
-                            (GitAction::Align, None) => format!("switch {}", item.repo),
                         };
                         let mut header =
                             top.lock().expect("fetch progress poisoned").add_child(name);
@@ -223,6 +279,26 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         // headline lives one level above the item we hand
                         // gix, which is never displayed directly.
                         let mut gix_item = header.add_child("connecting");
+
+                        // Rewrite `origin` before anything else touches the
+                        // repo: `align` (below) re-opens it and must see the
+                        // thornlist's URL, not the stale one the probe
+                        // flagged. A failure here is reported and dropped
+                        // exactly like an align/clone failure — no fetch is
+                        // attempted for an item whose remote we could not fix.
+                        if let Some(url) = &item.retarget {
+                            if let Err(e) = git::set_origin_url(&item.dir, url) {
+                                header.fail(format!("{}: {e:#}", item.repo));
+                                report.lock().expect("fetch report poisoned").failures.push(Failure {
+                                    what: item.repo.clone(),
+                                    error: format!("{e:#}"),
+                                });
+                                drop(gix_item);
+                                drop(header);
+                                top.lock().expect("fetch progress poisoned").inc();
+                                continue;
+                            }
+                        }
                         let before = match item.action {
                             GitAction::Clone => None,
                             _ => git::head_of(&item.dir).ok().map(|(_, id)| id),
@@ -249,6 +325,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 head: head.to_string(),
                                 changed: before != Some(head),
                                 forced: item.forced.clone(),
+                                retargeted: item.retarget.clone(),
                             }),
                             Err(e) => {
                                 header.fail(format!("{}: {e:#}", item.repo));
@@ -599,6 +676,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                 action: GitAction::Clone,
                 checkouts: group.checkouts,
                 forced: None,
+                retarget: None,
             }),
             RepoState::Clean { head_branch } => {
                 // No !REPO_BRANCH = follow whatever branch the clone is on.
@@ -613,6 +691,7 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                     action,
                     checkouts: group.checkouts,
                     forced: None,
+                    retarget: None,
                 });
             }
             RepoState::Dirty(reason) => {
@@ -712,5 +791,234 @@ mod tests {
     fn committed_splits_the_worktree_summary_off() {
         assert_eq!(committed("abc123"), "abc123");
         assert_eq!(committed("abc123+2mod@1700"), "abc123");
+    }
+
+    fn skipped_repo(dir: PathBuf, repo: &str, branch: Option<&str>) -> SkippedRepo {
+        SkippedRepo {
+            repo: repo.to_string(),
+            dir,
+            url: "https://example.invalid/repo.git".to_string(),
+            branch: branch.map(str::to_string),
+            reason: DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
+            untracked: Vec::new(),
+            checkouts: vec![repo.to_string()],
+        }
+    }
+
+    #[test]
+    fn force_where_moves_only_the_selected_repo_and_leaves_the_rest_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a_dir = tmp.path().join("A");
+        let b_dir = tmp.path().join("B");
+        git::testrepo::init(&a_dir);
+        git::testrepo::commit(&a_dir, "initial");
+        git::testrepo::init(&b_dir);
+        git::testrepo::commit(&b_dir, "initial");
+
+        let mut plan = Plan {
+            git: Vec::new(),
+            skipped: vec![skipped_repo(a_dir.clone(), "A", None), skipped_repo(b_dir.clone(), "B", Some("main"))],
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            root: "Cactus".to_string(),
+        };
+
+        let moved = plan.force_where(|s| s.repo == "A");
+        assert_eq!(moved, vec!["A".to_string()]);
+
+        // B stays skipped, in place.
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].repo, "B");
+
+        // A moved into the fetchable set, forced, and — since it had no
+        // !REPO_BRANCH (branch: None) — its branch was filled in from the
+        // repo's actual current head rather than left None (which would
+        // otherwise make `execute` error out).
+        assert_eq!(plan.git.len(), 1);
+        let forced = &plan.git[0];
+        assert_eq!(forced.repo, "A");
+        assert!(forced.forced.is_some());
+        // A is WorktreeModified, not RemoteUrlChanged: nothing to retarget.
+        assert_eq!(forced.retarget, None);
+        let (head_branch, _) = git::head_of(&a_dir).unwrap();
+        assert_eq!(forced.branch.as_deref(), Some(head_branch.as_str()));
+    }
+
+    #[test]
+    fn force_where_retargets_a_remote_url_changed_repo_and_always_aligns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("R");
+        git::testrepo::init(&dir);
+        git::testrepo::commit(&dir, "initial");
+        // Plant `refs/remotes/origin/main` at HEAD: that is exactly the state
+        // a repo is in after cactup fetched it from the URL the thornlist has
+        // since moved away from, and it is what makes `at_local_origin_tip`
+        // say "already at the tip".
+        let head = git::head_of(&dir).unwrap().1;
+        let remote_refs = dir.join(".git/refs/remotes/origin");
+        std::fs::create_dir_all(&remote_refs).unwrap();
+        std::fs::write(remote_refs.join("main"), format!("{head}\n")).unwrap();
+
+        let wanted_url = "https://example.invalid/repo.git".to_string();
+        let skipped = SkippedRepo {
+            repo: "R".to_string(),
+            dir: dir.clone(),
+            url: wanted_url.clone(),
+            branch: Some("main".to_string()),
+            reason: DirtyReason::RemoteUrlChanged {
+                on_disk: "https://old.example.invalid/repo.git".to_string(),
+                wanted: wanted_url.clone(),
+                modified: Vec::new(),
+            },
+            untracked: Vec::new(),
+            checkouts: vec!["R".to_string()],
+        };
+        let mut plan = Plan {
+            git: Vec::new(),
+            skipped: vec![skipped],
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            root: "Cactus".to_string(),
+        };
+
+        let moved = plan.force_where(|_| true);
+        assert_eq!(moved, vec!["R".to_string()]);
+        assert_eq!(plan.git.len(), 1);
+        let forced = &plan.git[0];
+        assert_eq!(forced.retarget.as_deref(), Some(wanted_url.as_str()));
+        // The point of the override: `refs/remotes/origin/main` above was
+        // planted at HEAD, so `at_local_origin_tip` reads "already at the
+        // tip" and the unforced path would pick `Update` — which would fetch
+        // the *old* upstream, since that ref and `origin` both still name it.
+        // The control assertion below proves the early-out really does fire
+        // on this fixture, so this one is a genuine override, not a repo
+        // where `Update` was never reachable anyway.
+        assert!(matches!(forced.action, GitAction::Align));
+        assert!(git::at_local_origin_tip(&dir, "main"), "fixture must trip the Update early-out");
+
+        // Control: the identical fixture, skipped for a reason that is *not*
+        // a URL change, does take the `Update` early-out.
+        let mut plan = Plan {
+            git: Vec::new(),
+            skipped: vec![skipped_repo(dir.clone(), "R", Some("main"))],
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            root: "Cactus".to_string(),
+        };
+        plan.force_where(|_| true);
+        assert!(matches!(plan.git[0].action, GitAction::Update));
+        assert_eq!(plan.git[0].retarget, None);
+    }
+
+    /// End-to-end: `plan()` classifies a repo whose `origin` has drifted from
+    /// the thornlist's `!URL` as `RemoteUrlChanged` and skips it; forcing it
+    /// moves it into `plan.git` retargeted at the *new* URL; `execute()` must
+    /// then actually fetch from that new URL — not the stale one `origin`
+    /// still names on disk — and leave the repo healed (a plain reprobe reads
+    /// Clean), which is the whole point of persisting the rewritten URL
+    /// rather than fetching from a one-off anonymous remote.
+    #[test]
+    fn forced_refetch_heals_a_repo_whose_remote_url_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Two independent source repos standing in for "the old upstream"
+        // (what `origin` still names on disk) and "the fork" (what the
+        // thornlist has since been repointed at) — distinct histories, so
+        // fetching the wrong one is unmistakable in the assertions below.
+        let upstream_dir = tmp.path().join("sources/upstream");
+        let fork_dir = tmp.path().join("sources/fork");
+        git::testrepo::init(&upstream_dir);
+        git::testrepo::commit(&upstream_dir, "upstream initial");
+        git::testrepo::init(&fork_dir);
+        git::testrepo::commit(&fork_dir, "fork initial");
+        git::testrepo::commit(&fork_dir, "fork-only commit");
+        let (fork_branch, fork_head) = git::head_of(&fork_dir).unwrap();
+
+        // `testrepo::init` never pins a branch name (no `init.defaultBranch`
+        // override) — both repos are freshly init'ed the same way, so in
+        // practice they land on gix's same built-in default, but that's an
+        // assumption worth checking rather than baking in: `align` fetches
+        // this exact branch name from the fork, so the fixture is broken if
+        // it ever disagrees with what `upstream` was cloned/probed against.
+        let (upstream_branch, _) = git::head_of(&upstream_dir).unwrap();
+        assert_eq!(
+            upstream_branch, fork_branch,
+            "fixture repos must share a branch name for align to target it"
+        );
+
+        // The installation tree: `R` cloned from `upstream`, exactly as an
+        // earlier fetch would have left it — this is the on-disk state the
+        // thornlist below no longer matches.
+        let root = tmp.path().join("install");
+        let repo_dir = root.join("Cactus/repos/R");
+        let upstream_url = upstream_dir.to_string_lossy().into_owned();
+        let fork_url = fork_dir.to_string_lossy().into_owned();
+        let mut clone_progress = prodash::tree::Root::new().add_child("test clone");
+        git::clone(&upstream_url, Some(&upstream_branch), &repo_dir, &mut clone_progress).unwrap();
+
+        // A thornlist whose `!URL` names the fork, not the upstream `R` was
+        // actually cloned from.
+        let list_src = format!(
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET   = $ROOT\n\
+             !TYPE     = git\n\
+             !URL      = {fork_url}\n\
+             !REPO_BRANCH = {fork_branch}\n\
+             !NAME     = R\n\
+             !CHECKOUT = Makefile\n"
+        );
+        let list = crate::thornlist::parse(&list_src).unwrap();
+
+        // plan(): must classify `R` as dirty for exactly `RemoteUrlChanged`,
+        // never silently fetchable and never some other dirty reason.
+        let mut classify = prodash::tree::Root::new().add_child("test plan");
+        let mut plan = plan(&list, &root, &mut classify).unwrap();
+        assert!(plan.git.is_empty(), "a retargeted repo must not be silently fetchable");
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(
+            matches!(plan.skipped[0].reason, DirtyReason::RemoteUrlChanged { .. }),
+            "expected RemoteUrlChanged, got {:?}",
+            plan.skipped[0].reason
+        );
+
+        // force_where(): moved into `git`, retargeted at the fork's URL, and
+        // always `Align` (never `Update` — see force_where's own comment on
+        // why the local-origin-tip early-out cannot be trusted here).
+        let moved = plan.force_where(|_| true);
+        assert_eq!(moved, vec!["R".to_string()]);
+        assert_eq!(plan.git.len(), 1);
+        assert_eq!(plan.git[0].retarget.as_deref(), Some(fork_url.as_str()));
+        assert!(matches!(plan.git[0].action, GitAction::Align));
+
+        // execute(): the real end-to-end path — `set_origin_url` rewrites
+        // `origin` to the fork before `align` ever runs, so the fetch below
+        // must land on the fork's tip, not the upstream `origin` still named
+        // on disk a moment ago.
+        let report = execute(&plan, &root).unwrap();
+        assert!(report.failures.is_empty(), "unexpected failures: {:?}", report.failures);
+        assert_eq!(report.repos.len(), 1);
+        let result = &report.repos[0];
+        assert_eq!(result.repo, "R");
+        assert_eq!(result.retargeted.as_deref(), Some(fork_url.as_str()));
+        assert_eq!(result.head, fork_head.to_string());
+
+        // The repo's actual on-disk HEAD is the fork's tip, not the
+        // upstream's — proof the fetch really went to the new remote.
+        let (_, head) = git::head_of(&repo_dir).unwrap();
+        assert_eq!(head, fork_head);
+
+        // And the persisted URL is what stops the *next* refetch from
+        // re-flagging this repo: probing it again against the fork's URL now
+        // reads Clean, whereas before `execute` it read `RemoteUrlChanged`.
+        let reprobe = git::probe(&repo_dir, &fork_url, &fork_branch);
+        assert!(
+            matches!(reprobe.state, RepoState::Clean { .. }),
+            "expected Clean after healing, got {:?}",
+            reprobe.state
+        );
     }
 }

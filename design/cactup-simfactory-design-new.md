@@ -300,8 +300,8 @@ cactup installation list [--all]                  (list installations)
 cactup installation show [<alias>]                (details of one installation)
 cactup installation use <alias>                   (set active installation)
 cactup installation refetch [THORNLIST | --release TAG] [-f]
-       [--overwrite-modified] [--replace-thornlist] [--prune] [-s|--silent]
-       [-n|--dry-run]                             (re-run the component fetch —
+       [--overwrite-modified] [--overwrite NAMES] [--replace-thornlist]
+       [--prune] [-s|--silent] [-n|--dry-run]     (re-run the component fetch —
                                                    see §3.2)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
@@ -384,14 +384,34 @@ with the desired branch absent locally → fetch + create + check out. Everythin
 else — modified/staged/deleted tracked files, local commits, detached HEAD or
 mid-rebase/merge, HEAD on another branch, changed remote URL, or a failed
 probe — is **skipped and reported**, and fetched only under
-`--overwrite-modified` (modified files are first backed up to
-`~/.cactup/refetch-backups/<alias>/<ts>/<repo>/`). Untracked files never block
+`--overwrite-modified` (every skipped repo) or a targeted `--overwrite NAMES`
+(just the named ones: a repo dir under `Cactus/repos/`, a full thorn checkout,
+or a bare thorn name — case-insensitive, comma/space-separated, repeatable).
+Either way modified files are backed up first, to
+`~/.cactup/refetch-backups/<alias>/<ts>/<repo>/`. Untracked files never block
 a fetch but do block `--prune`.
+
+The remote-URL comparison is canonical, not textual: scp-style
+(`git@host:user/repo`), `ssh://`, `git://`, `https://`, `http://`, and
+`file://`/local-path forms all normalize to the same key (userinfo, a numeric
+port, host case, and a trailing `/` or `.git` are ignored); the path past the
+host is still compared exactly, so a different owner is a genuinely different
+repo. Forcing a repo skipped for a URL change — via `-f`/`--overwrite-modified`
+or by naming it in `--overwrite` — rewrites its `origin` fetch URL to the
+thornlist's URL, persisted to `.git/config` and always reported, before
+fetching and checking out from it; this is the fork-adoption path (point the
+thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
 
 Flags follow the §3 umbrella rule: `-f` implies `--overwrite-modified`,
 `--replace-thornlist`, and the prune confirmation, but not `--prune` itself
-(a mode, not a nag). `-s/--silent` silences the skip-warning block only — it
-never authorizes deletion. `-n/--dry-run` prints the full classification and
+(a mode, not a nag); it supersedes any `--overwrite` selection (naming both
+is not an error, just a note that `-f` already covers everything). An
+`--overwrite` name matching nothing in the thornlist is a hard error, checked
+before anything is fetched (so `-n` catches it too); a name matching a repo
+that isn't skipped is not an error, just a note that there's nothing to
+overwrite there. `-s/--silent` silences the skip-warning block only — it
+never authorizes deletion. `-n/--dry-run` prints the full classification —
+marking exactly the repos that would be forced under the given flags — and
 touches nothing.
 
 A refetched thornlist (from `--release TAG` or a positional `THORNLIST`) is

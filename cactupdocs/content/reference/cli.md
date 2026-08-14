@@ -31,8 +31,8 @@ Global options (available on every subcommand) are listed first, followed by eve
 - `~/.cactup/mdb/` — the system machine database (git-managed by cactup).
 - `~/.cactup/machines/` — your own machine definitions (the user overlay).
 - `~/.cactup/refetch-backups/<alias>/<timestamp>/` — files backed up before
-  `cactup installation refetch --overwrite-modified` (or `-f`) fetches over a
-  repo with local changes.
+  `cactup installation refetch --overwrite-modified` (or `-f`, or a targeted
+  `--overwrite <name>`) fetches over a repo with local changes.
 - Install prefix (default `~/.cactup/cacti/`) — Cactus source trees and builds; override with `--install-prefix`.
 - `<installation root>/.cactup/fetch-state.toml` — per-repo record of what
   `cactup` itself fetched into an installation; `refetch --prune` only ever

@@ -59,6 +59,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let overwrite_modified = args.overwrite_modified || args.force;
     let replace_thornlist = args.replace_thornlist || args.force;
+    let overwrite_names = overwrite_selection(&args.overwrite);
 
     // §2.3 item 6: the fetch lock. Dry-run stays read-only but still probes
     // it — classifying 81 worktrees mid-checkout would be garbage.
@@ -153,21 +154,56 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let orphans = enumerate_orphans(&inst, &list, &plan)?;
     let configs = crate::commands::config::list_configs(&inst.cactus_root())?;
 
+    // Resolve --overwrite against the plan before the dry-run early return,
+    // so `-n` also catches a typo'd name — a hard error, since silently
+    // ignoring it would mean the flag did nothing and the user finds out
+    // only when the repo is skipped anyway.
+    let selected = if overwrite_names.is_empty() {
+        BTreeSet::new()
+    } else {
+        let resolved = resolve_overwrite_selection(&plan, &overwrite_names)?;
+        if overwrite_modified {
+            // -f/--overwrite-modified already subsumes any --overwrite
+            // selection; naming both is not a conflict, just redundant.
+            println!(
+                "{}",
+                "--overwrite-modified (or -f) already forces every skipped repo; the \
+                 --overwrite name(s) add nothing."
+                    .yellow()
+            );
+        }
+        resolved
+    };
+    // The broad flag wins: it forces everything, superseding any narrower
+    // --overwrite selection.
+    let forced_repo_names: BTreeSet<String> =
+        if overwrite_modified { plan.skipped.iter().map(|s| s.repo.clone()).collect() } else { selected };
+
     if args.dry_run {
-        print_dry_run(&inst, &plan, &orphans, &configs, &divergence, &args, overwrite_modified);
+        print_dry_run(&inst, &plan, &orphans, &configs, &divergence, &args, &forced_repo_names);
         return Ok(());
     }
 
-    // --overwrite-modified: back the dirty repos' modified files up outside
-    // the installation (uninstall deletes the installation), then fetch them
-    // like clean repos.
-    if overwrite_modified && !plan.skipped.is_empty() {
-        let backup_root = backup_dirty(&inst, &plan.skipped)?;
-        println!(
-            "Backed up locally-modified files to {} — restore by copying them back.",
-            backup_root.display().to_string().bold()
-        );
-        plan.force();
+    // Back the dirty repos actually being forced up outside the installation
+    // (uninstall deletes the installation), then fetch them like clean repos.
+    if !forced_repo_names.is_empty() {
+        let to_force: Vec<&fetch::SkippedRepo> =
+            plan.skipped.iter().filter(|s| forced_repo_names.contains(&s.repo)).collect();
+        if let Some(backup_root) = backup_dirty(&inst, &to_force)? {
+            println!(
+                "Backed up locally-modified files to {} — restore by copying them back.",
+                backup_root.display().to_string().bold()
+            );
+        }
+        let moved = if overwrite_modified {
+            plan.force()
+        } else {
+            plan.force_where(|s| forced_repo_names.contains(&s.repo))
+        };
+        // "local modifications" would be wrong for a repo forced for a
+        // changed remote URL, a detached HEAD, or local commits — none of
+        // which are modified files.
+        println!("Forcing {} skipped repo(s): {}.", moved.len(), moved.join(", ").bold());
     }
 
     let had_work = !plan.git.is_empty() || !plan.downloads.is_empty() || !plan.external.is_empty();
@@ -187,6 +223,19 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         up_to_date,
         report.downloads.len()
     );
+    // Unconditional, not gated on --verbose: rewriting a user's `origin` is a
+    // persistent mutation of their repo, not routine fetch chatter.
+    let repointed: Vec<(&str, &str)> = report
+        .repos
+        .iter()
+        .filter_map(|r| r.retargeted.as_deref().map(|url| (r.repo.as_str(), url)))
+        .collect();
+    if !repointed.is_empty() {
+        println!("{}", format!("{} repo(s) had their origin re-pointed:", repointed.len()).bold());
+        for (repo, url) in &repointed {
+            println!("  {repo}: origin now points at {}", url.bold());
+        }
+    }
     if ctx.globals.verbose {
         for r in &report.repos {
             let mark = if r.changed { "updated" } else { "up to date" };
@@ -372,6 +421,87 @@ fn live_divergence(live: &Path, pristine: &Path) -> Res<Vec<String>> {
     Ok(out)
 }
 
+/// Split every raw `--overwrite` value on whitespace or commas (so
+/// `"SpacetimeX Cottonmouth"` and two separate `--overwrite` occurrences mean
+/// the same thing), drop empty tokens, and dedupe while keeping the order
+/// names were first seen in.
+fn overwrite_selection(raw: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for entry in raw {
+        for name in entry.split([' ', ',', '\t']).map(str::trim).filter(|s| !s.is_empty()) {
+            if seen.insert(name.to_string()) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Does `name` (a `--overwrite` argument) pick out this repo? Matches the
+/// repo name itself, one of its checkouts in full (`SpacetimeX/WeylScal4`),
+/// or just a checkout's bare thorn name (`WeylScal4`) — all case-insensitive,
+/// since these are proper nouns a user is typing from memory.
+fn matches_name(repo: &str, checkouts: &[String], name: &str) -> bool {
+    repo.eq_ignore_ascii_case(name)
+        || checkouts.iter().any(|c| {
+            c.eq_ignore_ascii_case(name)
+                || c.rsplit('/').next().is_some_and(|thorn| thorn.eq_ignore_ascii_case(name))
+        })
+}
+
+/// Resolve `--overwrite` names against the plan. A name matching a skipped
+/// repo goes into the returned set (to be forced); a name matching only a
+/// repo the plan is already going to fetch cleanly is reported (nothing to
+/// overwrite there) but is not an error; a name matching neither is a typo,
+/// and *all* such names are collected into a single hard error — checked
+/// before anything is fetched (including under `--dry-run`) so a typo is
+/// never discovered only after the rest of the fetch already ran.
+fn resolve_overwrite_selection(plan: &fetch::Plan, names: &[String]) -> Res<BTreeSet<String>> {
+    let mut forced = BTreeSet::new();
+    let mut unmatched = Vec::new();
+    for name in names {
+        let hit_skipped: Vec<&str> = plan
+            .skipped
+            .iter()
+            .filter(|s| matches_name(&s.repo, &s.checkouts, name))
+            .map(|s| s.repo.as_str())
+            .collect();
+        if !hit_skipped.is_empty() {
+            forced.extend(hit_skipped.into_iter().map(str::to_string));
+            continue;
+        }
+        let hits_fetchable = plan.git.iter().any(|g| matches_name(&g.repo, &g.checkouts, name));
+        // Downloads and svn/cvs/hg/darcs components are in the thornlist but
+        // have no worktree to preserve, so they are never skipped and never
+        // need overwriting — naming one is pointless, not a typo, and must
+        // not be reported as "not found in this thornlist".
+        let hits_other = plan
+            .downloads
+            .iter()
+            .chain(&plan.external)
+            .any(|c| matches_name("", std::slice::from_ref(&c.checkout), name));
+        if hits_fetchable || hits_other {
+            println!("{}", format!("nothing to overwrite for {name}: it is not skipped.").yellow());
+        } else {
+            unmatched.push(name.clone());
+        }
+    }
+    if !unmatched.is_empty() {
+        let available = if plan.skipped.is_empty() {
+            "none".to_string()
+        } else {
+            plan.skipped.iter().map(|s| s.repo.as_str()).collect::<Vec<_>>().join(", ")
+        };
+        bail!(
+            "--overwrite name(s) not found in this thornlist: {} (skipped repos available to \
+             overwrite: {available})",
+            unmatched.join(", ")
+        );
+    }
+    Ok(forced)
+}
+
 fn print_skip_block(skipped: &[fetch::SkippedRepo], overwrite_modified: bool) {
     for s in skipped {
         println!("  {} — {}", s.repo.bold(), s.reason.describe());
@@ -382,11 +512,24 @@ fn print_skip_block(skipped: &[fetch::SkippedRepo], overwrite_modified: bool) {
     }
     if !overwrite_modified {
         println!(
-            "  Pass {} to fetch over these anyway (modified files are backed up \
-             first), or {} to hide this list.",
-            "--overwrite-modified / -f".bold(),
+            "  Pass {} to fetch over all of these anyway (modified files are backed up first).",
+            "--overwrite-modified / -f".bold()
+        );
+        // skipped is non-empty whenever this fn is called (both call sites
+        // guard on it), so a real example name is always available.
+        println!(
+            "  Or {} to overwrite just one or a few (e.g. {}), or {} to hide this list.",
+            "--overwrite <name>".bold(),
+            format!("--overwrite {}", skipped[0].repo).bold(),
             "-s/--silent".bold()
         );
+        if skipped.iter().any(|s| matches!(s.reason, fetch::git::DirtyReason::RemoteUrlChanged { .. })) {
+            println!(
+                "  Forcing a repo skipped for a changed remote URL also re-points its {} at the \
+                 thornlist's URL before fetching (e.g. adopting a fork).",
+                "origin".bold()
+            );
+        }
     }
 }
 
@@ -650,7 +793,7 @@ fn print_dry_run(
     configs: &[(String, Option<crate::build::ConfigMeta>)],
     divergence: &[String],
     args: &RefetchArgs,
-    overwrite_modified: bool,
+    forced_repo_names: &BTreeSet<String>,
 ) {
     println!("{}", "Dry run — nothing will be touched.".bold());
     for item in &plan.git {
@@ -673,7 +816,7 @@ fn print_dry_run(
         println!("  {} — {:?} via system tool", c.checkout.bold(), c.ty);
     }
     for s in &plan.skipped {
-        let forced = if overwrite_modified { " (would be fetched: forced)" } else { "" };
+        let forced = if forced_repo_names.contains(&s.repo) { " (would be fetched: forced)" } else { "" };
         println!("  {} — {} {}{forced}", s.repo.bold(), "SKIP:".yellow(), s.reason.describe());
     }
     if plan.git.is_empty() && plan.skipped.is_empty() && plan.downloads.is_empty() && plan.external.is_empty() {
@@ -721,34 +864,45 @@ fn print_dry_run(
     let _ = inst;
 }
 
-/// Copy each dirty repo's modified files (per the probe) out of the
-/// installation before fetching over them. Outside the installation because
-/// `uninstall` deletes the installation directory.
-fn backup_dirty(inst: &Installation, skipped: &[fetch::SkippedRepo]) -> Res<PathBuf> {
-    let root = backup_dir(&inst.alias)?;
-    for s in skipped {
-        match &s.reason {
-            fetch::git::DirtyReason::WorktreeModified(paths) => {
-                for rel in paths {
-                    let from = s.dir.join(rel);
-                    if from.is_file() {
-                        let to = root.join(&s.repo).join(rel);
-                        if let Some(parent) = to.parent() {
-                            fs::create_dir_all(parent)
-                                .with_context(|| format!("Failed to create {}", parent.display()))?;
-                        }
-                        fs::copy(&from, &to)
-                            .with_context(|| format!("Failed to back up {}", from.display()))?;
-                    }
-                }
-            }
-            // Local commits / detached HEADs stay recoverable through the
-            // repo's own reflog (align force-moves refs with a reflog
-            // entry); other reasons have no file contents to save.
-            _ => {}
-        }
+/// Copy the modified files (per the probe) of only the repos about to be
+/// forced out of the installation, before fetching over them. Both
+/// `WorktreeModified` and `RemoteUrlChanged` carry file contents worth
+/// saving here — a retargeted repo can also be locally edited (the
+/// fork-adoption workflow is exactly "edit a thorn, then repoint origin at
+/// your fork"), and forcing replaces the whole worktree either way. Outside
+/// the installation because `uninstall` deletes the installation directory.
+/// `Ok(None)` when none of `skipped` actually has file contents to save (e.g.
+/// a --overwrite selection that only hit local-commit/detached-HEAD repos) —
+/// callers must not report a backup path, or create a backup dir, in that case.
+fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Option<PathBuf>> {
+    // Local commits / detached HEADs stay recoverable through the repo's own
+    // reflog (align force-moves refs with a reflog entry); only
+    // WorktreeModified and RemoteUrlChanged have file contents worth copying
+    // out.
+    let files: Vec<(&fetch::SkippedRepo, &String)> = skipped
+        .iter()
+        .filter_map(|s| match &s.reason {
+            fetch::git::DirtyReason::WorktreeModified(paths) => Some((*s, paths)),
+            fetch::git::DirtyReason::RemoteUrlChanged { modified, .. } => Some((*s, modified)),
+            _ => None,
+        })
+        .flat_map(|(s, paths)| paths.iter().map(move |rel| (s, rel)))
+        .filter(|(s, rel)| s.dir.join(rel).is_file())
+        .collect();
+    if files.is_empty() {
+        return Ok(None);
     }
-    Ok(root)
+
+    let root = backup_dir(&inst.alias)?;
+    for (s, rel) in files {
+        let from = s.dir.join(rel);
+        let to = root.join(&s.repo).join(rel);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        fs::copy(&from, &to).with_context(|| format!("Failed to back up {}", from.display()))?;
+    }
+    Ok(Some(root))
 }
 
 fn backup_dir(alias: &str) -> Res<PathBuf> {
@@ -870,5 +1024,110 @@ fn report_configs(
             "  (A release change moves the Cactus flesh, which `cactup build` classifies as a \
              from-scratch rebuild by itself — no -f needed.)"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overwrite_selection_splits_on_whitespace_and_commas_and_dedupes() {
+        assert_eq!(
+            overwrite_selection(&["SpacetimeX Cottonmouth".to_string()]),
+            vec!["SpacetimeX".to_string(), "Cottonmouth".to_string()]
+        );
+        assert_eq!(
+            overwrite_selection(&["SpacetimeX".to_string(), "Cottonmouth".to_string()]),
+            vec!["SpacetimeX".to_string(), "Cottonmouth".to_string()]
+        );
+        // Commas, repeated separators, and stray whitespace are all accepted.
+        assert_eq!(
+            overwrite_selection(&["A, B ,,C".to_string()]),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+        // A name repeated across occurrences collapses to one, in first-seen order.
+        assert_eq!(
+            overwrite_selection(&["A B".to_string(), "B A".to_string()]),
+            vec!["A".to_string(), "B".to_string()]
+        );
+        assert!(overwrite_selection(&[]).is_empty());
+        assert!(overwrite_selection(&["   ".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn matches_name_checks_repo_full_checkout_and_bare_thorn_case_insensitively() {
+        let checkouts = vec!["SpacetimeX/WeylScal4".to_string(), "SpacetimeX/NewRad".to_string()];
+        assert!(matches_name("SpacetimeX", &checkouts, "spacetimex"), "repo name, case-insensitive");
+        assert!(matches_name("SpacetimeX", &checkouts, "SpacetimeX/WeylScal4"), "full checkout string");
+        assert!(matches_name("SpacetimeX", &checkouts, "weylscal4"), "bare thorn name, case-insensitive");
+        assert!(!matches_name("SpacetimeX", &checkouts, "Cottonmouth"), "no match");
+    }
+
+    fn skipped(repo: &str, checkouts: &[&str]) -> fetch::SkippedRepo {
+        fetch::SkippedRepo {
+            repo: repo.to_string(),
+            dir: PathBuf::from(format!("/nonexistent/{repo}")),
+            url: "https://example.invalid/repo.git".to_string(),
+            branch: Some("main".to_string()),
+            reason: fetch::git::DirtyReason::WorktreeModified(vec!["src/foo.c".to_string()]),
+            untracked: Vec::new(),
+            checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn fetchable_repo(repo: &str, checkouts: &[&str]) -> fetch::GitRepoPlan {
+        fetch::GitRepoPlan {
+            repo: repo.to_string(),
+            dir: PathBuf::from(format!("/nonexistent/{repo}")),
+            url: "https://example.invalid/repo.git".to_string(),
+            branch: Some("main".to_string()),
+            action: GitAction::Update,
+            checkouts: checkouts.iter().map(|s| s.to_string()).collect(),
+            forced: None,
+            retarget: None,
+        }
+    }
+
+    fn plan_with(skipped_repos: Vec<fetch::SkippedRepo>, fetchable_repos: Vec<fetch::GitRepoPlan>) -> fetch::Plan {
+        fetch::Plan {
+            git: fetchable_repos,
+            skipped: skipped_repos,
+            downloads: Vec::new(),
+            external: Vec::new(),
+            links: Vec::new(),
+            root: "Cactus".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_overwrite_selection_forces_a_skipped_repo_matched_by_bare_thorn_name() {
+        let plan = plan_with(
+            vec![skipped("SpacetimeX", &["SpacetimeX/WeylScal4"])],
+            vec![fetchable_repo("Cottonmouth", &["Cottonmouth/Foo"])],
+        );
+        let forced = resolve_overwrite_selection(&plan, &["WeylScal4".to_string()]).unwrap();
+        assert_eq!(forced, BTreeSet::from(["SpacetimeX".to_string()]));
+    }
+
+    #[test]
+    fn resolve_overwrite_selection_reports_but_does_not_error_on_an_already_fetchable_repo() {
+        let plan = plan_with(
+            vec![skipped("SpacetimeX", &["SpacetimeX/WeylScal4"])],
+            vec![fetchable_repo("Cottonmouth", &["Cottonmouth/Foo"])],
+        );
+        // Cottonmouth is clean and already planned to fetch — nothing to
+        // overwrite there, but that is not a typo, so no error.
+        let forced = resolve_overwrite_selection(&plan, &["Cottonmouth".to_string()]).unwrap();
+        assert!(forced.is_empty());
+    }
+
+    #[test]
+    fn resolve_overwrite_selection_errors_on_a_name_matching_nothing_in_the_plan() {
+        let plan = plan_with(vec![skipped("SpacetimeX", &["SpacetimeX/WeylScal4"])], vec![]);
+        let err = resolve_overwrite_selection(&plan, &["Typo".to_string()]).unwrap_err();
+        // The error names the typo and lists what is actually available.
+        assert!(err.to_string().contains("Typo"));
+        assert!(err.to_string().contains("SpacetimeX"));
     }
 }

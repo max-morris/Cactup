@@ -151,8 +151,13 @@ pub(crate) struct RefetchArgs {
     #[clap(short, long)]
     pub force: bool,
     /// Fetch over repos with local modifications (they are backed up first).
+    /// The "all repos" form of `--overwrite`.
     #[clap(long)]
     pub overwrite_modified: bool,
+    /// Fetch over these specific repos' local modifications (space- or comma-separated;
+    /// repeatable). Names match a repo under `repos/` or any thorn it provides.
+    #[clap(long, value_name = "NAMES")]
+    pub overwrite: Vec<String>,
     /// Proceed even when the live thornlist has hand edits, discarding them (a snapshot is kept).
     #[clap(long)]
     pub replace_thornlist: bool,
@@ -588,6 +593,8 @@ mod tests {
             vec!["cactup", "inst", "refetch"],
             vec!["cactup", "inst", "refetch", "--release", "ET_2026_11", "-f"],
             vec!["cactup", "installation", "refetch", "new.th", "--overwrite-modified", "--prune", "-n"],
+            vec!["cactup", "inst", "refetch", "--overwrite", "SpacetimeX Cottonmouth", "-n"],
+            vec!["cactup", "inst", "refetch", "--overwrite", "SpacetimeX", "--overwrite", "Cottonmouth", "-n"],
             vec!["cactup", "inst", "delta"],
             vec!["cactup", "installation", "delta", "et"],
             vec!["cactup", "config", "delta"],
@@ -663,5 +670,33 @@ mod tests {
         );
         // --dry-run and --silent are mutually exclusive (§ RefetchArgs).
         assert!(Args::try_parse_from(["cactup", "inst", "refetch", "-n", "-s"]).is_err());
+    }
+
+    /// `--overwrite` must collect one value per occurrence without swallowing
+    /// the positional THORNLIST that can follow it on the same command line.
+    fn refetch_args(argv: &[&str]) -> RefetchArgs {
+        match Args::try_parse_from(argv).unwrap_or_else(|e| panic!("failed to parse {argv:?}: {e}")).command {
+            Commands::Inst(InstallationCommand::Refetch(args))
+            | Commands::Installation(InstallationCommand::Refetch(args)) => args,
+            other => panic!("expected a refetch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overwrite_flag_parses_repeated_and_space_separated_values() {
+        let args = refetch_args(&["cactup", "inst", "refetch", "--overwrite", "SpacetimeX Cottonmouth", "-n"]);
+        assert_eq!(args.overwrite, vec!["SpacetimeX Cottonmouth".to_string()]);
+
+        let args = refetch_args(&[
+            "cactup", "inst", "refetch", "--overwrite", "SpacetimeX", "--overwrite", "Cottonmouth", "-n",
+        ]);
+        assert_eq!(args.overwrite, vec!["SpacetimeX".to_string(), "Cottonmouth".to_string()]);
+    }
+
+    #[test]
+    fn overwrite_flag_does_not_swallow_the_positional_thornlist() {
+        let args = refetch_args(&["cactup", "inst", "refetch", "--overwrite", "A", "new.th"]);
+        assert_eq!(args.overwrite, vec!["A".to_string()]);
+        assert_eq!(args.thornlist, Some(PathBuf::from("new.th")));
     }
 }
