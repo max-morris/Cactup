@@ -256,14 +256,15 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     // The pristine as-fetched copy (§3.2): the baseline `installation
     // refetch`'s hand-edit guard compares against.
-    fs::write(install_dir.join("einsteintoolkit.th"), &thorn_list)
-       .with_context(|| format!("Failed to write einsteintoolkit.th to {}", install_dir.display()))?;
+    fs::write(install_dir.join(crate::installation::SOURCE_THORNLIST), &thorn_list).with_context(|| {
+        format!("Failed to write {} to {}", crate::installation::SOURCE_THORNLIST, install_dir.display())
+    })?;
 
     // --- Native component fetch (§3.2; GetComponents is gone) ---
-    let thorn_list_text = String::from_utf8(thorn_list.clone())
-        .with_context(|| "einsteintoolkit.th is not UTF-8")?;
+    let thorn_list_text =
+        String::from_utf8(thorn_list.clone()).with_context(|| "the source thornlist is not UTF-8")?;
     let list = crate::thornlist::parse(&thorn_list_text)
-        .with_context(|| "Failed to parse einsteintoolkit.th")?;
+        .with_context(|| "Failed to parse the source thornlist")?;
     for w in list.warnings() {
         println!("{}", format!("thornlist warning: {w}").yellow());
     }
@@ -286,13 +287,15 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
     crate::fetch::FetchState::record(&install_dir, &report.records())?;
 
-    // GetComponents used to deposit the live thornlist via its
-    // COMPONENTLIST_TARGET; build.rs::resolve_thornlist depends on it.
+    // The live, editable copy, where GetComponents' COMPONENTLIST_TARGET used
+    // to land it (under its own name — the directory is inherited, the filename
+    // is ours); build.rs::resolve_thornlist depends on it being here.
     let live_dir = install_dir.join("Cactus").join("thornlists");
     fs::create_dir_all(&live_dir)
         .with_context(|| format!("Failed to create {}", live_dir.display()))?;
-    fs::write(live_dir.join("einsteintoolkit.th"), &thorn_list)
-        .with_context(|| format!("Failed to write {}", live_dir.join("einsteintoolkit.th").display()))?;
+    fs::write(live_dir.join(crate::installation::LIVE_THORNLIST), &thorn_list).with_context(|| {
+        format!("Failed to write {}", live_dir.join(crate::installation::LIVE_THORNLIST).display())
+    })?;
 
     if do_symlink {
         fs::create_dir_all(Path::new(&symlink_prefix))

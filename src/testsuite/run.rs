@@ -565,7 +565,7 @@ mod tests {
             r#"
             name = "tests"
             variant = "default"
-            thornlist = "einsteintoolkit.th"
+            thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-tests-1"
             build-id = "build-tests-1"

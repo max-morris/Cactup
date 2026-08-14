@@ -67,23 +67,25 @@ Use a custom thornlist:
 cactup build myconfig --thornlist /path/to/custom.th
 ```
 
-For a brand-new config, cactup defaults to the installation's built-in thornlist
-(`<Cactus root>/thornlists/einsteintoolkit.th`). After that, the config remembers
-the thornlist it was built from, so you don't have to repeat `--thornlist` on
-every rebuild — pass it again only to switch to a different file.
+For a brand-new config, cactup defaults to the installation's built-in
+thornlist (`<Cactus root>/thornlists/installation-default.th`). After that, the
+config remembers the thornlist it was built from, so you don't have to repeat
+`--thornlist` on every rebuild — pass it again only to switch to a different
+file.
 
-That built-in file is named `einsteintoolkit.th` whatever it holds — for a
-custom installation it contains the custom list's thorns under that
-stock-looking name. So `cactup config show` annotates the `thornlist:` line
-with its provenance: whether the path is the installation's live list (and
-what that list actually is — a release, or a custom file), was recorded from
-an explicit `--thornlist`, or points at a file that has since disappeared
-(in which case rebuilds fall back to the config's snapshot).
+That built-in file is named `installation-default.th` whatever it holds: on a
+custom installation it holds your custom list's thorns, and the filename alone
+won't tell you which. So `cactup config show` annotates the `thornlist:` line
+with its provenance:
+whether the path is the installation's live list (and what that list actually
+is — a release, or a custom file), was recorded from an explicit
+`--thornlist`, or points at a file that has since disappeared (in which case
+rebuilds fall back to the config's snapshot).
 
 #### Editing a thornlist and rebuilding
 
 Edit the **source** thornlist — the file you passed to `--thornlist`, or the
-installation's `thornlists/einsteintoolkit.th`. Then rebuild:
+installation's `thornlists/installation-default.th`. Then rebuild:
 
 ```sh
 cactup build myconfig
@@ -101,10 +103,16 @@ copies, rewritten on every build, so your edits there would be overwritten:
   to Cactus.
 - `ThornList` — Cactus's own copy of that file, made by its build system. This
   is the one Cactus compiles from.
-- `<installation root>/einsteintoolkit.th` — the pristine as-fetched copy of
-  the thornlist, written at install time and updated by `cactup installation
-  refetch`. It's the baseline cactup diffs the live thornlist against to
-  detect hand edits; don't edit it directly.
+- `<installation root>/installation-source.th` — the pristine as-fetched copy
+  of the thornlist, written at install time and updated by `cactup
+  installation refetch`. It's the baseline cactup diffs the live thornlist
+  against to detect hand edits; don't edit it directly.
+
+(Both names are recent: the pristine and the live copy used to share one name,
+`einsteintoolkit.th`, which is why it was never obvious which was which. An
+installation created before the rename is upgraded to the new names
+automatically, the first time any `cactup` command touches it, so there's
+nothing to do by hand.)
 
 A third file, `cactup-thornlist.src.th`, is a verbatim snapshot of the source
 thornlist. It exists so the config stays rebuildable if the original file is
@@ -122,7 +130,7 @@ A config is built from two things, and cactup tracks changes to both:
 
 - **Which thorns get built** comes from the thornlist. A config with no
   `--thornlist` override builds from the installation's live
-  `Cactus/thornlists/einsteintoolkit.th`; a config built with an explicit
+  `Cactus/thornlists/installation-default.th`; a config built with an explicit
   `--thornlist` keeps building from that same file, wherever it lives.
 - **What those thorns are built from** comes from the source repos under
   `Cactus/repos/`. At every build, cactup records the commit each of that

@@ -403,7 +403,7 @@ mod tests {
             variant = "default"
             gpu = {gpu}
             compatible-queues = [{}]
-            thornlist = "einsteintoolkit.th"
+            thornlist = "installation-default.th"
             machine = "testbox"
             config-id = "c1"
             build-id = "b1"
@@ -628,7 +628,7 @@ mod tests {
                 r#"
                 name = "sim"
                 variant = "default"
-                thornlist = "einsteintoolkit.th"
+                thornlist = "installation-default.th"
                 machine = "gq"
                 universe = "{universe}"
                 config-id = "c1"

@@ -18,6 +18,7 @@ use crate::mdb::Machine;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
+use colored::Colorize;
 use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,35 @@ impl Default for TestRegistry {
     }
 }
 
+/// The pristine as-fetched thornlist, at the installation root (§3.2): the
+/// exact list the installation was fetched (or last refetched) from, and the
+/// baseline `installation refetch`'s hand-edit guard compares against. Never
+/// hand-edited.
+pub const SOURCE_THORNLIST: &str = "installation-source.th";
+
+/// The live, editable thornlist, in `Cactus/thornlists/` — what a build reads
+/// by default and what a user edits to add or drop a thorn.
+pub const LIVE_THORNLIST: &str = "installation-default.th";
+
+/// The name both copies used before the rename, inherited from GetComponents'
+/// `COMPONENTLIST_TARGET`. It said nothing about which copy was which and read
+/// as "stock Einstein Toolkit" even when it held a custom list, which is why
+/// it is gone. Installations that predate the rename are upgraded in place by
+/// [`Installation::migrate_thornlist_names`]; every read additionally falls
+/// back to this name in case that migration could not run (a read-only tree,
+/// say), so an un-migrated installation keeps working.
+pub const LEGACY_THORNLIST: &str = "einsteintoolkit.th";
+
+/// `preferred` if it exists, else `legacy` if *that* exists, else `preferred`
+/// — so a caller that goes on to report a missing file names the new one.
+fn prefer_existing(preferred: PathBuf, legacy: PathBuf) -> PathBuf {
+    if preferred.exists() || !legacy.exists() {
+        preferred
+    } else {
+        legacy
+    }
+}
+
 /// One Einstein Toolkit installation on disk.
 pub struct Installation {
     pub alias: String,
@@ -158,7 +188,11 @@ impl Installation {
             .installations
             .get(&alias)
             .ok_or_else(|| anyhow!("no installation named \"{alias}\" (see `cactup list`)"))?;
-        Ok(Installation::new(alias, &entry.path))
+        let inst = Installation::new(alias, &entry.path);
+        // Upgrade a pre-rename installation on first use, whatever the command
+        // is: every path that reads a thornlist then sees one set of names.
+        inst.upgrade_thornlist_names();
+        Ok(inst)
     }
 
     /// The Cactus source root of this installation.
@@ -166,25 +200,121 @@ impl Installation {
         self.root.join("Cactus")
     }
 
-    /// The installation's live thornlist. The filename is fixed (inherited
-    /// from GetComponents' COMPONENTLIST_TARGET) regardless of what was
-    /// installed, so for a custom installation this file holds the custom
-    /// list's content under a stock-looking name.
+    /// The installation's live thornlist ([`LIVE_THORNLIST`]) — the canonical
+    /// path, and the one to *write*. The filename is fixed regardless of what
+    /// was installed, so for a custom installation this file holds the custom
+    /// list's content; `config show` says as much rather than leaving the name
+    /// to imply it.
     pub fn live_thornlist(&self) -> PathBuf {
-        self.cactus_root().join("thornlists/einsteintoolkit.th")
+        self.cactus_root().join("thornlists").join(LIVE_THORNLIST)
+    }
+
+    /// The live thornlist under its pre-rename name ([`LEGACY_THORNLIST`]).
+    pub fn legacy_live_thornlist(&self) -> PathBuf {
+        self.cactus_root().join("thornlists").join(LEGACY_THORNLIST)
+    }
+
+    /// The live thornlist to *read*: the current name, falling back to the
+    /// pre-rename one on an installation the migration has not reached.
+    pub fn live_thornlist_to_read(&self) -> PathBuf {
+        prefer_existing(self.live_thornlist(), self.legacy_live_thornlist())
+    }
+
+    /// The installation's pristine as-fetched thornlist ([`SOURCE_THORNLIST`])
+    /// — the canonical path, and the one to *write*.
+    pub fn source_thornlist(&self) -> PathBuf {
+        self.root.join(SOURCE_THORNLIST)
+    }
+
+    /// The pristine copy under its pre-rename name ([`LEGACY_THORNLIST`]).
+    pub fn legacy_source_thornlist(&self) -> PathBuf {
+        self.root.join(LEGACY_THORNLIST)
+    }
+
+    /// The pristine copy to *read*, with the same pre-rename fallback as
+    /// [`Installation::live_thornlist_to_read`].
+    pub fn source_thornlist_to_read(&self) -> PathBuf {
+        prefer_existing(self.source_thornlist(), self.legacy_source_thornlist())
     }
 
     /// Whether a config's recorded thornlist path is this installation's live
     /// thornlist (as opposed to an explicit `--thornlist` file). Tolerates
     /// both forms `resolve_thornlist` records: a plain `display()` string for
     /// the default, and a canonicalized path when the same file was named via
-    /// `--thornlist`.
+    /// `--thornlist`. The pre-rename name counts too: a config recorded before
+    /// the rename was still built from the live list, and must not start
+    /// reading as `--thornlist`.
     pub fn is_live_thornlist(&self, recorded: &str) -> bool {
-        let live = self.live_thornlist();
-        if recorded == live.display().to_string() {
-            return true;
+        let same = |candidate: PathBuf| {
+            if recorded == candidate.display().to_string() {
+                return true;
+            }
+            std::fs::canonicalize(&candidate).is_ok_and(|c| recorded == c.display().to_string())
+        };
+        same(self.live_thornlist()) || same(self.legacy_live_thornlist())
+    }
+
+    /// [`Installation::migrate_thornlist_names`], reported and best-effort: a
+    /// failure (a read-only tree, say) must not fail the command the user
+    /// actually ran, since reads fall back to the pre-rename names on their
+    /// own. The notice goes to stderr — it is out-of-band with respect to
+    /// whatever that command is printing.
+    pub fn upgrade_thornlist_names(&self) {
+        match self.migrate_thornlist_names() {
+            Ok(true) => eprintln!(
+                "{}",
+                format!(
+                    "Renamed this installation's thornlists: the pristine as-fetched copy is now \
+                     {}, and the live, editable one is Cactus/thornlists/{LIVE_THORNLIST}.",
+                    self.source_thornlist().display()
+                )
+                .dimmed()
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "{}",
+                format!("Warning: could not rename this installation's thornlists: {e:#}").yellow()
+            ),
         }
-        std::fs::canonicalize(&live).is_ok_and(|c| recorded == c.display().to_string())
+    }
+
+    /// Move an installation created before the thornlist rename onto the
+    /// current names: `<root>/einsteintoolkit.th` becomes
+    /// `<root>/installation-source.th` and
+    /// `Cactus/thornlists/einsteintoolkit.th` becomes
+    /// `Cactus/thornlists/installation-default.th`, and configs that recorded
+    /// the old live path are retargeted so a rebuild still resolves the file
+    /// it was built from (`build::resolve_thornlist` rule 2) instead of
+    /// silently dropping to the config's snapshot.
+    ///
+    /// Idempotent, and cheap enough to run before every command that resolves
+    /// an installation: an already-migrated tree costs two `exists` calls and
+    /// touches nothing. A copy that already exists under the current name is
+    /// never overwritten — reads prefer it, so a leftover file under the old
+    /// name is inert. Returns whether anything moved.
+    pub fn migrate_thornlist_names(&self) -> Res<bool> {
+        let mut moved = false;
+        for (legacy, current) in [
+            (self.legacy_source_thornlist(), self.source_thornlist()),
+            (self.legacy_live_thornlist(), self.live_thornlist()),
+        ] {
+            if !legacy.exists() || current.exists() {
+                continue;
+            }
+            std::fs::rename(&legacy, &current).with_context(|| {
+                format!("Failed to rename {} to {}", legacy.display(), current.display())
+            })?;
+            moved = true;
+        }
+        if !moved {
+            return Ok(false);
+        }
+        crate::build::retarget_recorded_thornlist(
+            &self.cactus_root(),
+            &self.legacy_live_thornlist(),
+            &self.live_thornlist(),
+        )?;
+        Ok(true)
     }
 
     pub fn cactup_dir(&self) -> PathBuf {
@@ -348,6 +478,105 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let inst = Installation::new("et-dev", dir.path());
         (dir, inst)
+    }
+
+    /// The pre-rename layout: both copies named `einsteintoolkit.th`, and a
+    /// config recording the live one as the file it was built from.
+    fn legacy_layout(inst: &Installation) {
+        std::fs::create_dir_all(inst.cactus_root().join("thornlists")).unwrap();
+        std::fs::write(inst.legacy_source_thornlist(), "A/B\n").unwrap();
+        std::fs::write(inst.legacy_live_thornlist(), "A/B\nC/D\n").unwrap();
+        let cfg = inst.cactus_root().join("configs/sim");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("cactup-config.toml"),
+            format!(
+                "name = \"sim\"\nvariant = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
+                 config-id = \"c1\"\nbuild-id = \"b1\"\n",
+                inst.legacy_live_thornlist().display()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Pre-rename installations must keep working *before* the migration runs:
+    /// reads fall back to the old name, and a config recorded against it still
+    /// reads as the live list rather than as an explicit `--thornlist`.
+    #[test]
+    fn pre_rename_thornlists_are_still_found() {
+        let (_dir, inst) = inst();
+        legacy_layout(&inst);
+
+        assert_eq!(inst.live_thornlist_to_read(), inst.legacy_live_thornlist());
+        assert_eq!(inst.source_thornlist_to_read(), inst.legacy_source_thornlist());
+        assert!(inst.is_live_thornlist(&inst.legacy_live_thornlist().display().to_string()));
+
+    }
+
+    /// Nothing on disk at all: name the current file, not the old one, so the
+    /// error a caller reports teaches the right name.
+    #[test]
+    fn missing_thornlists_resolve_to_the_current_name() {
+        let (_dir, empty) = inst();
+        assert_eq!(empty.live_thornlist_to_read(), empty.live_thornlist());
+        assert_eq!(empty.source_thornlist_to_read(), empty.source_thornlist());
+    }
+
+    #[test]
+    fn migration_renames_both_copies_and_retargets_configs() {
+        let (_dir, inst) = inst();
+        legacy_layout(&inst);
+
+        assert!(inst.migrate_thornlist_names().unwrap());
+        assert_eq!(std::fs::read_to_string(inst.source_thornlist()).unwrap(), "A/B\n");
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "A/B\nC/D\n");
+        assert!(!inst.legacy_source_thornlist().exists());
+        assert!(!inst.legacy_live_thornlist().exists());
+
+        // Retargeted, so a rebuild still resolves the live list (and still
+        // picks up edits to it) instead of dropping to the config's snapshot.
+        let meta = crate::build::ConfigMeta::load(&inst.cactus_root(), "sim").unwrap().unwrap();
+        assert_eq!(meta.thornlist, inst.live_thornlist().display().to_string());
+        assert!(inst.is_live_thornlist(&meta.thornlist));
+
+        // Idempotent: the second run has nothing to move.
+        assert!(!inst.migrate_thornlist_names().unwrap());
+    }
+
+    /// A file already under the current name wins; a leftover under the old one
+    /// is never allowed to overwrite it.
+    #[test]
+    fn migration_never_clobbers_a_current_copy() {
+        let (_dir, inst) = inst();
+        legacy_layout(&inst);
+        std::fs::write(inst.live_thornlist(), "live\n").unwrap();
+
+        assert!(inst.migrate_thornlist_names().unwrap());
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "live\n");
+        assert_eq!(inst.live_thornlist_to_read(), inst.live_thornlist());
+        // The pristine copy had no current-name file, so it still moved.
+        assert!(inst.source_thornlist().exists());
+    }
+
+    /// A config built from an explicit `--thornlist` elsewhere is not ours to
+    /// retarget, even when that file happens to carry the old name.
+    #[test]
+    fn migration_leaves_explicit_thornlists_alone() {
+        let (dir, inst) = inst();
+        legacy_layout(&inst);
+        let elsewhere = dir.path().join("custom").join(LEGACY_THORNLIST);
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::write(&elsewhere, "X/Y\n").unwrap();
+        let cfg = inst.cactus_root().join("configs/sim/cactup-config.toml");
+        let text = std::fs::read_to_string(&cfg)
+            .unwrap()
+            .replace(&inst.legacy_live_thornlist().display().to_string(), &elsewhere.display().to_string());
+        std::fs::write(&cfg, text).unwrap();
+
+        assert!(inst.migrate_thornlist_names().unwrap());
+        let meta = crate::build::ConfigMeta::load(&inst.cactus_root(), "sim").unwrap().unwrap();
+        assert_eq!(meta.thornlist, elsewhere.display().to_string());
+        assert!(!inst.is_live_thornlist(&meta.thornlist));
     }
 
     #[test]

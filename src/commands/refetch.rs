@@ -100,16 +100,22 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // as-fetched copy, that is a hand edit (e.g. a hand-added thorn) and we
     // refuse to destroy it silently. Compared as parsed component sets, not
     // text — generated headers differ on every pre-existing installation.
+    // Both copies are read under whichever name they carry and written under
+    // the current one: the guard must still see hand edits in a file left
+    // under the pre-rename name (§3.2), or an installation the name migration
+    // could not reach would have those edits silently overwritten.
     let live_path = inst.live_thornlist();
-    let pristine_path = inst.root.join("einsteintoolkit.th");
-    let divergence = if source.is_explicit() { live_divergence(&live_path, &pristine_path)? } else { Vec::new() };
+    let live_read = inst.live_thornlist_to_read();
+    let pristine_path = inst.source_thornlist();
+    let pristine_read = inst.source_thornlist_to_read();
+    let divergence = if source.is_explicit() { live_divergence(&live_read, &pristine_read)? } else { Vec::new() };
     if !divergence.is_empty() && !replace_thornlist && !args.dry_run {
         println!(
             "{}",
             format!(
                 "{} has hand edits not present in the pristine as-fetched copy ({}):",
-                live_path.display(),
-                pristine_path.display()
+                live_read.display(),
+                pristine_read.display()
             )
             .bright_red()
         );
@@ -231,9 +237,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     let mut recorded = false;
     if fetch_ok || had_work {
         if source.is_explicit() {
-            snapshot_live(&inst, &live_path)?;
+            snapshot_live(&inst, &live_read)?;
             fs::write(&live_path, source.bytes())
                 .with_context(|| format!("Failed to write {}", live_path.display()))?;
+            // Writing the current name beside a pre-rename copy would leave two
+            // thornlists where reads only ever consult one — exactly the
+            // ambiguity the rename removes. The old copy was just snapshotted,
+            // so dropping it loses nothing; best-effort, since failing to
+            // delete it is not worth failing a completed refetch over.
+            if live_read != live_path {
+                let _ = fs::remove_file(&live_read);
+            }
             // The pristine as-fetched baseline tracks the last *adopted
             // official source* only. A no-argument refetch must NOT touch it
             // — hand edits in the live file stay visible as divergence, so
@@ -241,6 +255,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             // refetch even after they have been fetched once.
             fs::write(&pristine_path, source.bytes())
                 .with_context(|| format!("Failed to write {}", pristine_path.display()))?;
+            if pristine_read != pristine_path {
+                let _ = fs::remove_file(&pristine_read);
+            }
         }
 
         // DB provenance (§2.1): only for explicit sources, and only when the
@@ -309,8 +326,8 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 }
 
 /// §3.2 source precedence: `--release TAG` → positional THORNLIST → the
-/// live `Cactus/thornlists/einsteintoolkit.th` (falling back to the pristine
-/// root copy on very old trees).
+/// live `Cactus/thornlists/installation-default.th` (falling back to the
+/// pristine root copy on very old trees).
 fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Source> {
     if let Some(tag_name) = &args.release {
         let repo = manifest::ensure_manifest_repo(&crate::CACTUP_ROOT, &ctx.globals.manifest_url)?;
@@ -332,8 +349,8 @@ fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Sou
             fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
         return Ok(Source::File { path, bytes });
     }
-    let live = inst.live_thornlist();
-    let path = if live.exists() { live } else { inst.root.join("einsteintoolkit.th") };
+    let live = inst.live_thornlist_to_read();
+    let path = if live.exists() { live } else { inst.source_thornlist_to_read() };
     let bytes =
         fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     Ok(Source::Live { path, bytes })
@@ -818,7 +835,7 @@ fn report_configs(
     // itself makes the authoritative call via `provider_delta`. Any parse
     // failure silently disables the note below — a report must never fail
     // the refetch.
-    let live_path = inst.live_thornlist();
+    let live_path = inst.live_thornlist_to_read();
     let fresh_providers = fs::read_to_string(&live_path)
         .ok()
         .and_then(|text| thornlist::parse_with_base(&text, live_path.parent()).ok())

@@ -251,7 +251,7 @@ pub(crate) struct BuildOpts {
     #[clap(short, long)]
     pub force: bool,
     /// Thornlist path (default: the one this config was last built from, else
-    /// <Cactus root>/thornlists/einsteintoolkit.th).
+    /// <Cactus root>/thornlists/installation-default.th).
     #[clap(long, value_name = "PATH")]
     pub thornlist: Option<PathBuf>,
     /// Optionlist variant (required iff the machine has more than one — §4.4).

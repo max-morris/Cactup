@@ -195,7 +195,9 @@ pub struct ResolvedThornlist {
 ///   2. the path this config was last built from (stored metadata).
 ///   3. that config's verbatim snapshot, when the stored path has since moved
 ///      or been deleted.
-///   4. `<Cactus root>/thornlists/einsteintoolkit.th` — the fresh-config default.
+///   4. `<Cactus root>/thornlists/installation-default.th` — the fresh-config
+///      default (the pre-rename `einsteintoolkit.th` on an installation the
+///      §3.2 name migration has not reached).
 ///
 /// Steps 2-3 are why a rebuild no longer silently reverts a config built from a
 /// custom thornlist to the stock Einstein Toolkit list: the flag need not be
@@ -230,6 +232,20 @@ pub fn resolve_thornlist(
                 from_snapshot: false,
             });
         }
+        // A path recorded under the pre-rename thornlist name whose file is
+        // gone is almost certainly the §3.2 rename, not a deleted file: look
+        // for the renamed one beside it before falling back to the snapshot,
+        // so an installation the migration could not retarget (a config copied
+        // in from elsewhere, say) still rebuilds from the live list.
+        if let Some(renamed) = renamed_legacy_thornlist(Path::new(stored_path)) {
+            if let Ok(text) = fs::read_to_string(&renamed) {
+                return Ok(ResolvedThornlist {
+                    recorded: renamed.display().to_string(),
+                    text,
+                    from_snapshot: false,
+                });
+            }
+        }
         let snapshot = config_file(cactus_root, name, THORNLIST_SNAPSHOT);
         let text = fs::read_to_string(&snapshot).with_context(|| {
             format!(
@@ -246,7 +262,7 @@ pub fn resolve_thornlist(
         });
     }
 
-    let default = cactus_root.join("thornlists/einsteintoolkit.th");
+    let default = default_thornlist(cactus_root);
     let text = fs::read_to_string(&default)
         .with_context(|| format!("Failed to read thornlist {}", default.display()))?;
     Ok(ResolvedThornlist {
@@ -254,6 +270,72 @@ pub fn resolve_thornlist(
         text,
         from_snapshot: false,
     })
+}
+
+/// The live thornlist a fresh config builds from (rule 4 above), by Cactus root
+/// rather than by [`Installation`](crate::installation::Installation) — build
+/// resolution is given only the root. Falls back to the pre-rename name for an
+/// un-migrated installation, exactly as `Installation::live_thornlist_to_read`
+/// does.
+pub fn default_thornlist(cactus_root: &Path) -> PathBuf {
+    let dir = cactus_root.join("thornlists");
+    let current = dir.join(crate::installation::LIVE_THORNLIST);
+    let legacy = dir.join(crate::installation::LEGACY_THORNLIST);
+    if current.exists() || !legacy.exists() {
+        current
+    } else {
+        legacy
+    }
+}
+
+/// `path` with the pre-rename thornlist name swapped for the current live one,
+/// or `None` if `path` does not end in the pre-rename name.
+fn renamed_legacy_thornlist(path: &Path) -> Option<PathBuf> {
+    (path.file_name()? == crate::installation::LEGACY_THORNLIST)
+        .then(|| path.with_file_name(crate::installation::LIVE_THORNLIST))
+}
+
+/// Point configs that recorded the live thornlist under its pre-rename name at
+/// the renamed file. Part of `Installation::migrate_thornlist_names`; a config
+/// whose recorded path is anything else (an explicit `--thornlist` file) is
+/// left alone. Returns how many configs were retargeted.
+///
+/// A config left pointing at the vanished old name would still build — via its
+/// snapshot (`resolve_thornlist` rule 3) — but it would stop picking up edits
+/// to the live list, which is the whole point of rule 2.
+pub fn retarget_recorded_thornlist(
+    cactus_root: &Path,
+    legacy_live: &Path,
+    live: &Path,
+) -> Res<usize> {
+    let legacy_display = legacy_live.display().to_string();
+    let live_display = live.display().to_string();
+    let mut retargeted = 0;
+    for (name, meta) in crate::commands::config::list_configs(cactus_root)? {
+        let Some(mut meta) = meta else { continue };
+        // The recorded path is either what rule 4 wrote (a plain `display()`
+        // of the live path) or, when the same file was named via
+        // `--thornlist`, its canonicalized form. The old file is gone by now,
+        // so match on the name and directory instead of canonicalizing it.
+        let recorded = Path::new(&meta.thornlist);
+        let same_dir = || match (recorded.parent(), legacy_live.parent()) {
+            (Some(a), Some(b)) => {
+                a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+            }
+            _ => false,
+        };
+        let is_legacy_live = meta.thornlist == legacy_display
+            || (recorded.file_name() == Some(crate::installation::LEGACY_THORNLIST.as_ref())
+                && same_dir());
+        if !is_legacy_live {
+            continue;
+        }
+        meta.thornlist = live_display.clone();
+        meta.store(cactus_root)
+            .with_context(|| format!("Failed to retarget config \"{name}\"'s thornlist"))?;
+        retargeted += 1;
+    }
+    Ok(retargeted)
 }
 
 /// Apply the §7.5 (D8) machine thorn toggles to a thornlist's contents:
@@ -1108,6 +1190,56 @@ mod tests {
         );
     }
 
+    /// Both pre-rename escapes in thornlist resolution: rule 4 finds a live
+    /// list still under the old name, and rule 2 follows a recorded old-name
+    /// path to the renamed file beside it rather than dropping to the snapshot
+    /// (which would stop picking up edits to the live list).
+    #[test]
+    fn resolve_thornlist_tolerates_the_pre_rename_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let cactus = dir.path().join("Cactus");
+        let lists = cactus.join("thornlists");
+        fs::create_dir_all(&lists).unwrap();
+        let legacy = lists.join(crate::installation::LEGACY_THORNLIST);
+        fs::write(&legacy, "A/B\n").unwrap();
+
+        // Rule 4, un-migrated: the old name is the only live list there is.
+        assert_eq!(default_thornlist(&cactus), legacy);
+        let fresh = resolve_thornlist(&cactus, "sim", None, None).unwrap();
+        assert_eq!(fresh.text, "A/B\n");
+        assert_eq!(fresh.recorded, legacy.display().to_string());
+
+        // Rule 4, migrated: the current name wins even with the old one left
+        // behind.
+        let current = lists.join(crate::installation::LIVE_THORNLIST);
+        fs::write(&current, "A/B\nC/D\n").unwrap();
+        assert_eq!(default_thornlist(&cactus), current);
+
+        // Rule 2 with a recorded path whose old-name file is gone.
+        fs::remove_file(&legacy).unwrap();
+        let stored = ConfigMeta {
+            schema: SCHEMA,
+            name: "sim".to_owned(),
+            variant: "default".to_owned(),
+            gpu: false,
+            compatible_queues: Vec::new(),
+            thornlist: legacy.display().to_string(),
+            machine: "fake".to_owned(),
+            universe: None,
+            coerce_run_universe: true,
+            config_id: "c1".to_owned(),
+            build_id: "b1".to_owned(),
+            built: None,
+            flags: BuildFlags::default(),
+            sources: None,
+            thorn_providers: None,
+        };
+        let resolved = resolve_thornlist(&cactus, "sim", Some(&stored), None).unwrap();
+        assert!(!resolved.from_snapshot, "the renamed live list, not the snapshot");
+        assert_eq!(resolved.text, "A/B\nC/D\n");
+        assert_eq!(resolved.recorded, current.display().to_string());
+    }
+
     #[test]
     fn thorn_toggles() {
         let list = "# comment\nCactusBase/IOUtil\n#DISABLED McLachlan/ML_BSSN\nCarpetX/CarpetX\n";
@@ -1412,7 +1544,7 @@ mod tests {
         let root = dir.path();
         let cactus = root.join("inst/Cactus");
         fs::create_dir_all(cactus.join("thornlists")).unwrap();
-        fs::write(cactus.join("thornlists/einsteintoolkit.th"), "A/B\nC/D\n").unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\nC/D\n").unwrap();
 
         // Fake make: log every call; on `<name>-config` / `<name>` fabricate
         // the marker / executable. The `-config` step emulates the crucial
@@ -1540,7 +1672,7 @@ mod tests {
         let root = dir.path();
         let cactus = root.join("inst/Cactus");
         fs::create_dir_all(cactus.join("thornlists")).unwrap();
-        fs::write(cactus.join("thornlists/einsteintoolkit.th"), "A/B\n").unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
 
         // Fake make: emit a diagnostic and fail on the compile step (`sim`),
         // after the config step fabricated the marker.
@@ -1621,7 +1753,7 @@ mod tests {
     fn fake_tree(root: &Path, make_body: &str) -> (Mdb, Machine, Installation, BuildOpts) {
         let cactus = root.join("inst/Cactus");
         fs::create_dir_all(cactus.join("thornlists")).unwrap();
-        fs::write(cactus.join("thornlists/einsteintoolkit.th"), "A/B\n").unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
 
         let fake_make = root.join("fakemake");
         fs::write(&fake_make, format!("#!/bin/sh\ncase \"$2\" in\n{make_body}\nesac\n")).unwrap();
@@ -1705,7 +1837,7 @@ mod tests {
     /// The thornlist is a real rebuild input (§7.8), is remembered across
     /// rebuilds, and is snapshotted so a config survives its source file going
     /// away (§7.5). Previously an edited thornlist read as "up to date" and a
-    /// rebuild without `--thornlist` silently reverted to einsteintoolkit.th.
+    /// rebuild without `--thornlist` silently reverted to the live list.
     /// End-to-end for the §7.4 source-tracking hookup: a refetch that leaves
     /// the thornlist byte-identical must still rebuild, and moving the flesh
     /// must escalate that to a realclean. Before this wiring, every case here
@@ -1896,7 +2028,7 @@ mod tests {
         assert_eq!(orphaned.meta.thornlist, canonical);
         assert!(
             processed().contains("E/F"),
-            "the snapshot, not einsteintoolkit.th, must be what got built: {}",
+            "the snapshot, not the live list, must be what got built: {}",
             processed()
         );
 

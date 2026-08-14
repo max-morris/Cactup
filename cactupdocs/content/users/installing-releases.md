@@ -143,7 +143,7 @@ a different thornlist file entirely, without reinstalling from scratch.
 ### Picking up thornlist edits
 
 Edit the installation's live thornlist
-(`Cactus/thornlists/einsteintoolkit.th`), then refetch with no arguments:
+(`Cactus/thornlists/installation-default.th`), then refetch with no arguments:
 
 ```sh
 cactup inst refetch
@@ -194,10 +194,15 @@ cactup inst refetch
 
 When you refetch to an explicit source (`--release` or a thornlist path),
 cactup refuses to overwrite a hand-edited live
-`Cactus/thornlists/einsteintoolkit.th` — detected by diffing it against the
-pristine as-fetched copy at `<installation root>/einsteintoolkit.th`. Pass
-`--replace-thornlist` (or `-f`) to proceed anyway; the old live file is
+`Cactus/thornlists/installation-default.th` — detected by diffing it against
+the pristine as-fetched copy at `<installation root>/installation-source.th`.
+Pass `--replace-thornlist` (or `-f`) to proceed anyway; the old live file is
 snapshotted first, to `<installation root>/.cactup/thornlists/<timestamp>.th`.
+
+(An installation created before these two files took their current names —
+they used to share one name, `einsteintoolkit.th` — is upgraded to the new
+names automatically, the first time any `cactup` command touches it; nothing
+to do by hand.)
 
 ### Pruning removed thorns
 
