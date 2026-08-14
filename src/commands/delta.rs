@@ -66,24 +66,49 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     names.sort();
     names.dedup();
 
+    // Walk first, print after: every repo gets a full gix status walk, so the
+    // walks run on the parallel pool behind a phase-scoped renderer (the same
+    // "looks hung without progress" duration `fetch::plan` pays), and the
+    // report below then prints in name order from the finished results.
+    // `None` = not on disk.
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let probing = progress.add_child("probe sources");
+    probing.init(Some(names.len()), Some(prodash::unit::label("repos")));
+    let probing = std::sync::Mutex::new(probing);
+    let diffs: Vec<Option<Res<SourceDiff>>> = crate::par::parallel_map(&names, |repo| {
+        let dir = repos_dir.join(repo);
+        let diff = dir.is_dir().then(|| {
+            let current =
+                probing.lock().expect("delta progress poisoned").add_child(repo.clone());
+            let diff = fetch::git::source_diff(&dir);
+            drop(current);
+            diff
+        });
+        probing.lock().expect("delta progress poisoned").inc();
+        diff
+    });
+    drop(probing);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+
     let mut clean = 0usize;
     let mut reported = 0usize;
-    for repo in &names {
-        let dir = repos_dir.join(repo);
-        if !dir.is_dir() {
-            if recorded.contains_key(repo) {
-                reported += 1;
-                println!("  {} — {}", repo.bold(), "fetched, but no longer on disk".yellow());
+    for (repo, diff) in names.iter().zip(diffs) {
+        let diff = match diff {
+            None => {
+                if recorded.contains_key(repo) {
+                    reported += 1;
+                    println!("  {} — {}", repo.bold(), "fetched, but no longer on disk".yellow());
+                }
+                continue;
             }
-            continue;
-        }
-        let diff = match fetch::git::source_diff(&dir) {
-            Ok(diff) => diff,
-            Err(e) => {
+            Some(Err(e)) => {
                 reported += 1;
                 println!("  {} — {} {e:#}", repo.bold(), "could not inspect:".yellow());
                 continue;
             }
+            Some(Ok(diff)) => diff,
         };
         let record = recorded.get(repo);
         let moved = record.is_some_and(|r| r.head != diff.head.to_string());
@@ -172,7 +197,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         .with_context(|| format!("Failed to read {}", processed.display()))?;
     let live = crate::thornlist::parse(&text)
         .ok()
-        .and_then(|list| fetch::source_heads(&inst.root, &list).ok().flatten());
+        .and_then(|list| fetch::source_heads_with_progress(&inst.root, &list).ok().flatten());
 
     let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref());
     if delta == SourceDelta::Unknown {
@@ -186,9 +211,21 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     }
 
     let repos_dir = inst.root.join("Cactus").join("repos");
+    // The per-repo detail (which commit, which files) is a second status walk
+    // of just the changed repos; after a big refetch that can be most of the
+    // tree, so it runs on the parallel pool before any of it is printed.
+    let changed: Vec<String> =
+        change.moved.iter().chain(change.edited.iter()).cloned().collect();
+    let details: std::collections::BTreeMap<String, SourceDiff> =
+        crate::par::parallel_map(&changed, |repo| {
+            fetch::git::source_diff(&repos_dir.join(repo)).ok().map(|d| (repo.clone(), d))
+        })
+        .into_iter()
+        .flatten()
+        .collect();
     for repo in &change.moved {
         println!("  {} — {}", repo.bold(), "now on a different commit".yellow());
-        if let Ok(diff) = fetch::git::source_diff(&repos_dir.join(repo)) {
+        if let Some(diff) = details.get(repo) {
             println!(
                 "    commit:   {} (built {})",
                 short(&diff.head.to_string()),
@@ -198,13 +235,13 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
                     .map(|s| short(fetch::committed(s)))
                     .unwrap_or_else(|| "?".into())
             );
-            print_modified(&diff, verbose);
+            print_modified(diff, verbose);
         }
     }
     for repo in &change.edited {
         println!("  {} — {}", repo.bold(), "locally edited since the build".yellow());
-        if let Ok(diff) = fetch::git::source_diff(&repos_dir.join(repo)) {
-            print_modified(&diff, verbose);
+        if let Some(diff) = details.get(repo) {
+            print_modified(diff, verbose);
         }
     }
 
@@ -243,7 +280,7 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
     let Ok(text) = std::fs::read_to_string(&processed) else { return };
     let live = crate::thornlist::parse(&text)
         .ok()
-        .and_then(|list| fetch::source_heads(&inst.root, &list).ok().flatten());
+        .and_then(|list| fetch::source_heads_with_progress(&inst.root, &list).ok().flatten());
     let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref());
     if matches!(delta, SourceDelta::Unknown | SourceDelta::Unchanged) {
         return;

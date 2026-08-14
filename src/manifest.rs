@@ -16,6 +16,21 @@ pub(crate) fn setup_prodash() -> (ProgressHandle, JoinHandle) {
     setup_prodash_with(None, false)
 }
 
+/// Like [`setup_prodash`], but with no renderer at all when stderr is not a
+/// terminal: bars would not draw there anyway, and the render thread's
+/// shutdown writes a clear-line escape even to a pipe (job logs, captured
+/// test output). Only for phases whose items never call `info`/`fail` —
+/// the renderer DOES print those on a non-tty, so they would be lost here.
+pub(crate) fn setup_prodash_if_tty() -> (ProgressHandle, Option<JoinHandle>) {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        let (progress, renderer) = setup_prodash();
+        (progress, Some(renderer))
+    } else {
+        (prodash::tree::Root::new(), None)
+    }
+}
+
 /// Like [`setup_prodash`], but lets a caller cap which tree levels the
 /// renderer draws (e.g. hiding gix's per-thread delta-resolution children)
 /// and opt into throughput display (needed for byte-unit progress like

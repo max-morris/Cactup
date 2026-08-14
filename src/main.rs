@@ -7,6 +7,7 @@ mod installation;
 mod lock;
 mod manifest;
 mod mdb;
+mod par;
 mod scheduler;
 mod shell;
 mod sim;

@@ -1009,7 +1009,7 @@ pub fn build(
     // byte-identical.
     let fresh_sources = parsed_list
         .as_ref()
-        .and_then(|l| crate::fetch::source_heads(&installation.root, l).ok().flatten());
+        .and_then(|l| crate::fetch::source_heads_with_progress(&installation.root, l).ok().flatten());
     let fresh_providers = parsed_list.as_ref().map(|l| l.thorn_providers());
     // Computed unconditionally, even under `-f`: the baseline must be
     // recorded on every build, or a config that always rebuilds with `-f`

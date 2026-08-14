@@ -511,35 +511,70 @@ pub(crate) fn committed(state: &str) -> &str {
     state.split('+').next().unwrap_or(state)
 }
 
-/// Probe every repo this thornlist names. `Ok(None)` only when the tree holds
-/// no inspectable repo at all — callers must read that as "no information",
-/// never as "nothing changed". A repo that fails to probe is left out rather
-/// than guessed at.
-pub fn source_heads(install_root: &Path, list: &Thornlist) -> Res<Option<SourceHeads>> {
+/// Probe every repo this thornlist names — in parallel, because each probe
+/// is a full gix status walk with the same "looks hung without progress"
+/// duration [`plan`]'s probe loop pays. `progress` is init'ed to the repo
+/// count, shows each in-flight repo as a child, and counts probes as they
+/// finish. `Ok(None)` only when the tree holds no inspectable repo at all —
+/// callers must read that as "no information", never as "nothing changed".
+/// A repo that fails to probe is left out rather than guessed at.
+pub fn source_heads(
+    install_root: &Path,
+    list: &Thornlist,
+    progress: &mut prodash::tree::Item,
+) -> Res<Option<SourceHeads>> {
     let repos_dir = install_root.join(list.root()).join("repos");
     let mut out = SourceHeads::default();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut repos: Vec<String> = Vec::new();
     for c in list.components() {
         if out.flesh.is_none() && is_flesh(list.root(), c) {
             out.flesh = Some(c.repo.clone());
         }
-        if out.heads.contains_key(&c.repo) {
-            continue;
+        if seen.insert(c.repo.clone()) && repos_dir.join(&c.repo).is_dir() {
+            repos.push(c.repo.clone());
         }
-        let dir = repos_dir.join(&c.repo);
-        if !dir.is_dir() {
-            continue;
+    }
+
+    progress.init(Some(repos.len()), Some(prodash::unit::label("repos")));
+    let progress = std::sync::Mutex::new(progress);
+    let states = crate::par::parallel_map(&repos, |repo| {
+        let current = progress.lock().expect("source_heads progress poisoned").add_child(repo.clone());
+        let state = git::source_state(&repos_dir.join(repo)).ok();
+        drop(current);
+        progress.lock().expect("source_heads progress poisoned").inc();
+        state
+    });
+    for (repo, state) in repos.into_iter().zip(states) {
+        let Some(state) = state else { continue };
+        if state.contains("+") {
+            out.dirty.insert(repo.clone());
         }
-        if let Ok(state) = git::source_state(&dir) {
-            if state.contains("+") {
-                out.dirty.insert(c.repo.clone());
-            }
-            out.heads.insert(c.repo.clone(), state);
-        }
+        out.heads.insert(repo, state);
     }
     if out.heads.is_empty() {
         return Ok(None);
     }
     Ok(Some(out))
+}
+
+/// [`source_heads`] behind its own phase-scoped line renderer, for callers
+/// that carry no renderer of their own (the submit/run divergence warning,
+/// `config delta`, the build's rebuild decision). The renderer's 500ms
+/// initial delay means a tree that probes quickly never flashes a bar, and
+/// on a non-tty stderr (job logs, pipes) there is no renderer at all.
+pub fn source_heads_with_progress(
+    install_root: &Path,
+    list: &Thornlist,
+) -> Res<Option<SourceHeads>> {
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let mut probing = progress.add_child("probe sources");
+    let result = source_heads(install_root, list, &mut probing);
+    drop(probing);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    result
 }
 
 /// The flesh is the repo that checks the Cactus make system straight into the
@@ -557,9 +592,10 @@ fn is_flesh(root: &str, c: &Component) -> bool {
 /// Classify every component of `list` against the tree at `install_root`
 /// (the directory that contains `<root>/`, i.e. the installation root).
 /// Read-only; the network is never touched. `progress` is init'ed to the
-/// repo count once the group map is built, then incremented as each repo is
-/// probed — a plain gix status walk per repo, which on ~80 repos takes long
-/// enough that without this the command looks hung before anything appears.
+/// repo count once the group map is built, then incremented as each repo's
+/// probe — a plain gix status walk — finishes. The probes run on the
+/// [`crate::par`] pool: even so, on ~80 repos they take long enough that
+/// without progress the command looks hung before anything appears.
 pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree::Item) -> Res<Plan> {
     let root = list.root().to_owned();
     let repos_dir = install_root.join(&root).join("repos");
@@ -647,14 +683,19 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
 
     progress.init(Some(git_groups.len()), Some(prodash::unit::label("repos")));
 
-    for (repo, group) in git_groups {
-        let _current = progress.add_child(repo.clone());
-        let dir = repos_dir.join(&repo);
+    // Probe in parallel (each probe is an independent read-only walk of its
+    // own repo), then classify sequentially in the stable BTreeMap order so
+    // the plan comes out deterministic.
+    let groups: Vec<(String, Group)> = git_groups.into_iter().collect();
+    let progress = std::sync::Mutex::new(progress);
+    let probes = crate::par::parallel_map(&groups, |(repo, group)| {
+        let current = progress.lock().expect("plan progress poisoned").add_child(repo.clone());
+        let dir = repos_dir.join(repo);
         let mut probe = git::probe(&dir, &group.url, group.branch.as_deref().unwrap_or(""));
         if let RepoState::Dirty(DirtyReason::BranchSwitched { head, .. }) = &probe.state
             && fetch_state
                 .as_ref()
-                .and_then(|s| s.repos.get(&repo))
+                .and_then(|s| s.repos.get(repo))
                 .is_some_and(|r| r.branch.as_deref() == Some(head))
         {
             // cactup's own doing. Re-probe against the current branch to
@@ -667,6 +708,13 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                 };
             }
         }
+        drop(current);
+        progress.lock().expect("plan progress poisoned").inc();
+        probe
+    });
+
+    for ((repo, group), probe) in groups.into_iter().zip(probes) {
+        let dir = repos_dir.join(&repo);
         match probe.state {
             RepoState::Absent => plan.git.push(GitRepoPlan {
                 repo,
@@ -709,7 +757,6 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
                 });
             }
         }
-        progress.inc();
     }
 
     Ok(plan)
@@ -755,7 +802,8 @@ mod tests {
             git::testrepo::commit(&repos.join(name), "initial");
         }
         let list = crate::thornlist::parse(LIST).unwrap();
-        let got = source_heads(root, &list).unwrap().unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test probe");
+        let got = source_heads(root, &list, &mut progress).unwrap().unwrap();
 
         // The flesh is `core` here: it is the section checking Makefile/lib/src
         // straight into the Cactus root. simfactory2 also targets the root but
@@ -773,7 +821,7 @@ mod tests {
         // manual checkout, looks like from the build's point of view.
         let before = got.heads["core"].clone();
         git::testrepo::commit(&repos.join("core"), "second");
-        let after = source_heads(root, &list).unwrap().unwrap();
+        let after = source_heads(root, &list, &mut progress).unwrap().unwrap();
         assert_ne!(after.heads["core"], before);
         assert_eq!(after.heads["cactusbase"], got.heads["cactusbase"], "untouched repos hold still");
     }
@@ -784,7 +832,8 @@ mod tests {
         let list = crate::thornlist::parse(LIST).unwrap();
         // No repos on disk at all: no information, which callers must not read
         // as "nothing changed".
-        assert!(source_heads(tmp.path(), &list).unwrap().is_none());
+        let mut progress = prodash::tree::Root::new().add_child("test probe");
+        assert!(source_heads(tmp.path(), &list, &mut progress).unwrap().is_none());
     }
 
     #[test]
