@@ -973,10 +973,16 @@ fn report_configs(
     // failure silently disables the note below — a report must never fail
     // the refetch.
     let live_path = inst.live_thornlist();
-    let fresh_providers = fs::read_to_string(&live_path)
+    let live_list = fs::read_to_string(&live_path)
         .ok()
-        .and_then(|text| thornlist::parse_with_base(&text, live_path.parent()).ok())
-        .map(|list| list.thorn_providers());
+        .and_then(|text| thornlist::parse_with_base(&text, live_path.parent()).ok());
+    let fresh_providers = live_list.as_ref().map(|list| list.thorn_providers());
+    // The per-thorn shape fingerprints, read off the tree the fetch just
+    // left behind. Same best-effort caveat as the providers above, plus one
+    // of its own: this walks every thorn (~0.2 s on the real list), which is
+    // nothing next to the fetch that just ran.
+    let fresh_shapes =
+        live_list.as_ref().map(|list| crate::build::thorn_shapes(&inst.cactus_root(), list));
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {
@@ -1014,6 +1020,22 @@ fn report_configs(
                          `cactup build {name}` removes their stale per-thorn build state \
                          before compiling.",
                         summarize_names(&changed)
+                    );
+                }
+                // The sibling case: same provider, but the fetched content
+                // changed what that thorn compiles (a `.ccl` edit, a source
+                // file added or removed). Reported separately from the
+                // provider swap above, because the two are diagnosed
+                // differently even though the remedy is identical.
+                let reshaped = crate::build::shape_delta(m.thorn_shapes.as_ref(), fresh_shapes.as_ref());
+                let reshaped: Vec<String> =
+                    reshaped.into_iter().filter(|t| !changed.contains(t)).collect();
+                if !reshaped.is_empty() {
+                    println!(
+                        "      note: thorn(s) {} changed shape (files added/removed, or a \
+                         .ccl/make.code.defn edited); `cactup build {name}` removes their \
+                         stale per-thorn build state before compiling.",
+                        summarize_names(&reshaped)
                     );
                 }
             }

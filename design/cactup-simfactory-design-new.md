@@ -1653,6 +1653,33 @@ separately): a resolved universe that differs from the stored one also forces a
 full realclean + rebuild, since a host build and an in-container build are not
 interchangeable (§4.8).
 
+**Per-thorn build-state tracking.** Two more optional maps are recorded each
+build, both reading absence as "no information", never as "unchanged" — same
+convention as `sources` (the per-repo HEAD/dirty state used by source
+tracking, above), and absent for a config built before each map landed:
+
+- **`thorn-providers`** — thorn name → providing directory, from the
+  processed thornlist. Cactus keys `configs/<name>/build/<Thorn>/` and
+  `libthorn_<Thorn>.a` by thorn **name** only, never by arrangement, so
+  swapping which arrangement provides a name (disabling
+  `EinsteinAnalysis/Foo`, enabling `SpacetimeX/Foo`) would otherwise silently
+  reuse build state compiled from the other source tree.
+- **`thorn-shapes`** — thorn name → a fingerprint hash. Covers the providing
+  directory; the symlink target it resolves to and the backing repo's
+  normalized `origin` URL (so re-pointing a repo at a fork invalidates that
+  repo's thorns, while a mere URL-spelling change does not); the sorted list
+  of file paths in the thorn (top-level plus everything under `src/`); and
+  the contents of its `*.ccl` files and `make.code.defn` /
+  `make.configuration.defn` / `make.code.deps`. It deliberately excludes the
+  contents of ordinary source files: `make`'s own `.d` dependency tracking
+  already gets body-code edits right, and hashing bodies would discard a
+  thorn's whole build directory on every such edit — the opposite of what
+  this tracking is for.
+
+A thorn whose recorded provider or shape has moved since the last build has
+its `build/<Thorn>/` and `libthorn_<Thorn>.a` deleted before the reconfigure
+(§7.8) — these stored maps are what `cactup build` diffs to find it.
+
 The installation's **active config** is recorded per-installation in
 `<installation home>/.cactup/installation.toml` (§8.1), not the global DB —
 consistent with D6. (The global DB tracks *which installation* is active; the
@@ -1783,14 +1810,18 @@ it is never diffed for the rebuild decision):**
    identifiers and are emitted **verbatim** — cactup maps `optimize` → `OPTIMISE`
    at render. Never Americanize keys inside `[options]`.
 
-**Rebuild trigger.** The decision to rebuild diffs three inputs against what the
+**Rebuild trigger.** The decision to rebuild diffs four inputs against what the
 config was last built with:
 
 1. the freshly-selected **source optionlist TOML** against the copy stored at
    build time (`configs/<name>/cactup-optionlist.toml`, §7.4);
 2. the resolved build **universe** against the recorded one (§7.4);
 3. the **processed thornlist** against the stored
-   `configs/<name>/cactup-thornlist.th` (§7.5).
+   `configs/<name>/cactup-thornlist.th` (§7.5);
+4. each thorn's recorded **provider** and **shape** (§7.4) against the stored
+   `thorn-providers`/`thorn-shapes` maps — independent of the thornlist-text
+   diff above, since a thornlist can be byte-for-byte unchanged while what a
+   name resolves to underneath it, or what that thorn contains, is not.
 
 An optionlist or universe difference — a changed flag, a new key, a bumped
 `VERSION` — triggers a full `make <config>-realclean` + reconfigure + rebuild.
@@ -1811,8 +1842,24 @@ from-scratch rebuild for it would be a poor trade; `-f` still forces one.
 Diffing the *processed* text (not the source) makes this one comparison cover a
 source-thornlist edit, a switch to a different thornlist file, and a change to
 the machine's or variant's `enabled-thorns`/`disabled-thorns` — none of which the
-optionlist diff can see. Only when all three inputs match does a complete config
-short-circuit as up to date.
+optionlist diff can see.
+
+A thorn whose provider or shape differs also triggers a reconfigure + `make`
+without the realclean, but scoped to that thorn alone: `build/<Thorn>/` and
+`libthorn_<Thorn>.a` are deleted before make runs, not the whole config. A
+provider change means the name now resolves to a different arrangement
+entirely; a shape change means a file was added or removed, or one of the
+thorn's `.ccl`/`make.code.defn`/`make.configuration.defn`/`make.code.deps`
+was edited — either way, make's own dependency tracking cannot be trusted to
+notice on its own (a stale `.d` can still name a bindings header Cactus's
+configure step has since deleted, and `ar` updates `libthorn_*.a` in place,
+so a removed source's orphaned `.o` keeps linking in). Ordinary edits to a
+thorn's existing source-file bodies do **not** appear in either map and so
+never trigger this: `make` recompiles what such an edit affects on its own,
+the same trust extended to an edited flesh above.
+
+Only when all four inputs match does a complete config short-circuit as up to
+date.
 
 ---
 

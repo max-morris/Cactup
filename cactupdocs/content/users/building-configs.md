@@ -144,7 +144,8 @@ What each costs:
 | What changed | What `cactup build <name>` does |
 |---|---|
 | Nothing under this config | short-circuits: "up to date" |
-| A thorn edited in place | reconfigure + rebuild what the edit affects |
+| A thorn's body code edited in place (a `.cc`, `.F90`, header, …) | reconfigure + rebuild what the edit affects; that thorn's `build/<Thorn>/` is left alone |
+| A thorn's *shape* changed — a file added or removed, or a `.ccl` / `make.code.defn` / `make.configuration.defn` / `make.code.deps` edited | that thorn's `build/<Thorn>/` and `libthorn_<Thorn>.a` are deleted, then rebuilt from scratch |
 | A thorn repo on a different commit | reconfigure + rebuild what that affects |
 | The **Cactus flesh** on a different commit | a from-scratch rebuild — the make system and everything `config-data` is generated from have changed |
 
@@ -152,6 +153,22 @@ Editing the flesh *in place* is deliberately **not** escalated to a
 from-scratch rebuild: `make` recompiles what the edit affects, and a realclean
 would be a brutal price for iterating on flesh code. Pass `-f` when you want
 one anyway.
+
+The same trust-but-verify split applies one level down, per thorn. Ordinary
+body-code edits are left to `make`'s own `.d` dependency tracking, which gets
+them right — there's no reason to punish the edit-and-rebuild loop by
+discarding a thorn's object files every time a line changes. But `make` can't
+be trusted with a change to a thorn's *shape*: if a `.ccl` drops a
+`REQUIRES`, Cactus deletes the now-unneeded bindings header, yet the stale
+`build/<Thorn>/*.d` still lists it as a prerequisite, and make dies with "No
+rule to make target" instead of rebuilding. And if a source file is removed
+from a thorn, its leftover `.o` isn't recompiled away — Cactus updates
+`libthorn_<Thorn>.a` with `ar`, which only adds and replaces members, so the
+orphan object keeps linking in silently. Both failures require deleting that
+thorn's build state outright, which is why a shape change gets a harder reset
+than a body edit. As with source tracking, a config built before this landed
+has no recorded shape baseline; its first build afterward records one and
+invalidates nothing, and every build after that is detected.
 
 Untracked files are ignored throughout — the test harness leaves output inside
 the source tree, and that must never read as a source change.

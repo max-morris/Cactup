@@ -12,12 +12,13 @@ use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
 use crate::mdb::{Machine, Optionlist};
 use crate::template::{VarSet, VarValue};
+use crate::thornlist::Thornlist;
 use crate::Res;
 use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -110,6 +111,18 @@ pub struct ConfigMeta {
     /// table, and a table may not precede scalar keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thorn_providers: Option<BTreeMap<String, String>>,
+    /// Thorn name -> `thorn_shapes` fingerprint, as of this build — the §7.4
+    /// input that catches every OTHER way a thorn's content changes while its
+    /// thornlist path stays identical (see `thorn_shapes`'s doc comment for
+    /// the two motivating incidents: a `.ccl` REQUIRES edit and a removed
+    /// source file, both of which `thorn_providers`/`provider_delta` are
+    /// blind to since neither moves which directory provides the name).
+    /// Absent reads as "no information", never as "unchanged" — same
+    /// convention as `sources` and `thorn_providers`. Serialized last,
+    /// alongside them: it is a TOML table, and a table may not precede
+    /// scalar keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thorn_shapes: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -346,6 +359,13 @@ pub enum RebuildDecision {
     /// keeps this variant safe by deleting the affected per-thorn state
     /// before invoking make — see `provider_delta` and its call site in
     /// `build()`.
+    ///
+    /// A second, sibling per-thorn invalidation trigger: a thorn's *content*
+    /// changing shape (a `.ccl` `REQUIRES` edit, a removed source file) while
+    /// its thornlist path stays byte-identical, so nothing else here would
+    /// otherwise notice. See `thorn_shapes`/`shape_delta` and their call site
+    /// in `build()`, which deletes the same per-thorn state for the same
+    /// reason as the provider-swap case above.
     Incremental(&'static str),
     /// Optionlist or universe changed: realclean + reconfigure + build. Both
     /// change *how* the sources compile, so every existing object is suspect.
@@ -463,6 +483,245 @@ pub fn provider_delta(
         .collect()
 }
 
+/// Names of files/dirs `thorn_shapes` never walks into once past a thorn's
+/// top level — the ones we *do* walk (a bare file, or `src/` recursively) are
+/// simpler to say positively, so this only exists to name them in one place
+/// for the doc comment above.
+const SHAPE_QUALIFYING_STEMS: [&str; 3] =
+    ["make.code.defn", "make.configuration.defn", "make.code.deps"];
+
+/// A file's basename decides `.ccl`-family generation/compilation inputs
+/// (item 5 of `thorn_shapes`): any `*.ccl`, or one of the three fixed
+/// `make.*` filenames Cactus's build system reads per-thorn.
+fn is_shape_qualifying(basename: &str) -> bool {
+    basename.ends_with(".ccl") || SHAPE_QUALIFYING_STEMS.contains(&basename)
+}
+
+/// Depth cap for the recursive `src/` walk below: a thorn dir is normally a
+/// symlink, and following symlinks (needed to reach the real tree) means a
+/// hostile or accidental symlink cycle under `src/` could recurse forever.
+/// 32 is far deeper than any real thorn's source tree.
+const SHAPE_WALK_MAX_DEPTH: u32 = 32;
+
+/// Recursively collect file paths under `dir` (a thorn's `src/`, or a
+/// directory beneath it), relative to the thorn dir, into `out`. Symlinks are
+/// followed (`fs::metadata`, not `symlink_metadata`) since the thorn dir
+/// itself is normally one; `depth` guards against a symlink loop hanging the
+/// build by simply declining to recurse past `SHAPE_WALK_MAX_DEPTH` rather
+/// than erroring — silent truncation is fine here, since it can only make a
+/// fingerprint miss part of an already-pathological tree, not corrupt one.
+fn walk_shape_dir(dir: &Path, prefix: &str, depth: u32, out: &mut Vec<String>) -> std::io::Result<()> {
+    if depth > SHAPE_WALK_MAX_DEPTH {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let rel = format!("{prefix}/{name}");
+        let meta = fs::metadata(entry.path())?;
+        if meta.is_dir() {
+            walk_shape_dir(&entry.path(), &rel, depth + 1, out)?;
+        } else if meta.is_file() {
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
+/// Item 4 of `thorn_shapes`: the compilation-relevant file paths under a
+/// thorn dir, relative to it — direct children, plus everything recursively
+/// under `src/`. `doc/`, `test/`, `par/`, `.git`, and any other subdirectory
+/// are deliberately not descended into: none of them feed the compile or the
+/// bindings generation this fingerprint exists to track.
+fn shape_files(thorn_dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(thorn_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+        let meta = fs::metadata(entry.path())?;
+        if meta.is_dir() {
+            if name_str == "src" {
+                walk_shape_dir(&entry.path(), "src", 0, &mut files)?;
+            }
+        } else if meta.is_file() {
+            files.push(name_str);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// If `real` (a canonicalized thorn dir) lands under `repos_root`
+/// (canonicalized `<cactus_root>/repos`), the repo directory that provides
+/// it — i.e. `repos_root` plus just the first path component past it, so a
+/// thorn checked out via `!REPO_PATH` into a subdirectory of the repo still
+/// resolves to the repo itself, not that subdirectory.
+fn shape_repo_dir(real: &Path, repos_root: &Path) -> Option<PathBuf> {
+    let rel = real.strip_prefix(repos_root).ok()?;
+    let repo_name = rel.components().next()?;
+    Some(repos_root.join(repo_name.as_os_str()))
+}
+
+/// `origin`'s normalized fetch URL for the repo at `repo_dir`, cached across
+/// calls: ~30 thorns can share one repo, and reopening it per thorn would be
+/// wasteful on a real ~400-thorn tree. `None` (unreadable repo, no `origin`,
+/// no fetch URL) is cached too, so a repo that fails once isn't retried for
+/// every thorn it provides.
+fn shape_repo_url(repo_dir: &Path, cache: &mut HashMap<PathBuf, Option<String>>) -> Option<String> {
+    if let Some(cached) = cache.get(repo_dir) {
+        return cached.clone();
+    }
+    let url = (|| {
+        let repo = gix::open(repo_dir).ok()?;
+        let remote = repo.find_remote("origin").ok()?;
+        let raw = remote.url(gix::remote::Direction::Fetch)?.to_bstring().to_string();
+        Some(crate::fetch::git::normalize_url(&raw))
+    })();
+    cache.insert(repo_dir.to_owned(), url.clone());
+    url
+}
+
+/// Feed one length-prefixed frame (`u64` little-endian byte length, then the
+/// bytes themselves) into `hasher`. This is what makes the byte stream
+/// `thorn_shapes` hashes unambiguous: a length-prefixed frame is a prefix
+/// code, so the concatenation of frames for one thorn can only be produced by
+/// that exact sequence of fields — no frame boundary can be mistaken for
+/// content, and (since item 3 below is omitted outright rather than replaced
+/// by a placeholder when it doesn't apply) a thorn with N frames can never
+/// coincide with one with a different frame count.
+fn feed(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Per-thorn "shape" fingerprints: thorn name -> hash of everything that
+/// decides WHAT is compiled into `build/<Thorn>/` and what bindings are
+/// generated for it. The sibling of `thorn_providers`/`provider_delta`: those
+/// catch a thorn *name* silently changing which directory provides it; this
+/// catches every other way a thorn's content changes while its thornlist path
+/// stays byte-identical, so nothing about the thornlist diff or `provider_delta`
+/// would notice. Two incidents motivate it:
+///
+///   - A thorn's `configuration.ccl` `REQUIRES` goes non-empty -> empty across
+///     a refetch. Cactus's CST deletes the now-unneeded
+///     `bindings/Configuration/Thorns/cctki_<Thorn>.h`, but the stale
+///     `build/<Thorn>/*.d` still lists it as a prerequisite: `make: *** No
+///     rule to make target '.../cctki_<Thorn>.h'` — a hard build failure.
+///   - A source file is removed from a thorn. Its `.o` survives in
+///     `build/<Thorn>/`, and Cactus updates `libthorn_<Thorn>.a` in place
+///     with `ar`, so the orphan object links in silently.
+///
+/// For each `list.thorn_providers()` entry (thorn name -> provider path, e.g.
+/// `arrangements/SpacetimeX/WeylScal4`, relative to `cactus_root`), the
+/// following are hashed in order, each as a `feed` frame (see its doc
+/// comment for why that makes the stream unambiguous):
+///
+///   1. the provider path itself;
+///   2. the raw `fs::read_link` target of `<cactus_root>/<provider path>` if
+///      it is a symlink (normally the case), or the fixed marker `<dir>`
+///      when it is a real directory;
+///   3. the backing repo's normalized `origin` fetch URL, when the provider
+///      path resolves under `<cactus_root>/repos/<repo>` — normalized via
+///      `git::normalize_url` so a mere URL-spelling change (not a fork/repoint)
+///      is not an identity change. Omitted entirely (not a placeholder) when
+///      the thorn does not resolve into `repos/`, e.g. a hand-placed
+///      arrangement or a test fixture;
+///   4. the sorted list of file paths under the thorn (`shape_files`,
+///      relative to the thorn dir), one frame per path;
+///   5. for each of those files whose basename is `*.ccl` or one of the fixed
+///      `make.*.defn`/`make.code.deps` names (`is_shape_qualifying`), in the
+///      same sorted order: a frame for its path, then a frame for its bytes.
+///
+/// Deliberately NOT hashed: the contents of ordinary source files (`.cc`,
+/// `.F90`, …). Make's own `.d` dependency tracking is correct for body-code
+/// edits, and hashing them would delete a thorn's whole build directory on
+/// every edit — the exact "punish anyone iterating on sources" outcome
+/// `SourceDelta::Edited`'s doc comment already rejects for the flesh; the
+/// same trade applies per-thorn here.
+///
+/// Error semantics are load-bearing: if a thorn's directory cannot be read at
+/// all — missing, or an I/O error anywhere inside it (listing it, reading a
+/// qualifying file, hashing) — that thorn is simply omitted from the
+/// returned map, never an error. This is fail-safe in both directions:
+/// `shape_delta` treats stored-has-it/fresh-lacks-it as a change (a vanished
+/// thorn's stale build state is invalidated), while a thorn absent on *both*
+/// sides — the normal case in unit tests, and in a config whose fetch never
+/// ran — produces no spurious delta. `thorn_shapes` therefore never returns a
+/// `Result`: a build must never fail because a thorn directory happened to be
+/// unreadable.
+pub fn thorn_shapes(cactus_root: &Path, list: &Thornlist) -> BTreeMap<String, String> {
+    let repos_root = fs::canonicalize(cactus_root.join("repos")).ok();
+    let mut url_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+    let mut out = BTreeMap::new();
+
+    'thorn: for (name, provider) in list.thorn_providers() {
+        let thorn_dir = cactus_root.join(&provider);
+
+        let Ok(files) = shape_files(&thorn_dir) else { continue };
+        let Ok(link_meta) = fs::symlink_metadata(&thorn_dir) else { continue };
+        let shape_marker: Vec<u8> = if link_meta.file_type().is_symlink() {
+            match fs::read_link(&thorn_dir) {
+                Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
+                Err(_) => continue,
+            }
+        } else {
+            b"<dir>".to_vec()
+        };
+
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        feed(&mut hasher, provider.as_bytes());
+        feed(&mut hasher, &shape_marker);
+
+        if let Some(repos_root) = &repos_root
+            && let Ok(real) = fs::canonicalize(&thorn_dir)
+            && let Some(repo_dir) = shape_repo_dir(&real, repos_root)
+            && let Some(url) = shape_repo_url(&repo_dir, &mut url_cache)
+        {
+            feed(&mut hasher, url.as_bytes());
+        }
+
+        for f in &files {
+            feed(&mut hasher, f.as_bytes());
+        }
+        for f in &files {
+            let basename = Path::new(f).file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !is_shape_qualifying(basename) {
+                continue;
+            }
+            let Ok(bytes) = fs::read(thorn_dir.join(f)) else { continue 'thorn };
+            feed(&mut hasher, f.as_bytes());
+            feed(&mut hasher, &bytes);
+        }
+
+        let Ok(id) = hasher.try_finalize() else { continue };
+        out.insert(name, id.to_hex_with_len(16).to_string());
+    }
+
+    out
+}
+
+/// The `thorn_shapes` counterpart to `provider_delta`: names present in
+/// `stored` whose `fresh` fingerprint differs or is absent. Semantics are
+/// identical to `provider_delta` — read that doc comment for the reasoning —
+/// mirrored exactly: names only in `fresh` are not a change (nothing built
+/// yet to invalidate), and either side `None` means no information, never
+/// "unchanged", so this returns empty rather than guessing.
+pub fn shape_delta(
+    stored: Option<&BTreeMap<String, String>>,
+    fresh: Option<&BTreeMap<String, String>>,
+) -> Vec<String> {
+    let (Some(stored), Some(fresh)) = (stored, fresh) else {
+        return Vec::new();
+    };
+    stored
+        .iter()
+        .filter(|(name, shape)| fresh.get(name.as_str()) != Some(shape))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// `stored_thornlist`/`fresh_thornlist` are the *processed* (toggles-applied)
 /// texts, so this one comparison covers a source-thornlist edit, a switch to a
 /// different thornlist file, and a change to the machine's or variant's
@@ -481,6 +740,7 @@ pub fn rebuild_decision(
     fresh_thornlist: &str,
     sources: SourceDelta,
     changed_providers: &[String],
+    changed_shapes: &[String],
 ) -> RebuildDecision {
     match stored_optionlist {
         None => RebuildDecision::Fresh,
@@ -508,6 +768,13 @@ pub fn rebuild_decision(
         // provenance map still shows the swap.
         Some(_) if !changed_providers.is_empty() => {
             RebuildDecision::Incremental("thorn names changed provider")
+        }
+        // A thorn's content changed shape (a `.ccl` REQUIRES edit, a removed
+        // source file, …) with the thornlist itself untouched — the gap
+        // `thorn_providers`/`provider_delta` don't cover, since neither of
+        // those changes moves which directory provides the name.
+        Some(_) if !changed_shapes.is_empty() => {
+            RebuildDecision::Incremental("thorn contents changed")
         }
         Some(_) if sources == SourceDelta::Thorns => {
             RebuildDecision::Incremental("the thorn sources moved to a different commit")
@@ -662,6 +929,10 @@ pub fn build(
         .as_ref()
         .and_then(|l| crate::fetch::source_heads(&installation.root, l).ok().flatten());
     let fresh_providers = parsed_list.as_ref().map(|l| l.thorn_providers());
+    // Computed unconditionally, even under `-f`: the baseline must be
+    // recorded on every build, or a config that always rebuilds with `-f`
+    // could never acquire one to diff a later plain rebuild against.
+    let fresh_shapes = parsed_list.as_ref().map(|l| thorn_shapes(&cactus_root, l));
     let (sources, source_change) =
         source_delta(stored_meta.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
     // Which thorn names changed which directory provides them (§7.4) — the
@@ -670,6 +941,13 @@ pub fn build(
     let changed_providers = provider_delta(
         stored_meta.as_ref().and_then(|m| m.thorn_providers.as_ref()),
         fresh_providers.as_ref(),
+    );
+    // Which thorn names changed shape (§7.4) — the sibling gap: same name,
+    // same provider, but different content (a `.ccl` edit, a removed source
+    // file) that neither the thornlist text diff nor `provider_delta` sees.
+    let changed_shapes = shape_delta(
+        stored_meta.as_ref().and_then(|m| m.thorn_shapes.as_ref()),
+        fresh_shapes.as_ref(),
     );
     let mut decision = rebuild_decision(
         stored_optionlist.as_deref(),
@@ -680,6 +958,7 @@ pub fn build(
         &thornlist_processed,
         sources,
         &changed_providers,
+        &changed_shapes,
     );
     if opts.force || opts.reconfig {
         decision = RebuildDecision::Full("-f/--reconfig given");
@@ -692,23 +971,29 @@ pub fn build(
              sources); pass -f to rebuild.",
             name
         );
-        // Record the source/provider baseline even though nothing was built.
-        // A config last built by a cactup without source or provenance
-        // tracking has neither, and without this it could never acquire
-        // either: every future build would short-circuit here and the next
-        // refetch, edit, or provider swap would go unnoticed. This writes
-        // metadata only — no build, and build-id/built are preserved.
+        // Record the source/provider/shape baseline even though nothing was
+        // built. A config last built by a cactup without source, provenance,
+        // or shape tracking has none of them, and without this it could never
+        // acquire any: every future build would short-circuit here and the
+        // next refetch, edit, provider swap, or content change would go
+        // unnoticed. This writes metadata only — no build, and build-id/built
+        // are preserved.
         let mut stored = stored;
         let sources_changed =
             fresh_sources.as_ref().is_some_and(|live| stored.sources.as_ref() != Some(&live.heads));
         let providers_changed =
             fresh_providers.as_ref().is_some_and(|live| stored.thorn_providers.as_ref() != Some(live));
-        if sources_changed || providers_changed {
+        let shapes_changed =
+            fresh_shapes.as_ref().is_some_and(|live| stored.thorn_shapes.as_ref() != Some(live));
+        if sources_changed || providers_changed || shapes_changed {
             if let Some(live) = fresh_sources {
                 stored.sources = Some(live.heads);
             }
             if let Some(live) = fresh_providers {
                 stored.thorn_providers = Some(live);
+            }
+            if let Some(live) = fresh_shapes {
+                stored.thorn_shapes = Some(live);
             }
             stored.store(&cactus_root)?;
         }
@@ -740,15 +1025,25 @@ pub fn build(
         }
     }
 
-    // The provider-swap incident this exists for: a same-named build/<Thorn>/
-    // left over from the old provider carries stale `.d` files naming
-    // bindings headers the reconfigure below is about to delete (a hard make
-    // error), and Cactus updates an existing libthorn_<Thorn>.a in place with
-    // `ar`, so stale members from the old provider can otherwise survive into
-    // the link without so much as a warning. Both must go before make runs.
-    // `Full` is excluded on purpose: `realclean` already wipes every config's
-    // build state, so this would just be redundant there.
-    if matches!(decision, RebuildDecision::Incremental(_)) && !changed_providers.is_empty() {
+    // Two incidents this exists for, both leaving a same-named build/<Thorn>/
+    // holding state compiled from the wrong source: a provider swap (old
+    // arrangement's stale `.d` files can name a bindings header the
+    // reconfigure below is about to delete — a hard make error) and a shape
+    // change (a `.ccl` REQUIRES edit or a removed source file, same failure
+    // modes — see `thorn_shapes`'s doc comment). Either way Cactus updates an
+    // existing libthorn_<Thorn>.a in place with `ar`, so stale members can
+    // otherwise survive into the link without so much as a warning. Both
+    // must go before make runs. `Full` is excluded on purpose: `realclean`
+    // already wipes every config's build state, so this would just be
+    // redundant there.
+    let invalidated_thorns: Vec<String> = changed_providers
+        .iter()
+        .chain(&changed_shapes)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if matches!(decision, RebuildDecision::Incremental(_)) && !invalidated_thorns.is_empty() {
         fn remove_stale(path: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) -> Res<()> {
             match remove(path) {
                 Ok(()) => Ok(()),
@@ -762,11 +1057,19 @@ pub fn build(
                 }),
             }
         }
-        println!(
-            "  changed provider (removing their stale per-thorn build state): {}",
-            summarize(&changed_providers)
-        );
-        for thorn in &changed_providers {
+        if !changed_providers.is_empty() {
+            println!(
+                "  changed provider (removing their stale per-thorn build state): {}",
+                summarize(&changed_providers)
+            );
+        }
+        if !changed_shapes.is_empty() {
+            println!(
+                "  changed contents (removing their stale per-thorn build state): {}",
+                summarize(&changed_shapes)
+            );
+        }
+        for thorn in &invalidated_thorns {
             remove_stale(&config_dir.join("build").join(thorn), |p| fs::remove_dir_all(p))?;
             remove_stale(&config_dir.join("lib").join(format!("libthorn_{thorn}.a")), |p| fs::remove_file(p))?;
         }
@@ -946,6 +1249,7 @@ pub fn build(
         flags,
         sources: fresh_sources.map(|s| s.heads),
         thorn_providers: fresh_providers,
+        thorn_shapes: fresh_shapes,
     };
     meta.store(&cactus_root)?;
     fs::write(&snapshot_path, &optionlist.source)
@@ -1191,62 +1495,64 @@ mod tests {
         // which must be unchanged.
         let n = S::Unchanged;
         let no_prov: &[String] = &[];
+        let no_shapes: &[String] = &[];
         let swapped: &[String] = &["WeylScal4".to_owned()];
+        let reshaped: &[String] = &["WeylScal4".to_owned()];
         // No stored optionlist at all ⇒ nothing has been built here yet.
-        assert_eq!(rebuild_decision(None, "x", None, None, None, "t", n, no_prov), R::Fresh);
+        assert_eq!(rebuild_decision(None, "x", None, None, None, "t", n, no_prov, no_shapes), R::Fresh);
         assert_eq!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, no_prov, no_shapes),
             R::UpToDate
         );
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, no_prov),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, no_prov, no_shapes),
             R::Full(_)
         ));
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t", n, no_prov),
+            rebuild_decision(Some("x"), "x", Some("et-sif"), None, Some("t"), "t", n, no_prov, no_shapes),
             R::Full(_)
         ));
         assert_eq!(
-            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t", n, no_prov),
+            rebuild_decision(Some("x"), "x", Some("u"), Some("u"), Some("t"), "t", n, no_prov, no_shapes),
             R::UpToDate
         );
 
         // A thornlist edit is a rebuild — the bug this fixes was it reading as
         // up-to-date — but a reconfigure, not a realclean.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", n, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", n, no_prov, no_shapes),
             R::Incremental(_)
         ));
         // An optionlist change outranks it: realclean wins over reconfigure.
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2", n, no_prov),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t2", n, no_prov, no_shapes),
             R::Full(_)
         ));
         // No processed thornlist on disk ⇒ nothing to compare, not an edit.
         assert_eq!(
-            rebuild_decision(Some("x"), "x", None, None, None, "t", n, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, None, "t", n, no_prov, no_shapes),
             R::UpToDate
         );
 
         // Source tracking: a refetch with an untouched thornlist used to read
         // as UpToDate and silently never compile the new sources.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Thorns, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Thorns, no_prov, no_shapes),
             R::Incremental(_)
         ));
         // The flesh earns a realclean, and outranks a simultaneous thornlist
         // edit — a release bump changes both at once.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Flesh, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Flesh, no_prov, no_shapes),
             R::Full(_)
         ));
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", S::Flesh, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t2", S::Flesh, no_prov, no_shapes),
             R::Full(_)
         ));
         // No fetch record / unparseable thornlist ⇒ exactly the old behavior.
         assert_eq!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Unknown, no_prov),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", S::Unknown, no_prov, no_shapes),
             R::UpToDate
         );
 
@@ -1254,16 +1560,34 @@ mod tests {
         // this exists for: the processed thornlist was hand-deleted, so the
         // text diff reads as unchanged) still triggers a reconfigure.
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, swapped),
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, swapped, no_shapes),
             R::Incremental(_)
         ));
         assert!(matches!(
-            rebuild_decision(Some("x"), "x", None, None, None, "t", n, swapped),
+            rebuild_decision(Some("x"), "x", None, None, None, "t", n, swapped, no_shapes),
             R::Incremental(_)
         ));
         // An optionlist change still outranks a provider swap: realclean wins.
         assert!(matches!(
-            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, swapped),
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, swapped, no_shapes),
+            R::Full(_)
+        ));
+
+        // A shape-only change (content, not provider) also triggers a
+        // reconfigure — the gap this whole mechanism exists for.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, Some("t"), "t", n, no_prov, reshaped),
+            R::Incremental(_)
+        ));
+        // ...even with the processed thornlist hand-deleted, same as the
+        // provider-swap edge case above.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "x", None, None, None, "t", n, no_prov, reshaped),
+            R::Incremental(_)
+        ));
+        // An optionlist change still outranks a shape change: realclean wins.
+        assert!(matches!(
+            rebuild_decision(Some("x"), "y", None, None, Some("t"), "t", n, no_prov, reshaped),
             R::Full(_)
         ));
     }
@@ -1393,6 +1717,33 @@ mod tests {
             ("ML_BSSN", "arrangements/McLachlan/ML_BSSN"),
         ]);
         assert!(provider_delta(Some(&stored), Some(&added)).is_empty());
+    }
+
+    #[test]
+    fn shape_deltas() {
+        let stored = provider_map(&[("WeylScal4", "aaa"), ("Boundary", "bbb")]);
+
+        // Either side (or both) absent ⇒ no information, never "unchanged".
+        assert!(shape_delta(None, None).is_empty());
+        assert!(shape_delta(Some(&stored), None).is_empty());
+        assert!(shape_delta(None, Some(&stored)).is_empty());
+
+        // Identical ⇒ nothing to invalidate.
+        assert!(shape_delta(Some(&stored), Some(&stored)).is_empty());
+
+        // A changed fingerprint is reported.
+        let changed = provider_map(&[("WeylScal4", "ccc"), ("Boundary", "bbb")]);
+        assert_eq!(shape_delta(Some(&stored), Some(&changed)), vec!["WeylScal4".to_string()]);
+
+        // A dropped thorn is reported too — same reasoning as `provider_delta`:
+        // re-adding the name later would otherwise find no baseline to diff.
+        let dropped = provider_map(&[("Boundary", "bbb")]);
+        assert_eq!(shape_delta(Some(&stored), Some(&dropped)), vec!["WeylScal4".to_string()]);
+
+        // An added-only thorn is not a change: nothing exists yet to
+        // invalidate.
+        let added = provider_map(&[("WeylScal4", "aaa"), ("Boundary", "bbb"), ("ML_BSSN", "ddd")]);
+        assert!(shape_delta(Some(&stored), Some(&added)).is_empty());
     }
 
     #[test]
@@ -2060,6 +2411,241 @@ mod tests {
         assert!(!again.rebuilt, "nothing changed besides the missing baseline");
         let reloaded = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
         assert!(reloaded.thorn_providers.is_some(), "the baseline must be adopted on disk");
+    }
+
+    /// A single-thorn CRL list plus a real thorn directory on disk, shared by
+    /// the `thorn_shapes` build-level tests below. The thorn dir is a plain
+    /// directory (not a symlink into `repos/`), so item 2 of the fingerprint
+    /// is the `<dir>` marker and item 3 (repo URL) is omitted — exactly the
+    /// "hand-placed arrangement" / test-fixture case, and it needs no real
+    /// git repo to exercise the file-content half of the mechanism.
+    fn write_shape_fixture(cactus: &Path) -> (PathBuf, PathBuf) {
+        let list = cactus.join("crl.th");
+        fs::write(
+            &list,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/testarr.git\n\
+             !CHECKOUT = TestArr/TestThorn\n",
+        )
+        .unwrap();
+        let thorn_dir = cactus.join("arrangements/TestArr/TestThorn");
+        fs::create_dir_all(thorn_dir.join("src")).unwrap();
+        fs::write(thorn_dir.join("configuration.ccl"), "REQUIRES GenericFD\n").unwrap();
+        fs::write(thorn_dir.join("src/make.code.defn"), "SRCS = thorn.cc\n").unwrap();
+        fs::write(thorn_dir.join("src/thorn.cc"), "int a;\n").unwrap();
+        (list, thorn_dir)
+    }
+
+    /// Fabricate stale per-thorn build state exactly as a real prior build
+    /// would leave behind — same shape as `provider_swap_invalidates_per_thorn_build_state`.
+    fn fabricate_stale_thorn_state(config_dir: &Path, thorn: &str) {
+        fs::create_dir_all(config_dir.join("build").join(thorn)).unwrap();
+        fs::write(config_dir.join("build").join(thorn).join("Kranc.cc.d"), "stale\n").unwrap();
+        fs::write(config_dir.join("lib").join(format!("libthorn_{thorn}.a")), "stale\n").unwrap();
+    }
+
+    fn stale_thorn_state_gone(config_dir: &Path, thorn: &str) -> bool {
+        !config_dir.join("build").join(thorn).exists()
+            && !config_dir.join("lib").join(format!("libthorn_{thorn}.a")).exists()
+    }
+
+    /// The real incident this whole mechanism exists for: a thorn's
+    /// `configuration.ccl` `REQUIRES` goes non-empty -> empty (here, deleted
+    /// entirely) with the thornlist itself byte-identical. `provider_delta`
+    /// is blind to this — the provider never moved — so without
+    /// `thorn_shapes` the stale `build/<Thorn>/` would survive into a
+    /// reconfigure that just deleted the bindings header it references.
+    #[test]
+    fn ccl_change_invalidates_per_thorn_build_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        let (list, thorn_dir) = write_shape_fixture(&cactus);
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list);
+        let first = build(&inst, &machine, "sim", &first_opts).unwrap();
+        assert!(first.rebuilt);
+        assert!(first.meta.thorn_shapes.as_ref().unwrap().contains_key("TestThorn"));
+
+        let config_dir = cactus.join("configs/sim");
+        fabricate_stale_thorn_state(&config_dir, "TestThorn");
+
+        // Rewrite configuration.ccl to a comment-only file: same thornlist,
+        // same provider, different shape.
+        fs::write(thorn_dir.join("configuration.ccl"), "# no longer requires anything\n").unwrap();
+        clear_log();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(edited.rebuilt, "a shape change must rebuild");
+        assert!(log().contains("sim-config"), "must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "a shape change needs no realclean: {}", log());
+        assert!(
+            stale_thorn_state_gone(&config_dir, "TestThorn"),
+            "the stale per-thorn build state must be removed"
+        );
+    }
+
+    /// The second incident: a source file removed from a thorn's `src/`.
+    /// Cactus's `ar` would otherwise update `libthorn_<Thorn>.a` in place,
+    /// letting the orphan `.o` link in silently — so the whole per-thorn
+    /// build state must be invalidated instead.
+    #[test]
+    fn removed_source_file_invalidates_per_thorn_build_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        let (list, thorn_dir) = write_shape_fixture(&cactus);
+        // A second source file that will be removed between builds.
+        fs::write(thorn_dir.join("src/extra.cc"), "int b;\n").unwrap();
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list);
+        let first = build(&inst, &machine, "sim", &first_opts).unwrap();
+        assert!(first.rebuilt);
+
+        let config_dir = cactus.join("configs/sim");
+        fabricate_stale_thorn_state(&config_dir, "TestThorn");
+
+        fs::remove_file(thorn_dir.join("src/extra.cc")).unwrap();
+        clear_log();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(edited.rebuilt, "a removed source file must rebuild");
+        assert!(!log().contains("realclean"), "needs no realclean: {}", log());
+        assert!(
+            stale_thorn_state_gone(&config_dir, "TestThorn"),
+            "the stale per-thorn build state must be removed"
+        );
+    }
+
+    /// The critical negative case: editing only the *body* of an ordinary
+    /// source file — no file added or removed, no `.ccl`/`make.*` touched —
+    /// must NOT be treated as a shape change. `make`'s own `.d` dependency
+    /// tracking is what should handle this, exactly as it does for the flesh
+    /// (`SourceDelta::Edited`); if `thorn_shapes` hashed body content, every
+    /// edit would wipe a thorn's whole build directory, punishing anyone
+    /// iterating on sources.
+    #[test]
+    fn body_edit_does_not_wipe_per_thorn_build_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        let (list, thorn_dir) = write_shape_fixture(&cactus);
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list);
+        let first = build(&inst, &machine, "sim", &first_opts).unwrap();
+        assert!(first.rebuilt);
+        let first_shape = first.meta.thorn_shapes.as_ref().unwrap()["TestThorn"].clone();
+
+        let config_dir = cactus.join("configs/sim");
+        fabricate_stale_thorn_state(&config_dir, "TestThorn");
+
+        // Edit the body of the ordinary source file only.
+        fs::write(thorn_dir.join("src/thorn.cc"), "int a; int b;\n").unwrap();
+        clear_log();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!edited.rebuilt, "a body-only edit must not by itself trigger a rebuild");
+        assert_eq!(
+            edited.meta.thorn_shapes.as_ref().unwrap()["TestThorn"], first_shape,
+            "the fingerprint must be blind to ordinary source content"
+        );
+        assert!(
+            !stale_thorn_state_gone(&config_dir, "TestThorn"),
+            "make must be left to handle a body edit — the per-thorn build state must survive"
+        );
+
+        // The assertion above is necessary but not sufficient: nothing was
+        // rebuilt, so the deletion block never ran and could not have wiped
+        // anything regardless. Force a real `Incremental` pass — a *second*
+        // thorn changing shape in the same build — and check that the
+        // invalidation is scoped to that thorn and does not sweep up the
+        // body-edited one alongside it.
+        let other_dir = cactus.join("arrangements/TestArr/OtherThorn");
+        fs::create_dir_all(other_dir.join("src")).unwrap();
+        fs::write(other_dir.join("configuration.ccl"), "REQUIRES GenericFD\n").unwrap();
+        fs::write(other_dir.join("src/make.code.defn"), "SRCS = other.cc\n").unwrap();
+        fs::write(other_dir.join("src/other.cc"), "int c;\n").unwrap();
+        let list = cactus.join("crl.th");
+        fs::write(
+            &list,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/testarr.git\n\
+             !CHECKOUT = TestArr/TestThorn TestArr/OtherThorn\n",
+        )
+        .unwrap();
+        clear_log();
+        build(&inst, &machine, "sim", &opts).unwrap();
+
+        // Both thorns now have a recorded baseline and fabricated stale state.
+        fabricate_stale_thorn_state(&config_dir, "TestThorn");
+        fabricate_stale_thorn_state(&config_dir, "OtherThorn");
+
+        // One body edit, one shape change, in the same build.
+        fs::write(thorn_dir.join("src/thorn.cc"), "int a; int b; int c;\n").unwrap();
+        fs::write(other_dir.join("configuration.ccl"), "# nothing required now\n").unwrap();
+        clear_log();
+        let mixed = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(mixed.rebuilt, "a shape change must trigger a rebuild");
+        assert!(
+            stale_thorn_state_gone(&config_dir, "OtherThorn"),
+            "the reshaped thorn's stale build state must be removed"
+        );
+        assert!(
+            !stale_thorn_state_gone(&config_dir, "TestThorn"),
+            "invalidation must be scoped per thorn: a body-edited thorn keeps its build state \
+             even while another thorn is being invalidated in the same build"
+        );
     }
 
     /// Defect A, configure-failure branch: the marker is absent (configure
