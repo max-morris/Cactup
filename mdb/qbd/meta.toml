@@ -23,7 +23,7 @@ nickname    = "qbd"
 location    = "LONI"
 description = "Auto-configured"
 status      = "production"
-hostname    = "qbd504.loni.org"
+hostname    = "qbd.loni.org"
 
 [paths]
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.

@@ -360,20 +360,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         let clears_partial = was_partial && unfetched.is_empty();
         match &source {
             Source::Release { tag, .. } => println!(
-                "This installation is now on {} (its install-time provenance is preserved; \
-                 `cactup list` shows both).{}",
+                "This installation is now on {}.{}",
                 tag.bold(),
                 if clears_partial { " (this clears the previous partial-adoption warning)" } else { "" }
             ),
             Source::File { path, .. } => println!(
-                "This installation now tracks the custom thornlist {} (install-time \
-                 provenance preserved).{}",
+                "This installation now tracks the custom thornlist {}.{}",
                 path.display().to_string().bold(),
                 if clears_partial { " (this clears the previous partial-adoption warning)" } else { "" }
             ),
             Source::Live { .. } if clears_partial => println!(
-                "Every repo the live thornlist names is now fetched; this installation is \
-                 fully in sync with it again."
+                "This installation is now fully in sync with the live thornlist."
             ),
             Source::Live { .. } => {}
         }
@@ -598,13 +595,6 @@ fn print_skip_block(skipped: &[fetch::SkippedRepo], overwrite_modified: bool) {
             format!("--overwrite {}", skipped[0].repo).bold(),
             "-s/--silent".bold()
         );
-        if skipped.iter().any(|s| matches!(s.reason, fetch::git::DirtyReason::RemoteUrlChanged { .. })) {
-            println!(
-                "  Forcing a repo skipped for a changed remote URL also re-points its {} at the \
-                 thornlist's URL before fetching (e.g. adopting a fork).",
-                "origin".bold()
-            );
-        }
     }
 }
 
@@ -1116,7 +1106,6 @@ fn print_partial_adoption(header_line: &str, unfetched: &IndexMap<String, Unfetc
             .yellow()
         );
     }
-    println!("`cactup inst show` reports this until every repo is fetched.");
 }
 
 /// §7.4: `rebuild_decision` now diffs the per-repo HEADs `fetch-state.toml`
