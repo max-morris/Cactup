@@ -118,6 +118,9 @@ fn list(installation: &Installation) -> Res<()> {
 /// What the installation's live thornlist currently holds, from the DB
 /// entry's provenance fields: an explicit-source refetch (which records
 /// `current_*`) outranks install-time provenance, which is never rewritten.
+/// When `unfetched_repos` (§2.1) is non-empty, the tree only partially
+/// conforms to that provenance — some repos were skipped or failed the last
+/// refetch — so that is appended too rather than silently claimed away.
 fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String {
     let (release, from_list) = if entry.current_release.is_some() || entry.current_thornlist.is_some()
     {
@@ -125,11 +128,23 @@ fn live_thornlist_source(entry: &crate::database::CactusInstallation) -> String 
     } else {
         (entry.release.as_deref(), entry.thornlist.as_deref())
     };
-    match (release, from_list) {
+    let mut source = match (release, from_list) {
         (Some(release), _) => format!("release {release}"),
         (None, Some(list)) => format!("custom, from {list}"),
         (None, None) => "custom installation".to_owned(),
+    };
+    if !entry.unfetched_repos.is_empty() {
+        let failed = entry.failed_repo_count();
+        let skipped = entry.skipped_repo_count();
+        if failed > 0 {
+            source.push_str(&format!(
+                " (partial: {failed} repo(s) failed to fetch, {skipped} skipped)"
+            ));
+        } else {
+            source.push_str(&format!(" (partial: {skipped} repo(s) not fetched)"));
+        }
     }
+    source
 }
 
 /// `cactup config show [name]`: the active config, or a named one, in detail.
@@ -301,6 +316,7 @@ mod tests {
                 thornlist: thornlist.map(str::to_owned),
                 current_release: current_release.map(str::to_owned),
                 current_thornlist: current_thornlist.map(str::to_owned),
+                unfetched_repos: Default::default(),
             }
         };
         // Install-time provenance, never refetched.
@@ -320,6 +336,56 @@ mod tests {
         assert_eq!(
             live_thornlist_source(&entry(None, Some("/p/forks.th"), Some("ET_2026_11"), None)),
             "release ET_2026_11"
+        );
+    }
+
+    /// §2.1's `unfetched_repos`: a partial adoption is surfaced as a suffix
+    /// on whichever provenance string would otherwise be returned, and is
+    /// silent when the tree fully conforms. A failed repo (an error) is
+    /// worded differently from a merely-skipped one (a choice).
+    #[test]
+    fn live_thornlist_source_flags_partial_conformance() {
+        use crate::database::{UnfetchedReason, UnfetchedRepo};
+
+        let mut partial = crate::database::CactusInstallation {
+            alias: "et".into(),
+            release: Some("ET_2026_05".into()),
+            path: "/inst".into(),
+            thornlist: None,
+            current_release: None,
+            current_thornlist: None,
+            unfetched_repos: Default::default(),
+        };
+        assert_eq!(live_thornlist_source(&partial), "release ET_2026_05");
+
+        let mut unfetched = indexmap::IndexMap::new();
+        unfetched.insert(
+            "cactusbase".to_owned(),
+            UnfetchedRepo {
+                reason: UnfetchedReason::Skipped,
+                thorns: vec!["CactusBase/Boundary".to_owned()],
+                detail: Some("worktree modified".to_owned()),
+            },
+        );
+        partial.unfetched_repos = unfetched;
+        assert_eq!(
+            live_thornlist_source(&partial),
+            "release ET_2026_05 (partial: 1 repo(s) not fetched)"
+        );
+
+        let mut with_failure = indexmap::IndexMap::new();
+        with_failure.insert(
+            "openpmd-api".to_owned(),
+            UnfetchedRepo {
+                reason: UnfetchedReason::Failed,
+                thorns: vec!["ExternalLibraries/openPMD".to_owned()],
+                detail: Some("connection reset by peer".to_owned()),
+            },
+        );
+        partial.unfetched_repos = with_failure;
+        assert_eq!(
+            live_thornlist_source(&partial),
+            "release ET_2026_05 (partial: 1 repo(s) failed to fetch, 0 skipped)"
         );
     }
 

@@ -96,7 +96,7 @@ and is concerned **exclusively** with global cactup state:
 
 - `cactup-version`
 - `installations`: alias → `{ alias, release, path, thornlist?,
-  current-release?, current-thornlist? }`. `release` is
+  current-release?, current-thornlist?, unfetched-repos? }`. `release` is
   `null` for a **custom installation** (`install --thornlist`), in which case
   `thornlist` records the absolute path it was installed from — the only thing
   that identifies such an installation, and what `show`/`list` name in place of
@@ -106,8 +106,24 @@ and is concerned **exclusively** with global cactup state:
   optional `current-release` / `current-thornlist` keys (absent until the first
   explicit-source refetch; serde `default` + `skip_serializing_if`, so no
   `schema` bump), and `list`/`show` render both, e.g. "ET_2026_05, now on
-  ET_2026_11". They are recorded only when no repo was skipped (or `-f` forced
-  the full fetch) — the DB must not assert a tree state that does not exist.
+  ET_2026_11". They are recorded whenever the refetched thornlist is adopted
+  on disk, even if some repos were skipped as dirty or failed — the
+  installation now tracks that list as authoritatively as the fetch allowed.
+  `unfetched-repos` (optional, same serde `default` + `skip_serializing_if`,
+  so no `schema` bump) is a map of repo name → `{ reason, thorns, detail? }`,
+  recording exactly which repos the refetch did **not** fetch and why:
+  `reason` is `skipped` (dirty local state, preserved on purpose — a
+  supported workflow) or `failed` (an error — the user asked for the fetch
+  and did not get it), `thorns` the thorns that repo backs (a failed
+  download/external/symlink component backs itself, so counts stay
+  consistent), and `detail` the dirty-state description or error text.
+  Non-empty means the tree only **partially** conforms to the recorded
+  thornlist — those thorns on disk still hold their previous contents, which
+  `show`/`list`/`config show` report as a conformance caveat, failures
+  angrier than skips (§3.2). It is cleared by any refetch that fetches every
+  repo the thornlist names — the DB must not assert a tree state that does
+  not exist; it now records the shortfall explicitly rather than withholding
+  the provenance.
 - `active-installation`
 - **knobs** (new; see §5) — global defaults, one flat map (a `~/.cactup` lives
   on exactly one machine).
@@ -400,7 +416,15 @@ written verbatim to `Cactus/thornlists/einsteintoolkit.th` and
 and divergence of the live copy from it (compared as parsed component sets,
 not text) means a hand edit → refetch refuses to replace it without
 `--replace-thornlist`/`-f`. The DB records `current-release`/
-`current-thornlist` (§2.1) without touching install-time provenance. A refetch
+`current-thornlist` (§2.1) without touching install-time provenance, and does
+so on adoption even when repos were skipped as dirty or failed; the shortfall
+is recorded in `unfetched-repos` (§2.1) and reported by `show`, `list`, and
+`config show` alike, in two tones: **failed** repos are an error (red,
+reported first, header word `INCOMPLETE`, remedy: retry the refetch) while
+**skipped** repos are a supported choice (yellow, header word `PARTIAL` when
+nothing failed, remedy: `refetch -f`/`--overwrite-modified` if the skip was
+unintended). Refetch itself prints a loud "Partial adoption" block with the
+same FAILED/skipped split whenever this happens. A refetch
 does not rebuild configs; it warns per config (§7.4).
 
 ## 4. The machine database (MDB)

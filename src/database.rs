@@ -57,6 +57,67 @@ pub struct CactusInstallation {
     pub current_release: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_thornlist: Option<String>,
+    /// Repos the last refetch did not fetch — skipped as dirty, or failed —
+    /// and why. Non-empty means the tree only *partially* conforms to the
+    /// recorded thornlist above: those thorns on disk still hold what they
+    /// held before. Recorded because the thornlist is adopted on disk even
+    /// when some repos are skipped or a fetch errors, so the DB would
+    /// otherwise assert a conformance the tree does not have. Cleared by any
+    /// refetch that fetches every repo the list names (e.g. `refetch -f`).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub unfetched_repos: IndexMap<String, UnfetchedRepo>,
+}
+
+/// A repo the last refetch did not fetch, and why: a deliberate skip (the
+/// repo has local state) or an outright failure (the fetch was attempted and
+/// errored). The two are not the same kind of fact — a skip is a supported
+/// workflow the user may have intended, a failure is not — so callers must
+/// keep them distinguishable rather than lumping both into one count.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub struct UnfetchedRepo {
+    /// Why it did not get fetched — a deliberate skip or an outright error.
+    pub reason: UnfetchedReason,
+    /// The thorns this repo backs. For a failed download/external component,
+    /// which backs no other thorn, this is the component itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thorns: Vec<String>,
+    /// For `Skipped`, the dirty-state description (`local commits`, …); for
+    /// `Failed`, the error text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnfetchedReason {
+    /// Left alone deliberately: the repo has local state (modifications,
+    /// local commits, a switched branch, an in-progress rebase, …). A
+    /// supported workflow, not an error — `--overwrite-modified`/`-f`
+    /// fetches over it if that was not what the user wanted.
+    Skipped,
+    /// The fetch was attempted and errored. The user asked for this repo and
+    /// did not get it, so this is an error state, reported more loudly.
+    Failed,
+}
+
+impl CactusInstallation {
+    /// Thorns whose on-disk contents do not conform to the recorded
+    /// thornlist, i.e. the thorns backed by every unfetched repo.
+    pub fn unfetched_thorn_count(&self) -> usize {
+        self.unfetched_repos.values().map(|r| r.thorns.len()).sum()
+    }
+
+    /// Repos that errored out — an error state, not a choice, reported more
+    /// loudly than a skip.
+    pub fn failed_repo_count(&self) -> usize {
+        self.unfetched_repos.values().filter(|r| r.reason == UnfetchedReason::Failed).count()
+    }
+
+    /// Repos deliberately left alone because they hold local state.
+    pub fn skipped_repo_count(&self) -> usize {
+        self.unfetched_repos.values().filter(|r| r.reason == UnfetchedReason::Skipped).count()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -295,6 +356,7 @@ mod tests {
                     thornlist: Some("/home/u/lists/mine.th".to_owned()),
                     current_release: None,
                     current_thornlist: None,
+                    unfetched_repos: IndexMap::new(),
                 },
             );
             Ok(())
@@ -309,6 +371,89 @@ mod tests {
         // existing database.json files gain nothing.
         let raw = fs::read_to_string(dir.path().join("database.json")).unwrap();
         assert!(raw.contains("mine.th"), "{raw}");
+    }
+
+    /// `unfetched_repos` — the partial-conformance marker — survives a
+    /// write/read round-trip with its order and contents intact (a `Skipped`
+    /// and a `Failed` entry alike), and stays invisible in the JSON (no key
+    /// emitted) when empty, so pre-existing `database.json` files gain
+    /// nothing from this field.
+    #[test]
+    fn unfetched_repos_records_partial_conformance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        let mut unfetched = IndexMap::new();
+        unfetched.insert(
+            "carpetx".to_owned(),
+            UnfetchedRepo {
+                reason: UnfetchedReason::Skipped,
+                thorns: vec!["CarpetX/Algo".to_owned(), "CarpetX/BoxUtils".to_owned()],
+                detail: Some("local commits".to_owned()),
+            },
+        );
+        unfetched.insert(
+            "openpmd-api".to_owned(),
+            UnfetchedRepo {
+                reason: UnfetchedReason::Failed,
+                thorns: vec!["ExternalLibraries/openPMD".to_owned()],
+                detail: Some("connection reset by peer".to_owned()),
+            },
+        );
+        db.update(|d| {
+            d.installations.insert(
+                "et".to_owned(),
+                CactusInstallation {
+                    alias: "et".to_owned(),
+                    release: Some("ET_2026_05".to_owned()),
+                    path: "/x".to_owned(),
+                    thornlist: None,
+                    current_release: None,
+                    current_thornlist: None,
+                    unfetched_repos: unfetched,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let snapshot = db.read().unwrap();
+        let entry = &snapshot.installations["et"];
+        let carpetx = &entry.unfetched_repos["carpetx"];
+        assert_eq!(carpetx.reason, UnfetchedReason::Skipped);
+        assert_eq!(carpetx.thorns, vec!["CarpetX/Algo".to_owned(), "CarpetX/BoxUtils".to_owned()]);
+        assert_eq!(carpetx.detail.as_deref(), Some("local commits"));
+        let openpmd = &entry.unfetched_repos["openpmd-api"];
+        assert_eq!(openpmd.reason, UnfetchedReason::Failed);
+        assert_eq!(openpmd.thorns, vec!["ExternalLibraries/openPMD".to_owned()]);
+        assert_eq!(openpmd.detail.as_deref(), Some("connection reset by peer"));
+        assert_eq!(entry.unfetched_thorn_count(), 3);
+        assert_eq!(entry.failed_repo_count(), 1);
+        assert_eq!(entry.skipped_repo_count(), 1);
+        let raw = fs::read_to_string(dir.path().join("database.json")).unwrap();
+        assert!(raw.contains("unfetched-repos"), "{raw}");
+
+        // A separate DB with only an empty map: the key is skipped entirely
+        // — existing database.json files gain nothing from this field.
+        let dir2 = tempfile::tempdir().unwrap();
+        let db2 = Db::in_dir(dir2.path());
+        db2.update(|d| {
+            d.installations.insert(
+                "clean".to_owned(),
+                CactusInstallation {
+                    alias: "clean".to_owned(),
+                    release: Some("ET_2026_05".to_owned()),
+                    path: "/y".to_owned(),
+                    thornlist: None,
+                    current_release: None,
+                    current_thornlist: None,
+                    unfetched_repos: IndexMap::new(),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let raw2 = fs::read_to_string(dir2.path().join("database.json")).unwrap();
+        assert!(!raw2.contains("unfetched-repos"), "{raw2}");
     }
 
     #[test]

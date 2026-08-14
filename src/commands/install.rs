@@ -358,6 +358,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             thornlist: source_thornlist.clone(),
             current_release: None,
             current_thornlist: None,
+            unfetched_repos: Default::default(),
         });
         if database.active_installation.is_none() {
             database.active_installation = Some(alias.clone());

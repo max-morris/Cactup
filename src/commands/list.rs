@@ -32,6 +32,22 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
             }
             _ => {}
         }
+        // §2.1's `unfetched_repos`: non-empty means the on-disk tree only
+        // partially conforms to the thornlist named above — some repos were
+        // skipped (dirty) or failed the last refetch. A failure is an error
+        // the user did not ask for, so it reads angrier than a mere skip.
+        if !installation.unfetched_repos.is_empty() {
+            let failed = installation.failed_repo_count();
+            let skipped = installation.skipped_repo_count();
+            if failed > 0 {
+                print!(
+                    "{}",
+                    format!(", partial ({failed} repo(s) FAILED, {skipped} skipped)").bright_red()
+                );
+            } else {
+                print!("{}", format!(", partial ({skipped} repo(s) not fetched)").yellow());
+            }
+        }
         if let Some(active_installation) = &database.active_installation && *active_installation == installation.alias {
             print!("{}", " (active)".bold().bright_green());
         }
