@@ -229,6 +229,51 @@ After `refetch --release TAG` or `refetch FILE`, `cactup list` and
 `cactup inst show` render "now on `<TAG>`" next to the install-time release,
 so you can tell an installation has moved on.
 
+### Partial adoption
+
+If the skip contract left some repos untouched — or a fetch simply failed —
+the new thornlist is still adopted: cactup now tracks the installation as
+being on `<TAG>` as far as that refetch could actually manage, rather than
+silently keeping the old provenance. But it also remembers exactly which
+repos didn't make it over — and *why*, because the two causes mean different
+things. A **skipped** repo is a supported workflow: you have local work
+there, and refetch preserved it on purpose. A **failed** repo is an error —
+you asked for it and didn't get it — so it is reported first, in red, with
+its own remedy. `show` calls all of this out instead of reporting clean
+conformance:
+
+```sh
+cactup inst show myrelease
+# release:      ET_2026_05
+# now on:       ET_2026_11 (refetched)
+# conformance:  INCOMPLETE — 1 repo(s) FAILED to fetch and 1 repo(s) were skipped; 4 thorn(s) on disk do not match the thornlist above.
+#                 Failed:
+#                   carpetx — connection reset by peer
+#                     CarpetX/Algo, CarpetX/BoxUtils
+#                 Skipped:
+#                   mclachlan — local commits
+#                     McLachlan/ML_BSSN, McLachlan/ML_ADMConstraints
+#                 Retry the failed repo(s) with `cactup inst refetch`.
+#                 Fetch over the skipped ones with `cactup inst refetch -f` (modified files are backed up first); `cactup inst delta` shows what differs.
+```
+
+When nothing failed the header softens to `PARTIAL — N repo(s) were
+skipped, …` and only the yellow skipped group appears. At most six thorns
+are named per repo and eight repos in total, each capped with a `+N more`
+tail; `cactup inst delta` has the unabridged picture.
+
+`cactup list` appends the shorter `, partial (2 repo(s) not fetched)` — or,
+when anything failed, `, partial (1 repo(s) FAILED, 1 skipped)` in red — and
+`cactup config show`'s live-thornlist provenance line gets the matching
+`(partial: …)` suffix. Refetch itself doesn't adopt a partial thornlist
+quietly either — it prints a "Partial adoption" block naming the same repos
+at the moment it happens, with the same FAILED/skipped split.
+
+The marker clears itself the next time a refetch manages to fetch every repo
+the thornlist names — `cactup inst refetch -f` backs up the dirty repos'
+modified files first and then fetches over them, or you can clean the repos
+by hand and refetch normally.
+
 > [!NOTE]
 > Refetching does not rebuild anything by itself, but it does not have to be
 > followed by `-f` either. Every build records the commit each of that config's

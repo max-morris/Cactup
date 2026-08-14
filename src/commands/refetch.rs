@@ -11,6 +11,7 @@
 
 use super::{prompt_with_default, Ctx};
 use crate::args::RefetchArgs;
+use crate::database::{UnfetchedReason, UnfetchedRepo};
 use crate::fetch::{self, link::LinkOutcome, GitAction};
 use crate::installation::Installation;
 use crate::lock::LinkLock;
@@ -18,6 +19,7 @@ use crate::thornlist::{self, Thornlist};
 use crate::{manifest, shell, Res};
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
+use indexmap::IndexMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -206,7 +208,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         println!("Forcing {} skipped repo(s): {}.", moved.len(), moved.join(", ").bold());
     }
 
-    let had_work = !plan.git.is_empty() || !plan.downloads.is_empty() || !plan.external.is_empty();
+    // The symlink pass runs for every git component regardless of whether its
+    // repo was skipped (it targets the checkout, not the repo dir), and it
+    // can fail on its own (a blocked/foreign path becomes a `Failure`) — so
+    // it is part of the fetch's effect on disk and counts as work. Without
+    // this, "every git repo skipped AND one symlink errored" left both
+    // `fetch_ok` and `had_work` false, so the whole block below silently
+    // skipped writing the thornlist or updating the DB.
+    let had_work = !plan.git.is_empty()
+        || !plan.downloads.is_empty()
+        || !plan.external.is_empty()
+        || !plan.links.is_empty();
     let report = fetch::execute(&plan, &inst.root)?;
 
     // Post-pass bookkeeping: record what we fetched (prune safety + the
@@ -278,6 +290,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // old live copy is snapshotted first).
     let fetch_ok = report.failures.is_empty();
     let mut recorded = false;
+    let mut unfetched: IndexMap<String, UnfetchedRepo> = IndexMap::new();
     if fetch_ok || had_work {
         if source.is_explicit() {
             snapshot_live(&inst, &live_path)?;
@@ -292,39 +305,78 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
                 .with_context(|| format!("Failed to write {}", pristine_path.display()))?;
         }
 
-        // DB provenance (§2.1): only for explicit sources, and only when the
-        // tree fully matches the new list (no skips, unless they were forced
-        // in and fetched).
-        if source.is_explicit() && plan.skipped.is_empty() && fetch_ok {
-            let (current_release, current_thornlist) = match &source {
-                Source::Release { tag, .. } => (Some(tag.clone()), None),
-                Source::File { path, .. } => (None, Some(path.display().to_string())),
-                Source::Live { .. } => unreachable!(),
-            };
-            let alias = inst.alias.clone();
-            ctx.db.update(move |db| {
-                let entry = db
-                    .installations
-                    .get_mut(&alias)
-                    .ok_or_else(|| anyhow!("installation \"{alias}\" vanished from the database"))?;
-                entry.current_release = current_release.clone();
-                entry.current_thornlist = current_thornlist.clone();
-                Ok(())
-            })?;
-            recorded = true;
-            match &source {
-                Source::Release { tag, .. } => println!(
-                    "This installation is now on {} (its install-time provenance is preserved; \
-                     `cactup list` shows both).",
-                    tag.bold()
-                ),
-                Source::File { path, .. } => println!(
-                    "This installation now tracks the custom thornlist {} (install-time \
-                     provenance preserved).",
-                    path.display().to_string().bold()
-                ),
-                Source::Live { .. } => unreachable!(),
+        // DB provenance (§2.1): the thornlist is adopted on disk above
+        // regardless of whether every repo behind it was actually fetched
+        // (a dirty repo is skipped, not blocked on), so the DB now records
+        // that adoption unconditionally too — asserting anything less would
+        // just be a second, independently-stale copy of what's on disk.
+        // What it also records, separately, is which repos were left
+        // unfetched (skipped as dirty, or failed) and the thorns they back:
+        // `unfetched_repos`, non-empty exactly when the tree only
+        // *partially* conforms to the thornlist just recorded. Any refetch
+        // that fetches every repo the list names — e.g. `refetch -f`, which
+        // drains `plan.skipped` via `Plan::force` before we get here —
+        // naturally computes an empty map and clears the marker.
+        unfetched = unfetched_repos(&plan, &report);
+        let explicit = match &source {
+            Source::Release { tag, .. } => Some((Some(tag.clone()), None::<String>)),
+            Source::File { path, .. } => Some((None::<String>, Some(path.display().to_string()))),
+            Source::Live { .. } => None,
+        };
+        let alias = inst.alias.clone();
+        let unfetched_for_db = unfetched.clone();
+        let was_partial = ctx.db.update(move |db| {
+            let entry = db
+                .installations
+                .get_mut(&alias)
+                .ok_or_else(|| anyhow!("installation \"{alias}\" vanished from the database"))?;
+            let was_partial = !entry.unfetched_repos.is_empty();
+            if let Some((current_release, current_thornlist)) = explicit {
+                entry.current_release = current_release;
+                entry.current_thornlist = current_thornlist;
             }
+            entry.unfetched_repos = unfetched_for_db;
+            Ok(was_partial)
+        })?;
+        recorded = source.is_explicit();
+
+        let clears_partial = was_partial && unfetched.is_empty();
+        match &source {
+            Source::Release { tag, .. } => println!(
+                "This installation is now on {} (its install-time provenance is preserved; \
+                 `cactup list` shows both).{}",
+                tag.bold(),
+                if clears_partial { " (this clears the previous partial-adoption warning)" } else { "" }
+            ),
+            Source::File { path, .. } => println!(
+                "This installation now tracks the custom thornlist {} (install-time \
+                 provenance preserved).{}",
+                path.display().to_string().bold(),
+                if clears_partial { " (this clears the previous partial-adoption warning)" } else { "" }
+            ),
+            Source::Live { .. } if clears_partial => println!(
+                "Every repo the live thornlist names is now fetched; this installation is \
+                 fully in sync with it again."
+            ),
+            Source::Live { .. } => {}
+        }
+        if !unfetched.is_empty() {
+            let thorn_count = unfetched.values().map(|r| r.thorns.len()).sum::<usize>();
+            let header_line = if source.is_explicit() {
+                format!(
+                    "Partial adoption: the thornlist above is now recorded, but {} repo(s) \
+                     were not fetched, so {thorn_count} thorn(s) on disk still hold their \
+                     previous contents.",
+                    unfetched.len()
+                )
+            } else {
+                format!(
+                    "{} repo(s) were not fetched, so {thorn_count} thorn(s) on disk do not \
+                     match the live thornlist.",
+                    unfetched.len()
+                )
+            };
+            print_partial_adoption(&header_line, &unfetched);
         }
     }
 
@@ -344,11 +396,17 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             println!("  {}: {}", f.what.bold(), f.error);
         }
         println!(
-            "The recorded thornlist {} updated.",
-            if source.is_explicit() {
-                if recorded { "WAS" } else { "was written to disk but NOT recorded in the database; re-run refetch to finish" }
+            "The recorded thornlist {}.",
+            if recorded {
+                if unfetched.is_empty() {
+                    "WAS updated".to_owned()
+                } else {
+                    "WAS updated (see the partial-adoption note above for what these \
+                     failures leave unfetched)"
+                        .to_owned()
+                }
             } else {
-                "did not need to be"
+                "did not need to be updated".to_owned()
             }
         );
         bail!("refetch completed with {} failure(s)", report.failures.len());
@@ -945,16 +1003,103 @@ fn snapshot_live(inst: &Installation, live: &Path) -> Res<()> {
     Ok(())
 }
 
-/// Join names for a one-line message, capping the tail. Mirrors
+/// Join names for a one-line message, capping the tail at `shown`. Mirrors
 /// `build::summarize` (private to that module) — kept in sync by hand since
 /// there is no shared, public helper to call instead.
-fn summarize_names(names: &[String]) -> String {
-    const SHOWN: usize = 8;
-    let head = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
-    match names.len().checked_sub(SHOWN) {
+fn summarize_names(names: &[String], shown: usize) -> String {
+    let head = names.iter().take(shown).cloned().collect::<Vec<_>>().join(", ");
+    match names.len().checked_sub(shown) {
         Some(rest) if rest > 0 => format!("{head}, +{rest} more"),
         _ => head,
     }
+}
+
+/// The repos an `installation refetch` did not fetch — skipped as dirty, or
+/// failed — mapped to why and the thorns they back (§2.1's
+/// `unfetched_repos`). A skip is a supported workflow (the user may have
+/// local work there); a failure is an error the user asked to avoid and did
+/// not, so failures are inserted last and unconditionally: `plan.skipped`
+/// and `report.failures` cannot name the same repo in practice (a skipped
+/// repo never reaches `execute`), but this order — skips via `entry`/
+/// `or_insert`, failures via a plain `insert` — is used anyway so a future
+/// change to that invariant fails safe: the error, the more important fact,
+/// wins rather than being silently shadowed by a stale skip entry.
+fn unfetched_repos(plan: &fetch::Plan, report: &fetch::ExecReport) -> IndexMap<String, UnfetchedRepo> {
+    let mut out: IndexMap<String, UnfetchedRepo> = IndexMap::new();
+    for s in &plan.skipped {
+        out.entry(s.repo.clone()).or_insert_with(|| UnfetchedRepo {
+            reason: UnfetchedReason::Skipped,
+            thorns: s.checkouts.clone(),
+            detail: Some(s.reason.describe()),
+        });
+    }
+    for f in &report.failures {
+        // A failed git repo is named by `f.what == item.repo` (both the clone
+        // /fetch failure and the post-fetch HEAD-mismatch check), and backs
+        // every thorn in that repo's plan entry. A failed download,
+        // external-tool, or symlink component is named by its own checkout
+        // instead, and backs no thorn but itself — so that checkout name is
+        // also its own fallback "thorn" (otherwise the repo count and thorn
+        // count would disagree: one failed download would read as "1 repo(s)
+        // ... so 0 thorn(s)").
+        let thorns = plan
+            .git
+            .iter()
+            .find(|g| g.repo == f.what)
+            .map(|g| g.checkouts.clone())
+            .unwrap_or_else(|| vec![f.what.clone()]);
+        out.insert(
+            f.what.clone(),
+            UnfetchedRepo { reason: UnfetchedReason::Failed, thorns, detail: Some(f.error.clone()) },
+        );
+    }
+    out
+}
+
+/// The "partial adoption" block printed after a refetch that leaves some
+/// repos unfetched: `header_line` names the count/cause (adoption vs.
+/// live-thornlist mismatch — the two callers word it differently). This runs
+/// right after the detailed skip/failure blocks above it, so it stays tight —
+/// what this means for provenance, not a re-listing of detail — just the
+/// repo names, grouped by whether each is an error (angrier: bright red,
+/// bold) or a supported choice (yellow), and how to act on each.
+fn print_partial_adoption(header_line: &str, unfetched: &IndexMap<String, UnfetchedRepo>) {
+    const NAMES_SHOWN: usize = 8;
+    println!("{}", header_line.yellow().bold());
+
+    let failed: Vec<String> = unfetched
+        .iter()
+        .filter(|(_, r)| r.reason == UnfetchedReason::Failed)
+        .map(|(repo, _)| repo.clone())
+        .collect();
+    let skipped: Vec<String> = unfetched
+        .iter()
+        .filter(|(_, r)| r.reason == UnfetchedReason::Skipped)
+        .map(|(repo, _)| repo.clone())
+        .collect();
+
+    if !failed.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "  FAILED: {} — an error; retry with `cactup inst refetch`",
+                summarize_names(&failed, NAMES_SHOWN)
+            )
+            .bright_red()
+            .bold()
+        );
+    }
+    if !skipped.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "  skipped: {} — local state preserved; `cactup inst refetch -f` fetches over them",
+                summarize_names(&skipped, NAMES_SHOWN)
+            )
+            .yellow()
+        );
+    }
+    println!("`cactup inst show` reports this until every repo is fetched.");
 }
 
 /// §7.4: `rebuild_decision` now diffs the per-repo HEADs `fetch-state.toml`
@@ -1019,7 +1164,7 @@ fn report_configs(
                         "      note: thorn name(s) {} now come from a different provider; \
                          `cactup build {name}` removes their stale per-thorn build state \
                          before compiling.",
-                        summarize_names(&changed)
+                        summarize_names(&changed, 8)
                     );
                 }
                 // The sibling case: same provider, but the fetched content
@@ -1035,7 +1180,7 @@ fn report_configs(
                         "      note: thorn(s) {} changed shape (files added/removed, or a \
                          .ccl/make.code.defn edited); `cactup build {name}` removes their \
                          stale per-thorn build state before compiling.",
-                        summarize_names(&reshaped)
+                        summarize_names(&reshaped, 8)
                     );
                 }
             }
