@@ -870,7 +870,7 @@ mod tests {
             r#"
             name = "sim"
             variant = "default"
-            thornlist = "einsteintoolkit.th"
+            thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-sim-1"
             build-id = "build-sim-1"

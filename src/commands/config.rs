@@ -168,10 +168,11 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     };
     println!("{}", meta.name.bold());
     println!("  variant: {}", meta.variant);
-    // The bare path misleads on a custom installation: the live thornlist's
-    // fixed filename is `einsteintoolkit.th` whatever content it holds, so a
-    // config built from a custom install looks stock. Say which resolution
-    // rule produced the path and, for the live list, what it actually holds.
+    // The bare path misleads on a custom installation: the live list's fixed
+    // filename is `installation-default.th` whatever content it holds, so
+    // the path alone can't say whether it's stock or custom. Say which
+    // resolution rule produced the path and, for the live list, what it
+    // actually holds.
     let provenance = if installation.is_live_thornlist(&meta.thornlist) {
         let source = ctx
             .db
@@ -410,7 +411,7 @@ mod tests {
             r#"
             name = "bbh"
             variant = "default"
-            thornlist = "einsteintoolkit.th"
+            thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-bbh-1"
             build-id = "build-bbh-1"

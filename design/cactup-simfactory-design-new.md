@@ -431,21 +431,31 @@ marking exactly the repos that would be forced under the given flags — and
 touches nothing.
 
 A refetched thornlist (from `--release TAG` or a positional `THORNLIST`) is
-written verbatim to `Cactus/thornlists/einsteintoolkit.th` and
-`<root>/einsteintoolkit.th`; the latter is the **pristine as-fetched copy**,
-and divergence of the live copy from it (compared as parsed component sets,
-not text) means a hand edit → refetch refuses to replace it without
-`--replace-thornlist`/`-f`. The DB records `current-release`/
-`current-thornlist` (§2.1) without touching install-time provenance, and does
-so on adoption even when repos were skipped as dirty or failed; the shortfall
-is recorded in `unfetched-repos` (§2.1) and reported by `show`, `list`, and
-`config show` alike, in two tones: **failed** repos are an error (red,
-reported first, header word `INCOMPLETE`, remedy: retry the refetch) while
-**skipped** repos are a supported choice (yellow, header word `PARTIAL` when
-nothing failed, remedy: `refetch -f`/`--overwrite-modified` if the skip was
-unintended). Refetch itself prints a loud "Partial adoption" block with the
-same FAILED/skipped split whenever this happens. A refetch
-does not rebuild configs; it warns per config (§7.4).
+written verbatim to `Cactus/thornlists/installation-default.th` (the **live,
+editable copy** — what a build reads by default) and
+`<root>/installation-source.th` (the **pristine as-fetched copy** — the
+source the installation was fetched from); divergence of the live copy from
+the pristine one (compared as parsed component sets, not text) means a hand
+edit → refetch refuses to replace it without `--replace-thornlist`/`-f`. The
+DB records `current-release`/`current-thornlist` (§2.1) without touching
+install-time provenance, and does so on adoption even when repos were skipped
+as dirty or failed; the shortfall is recorded in `unfetched-repos` (§2.1) and
+reported by `show`, `list`, and `config show` alike, in two tones: **failed**
+repos are an error (red, reported first, header word `INCOMPLETE`, remedy:
+retry the refetch) while **skipped** repos are a supported choice (yellow,
+header word `PARTIAL` when nothing failed, remedy: `refetch -f`/
+`--overwrite-modified` if the skip was unintended). Refetch itself prints a
+loud "Partial adoption" block with the same FAILED/skipped split whenever this
+happens. A refetch does not rebuild configs; it warns per config (§7.4).
+
+Both names are recent: before the rename both copies were called
+`einsteintoolkit.th`, which said nothing about which was which and read as
+"stock Einstein Toolkit" even when it held a custom list. An installation
+created under the old scheme is migrated in place — both files renamed, and
+any config that recorded the old live path retargeted — by the first `cactup`
+command that resolves it; the migration is best-effort and idempotent, and a
+read falls back to the old name if it hasn't run yet, so nothing breaks if it
+can't.
 
 ## 4. The machine database (MDB)
 
@@ -1561,8 +1571,9 @@ cactup config delete <name>
 - `build`: builds (or rebuilds with `-f`) config `<name>` in the active
   installation. `--thornlist` defaults to the thornlist the config was last
   built from (§7.5), falling back to
-  `<Cactus root>/thornlists/einsteintoolkit.th` for a fresh config. `--variant` selects the
-  optionlist variant (required iff the machine has >1 optionlist variant — §4.4).
+  `<Cactus root>/thornlists/installation-default.th` for a fresh config.
+  `--variant` selects the optionlist variant (required iff the machine has >1
+  optionlist variant — §4.4).
   `--universe <U>` runs the build inside a declared universe (e.g. an Apptainer
   image), `--no-universe` forces the host context; both override the
   optionlist/machine defaults (§4.8).
@@ -1636,7 +1647,7 @@ name = "sim-gpu"
 variant = "gpu"                 # optionlist variant used
 gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
 compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
-thornlist = "thornlists/einsteintoolkit.th"
+thornlist = "thornlists/installation-default.th"
 universe = "et-sif"             # resolved build universe; omitted when built bare/in host —
                                  # treated as "host" wherever a build universe is consulted
                                  # (script-variant `build-universes` filtering, §4.4; run coercion, §4.8)
@@ -1730,7 +1741,7 @@ the source is snapshotted verbatim to `configs/<name>/cactup-thornlist.src.th`.
 2. the path recorded in the config's metadata (`thornlist`), when still readable.
 3. that config's `cactup-thornlist.src.th` snapshot, when the recorded path has
    moved or been deleted — with a warning, and the original path stays recorded.
-4. `<Cactus root>/thornlists/einsteintoolkit.th`, for a fresh config only.
+4. `<Cactus root>/thornlists/installation-default.th`, for a fresh config only.
 
 Step 2 means `--thornlist` does not have to be repeated on every rebuild: a
 config built from a custom thornlist never silently reverts to the stock
@@ -3040,7 +3051,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` + `@ENV(NAME)@`** (unset/empty env = hard error); `.py` for logic (JSON-on-stdin convention, §6.1) |
 | cactup binary var | `@SIMFACTORY@` | `@CACTUP@` |
 | Machine detection | `aliaspattern` regex on hostname | `discover.py`; result cached in DB as a single `detected-machine` string (not per-hostname — §4.3) |
-| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<root>/einsteintoolkit.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
+| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<root>/installation-source.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
 | Test-suite command | `sim create --testsuite` (overloads `sim`) | `cactup test run`/`submit` against any built config (own command tree — §11) |
 | Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |

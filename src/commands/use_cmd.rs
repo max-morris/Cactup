@@ -25,6 +25,10 @@ pub fn dispatch(ctx: &Ctx, alias: String) -> Res<()> {
     // the sim-home/test-home keys gets them fixed now, from the machine's
     // [paths] — the hook the sim_home()/test_home() error messages point at.
     let inst = Installation::new(&alias, path);
+    // The same idea for the §3.2 thornlist names: `use` is the other place an
+    // installation from an older cactup gets picked up, and it may be picked up
+    // here before any command that goes through `Installation::resolve`.
+    inst.upgrade_thornlist_names();
     let meta = inst.meta()?;
     if meta.sim_home.is_none() || meta.test_home.is_none() {
         let machine = machine::resolve(ctx)?;
