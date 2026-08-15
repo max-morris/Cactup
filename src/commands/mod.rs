@@ -16,6 +16,7 @@ pub mod sim;
 pub mod test;
 pub mod uninstall;
 pub mod use_cmd;
+pub mod wisdom;
 
 use crate::args::GlobalOpts;
 use crate::database::Db;

@@ -21,6 +21,8 @@ prodash = {
     features = ["progress-tree-log", "render-line", "render-line-crossterm", "render-line-autoconfigure", "signal-hook", "unit-bytes"]
 }
 colored = "3.1.1"
+# Already in the tree transitively (tempfile, gix-fs); pure Rust, MUSL-safe.
+fastrand = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_derive = "1.0.228"
 serde_json = "1.0.150"

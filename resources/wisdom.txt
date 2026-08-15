@@ -1,0 +1,198 @@
+# cactup wisdom corpus (spec §16). This file is compiled into the binary via
+# include_str! and never ships as a file.
+#
+# Format:
+#   - Entries are separated by lines containing only "%".
+#   - Lines whose first non-whitespace character is "#" are comments — use
+#     them to record the source of anything pulled from the internet. They
+#     are never printed.
+#   - An entry whose first line is exactly "!zen" is a quote/wisdom entry
+#     (filtered out under `cactup knob wisdom-kind relevant`); everything
+#     else is a cactup feature tip. Put visible attribution for direct
+#     quotes inside the entry text as an "— Name" line.
+%
+Watch a run live, stdout and stderr side by side, in a scrollable TUI:
+cactup sim log <name> --follow
+%
+The log TUI speaks vim: j/k and h/l scroll, g/G jump, Tab switches panes,
+and the mouse wheel works too. Try it: cactup sim log <name> -f
+%
+Scrolling up in the log TUI pauses following so you can read; jump back to
+the bottom (or press End) to resume the live view.
+%
+Need to grep a live run? -o and -e stream one channel raw, pipe-friendly:
+cactup sim log <name> -o | grep -i horizon
+%
+Test suites get the same live log view as simulations:
+cactup test log <config> --follow
+%
+Ask for more walltime than the queue allows and cactup pre-submits a chain
+of dependency-gated jobs for you: cactup sim submit <name> -w 100:00:00
+%
+Cactus needs time to write its final checkpoint. Tune the reserve with:
+cactup sim submit <name> -w 24:00:00 --checkpt-buffer 00:45:00
+%
+cd straight into a run's output directory:
+cd "$(cactup sim show <name> --output-dir)"
+%
+What was this binary compiled from? The thornlist and optionlist are frozen
+into every simulation at create time: cactup sim show <name> --long
+%
+Plain `cactup sim stop` asks Cactus to wind down and checkpoint; only -f
+goes straight to the scheduler's kill. Graceful first.
+%
+`cactup sim delete` is a trash can — the simulation moves to TRASH/ and is
+recoverable. Only -f purges it for real.
+%
+`cactup sim clean` hard-links byte-identical Formaline tarballs across
+restarts, reclaiming space without ever touching a checkpoint.
+%
+See every simulation across every installation at once:
+cactup sim list --long --all
+%
+Preview exactly what a refetch would do to every repo — clone, fetch,
+align, or skip — without touching anything: cactup inst refetch -n
+%
+Force-refetch just the repos you name — a name matches a repo or any thorn
+it provides: cactup inst refetch --overwrite SpacetimeX
+%
+Refetch never destroys your local modifications: overwritten repos are
+backed up first, under ~/.cactup/refetch-backups/
+%
+Hop an existing installation to another release in place:
+cactup releases --all, then cactup inst refetch --release <name>
+%
+One Ctrl-C stops cactup gracefully — locks released, tempfiles cleaned,
+interrupted work reported honestly. A second one aborts on the spot.
+%
+`-j max` doesn't count your login node's cores — it becomes $(nproc)
+evaluated inside the job itself: cactup build <config> -j max
+%
+Benchmarking a prebuilt executable? Skip configure and make entirely:
+cactup build <config> --virtual /path/to/cactus_exe
+%
+Machines can carry several compile flavors. See them and pick one:
+cactup machine show --variants, then cactup build <config> --variant debug
+%
+Build and run inside an Apptainer image by attaching a universe:
+cactup build <config> --universe et-sif
+%
+Test machine discovery for a cluster you're not logged into:
+cactup machine show --hostname mel5.cct.lsu.edu
+%
+Fork the detected machine into your own tunable copy:
+cactup machine create mymachine --from-existing
+%
+Lost? `cactup show` prints your active installation, active config, and
+resolved machine — read-only, never prompts.
+%
+Tired of typing -a on every submit? Persist a default once:
+cactup knob allocation <account>
+%
+Target another installation for a single command instead of switching:
+cactup --installation <alias> sim list
+%
+See every shell command cactup runs, as it runs it — the fastest way to
+debug a scheduler rejection: cactup --trace sim submit <name>
+%
+The progress tree goes deeper than it shows. Peel it back:
+CACTUP_PROGRESS_DEPTH=6 cactup inst refetch
+%
+Submit-script templates read the environment at substitution time with
+@ENV(NAME)@ — and an unknown or empty variable is a loud error, never a
+silent empty splice.
+%
+Parameter files and scripts ending in .py are first-class: every template
+variable arrives as a Python global, and the script's stdout is the
+artifact. Try: cactup sim submit <name> <parfile>.py
+%
+Run one thorn's tests instead of the whole suite:
+cactup test run McLachlan/ML_BSSN
+%
+# Source: https://en.wikipedia.org/wiki/Perfect_is_the_enemy_of_good
+!zen
+The best is the enemy of the good.
+— Voltaire
+%
+# Source: https://en.wikipedia.org/wiki/Perfect_is_the_enemy_of_good
+# (Watson-Watt's "cult of the imperfect", from his radar work)
+!zen
+Give them the third best to go on with; the second best comes too late,
+the best never comes.
+— Robert Watson-Watt
+%
+# Source: https://silgro.com/fortunes.htm (classic fortune corpus)
+!zen
+An expert is a person who has made all the mistakes that can be made in a
+very narrow field.
+— Niels Bohr
+%
+# Source: https://silgro.com/fortunes.htm (classic fortune corpus)
+!zen
+The purpose of computing is insight, not numbers.
+— Richard Hamming
+%
+# Source: https://silgro.com/fortunes.htm (classic fortune corpus)
+!zen
+Always do right. This will gratify some people and astonish the rest.
+— Mark Twain
+%
+# Source: https://en.wikipedia.org/wiki/Perfect_is_the_enemy_of_good
+!zen
+Better a diamond with a flaw than a pebble without.
+— Confucius
+%
+# Source: https://silgro.com/fortunes.htm; widely attributed to the Harvard
+# chemist Frank Westheimer.
+!zen
+A couple of months in the laboratory can frequently save a couple of hours
+in the library.
+— Frank Westheimer
+%
+# Source: Pasteur's 1854 lecture at Lille ("Dans les champs de
+# l'observation le hasard ne favorise que les esprits préparés").
+!zen
+In the fields of observation, chance favors only the prepared mind.
+— Louis Pasteur
+%
+# Source: https://silgro.com/fortunes.htm (classic fortune corpus)
+!zen
+Controlling complexity is the essence of computer programming.
+— Brian Kernighan
+%
+# Source: Kernighan & Plauger, "The Elements of Programming Style" (1974).
+!zen
+Debugging is twice as hard as writing the code in the first place.
+Therefore, if you write the code as cleverly as possible, you are, by
+definition, not smart enough to debug it.
+— Brian Kernighan
+%
+# Source: Antoine de Saint-Exupéry, "Terre des Hommes" (1939).
+!zen
+Perfection is achieved, not when there is nothing more to add, but when
+there is nothing left to take away.
+— Antoine de Saint-Exupéry
+%
+# Source: Piet Hein, "Grooks" (1966).
+!zen
+Problems worthy of attack prove their worth by hitting back.
+— Piet Hein
+%
+# Source: Marie Curie, as quoted in "Our Precarious Habitat" (1973) by
+# Melvin A. Benarde.
+!zen
+Nothing in life is to be feared, it is only to be understood. Now is the
+time to understand more, so that we may fear less.
+— Marie Curie
+%
+# Source: Seneca, "Letters to Lucilius", letter 13.
+!zen
+We suffer more often in imagination than in reality.
+— Seneca
+%
+# Source: Richard Feynman, 1974 Caltech commencement address
+# ("Cargo Cult Science").
+!zen
+The first principle is that you must not fool yourself — and you are the
+easiest person to fool.
+— Richard Feynman

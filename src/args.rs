@@ -121,6 +121,8 @@ pub(crate) enum Commands {
     /// Inspect and manage machine definitions (§4)
     #[clap(subcommand)]
     Machine(MachineCommand),
+    /// Print one random piece of cactup wisdom (§16)
+    Wisdom,
 }
 
 #[derive(Subcommand, Debug)]
@@ -638,6 +640,8 @@ mod tests {
             vec!["cactup", "machine", "create", "mylaptop", "--from-existing", "--silent"],
             vec!["cactup", "machine", "list"],
             vec!["cactup", "machine", "show", "--hostname", "mel5.host"],
+            vec!["cactup", "knob", "wisdom-frequency", "chatty"],
+            vec!["cactup", "wisdom"],
         ] {
             if let Err(e) = Args::try_parse_from(&argv) {
                 panic!("failed to parse {argv:?}: {e}");

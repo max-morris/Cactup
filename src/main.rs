@@ -17,7 +17,7 @@ mod testsuite;
 mod thornlist;
 mod walltime;
 
-use crate::args::{Args, Commands, ConfigCommand};
+use crate::args::{Args, Commands, ConfigCommand, SimCommand, TestCommand};
 use crate::commands::Ctx;
 use crate::database::Db;
 use clap::Parser;
@@ -63,7 +63,22 @@ fn main() -> Res<()> {
         db: Db::open()?,
     };
 
-    match args.command {
+    // Skip the random post-command wisdom where it would be noise: the
+    // compute-node path must stay hermetic (D11), and the log-follow views
+    // end via Ctrl-C, where a trailing aphorism reads as clutter.
+    let suppress_wisdom = match &args.command {
+        Commands::Sim(SimCommand::Run(run)) if run.sim_dir.is_some() => true,
+        Commands::Sim(SimCommand::Log { follow, follow_out, follow_err, .. })
+        | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. })
+            if *follow || *follow_out || *follow_err =>
+        {
+            true
+        }
+        Commands::Wisdom => true, // no double dose
+        _ => false,
+    };
+
+    let result = match args.command {
         Commands::Releases { all } => commands::releases::dispatch(&ctx, all),
         Commands::List => commands::list::dispatch(&ctx),
         Commands::Show => commands::show::dispatch(&ctx),
@@ -78,5 +93,13 @@ fn main() -> Res<()> {
         Commands::Test(cmd) => commands::test::dispatch(&ctx, cmd),
         Commands::Knob { name, value } => commands::knob::dispatch(&ctx, name, value),
         Commands::Machine(cmd) => commands::machine::dispatch(&ctx, cmd),
+        Commands::Wisdom => commands::wisdom::dispatch(&ctx),
+    };
+
+    // Wisdom after failure would be flippant — and gating on Ok also keeps
+    // anyhow's after-main `Error:` print from landing below decoration.
+    if result.is_ok() && !suppress_wisdom {
+        commands::wisdom::maybe_print(&ctx);
     }
+    result
 }

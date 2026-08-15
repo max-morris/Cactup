@@ -1355,6 +1355,17 @@ Recognized knobs (from `cactup-simfactory-design.txt`): `allocation`, `mail`,
 extras (`user`, `email`) are derived automatically (`$USER`, `git config
 user.email`) the way simfactory's `setup` did, but can be overridden as knobs.
 
+Additionally `wisdom-frequency` and `wisdom-kind` (§16). Unlike the free-form
+knobs above, these have closed value sets: each knob is described by a
+`KnobSpec` — a name plus a `validate` fn (checks + normalizes a user value
+into the stored form; the set path rejects bad values with the list of valid
+ones) and a `render` fn (stored form → display form). Free-form knobs use
+identity fns; future knobs opt into validation by supplying their own.
+`wisdom-frequency` accepts `off|rare|normal|chatty|always`, stores the
+ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
+`normal`, `database.json` holds `"2"`). `wisdom-kind` accepts and stores
+`relevant|all`.
+
 **Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
 as a single flat map — a `~/.cactup` lives on exactly one machine, so there is
 nothing to key them by. This is consistent with D4 (the global DB holds global
@@ -3180,3 +3191,43 @@ Each is marked **ASSUMPTION** inline above; collected here:
 | 23 bugs/quirks | fixed where noted (§6.1, §9.3) or N/A |
 | 24 recommendations | honored (§9 contract, inferred state) |
 ```
+
+---
+
+## 16. Wisdom
+
+`cactup wisdom` prints one random message from a corpus compiled into the
+binary — a mix of **feature tips** (a concise description of a useful or
+obscure cactup feature with a copy-pasteable call to action) and **zen
+entries** (mature, practically applicable words of wisdom; direct quotes
+carry visible `— Name` attribution as part of the printed text).
+
+**Corpus** — `resources/wisdom.txt`, embedded via `include_str!`
+(the file never ships to users; edits are compile-time only):
+
+- Entries are separated by lines containing only `%`. Leading, trailing,
+  and doubled separators are harmless (empty entries are dropped).
+- Lines whose first non-whitespace character is `#` are comments — used to
+  record the source of anything pulled from the internet (attribution in
+  the file is required for such entries). Never printed.
+- An entry whose first line is exactly `!zen` is a zen entry; the marker is
+  stripped from display. Anything unmarked is a feature tip.
+- A unit test validates the corpus (non-empty, both kinds present, no tabs,
+  ≤ 100 columns, every zen entry attributed), so a malformed edit fails CI.
+
+**Random post-command wisdom** — after any *successful* command, cactup may
+print one entry to **stderr**, each line dimmed, preceded by a blank line,
+so it reads as decoration rather than output. Controls:
+
+- `wisdom-frequency` knob (§5): `off` (never), `rare` (1/15), `normal`
+  (1/8, the default), `chatty` (1/4), `always` (1/1).
+- `wisdom-kind` knob (§5): `relevant` = feature tips only; `all` (default)
+  = tips mixed with zen entries. When `all`, a zen entry is chosen 25% of
+  the time (a dev-time constant in `commands/wisdom.rs`, not a knob).
+- Suppressed when stderr is not a terminal (pipes, scripts, job logs), on
+  the compute-node path (`sim run --sim-dir …` — D11 hermeticity: no DB,
+  no decoration in scheduler logs), after the log-follow views (`sim log` /
+  `test log` with `-f`/`-o`/`-e`, which end via Ctrl-C), after `cactup
+  wisdom` itself, and after any failed command. Decoration must never fail
+  a command: any problem in the hook (unreadable DB, empty corpus) is a
+  silent no-op.

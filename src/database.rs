@@ -31,9 +31,50 @@ fn default_schema() -> u32 {
     SCHEMA
 }
 
-/// Knob names cactup recognizes (§5). `user`/`email` are normally derived
+/// A knob cactup recognizes (§5): its name plus how to check a value on
+/// the way in and how to show the stored form on the way out. Most knobs
+/// are free-form ([`KnobSpec::free_form`]); a knob with a closed value set
+/// supplies its own `validate`/`render` (see `wisdom-frequency`, which
+/// stores an ordinal but always renders the name).
+pub struct KnobSpec {
+    pub name: &'static str,
+    /// Validate + normalize a user-supplied value into the stored form.
+    pub validate: fn(&str) -> Res<String>,
+    /// Render the stored form for display.
+    pub render: fn(&str) -> String,
+}
+
+impl KnobSpec {
+    const fn free_form(name: &'static str) -> Self {
+        Self { name, validate: |v| Ok(v.to_owned()), render: str::to_owned }
+    }
+}
+
+/// Knobs cactup recognizes (§5). `user`/`email` are normally derived
 /// (`$USER`, `git config user.email`) but may be overridden as knobs.
-pub const KNOWN_KNOBS: &[&str] = &["allocation", "mail", "mail-type", "queue", "user", "email"];
+pub const KNOWN_KNOBS: &[KnobSpec] = &[
+    KnobSpec::free_form("allocation"),
+    KnobSpec::free_form("mail"),
+    KnobSpec::free_form("mail-type"),
+    KnobSpec::free_form("queue"),
+    KnobSpec::free_form("user"),
+    KnobSpec::free_form("email"),
+    KnobSpec {
+        name: "wisdom-frequency",
+        validate: crate::commands::wisdom::validate_frequency,
+        render: crate::commands::wisdom::render_frequency,
+    },
+    KnobSpec {
+        name: "wisdom-kind",
+        validate: crate::commands::wisdom::validate_kind,
+        render: str::to_owned,
+    },
+];
+
+/// The spec for a knob name, if cactup recognizes it.
+pub fn knob_spec(name: &str) -> Option<&'static KnobSpec> {
+    KNOWN_KNOBS.iter().find(|s| s.name == name)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -168,6 +209,9 @@ impl Database {
             "mail-type" => Some("all".to_owned()),
             "user" => std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).ok(),
             "email" => git_config_email(),
+            // Stored form (§5): frequency is an ordinal, 2 = "normal".
+            "wisdom-frequency" => Some("2".to_owned()),
+            "wisdom-kind" => Some("all".to_owned()),
             _ => None,
         }
     }
@@ -461,6 +505,10 @@ mod tests {
         let db = Database::new();
         assert_eq!(db.knob_or_default("mail-type").as_deref(), Some("all"));
         assert_eq!(db.knob_or_default("allocation"), None);
+        // Wisdom defaults (§5): stored forms — the frequency ordinal 2 is
+        // rendered as "normal" by the KnobSpec, and kind defaults to "all".
+        assert_eq!(db.knob_or_default("wisdom-frequency").as_deref(), Some("2"));
+        assert_eq!(db.knob_or_default("wisdom-kind").as_deref(), Some("all"));
         let mut db = db;
         db.set_knob("mail-type", "none".to_owned());
         assert_eq!(db.knob_or_default("mail-type").as_deref(), Some("none"));
