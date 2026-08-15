@@ -117,6 +117,10 @@ Stream output as it runs:
 cactup test log mytest --follow
 ```
 
+This opens a live split-pane view of stdout/stderr — see
+[Monitoring & Logs](monitoring.html) for the keybindings and the
+`--follow-out`/`--follow-err` single-stream variants.
+
 Tail the last 100 lines:
 
 ```sh

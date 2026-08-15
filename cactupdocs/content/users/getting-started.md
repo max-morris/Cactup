@@ -127,7 +127,7 @@ cactup sim show mysim        # Summary
 cactup sim show mysim --long # Extended details
 ```
 
-Stream the output:
+Follow it live (opens a split stdout/stderr view):
 
 ```sh
 cactup sim log mysim --follow

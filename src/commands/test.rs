@@ -12,7 +12,10 @@ pub fn dispatch(ctx: &Ctx, cmd: TestCommand) -> Res<()> {
         TestCommand::Clean => testsuite::manage::clean(ctx),
         TestCommand::List { long, all } => testsuite::manage::list(ctx, long, all),
         TestCommand::Show { name } => testsuite::manage::show(ctx, &name),
-        TestCommand::Log { name, follow } => testsuite::manage::log_cmd(ctx, &name, follow),
+        TestCommand::Log { name, follow, follow_out, follow_err } => {
+            let mode = crate::tail::FollowMode::from_flags(follow, follow_out, follow_err);
+            testsuite::manage::log_cmd(ctx, &name, mode)
+        }
         TestCommand::Stop { name, force } => testsuite::manage::stop(ctx, &name, force),
         TestCommand::Delete { name, force, purge } => {
             testsuite::manage::delete(ctx, &name, force, purge)

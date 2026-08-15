@@ -32,6 +32,9 @@ pub fn dispatch(ctx: &Ctx, cmd: SimCommand) -> Res<()> {
         SimCommand::Show { sim, long, output_dir, restart_id } => {
             sim::manage::show(ctx, &sim, long, output_dir, restart_id)
         }
-        SimCommand::Log { sim, follow } => sim::manage::log_cmd(ctx, &sim, follow),
+        SimCommand::Log { sim, follow, follow_out, follow_err } => {
+            let mode = crate::tail::FollowMode::from_flags(follow, follow_out, follow_err);
+            sim::manage::log_cmd(ctx, &sim, mode)
+        }
     }
 }
