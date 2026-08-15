@@ -69,7 +69,6 @@ module -q load openmpi/4.0.3
 submit          = "sbatch @SCRIPTFILE@; sleep 1"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
-interactive-cmd = "srun -A @ALLOCATION@ -p @QUEUE@ -t @WALLTIME@ -N @NODES@ -n @TASKS@ --mem @MEMORY@MB -c @CPUS_PER_TASK@ -J interactive --pty /bin/bash -l"
 get-status      = "squeue -j @JOB_ID@"
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
@@ -82,16 +81,13 @@ running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname"
 exec-host-pattern = '^(\S+)'
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 max-walltime    = "24:00:00"
 allocation      = "def-@USER@"
 
 # Two cactup queues over Compute Canada's account-scheduled (no-partition)
 # system. The keys carry the D12 gpu flag and route to the run/submit script
 # variants; `name = "NO_QUEUE"` keeps @QUEUE@ at the historical placeholder
-# (the submitscripts pass no -p anyway; only interactive-cmd references it).
+# (the submitscripts pass no -p anyway).
 [queues.cpu]
 gpu     = false
 default = true

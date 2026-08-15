@@ -103,9 +103,6 @@ running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = ' S '
 exec-host        = "hostname"
 # TODO (upstream): make this work using bpeek
-stdout           = "cat @SIMULATION_NAME@.out"
-stderr           = "cat @SIMULATION_NAME@.err"
-stdout-follow    = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 # Machine-level fallback ceiling (design §4.2); also depends on number of nodes.
 max-walltime     = "08:00:00"
 # historical default allocation; set the allocation knob instead

@@ -58,9 +58,6 @@ holding-pattern  = ' H '
 # metadata dir rename §9.3).
 exec-host        = "head -n 1 .cactup/NODES"
 exec-host-pattern = '^(\S+)'
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 # No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
 
 [queues."sciama2.q"]

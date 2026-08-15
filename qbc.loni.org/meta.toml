@@ -53,7 +53,6 @@ universe = "et-sing"
 # its own `srun … singularity exec` launch — §4.8's MPI boundary); the
 # optionlist sets coerce-run-universe = false accordingly.
 [universes.et-sing]
-kind = "singularity"
 wrapper-argv = [
     "srun", "-u", "-A", "@ALLOCATION@", "-p", "checkpt",
     "-n", "1", "--cpus-per-task", "48",
@@ -87,9 +86,6 @@ running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname -s"
 exec-host-pattern = '(\S+)'
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 # Machine-level fallback ceiling (design §4.2); the single queue relies on it.
 max-walltime    = "72:00:00"
 
