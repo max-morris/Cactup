@@ -123,9 +123,6 @@ running-pattern = " R "
 holding-pattern = '\(JobHeldUser\)'
 exec-host = "hostname -s"
 exec-host-pattern = '(\S+)'
-stdout = "cat @SIMULATION_NAME@.out"
-stderr = "cat @SIMULATION_NAME@.err"
-stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 max-walltime = "24:00:00"
 ```
 
@@ -166,9 +163,6 @@ running-pattern = " R "
 holding-pattern = " H "
 exec-host = "hostname -s"
 exec-host-pattern = '(\S+)'
-stdout = "cat @SIMULATION_NAME@.out"
-stderr = "cat @SIMULATION_NAME@.err"
-stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 max-walltime = "24:00:00"
 ```
 

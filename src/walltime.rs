@@ -86,13 +86,6 @@ impl Walltime {
         Ok(Walltime(days * 86400 + hh * 3600 + mm * 60 + ss))
     }
 
-    // Pinned foundation API; callers in this crate construct `Walltime(secs)`
-    // directly (the tuple field is crate-visible).
-    #[allow(dead_code)]
-    pub fn from_seconds(secs: u64) -> Walltime {
-        Walltime(secs)
-    }
-
     pub fn total_seconds(&self) -> u64 {
         self.0
     }

@@ -51,9 +51,6 @@ disabled-thorns = [
 # commands were blank. The old ini also carried these commented-out keys:
 #exechost        =
 #exechostpattern =
-#stdout          = cat @SIMULATION_NAME@.out
-#stderr          = cat @SIMULATION_NAME@.err
-#stdout-follow   = tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err
 # historical default allocation; set the allocation knob instead
 allocation      = "NO_ALLOCATION"
 

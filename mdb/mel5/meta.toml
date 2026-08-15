@@ -45,9 +45,6 @@ running-pattern  = "^"           # matches anything: in ps => running
 holding-pattern  = "$^"          # matches nothing: never "held"
 exec-host        = "echo localhost"
 exec-host-pattern = "(.*)"
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
 [environment]
 # Shell setup sourced before build/submit/run commands (module loads, env);

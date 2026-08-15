@@ -59,10 +59,6 @@ running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname"
 exec-host-pattern = '^(\S+)'
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
-max-queue-slots  = 132          # unknown (upstream comment)
 # Machine-level fallback ceiling (design §4.2). Upstream note: 72, 24, 12, 3
 # hours is likely more sensible.
 max-walltime    = "168:00:00"

@@ -22,7 +22,6 @@ pub const HOST_UNIVERSE: &str = "host";
 
 /// The implicit `host` universe (§4.8): identity wrapping, machine-level env.
 static IMPLICIT_HOST: Universe = Universe {
-    kind: None,
     wrapper_argv: None,
     wrapper: None,
     environment: Environment {
@@ -200,16 +199,16 @@ impl Environment {
     }
 }
 
-/// §10 keeps simfactory's scheduler keys verbatim; the `allow(dead_code)`
-/// ones are carried for MDB fidelity, not consumed: `interactive` was dropped
-/// (§3.1), stdout/stderr filenames are template-owned via @STDOUT_FILE@/
-/// @STDERR_FILE@ (§8.3.1), and chain sizing is walltime-only (§8.8).
+/// §10 keeps simfactory's *consumed* scheduler keys verbatim. Its unconsumed
+/// ones were dropped outright (unknown keys parse as no-ops): `interactive`
+/// went with §3.1, `stdout`/`stderr`/`stdout-follow` because output filenames
+/// are template-owned via @STDOUT_FILE@/@STDERR_FILE@ (§8.3.1) and `log`
+/// follows natively, and `max-queue-slots` because chain sizing is
+/// walltime-only (§8.8).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Scheduler {
     pub submit: Option<String>,
-    #[allow(dead_code)]
-    pub interactive_cmd: Option<String>,
     pub get_status: Option<String>,
     /// Optional one-call form of `get-status` (§10, a cactup addition): lists
     /// every live job of `@USER@`, one per line, the job id as the first
@@ -228,14 +227,6 @@ pub struct Scheduler {
     pub holding_pattern: Option<String>,
     pub exec_host: Option<String>,
     pub exec_host_pattern: Option<String>,
-    #[allow(dead_code)]
-    pub stdout: Option<String>,
-    #[allow(dead_code)]
-    pub stderr: Option<String>,
-    #[allow(dead_code)]
-    pub stdout_follow: Option<String>,
-    #[allow(dead_code)]
-    pub max_queue_slots: Option<u32>,
     /// Machine-level fallback ceiling for queues that omit `max-walltime` (§4.2).
     pub max_walltime: Option<Walltime>,
     /// Env var(s) the scheduler sets inside a job allocation — e.g.
@@ -436,9 +427,6 @@ impl<'de> Deserialize<'de> for ScriptVariants {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Universe {
-    /// Documentation only; cactup does not switch on it.
-    #[allow(dead_code)]
-    pub kind: Option<String>,
     /// Prefix form: cactup runs `<wrapper-argv…> /bin/sh -c <inner>`.
     pub wrapper_argv: Option<Vec<String>>,
     /// Template form: one shell command containing exactly one `@COMMAND@`.
@@ -1246,7 +1234,6 @@ mod tests {
         );
 
         let ssh = Universe {
-            kind: None,
             wrapper_argv: None,
             wrapper: Some("ssh headnode 'cd @SOURCEDIR@ && '@COMMAND@".to_owned()),
             environment: Environment::default(),
