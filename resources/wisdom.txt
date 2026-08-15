@@ -62,9 +62,6 @@ backed up first, under ~/.cactup/refetch-backups/
 Hop an existing installation to another release in place:
 cactup releases --all, then cactup inst refetch --release <name>
 %
-One Ctrl-C stops cactup gracefully — locks released, tempfiles cleaned,
-interrupted work reported honestly. A second one aborts on the spot.
-%
 `-j max` doesn't count your login node's cores — it becomes $(nproc)
 evaluated inside the job itself: cactup build <config> -j max
 %
@@ -74,9 +71,6 @@ cactup build <config> --virtual /path/to/cactus_exe
 Machines can carry several compile flavors. See them and pick one:
 cactup machine show --variants, then cactup build <config> --variant debug
 %
-Build and run inside an Apptainer image by attaching a universe:
-cactup build <config> --universe et-sif
-%
 Test machine discovery for a cluster you're not logged into:
 cactup machine show --hostname mel5.cct.lsu.edu
 %
@@ -84,7 +78,7 @@ Fork the detected machine into your own tunable copy:
 cactup machine create mymachine --from-existing
 %
 Lost? `cactup show` prints your active installation, active config, and
-resolved machine — read-only, never prompts.
+resolved machine.
 %
 Tired of typing -a on every submit? Persist a default once:
 cactup knob allocation <account>
@@ -97,10 +91,6 @@ debug a scheduler rejection: cactup --trace sim submit <name>
 %
 The progress tree goes deeper than it shows. Peel it back:
 CACTUP_PROGRESS_DEPTH=6 cactup inst refetch
-%
-Submit-script templates read the environment at substitution time with
-@ENV(NAME)@ — and an unknown or empty variable is a loud error, never a
-silent empty splice.
 %
 Parameter files and scripts ending in .py are first-class: every template
 variable arrives as a Python global, and the script's stdout is the
@@ -196,3 +186,410 @@ We suffer more often in imagination than in reality.
 The first principle is that you must not fool yourself — and you are the
 easiest person to fool.
 — Richard Feynman
+%
+# Source: G. C. Lichtenberg, "Sudelbücher" (Waste Books, 1765-1799);
+# https://todayinsci.com/L/Lichtenberg_Georg/LichtenbergGeorg-Quotations.htm
+!zen
+Nothing is more inimical to the progress of science than the belief that
+we know what we do not yet know.
+— Georg Christoph Lichtenberg
+%
+# Source: G. C. Lichtenberg, "Sudelbücher" (Waste Books, 1765-1799).
+!zen
+There is no more important rule of conduct in the world than this: attach
+yourself as much as you can to people who are abler than you and yet not
+so very different that you cannot understand them.
+— Georg Christoph Lichtenberg
+%
+# Source: G. C. Lichtenberg, "Sudelbücher" (Waste Books, 1765-1799).
+!zen
+Doubt must be no more than vigilance, otherwise it can become dangerous.
+— Georg Christoph Lichtenberg
+%
+# Source: Richard Hamming, "You and Your Research", Bell Labs talk, 1986;
+# https://www.cs.virginia.edu/~robins/YouAndYourResearch.html
+!zen
+Knowledge and productivity are like compound interest.
+— Richard Hamming
+%
+# Source: Richard Hamming, "You and Your Research", Bell Labs talk, 1986.
+!zen
+Once you get your courage up and believe that you can do important
+problems, then you can. If you think you can't, almost surely you are not
+going to.
+— Richard Hamming
+%
+# Source: Richard Hamming, "You and Your Research", Bell Labs talk, 1986.
+!zen
+He who works with the door open gets all kinds of interruptions, but he
+also occasionally gets clues as to what the world is and what might be
+important.
+— Richard Hamming
+%
+# Source: John Archibald Wheeler, on the search for understanding; quoted
+# by Misner, Thorne & Zurek, "John Wheeler, relativity, and quantum
+# information", Physics Today 62(4), 2009.
+!zen
+We can afford many mistakes in the search. The main thing is to make them
+as fast as possible.
+— John Archibald Wheeler
+%
+# Source: Piet Hein, "The Road to Wisdom", Grooks (1966);
+# https://en.wikiquote.org/wiki/Piet_Hein
+!zen
+The road to wisdom? — Well, it's plain
+and simple to express:
+Err
+and err
+and err again
+but less
+and less
+and less.
+— Piet Hein
+%
+# Source: Wisława Szymborska, Nobel lecture "The Poet and the World", 1996.
+!zen
+Whatever inspiration is, it's born from a continuous "I don't know."
+— Wisława Szymborska
+%
+# Source: Antonio Machado, "Proverbios y cantares XXIX", Campos de
+# Castilla (1912). "Caminante, no hay camino, se hace camino al andar."
+!zen
+Traveler, there is no road; the road is made by walking.
+— Antonio Machado
+%
+# Source: Rainer Maria Rilke, "Letters to a Young Poet", letter 4 (1903).
+!zen
+Be patient toward all that is unsolved in your heart and try to love the
+questions themselves.
+— Rainer Maria Rilke
+%
+# Source: Stanisław Jerzy Lec, "Unkempt Thoughts" (Myśli nieuczesane, 1957).
+!zen
+He who limps is still walking.
+— Stanisław Jerzy Lec
+%
+# Source: E. W. Dijkstra, EWD896, "On the nature of Computing Science"
+# (1984); https://www.cs.utexas.edu/users/EWD/
+!zen
+Simplicity is a great virtue but it requires hard work to achieve it and
+education to appreciate it. And to make matters worse: complexity sells
+better.
+— Edsger W. Dijkstra
+%
+# Source: Alan Perlis, "Epigrams on Programming", epigram 58, SIGPLAN
+# Notices 17(9), 1982.
+!zen
+Fools ignore complexity. Pragmatists suffer it. Some can avoid it.
+Geniuses remove it.
+— Alan Perlis
+%
+# Source: Donald Knuth, 1977 memo to Peter van Emde Boas;
+# https://www-cs-faculty.stanford.edu/~knuth/faq.html
+!zen
+Beware of bugs in the above code; I have only proved it correct, not
+tried it.
+— Donald Knuth
+%
+# Source: C. A. R. Hoare, "The Emperor's Old Clothes", Turing Award
+# lecture, 1980.
+!zen
+There are two ways of constructing a software design: one way is to make
+it so simple that there are obviously no deficiencies, and the other way
+is to make it so complicated that there are no obvious deficiencies. The
+first method is far more difficult.
+— C. A. R. Hoare
+%
+# Source: Antonio Porchia, "Voces" (1943), trans. W. S. Merwin, "Voices"
+# (1969); https://archive.org/details/voices-by-antonio-porchia-trans.-by-w.-s.-merwin-1969
+!zen
+They will say you are on the wrong road, if it is your own.
+— Antonio Porchia
+%
+# Source: Antonio Porchia, "Voces" (1943), trans. W. S. Merwin (1969).
+!zen
+Only a few arrive at nothing, because the way is long.
+— Antonio Porchia
+%
+# Source: Santiago Ramón y Cajal, "Reglas y consejos sobre investigación
+# científica" (1897), trans. "Advice for a Young Investigator" (MIT Press).
+!zen
+Any man could, if he were so inclined, be the sculptor of his own brain.
+— Santiago Ramón y Cajal
+%
+# Source: Peter Medawar, "Advice to a Young Scientist" (1979).
+!zen
+The intensity of the conviction that a hypothesis is true has no bearing
+on whether it is true or not.
+— Peter Medawar
+%
+# Source: Maurice Wilkes, "Memoirs of a Computer Pioneer" (1985), on a
+# 1949 moment beside the EDSAC.
+!zen
+The realization came over me with full force that a good part of the
+remainder of my life was going to be spent in finding errors in my own
+programs.
+— Maurice Wilkes
+%
+# Source: Sister Corita Kent, Immaculate Heart College Art Department
+# Rules (1968), rule 7. Often misattributed to John Cage.
+!zen
+The only rule is work. If you work it will lead to something.
+— Corita Kent
+%
+# Source: Novalis, as the epigraph of Karl Popper's "The Logic of
+# Scientific Discovery" (1934/1959).
+!zen
+Hypotheses are nets: only he who casts will catch.
+— Novalis
+%
+# Source: David Hilbert, radio address at Königsberg, 1930 ("Wir müssen
+# wissen — wir werden wissen"); engraved on his tombstone in Göttingen.
+!zen
+We must know — we will know.
+— David Hilbert
+%
+# Source: John A. Shedd, "Salt from My Attic" (1928). Often misattributed
+# to Grace Hopper, who was fond of quoting it.
+!zen
+A ship in harbor is safe, but that is not what ships are built for.
+— John A. Shedd
+%
+# Source: William Stafford, on writing daily; see "Writing the Australian
+# Crawl" (1978) and his interviews.
+!zen
+There is no such thing as writer's block for writers whose standards are
+low enough.
+— William Stafford
+%
+# Source: Frederick Brooks, "No Silver Bullet" (1986), collected in "The
+# Mythical Man-Month" (anniversary ed.).
+!zen
+Einstein repeatedly argued that there must be simplified explanations of
+nature, because God is not capricious or arbitrary. No such faith
+comforts the software engineer.
+— Frederick Brooks
+%
+# Source: Butler Lampson, "Hints for Computer System Design" (SOSP 1983).
+!zen
+Neither abstraction nor simplicity is a substitute for getting it right.
+— Butler Lampson
+%
+# Source: E. W. Dijkstra, "The Humble Programmer" (EWD340), Turing Award
+# lecture, 1972.
+!zen
+The competent programmer is fully aware of the strictly limited size of
+his own skull; therefore he approaches the programming task in full
+humility.
+— Edsger W. Dijkstra
+%
+# Source: Albert Camus, "Le Mythe de Sisyphe" (1942), closing lines.
+!zen
+The struggle itself toward the heights is enough to fill a man's heart.
+One must imagine Sisyphus happy.
+— Albert Camus
+%
+# Source: Søren Kierkegaard, journals (1843), IV A 164.
+!zen
+Life can only be understood backwards; but it must be lived forwards.
+— Søren Kierkegaard
+%
+# Source: Friedrich Nietzsche, "Twilight of the Idols" (1889), Maxims and
+# Arrows 12; popularized by Viktor Frankl in "Man's Search for Meaning".
+!zen
+He who has a why to live can bear almost any how.
+— Friedrich Nietzsche
+%
+# Source: Samuel Beckett, "Worstward Ho" (1983).
+!zen
+Ever tried. Ever failed. No matter. Try again. Fail again. Fail better.
+— Samuel Beckett
+%
+# Source: Fyodor Dostoevsky, "The Brothers Karamazov" (1880), book II,
+# chapter 4 (Zosima to Fyodor Pavlovich).
+!zen
+Above all, don't lie to yourself. The man who lies to himself and listens
+to his own lie comes to a point that he cannot distinguish the truth
+within him, or around him.
+— Fyodor Dostoevsky
+%
+# Source: Aleksandr Solzhenitsyn, "The Gulag Archipelago" (1973), part I,
+# chapter 4.
+!zen
+The line separating good and evil passes not through states, nor between
+classes, nor between political parties either — but right through every
+human heart.
+— Aleksandr Solzhenitsyn
+%
+# Source: Ivan Turgenev, "Fathers and Sons" (1862), chapter 9 (Bazarov).
+!zen
+Nature is not a temple, but a workshop, and man's the workman in it.
+— Ivan Turgenev
+%
+# Source: apocryphal — no evidence Lenin said it; first attributed to him
+# in 2001. See https://quoteinvestigator.com/2020/07/13/decades-weeks/ and
+# https://www.snopes.com/fact-check/lenin-decades-quote/
+!zen
+There are decades where nothing happens; and there are weeks where
+decades happen.
+— attributed to Vladimir Lenin
+%
+# Source: Yogi Berra, on directions to his house; "The Yogi Book" (1998).
+!zen
+When you come to a fork in the road, take it.
+— Yogi Berra
+%
+# Source: Yogi Berra, "The Yogi Book" (1998).
+!zen
+You can observe a lot by watching.
+— Yogi Berra
+%
+# Source: Yogi Berra, on the 1973 pennant race; "The Yogi Book" (1998).
+!zen
+It ain't over till it's over.
+— Yogi Berra
+%
+# Source: Yogi Berra, "The Yogi Book" (1998).
+!zen
+The future ain't what it used to be.
+— Yogi Berra
+%
+# Source: Benjamin Brewster, The Yale Literary Magazine, 1882. Commonly
+# misattributed to Yogi Berra.
+!zen
+In theory there is no difference between theory and practice. In
+practice there is.
+— Benjamin Brewster
+%
+# Source: Eugene Wigner, "The Unreasonable Effectiveness of Mathematics in
+# the Natural Sciences", Comm. Pure Appl. Math. 13 (1960), closing.
+!zen
+The miracle of the appropriateness of the language of mathematics for the
+formulation of the laws of physics is a wonderful gift which we neither
+understand nor deserve.
+— Eugene Wigner
+%
+# Source: the 1921 remark (to Oscar Veblen, now carved in Princeton's Fine
+# Hall) per A. Pais, "Subtle is the Lord" (1982); the recantation per
+# Jamie Sayen, "Einstein in America" (1985), p. 51.
+!zen
+Subtle is the Lord, but malicious He is not.
+— Albert Einstein, 1921
+
+I have second thoughts. Maybe God is malicious.
+— Albert Einstein, to Valentine Bargmann, years later
+%
+# Source: J. B. S. Haldane, "Possible Worlds and Other Essays" (1927).
+!zen
+My own suspicion is that the universe is not only queerer than we
+suppose, but queerer than we can suppose.
+— J. B. S. Haldane
+%
+# Source: Niels Bohr, as quoted by Hans Bohr in "My Father", collected in
+# "Niels Bohr: His Life and Work" (1967).
+!zen
+The opposite of a correct statement is a false statement. But the
+opposite of a profound truth may well be another profound truth.
+— Niels Bohr
+%
+# Source: attributed; see MacTutor History of Mathematics, Ulam
+# quotations (https://mathshistory.st-andrews.ac.uk/Biographies/Ulam/quotations/).
+!zen
+The infinite we shall do right away. The finite may take a little longer.
+— attributed to Stanislaw Ulam
+%
+# Source: John von Neumann, reply to a young physicist's complaint that he
+# didn't understand a method; reported by Felix Smith, quoted in G.
+# Zukav, "The Dancing Wu Li Masters" (1979).
+!zen
+Young man, in mathematics you don't understand things. You just get used
+to them.
+— John von Neumann
+%
+# Source: Blaise Pascal, "Pensées" (1670), fr. 201 (Lafuma) / 206
+# (Brunschvicg): "Le silence éternel de ces espaces infinis m'effraie."
+!zen
+The eternal silence of these infinite spaces terrifies me.
+— Blaise Pascal
+%
+# Source: Steven Weinberg, "The First Three Minutes" (1977), closing
+# paragraph — the sentence after the famous "pointless" line.
+!zen
+The effort to understand the universe is one of the very few things that
+lifts human life a little above the level of farce, and gives it some of
+the grace of tragedy.
+— Steven Weinberg
+%
+# Source: Jacques Monod, "Chance and Necessity" (1970), trans. Austryn
+# Wainhouse.
+!zen
+The universe was not pregnant with life nor the biosphere with man. Our
+number came up in the Monte Carlo game.
+— Jacques Monod
+%
+# Source: Johannes Kepler, "Harmonices Mundi" (1619), book V, on writing
+# for whoever may come.
+!zen
+It may well wait a century for a reader, as God himself has waited six
+thousand years for an observer.
+— Johannes Kepler
+%
+# Source: Alan Turing, "Computing Machinery and Intelligence", Mind 59
+# (1950), closing line.
+!zen
+We can only see a short distance ahead, but we can see plenty there that
+needs to be done.
+— Alan Turing
+%
+# Source: Subrahmanyan Chandrasekhar, "The Mathematical Theory of Black
+# Holes" (1983), prologue.
+!zen
+The black holes of nature are the most perfect macroscopic objects there
+are in the universe: the only elements in their construction are our
+concepts of space and time.
+— Subrahmanyan Chandrasekhar
+%
+# Source: Max Stirner, "Der Einzige und sein Eigentum" (1844), trans.
+# Steven Byington, "The Ego and Its Own" (1907), opening section.
+!zen
+The divine is God's concern; the human, man's. My concern is neither the
+divine nor the human, not the true, good, just, free, etc., but solely
+what is mine, and it is not a general one, but is — unique, as I am
+unique.
+— Max Stirner
+%
+# Source: Friedrich Nietzsche, "The Gay Science" (1882), §270.
+!zen
+What does your conscience say? — "You shall become the person you are."
+— Friedrich Nietzsche
+%
+# Source: Ralph Waldo Emerson, "Self-Reliance" (1841).
+!zen
+A foolish consistency is the hobgoblin of little minds, adored by little
+statesmen and philosophers and divines.
+— Ralph Waldo Emerson
+%
+# Source: Henrik Ibsen, "An Enemy of the People" (1882), Dr. Stockmann's
+# closing line — a scientist punished for inconvenient findings.
+!zen
+The strongest man in the world is he who stands most alone.
+— Henrik Ibsen
+%
+# Source: Nikos Kazantzakis' epitaph, on his tomb in Heraklion, Crete.
+!zen
+I hope for nothing. I fear nothing. I am free.
+— Nikos Kazantzakis
+%
+# Source: Diogenes Laertius, "Lives of Eminent Philosophers", VI.38 —
+# Diogenes of Sinope's reply when Alexander the Great offered him
+# anything he wished.
+!zen
+Stand a little out of my sun.
+— Diogenes of Sinope
+%
+# Source: Henry David Thoreau, "Walden" (1854), conclusion.
+!zen
+If a man does not keep pace with his companions, perhaps it is because he
+hears a different drummer. Let him step to the music which he hears,
+however measured or far away.
+— Henry David Thoreau

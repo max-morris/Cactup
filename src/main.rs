@@ -16,6 +16,10 @@ mod template;
 mod testsuite;
 mod thornlist;
 mod walltime;
+// The corpus parser: used by build.rs (via include!) at build time, and by
+// the crate only in tests — hence cfg(test).
+#[cfg(test)]
+mod wisdom_parse;
 
 use crate::args::{Args, Commands, ConfigCommand, SimCommand, TestCommand};
 use crate::commands::Ctx;

@@ -9,54 +9,16 @@ use crate::Res;
 use anyhow::bail;
 use colored::Colorize;
 use std::io::IsTerminal;
-use std::sync::LazyLock;
 
-/// The corpus source. Compiled in; the file never ships to users.
-const RAW: &str = include_str!("../../resources/wisdom.txt");
+// `TIPS`/`ZENS`: the corpus, parsed and validated from
+// `resources/wisdom.txt` by `build.rs` (shared parser: `wisdom_parse.rs`).
+// A malformed corpus is a *build* failure, so no runtime path here can see
+// a bad entry.
+include!(concat!(env!("OUT_DIR"), "/wisdom_gen.rs"));
 
 /// When `wisdom-kind` is `all`, the chance (in percent) that the pick is a
 /// zen entry rather than a feature tip. Dev-time tunable, not a knob.
 const ZEN_PERCENT: u32 = 25;
-
-/// The corpus, partitioned by kind. Entries in `wisdom.txt` are separated
-/// by `%` lines; `#` lines are comments; a leading `!zen` line marks a
-/// quote/wisdom entry (everything else is a feature tip).
-struct Corpus {
-    tips: Vec<String>,
-    zens: Vec<String>,
-}
-
-static CORPUS: LazyLock<Corpus> = LazyLock::new(|| parse(RAW));
-
-fn parse(raw: &str) -> Corpus {
-    let mut corpus = Corpus { tips: Vec::new(), zens: Vec::new() };
-    for block in raw.split('\n').map(str::trim_end).fold(vec![Vec::new()], |mut acc, line| {
-        if line == "%" {
-            acc.push(Vec::new());
-        } else if !line.trim_start().starts_with('#') {
-            acc.last_mut().expect("fold starts non-empty").push(line);
-        }
-        acc
-    }) {
-        let mut lines = block.as_slice();
-        while lines.first().is_some_and(|l| l.is_empty()) {
-            lines = &lines[1..];
-        }
-        while lines.last().is_some_and(|l| l.is_empty()) {
-            lines = &lines[..lines.len() - 1];
-        }
-        let zen = lines.first().copied() == Some("!zen");
-        if zen {
-            lines = &lines[1..];
-        }
-        if lines.is_empty() {
-            continue;
-        }
-        let text = lines.join("\n");
-        if zen { &mut corpus.zens } else { &mut corpus.tips }.push(text);
-    }
-    corpus
-}
 
 /// How often the random post-command wisdom fires (§5, `wisdom-frequency`).
 /// Stored on disk as the ordinal, always rendered as the name.
@@ -174,20 +136,19 @@ fn knob_settings(db: &Database) -> (WisdomFrequency, WisdomKind) {
 /// One uniformly random eligible entry. Under `all`, a zen entry is chosen
 /// `ZEN_PERCENT`% of the time (falling back across empty pools).
 fn pick(kind: WisdomKind) -> Option<&'static str> {
-    let Corpus { tips, zens } = &*CORPUS;
-    let pool = match kind {
-        WisdomKind::Relevant => tips,
-        WisdomKind::All if tips.is_empty() => zens,
-        WisdomKind::All if zens.is_empty() => tips,
+    let pool: &[&str] = match kind {
+        WisdomKind::Relevant => TIPS,
+        WisdomKind::All if TIPS.is_empty() => ZENS,
+        WisdomKind::All if ZENS.is_empty() => TIPS,
         WisdomKind::All => {
             if fastrand::u32(..100) < ZEN_PERCENT {
-                zens
+                ZENS
             } else {
-                tips
+                TIPS
             }
         }
     };
-    (!pool.is_empty()).then(|| pool[fastrand::usize(..pool.len())].as_str())
+    (!pool.is_empty()).then(|| pool[fastrand::usize(..pool.len())])
 }
 
 /// `cactup wisdom`: print one entry, plain, to stdout.
@@ -226,32 +187,18 @@ pub fn maybe_print(ctx: &Ctx) {
 mod tests {
     use super::*;
 
-    /// The shipped corpus is well-formed — this is the CI gate on
-    /// `wisdom.txt` edits.
-    #[test]
-    fn corpus_is_nonempty_and_clean() {
-        assert!(CORPUS.tips.len() >= 10, "suspiciously few tips: {}", CORPUS.tips.len());
-        assert!(CORPUS.zens.len() >= 5, "suspiciously few zens: {}", CORPUS.zens.len());
-        for entry in CORPUS.tips.iter().chain(&CORPUS.zens) {
-            assert!(!entry.trim().is_empty());
-            assert!(!entry.contains('\t'), "tabs render unpredictably: {entry:?}");
-            for line in entry.lines() {
-                assert!(line.chars().count() <= 100, "line too wide: {line:?}");
-            }
-        }
-        // Direct quotes carry visible attribution.
-        for zen in &CORPUS.zens {
-            assert!(zen.contains('—'), "zen entry lacks an — Name attribution: {zen:?}");
-        }
-    }
+    // Corpus well-formedness (counts, no tabs, line width, zen
+    // attribution) is enforced by build.rs — a bad wisdom.txt cannot
+    // compile, so there is no test for it here.
 
     #[test]
     fn parse_handles_separator_comment_and_marker_edge_cases() {
-        let corpus = parse("%\n# c\nA\n%\n%\n!zen\nB\n— X\n%\n\n%\n# only a comment\n%");
-        assert_eq!(corpus.tips, ["A"]);
-        assert_eq!(corpus.zens, ["B\n— X"]);
-        let empty = parse("# nothing but comments\n%\n#x");
-        assert!(empty.tips.is_empty() && empty.zens.is_empty());
+        use crate::wisdom_parse::parse_wisdom;
+        let (tips, zens) = parse_wisdom("%\n# c\nA\n%\n%\n!zen\nB\n— X\n%\n\n%\n# only a comment\n%");
+        assert_eq!(tips, ["A"]);
+        assert_eq!(zens, ["B\n— X"]);
+        let (tips, zens) = parse_wisdom("# nothing but comments\n%\n#x");
+        assert!(tips.is_empty() && zens.is_empty());
     }
 
     #[test]
@@ -282,15 +229,15 @@ mod tests {
     fn pick_respects_kind() {
         for _ in 0..200 {
             let tip = pick(WisdomKind::Relevant).unwrap();
-            assert!(CORPUS.tips.iter().any(|t| t == tip));
+            assert!(TIPS.contains(&tip));
         }
         // Under `all`, both pools are reachable.
         let mut saw_zen = false;
         let mut saw_tip = false;
         for _ in 0..1000 {
             let entry = pick(WisdomKind::All).unwrap();
-            saw_zen |= CORPUS.zens.iter().any(|z| z == entry);
-            saw_tip |= CORPUS.tips.iter().any(|t| t == entry);
+            saw_zen |= ZENS.contains(&entry);
+            saw_tip |= TIPS.contains(&entry);
         }
         assert!(saw_zen && saw_tip);
     }

@@ -3212,8 +3212,12 @@ carry visible `— Name` attribution as part of the printed text).
   the file is required for such entries). Never printed.
 - An entry whose first line is exactly `!zen` is a zen entry; the marker is
   stripped from display. Anything unmarked is a feature tip.
-- A unit test validates the corpus (non-empty, both kinds present, no tabs,
-  ≤ 100 columns, every zen entry attributed), so a malformed edit fails CI.
+- The corpus is parsed and validated at **build time**: `build.rs` (sharing
+  the parser in `src/wisdom_parse.rs` via `include!`) checks it (non-empty,
+  both kinds present, no tabs, ≤ 100 columns, every zen entry attributed)
+  and generates static `TIPS`/`ZENS` slices into `OUT_DIR`, so a malformed
+  edit fails `cargo build` itself and the binary does zero parsing at run
+  time.
 
 **Random post-command wisdom** — after any *successful* command, cactup may
 print one entry to **stderr**, each line dimmed, preceded by a blank line,
