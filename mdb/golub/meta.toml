@@ -64,7 +64,6 @@ module load hwloc/1.7.2
 submit          = "sbatch @SCRIPTFILE@ ; sleep 1"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
-interactive-cmd = "qsub -I -X -l nodes=@NODES@:ppn=@MAX_CPUS_PER_NODE@:golub -l walltime=@WALLTIME@ -l cput=@WALLTIME@"
 get-status      = "qstat @JOB_ID@"
 stop            = "qdel @JOB_ID@"
 submit-pattern   = '^Submitted batch job (\d+)$'
@@ -74,9 +73,6 @@ running-pattern  = ' R '
 holding-pattern  = ' H '
 exec-host        = "qstat -f @JOB_ID@"
 exec-host-pattern = 'exec_host = (\w+)/'
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
 [queues.secondary]
 gpu     = false

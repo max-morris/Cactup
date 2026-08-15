@@ -47,11 +47,7 @@ running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname -s"
 exec-host-pattern = '(.*)'
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail -F -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 # The old ini kept this alternative commented out:
-# stdout-follow = while ! scontrol >/dev/null wait_job @JOB_ID@ ; do sleep 5 ; done ; tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err
 # Machine-level fallback ceiling (design §4.2); the single queue relies on it.
 max-walltime    = "72:00:00"
 

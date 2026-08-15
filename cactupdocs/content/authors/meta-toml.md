@@ -100,9 +100,6 @@ queued-pattern = " PD "
 running-pattern = " R "
 exec-host = "hostname -s"
 exec-host-pattern = '(\S+)'
-stdout = "cat @SIMULATION_NAME@.out"
-stderr = "cat @SIMULATION_NAME@.err"
-stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 max-walltime = "24:00:00"
 
 [queues.default]
@@ -165,9 +162,6 @@ queued-pattern = "$^"
 running-pattern = "^"
 exec-host = "echo localhost"
 exec-host-pattern = "(.*)"
-stdout = "cat @SIMULATION_NAME@.out"
-stderr = "cat @SIMULATION_NAME@.err"
-stdout-follow = "tail -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
 [queues.local]
 gpu = false

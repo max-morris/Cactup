@@ -53,7 +53,6 @@ impl UniverseSpec {
     /// an identity universe.
     pub fn to_universe(&self) -> Universe {
         Universe {
-            kind: None,
             wrapper_argv: self.wrapper_argv.clone(),
             wrapper: self.wrapper.clone(),
             environment: Default::default(),

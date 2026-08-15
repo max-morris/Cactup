@@ -630,8 +630,8 @@ fn print_output_dir(inst: &Installation, name: &str, restart_id: Option<u32>) ->
 
 /// `sim log`: print the tail of the active/latest restart's stdout/stderr
 /// (paths from the frozen `@STDOUT_FILE@`/`@STDERR_FILE@` vars when present).
-/// With `follow`, keep streaming newly-appended bytes (`tail -f`) until Ctrl-C.
-pub fn log_cmd(ctx: &Ctx, name: &str, follow: bool) -> Res<()> {
+/// Per `mode`, keep streaming newly-appended bytes until Ctrl-C.
+pub fn log_cmd(ctx: &Ctx, name: &str, mode: crate::tail::FollowMode) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let sim = Simulation::locate(&inst, name)?;
     let id = restart::active_id(&sim.dir)?
@@ -656,7 +656,7 @@ pub fn log_cmd(ctx: &Ctx, name: &str, follow: bool) -> Res<()> {
 
     let sources = [("stdout", out), ("stderr", err)];
     let subject = format!("{} {}", name.bold(), restart::dir_name(id));
-    crate::tail::tail_log(&sources, follow, &subject)
+    crate::tail::tail_log(&sources, mode, &subject)
 }
 
 #[cfg(test)]

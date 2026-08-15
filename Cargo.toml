@@ -32,6 +32,11 @@ regex = "1.13.0"
 gethostname = "1.1.0"
 tempfile = "3.27.0"
 chrono = { version = "0.4.45", features = ["serde"] }
+# Pinned to the same 0.29 line prodash already pulls in via crosstermion, and
+# ratatui's `crossterm_0_29` feature makes it target that same crossterm —
+# `cargo tree -i crossterm` must show a single 0.29.x entry, not two majors.
+crossterm = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
 
 [[bin]]
 name = "cactup"

@@ -89,13 +89,45 @@ View the last 100 lines of stdout/stderr:
 cactup sim log mysim
 ```
 
-Stream output in real time (like `tail -f`):
+Follow a running simulation with `-f`/`--follow`. This opens a full-screen,
+side-by-side terminal UI: stdout live-tailing in the left pane, stderr in
+the right.
 
 ```sh
 cactup sim log mysim --follow
 ```
 
-Press Ctrl-C to stop streaming. This is useful for watching a running simulation interactively.
+Each pane scrolls independently:
+
+- `Tab` — switch focus between panes
+- Arrow keys, `PgUp`/`PgDn` — scroll the focused pane
+- `Left`/`Right` — pan long lines horizontally
+- `End` — jump to the bottom of the focused pane
+- Mouse wheel also works
+
+Scrolling up pauses auto-follow for that pane, so new output doesn't yank
+you away while you're reading. Scroll back to the bottom (or press `End`)
+to resume following. Press `q` or `Ctrl-C` to quit.
+
+New output is picked up within about 50ms while the run is actively
+writing; once the log goes quiet, cactup backs off and polls less
+frequently, to be kind to shared filesystems like Lustre/NFS.
+
+If stdout isn't a terminal — for example, you've piped it to another
+command — `--follow` falls back to the old interleaved streaming instead
+of opening the TUI.
+
+To follow just one stream, use `-o`/`--follow-out` or `-e`/`--follow-err`
+instead of `--follow`. These stream plain `tail -f`-style output for just
+stdout or just stderr — handy for piping into `grep` or similar, since
+headers and "waiting for output" notices go to stderr, keeping stdout
+clean:
+
+```sh
+cactup sim log mysim --follow-out | grep ERROR
+```
+
+`--follow`, `--follow-out`, and `--follow-err` are mutually exclusive.
 
 ## Output files
 
@@ -129,7 +161,8 @@ View a test run:
 cactup test show mytest
 ```
 
-Stream test output:
+Stream test output the same way `sim log` does — `--follow` opens the
+split-pane TUI, or use `--follow-out`/`--follow-err` for a single stream:
 
 ```sh
 cactup test log mytest --follow

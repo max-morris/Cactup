@@ -398,8 +398,12 @@ pub(crate) enum SimCommand {
     /// Tail the simulation's stdout/stderr
     Log {
         sim: String,
-        #[clap(short, long, help = "Keep streaming new output as it is written (like tail -f), until Ctrl-C.")]
+        #[clap(short, long, conflicts_with_all = ["follow_out", "follow_err"], help = "Side-by-side live TUI of stdout and stderr, until Ctrl-C.")]
         follow: bool,
+        #[clap(short = 'o', long, conflicts_with = "follow_err", help = "Stream only stdout (tail -f style), until Ctrl-C.")]
+        follow_out: bool,
+        #[clap(short = 'e', long, help = "Stream only stderr (tail -f style), until Ctrl-C.")]
+        follow_err: bool,
     },
 }
 
@@ -479,8 +483,12 @@ pub(crate) enum TestCommand {
     /// Tail the test run's stdout/stderr
     Log {
         name: String,
-        #[clap(short, long, help = "Keep streaming new output as it is written (like tail -f), until Ctrl-C.")]
+        #[clap(short, long, conflicts_with_all = ["follow_out", "follow_err"], help = "Side-by-side live TUI of stdout and stderr, until Ctrl-C.")]
         follow: bool,
+        #[clap(short = 'o', long, conflicts_with = "follow_err", help = "Stream only stdout (tail -f style), until Ctrl-C.")]
+        follow_out: bool,
+        #[clap(short = 'e', long, help = "Stream only stderr (tail -f style), until Ctrl-C.")]
+        follow_err: bool,
     },
     /// Stop a queue-submitted test run (§11.7)
     Stop {

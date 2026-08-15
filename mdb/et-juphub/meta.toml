@@ -47,9 +47,6 @@ running-pattern  = "^"           # in ps => running
 holding-pattern  = "$^"          # never "held"
 exec-host        = "echo localhost"
 exec-host-pattern = "(.*)"
-stdout          = "cat @SIMULATION_NAME@.out"
-stderr          = "cat @SIMULATION_NAME@.err"
-stdout-follow   = "tail --pid @JOB_ID@ -F -n 100 -f @SIMULATION_NAME@.out @SIMULATION_NAME@.err"
 
 [queues.local]
 gpu     = false

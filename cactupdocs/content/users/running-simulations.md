@@ -264,8 +264,11 @@ Stream simulation output:
 
 ```sh
 cactup sim log mysim               # Last 100 lines
-cactup sim log mysim --follow      # Stream like `tail -f` (Ctrl-C to stop)
+cactup sim log mysim --follow      # Live split-pane view of stdout/stderr
 ```
+
+See [Monitoring & Logs](monitoring.html) for the follow-pane keybindings
+and the `--follow-out`/`--follow-err` single-stream variants.
 
 Get the output directory:
 

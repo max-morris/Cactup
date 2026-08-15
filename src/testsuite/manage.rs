@@ -172,10 +172,10 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
 
 /// `test log`: print the tail of the run's stdout/stderr — paths from the
 /// frozen `@STDOUT_FILE@`/`@STDERR_FILE@` vars when present, else
-/// `<run-dir>/test.{out,err}` (§11.5). With `follow`, keep streaming
-/// newly-appended bytes (`tail -f`) until Ctrl-C. Mirrors `sim log` (§8), but
-/// against the single per-run output pair — there is no restart chain (§11.6).
-pub fn log_cmd(ctx: &Ctx, name: &str, follow: bool) -> Res<()> {
+/// `<run-dir>/test.{out,err}` (§11.5). Per `mode`, keep streaming
+/// newly-appended bytes until Ctrl-C. Mirrors `sim log` (§8), but against the
+/// single per-run output pair — there is no restart chain (§11.6).
+pub fn log_cmd(ctx: &Ctx, name: &str, mode: crate::tail::FollowMode) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let run = TestRun::locate(&inst, name)?;
 
@@ -194,7 +194,7 @@ pub fn log_cmd(ctx: &Ctx, name: &str, follow: bool) -> Res<()> {
         Some(id) => format!("{} {}", name.bold(), results_name(id)),
         None => name.bold().to_string(),
     };
-    crate::tail::tail_log(&sources, follow, &subject)
+    crate::tail::tail_log(&sources, mode, &subject)
 }
 
 /// `test stop` (§11.7): the §8.6 stop semantics for the active result
