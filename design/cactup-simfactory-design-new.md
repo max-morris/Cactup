@@ -279,6 +279,40 @@ only for the short, DB-only commands that legitimately hold the lock for their
 whole (brief) lifetime, and it persists **only while the lock is still held**;
 otherwise it is a no-op.
 
+### 2.4 Interrupts & progress (required for every long-running path)
+
+**Interrupt contract.** `main.rs` installs the process signal handler with a
+grace count of 1: the **first** Ctrl-C prints a notice ("stopping…, Ctrl-C
+again aborts instantly") and sets the global interrupt flag
+(`gix::interrupt::is_triggered()`); the **second** aborts on the spot. The
+notice is a promise, so every long-running path — any loop over
+repos/thorns/files, child-process wait, network operation, or polling loop —
+**must poll the flag** at per-item/per-tick granularity and stop within a
+fraction of a second:
+
+- Fail with an explicit "interrupted" error rather than returning partial
+  results shaped like success. Where results are per-item reports
+  (`fetch::execute`), unstarted items are recorded as *failures*, never
+  silently dropped — an interrupted run must not masquerade as complete.
+- `par::parallel_map` implements the contract for fan-out work; prefer it.
+- Foreground children receive the terminal's SIGINT themselves; wait ~2 s,
+  then kill (`sim::start::spawn_and_wait`). gix APIs take
+  `&gix::interrupt::IS_INTERRUPTED` and abort in-flight work internally.
+- Graceful wind-down is also what releases §2.3's locks and cleans
+  tempfiles; an abort leaves lock corpses that block other hosts for up to
+  `LOCK_STALE_SECS`.
+
+**Progress contract.** No silent multi-second phases — a quiet pause reads
+as a hang. Any phase that can plausibly exceed ~1 s on a real tree (~80
+repos / ~400 thorns on NFS) renders prodash progress: a phase-scoped
+renderer (`manifest::setup_prodash*`, shut down before normal printing
+resumes), an item init'ed with a count and unit, a short-lived child naming
+each in-flight unit, `inc()` per completion. The renderer's 500 ms initial
+delay means fast runs never flash a bar, so "usually quick" is not a reason
+to skip it. `setup_prodash_if_tty` is only for phases whose items never call
+`info()`/`fail()` — those messages are printed by the render thread even on
+a non-tty, and skipping the renderer would drop them.
+
 ---
 
 ## 3. CLI surface
