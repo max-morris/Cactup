@@ -15,7 +15,7 @@ lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
-lines.append("#SBATCH --gpus-per-task 1")
+lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
 lines.append("#SBATCH --gres=gpu:{0}".format(typed["NODES"] * typed["TASKS"]))
 lines.append("#SBATCH -J {0}".format(TEST_NAME))
 if EMAIL:

@@ -34,7 +34,7 @@ export OMP_PLACES=cores
 # them out of the shell's hands. The launcher mirrors runscripts/default.sh
 # (its GRES branch depends on $QUEUE, which is unset here, so it is omitted).
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
-export CCTK_TESTSUITE_RUN_COMMAND='srun --overlap -n $nprocs --cpus-per-task=@CPUS_PER_TASK@ --gpus-per-task=1 $exe $parfile'
+export CCTK_TESTSUITE_RUN_COMMAND='srun --overlap -n $nprocs --cpus-per-task=@CPUS_PER_TASK@ --gpus-per-task=@GPUS_PER_TASK@ $exe $parfile'
 
 # Redirect testsuite output into test-home (design §11.6): the flesh harness
 # honors TESTS_DIR and writes each test's run dirs plus summary.log under

@@ -1,8 +1,9 @@
 # db1.hpc.lsu.edu submitscript (variant "sing"), ported from simfactory2
 # mdb/submitscripts/db-sing-nv.sub. Serves the Singularity build flavors (the
 # et-sing and et-sing-cpu build universes; upstream db-sing-cpu reused
-# db-sing-nv's submitscript). The verbatim GPU directives (--gpus-per-task 1,
-# --gres=gpu:2) apply to both.
+# db-sing-nv's submitscript). The GPU directives (--gpus-per-task, --gres=gpu:2)
+# apply to both; --gres stays verbatim, while --gpus-per-task now carries the
+# §8.5 GPUS_PER_TASK topology variable (still 1 by default — see default.py).
 #
 # .py variant (design §6.1): the old script used simfactory's ternary
 # expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
@@ -26,7 +27,7 @@ lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
-lines.append("#SBATCH --gpus-per-task 1")
+lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
 lines.append("#SBATCH --gres=gpu:{0}".format(typed["NODES"] * typed["TASKS"]))
 if CHAINED_JOB_ID:
     lines.append("#SBATCH -d afterany:{0}".format(CHAINED_JOB_ID))
