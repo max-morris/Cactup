@@ -19,38 +19,92 @@ use std::sync::Arc;
 
 mod tui;
 
-/// Adaptive poll-interval backoff shared by every follow loop (and, later,
-/// Part B's TUI event loop). We poll on a timer rather than use inotify (or
+/// Adaptive poll-interval backoff shared by every follow loop and by the
+/// TUI's poll scheduling. We poll on a timer rather than use inotify (or
 /// similar) because sim logs frequently live on network filesystems —
 /// Lustre, NFS — where inotify events don't reliably fire. But those same
 /// filesystems charge a metadata RPC per `stat`, so an idle follow must not
-/// hammer them either: we start at the floor for near-live latency while a
-/// sim is actively writing, and back off exponentially (capped at the
-/// ceiling) while it's quiet, snapping back to the floor the moment new
+/// hammer them either: we hold the floor for near-live latency while a sim
+/// is actively writing, and back off exponentially (capped at the ceiling)
+/// once it has really gone quiet, snapping back to the floor the moment new
 /// bytes show up.
 ///
-/// Backing off only begins once [`Self::GRACE_ROUNDS`] consecutive polls
-/// have come up empty (~500ms at the floor). Without that grace period a
-/// producer writing at a steady few lines per second sits in an oscillation
-/// — interval grows past the write cadence, a clump of lines lands, reset,
-/// repeat — which reads as bursty, bouncy output in the follow views. With
-/// it, anything writing at least ~2 lines/sec stays pinned to the floor
-/// (smooth, near-live delivery), while a truly quiet log still reaches the
-/// ceiling within ~2.5s of its last byte.
+/// Backing off begins only after a *grace period* of accumulated quiet.
+/// Without one, a producer whose write cadence is slower than the interval
+/// sits in an oscillation — interval grows past the cadence, a clump of
+/// output lands, reset to the floor, repeat — which reads as bursty, bouncy
+/// output in the follow views, and (worse) means we routinely sleep past
+/// bytes that were already readable.
+///
+/// The grace period is measured in **elapsed quiet time, not rounds**,
+/// because rounds are not a fixed unit once the interval starts growing.
+/// The previous tuning (10 empty rounds ≈ 500ms) was sized for a producer
+/// emitting a couple of lines per second, which is not what real sim output
+/// looks like: the writer's stdio is block-buffered and its stdout goes
+/// through the batch scheduler to a shared filesystem, so bytes arrive as
+/// one ~8192-byte block roughly once every 0.9s — about 1.1 rounds-with-data
+/// per second. Measured against a live job, the 500ms grace expired before
+/// each block landed, the interval climbed 100 → 200 → … → 1000ms, and gaps
+/// between consecutive writes by the follower hit 2.06s and once 3.06s
+/// against a producer appending every ~0.9s. (The filesystem was not the
+/// constraint: `stat` and `read` on that file both measured well under 5ms.)
+///
+/// So the grace period is at least [`Self::GRACE_MIN`] — comfortably longer
+/// than that ~0.9s block cadence plus jitter — which pins a 1Hz block
+/// writer to the floor indefinitely, for a worst-case added latency of one
+/// floor interval (50ms).
+///
+/// A fixed grace only stretches so far, so we also remember the producer's
+/// rhythm: [`Self::cadence`] is an envelope follower over the quiet
+/// stretches that preceded recent rounds-with-data — it jumps straight to a
+/// longer gap and decays only slowly toward shorter ones, so a *bursty*
+/// producer (several rounds with data, then a long pause) is still paced by
+/// its long pause rather than by its burst. The grace period is twice that
+/// cadence, clamped to [`Self::GRACE_MIN`]..=[`Self::GRACE_MAX`], so any
+/// roughly-periodic producer up to a ~1.5s cadence stays pinned at the
+/// floor, and slower ones back off by at most one doubling step per further
+/// quiet interval.
+///
+/// A truly dead log — a queued job, a finished run left open overnight —
+/// still walks to the ceiling within ~3s (typical) to ~4.5s (worst case,
+/// after a slow producer) of its last byte, and idles there at one `stat`
+/// per second per followed file.
+///
+/// Quiet time is accumulated by summing the intervals we scheduled rather
+/// than by reading a clock: it keeps the pacer pure and unit-testable
+/// without sleeping, and it errs in the safe direction — a real round takes
+/// the sleep *plus* the poll work, so we slightly under-count elapsed time
+/// and are therefore slightly more patient than the constants suggest,
+/// never less.
 pub(crate) struct PollBackoff {
     current: std::time::Duration,
-    /// Consecutive empty polling rounds seen since the last one with data.
-    empty_rounds: u32,
+    /// Quiet time accumulated since the last round that saw bytes, summed
+    /// from the intervals this pacer scheduled.
+    quiet: std::time::Duration,
+    /// Envelope-followed estimate of the producer's inter-arrival gap: the
+    /// quiet stretch preceding recent rounds-with-data, attacking fast and
+    /// decaying slowly (see the type docs).
+    cadence: std::time::Duration,
 }
 
 impl PollBackoff {
     const FLOOR: std::time::Duration = std::time::Duration::from_millis(50);
     const CEILING: std::time::Duration = std::time::Duration::from_millis(1000);
-    /// Empty rounds tolerated at the current interval before growth starts.
-    const GRACE_ROUNDS: u32 = 10;
+    /// Shortest grace period: quiet time tolerated at the floor before
+    /// growth starts, even for a producer we know nothing about yet. Sized
+    /// to clear the measured ~0.9s block-write cadence with margin.
+    const GRACE_MIN: std::time::Duration = std::time::Duration::from_millis(1500);
+    /// Longest grace period, however slow the observed cadence: bounds how
+    /// long a dead log keeps polling at the floor before it starts backing
+    /// off.
+    const GRACE_MAX: std::time::Duration = std::time::Duration::from_millis(3000);
 
     pub fn new() -> Self {
-        PollBackoff { current: Self::FLOOR, empty_rounds: 0 }
+        PollBackoff {
+            current: Self::FLOOR,
+            quiet: std::time::Duration::ZERO,
+            cadence: std::time::Duration::ZERO,
+        }
     }
 
     /// The interval to wait before the next poll.
@@ -58,16 +112,33 @@ impl PollBackoff {
         self.current
     }
 
+    /// How much accumulated quiet is tolerated at the current interval
+    /// before growth starts, given the producer's observed cadence.
+    fn grace(&self) -> std::time::Duration {
+        self.cadence.saturating_mul(2).clamp(Self::GRACE_MIN, Self::GRACE_MAX)
+    }
+
     /// Record the outcome of a polling round: any round that saw new bytes
-    /// (from any source) resets to the floor; an empty round past the grace
-    /// period doubles the interval, clamped to the ceiling.
+    /// (from any source) resets to the floor and re-arms the grace period;
+    /// an empty round adds the interval we just waited out to the quiet
+    /// total, and once that total passes the grace period each further
+    /// empty round doubles the interval, clamped to the ceiling.
     pub fn note(&mut self, had_data: bool) {
         if had_data {
+            // Fast attack, slow decay: a single burst of back-to-back data
+            // rounds (gap ≈ 0) must not erase what we learned about this
+            // producer's long pauses.
+            let gap = self.quiet;
+            self.cadence = if gap > self.cadence {
+                gap
+            } else {
+                (self.cadence.saturating_mul(3) + gap) / 4
+            };
             self.current = Self::FLOOR;
-            self.empty_rounds = 0;
+            self.quiet = std::time::Duration::ZERO;
         } else {
-            self.empty_rounds += 1;
-            if self.empty_rounds > Self::GRACE_ROUNDS {
+            self.quiet = self.quiet.saturating_add(self.current);
+            if self.quiet >= self.grace() {
                 self.current = (self.current * 2).min(Self::CEILING);
             }
         }
@@ -554,38 +625,122 @@ mod tests {
         assert_eq!(backoff.interval(), PollBackoff::FLOOR);
     }
 
+    /// Drive a backoff against a producer that appends strictly every
+    /// `period`, simulating time by summing the intervals the pacer asks
+    /// for (exactly how the pacer accounts for quiet time, and how the real
+    /// follow loops spend it). Returns the widest interval the pacer ever
+    /// asked for and the worst latency between a byte becoming readable and
+    /// the round that picked it up, ignoring the first `warmup` of
+    /// simulated time (during which the pacer has yet to observe the
+    /// producer's cadence at all).
+    fn drive_periodic(
+        period: std::time::Duration,
+        rounds: u32,
+        warmup: std::time::Duration,
+    ) -> (std::time::Duration, std::time::Duration) {
+        let mut backoff = PollBackoff::new();
+        let mut now = std::time::Duration::ZERO;
+        let mut next_write = period;
+        let mut worst_interval = std::time::Duration::ZERO;
+        let mut worst_latency = std::time::Duration::ZERO;
+        for _ in 0..rounds {
+            // Sleep the interval the pacer asked for, then poll.
+            now += backoff.interval();
+            let had_data = now >= next_write;
+            if had_data {
+                if now >= warmup {
+                    worst_latency = worst_latency.max(now - next_write);
+                }
+                // The producer keeps its own rhythm regardless of when we
+                // got around to noticing.
+                while next_write <= now {
+                    next_write += period;
+                }
+            }
+            backoff.note(had_data);
+            if now >= warmup {
+                worst_interval = worst_interval.max(backoff.interval());
+            }
+        }
+        assert!(now > warmup, "not enough rounds to get past the warmup");
+        (worst_interval, worst_latency)
+    }
+
     #[test]
     fn backoff_holds_the_floor_through_the_grace_period() {
         let mut backoff = PollBackoff::new();
-        for _ in 0..PollBackoff::GRACE_ROUNDS {
+        let mut quiet = std::time::Duration::ZERO;
+        // With no cadence learned yet the grace period is GRACE_MIN.
+        while quiet + PollBackoff::FLOOR < PollBackoff::GRACE_MIN {
             backoff.note(false);
+            quiet += PollBackoff::FLOOR;
             assert_eq!(backoff.interval(), PollBackoff::FLOOR);
         }
-        // The round after the grace period is the first to grow.
+        // The round that takes accumulated quiet past the grace period is
+        // the first to grow.
         backoff.note(false);
         assert_eq!(backoff.interval(), PollBackoff::FLOOR * 2);
+        // A grace period measured in time, not rounds: GRACE_MIN of it.
+        assert_eq!(quiet + PollBackoff::FLOOR, PollBackoff::GRACE_MIN);
     }
 
     #[test]
     fn backoff_doubles_past_grace_and_clamps_to_ceiling() {
         let mut backoff = PollBackoff::new();
         let mut seen = Vec::new();
-        for _ in 0..(PollBackoff::GRACE_ROUNDS + 10) {
+        let mut quiet = std::time::Duration::ZERO;
+        for _ in 0..80 {
+            quiet += backoff.interval();
             backoff.note(false);
-            seen.push(backoff.interval());
+            seen.push((quiet, backoff.interval()));
         }
-        // Doubles each empty round once the grace period is spent...
-        assert_eq!(seen[PollBackoff::GRACE_ROUNDS as usize], PollBackoff::FLOOR * 2);
-        assert_eq!(seen[PollBackoff::GRACE_ROUNDS as usize + 1], PollBackoff::FLOOR * 4);
+        // Each further empty round doubles, once the grace period is spent.
+        let grown: Vec<_> =
+            seen.iter().skip_while(|(_, d)| *d == PollBackoff::FLOOR).map(|(_, d)| *d).collect();
+        assert_eq!(grown[0], PollBackoff::FLOOR * 2);
+        assert_eq!(grown[1], PollBackoff::FLOOR * 4);
         // ...until it clamps at the ceiling and stays there.
-        assert!(seen.iter().all(|d| *d <= PollBackoff::CEILING));
-        assert_eq!(*seen.last().unwrap(), PollBackoff::CEILING);
+        assert!(seen.iter().all(|(_, d)| *d <= PollBackoff::CEILING));
+        assert_eq!(seen.last().unwrap().1, PollBackoff::CEILING);
+    }
+
+    #[test]
+    fn backoff_reaches_a_filesystem_friendly_interval_when_idle() {
+        // A genuinely dead log (queued job, finished run left open) must
+        // stop hammering the fileserver within a few seconds of the last
+        // byte, and idle at one stat/sec.
+        let mut backoff = PollBackoff::new();
+        // Worst case: the producer's last observed cadence was slow, so the
+        // grace period is at its maximum.
+        for _ in 0..(PollBackoff::GRACE_MAX.as_millis() as u32
+            / PollBackoff::FLOOR.as_millis() as u32)
+        {
+            backoff.note(false);
+        }
+        backoff.note(true);
+        assert_eq!(backoff.grace(), PollBackoff::GRACE_MAX);
+
+        let mut quiet = std::time::Duration::ZERO;
+        while backoff.interval() < PollBackoff::CEILING {
+            quiet += backoff.interval();
+            backoff.note(false);
+        }
+        assert_eq!(backoff.interval(), PollBackoff::CEILING);
+        assert!(
+            quiet <= std::time::Duration::from_millis(4600),
+            "idle log took {quiet:?} to reach the ceiling"
+        );
+        // And it stays there — one stat per second per followed file.
+        for _ in 0..100 {
+            backoff.note(false);
+            assert_eq!(backoff.interval(), PollBackoff::CEILING);
+        }
     }
 
     #[test]
     fn backoff_resets_interval_and_grace_on_data() {
         let mut backoff = PollBackoff::new();
-        for _ in 0..(PollBackoff::GRACE_ROUNDS + 10) {
+        for _ in 0..200 {
             backoff.note(false);
         }
         assert_eq!(backoff.interval(), PollBackoff::CEILING);
@@ -604,6 +759,105 @@ mod tests {
         let mut backoff = PollBackoff::new();
         for round in 0..100 {
             backoff.note(round % 4 == 0);
+            assert_eq!(backoff.interval(), PollBackoff::FLOOR);
+        }
+    }
+
+    #[test]
+    fn backoff_stays_at_floor_for_a_1hz_block_buffered_producer() {
+        // The measured real-world shape this tuning exists for: a
+        // block-buffered writer whose stdout lands as one ~8KB block about
+        // once every 0.9s — roughly 1.1 rounds-with-data per second. Under
+        // the old 10-empty-rounds (500ms) grace this producer climbed to
+        // the ceiling and the follower slept past readable bytes for 2s+ at
+        // a time. It must now sit at the floor for as long as the job runs,
+        // not just for the first few rounds.
+        // 4000 rounds at the floor is over three minutes of simulated time
+        // — "sustained indefinitely", not "for the first few rounds".
+        let (worst_interval, worst_latency) =
+            drive_periodic(std::time::Duration::from_millis(900), 4_000, std::time::Duration::ZERO);
+        assert_eq!(
+            worst_interval,
+            PollBackoff::FLOOR,
+            "a ~1Hz block writer must never leave the floor"
+        );
+        assert!(
+            worst_latency <= PollBackoff::FLOOR,
+            "added latency {worst_latency:?} exceeds one floor interval"
+        );
+
+        // Same story with jitter either side of 1s.
+        for period_ms in [773, 935, 1_075, 1_222, 1_460] {
+            let (worst_interval, worst_latency) = drive_periodic(
+                std::time::Duration::from_millis(period_ms),
+                4_000,
+                std::time::Duration::ZERO,
+            );
+            assert_eq!(
+                worst_interval,
+                PollBackoff::FLOOR,
+                "a producer writing every {period_ms}ms left the floor"
+            );
+            assert!(worst_latency <= PollBackoff::FLOOR);
+        }
+    }
+
+    #[test]
+    fn backoff_learns_a_slow_periodic_cadence_instead_of_oscillating() {
+        // Past GRACE_MIN the remembered cadence takes over: a producer with
+        // a steady multi-second rhythm is paced by that rhythm rather than
+        // bouncing between the floor and the ceiling on every block.
+        // (The very first gap is longer than GRACE_MIN and there is nothing
+        // learned yet, so one warmup cycle is allowed to back off.)
+        let (worst_interval, worst_latency) = drive_periodic(
+            std::time::Duration::from_millis(2_500),
+            2_000,
+            std::time::Duration::from_millis(6_000),
+        );
+        assert_eq!(worst_interval, PollBackoff::FLOOR);
+        assert!(worst_latency <= PollBackoff::FLOOR);
+
+        // And beyond even GRACE_MAX, growth is bounded by one doubling per
+        // quiet interval, so delivery stays inside the ceiling.
+        let (worst_interval, worst_latency) = drive_periodic(
+            std::time::Duration::from_millis(6_000),
+            2_000,
+            std::time::Duration::from_millis(12_000),
+        );
+        assert!(worst_interval <= PollBackoff::CEILING);
+        assert!(
+            worst_latency <= PollBackoff::CEILING,
+            "latency {worst_latency:?} for a 6s producer"
+        );
+    }
+
+    #[test]
+    fn backoff_cadence_memory_survives_a_burst() {
+        // Bursty producer: a run of back-to-back data rounds every ~1.2s.
+        // The burst's zero-length gaps must not wipe out what we learned
+        // from the pause, or the next pause re-enters the oscillation.
+        let mut backoff = PollBackoff::new();
+        let mut now = std::time::Duration::ZERO;
+        let mut next_burst = std::time::Duration::from_millis(1_200);
+        for _ in 0..2_000 {
+            now += backoff.interval();
+            let mut had_data = false;
+            if now >= next_burst {
+                // Five rounds of data in a row, then quiet until the next
+                // burst.
+                for _ in 0..5 {
+                    backoff.note(true);
+                    now += backoff.interval();
+                }
+                next_burst += std::time::Duration::from_millis(1_200);
+                while next_burst <= now {
+                    next_burst += std::time::Duration::from_millis(1_200);
+                }
+                had_data = true;
+            }
+            if !had_data {
+                backoff.note(false);
+            }
             assert_eq!(backoff.interval(), PollBackoff::FLOOR);
         }
     }
