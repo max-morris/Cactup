@@ -18,7 +18,7 @@ include!(concat!(env!("OUT_DIR"), "/wisdom_gen.rs"));
 
 /// When `wisdom-kind` is `all`, the chance (in percent) that the pick is a
 /// zen entry rather than a feature tip. Dev-time tunable, not a knob.
-const ZEN_PERCENT: u32 = 25;
+const ZEN_PERCENT: u32 = 10;
 
 /// How often the random post-command wisdom fires (§5, `wisdom-frequency`).
 /// Stored on disk as the ordinal, always rendered as the name.
