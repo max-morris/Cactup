@@ -108,7 +108,7 @@ impl Optionlist {
                 toml::Value::Integer(v) => OptionValue::Int(v),
                 toml::Value::Float(_) => bail!(
                     "[options].{key} is a float; Cactus options are never floats — \
-                     quote it as a string if the dotted value is intended (§7.8)"
+                     quote it as a string if the dotted value is intended" // §7.8
                 ),
                 other => bail!(
                     "[options].{key} must be a string, boolean, or integer (got {})",

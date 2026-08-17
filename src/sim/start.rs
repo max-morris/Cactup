@@ -34,8 +34,9 @@ fn obtain_sim(
     let exists = inst.simulations()?.simulations.contains_key(&args.sim);
     match (&args.parfile, exists) {
         (None, true) => Simulation::locate(inst, &args.sim),
+        // §8.3
         (None, false) => bail!(
-            "no simulation named \"{}\" — pass a parfile to create it (§8.3)",
+            "no simulation named \"{}\" — pass a parfile to create it",
             args.sim
         ),
         (Some(par), false) => crate::sim::create(
@@ -81,19 +82,21 @@ pub fn resolve_run_universe<'m>(
     }
     if let Some(build_uni) = &cfg.universe {
         if cfg.coerce_run_universe {
+            // §4.8
             let u = machine.meta.universe(build_uni).with_context(|| {
                 format!(
                     "config \"{}\" was built in universe \"{build_uni}\", which this machine no \
-                     longer defines; pass --no-universe or rebuild (§4.8)",
+                     longer defines; pass --no-universe or rebuild",
                     cfg.name
                 )
             })?;
             if verbose {
                 if let Some(v) = variant_universe {
                     if v != build_uni {
+                        // §4.8
                         eprintln!(
                             "{} runscript variant names universe \"{v}\" but the config's build \
-                             universe \"{build_uni}\" takes precedence (§4.8)",
+                             universe \"{build_uni}\" takes precedence",
                             "note:".yellow()
                         );
                     }
@@ -327,8 +330,9 @@ fn submit_impl(
     let (segments, job_wall) = vars::chain_segments(topo.total_wall, ceiling);
     let buffer = args.checkpt_buffer.unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
     if segments > 1 {
+        // §8.8
         println!(
-            "Total walltime {} exceeds the {} ceiling of queue \"{}\": pre-submitting {} chained jobs (§8.8)",
+            "Total walltime {} exceeds the {} ceiling of queue \"{}\": pre-submitting {} chained jobs",
             topo.total_wall.canonical(),
             ceiling.canonical(),
             topo.queue,

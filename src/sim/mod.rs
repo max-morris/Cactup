@@ -163,9 +163,10 @@ impl Simulation {
             )
         })?;
         if !entry.dir.is_dir() {
+            // §8.1
             bail!(
                 "simulation \"{name}\" is registered at {} but that directory is missing;\n\
-                 run `cactup sim delete {name}` to drop the stale registry entry (§8.1)",
+                 run `cactup sim delete {name}` to drop the stale registry entry",
                 entry.dir.display()
             );
         }
@@ -201,8 +202,9 @@ fn validate_parfile(parfile: &Path) -> Res<(String, String)> {
         .ok_or_else(|| anyhow!("parfile path {} has no valid file name", parfile.display()))?
         .to_owned();
     if !basename.ends_with(".par") && !basename.ends_with(".py") {
+        // §6.2
         bail!(
-            "parfile {} must end in .par (literal @NAME@ substitution) or .py (computed — §6.2)",
+            "parfile {} must end in .par (literal @NAME@ substitution) or .py (computed)",
             parfile.display()
         );
     }
@@ -211,9 +213,10 @@ fn validate_parfile(parfile: &Path) -> Res<(String, String)> {
         bail!("parfile {} has an empty basename", parfile.display());
     }
     if RESERVED_NAMES.contains(&stem.as_str()) {
+        // §8.2
         bail!(
             "parfile basename \"{stem}\" is reserved (one of: {}) — it would collide with \
-             cactup's metadata entries (§8.2)",
+             cactup's metadata entries",
             RESERVED_NAMES.join(", ")
         );
     }

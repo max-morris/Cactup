@@ -613,17 +613,17 @@ impl ScriptVariants {
                     )
                 })?;
             if use_test && !entry.test {
-                bail!("variant \"{name}\" is not test-marked, but this machine has test variants (§11.2)");
+                bail!("variant \"{name}\" is not test-marked, but this machine has test variants"); // §11.2
             }
             if !prefer_test && entry.test {
-                bail!("variant \"{name}\" is test-only (test = true) and cannot serve a normal run (§11.2)");
+                bail!("variant \"{name}\" is test-only (test = true) and cannot serve a normal run"); // §11.2
             }
             if !entry.compatible_with(universe) {
                 bail!(
                     "variant \"{name}\" is not compatible with build universe \"{universe}\" \
-                     (build-universes = [{}]) (§4.4)",
+                     (build-universes = [{}])",
                     entry.build_universes.as_deref().unwrap_or_default().join(", ")
-                );
+                ); // §4.4
             }
             return Ok((name.as_str(), entry));
         }
@@ -801,7 +801,7 @@ impl Meta {
                 if universes.is_empty() {
                     bail!(
                         "queue \"{name}\" declares an empty build-universes list; omit the key \
-                         to be compatible with all universes (§4.4)"
+                         to be compatible with all universes"
                     );
                 }
                 for u in universes {
@@ -823,20 +823,20 @@ impl Meta {
 
         for (name, universe) in &self.universes {
             match (&universe.wrapper_argv, &universe.wrapper) {
-                (Some(_), Some(_)) => bail!("universe \"{name}\" defines both wrapper-argv and wrapper; pick one (§4.8)"),
+                (Some(_), Some(_)) => bail!("universe \"{name}\" defines both wrapper-argv and wrapper; pick one"), // §4.8
                 // Neither wrapper = identity universe (§4.8): legal, e.g. as a
                 // pure env-setup override carrier.
                 (None, None) => {}
                 (None, Some(t)) => {
                     if !t.contains("@COMMAND@") {
-                        bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@ (§4.8)")
+                        bail!("universe \"{name}\"'s wrapper template does not contain @COMMAND@") // §4.8
                     }
                     if let Some(pos) = command_token_in_quotes(t) {
                         bail!(
                             "universe \"{name}\"'s wrapper template puts @COMMAND@ inside a \
                              quoted string (byte {pos}); wrap() supplies @COMMAND@ already \
                              shell-quoted, so it must sit OUTSIDE the template's own quotes \
-                             — e.g. `bash -lc '… && '@COMMAND@` (§4.8)"
+                             — e.g. `bash -lc '… && '@COMMAND@`" // §4.8
                         )
                     }
                 }
@@ -892,7 +892,7 @@ impl Meta {
                 if universes.is_empty() {
                     bail!(
                         "variant \"{name}\" declares an empty build-universes list; omit the key \
-                         to be compatible with all universes (§4.4)"
+                         to be compatible with all universes" // §4.4
                     );
                 }
                 for u in universes {
@@ -951,7 +951,7 @@ impl Meta {
                         && sv.partition_default(test, universe).is_none()
                     {
                         bail!(
-                            "queue \"{queue}\" is served by no {label}variant and none is marked default = true (§4.2)"
+                            "queue \"{queue}\" is served by no {label}variant and none is marked default = true" // §4.2
                         );
                     }
                 }
