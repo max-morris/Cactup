@@ -314,6 +314,17 @@ to skip it. `setup_prodash_if_tty` is only for phases whose items never call
 `info()`/`fail()` — those messages are printed by the render thread even on
 a non-tty, and skipping the renderer would drop them.
 
+**§-reference hygiene.** Annotate code with spec section references (`§8.5`)
+liberally — they are how contributors (human or agent) jump from a feature to
+its contract here. But they are internal navigation, never user-facing: no
+§-refs in anything cactup shows or emits — clap help (in `src/args.rs`, every
+`///` doc comment and `help =`/`about =` string IS help output), `bail!`/
+`anyhow!`/`println!` message strings, or generated file content (e.g. the
+`.py` preamble). Put the reference in a plain `//` comment adjacent to the
+string instead — trailing on the line, or just above the statement. Test
+assertion messages, `#[cfg(test)]` fixtures, and comments in `mdb/` source
+files are internal and may carry §-refs freely.
+
 ---
 
 ## 3. CLI surface
