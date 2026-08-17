@@ -251,6 +251,38 @@ sys.stdout.write("\n".join(lines) + "\n")    # stdout is the generated script
 
 Python is useful for complex script generation, but shell is simpler for most machines.
 
+#### Refusing a request
+
+Some clusters have rules cactup cannot know about — a partition that only grants
+GPUs in certain multiples, a combination of directives the scheduler silently
+mangles. When the variables you were handed describe a job your machine cannot
+actually run, `raise CactupError(...)`:
+
+```python
+gpus = typed['GPUS_PER_TASK'] * typed['TASKS_PER_NODE']
+if gpus > gres:
+    raise CactupError(
+        f"this layout binds {gpus} GPUs per node but {QUEUE} only reserves {gres}.\n"
+        f"Raise --cpus, or drop to --tpn 1."
+    )
+```
+
+cactup prints your message and stops. Nothing is submitted, and no restart
+directory is left behind:
+
+```
+$ cactup sim submit mysim -c 16 --tpn 2
+error: this layout binds 2 GPUs per node but gpu2 only reserves 1.
+Raise --cpus, or drop to --tpn 1. (/path/to/submitscripts/default.py)
+```
+
+Write the message for the person who typed the command: say which flag to
+change, not just which invariant broke. Multi-line messages are preserved.
+
+`CactupError` is for *policy* — a request that is legitimately impossible here.
+Any other exception is treated as a bug in your script and reported with its
+full traceback, so a typo stays debuggable instead of looking like a site rule.
+
 ## Environment setup: @ENV_SETUP@
 
 The `@ENV_SETUP@` variable expands to shell commands that set up the build environment:

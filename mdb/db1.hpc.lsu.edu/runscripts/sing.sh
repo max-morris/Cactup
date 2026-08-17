@@ -76,7 +76,7 @@ time srun -u -A @ALLOCATION@ -p gpu \
     -N @NODES@ -n @TASKS@ \
     --cpus-per-task @CPUS_PER_TASK@ \
     --gres=gpu:$GRES \
-    --gpus-per-task 1 \
+    --gpus-per-task @GPUS_PER_TASK@ \
     singularity exec --nv --bind /var/spool --bind /project --bind /ddnA/project --bind /etc/ssh/ssh_known_hosts --bind /ddnA/work --bind /work --bind /scratch /work/sbrandt/images/etworkshop2.simg @EXECUTABLE@ -L 3 @PARFILE@
 else
 # This is for the testsuite

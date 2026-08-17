@@ -11,8 +11,10 @@
 # $QUEUE is a shell variable the GRES branch reads; upstream never exports it
 # (the submitscript sets @QUEUE@ only in the #SBATCH -p directive), so it is
 # unset at runtime and GRES stays empty for the "gpu" queue — the srun below
-# still requests a GPU via --gpus-per-task=1. The gpu2/gpu4 branches are kept
-# verbatim for the day a user runs on those partitions.
+# still requests a GPU via --gpus-per-task=@GPUS_PER_TASK@ (1 by default —
+# db1 declares no max-gpus-per-node, so §8.5 falls back to one GPU per task).
+# The gpu2/gpu4 branches are kept verbatim for the day a user runs on those
+# partitions.
 
 echo "Preparing:"
 set -x                          # Output commands
@@ -66,7 +68,7 @@ export CACTUS_STARTTIME=$(date +%s)
 
 time srun --overlap -n @TASKS@ \
     --cpus-per-task=@CPUS_PER_TASK@ \
-    --gpus-per-task=1 \
+    --gpus-per-task=@GPUS_PER_TASK@ \
     $GRES \
     @EXECUTABLE@ -L 3 @PARFILE@
 

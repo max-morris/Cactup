@@ -34,10 +34,17 @@ test-home       = "/work/@USER@/tests"
 
 [hardware]
 max-cpus-per-node = 64
-# Request default when `-c` is omitted (design §8.5): 2 tasks × 32 CPUs fills
-# a 64-core node and matches gpu2's 2 GPUs at exactly the 32-CPUs-per-GPU cap
-# (the same shape as db1's 2 × 24 on 48-core/2-GPU nodes).
+# Request default when `-c` is omitted (design §8.5). The shape both partitions
+# aim for is ONE RANK PER GPU with the node's cores split evenly between them —
+# which, since cactup gives each rank one GPU by default, is what makes a
+# no-flag job fill the node it was given. That means this key has to track the
+# partition's GPU count: 64/2 = 32 here for gpu2, overridden to 64/4 = 16 on
+# gpu4 below. 32 also lands gpu2 exactly on its 32-CPUs-per-GPU cap (the same
+# shape as db1's 2 × 24 on 48-core/2-GPU nodes).
 default-cpus-per-task = 32
+# No `default-gpus-per-task` here: one GPU per rank is cactup's global default
+# (§8.5) and is exactly what QB4 wants, on both partitions. Setting it would be
+# a no-op key for a future editor to trip over.
 memory             = 514913    # MB per node
 
 [build]
@@ -156,12 +163,27 @@ max-walltime     = "24:00:00"
 # CPUs per GPU are capped (32 on gpu2) and only GPUs requested via `--gres`
 # count — so the submitscripts emit `--gres=gpu:{4,2}` per queue and the
 # build universe above requests `--gres=gpu:2`.
+#
+# The 2-vs-4 split is a per-queue `max-gpus-per-node` override (§4.2) rather
+# than a machine-level [hardware] key, because the two partitions genuinely
+# differ; everything else (64 CPUs, 32 CPUs/task, memory) is shared and stays
+# inherited. These are ceilings, not targets: at cactup's default of one GPU
+# per rank they are what a layout is checked against (§8.5), so a request
+# needing more GPUs per node than the partition has — e.g. `-c 16` on gpu2,
+# which puts 4 ranks over 2 GPUs — is refused before anything is submitted
+# rather than queued forever.
 [queues.gpu2]
 gpu     = true    # native CUDA build (nvcc, AMREX_ENABLE_CUDA = yes)
 default = true
+max-gpus-per-node = 2
 
 [queues.gpu4]
 gpu = true
+max-gpus-per-node = 4
+# 64/4: four ranks, one per GPU, 16 cores each. Inheriting [hardware]'s 32
+# would give 2 ranks — half a node's worth of work on a node whose whole
+# 4-GPU complement the --gres branch below reserves regardless.
+default-cpus-per-task = 16
 
 [variants.submitscript]
 "default" = { queues = ["gpu2", "gpu4"], default = true }

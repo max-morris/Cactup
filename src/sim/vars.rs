@@ -4,7 +4,7 @@
 use crate::args::TopologyFlags;
 use crate::build::ConfigMeta;
 use crate::database::Database;
-use crate::mdb::{Machine, Phase, HOST_UNIVERSE};
+use crate::mdb::{Hardware, Machine, Phase, HOST_UNIVERSE};
 use crate::sim::{restart, Simulation};
 use crate::template::VarSet;
 use crate::walltime::Walltime;
@@ -20,6 +20,8 @@ pub struct Topology {
     pub tpn: u32,
     pub cpus: u32,
     pub gpu: bool,
+    /// GPUs per task (§8.5); always 0 on a non-GPU run.
+    pub gpus_per_task: u32,
     pub queue: String,
     /// The scheduler-facing queue name (§4.2): the queue's `name` override
     /// when set, else `queue` itself. `@QUEUE@` resolves to this; everything
@@ -106,6 +108,15 @@ pub fn resolve_topology(
             cfg.name,
         );
     }
+    // `--gpus-per-task` is meaningful only once GPU is on: refused rather than
+    // silently ignored, so a user who asked for GPUs per task and landed on a
+    // CPU queue finds out here instead of from the scheduler.
+    if flags.gpus_per_task.is_some() && !gpu {
+        bail!(
+            "--gpus-per-task is only meaningful on a GPU run, but queue \"{queue}\" is not \
+             GPU-flagged and --gpu was not given (§8.5)"
+        );
+    }
 
     // Process layout (§8.5 derivation), from the queue-effective hardware
     // (per-queue overrides falling back to [hardware] — §4.2).
@@ -126,6 +137,7 @@ pub fn resolve_topology(
     if flags.tpn.is_none() {
         tpn = tpn.min(tasks.div_ceil(nodes).max(1));
     }
+    let gpus_per_task = derive_gpus_per_task(flags, &hw, gpu, tpn, &queue)?;
 
     let total_wall = match flags.wall_time {
         Some(w) => w,
@@ -138,6 +150,7 @@ pub fn resolve_topology(
         tpn,
         cpus,
         gpu,
+        gpus_per_task,
         scheduler_queue: machine.meta.scheduler_queue_name(&queue)?.to_owned(),
         queue,
         allocation: flags.allocation.clone().or_else(|| db.knob("allocation").map(str::to_owned)),
@@ -154,11 +167,60 @@ pub fn resolve_topology(
     })
 }
 
+/// `GPUS_PER_TASK` (§8.5): `--gpus-per-task` → the queue-effective
+/// `default-gpus-per-task` → **1**. Always 0 on a non-GPU run (the
+/// explicit-flag-without-GPU case is refused in `resolve_topology`).
+///
+/// One GPU per rank is the default everywhere, deliberately unlike the CPU
+/// chain's fill-the-node rule. A GPU is not divisible the way a core is: the
+/// overwhelmingly common shape is one device per rank, and a machine that wants
+/// otherwise says so with `default-gpus-per-task`. Deriving it from the node's
+/// GPU count instead would silently hand extra devices to a job that shrank its
+/// rank count for unrelated reasons, and would fight any machine whose
+/// scheduler reserves GPUs on a different axis than it binds them.
+///
+/// `max-gpus-per-node` therefore does not feed this at all — it is purely the
+/// ceiling checked below. That check is the one place the GPU chain is stricter
+/// than the CPU chain: CPUs oversubscribe harmlessly (threads time-share a
+/// core), while a job asking for GPUs a partition does not have either never
+/// schedules or lands with ranks fighting over one device.
+fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool, tpn: u32, queue: &str) -> Res<u32> {
+    if !gpu {
+        return Ok(0);
+    }
+    let tpn = tpn.max(1);
+    let per_task = flags.gpus_per_task.or(hw.default_gpus_per_task).unwrap_or(1).max(1);
+    if let Some(max) = hw.max_gpus_per_node {
+        let needed = per_task * tpn;
+        if needed > max {
+            // Point at whichever knob the user actually turned: telling someone
+            // who passed --gpus-per-task to "set --gpus-per-task" is noise, and
+            // at 1 GPU per rank there is nothing left to lower at all.
+            let fix = if per_task > 1 {
+                format!("--gpus-per-task {} or lower fits this layout", max / tpn)
+            } else {
+                "each rank already takes one GPU, so lower --tpn/--tasks, or raise --cpus \
+                 so fewer ranks land on a node"
+                    .to_owned()
+            };
+            bail!(
+                "this layout needs {needed} GPUs per node ({per_task} per task × {tpn} tasks/node) \
+                 but queue \"{queue}\" has {max} (§8.5); {fix}"
+            );
+        }
+    }
+    Ok(per_task)
+}
+
 /// Apply the default-tasks chain to a resolved topology: the selected script
 /// variant's `tasks` setting (§4.2) first, then the caller's fallback (2 for
 /// testsuite runs — §11.6), else keep the §8.5 fill-the-node value. Any
 /// explicit process-layout flag (-n/-T/-t) disables the whole chain; tpn is
 /// capped so the recorded layout stays self-consistent.
+///
+/// `GPUS_PER_TASK` needs no revisiting here: it is per-*task*, so shrinking the
+/// rank count leaves it untouched, and `tpn` only ever shrinks below — which
+/// can only relax the §8.5 GPUs-per-node ceiling, never breach it.
 pub fn apply_tasks_default(
     topo: &mut Topology,
     flags: &TopologyFlags,
@@ -242,6 +304,7 @@ pub fn set_topology_vars(v: &mut VarSet, topo: &Topology, default_job_name: &str
     v.set("TASKS_PER_NODE", topo.tpn as u64);
     v.set("CPUS_PER_TASK", topo.cpus as u64);
     v.set("GPU", topo.gpu);
+    v.set("GPUS_PER_TASK", topo.gpus_per_task as u64);
     v.set("ALLOCATION", topo.allocation.as_deref().unwrap_or(""));
     v.set("QUEUE", topo.scheduler_queue.as_str());
     v.set("MAIL", topo.mail.as_deref().unwrap_or(""));
@@ -271,6 +334,10 @@ pub fn set_walltime_vars(v: &mut VarSet, wall: Walltime, buffer: Walltime) {
 pub fn set_machine_vars(v: &mut VarSet, machine: &Machine, queue: &str, run_universe: Option<&str>) -> Res<()> {
     let hw = machine.meta.effective_hardware(queue)?;
     v.set("MAX_CPUS_PER_NODE", hw.max_cpus_per_node.unwrap_or(1) as u64);
+    // 0, not 1, when undeclared: unlike CPUs (where every node has at least
+    // one) an absent GPU count means "none or unknown", and a script reading
+    // this must not mistake that for a real one-GPU node.
+    v.set("MAX_GPUS_PER_NODE", hw.max_gpus_per_node.unwrap_or(0) as u64);
     v.set("MEMORY", hw.memory.unwrap_or(0));
     v.set("THREADS_PER_CPU", hw.threads_per_cpu() as u64);
     v.set("ENV_SETUP", machine.meta.effective_env(run_universe, Phase::Run));
@@ -377,11 +444,31 @@ mod tests {
             max-cpus-per-node = 48
             default-cpus-per-task = 24
 
+            [queues.gpucap]
+            gpu = true
+            max-walltime = "24:00:00"
+            # qbd-gpu4 shape: 64 CPUs at 32/task = 2 tasks/node, on a 4-GPU
+            # node. `max-gpus-per-node` is a ceiling only — it never feeds the
+            # §8.5 default, which is a flat 1 GPU/task.
+            max-cpus-per-node = 64
+            default-cpus-per-task = 32
+            max-gpus-per-node = 4
+
+            [queues.gpudef]
+            gpu = true
+            max-walltime = "24:00:00"
+            # Same node, but this partition hands each rank two devices — the
+            # one way to depart from the global 1 (§8.5).
+            max-cpus-per-node = 64
+            default-cpus-per-task = 32
+            max-gpus-per-node = 4
+            default-gpus-per-task = 2
+
             [variants.submitscript]
-            "default" = { queues = ["batch", "gpuq", "fillq"], default = true }
+            "default" = { queues = ["batch", "gpuq", "fillq", "gpucap", "gpudef"], default = true }
 
             [variants.runscript]
-            "default" = { queues = ["batch", "gpuq", "fillq"], default = true }
+            "default" = { queues = ["batch", "gpuq", "fillq", "gpucap", "gpudef"], default = true }
 
             [variants.optionlist]
             variants = ["default"]
@@ -424,6 +511,7 @@ mod tests {
             tpn: None,
             cpus: None,
             gpu: false,
+            gpus_per_task: None,
             job_name: None,
             wall_time: None,
             out: None,
@@ -559,6 +647,120 @@ mod tests {
             apply_tasks_default(&mut topo, &f, Some(4), Some(2));
             assert_eq!((topo.tasks, topo.tpn), before, "flags win over defaults");
         }
+    }
+
+    #[test]
+    fn gpus_per_task_derivation() {
+        let machine = test_machine();
+        let db = Database::new();
+        let cfg = test_cfg(false, &[]);
+        let topo = |f: &TopologyFlags| resolve_topology(f, &machine, &db, &cfg, false).unwrap();
+
+        // Non-GPU run: the variable is 0, never 1 — a script must be able to
+        // tell "no GPUs" from "one GPU" using this alone.
+        assert_eq!(topo(&flags()).gpus_per_task, 0);
+
+        // One GPU per rank is the default, even on a 4-GPU node running 2
+        // ranks: `max-gpus-per-node` is a ceiling, NOT a target to fill.
+        let mut f = flags();
+        f.queue = Some("gpucap".to_owned());
+        let t = topo(&f);
+        assert_eq!((t.tpn, t.gpus_per_task), (2, 1));
+
+        // …and it stays 1 regardless of how the ranks are laid out, so a job
+        // that shrinks for unrelated reasons never silently grabs more devices.
+        f.tpn = Some(1);
+        assert_eq!(topo(&f).gpus_per_task, 1);
+        f.tpn = Some(4);
+        assert_eq!(topo(&f).gpus_per_task, 1);
+
+        // An explicit flag wins, up to what the node holds.
+        f.tpn = None;
+        f.gpus_per_task = Some(2);
+        assert_eq!(topo(&f).gpus_per_task, 2);
+
+        // `default-gpus-per-task` is the one way to depart from the global 1.
+        let mut f = flags();
+        f.queue = Some("gpudef".to_owned());
+        assert_eq!(topo(&f).gpus_per_task, 2, "queue default outranks the global 1");
+        f.gpus_per_task = Some(1);
+        assert_eq!(topo(&f).gpus_per_task, 1, "the flag still wins");
+
+        // A GPU queue that declares no GPU count also gets 1 — and with no
+        // ceiling to check, a big explicit request is nobody's business to
+        // refuse.
+        let mut f = flags();
+        f.queue = Some("gpuq".to_owned());
+        assert_eq!(topo(&f).gpus_per_task, 1);
+        f.gpus_per_task = Some(64);
+        assert_eq!(topo(&f).gpus_per_task, 64);
+    }
+
+    #[test]
+    fn gpus_per_node_capacity_is_enforced() {
+        // Unlike CPUs, GPUs cannot be oversubscribed: a layout needing more of
+        // them per node than the queue has is refused up front rather than
+        // submitted to sit unschedulable (or to land with ranks fighting over
+        // one device).
+        let machine = test_machine();
+        let db = Database::new();
+        let cfg = test_cfg(false, &[]);
+        let err = |f: &TopologyFlags| resolve_topology(f, &machine, &db, &cfg, false).unwrap_err().to_string();
+
+        // 4 GPUs, but 8 ranks per node want one each.
+        let mut f = flags();
+        f.queue = Some("gpucap".to_owned());
+        f.tpn = Some(8);
+        let e = err(&f);
+        assert!(e.contains("8 GPUs per node") && e.contains("has 4"), "{e}");
+
+        // At 1 GPU per rank there is nothing left to lower, so the advice must
+        // point at the layout instead of at --gpus-per-task.
+        assert!(e.contains("already takes one GPU") && e.contains("--tpn"), "{e}");
+
+        // An explicit over-request is refused the same way, and there the
+        // advice DOES name the flag the user turned.
+        let mut f = flags();
+        f.queue = Some("gpucap".to_owned());
+        f.gpus_per_task = Some(3); // × 2 tasks/node = 6 > 4
+        let e = err(&f);
+        assert!(e.contains("6 GPUs per node") && e.contains("--gpus-per-task 2"), "{e}");
+
+        // Exactly filling the node is fine — the check is a ceiling, not a cap
+        // on using everything.
+        f.gpus_per_task = Some(2);
+        assert!(resolve_topology(&f, &machine, &db, &cfg, false).is_ok());
+
+        // A queue whose `default-gpus-per-task` overshoots its own node is
+        // caught too: gpudef hands out 2 each, so 4 ranks would need 8.
+        let mut f = flags();
+        f.queue = Some("gpudef".to_owned());
+        f.tpn = Some(4);
+        assert!(err(&f).contains("8 GPUs per node"), "{}", err(&f));
+
+        // Shrinking the layout afterwards leaves GPUS_PER_TASK alone — it is
+        // per-task, so fewer ranks simply need fewer GPUs.
+        let mut f = flags();
+        f.queue = Some("gpudef".to_owned());
+        let mut topo = resolve_topology(&f, &machine, &db, &cfg, false).unwrap();
+        apply_tasks_default(&mut topo, &f, Some(1), None);
+        assert_eq!((topo.tpn, topo.gpus_per_task), (1, 2));
+    }
+
+    #[test]
+    fn gpus_per_task_requires_a_gpu_run() {
+        let machine = test_machine();
+        let db = Database::new();
+        let mut f = flags();
+        f.gpus_per_task = Some(2);
+        // Default queue `batch` is not GPU-flagged: refused, not ignored.
+        let err = resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--gpus-per-task"), "{err}");
+        // `--gpu` alone is enough to make it meaningful again.
+        f.gpu = true;
+        assert_eq!(resolve_topology(&f, &machine, &db, &test_cfg(false, &[]), false).unwrap().gpus_per_task, 2);
     }
 
     #[test]
@@ -748,4 +950,94 @@ mod tests {
         assert!(vars.get("EXECUTABLE").unwrap().canonical().ends_with(".cactup/exe"));
         assert!(vars.get("PARFILE").unwrap().canonical().ends_with("output-0002/bbh.par"));
     }
+
+    /// A no-flag `sim submit` should use the whole node it was given. On a
+    /// machine with GPU partitions of different widths that is not automatic:
+    /// `default-cpus-per-task` sets the rank count, `max-gpus-per-node` sets
+    /// how many ranks the GPUs can feed, and the two are declared in different
+    /// places — so an inherited CPU default silently underfills the wider
+    /// partition. qbd carries both shapes, so it is the regression test.
+    #[test]
+    fn qbd_defaults_fill_each_partition() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let machine = mdb.load("qbd").unwrap();
+        let db = Database::new();
+        let cfg: ConfigMeta = toml::from_str(
+            "name=\"s\"\nvariant=\"default\"\ngpu=true\nthornlist=\"t.th\"\n\
+             machine=\"qbd\"\nconfig-id=\"c\"\nbuild-id=\"b\"",
+        )
+        .unwrap();
+
+        for (queue, gpus) in [("gpu2", 2), ("gpu4", 4)] {
+            let mut f = flags();
+            f.queue = Some(queue.to_owned());
+            let t = resolve_topology(&f, &machine, &db, &cfg, false).unwrap();
+            let hw = machine.meta.effective_hardware(queue).unwrap();
+            assert_eq!(hw.max_gpus_per_node, Some(gpus), "{queue}");
+            // One rank per GPU, every GPU busy…
+            assert_eq!(t.gpus_per_task, 1, "{queue}");
+            assert_eq!(t.tpn, gpus, "{queue}: a rank per GPU");
+            assert_eq!(t.tpn * t.gpus_per_task, gpus, "{queue}: no idle GPUs");
+            // …and the node's cores split evenly among them, none left over.
+            assert_eq!(t.tpn * t.cpus, hw.max_cpus_per_node.unwrap(), "{queue}: no idle cores");
+        }
+    }
+
+    /// The bundled `.sh` scripts are only checked at substitution time, so a
+    /// template naming a variable cactup does not set fails at submit — on the
+    /// user's cluster, not here. db1's runscripts reference `@GPUS_PER_TASK@`;
+    /// this pins that the assembled set actually carries it.
+    #[test]
+    fn real_templates_naming_gpus_per_task_substitute() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let mut checked = 0;
+        for (name, _layer) in mdb.machines().unwrap() {
+            let machine = mdb.load(&name).unwrap();
+            for kind in [crate::mdb::ScriptKind::Run, crate::mdb::ScriptKind::Submit] {
+                for variant in machine.meta.script_variants(kind).variants.keys() {
+                    let script = machine.script_path(kind, variant).unwrap();
+                    if script.python {
+                        continue; // .py variants read globals, not @NAME@ tokens
+                    }
+                    let body = std::fs::read_to_string(&script.path).unwrap();
+                    if !body.contains("@GPUS_PER_TASK@") {
+                        continue;
+                    }
+                    // A test var set exercises the same `set_topology_vars`
+                    // block the sim path uses, and reaches the test scripts too.
+                    let mut v = VarSet::new();
+                    let topo = resolve_topology(
+                        &flags(),
+                        &test_machine(),
+                        &Database::new(),
+                        &test_cfg(false, &[]),
+                        false,
+                    )
+                    .unwrap();
+                    set_topology_vars(&mut v, &topo, "job");
+                    for token in body.split('@').skip(1).step_by(2) {
+                        // Fill everything this template names that isn't ours,
+                        // so the assertion is about GPUS_PER_TASK alone.
+                        if v.get(token).is_none() {
+                            v.set(token, "x");
+                        }
+                    }
+                    v.substitute(&body).unwrap_or_else(|e| {
+                        panic!("{name} {kind:?} {variant} failed to substitute: {e:#}")
+                    });
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "expected at least one template using @GPUS_PER_TASK@");
+    }
 }
+
+
+

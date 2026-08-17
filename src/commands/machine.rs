@@ -282,9 +282,12 @@ fn print_summary(machine: &Machine) -> Res<()> {
         println!("  created from: {} (hash {})", origin.from, origin.hash);
     }
     println!(
-        "  hardware: max-cpus-per-node={} default-cpus-per-task={} threads-per-cpu={} memory={} MB",
+        "  hardware: max-cpus-per-node={} default-cpus-per-task={} max-gpus-per-node={} \
+         default-gpus-per-task={} threads-per-cpu={} memory={} MB",
         meta.hardware.max_cpus_per_node.map_or("?".into(), |v| v.to_string()),
         meta.hardware.default_cpus_per_task.map_or("?".into(), |v| v.to_string()),
+        meta.hardware.max_gpus_per_node.map_or("?".into(), |v| v.to_string()),
+        meta.hardware.default_gpus_per_task.map_or("?".into(), |v| v.to_string()),
         meta.hardware.threads_per_cpu(),
         meta.hardware.memory.map_or("?".into(), |v| v.to_string()),
     );
@@ -309,6 +312,8 @@ fn print_summary(machine: &Machine) -> Res<()> {
         for (label, value) in [
             ("max-cpus-per-node", queue.max_cpus_per_node.map(|v| v.to_string())),
             ("default-cpus-per-task", queue.default_cpus_per_task.map(|v| v.to_string())),
+            ("max-gpus-per-node", queue.max_gpus_per_node.map(|v| v.to_string())),
+            ("default-gpus-per-task", queue.default_gpus_per_task.map(|v| v.to_string())),
             ("threads-per-cpu", queue.threads_per_cpu.map(|v| v.to_string())),
             ("memory", queue.memory.map(|v| format!("{v} MB"))),
         ] {
@@ -472,6 +477,11 @@ fn create_machine(
     hardware_tbl.insert("max-cpus-per-node".into(), (hw.cores as i64).into());
     if let Some(memory) = hw.memory_mb {
         hardware_tbl.insert("memory".into(), (memory as i64).into());
+    }
+    // Only written when GPUs were actually found: the key's absence is a valid
+    // state (§4.2), so a GPU-less host must not record a hard `0`.
+    if let Some(gpus) = hw.gpus {
+        hardware_tbl.insert("max-gpus-per-node".into(), (gpus as i64).into());
     }
 
     let default_sim_home = crate::CACTUP_ROOT.join("simulations");

@@ -77,6 +77,10 @@ pub struct RestartMeta {
     pub tasks: u32,
     pub tpn: u32,
     pub cpus: u32,
+    /// GPUs per task (§8.5); 0 on a non-GPU run, which is also what a restart
+    /// written before this key existed reads back as.
+    #[serde(default)]
+    pub gpus_per_task: u32,
     pub queue: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocation: Option<String>,

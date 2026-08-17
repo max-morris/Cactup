@@ -236,6 +236,10 @@ pub(crate) struct TopologyFlags {
     /// Use GPUs (default: inferred from the queue's gpu flag).
     #[clap(short, long)]
     pub gpu: bool,
+    /// GPUs per task; GPU runs only (default: the machine/queue
+    /// `default-gpus-per-task`, else 1).
+    #[clap(short = 'G', long, value_name = "N")]
+    pub gpus_per_task: Option<u32>,
     /// Job name (default: the simulation name).
     #[clap(short, long, value_name = "NAME")]
     pub job_name: Option<String>,

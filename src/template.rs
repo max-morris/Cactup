@@ -82,12 +82,33 @@ pub struct VarSet {
 
 /// Prepended to every `.py` variant (§6.1): binds each variable as a module
 /// global in canonical-string form and exposes the typed companions as `typed`.
+/// Everything after this marker on stderr is a script's own refusal message,
+/// reported to the user verbatim instead of as a Python crash (§6.1).
+const PY_ERROR_MARKER: &str = "cactup-script-error:";
+
 const PY_PREAMBLE: &str = "\
 import sys as _cactup_sys, json as _cactup_json
 _cactup_d = _cactup_json.load(_cactup_sys.stdin)
 globals().update(_cactup_d[\"vars\"])
 typed = _cactup_d[\"typed\"]
-del _cactup_sys, _cactup_json, _cactup_d
+
+class CactupError(Exception):
+    \"\"\"Raise to refuse the run with a message shown to the user (§6.1).
+
+    For a request this machine cannot serve — a scheduler rule the topology
+    violates, an unsupported combination of variables. cactup prints the
+    message and stops; nothing is submitted. Any OTHER exception is treated
+    as a bug in the script and reported with its full traceback.
+    \"\"\"
+
+def _cactup_excepthook(kind, exc, tb):
+    if issubclass(kind, CactupError):
+        _cactup_sys.stderr.write(\"cactup-script-error:\" + str(exc))
+    else:
+        import traceback as _tb
+        _tb.print_exception(kind, exc, tb, file=_cactup_sys.stderr)
+_cactup_sys.excepthook = _cactup_excepthook
+del _cactup_json, _cactup_d
 ";
 
 impl VarSet {
@@ -256,11 +277,19 @@ impl VarSet {
             .with_context(|| format!("Failed to wait for python3 running {}", script.display()))?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // A `raise CactupError(...)` is the script refusing the run on
+            // purpose (§6.1): report its message as the error, with no Python
+            // wrapping — the user asked cactup for something this machine
+            // cannot do, which is not a crash.
+            if let Some((_, message)) = stderr.split_once(PY_ERROR_MARKER) {
+                bail!("{} ({})", message.trim(), script.display());
+            }
             bail!(
                 "Python variant {} exited unsuccessfully ({}):\n{}",
                 script.display(),
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim_end()
+                stderr.trim_end()
             );
         }
 
@@ -341,5 +370,37 @@ mod tests {
         f.flush().unwrap();
         let out = vars().run_py_script(f.path()).unwrap();
         assert_eq!(out.trim(), "N=4 n=5 q=checkpt");
+    }
+
+    #[test]
+    fn py_variant_can_refuse_the_run() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 not found; skipping");
+            return;
+        }
+        // A deliberate refusal reaches the user as its own message — no
+        // traceback, no "exited unsuccessfully" wrapper.
+        let mut f = tempfile::NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(f, "raise CactupError(f\"queue {{QUEUE}} allows at most 2 nodes, got {{NODES}}\")").unwrap();
+        f.flush().unwrap();
+        let err = vars().run_py_script(f.path()).unwrap_err().to_string();
+        assert!(err.starts_with("queue checkpt allows at most 2 nodes, got 4"), "{err}");
+        assert!(!err.contains("Traceback"), "{err}");
+
+        // Multi-line messages survive intact — a refusal usually wants to say
+        // what to do instead.
+        let mut f = tempfile::NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(f, "raise CactupError('no good\\ntry --tpn 1')").unwrap();
+        f.flush().unwrap();
+        let err = vars().run_py_script(f.path()).unwrap_err().to_string();
+        assert!(err.contains("no good\ntry --tpn 1"), "{err}");
+
+        // A genuine bug is NOT a refusal: it keeps its traceback, so a typo in
+        // a submitscript is debuggable rather than disguised as a policy error.
+        let mut f = tempfile::NamedTempFile::with_suffix(".py").unwrap();
+        writeln!(f, "print(NO_SUCH_VARIABLE)").unwrap();
+        f.flush().unwrap();
+        let err = vars().run_py_script(f.path()).unwrap_err().to_string();
+        assert!(err.contains("Traceback") && err.contains("NameError"), "{err}");
     }
 }

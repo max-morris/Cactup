@@ -70,6 +70,9 @@ pub struct TestMeta {
     pub tasks: u32,
     pub tpn: u32,
     pub cpus: u32,
+    /// GPUs per task (§8.5); 0 on a non-GPU run.
+    #[serde(default)]
+    pub gpus_per_task: u32,
     pub walltime: Walltime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocation: Option<String>,

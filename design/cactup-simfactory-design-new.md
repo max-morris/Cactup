@@ -599,7 +599,9 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   / CPU=core terminology): `ppn` → `max-cpus-per-node` (it is CPUs/cores per
   node, **not** ranks), `num-threads` → `default-cpus-per-task` (the default
   `CPUS_PER_TASK` when `--cpus` is omitted), `num-smt` → `threads-per-cpu`,
-  `memory` kept (plus the `autodetect` control flag, §4.6). simfactory's
+  `memory` kept (plus the `autodetect` control flag, §4.6). Two keys are new,
+  with no simfactory ancestor: `max-gpus-per-node` and `default-gpus-per-task`,
+  the GPU counterparts of the two CPU keys (§8.5). simfactory's
   informational keys (`spn`, `mpn`, `nodes`, `max-num-threads`, `max-num-smt`,
   `min-ppn`, `cpu-freq`, `flop-per-cycle`, cache descriptors, `efficiency`,
   `quota`, `cpu`) are dropped on port — nothing consumed them. Each kept key
@@ -694,6 +696,8 @@ hostname = "mike.hpc.lsu.edu"
 max-cpus-per-node = 16         # CPUs/cores per node (see [queues.*] overrides)
 memory = 196608                # MB per node
 # default-cpus-per-task = 1    # optional; default CPUS_PER_TASK when -c omitted
+# max-gpus-per-node = 4        # optional; GPUs/node (absent on CPU-only machines)
+# default-gpus-per-task = 1    # optional; default GPUS_PER_TASK when -G omitted
 # threads-per-cpu = 1          # optional; defaults to 1 (§8.5)
 
 [scheduler]
@@ -771,7 +775,14 @@ rank, CPU = core — §1.1): `max-cpus-per-node` (simfactory's `ppn`; the
 availability fact = CPUs/cores per node, **not** ranks; drives the §8.5
 process-layout defaults and `@MAX_CPUS_PER_NODE@`), `default-cpus-per-task`
 (simfactory's `num-threads`; the request-side default for `CPUS_PER_TASK` when
-`--cpus` is omitted — §8.5), `memory` (`@MEMORY@`, per-node MB), and
+`--cpus` is omitted — §8.5), `max-gpus-per-node` (the GPUs available per node;
+a **ceiling** §8.5 refuses to exceed, plus `@MAX_GPUS_PER_NODE@` — it does not
+set `GPUS_PER_TASK`, which defaults to 1; routinely **absent**, since most
+machines and most partitions have no GPUs, and absence simply means nothing is
+checked), `default-gpus-per-task` (the request-side default for `GPUS_PER_TASK`
+when `--gpus-per-task` is omitted — worth setting only on a partition that wants
+something other than one GPU per rank),
+`memory` (`@MEMORY@`, per-node MB), and
 `threads-per-cpu` (simfactory's `num-smt`; `@THREADS_PER_CPU@`, default 1) —
 plus the `autodetect` control flag (§4.6). simfactory's other
 capacity/documentation keys (`nodes`, `min-ppn`, `spn`, `mpn`,
@@ -1034,6 +1045,7 @@ counting both the top-level `[hardware]` keys and the per-queue overrides,
 |-----|-------|-------|
 | `max-cpus-per-node` | `nproc` (or `/proc/cpuinfo`) | `sysctl -n hw.ncpu` |
 | `memory` (MB) | `/proc/meminfo` `MemTotal` | `sysctl -n hw.memsize` |
+| `max-gpus-per-node` | `/proc/driver/nvidia/gpus`, amdkfd topology, or PCI class `0x0302` | not detected |
 
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
 (`simfactory-docs.txt` §20), but done at runtime so the built-in `generic`
@@ -1444,6 +1456,17 @@ rewritten as a Python `.py` variant.
    (`typed["NODES"] == 4`) so authors needn't re-parse. The JSON-on-stdin choice
    keeps values out of the process table and argv length limits.
 
+   **Refusing the run.** A `.py` variant may `raise CactupError("…")` (the class
+   is provided by the preamble) to reject the request outright: cactup prints the
+   message as its own error and stops, so nothing is submitted and no restart
+   directory is left behind. This is for a request the machine genuinely cannot
+   serve — a scheduler rule the topology violates, a combination of variables the
+   site rejects — which cactup cannot check itself because the rule lives in the
+   script's own arithmetic. Any **other** exception is treated as a bug in the
+   variant and reported with its full Python traceback, so a typo stays
+   debuggable instead of masquerading as a site policy. Multi-line messages are
+   preserved; say what to change, not just what is wrong.
+
 **`env-setup` handling — the effective block and where it is injected.** For any
 given phase (build/submit/run), the **effective env-setup** is the concatenation
 of the machine's `env-setup` and that phase's optional `env-<phase>-setup`
@@ -1535,7 +1558,8 @@ flags exactly** — this is the primary divergence from simfactory's names.
 
 **Topology (canonical — one variable per §8.5 flag):**
 `NODES` (`-n`), `TASKS` (`-T`, total MPI ranks), `TASKS_PER_NODE` (`-t`/tpn),
-`CPUS_PER_TASK` (`-c`/cpus), `GPU` (`-g`; `1`/`0`), `ALLOCATION` (`-a`),
+`CPUS_PER_TASK` (`-c`/cpus), `GPU` (`-g`; `1`/`0`),
+`GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`),
 `QUEUE` (`-q`; the scheduler-facing name — the selected queue's `name` override
 when set, else its `[queues.<q>]` key — §4.2), `MAIL` (`-m`), `MAIL_TYPE` (`-M`),
 `JOB_NAME` (`-j`),
@@ -1579,6 +1603,9 @@ re-invoke `@CACTUP@ sim run …`; renamed from simfactory's `@SIMFACTORY@`).
 values for the job's queue (§4.2), available to scripts but not topology
 flags): `MAX_CPUS_PER_NODE` (CPUs/cores available per node — an availability
 fact, **not** MPI ranks; from `max-cpus-per-node`),
+`MAX_GPUS_PER_NODE` (GPUs available per node; from `max-gpus-per-node`, and
+**`0`** when undeclared — unlike CPUs, an absent GPU count means none/unknown
+rather than one),
 `MEMORY` (per-node MB), `THREADS_PER_CPU` (from `threads-per-cpu`, default 1;
 §8.5 assumption), `ENV_SETUP` (the **effective** env-setup
 block for the current phase — `env-setup` plus the phase's `env-<phase>-setup`,
@@ -2217,6 +2244,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | `-t/--tpn` * | tasks per node | full node (see below) |
 | `-c/--cpus` * | CPUs (threads) per task | 1 |
 | `-g/--gpu` | use GPUs | inferred from the queue's `gpu` flag |
+| `-G/--gpus-per-task` * | GPUs per task (GPU runs only) | machine `default-gpus-per-task`, else 1 |
 | `-j/--job-name` * | job name | `<SimName>` |
 | `-w/--wall-time` * | total walltime, canonical format below | machine/queue default |
 | `-o/--out` * | stdout filename | template default |
@@ -2262,6 +2290,44 @@ facts fill any topology the user left unset.
   refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
   set and this computed `GPU` is `0`; a non-GPU binary with `GPU = 1` is
   allowed (advisory note only when a non-GPU queue exists on the machine).
+- `GPUS_PER_TASK` = `0` whenever `GPU` is `0` — a run with no GPUs asks for
+  none, and a script can branch on this variable alone. On a GPU run:
+  `--gpus-per-task` if given, else the queue-effective `default-gpus-per-task`,
+  else **`1`**. Passing `--gpus-per-task` when the run resolves to `GPU = 0` is
+  refused rather than ignored.
+
+  **One GPU per rank is the default everywhere**, deliberately *unlike* the CPU
+  chain's fill-the-node rule. A GPU is not divisible the way a core is: one
+  device per rank is the overwhelmingly common shape, and it is the only default
+  that stays correct when the layout changes for unrelated reasons. Dividing the
+  node's GPUs among its ranks instead would silently hand extra devices to a job
+  that merely shrank its rank count, and would fight any machine whose scheduler
+  *reserves* GPUs on a different axis than it *binds* them (qbd: `--gres` is
+  per-node and CPU-derived, `--gpus-per-task` is per-rank). A partition that
+  genuinely wants otherwise says so with `default-gpus-per-task`.
+
+  Consequently GPUs never feed back into `TASKS_PER_NODE` either: CPUs alone
+  drive the process layout.
+- **GPUs are not oversubscribable.** `max-gpus-per-node` is therefore a
+  **ceiling, never a target**: it does not set `GPUS_PER_TASK`, it bounds it.
+  A layout needing more GPUs per node than the queue has — `GPUS_PER_TASK ×
+  TASKS_PER_NODE > MAX_GPUS_PER_NODE`, whether from an explicit
+  `--gpus-per-task` or from too many ranks on a node — is a hard error, raised
+  before anything is submitted. This is the one place the GPU chain is stricter
+  than the CPU chain: CPU oversubscription merely time-slices, while a job
+  asking for GPUs a partition does not have either never schedules or lands with
+  ranks fighting over one device. Machines whose GPU count is undeclared cannot
+  be checked and are therefore never refused on this ground.
+
+  qbd is the worked example, and shows what a machine has to declare for a
+  no-flag job to fill its node. Its `gpu2` and `gpu4` partitions share a 64-CPU
+  node but hold 2 and 4 GPUs. With one GPU per rank fixed, the rank count is
+  what has to move — so each partition sets `default-cpus-per-task` to its own
+  `64 / GPUs`: 32 on `gpu2` (2 ranks) and 16 on `gpu4` (4 ranks). Both land on
+  one rank per GPU with the cores split evenly and nothing idle. Had `gpu4`
+  simply inherited `gpu2`'s 32, it would run 2 ranks on a 4-GPU node and waste
+  half of it — a reminder that `max-gpus-per-node` bounds a layout but never
+  builds one.
 - A script that needs "total cores" or "cores requested" computes them from
   `TASKS`, `CPUS_PER_TASK`, `NODES`, and `MAX_CPUS_PER_NODE` — cactup no
   longer pre-derives `PROCS`/`PROCS_REQUESTED`/`PPN_USED`.

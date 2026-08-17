@@ -46,6 +46,9 @@ description = "Path to built cactus executable"
 [GPU]
 description = "Whether the run uses GPUs (1/0)"
 
+[GPUS_PER_TASK]
+description = "GPUs per MPI task; 0 on a non-GPU run"
+
 [HOSTNAME]
 description = "Machine hostname"
 
@@ -69,6 +72,9 @@ description = "Parallel make jobs"
 
 [MAX_CPUS_PER_NODE]
 description = "CPU cores available per node"
+
+[MAX_GPUS_PER_NODE]
+description = "GPUs available per node; 0 when the machine declares none"
 
 [MEMORY]
 description = "Memory (MB) per node"

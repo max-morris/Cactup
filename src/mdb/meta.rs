@@ -125,8 +125,17 @@ pub struct Paths {
 ///   @MAX_CPUS_PER_NODE@),
 /// - `default-cpus-per-task` (simfactory's `num-threads`; the request-side
 ///   default for `CPUS_PER_TASK` when `--cpus` is omitted — §8.5),
+/// - `max-gpus-per-node` (the GPUs available per node; a **ceiling** §8.5
+///   refuses to exceed, plus @MAX_GPUS_PER_NODE@ — it never sets
+///   `GPUS_PER_TASK`, which defaults to 1) and `default-gpus-per-task` (the
+///   machine's own per-task default, for the rare partition that is not 1),
 /// - `memory` (@MEMORY@), and `threads-per-cpu` (simfactory's `num-smt`;
 ///   @THREADS_PER_CPU@).
+///
+/// The two GPU keys are routinely absent: a CPU-only machine — or a CPU
+/// partition on a machine whose GPU partitions declare their own — has no GPUs
+/// to describe, and §8.5 falls back to one GPU per task rather than treating a
+/// missing value as an error.
 ///
 /// Simfactory's other capacity keys (`min-ppn`, `spn`, `mpn`, `nodes`, `max-*`,
 /// `cpu-freq`, `flop-per-cycle`, …) were dropped — nothing consumed them.
@@ -145,6 +154,16 @@ pub struct Hardware {
     pub max_cpus_per_node: Option<u32>,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted (§8.5).
     pub default_cpus_per_task: Option<u32>,
+    /// GPUs available per node. Purely a ceiling: §8.5 refuses a layout whose
+    /// `GPUS_PER_TASK × TASKS_PER_NODE` exceeds it, but never derives from it
+    /// (GPUs are not oversubscribable the way CPUs are). Legitimately unset —
+    /// a queue, or a whole machine, may have no GPUs at all — in which case
+    /// nothing is checked.
+    pub max_gpus_per_node: Option<u32>,
+    /// Request-side default for `GPUS_PER_TASK` when `--gpus-per-task` is
+    /// omitted (§8.5). Only worth setting on a partition that wants something
+    /// other than the global default of one GPU per rank.
+    pub default_gpus_per_task: Option<u32>,
     pub threads_per_cpu: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
@@ -281,6 +300,11 @@ pub struct Queue {
     /// `[hardware]` value when unset (`Meta::effective_hardware`).
     pub max_cpus_per_node: Option<u32>,
     pub default_cpus_per_task: Option<u32>,
+    /// GPUs per node on this partition — the key that lets one machine carry
+    /// GPU partitions of different widths (qbd's gpu2/gpu4), each with its own
+    /// §8.5 ceiling.
+    pub max_gpus_per_node: Option<u32>,
+    pub default_gpus_per_task: Option<u32>,
     pub threads_per_cpu: Option<u32>,
     /// MB per node.
     pub memory: Option<u64>,
@@ -659,15 +683,18 @@ impl Meta {
     }
 
     /// The hardware in effect on `queue` (§4.2): the queue's own
-    /// `max-cpus-per-node`/`default-cpus-per-task`/`threads-per-cpu`/`memory`
-    /// where set, inheriting anything else from the top-level `[hardware]`
-    /// table (which is itself optional).
+    /// `max-cpus-per-node`/`default-cpus-per-task`/`max-gpus-per-node`/
+    /// `default-gpus-per-task`/`threads-per-cpu`/`memory` where set, inheriting
+    /// anything else from the top-level `[hardware]` table (which is itself
+    /// optional).
     pub fn effective_hardware(&self, queue: &str) -> Res<Hardware> {
         let q = self.queue(queue)?;
         Ok(Hardware {
             autodetect: self.hardware.autodetect,
             max_cpus_per_node: q.max_cpus_per_node.or(self.hardware.max_cpus_per_node),
             default_cpus_per_task: q.default_cpus_per_task.or(self.hardware.default_cpus_per_task),
+            max_gpus_per_node: q.max_gpus_per_node.or(self.hardware.max_gpus_per_node),
+            default_gpus_per_task: q.default_gpus_per_task.or(self.hardware.default_gpus_per_task),
             threads_per_cpu: q.threads_per_cpu.or(self.hardware.threads_per_cpu),
             memory: q.memory.or(self.hardware.memory),
         })
@@ -999,6 +1026,7 @@ mod tests {
         max-walltime = "24:00:00"
         # Per-queue hardware overrides (§4.2); unset keys inherit [hardware].
         max-cpus-per-node = 64
+        max-gpus-per-node = 4
         threads-per-cpu = 2
 
         [variants.submitscript]
@@ -1058,9 +1086,12 @@ mod tests {
         // Queue with no overrides: pure inheritance from [hardware].
         let hw = meta.effective_hardware("checkpt").unwrap();
         assert_eq!((hw.max_cpus_per_node, hw.memory, hw.threads_per_cpu()), (Some(16), Some(64000), 1));
+        // …and a CPU queue simply has no GPU facts to inherit.
+        assert_eq!((hw.max_gpus_per_node, hw.default_gpus_per_task), (None, None));
         // Queue overrides win key-by-key; unset keys still inherit.
         let hw = meta.effective_hardware("gpu").unwrap();
         assert_eq!((hw.max_cpus_per_node, hw.memory, hw.threads_per_cpu()), (Some(64), Some(64000), 2));
+        assert_eq!(hw.max_gpus_per_node, Some(4), "per-queue GPU count is what makes qbd's gpu2/gpu4 expressible");
         assert!(meta.effective_hardware("nope").is_err());
     }
 

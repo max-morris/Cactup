@@ -12,8 +12,11 @@
 #   mail directives guarded by `if EMAIL:` (the old script emitted them always)
 #   @SIMFACTORY@ run --basedir=… -> @CACTUP@ sim run --installation/--sim-dir/
 #     --machine (the compute-node re-invocation locator)
-# Kept verbatim: the NERSC GPU-account suffix (-A <allocation>_g), -C gpu,
-# --gpus-per-task 1, and --gpu-bind=map_gpu:0,1,2,3.
+# Kept verbatim: the NERSC GPU-account suffix (-A <allocation>_g), -C gpu, and
+# --gpu-bind=map_gpu:0,1,2,3.
+# --gpus-per-task is now the §8.5 GPUS_PER_TASK topology variable rather than a
+# literal 1. Same value today (this machine declares no max-gpus-per-node, so
+# the derivation falls back to 1); `--gpus-per-task N` now overrides it.
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}_g".format(ALLOCATION))
@@ -22,7 +25,7 @@ lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1} -c {2}".format(NODES, TASKS, CPUS_PER_TASK))
 lines.append("#SBATCH --ntasks-per-node {0}".format(TASKS_PER_NODE))
-lines.append("#SBATCH --gpus-per-task 1")
+lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
 lines.append("#SBATCH --gpu-bind=map_gpu:0,1,2,3")
 if CHAINED_JOB_ID:
     lines.append("#SBATCH -d afterany:{0}".format(CHAINED_JOB_ID))

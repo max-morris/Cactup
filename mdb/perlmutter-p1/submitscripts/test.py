@@ -16,7 +16,7 @@ lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1} -c {2}".format(NODES, TASKS, CPUS_PER_TASK))
 lines.append("#SBATCH --ntasks-per-node {0}".format(TASKS_PER_NODE))
-lines.append("#SBATCH --gpus-per-task 1")
+lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
 lines.append("#SBATCH --gpu-bind=map_gpu:0,1,2,3")
 lines.append("#SBATCH -J {0}".format(TEST_NAME))
 if EMAIL:

@@ -9,7 +9,7 @@ pub mod meta;
 pub mod optionlist;
 
 // Convenience re-exports for the consuming subsystems.
-pub use meta::{Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
+pub use meta::{Hardware, Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 pub use optionlist::Optionlist;
 
 use crate::Res;
@@ -225,6 +225,11 @@ impl Machine {
         // top level, per-queue, or both, per-queue winning; §4.2). Explicit
         // values always win, and a machine whose queues fully cover a key is
         // left alone even when the top-level key is absent.
+        //
+        // `max-gpus-per-node` is filled opportunistically but deliberately does
+        // NOT join the `incomplete` test: most machines have no GPUs, so a
+        // missing value there is the normal case, not a gap to repair — and
+        // §8.5 already falls back to one GPU per task without it.
         let incomplete = meta.queues.values().any(|q| {
             q.max_cpus_per_node.or(meta.hardware.max_cpus_per_node).is_none() || q.memory.or(meta.hardware.memory).is_none()
         });
@@ -233,6 +238,7 @@ impl Machine {
             let hw = &mut meta.hardware;
             hw.max_cpus_per_node = hw.max_cpus_per_node.or(Some(detected.cores));
             hw.memory = hw.memory.or(detected.memory_mb);
+            hw.max_gpus_per_node = hw.max_gpus_per_node.or(detected.gpus);
         }
 
         // [paths] values keep their @USER@/@ENV(NAME)@ tokens at load; they
@@ -484,6 +490,16 @@ mod tests {
         // 32-CPU default request = 2 tasks/node, gpu2's 32-CPUs-per-GPU cap.
         let hw = qbd.meta.effective_hardware("gpu2").unwrap();
         assert_eq!((hw.max_cpus_per_node, hw.default_cpus_per_task), (Some(64), Some(32)));
+        assert_eq!(hw.max_gpus_per_node, Some(2));
+        // gpu4 is the same node with twice the GPUs, so it overrides BOTH the
+        // GPU count and the CPU request that sets the rank count — 64/4 = 16,
+        // i.e. 4 ranks, one per GPU. Inheriting 32 would leave 2 GPUs idle;
+        // `qbd_defaults_fill_each_partition` (sim::vars) pins the consequence.
+        let hw = qbd.meta.effective_hardware("gpu4").unwrap();
+        assert_eq!(
+            (hw.max_cpus_per_node, hw.default_cpus_per_task, hw.max_gpus_per_node),
+            (Some(64), Some(16), Some(4))
+        );
 
         // graham unifies one Compute Canada cluster's CPU (g++) and CUDA (nvcc)
         // build flavors into two optionlist variants. The CUDA variant carries

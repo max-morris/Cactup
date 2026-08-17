@@ -1,21 +1,102 @@
 //! Runtime hardware detection (spec §4.6): fills missing `max-cpus-per-node`/
-//! `memory` for machines with `[hardware].autodetect = true` (or when some
-//! queue would otherwise resolve no value), so the built-in `generic` works on
-//! any laptop with zero configuration. Explicit `meta.toml` values always win.
+//! `memory`/`max-gpus-per-node` for machines with `[hardware].autodetect = true`
+//! (or when some queue would otherwise resolve no value), so the built-in
+//! `generic` works on any laptop with zero configuration. Explicit `meta.toml`
+//! values always win.
+
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 /// Best-effort detected hardware. `cores` always has a value (min 1);
-/// `memory_mb` is `None` when the OS query fails.
+/// `memory_mb` and `gpus` are `None` when the OS query fails or finds nothing.
 #[derive(Debug, Clone, Copy)]
 pub struct DetectedHardware {
     pub cores: u32,
     pub memory_mb: Option<u64>,
+    /// GPUs on *this* host. On a cluster that is usually the login node, which
+    /// typically has none even though the compute nodes are full of them — so
+    /// a `None` here means "say nothing", never "this machine has no GPUs".
+    pub gpus: Option<u32>,
 }
 
 pub fn detect() -> DetectedHardware {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1);
-    DetectedHardware { cores, memory_mb: detect_memory_mb() }
+    DetectedHardware { cores, memory_mb: detect_memory_mb(), gpus: detect_gpus() }
+}
+
+/// Best-effort GPU count, from the kernel's own bookkeeping only — no
+/// `nvidia-smi`/`rocm-smi` subprocess (this runs on every machine load) and no
+/// libc/NVML binding (the binary must stay statically linked — D13). Takes the
+/// largest of three independent probes, since a host may expose only one of
+/// them; `None` when they all come up empty.
+///
+/// The probes take their roots as arguments so the tests can point them at a
+/// fixture tree — a dev box has no GPUs, so this code would otherwise ship
+/// having only ever exercised its empty path.
+#[cfg(target_os = "linux")]
+fn detect_gpus() -> Option<u32> {
+    gpus_under(Path::new("/"))
+}
+
+#[cfg(target_os = "linux")]
+fn gpus_under(root: &Path) -> Option<u32> {
+    let n = [
+        gpus_nvidia(&root.join("proc/driver/nvidia/gpus")),
+        gpus_amd(&root.join("sys/class/kfd/kfd/topology/nodes")),
+        gpus_pci(&root.join("sys/bus/pci/devices")),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    (n > 0).then_some(n)
+}
+
+/// NVIDIA proprietary driver: one directory per GPU, keyed by PCI address.
+/// Present whenever the `nvidia` kernel module is loaded.
+#[cfg(target_os = "linux")]
+fn gpus_nvidia(dir: &Path) -> u32 {
+    count_dir_entries(dir, |entry| entry.path().is_dir())
+}
+
+/// ROCm/amdkfd: one topology node per agent, CPUs included — the GPU agents are
+/// the ones reporting a non-zero `simd_count`.
+#[cfg(target_os = "linux")]
+fn gpus_amd(dir: &Path) -> u32 {
+    count_dir_entries(dir, |entry| {
+        let Ok(props) = std::fs::read_to_string(entry.path().join("properties")) else {
+            return false;
+        };
+        props
+            .lines()
+            .find_map(|line| line.strip_prefix("simd_count "))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .is_some_and(|count| count > 0)
+    })
+}
+
+/// Generic PCI fallback: class `0x0302` is "3D controller", i.e. an accelerator
+/// with no display attached. Deliberately does NOT count `0x0300` ("VGA
+/// compatible"), so a workstation's integrated graphics cannot inflate the
+/// count into a bogus `max-gpus-per-node`.
+#[cfg(target_os = "linux")]
+fn gpus_pci(dir: &Path) -> u32 {
+    count_dir_entries(dir, |entry| {
+        std::fs::read_to_string(entry.path().join("class"))
+            .is_ok_and(|class| class.trim().starts_with("0x0302"))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn count_dir_entries(dir: &Path, keep: impl Fn(&std::fs::DirEntry) -> bool) -> u32 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries.flatten().filter(keep).count() as u32
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_gpus() -> Option<u32> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -59,5 +140,50 @@ mod tests {
         // Every dev/CI box this runs on has at least ~256 MB.
         let mem = hw.memory_mb.expect("memory detection should work on Linux/macOS");
         assert!(mem > 256, "implausible memory: {mem} MB");
+    }
+
+    /// Dev and CI boxes have no GPUs, so the probes are driven against fixture
+    /// trees shaped like the real `/proc` and `/sys` entries.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gpu_probes_read_the_kernel_trees() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Nothing there at all: absent, not zero — the caller must be able to
+        // tell "no GPUs found" from "this node has zero GPUs".
+        assert_eq!(gpus_under(root), None);
+
+        // NVIDIA: one directory per GPU.
+        let nv = root.join("proc/driver/nvidia/gpus");
+        fs::create_dir_all(nv.join("0000:07:00.0")).unwrap();
+        fs::create_dir_all(nv.join("0000:08:00.0")).unwrap();
+        assert_eq!(gpus_under(root), Some(2));
+
+        // amdkfd: CPU agents share the tree and must not be counted.
+        let kfd = root.join("sys/class/kfd/kfd/topology/nodes");
+        for (node, simd) in [("0", 0), ("1", 256), ("2", 256), ("3", 256)] {
+            fs::create_dir_all(kfd.join(node)).unwrap();
+            fs::write(kfd.join(node).join("properties"), format!("cpu_cores_count 8\nsimd_count {simd}\n")).unwrap();
+        }
+        // The largest probe wins: 3 GPU agents beats NVIDIA's 2.
+        assert_eq!(gpus_under(root), Some(3));
+
+        // PCI: 3D controllers count, the VGA display adapter does not.
+        let pci = root.join("sys/bus/pci/devices");
+        for (dev, class) in [
+            ("0000:01:00.0", "0x030000"), // VGA — integrated graphics
+            ("0000:07:00.0", "0x030200"),
+            ("0000:08:00.0", "0x030200"),
+            ("0000:09:00.0", "0x030200"),
+            ("0000:0a:00.0", "0x030200"),
+            ("0000:00:1f.0", "0x060100"), // ISA bridge
+        ] {
+            fs::create_dir_all(pci.join(dev)).unwrap();
+            fs::write(pci.join(dev).join("class"), format!("{class}\n")).unwrap();
+        }
+        assert_eq!(gpus_pci(&pci), 4, "VGA and non-display devices excluded");
+        assert_eq!(gpus_under(root), Some(4));
     }
 }

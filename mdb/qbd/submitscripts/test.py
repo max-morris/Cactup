@@ -16,8 +16,20 @@ lines.append("#SBATCH -A {0}".format(ALLOCATION))
 if QUEUE:
     lines.append("#SBATCH -p {0}".format(QUEUE))
 # --gres restored from the old qbd.sub — see submitscripts/default.py for
-# QB4's CPUs-per-gres-GPU rules.
-lines.append("#SBATCH --gres=gpu:{0}".format(4 if QUEUE == "gpu4" else 2))
+# QB4's CPUs-per-gres-GPU rules. A testsuite always takes the full node's GPUs
+# (it runs a couple of ranks, so the half-node gpu2 branch never applies).
+g_res = 4 if QUEUE == "gpu4" else 2
+gpus_wanted = typed['GPUS_PER_TASK'] * typed['TASKS_PER_NODE']
+if gpus_wanted > g_res:
+    raise CactupError(
+        "this testsuite layout binds {0} GPUs per node ({1} per task x {2} tasks/node) but "
+        "{3} reserves only --gres=gpu:{4}, and on QB4 only --gres GPUs count.\n"
+        "Lower --gpus-per-task or --tpn.".format(
+            gpus_wanted, GPUS_PER_TASK, TASKS_PER_NODE, QUEUE, g_res,
+        )
+    )
+lines.append("#SBATCH --gres=gpu:{0}".format(g_res))
+lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))

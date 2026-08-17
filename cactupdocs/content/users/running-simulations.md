@@ -109,7 +109,37 @@ Enable GPUs (if your machine supports them):
 cactup sim submit mysim --gpu
 ```
 
-The machine's queue configuration determines what GPU resources are allocated.
+You usually don't need this: a queue marked `gpu = true` in the machine
+database turns GPUs on by itself.
+
+Control how many GPUs each MPI task gets:
+
+```sh
+cactup sim submit mysim -G 2       # 2 GPUs per task
+```
+
+If you don't specify it, you get **1 GPU per task** — the right answer almost
+everywhere, and it stays right when you change the rest of the layout. A machine
+whose partitions want something else declares `default-gpus-per-task`.
+
+Unlike CPUs, GPUs can't be oversubscribed. If a layout needs more GPUs per node
+than the queue has, cactup refuses it up front rather than submitting a job that
+will never schedule:
+
+```
+$ cactup sim submit mysim -q gpu2 -c 16
+error: this layout needs 4 GPUs per node (1 per task × 4 tasks/node) but queue
+"gpu2" has 2 (§8.5); lower --tpn/--tasks, or raise --cpus so fewer ranks land on
+a node
+```
+
+Some machines enforce extra rules of their own and will refuse a request with a
+message explaining what to change — those come from the machine's submit script,
+not from cactup itself.
+
+`--gpus-per-task` applies only to GPU runs; passing it when the run isn't using
+GPUs is an error rather than being silently ignored. On a non-GPU run the
+`@GPUS_PER_TASK@` script variable is `0`.
 
 ## Walltime and checkpointing
 
