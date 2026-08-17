@@ -8,7 +8,7 @@
 //! tests at the bottom, and the terminal/event-loop plumbing around it that
 //! isn't practical to unit-test and is kept as thin as possible instead.
 
-use super::{LogTail, PollBackoff};
+use super::{LogTail, PollBackoff, SEED_BYTES};
 use crate::Res;
 use anyhow::Context;
 use crossterm::event::{
@@ -35,9 +35,6 @@ use std::time::{Duration, Instant};
 
 /// Lines retained per pane; oldest are dropped once this is exceeded.
 const MAX_LINES: usize = 10_000;
-/// Trailing bytes of an existing file read to seed a pane at startup;
-/// bounds startup memory/IO against multi-GB sim logs.
-const SEED_BYTES: u64 = 4 * 1024 * 1024;
 /// Columns panned per Left/Right keypress or horizontal wheel notch.
 const PAN_STEP: u16 = 8;
 /// Lines scrolled per mouse-wheel notch.

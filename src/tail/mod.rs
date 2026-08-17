@@ -148,6 +148,73 @@ impl LogTail {
     }
 }
 
+/// Trailing bytes of an existing file read to seed a static tail or a TUI
+/// pane; bounds startup memory/IO against multi-GB sim logs.
+pub(crate) const SEED_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Lines of backlog the static tail prints before a follow takes over.
+const TAIL_LINES: usize = 100;
+
+/// The seed of a static tail: the backlog to print, plus where a follow
+/// should pick up. Produced by [`read_static_tail`].
+pub(crate) struct StaticTail {
+    /// Up to `max_lines` trailing lines, ready to print (no line endings).
+    pub lines: Vec<String>,
+    /// Byte offset the file had been read to — hand this straight to
+    /// [`LogTail::new`] so the follow resumes on the first *unprinted* byte.
+    pub offset: u64,
+}
+
+/// Read the trailing backlog of `path`: at most `max_lines` lines taken from
+/// the last [`SEED_BYTES`] of the file, decoded lossily, plus the byte offset
+/// a follow should resume from. Returns `None` — and *only* — when the file
+/// can't be opened or read at all, which is the genuine "no output yet" case
+/// the callers report to the user.
+///
+/// Three things this deliberately does not do, each of which the old
+/// `fs::read_to_string` did:
+///
+/// - It never reads the whole file. Sim logs run to tens of GB on Lustre;
+///   slurping one to show its last 100 lines cost seconds of stall before a
+///   single line appeared. Only a bounded window is touched, so a very long
+///   line can push the yield below `max_lines` — an acceptable trade, which
+///   is why the window is megabytes rather than kilobytes.
+/// - It never fails on invalid UTF-8. Cactus logs carry the occasional stray
+///   byte, and `read_to_string`'s `Err` made those files look *absent*: the
+///   user was told there was no output about a file full of it. Decoding is
+///   lossy (`U+FFFD` for the bad bytes) so the file displays like any other.
+/// - It never measures the offset in decoded chars. `U+FFFD` is three bytes
+///   standing in for as little as one, so a decoded string's length is not
+///   the file's; the offset here comes from the raw read accounting, keeping
+///   [`LogTail`] byte-exact — no re-printed and no skipped bytes.
+fn read_static_tail(path: &Path, max_lines: usize) -> Option<StaticTail> {
+    let mut f = fs::File::open(path).ok()?;
+    // A file that grows between the `stat` and the read is fine: the window
+    // start is only a lower bound, and the offset below is derived from what
+    // was actually read, not from this length.
+    let start = f.metadata().ok()?.len().saturating_sub(SEED_BYTES);
+    let mut window = Vec::new();
+    f.seek(SeekFrom::Start(start)).ok()?;
+    f.read_to_end(&mut window).ok()?;
+    // Everything up to here was consumed, partial leading line included, so
+    // this is where the follow resumes regardless of what we end up printing.
+    let offset = start + window.len() as u64;
+
+    let mut seed = &window[..];
+    if start > 0 {
+        // Started mid-file: the first line is a fragment, so drop it.
+        seed = match seed.iter().position(|&b| b == b'\n') {
+            Some(i) => &seed[i + 1..],
+            None => &[],
+        };
+    }
+    let text = String::from_utf8_lossy(seed);
+    let all: Vec<&str> = text.lines().collect();
+    let first = all.len().saturating_sub(max_lines);
+    let lines = all[first..].iter().map(|l| (*l).to_string()).collect();
+    Some(StaticTail { lines, offset })
+}
+
 /// Register the shared Ctrl-C flag used by every follow loop below.
 fn install_sigint_flag() -> Res<Arc<AtomicBool>> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -209,16 +276,16 @@ pub(crate) fn tail_log(sources: &[(&str, PathBuf); 2], mode: FollowMode, subject
     let mut last_src: Option<usize> = None;
     let mut shown = false;
     for (i, (label, path)) in sources.iter().enumerate() {
-        let Ok(content) = fs::read_to_string(path) else { continue };
+        // Only a file we can't open at all counts as "not there yet"; one
+        // that merely holds non-UTF-8 bytes still gets shown.
+        let Some(seed) = read_static_tail(path, TAIL_LINES) else { continue };
         shown = true;
         print_source_header(path, label);
         last_src = Some(i);
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(100);
-        for line in &lines[start..] {
+        for line in &seed.lines {
             println!("{line}");
         }
-        offsets[i] = content.len() as u64;
+        offsets[i] = seed.offset;
     }
 
     if mode == FollowMode::None {
@@ -283,16 +350,18 @@ fn follow_single(source: &(&str, PathBuf), subject: &str) -> Res<()> {
     let (label, path) = source;
     eprintln!("{}", format!("==> {} ({}) <==", path.display(), label).bold());
 
-    let offset = match fs::read_to_string(path) {
-        Ok(content) => {
-            let lines: Vec<&str> = content.lines().collect();
-            let start = lines.len().saturating_sub(100);
-            for line in &lines[start..] {
+    let offset = match read_static_tail(path, TAIL_LINES) {
+        // The file is there — print its backlog and follow from the end of
+        // what we printed, even if some of its bytes decoded lossily.
+        Some(seed) => {
+            for line in &seed.lines {
                 println!("{line}");
             }
-            content.len() as u64
+            seed.offset
         }
-        Err(_) => {
+        // Genuinely absent: nothing to print, and the follow starts at the
+        // top of whatever eventually shows up.
+        None => {
             eprintln!("Waiting for output from {subject} (Ctrl-C to stop)…");
             0
         }
@@ -368,6 +437,115 @@ mod tests {
 
         let mut tail = LogTail::new(path, 5);
         assert_eq!(tail.poll().unwrap(), b"56789");
+    }
+
+    #[test]
+    fn static_tail_reports_a_missing_file_as_absent() {
+        // The one case that legitimately means "no output yet" — callers key
+        // their "No output files yet" / "Waiting for output" notices off it.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_static_tail(&tmp.path().join("missing.log"), 100).is_none());
+    }
+
+    #[test]
+    fn static_tail_keeps_only_the_last_n_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.log");
+        let body: String = (0..250).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &body).unwrap();
+
+        let seed = read_static_tail(&path, 100).unwrap();
+        assert_eq!(seed.lines.len(), 100);
+        assert_eq!(seed.lines[0], "line 150");
+        assert_eq!(seed.lines[99], "line 249");
+        assert_eq!(seed.offset, body.len() as u64);
+    }
+
+    #[test]
+    fn static_tail_displays_a_file_with_invalid_utf8() {
+        // The old `read_to_string` returned Err here, so the file was
+        // reported as *missing* even though it was sitting there full of
+        // output. It must display instead, with the bad bytes replaced.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.log");
+        fs::write(&path, b"good\n\xff\xfe bad bytes\ntrailing\n").unwrap();
+
+        let seed = read_static_tail(&path, 100).unwrap();
+        assert_eq!(seed.lines.len(), 3);
+        assert_eq!(seed.lines[0], "good");
+        assert!(seed.lines[1].contains("bad bytes"));
+        assert!(seed.lines[1].contains('\u{fffd}'));
+        assert_eq!(seed.lines[2], "trailing");
+    }
+
+    #[test]
+    fn static_tail_offset_is_raw_bytes_not_decoded_chars() {
+        // `U+FFFD` is three bytes replacing one, so the decoded string is
+        // longer than the file: an offset taken from it would make the first
+        // poll skip real bytes (or, on a shrinking file, re-print them).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.log");
+        let raw = b"line one\n\xff\xff\xff\nline three\n";
+        fs::write(&path, raw).unwrap();
+
+        let seed = read_static_tail(&path, 100).unwrap();
+        assert_eq!(seed.offset, raw.len() as u64);
+        // The decoded backlog really is longer than the file it came from.
+        let decoded: usize = seed.lines.iter().map(|l| l.len() + 1).sum();
+        assert!(decoded > raw.len());
+
+        // And resuming there sees nothing new — no double-printed tail.
+        let mut tail = LogTail::new(path.clone(), seed.offset);
+        assert!(tail.poll().is_none());
+        // Only genuinely new bytes come back.
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"line four\n").unwrap();
+        drop(f);
+        assert_eq!(tail.poll().unwrap(), b"line four\n");
+    }
+
+    #[test]
+    fn static_tail_reads_only_a_bounded_window_of_a_huge_file() {
+        // A file bigger than SEED_BYTES must not be slurped whole, but must
+        // still leave the follow positioned at its true end.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.log");
+        let filler = "x".repeat(4095);
+        let mut body = String::new();
+        while body.len() < (SEED_BYTES as usize) + 1024 * 1024 {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        body.push_str("the very last line\n");
+        fs::write(&path, &body).unwrap();
+
+        let seed = read_static_tail(&path, 100).unwrap();
+        assert_eq!(seed.offset, body.len() as u64);
+        assert_eq!(seed.lines.last().unwrap(), "the very last line");
+        // Only the window was read: the backlog can't exceed it, and is far
+        // short of the whole file.
+        let read: usize = seed.lines.iter().map(|l| l.len() + 1).sum();
+        assert!(read <= SEED_BYTES as usize);
+        assert!((read as u64) < body.len() as u64);
+        // ...and the follow starts clean at the end.
+        let mut tail = LogTail::new(path, seed.offset);
+        assert!(tail.poll().is_none());
+    }
+
+    #[test]
+    fn static_tail_drops_the_partial_line_when_the_window_starts_mid_file() {
+        // The window lands mid-line by construction; that fragment must not
+        // be printed as though it were a line of its own.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.log");
+        let mut body = "A".repeat(SEED_BYTES as usize);
+        body.push_str("cut-here\nwhole line\n");
+        fs::write(&path, &body).unwrap();
+
+        let seed = read_static_tail(&path, 100).unwrap();
+        assert_eq!(seed.lines, vec!["whole line".to_string()]);
+        assert!(!seed.lines.iter().any(|l| l.contains("cut-here")));
+        assert_eq!(seed.offset, body.len() as u64);
     }
 
     #[test]
