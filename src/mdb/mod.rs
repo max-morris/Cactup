@@ -328,13 +328,13 @@ impl Machine {
             [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist variant", self.name),
             [] => bail!(
                 "machine \"{}\" has several optionlist variants ({}) and none is marked \
-                 default = true; pick one with --variant (§4.4)",
+                 default = true; pick one with --variant", // §4.4
                 self.name,
                 listed.join(", ")
             ),
             several => bail!(
                 "machine \"{}\" marks several optionlist variants default = true ({}); \
-                 pick one with --variant (§4.4)",
+                 pick one with --variant", // §4.4
                 self.name,
                 several.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             ),

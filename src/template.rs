@@ -93,7 +93,7 @@ globals().update(_cactup_d[\"vars\"])
 typed = _cactup_d[\"typed\"]
 
 class CactupError(Exception):
-    \"\"\"Raise to refuse the run with a message shown to the user (§6.1).
+    \"\"\"Raise to refuse the run with a message shown to the user.
 
     For a request this machine cannot serve — a scheduler rule the topology
     violates, an unsupported combination of variables. cactup prints the

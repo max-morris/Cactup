@@ -72,7 +72,7 @@ pub fn resolve_topology(
     if !queue_def.compatible_with(cfg_universe) {
         bail!(
             "queue \"{queue}\" is not compatible with build universe \"{cfg_universe}\" \
-             (build-universes = [{}]) (§4.4)",
+             (build-universes = [{}])",
             queue_def.build_universes.as_deref().unwrap_or_default().join(", ")
         );
     }
@@ -94,9 +94,10 @@ pub fn resolve_topology(
     // queue existed.
     let gpu = flags.gpu || queue_def.gpu;
     if cfg.gpu && !gpu && !force_queue {
+        // §8.5
         bail!(
             "config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
-             use --force-queue to override (§8.5)",
+             use --force-queue to override",
             cfg.name,
         );
     }
@@ -112,9 +113,10 @@ pub fn resolve_topology(
     // silently ignored, so a user who asked for GPUs per task and landed on a
     // CPU queue finds out here instead of from the scheduler.
     if flags.gpus_per_task.is_some() && !gpu {
+        // §8.5
         bail!(
             "--gpus-per-task is only meaningful on a GPU run, but queue \"{queue}\" is not \
-             GPU-flagged and --gpu was not given (§8.5)"
+             GPU-flagged and --gpu was not given"
         );
     }
 
@@ -203,9 +205,10 @@ fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool, tpn: u3
                  so fewer ranks land on a node"
                     .to_owned()
             };
+            // §8.5
             bail!(
                 "this layout needs {needed} GPUs per node ({per_task} per task × {tpn} tasks/node) \
-                 but queue \"{queue}\" has {max} (§8.5); {fix}"
+                 but queue \"{queue}\" has {max}; {fix}"
             );
         }
     }
