@@ -121,7 +121,25 @@ pub(crate) enum Commands {
     /// Inspect and manage machine definitions (§4)
     #[clap(subcommand)]
     Machine(MachineCommand),
-    /// Print one random piece of cactup wisdom (§16)
+    /// Print one random piece of cactup wisdom (§16; --help for how to configure)
+    ///
+    /// Wisdom may also appear spontaneously after running a command. Two machine-global knobs
+    /// (§5) control that:
+    ///
+    ///   wisdom-frequency  How often the after-command wisdom fires:
+    ///                     off (never), rare (1 command in 15), normal
+    ///                     (1 in 8, the default), chatty (1 in 4), or
+    ///                     always.
+    ///   wisdom-kind       Which entries are eligible, here and after
+    ///                     commands: relevant (cactup feature tips only)
+    ///                     or all (the default: tips mixed with attributed
+    ///                     words of wisdom).
+    ///
+    /// Set them with `cactup knob`:
+    ///
+    ///   cactup knob wisdom-frequency chatty
+    ///   cactup knob wisdom-kind relevant
+    #[clap(verbatim_doc_comment)]
     Wisdom,
 }
 
