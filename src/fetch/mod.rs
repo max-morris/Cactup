@@ -524,6 +524,18 @@ pub struct SourceHeads {
     pub heads: BTreeMap<String, String>,
     /// Repos whose worktree has local modifications right now.
     pub dirty: std::collections::BTreeSet<String>,
+    /// Repos whose directory is on disk but could not be probed — most often
+    /// because it is no longer a git repo at all (someone dropped a
+    /// hand-built variant of a thorn tree in place of the checkout). These
+    /// are deliberately NOT absent-and-forgotten: a repo that lost its git
+    /// identity cannot be shown to still be the commit a config was built
+    /// from, so `build::source_delta` must read it as divergence rather than
+    /// skip it for want of a state string to compare.
+    pub unreadable: std::collections::BTreeSet<String>,
+    /// Git repos the thornlist names whose directory is not on disk at all —
+    /// divergence for the same reason as `unreadable`, once a config's
+    /// recorded baseline knows the repo.
+    pub missing: std::collections::BTreeSet<String>,
     /// The repo supplying the Cactus flesh, when this list has one.
     pub flesh: Option<String>,
 }
@@ -541,9 +553,15 @@ pub(crate) fn committed(state: &str) -> &str {
 /// is a full gix status walk with the same "looks hung without progress"
 /// duration [`plan`]'s probe loop pays. `progress` is init'ed to the repo
 /// count, shows each in-flight repo as a child, and counts probes as they
-/// finish. `Ok(None)` only when the tree holds no inspectable repo at all —
+/// finish. `Ok(None)` only when the tree holds no readable repo at all —
 /// callers must read that as "no information", never as "nothing changed".
-/// A repo that fails to probe is left out rather than guessed at.
+///
+/// A repo that cannot be probed is never guessed at, but it is not dropped on
+/// the floor either: it lands in `unreadable` (directory present, not a
+/// readable git repo) or `missing` (git component, no directory), both of
+/// which `build::source_delta` reads as divergence. Silently omitting them is
+/// what let a repo whose `.git` was replaced by a hand-built variant report
+/// as "matches what this config was built from".
 pub fn source_heads(
     install_root: &Path,
     list: &Thornlist,
@@ -557,8 +575,17 @@ pub fn source_heads(
         if out.flesh.is_none() && is_flesh(list.root(), c) {
             out.flesh = Some(c.repo.clone());
         }
-        if seen.insert(c.repo.clone()) && repos_dir.join(&c.repo).is_dir() {
+        if !seen.insert(c.repo.clone()) {
+            continue;
+        }
+        if repos_dir.join(&c.repo).is_dir() {
             repos.push(c.repo.clone());
+        } else if c.ty == ComponentType::Git {
+            // Only git components own a `repos/<repo>` directory at all —
+            // downloads and external checkouts land straight under their
+            // `!TARGET`, so their derived repo name is absent by design and
+            // must not read as a vanished source.
+            out.missing.insert(c.repo.clone());
         }
     }
 
@@ -572,12 +599,20 @@ pub fn source_heads(
         state
     })?;
     for (repo, state) in repos.into_iter().zip(states) {
-        let Some(state) = state else { continue };
+        let Some(state) = state else {
+            out.unreadable.insert(repo);
+            continue;
+        };
         if state.contains("+") {
             out.dirty.insert(repo.clone());
         }
         out.heads.insert(repo, state);
     }
+    // Not one readable repo ⇒ no information about this tree, exactly as
+    // before. Reporting an all-`missing`/all-`unreadable` reading as `Some`
+    // would be worse than useless: `build` records `heads` as the config's
+    // baseline, so an empty map would be stored and every later comparison
+    // would then find nothing to compare and read as "unchanged" forever.
     if out.heads.is_empty() {
         return Ok(None);
     }
@@ -850,6 +885,38 @@ mod tests {
         let after = source_heads(root, &list, &mut progress).unwrap().unwrap();
         assert_ne!(after.heads["core"], before);
         assert_eq!(after.heads["cactusbase"], got.heads["cactusbase"], "untouched repos hold still");
+    }
+
+    /// The git → non-git transition (and outright removal): a repo the
+    /// thornlist names that can no longer be read is recorded, not dropped.
+    /// Dropping it is what let `build::source_delta` report a checkout
+    /// replaced by a hand-built variant as "unchanged".
+    #[test]
+    fn source_heads_records_repos_it_cannot_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let repos = root.join("Cactus/repos");
+        for name in ["core", "cactusbase", "simfactory2"] {
+            git::testrepo::init(&repos.join(name));
+            git::testrepo::commit(&repos.join(name), "initial");
+        }
+        let list = crate::thornlist::parse(LIST).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test probe");
+
+        // Stand a hand-built variant in for the checkout: same directory, same
+        // files, no `.git/`.
+        std::fs::remove_dir_all(repos.join("cactusbase/.git")).unwrap();
+        let got = source_heads(root, &list, &mut progress).unwrap().unwrap();
+        assert!(!got.heads.contains_key("cactusbase"), "no state can be invented for it");
+        assert_eq!(got.unreadable.iter().cloned().collect::<Vec<_>>(), vec!["cactusbase".to_string()]);
+        assert!(got.missing.is_empty());
+
+        // Removed outright: `missing` rather than `unreadable`, so the report
+        // can say which of the two happened.
+        std::fs::remove_dir_all(repos.join("cactusbase")).unwrap();
+        let got = source_heads(root, &list, &mut progress).unwrap().unwrap();
+        assert!(got.unreadable.is_empty());
+        assert_eq!(got.missing.iter().cloned().collect::<Vec<_>>(), vec!["cactusbase".to_string()]);
     }
 
     #[test]

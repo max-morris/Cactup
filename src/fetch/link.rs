@@ -44,11 +44,27 @@ pub enum LinkOutcome {
     Blocked { existing: PathBuf },
 }
 
-/// Materialize the arrangement symlink for `component` under `install_root`,
-/// given the thornlist's `!DEFINE ROOT` value (`Thornlist::root()`). Creates
-/// parent directories as needed; never touches a pre-existing non-symlink
-/// path or a symlink that doesn't already point into `<root>/repos/`.
-pub fn link_component(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkOutcome> {
+/// Where a component's arrangement symlink belongs and what it must point at.
+/// The pure path half of [`link_component`], factored out so the read-only
+/// [`inspect_link`] resolves *exactly* the same path: a reporting view that
+/// disagreed with the fetcher about which path on disk is "the thorn's link"
+/// would be worse than no view at all.
+///
+/// Touches the filesystem only to resolve (never to create): `physical_resolve`
+/// and `canonicalize` read, and a not-yet-existing tail collapses lexically.
+struct LinkPlan {
+    /// `<install_root>/<root>/repos`, canonicalized. "Resolves under here" is
+    /// the test that separates a cactup-managed link from a hand-made one.
+    repos_dir: PathBuf,
+    /// The directory the symlink lives in.
+    target_dir: PathBuf,
+    /// The symlink itself.
+    link_path: PathBuf,
+    /// The absolute path the symlink must resolve to.
+    desired: PathBuf,
+}
+
+fn plan_link(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkPlan> {
     // Canonicalized so the relative-path math and the physically-resolved
     // target dir below live in one namespace even when `install_root` itself
     // contains symlinks.
@@ -104,33 +120,114 @@ pub fn link_component(install_root: &Path, root: &str, component: &Component) ->
         bail!("component '{}' resolves to an empty symlink name", component.checkout);
     }
 
-    let link_path = target_dir.join(&link_name);
-    std::fs::create_dir_all(&target_dir)
-        .with_context(|| format!("Failed to create {}", target_dir.display()))?;
+    Ok(LinkPlan {
+        link_path: target_dir.join(&link_name),
+        repos_dir,
+        target_dir,
+        desired: desired_absolute,
+    })
+}
 
-    match std::fs::symlink_metadata(&link_path) {
+/// Materialize the arrangement symlink for `component` under `install_root`,
+/// given the thornlist's `!DEFINE ROOT` value (`Thornlist::root()`). Creates
+/// parent directories as needed; never touches a pre-existing non-symlink
+/// path or a symlink that doesn't already point into `<root>/repos/`.
+pub fn link_component(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkOutcome> {
+    let plan = plan_link(install_root, root, component)?;
+    std::fs::create_dir_all(&plan.target_dir)
+        .with_context(|| format!("Failed to create {}", plan.target_dir.display()))?;
+
+    match std::fs::symlink_metadata(&plan.link_path) {
         Err(_) => {
-            create_symlink(&target_dir, &desired_absolute, &link_path)?;
+            create_symlink(&plan.target_dir, &plan.desired, &plan.link_path)?;
             Ok(LinkOutcome::Created)
         }
         Ok(meta) => {
             if !meta.file_type().is_symlink() {
-                return Ok(LinkOutcome::Blocked { existing: link_path });
+                return Ok(LinkOutcome::Blocked { existing: plan.link_path });
             }
-            let raw = std::fs::read_link(&link_path)
-                .with_context(|| format!("Failed to read existing symlink {}", link_path.display()))?;
-            let resolved_old = join_normalized(&target_dir, &raw);
-            if !resolved_old.starts_with(&repos_dir) {
-                return Ok(LinkOutcome::Blocked { existing: link_path });
+            let raw = std::fs::read_link(&plan.link_path).with_context(|| {
+                format!("Failed to read existing symlink {}", plan.link_path.display())
+            })?;
+            let resolved_old = join_normalized(&plan.target_dir, &raw);
+            if !resolved_old.starts_with(&plan.repos_dir) {
+                return Ok(LinkOutcome::Blocked { existing: plan.link_path });
             }
-            if resolved_old == desired_absolute {
+            if resolved_old == plan.desired {
                 return Ok(LinkOutcome::Unchanged);
             }
-            remove_symlink(&link_path)?;
-            create_symlink(&target_dir, &desired_absolute, &link_path)?;
+            remove_symlink(&plan.link_path)?;
+            create_symlink(&plan.target_dir, &plan.desired, &plan.link_path)?;
             Ok(LinkOutcome::Repointed { from: resolved_old })
         }
     }
+}
+
+/// What is at a component's arrangement link path *right now* — the read-only
+/// counterpart to [`LinkOutcome`], for `cactup installation delta`.
+///
+/// [`LinkOutcome::Blocked`] deliberately collapses two situations the fetcher
+/// treats identically (both mean "not mine, don't touch"). A report must not:
+/// a hand-placed thorn directory and a foreign symlink call for different
+/// responses from the user, so they are separate here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkState {
+    /// A symlink into `<root>/repos/`, pointing exactly where the thornlist
+    /// says, with the thorn source it names present.
+    Linked,
+    /// Pointed correctly, but nothing is at the other end — the thorn source
+    /// the thornlist names is not in the repo (a `!CHECKOUT` path that moved
+    /// upstream, or a half-removed repo).
+    Dangling { target: PathBuf },
+    /// Nothing exists at the link path at all: the thornlist names this thorn
+    /// and nothing links it into the build.
+    Missing,
+    /// A symlink into `<root>/repos/`, but at the wrong thorn — a refetch
+    /// would repoint it ([`LinkOutcome::Repointed`]).
+    Misdirected { target: PathBuf },
+    /// A real file or directory sits where the symlink belongs: a hand-placed
+    /// thorn, standing in for the checkout. cactup will never overwrite it,
+    /// and the build compiles it — so saying nothing about it is how a tree
+    /// silently stops matching its thornlist.
+    Replaced { existing: PathBuf },
+    /// A symlink pointing outside `<root>/repos/` — hand-made, or another
+    /// tool's. Left untouched by a fetch, exactly like `Replaced`.
+    Foreign { target: PathBuf },
+}
+
+impl LinkState {
+    /// Whether this is worth telling the user about; `Linked` is not.
+    pub fn is_divergence(&self) -> bool {
+        !matches!(self, LinkState::Linked)
+    }
+}
+
+/// Classify `component`'s arrangement link without touching anything —
+/// no `create_dir_all`, no repointing. Resolves the same path
+/// [`link_component`] would act on, by construction (both go through
+/// [`plan_link`]).
+pub fn inspect_link(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkState> {
+    let plan = plan_link(install_root, root, component)?;
+    let Ok(meta) = std::fs::symlink_metadata(&plan.link_path) else {
+        return Ok(LinkState::Missing);
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(LinkState::Replaced { existing: plan.link_path });
+    }
+    let raw = std::fs::read_link(&plan.link_path)
+        .with_context(|| format!("Failed to read symlink {}", plan.link_path.display()))?;
+    let resolved = join_normalized(&plan.target_dir, &raw);
+    if !resolved.starts_with(&plan.repos_dir) {
+        return Ok(LinkState::Foreign { target: resolved });
+    }
+    if resolved != plan.desired {
+        return Ok(LinkState::Misdirected { target: resolved });
+    }
+    // `exists()` follows the link, which is the question being asked here.
+    if !plan.link_path.exists() {
+        return Ok(LinkState::Dangling { target: plan.desired });
+    }
+    Ok(LinkState::Linked)
 }
 
 fn create_symlink(link_dir: &Path, absolute_target: &Path, link_path: &Path) -> crate::Res<()> {
@@ -384,6 +481,88 @@ mod tests {
         // The link resolves to the repo dir we made.
         let resolved = link_path.parent().unwrap().join(&raw);
         assert!(resolved.exists());
+    }
+
+    /// `inspect_link` must agree with `link_component` about which path is
+    /// the thorn's link, and must classify every way that path can go wrong.
+    /// The case that motivated it: a hand-placed thorn directory standing in
+    /// for the checkout is invisible to a per-repo status walk, because the
+    /// divergence is not inside any repo.
+    #[test]
+    fn inspect_link_classifies_every_way_a_link_can_diverge() {
+        let f = fixture();
+        make_repo(&f.install_root, "Foo");
+        make_repo(&f.install_root, "Bar");
+        let thorn = f.install_root.join("Cactus/repos/Foo/McLachlan/ML_BSSN");
+        std::fs::create_dir_all(&thorn).unwrap();
+        let c = git_component("McLachlan/ML_BSSN", "Foo");
+        let link_path = f.install_root.join("Cactus/arrangements/McLachlan/ML_BSSN");
+
+        // Nothing there yet.
+        assert_eq!(inspect_link(&f.install_root, "Cactus", &c).unwrap(), LinkState::Missing);
+
+        // What the fetcher creates must read back as sound — the two halves
+        // going through `plan_link` is what guarantees it.
+        assert_eq!(link_component(&f.install_root, "Cactus", &c).unwrap(), LinkOutcome::Created);
+        assert_eq!(inspect_link(&f.install_root, "Cactus", &c).unwrap(), LinkState::Linked);
+
+        // Correctly pointed, but the thorn source is gone from the repo.
+        std::fs::remove_dir_all(&thorn).unwrap();
+        match inspect_link(&f.install_root, "Cactus", &c).unwrap() {
+            LinkState::Dangling { target } => assert!(target.ends_with("Foo/McLachlan/ML_BSSN")),
+            other => panic!("expected Dangling, got {other:?}"),
+        }
+        std::fs::create_dir_all(&thorn).unwrap();
+
+        // Into repos/, but at the wrong thorn: a refetch repoints this one.
+        std::fs::remove_file(&link_path).unwrap();
+        std::os::unix::fs::symlink("../../repos/Bar/McLachlan/ML_BSSN", &link_path).unwrap();
+        match inspect_link(&f.install_root, "Cactus", &c).unwrap() {
+            LinkState::Misdirected { target } => assert!(target.ends_with("Bar/McLachlan/ML_BSSN")),
+            other => panic!("expected Misdirected, got {other:?}"),
+        }
+
+        // Outside repos/ entirely. `link_component` calls this Blocked and
+        // leaves it alone; the report must distinguish it from a hand-placed
+        // directory, since the two call for different responses.
+        std::fs::remove_file(&link_path).unwrap();
+        let elsewhere = f.install_root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &link_path).unwrap();
+        match inspect_link(&f.install_root, "Cactus", &c).unwrap() {
+            LinkState::Foreign { target } => assert!(target.ends_with("elsewhere"), "{target:?}"),
+            other => panic!("expected Foreign, got {other:?}"),
+        }
+
+        // The reported case: a real directory of someone's own source. cactup
+        // never replaces it, and the build compiles it as-is.
+        std::fs::remove_file(&link_path).unwrap();
+        std::fs::create_dir_all(link_path.join("src")).unwrap();
+        match inspect_link(&f.install_root, "Cactus", &c).unwrap() {
+            LinkState::Replaced { existing } => assert_eq!(existing, link_path),
+            other => panic!("expected Replaced, got {other:?}"),
+        }
+        // …and `link_component` agrees it is not to be touched.
+        assert!(matches!(
+            link_component(&f.install_root, "Cactus", &c).unwrap(),
+            LinkOutcome::Blocked { .. }
+        ));
+        assert!(link_path.join("src").is_dir(), "inspection and linking both leave it alone");
+    }
+
+    /// Inspection is read-only: it must not create the arrangement directory
+    /// the way `link_component` does, or merely *looking* at an unfetched tree
+    /// would start building one.
+    #[test]
+    fn inspect_link_creates_nothing() {
+        let f = fixture();
+        make_repo(&f.install_root, "Foo");
+        let c = git_component("McLachlan/ML_BSSN", "Foo");
+        assert_eq!(inspect_link(&f.install_root, "Cactus", &c).unwrap(), LinkState::Missing);
+        assert!(
+            !f.install_root.join("Cactus/arrangements").exists(),
+            "inspection must not materialize the target directory"
+        );
     }
 
     #[test]

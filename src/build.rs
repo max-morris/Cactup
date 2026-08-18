@@ -454,6 +454,16 @@ pub enum RebuildDecision {
     Full(&'static str),
 }
 
+/// The `Full` reason for a flesh-level source change, named because `build()`
+/// keys an extra explanatory line off exactly this decision. Matching the
+/// literal in both places would break silently the moment either is reworded.
+///
+/// Deliberately not "moved to a different commit": the flesh also reaches this
+/// state by ceasing to be readable as a git repo at all (`SourceChange`'s
+/// `vanished`), and a reason line that named the wrong cause would be worse
+/// than a general one.
+const FLESH_NOT_AS_BUILT: &str = "the Cactus flesh is not the commit this was built from";
+
 /// How the source trees under a config differ from what it was built with
 /// (§7.4). A refetch is only one of the ways this happens — editing a thorn in
 /// place, or `git checkout` inside a repo, are ordinary workflows too.
@@ -484,11 +494,16 @@ pub struct SourceChange {
     pub moved: Vec<String>,
     /// Repos whose worktree differs from what the build used.
     pub edited: Vec<String>,
+    /// Repos the build recorded a state for that can no longer be read: the
+    /// directory is gone, or it is no longer a git repo (a hand-built variant
+    /// dropped in place of the checkout). No state string exists to compare,
+    /// which is precisely why this is a change and not a skip.
+    pub vanished: Vec<String>,
 }
 
 impl SourceChange {
     fn is_empty(&self) -> bool {
-        self.moved.is_empty() && self.edited.is_empty()
+        self.moved.is_empty() && self.edited.is_empty() && self.vanished.is_empty()
     }
 }
 
@@ -500,6 +515,14 @@ impl SourceChange {
 /// just gained a thorn, would otherwise report every repo as new. A thornlist
 /// that gained or dropped a thorn is already caught by the processed-thornlist
 /// diff, so nothing is lost by only comparing repos both sides know about.
+///
+/// The opposite direction is NOT tolerated: a repo the stored record knows
+/// about that the live tree can no longer produce a state string for — gone
+/// from disk, or no longer a git repo because someone swapped in a hand-built
+/// variant — is `vanished`, and counts exactly like a moved commit. Walking
+/// only `fresh.heads` used to make that case invisible, so replacing a
+/// checkout with a non-git copy of it reported "matches what this config was
+/// built from".
 pub fn source_delta(
     stored: Option<&BTreeMap<String, String>>,
     fresh: Option<&SourceHeads>,
@@ -521,12 +544,26 @@ pub fn source_delta(
             change.moved.push(repo.clone());
         }
     }
+    for repo in fresh.unreadable.iter().chain(fresh.missing.iter()) {
+        if stored.contains_key(repo.as_str()) {
+            change.vanished.push(repo.clone());
+        }
+    }
+    change.vanished.sort();
     if change.is_empty() {
         return (SourceDelta::Unchanged, change);
     }
-    let delta = if fresh.flesh.as_deref().is_some_and(|f| change.moved.iter().any(|m| m == f)) {
+    // A vanished repo is treated like a moved one, flesh included: whatever is
+    // there now is provably not the commit that was compiled, and a flesh that
+    // can no longer be identified invalidates every object just as a flesh
+    // that moved does.
+    let flesh_gone = fresh
+        .flesh
+        .as_deref()
+        .is_some_and(|f| change.moved.iter().chain(change.vanished.iter()).any(|m| m == f));
+    let delta = if flesh_gone {
         SourceDelta::Flesh
-    } else if !change.moved.is_empty() {
+    } else if !change.moved.is_empty() || !change.vanished.is_empty() {
         SourceDelta::Thorns
     } else {
         SourceDelta::Edited
@@ -834,9 +871,7 @@ pub fn rebuild_decision(
         }
         // Ranked above the thornlist diff because it is the strictly stronger
         // response: a release bump usually changes both at once.
-        Some(_) if sources == SourceDelta::Flesh => {
-            RebuildDecision::Full("the Cactus flesh moved to a different commit")
-        }
+        Some(_) if sources == SourceDelta::Flesh => RebuildDecision::Full(FLESH_NOT_AS_BUILT),
         // An absent processed thornlist (hand-deleted from the config dir)
         // gives nothing to compare against, so it reads as unchanged; the
         // build rewrites it either way.
@@ -859,7 +894,7 @@ pub fn rebuild_decision(
             RebuildDecision::Incremental("thorn contents changed")
         }
         Some(_) if sources == SourceDelta::Thorns => {
-            RebuildDecision::Incremental("the thorn sources moved to a different commit")
+            RebuildDecision::Incremental("thorn sources are not the commits this was built from")
         }
         Some(_) if sources == SourceDelta::Edited => {
             RebuildDecision::Incremental("the source tree has local edits")
@@ -1090,10 +1125,10 @@ pub fn build(
              (pass -f for a from-scratch rebuild)."
         );
     }
-    if let RebuildDecision::Full("the Cactus flesh moved to a different commit") = decision {
+    if decision == RebuildDecision::Full(FLESH_NOT_AS_BUILT) {
         println!(
-            "Rebuilding config {name} from scratch: the Cactus flesh moved, so the make system \
-             and config-data are regenerated and every existing object is stale."
+            "Rebuilding config {name} from scratch: the Cactus flesh is not what it was, so the \
+             make system and config-data are regenerated and every existing object is stale."
         );
     }
     // Name the repos, so a source-driven rebuild is actionable rather than
@@ -1104,6 +1139,12 @@ pub fn build(
         }
         if !source_change.edited.is_empty() {
             println!("  locally edited: {}", summarize(&source_change.edited));
+        }
+        if !source_change.vanished.is_empty() {
+            println!(
+                "  no longer readable (gone, or no longer a git repo): {}",
+                summarize(&source_change.vanished)
+            );
         }
     }
 
@@ -1737,6 +1778,20 @@ mod tests {
                 .map(|(r, _)| r.to_string())
                 .collect(),
             flesh: flesh.map(str::to_owned),
+            ..SourceHeads::default()
+        }
+    }
+
+    /// `heads`, plus repos the live tree can no longer produce a state string
+    /// for (`.git` replaced by a hand-built variant, or the directory gone).
+    fn heads_with_vanished(
+        pairs: &[(&str, &str)],
+        flesh: Option<&str>,
+        vanished: &[&str],
+    ) -> SourceHeads {
+        SourceHeads {
+            unreadable: vanished.iter().map(|r| r.to_string()).collect(),
+            ..heads(pairs, flesh)
         }
     }
 
@@ -1811,6 +1866,47 @@ mod tests {
         // Incremental — is_flesh is what promotes it.
         let unnamed = heads(&[("cactusbase", "aaa"), ("flesh", "ggg")], None);
         assert_eq!(source_delta(Some(&stored), Some(&unnamed)).0, SourceDelta::Thorns);
+    }
+
+    /// The git → non-git transition: swapping a checkout for a hand-built
+    /// variant with no `.git/` leaves nothing to compare, and comparing only
+    /// the repos the live tree *could* be read from silently reported that as
+    /// "unchanged" — the loudest possible source change rendered invisible.
+    #[test]
+    fn a_repo_that_stopped_being_a_git_repo_is_a_change() {
+        let stored: BTreeMap<String, String> = [("cactusbase", "aaa"), ("flesh", "fff")]
+            .iter()
+            .map(|(r, h)| (r.to_string(), h.to_string()))
+            .collect();
+
+        let swapped = heads_with_vanished(&[("flesh", "fff")], Some("flesh"), &["cactusbase"]);
+        let (delta, change) = source_delta(Some(&stored), Some(&swapped));
+        assert_eq!(delta, SourceDelta::Thorns);
+        assert_eq!(change.vanished, vec!["cactusbase".to_string()]);
+        assert!(change.moved.is_empty() && change.edited.is_empty());
+
+        // Gone from disk entirely reads the same way — `missing` and
+        // `unreadable` differ only in what the report says about them.
+        let gone = SourceHeads {
+            missing: ["cactusbase".to_string()].into_iter().collect(),
+            ..heads(&[("flesh", "fff")], Some("flesh"))
+        };
+        assert_eq!(source_delta(Some(&stored), Some(&gone)).0, SourceDelta::Thorns);
+
+        // The flesh losing its git identity earns a realclean, exactly as a
+        // moved flesh commit does: nothing can vouch for the compiled objects.
+        let flesh_gone = heads_with_vanished(&[("cactusbase", "aaa")], Some("flesh"), &["flesh"]);
+        assert_eq!(source_delta(Some(&stored), Some(&flesh_gone)).0, SourceDelta::Flesh);
+
+        // Bootstrap tolerance is unchanged and asymmetric: a repo the stored
+        // record never knew about is not a change even when it is unreadable
+        // now, since there is nothing built from it to invalidate.
+        let unknown_repo = heads_with_vanished(
+            &[("cactusbase", "aaa"), ("flesh", "fff")],
+            Some("flesh"),
+            &["llama"],
+        );
+        assert_eq!(source_delta(Some(&stored), Some(&unknown_repo)).0, SourceDelta::Unchanged);
     }
 
     fn provider_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

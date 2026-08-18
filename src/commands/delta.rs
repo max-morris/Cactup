@@ -14,8 +14,9 @@
 
 use crate::build::{self, ConfigMeta, SourceDelta};
 use crate::commands::Ctx;
-use crate::fetch::{self, git::SourceDiff, FetchState};
+use crate::fetch::{self, git::SourceDiff, link::LinkState, FetchState};
 use crate::installation::Installation;
+use crate::thornlist::ComponentType;
 use crate::Res;
 use anyhow::{bail, Context};
 use colored::Colorize;
@@ -71,6 +72,12 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     // "looks hung without progress" duration `fetch::plan` pays), and the
     // report below then prints in name order from the finished results.
     // `None` = not on disk.
+    // Only git components own an arrangement symlink — downloads and external
+    // checkouts land straight under their `!TARGET` (see `fetch::plan`, whose
+    // `links` list is built in the git arm alone).
+    let linked: Vec<&crate::thornlist::Component> =
+        list.components().iter().filter(|c| c.ty == ComponentType::Git).collect();
+
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let probing = progress.add_child("probe sources");
     probing.init(Some(names.len()), Some(prodash::unit::label("repos")));
@@ -88,10 +95,26 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         diff
     });
     drop(probing);
+    // Second phase under the same renderer: resolving one thorn link walks the
+    // path component by component with a `canonicalize` at each step, so ~400
+    // of them is well past the "looks hung" threshold on a network filesystem.
+    let checking = progress.add_child("probe thorn links");
+    checking.init(Some(linked.len()), Some(prodash::unit::label("thorns")));
+    let checking = std::sync::Mutex::new(checking);
+    let states: Res<Vec<Res<LinkState>>> = crate::par::parallel_map(&linked, |c| {
+        let current =
+            checking.lock().expect("delta progress poisoned").add_child(c.checkout.clone());
+        let state = fetch::link::inspect_link(&inst.root, &root, c);
+        drop(current);
+        checking.lock().expect("delta progress poisoned").inc();
+        state
+    });
+    drop(checking);
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
     }
     let diffs = diffs?;
+    let states = states?;
 
     let mut clean = 0usize;
     let mut reported = 0usize;
@@ -154,13 +177,78 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         }
     }
 
+    // The thorn-link view. A repo can be a pristine git checkout while the
+    // arrangement entry that puts its thorn into the build is a hand-placed
+    // directory of someone's own source — the repo walk above cannot see that,
+    // because the divergence is not *in* any repo.
+    let mut sound = 0usize;
+    let mut diverged: Vec<(&str, LinkState)> = Vec::new();
+    let mut unresolvable: Vec<(&str, String)> = Vec::new();
+    for (c, state) in linked.iter().zip(states) {
+        match state {
+            Ok(state) if state.is_divergence() => diverged.push((c.checkout.as_str(), state)),
+            Ok(_) => sound += 1,
+            Err(e) => unresolvable.push((c.checkout.as_str(), format!("{e:#}"))),
+        }
+    }
+    diverged.sort_by(|a, b| a.0.cmp(b.0));
+    unresolvable.sort();
+    if !diverged.is_empty() {
+        println!(
+            "\n  {}",
+            format!("{} thorn(s) are not linked the way the thornlist says:", diverged.len())
+                .yellow()
+                .bold()
+        );
+        for (checkout, state) in &diverged {
+            let (what, detail) = match state {
+                // Spelled out rather than left as a path: this is the case a
+                // user reaches by hand and then forgets about.
+                LinkState::Replaced { existing } => (
+                    "a real directory, not a link into repos/ — built as-is, and no \
+                     refetch will replace it",
+                    Some(existing.clone()),
+                ),
+                LinkState::Foreign { target } => {
+                    ("links outside repos/ — left untouched by a refetch", Some(target.clone()))
+                }
+                LinkState::Misdirected { target } => {
+                    ("links to the wrong thorn — a refetch would repoint it", Some(target.clone()))
+                }
+                LinkState::Dangling { target } => {
+                    ("links to something that is not there", Some(target.clone()))
+                }
+                LinkState::Missing => ("not linked into the build at all", None),
+                LinkState::Linked => unreachable!("filtered by is_divergence"),
+            };
+            println!("    {} — {}", checkout.bold(), what.yellow());
+            if let Some(detail) = detail {
+                println!("      {}", detail.display().to_string().dimmed());
+            }
+        }
+    }
+    if !unresolvable.is_empty() {
+        println!(
+            "\n  {}",
+            format!("{} thorn(s) could not be resolved to a link path:", unresolvable.len()).yellow()
+        );
+        for (checkout, e) in &unresolvable {
+            println!("    {} — {e}", checkout.bold());
+        }
+    }
+
     // Without a fetch record there is nothing to have diverged *from*, so the
     // summary must not claim repos "match the last fetch".
     let baseline = if recorded.is_empty() { "are clean" } else { "match the last fetch exactly" };
-    if reported == 0 {
-        println!("  {}", format!("all {clean} repo(s) {baseline}.").green());
+    let all_sound = reported == 0 && diverged.is_empty() && unresolvable.is_empty();
+    if all_sound {
+        println!(
+            "  {}",
+            format!("all {clean} repo(s) {baseline}, and all {sound} thorn(s) link into them.")
+                .green()
+        );
     } else {
-        println!("\n  {clean} repo(s) {baseline}.");
+        println!("\n  {clean} repo(s) {baseline}; {sound} thorn(s) linked as expected.");
         println!(
             "  {}",
             "`cactup inst refetch -n` shows what a refetch would do with this state.".dimmed()
@@ -245,6 +333,21 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
             print_modified(diff, verbose);
         }
     }
+    // No `details` entry is possible for these — that they cannot be inspected
+    // as git repos is the whole finding.
+    for repo in &change.vanished {
+        let dir = repos_dir.join(repo);
+        println!(
+            "  {} — {}",
+            repo.bold(),
+            if dir.is_dir() {
+                "no longer a git repo; cactup cannot tell what this builds from".yellow()
+            } else {
+                "gone from disk since the build".yellow()
+            }
+        );
+        println!("    {}", dir.display().to_string().dimmed());
+    }
 
     match delta {
         SourceDelta::Unchanged => {
@@ -292,6 +395,9 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
     }
     if !change.edited.is_empty() {
         what.push(format!("{} locally edited", change.edited.len()));
+    }
+    if !change.vanished.is_empty() {
+        what.push(format!("{} no longer inspectable", change.vanished.len()));
     }
     println!(
         "{} the source tree has moved since config {} was built ({}). This run uses the \

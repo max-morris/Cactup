@@ -365,6 +365,8 @@ cactup installation refetch [THORNLIST | --release TAG] [-f]
        [--overwrite-modified] [--overwrite NAMES] [--replace-thornlist]
        [--prune] [-s|--silent] [-n|--dry-run]     (re-run the component fetch —
                                                    see §3.2)
+cactup installation delta [<alias>]               (how the source trees diverged
+                                                   from the last fetch — §3.3)
 cactup inst …                      (short form of `installation`, a duplicate
                                     clap variant routed identically, so the docs
                                     generator renders both)
@@ -376,6 +378,8 @@ cactup build …                       (alias for `config build`)
 cactup config show [<name>]
 cactup config use <name>
 cactup config delete <name>
+cactup config delta [<name>]         (how the sources diverged from the last
+                                      build of this config — §3.3)
 
 cactup sim create [-f] <sim> <parfile> [--config C] [--sim-dir P]
 cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> [<parfile> --config C] <TOPOLOGY…> [--checkpt-buffer W]
@@ -464,6 +468,28 @@ thornlist's URL, persisted to `.git/config` and always reported, before
 fetching and checking out from it; this is the fork-adoption path (point the
 thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
 
+**The arrangement link pass.** After every fetch, each git component's
+`$TARGET/$CHECKOUT` is materialized as a **relative symlink** into
+`<root>/repos/<repo>[/<REPO_PATH>]`. This is what actually puts a thorn into
+the build — a repo checkout on its own does nothing — so the links are as much
+part of a conforming tree as the repos are. (Only git components get one:
+downloads and external checkouts land straight under their `!TARGET`.)
+
+cactup is deliberately stricter here than GetComponents' `ln -nsf`, which
+overwrites whatever it can `unlink()` — any symlink, including a hand-made one
+pointing somewhere unrelated — while its plain-checkout branches skip relinking
+whenever *anything* already exists at the path, even a symlink resolving to the
+wrong repo. cactup inspects instead: a correct link is left alone, a link into
+`repos/` pointing at the wrong place is repointed, and anything else — a real
+file or directory, or a symlink resolving outside `repos/` — is **never touched
+and always reported**. Components whose target deliberately routes *through*
+another component's arrangement symlink (the Einstein Toolkit list has one) are
+linked last, so the path they resolve through already exists.
+
+A fetch only reports what it encountered while running. `installation delta`
+(§3.3) reports the standing state of these links at any later time, which is
+where a link that was hand-replaced *after* the fetch shows up.
+
 Flags follow the §3 umbrella rule: `-f` implies `--overwrite-modified`,
 `--replace-thornlist`, and the prune confirmation, but not `--prune` itself
 (a mode, not a nag); it supersedes any `--overwrite` selection (naming both
@@ -502,6 +528,54 @@ any config that recorded the old live path retargeted — by the first `cactup`
 command that resolves it; the migration is best-effort and idempotent, and a
 read falls back to the old name if it hasn't run yet, so nothing breaks if it
 can't.
+
+### 3.3 `installation delta` and `config delta`
+
+Two read-only views of "how does the tree on disk differ from what cactup
+believes about it". Neither takes a lock, writes anything, or touches the
+network. They differ in the **baseline** they compare against:
+
+- **`installation delta [<alias>]`** — against **the last fetch**
+  (`<root>/.cactup/fetch-state.toml`): *what have I changed since cactup put
+  these sources here*. An installation with no fetch record says so rather
+  than rendering every repo as diverged; local modifications are still
+  reported.
+- **`config delta [<name>]`** — against **the last build of that config**
+  (`sources` in its metadata, §7.4): *what would rebuilding pick up*. This is
+  exactly the input the rebuild decision acts on (§7.8 rule 5), so the two can
+  never disagree.
+
+**`installation delta` reports two independent things, because the tree can
+diverge in two independent ways.**
+
+1. **Per repo**, from a git status walk of `<root>/repos/<repo>`: a moved HEAD,
+   a changed branch, modified tracked files, untracked files (which never
+   affect a build but do block `--prune`), a repo the fetch recorded that is no
+   longer on disk, and a repo directory that **cannot be inspected as a git
+   repo at all** — most often because someone replaced the checkout with a
+   hand-built variant that has no `.git/`.
+2. **Per thorn**, from the arrangement symlink each git component owns (the
+   link pass, §3.2). A repo can be a pristine checkout while the arrangement
+   entry that puts its thorn into the build is something else entirely, and no
+   per-repo walk can see that — the divergence is not *inside* any repo. Each
+   link is classified without touching it: sound; **a real file or directory
+   standing in for the link** (a hand-placed thorn — cactup will never
+   overwrite it and the build compiles it as-is); a symlink pointing **outside
+   `repos/`** (hand-made or another tool's, equally untouchable); a symlink
+   into `repos/` at the **wrong thorn** (a refetch would repoint it); a link
+   whose **target is not there**; and **no link at all** for a thorn the
+   thornlist names.
+
+   The fetcher collapses the first two into one "not mine, don't touch"
+   outcome, which is right for *acting* on them and wrong for *reporting* them:
+   a hand-placed thorn and a foreign symlink call for different responses, so
+   this view keeps them apart. Both the report and the fetcher resolve the link
+   path through the same code, so they cannot disagree about which path on disk
+   is a given thorn's link.
+
+Resolving ~400 thorn links walks each path component with a `canonicalize` at
+each step, so both phases fan out over the parallel pool under progress, like
+every other whole-tree walk.
 
 ## 4. The machine database (MDB)
 
@@ -1650,6 +1724,7 @@ cactup build <name> …              # alias
 cactup config show [<name>]
 cactup config use <name>
 cactup config delete <name>
+cactup config delta [<name>]       # divergence from the last build (§3.3)
 ```
 
 - `build`: builds (or rebuilds with `-f`) config `<name>` in the active
@@ -1772,10 +1847,47 @@ separately): a resolved universe that differs from the stored one also forces a
 full realclean + rebuild, since a host build and an in-container build are not
 interchangeable (§4.8).
 
+**Source-tree tracking.** Each build also records an optional **`sources`**
+map: repo name → a compact *state string* for the tree that repo checked out,
+covering its HEAD commit plus a summary of the tracked files that differ from
+it (`<n>mod@<newest-mtime-nanos>`, mtime-based exactly like the `make` that
+consumes those files, so a second edit is distinguishable from the first).
+Untracked files are excluded deliberately: the test harness leaves output
+inside the source tree, and that must not read as a source change. Only repos
+the config's own processed thornlist names appear, so a config built from a
+narrow list is not invalidated by a repo it does not compile.
+
+This is a **live reading** of the tree at build time, not a replay of
+`fetch-state.toml` (§3.2): editing a thorn in place and rebuilding is an
+ordinary workflow, and so is a `git checkout` inside a repo, and neither moves
+anything the fetch recorded. It is what lets the rebuild decision (§7.8 rule 5)
+notice that sources moved under a config — without it a refetch that
+fast-forwards 81 repos leaves every config reading up-to-date and silently
+never gets compiled.
+
+Comparing the stored map against a fresh reading is **asymmetric, in both
+directions deliberately**:
+
+- A repo in the fresh reading that the **stored map** does not know about is
+  *not* a change. The first build after source tracking landed, and any config
+  whose thornlist just gained a thorn, would otherwise report every repo as
+  new — and a thornlist that gained or dropped a thorn is already caught by the
+  processed-thornlist diff, so nothing is lost.
+- A repo the **stored map knows about** that the live tree can no longer
+  produce a state string for **is** a change, ranking with a moved commit
+  (and earning a realclean when it is the flesh). Two ways to get there: the
+  repo directory is gone, or it is no longer a git repo — the hand-built
+  variant swapped in for a checkout again. There is no state string to compare
+  precisely *because* the source stopped being identifiable, which is the
+  strongest possible reason to rebuild, not a reason to skip the repo. A
+  reading in which not one repo is readable stays "no information" as below,
+  since recording an empty map as a config's baseline would make every later
+  comparison find nothing to compare and read as unchanged forever.
+
 **Per-thorn build-state tracking.** Two more optional maps are recorded each
 build, both reading absence as "no information", never as "unchanged" — same
-convention as `sources` (the per-repo HEAD/dirty state used by source
-tracking, above), and absent for a config built before each map landed:
+convention as `sources` above, and absent for a config built before each map
+landed:
 
 - **`thorn-providers`** — thorn name → providing directory, from the
   processed thornlist. Cactus keys `configs/<name>/build/<Thorn>/` and
@@ -1929,7 +2041,7 @@ it is never diffed for the rebuild decision):**
    identifiers and are emitted **verbatim** — cactup maps `optimize` → `OPTIMISE`
    at render. Never Americanize keys inside `[options]`.
 
-**Rebuild trigger.** The decision to rebuild diffs four inputs against what the
+**Rebuild trigger.** The decision to rebuild diffs five inputs against what the
 config was last built with:
 
 1. the freshly-selected **source optionlist TOML** against the copy stored at
@@ -1940,7 +2052,11 @@ config was last built with:
 4. each thorn's recorded **provider** and **shape** (§7.4) against the stored
    `thorn-providers`/`thorn-shapes` maps — independent of the thornlist-text
    diff above, since a thornlist can be byte-for-byte unchanged while what a
-   name resolves to underneath it, or what that thorn contains, is not.
+   name resolves to underneath it, or what that thorn contains, is not;
+5. the live **source-tree state** against the stored `sources` map (§7.4) — a
+   refetch, a manual `git checkout` inside a repo, a hand-edited thorn, or a
+   repo that stopped being identifiable at all. None of the text diffs above
+   can see any of it: every one of them leaves the thornlist byte-identical.
 
 An optionlist or universe difference — a changed flag, a new key, a bumped
 `VERSION` — triggers a full `make <config>-realclean` + reconfigure + rebuild.
@@ -1977,8 +2093,20 @@ thorn's existing source-file bodies do **not** appear in either map and so
 never trigger this: `make` recompiles what such an edit affects on its own,
 the same trust extended to an edited flesh above.
 
-Only when all four inputs match does a complete config short-circuit as up to
-date.
+A **source-tree** difference is graded by what moved. A repo on a different
+commit, or one that can no longer be read at all, triggers a reconfigure +
+`make`; the same for the **flesh** triggers a full realclean + rebuild, since
+the flesh is the make system and everything `config-data/cctk_Config.h` is
+generated from, so every existing object is suspect. A repo whose *worktree*
+alone differs — sources edited in place — never escalates past a reconfigure,
+the flesh included: `make`'s own dependency tracking decides what such an edit
+costs, and charging a from-scratch rebuild to anyone iterating on flesh code
+would be hostile.
+
+Only when all five inputs match does a complete config short-circuit as up to
+date. The baseline for all five is recorded on **every** build, including under
+`-f`: a config that always rebuilds with `-f` could otherwise never acquire one
+to diff a later plain rebuild against.
 
 ---
 
