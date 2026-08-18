@@ -476,6 +476,17 @@ never authorizes deletion. `-n/--dry-run` prints the full classification —
 marking exactly the repos that would be forced under the given flags — and
 touches nothing.
 
+Reporting follows the decision, so the two can never disagree: the force
+selection is resolved **before** anything about the plan is printed, and each
+dirty repo is then announced exactly once, under the verdict this run will
+actually apply to it. Repos being fetched over are reported as such (red,
+"local state NOT preserved") and are never first announced as "skipped (local
+state preserved)" and quietly overwritten later; the skipped group keeps the
+yellow headline and is the only group offered the `-f`/`--overwrite` remedy,
+which therefore always names a repo the remedy still applies to. `-n` marks
+the same split with `FORCE:`/`SKIP:` labels rather than tagging a "SKIP:" line
+with a contradicting "would be fetched" suffix.
+
 A refetched thornlist (from `--release TAG` or a positional `THORNLIST`) is
 written verbatim to `Cactus/thornlists/installation-default.th` (the **live,
 editable copy** — what a build reads by default) and
