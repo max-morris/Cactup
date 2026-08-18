@@ -11,6 +11,7 @@
 
 use super::{prompt_with_default, Ctx};
 use crate::args::RefetchArgs;
+use crate::commands::installation::Tone;
 use crate::database::{UnfetchedReason, UnfetchedRepo};
 use crate::fetch::{self, link::LinkOutcome, GitAction};
 use crate::installation::Installation;
@@ -144,28 +145,13 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     drop(classify);
     renderer.shutdown_and_wait();
 
-    // The skip warning block: before fetching, so it is seen up front, and
-    // the same lines again in the summary. Under -s only the one-line count
-    // survives — silence the block, never the fact.
-    if !plan.skipped.is_empty() {
-        println!(
-            "{}",
-            format!("{} repo(s) will be skipped (local state preserved).", plan.skipped.len()).yellow().bold()
-        );
-        if !args.silent {
-            print_skip_block(&plan.skipped, overwrite_modified);
-        }
-    }
-
-    // Orphans and config interactions are computed up front too — dry-run
-    // prints all of it, and the real run needs them after the fetch anyway.
-    let orphans = enumerate_orphans(&inst, &list, &plan)?;
-    let configs = crate::commands::config::list_configs(&inst.cactus_root())?;
-
-    // Resolve --overwrite against the plan before the dry-run early return,
-    // so `-n` also catches a typo'd name — a hard error, since silently
-    // ignoring it would mean the flag did nothing and the user finds out
-    // only when the repo is skipped anyway.
+    // Resolve --overwrite against the plan before a word is printed about
+    // it: the block below must know which of the skipped repos this very run
+    // is going to fetch over, or it announces "local state preserved" for
+    // repos it is about to overwrite. Resolving here also means `-n` catches
+    // a typo'd name — a hard error, since silently ignoring it would mean
+    // the flag did nothing and the user finds out only when the repo is
+    // skipped anyway.
     let selected = if overwrite_names.is_empty() {
         BTreeSet::new()
     } else {
@@ -186,6 +172,16 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // --overwrite selection.
     let forced_repo_names: BTreeSet<String> =
         if overwrite_modified { plan.skipped.iter().map(|s| s.repo.clone()).collect() } else { selected };
+
+    // The skip/force block: before fetching, so it is seen up front, and the
+    // same lines again in the summary. Under -s only the one-line counts
+    // survive — silence the block, never the fact.
+    print_skip_status(&plan.skipped, &forced_repo_names, overwrite_modified, &args, SkipPhase::BeforeFetch);
+
+    // Orphans and config interactions are computed up front too — dry-run
+    // prints all of it, and the real run needs them after the fetch anyway.
+    let orphans = enumerate_orphans(&inst, &list, &plan)?;
+    let configs = crate::commands::config::list_configs(&inst.cactus_root())?;
 
     if args.dry_run {
         print_dry_run(&inst, &plan, &orphans, &configs, &divergence, &args, &forced_repo_names);
@@ -210,8 +206,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         };
         // "local modifications" would be wrong for a repo forced for a
         // changed remote URL, a detached HEAD, or local commits — none of
-        // which are modified files.
-        println!("Forcing {} skipped repo(s): {}.", moved.len(), moved.join(", ").bold());
+        // which are modified files. "skipped" would be wrong too: these are
+        // the repos this run is *not* skipping.
+        println!("Overwriting local state in {} repo(s): {}.", moved.len(), moved.join(", ").bold());
     }
 
     // The symlink pass runs for every git component regardless of whether its
@@ -286,15 +283,10 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
             println!("  {checkout}: {}", existing.display());
         }
     }
-    if !plan.skipped.is_empty() {
-        println!(
-            "{}",
-            format!("{} repo(s) skipped (local state preserved).", plan.skipped.len()).yellow().bold()
-        );
-        if !args.silent {
-            print_skip_block(&plan.skipped, overwrite_modified);
-        }
-    }
+    // Forced repos left `plan.skipped` when `force`/`force_where` moved them
+    // into the fetchable set above, so this reports only the repos this run
+    // genuinely left alone.
+    print_skip_status(&plan.skipped, &forced_repo_names, overwrite_modified, &args, SkipPhase::Summary);
 
     // Orphan handling: always reported; removed only under --prune.
     report_orphans(&orphans);
@@ -585,27 +577,124 @@ fn resolve_overwrite_selection(plan: &fetch::Plan, names: &[String]) -> Res<BTre
     Ok(forced)
 }
 
-fn print_skip_block(skipped: &[fetch::SkippedRepo], overwrite_modified: bool) {
-    for s in skipped {
-        println!("  {} — {}", s.repo.bold(), s.reason.describe());
-        println!("    thorns: {}", s.checkouts.join(", "));
+/// Which of the two printings of the block this is: the one before the fetch
+/// (what is about to happen) or the one in the closing summary (what did).
+#[derive(Clone, Copy)]
+enum SkipPhase {
+    BeforeFetch,
+    Summary,
+}
+
+/// The skip/force block.
+///
+/// `skipped` is the *probe's* classification, not this run's verdict: the
+/// repos named in `forced` were classified dirty but the flags say to fetch
+/// over them anyway. Announcing those as "skipped (local state preserved)"
+/// and only later admitting they will be overwritten is the contradiction
+/// this split exists to prevent — a dirty repo appears under exactly one
+/// headline, and the one it appears under is what actually happens to it.
+fn skip_status_lines(
+    skipped: &[fetch::SkippedRepo],
+    forced: &BTreeSet<String>,
+    overwrite_modified: bool,
+    silent: bool,
+    dry_run: bool,
+    phase: SkipPhase,
+) -> Vec<(Tone, String)> {
+    let (forced_repos, kept): (Vec<&fetch::SkippedRepo>, Vec<&fetch::SkippedRepo>) =
+        skipped.iter().partition(|s| forced.contains(&s.repo));
+    let mut lines = Vec::new();
+
+    let detail = |lines: &mut Vec<(Tone, String)>, s: &fetch::SkippedRepo| {
+        lines.push((Tone::Plain, format!("  {} — {}", s.repo.bold(), s.reason.describe())));
+        lines.push((Tone::Plain, format!("    thorns: {}", s.checkouts.join(", "))));
         if !s.untracked.is_empty() {
-            println!("    ({} untracked file(s), which never block a fetch)", s.untracked.len());
+            lines.push((
+                Tone::Plain,
+                format!("    ({} untracked file(s), which never block a fetch)", s.untracked.len()),
+            ));
+        }
+    };
+
+    // Alarm, not Warn: this is the destructive half, and it must not read as
+    // a milder variant of the "preserved" headline below it. In the summary
+    // the forced repos have already left `skipped` (and are reported as
+    // fetched), so this group only ever fires in the pre-fetch printing.
+    if !forced_repos.is_empty() {
+        let verb = if dry_run { "would be fetched over" } else { "will be fetched over" };
+        let flag = if overwrite_modified { "--overwrite-modified / -f" } else { "--overwrite" };
+        lines.push((
+            Tone::Alarm,
+            format!(
+                "{} repo(s) with local state {verb} anyway ({flag}) — local state NOT preserved.",
+                forced_repos.len()
+            ),
+        ));
+        if !silent {
+            for s in &forced_repos {
+                detail(&mut lines, s);
+            }
+            lines.push((
+                Tone::Plain,
+                format!(
+                    "  Modified files are copied to {} first; local commits and detached \
+                     HEADs stay in the repo's reflog.",
+                    "~/.cactup/refetch-backups/<alias>/".bold()
+                ),
+            ));
         }
     }
-    if !overwrite_modified {
-        println!(
-            "  Pass {} to fetch over all of these anyway (modified files are backed up first).",
-            "--overwrite-modified / -f".bold()
-        );
-        // skipped is non-empty whenever this fn is called (both call sites
-        // guard on it), so a real example name is always available.
-        println!(
-            "  Or {} to overwrite just one or a few (e.g. {}), or {} to hide this list.",
-            "--overwrite <name>".bold(),
-            format!("--overwrite {}", skipped[0].repo).bold(),
-            "-s/--silent".bold()
-        );
+
+    if !kept.is_empty() {
+        let verb = match (phase, dry_run) {
+            (SkipPhase::BeforeFetch, true) => "would be skipped",
+            (SkipPhase::BeforeFetch, false) => "will be skipped",
+            (SkipPhase::Summary, _) => "skipped",
+        };
+        lines.push((Tone::Warn, format!("{} repo(s) {verb} (local state preserved).", kept.len())));
+        if !silent {
+            for s in &kept {
+                detail(&mut lines, s);
+            }
+            // --overwrite-modified forces every skipped repo, so a non-empty
+            // `kept` means it was not passed: the remedy below always applies
+            // to the repos just listed, and `kept[0]` is a real example name.
+            lines.push((
+                Tone::Plain,
+                format!(
+                    "  Pass {} to fetch over all of these anyway (modified files are backed up first).",
+                    "--overwrite-modified / -f".bold()
+                ),
+            ));
+            lines.push((
+                Tone::Plain,
+                format!(
+                    "  Or {} to overwrite just one or a few (e.g. {}), or {} to hide this list.",
+                    "--overwrite <name>".bold(),
+                    format!("--overwrite {}", kept[0].repo).bold(),
+                    "-s/--silent".bold()
+                ),
+            ));
+        }
+    }
+    lines
+}
+
+fn print_skip_status(
+    skipped: &[fetch::SkippedRepo],
+    forced: &BTreeSet<String>,
+    overwrite_modified: bool,
+    args: &RefetchArgs,
+    phase: SkipPhase,
+) {
+    for (tone, line) in
+        skip_status_lines(skipped, forced, overwrite_modified, args.silent, args.dry_run, phase)
+    {
+        match tone {
+            Tone::Alarm => println!("{}", line.bright_red().bold()),
+            Tone::Warn => println!("{}", line.yellow().bold()),
+            Tone::Plain => println!("{line}"),
+        }
     }
 }
 
@@ -892,8 +981,19 @@ fn print_dry_run(
         println!("  {} — {:?} via system tool", c.checkout.bold(), c.ty);
     }
     for s in &plan.skipped {
-        let forced = if forced_repo_names.contains(&s.repo) { " (would be fetched: forced)" } else { "" };
-        println!("  {} — {} {}{forced}", s.repo.bold(), "SKIP:".yellow(), s.reason.describe());
+        // A forced repo is not a skip. Tagging one "SKIP:" and appending
+        // "would be fetched" to the same line is the contradiction the
+        // split above removes, so the label itself carries the verdict.
+        if forced_repo_names.contains(&s.repo) {
+            println!(
+                "  {} — {} fetch over local state ({})",
+                s.repo.bold(),
+                "FORCE:".bright_red(),
+                s.reason.describe()
+            );
+        } else {
+            println!("  {} — {} {}", s.repo.bold(), "SKIP:".yellow(), s.reason.describe());
+        }
     }
     if plan.git.is_empty() && plan.skipped.is_empty() && plan.downloads.is_empty() && plan.external.is_empty() {
         println!("  everything is up to date");
@@ -1304,6 +1404,90 @@ mod tests {
         // overwrite there, but that is not a typo, so no error.
         let forced = resolve_overwrite_selection(&plan, &["Cottonmouth".to_string()]).unwrap();
         assert!(forced.is_empty());
+    }
+
+    /// Every line of the block, joined — for "this name is never mentioned"
+    /// assertions, which have to look at the whole block, not one line.
+    fn joined(lines: &[(Tone, String)]) -> String {
+        lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Index of the one line at `tone`; panics if there is not exactly one.
+    fn only_at(lines: &[(Tone, String)], tone: Tone) -> usize {
+        let mut hits = lines.iter().enumerate().filter(|(_, (t, _))| *t == tone);
+        let (i, _) = hits.next().unwrap_or_else(|| panic!("no {tone:?} line in {:?}", joined(lines)));
+        assert!(hits.next().is_none(), "more than one {tone:?} line in {:?}", joined(lines));
+        i
+    }
+
+    #[test]
+    fn skip_status_lines_never_promises_preserved_state_for_a_forced_repo() {
+        let repos = vec![
+            skipped("SpacetimeX", &["SpacetimeX/WeylScal4"]),
+            skipped("Cottonmouth", &["Cottonmouth/Foo"]),
+        ];
+        let forced = BTreeSet::from(["SpacetimeX".to_string()]);
+        let lines = skip_status_lines(&repos, &forced, false, false, true, SkipPhase::BeforeFetch);
+
+        // Two headlines, each counting only its own half: the forced repo is
+        // never included in the "local state preserved" promise.
+        let alarm = only_at(&lines, Tone::Alarm);
+        let warn = only_at(&lines, Tone::Warn);
+        assert!(lines[alarm].1.contains("1 repo(s)"), "{}", lines[alarm].1);
+        assert!(lines[alarm].1.contains("NOT preserved"), "{}", lines[alarm].1);
+        assert!(lines[warn].1.contains("1 repo(s) would be skipped (local state preserved)"), "{}", lines[warn].1);
+
+        // And each repo is listed under exactly the headline that tells the
+        // truth about it: the forced one above, the kept one below.
+        let at = |name: &str| lines.iter().position(|(_, l)| l.contains(name)).unwrap();
+        assert!(alarm < at("SpacetimeX") && at("SpacetimeX") < warn, "{:?}", joined(&lines));
+        assert!(warn < at("Cottonmouth"), "{:?}", joined(&lines));
+    }
+
+    #[test]
+    fn skip_status_lines_under_overwrite_modified_report_no_skips_at_all() {
+        let repos = vec![
+            skipped("SpacetimeX", &["SpacetimeX/WeylScal4"]),
+            skipped("Cottonmouth", &["Cottonmouth/Foo"]),
+        ];
+        let forced: BTreeSet<String> = repos.iter().map(|s| s.repo.clone()).collect();
+        let lines = skip_status_lines(&repos, &forced, true, false, true, SkipPhase::BeforeFetch);
+
+        let alarm = only_at(&lines, Tone::Alarm);
+        assert!(lines[alarm].1.contains("2 repo(s)"), "{}", lines[alarm].1);
+        assert!(lines[alarm].1.contains("--overwrite-modified / -f"), "{}", lines[alarm].1);
+        // -n phrases it as a hypothetical; nothing claims a skip, and the
+        // "pass -f to fetch over these" remedy would be nonsense here.
+        assert!(lines[alarm].1.contains("would be fetched over"), "{}", lines[alarm].1);
+        assert!(!lines.iter().any(|(t, _)| *t == Tone::Warn), "{:?}", joined(&lines));
+        assert!(!joined(&lines).contains("(local state preserved)"), "{:?}", joined(&lines));
+        assert!(!joined(&lines).contains("Pass"), "{:?}", joined(&lines));
+    }
+
+    #[test]
+    fn skip_status_lines_in_the_summary_report_the_kept_repos_in_the_past_tense() {
+        let repos = vec![skipped("SpacetimeX", &["SpacetimeX/WeylScal4"])];
+        let lines = skip_status_lines(&repos, &BTreeSet::new(), false, false, false, SkipPhase::Summary);
+
+        let warn = only_at(&lines, Tone::Warn);
+        assert_eq!(lines[warn].1, "1 repo(s) skipped (local state preserved).");
+        // The remedy names a repo that really is still skipped.
+        assert!(joined(&lines).contains("--overwrite SpacetimeX"), "{:?}", joined(&lines));
+    }
+
+    #[test]
+    fn skip_status_lines_under_silent_keep_the_counts_and_drop_the_detail() {
+        let repos = vec![
+            skipped("SpacetimeX", &["SpacetimeX/WeylScal4"]),
+            skipped("Cottonmouth", &["Cottonmouth/Foo"]),
+        ];
+        let forced = BTreeSet::from(["SpacetimeX".to_string()]);
+        let lines = skip_status_lines(&repos, &forced, false, true, false, SkipPhase::BeforeFetch);
+
+        assert_eq!(lines.len(), 2, "{:?}", joined(&lines));
+        assert_eq!(lines[0].0, Tone::Alarm);
+        assert_eq!(lines[1].0, Tone::Warn);
+        assert!(!joined(&lines).contains("thorns:"), "{:?}", joined(&lines));
     }
 
     #[test]
