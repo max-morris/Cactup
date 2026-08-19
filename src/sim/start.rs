@@ -676,10 +676,11 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     let parfile = resolve_parfile(sim, &r.dir, &vset)?;
     let workdir = restart::workdir(sim, r.id);
     fs::create_dir_all(&workdir).with_context(|| format!("Failed to create {}", workdir.display()))?;
-    let terminate = r.dir.join("TERMINATE");
-    if !terminate.exists() {
-        fs::write(&terminate, b"0\n").with_context(|| "Failed to create TERMINATE")?;
-    }
+    // TERMINATE is deliberately NOT created here. It is the running Cactus
+    // job's file (TerminationTrigger's create_termination_file), and `sim stop`
+    // treats its existence as the evidence that this run is actually watching
+    // it — a file we minted ourselves would send every stop down the graceful
+    // path, writing 1 into something nobody reads while the job runs on (§8.6).
 
     // Build the command: run-script, wrapped in the run universe if any.
     let script = r.cactup_dir().join("run-script");
@@ -1062,10 +1063,12 @@ mod tests {
         // Parfile resolved with substitution and the @@ escape (§6.1/§6.2).
         let par = fs::read_to_string(r1.dir.join("bbh.par")).unwrap();
         assert!(par.contains("# sim bbh t=8 lit=@"), "{par}");
-        // Completion recorded; TERMINATE + heartbeat exist (§9.3).
+        // Completion recorded; the heartbeat exists (§9.3). TERMINATE does
+        // not: only a real Cactus run creates it (§8.6), and `sim stop` reads
+        // its absence as "no graceful trigger, kill via the scheduler".
         let r1 = Restart::load(&sim.dir, 1).unwrap();
         assert!(r1.meta.terminated && r1.meta.finished.is_some());
-        assert!(r1.dir.join("TERMINATE").is_file());
+        assert!(!r1.dir.join("TERMINATE").exists());
         assert!(r1.heartbeat_path().is_file());
         // log.txt in the preserved format (§12).
         let log = fs::read_to_string(sim.log_path()).unwrap();

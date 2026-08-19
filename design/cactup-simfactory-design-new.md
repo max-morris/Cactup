@@ -2531,6 +2531,17 @@ Ports of `simfactory-docs.txt` §14.8 / §14.5:
 - `cactup sim stop <sim>`: if `TERMINATE` exists and not `-f`, write `1` into it
   (graceful termination trigger created by the running Cactus job), then finish.
   Otherwise run the machine `stop` command (forced) and finish.
+  - **DEVIATION (graceful stop is verified, not assumed).** `TERMINATE:=1` is a
+    request: Cactus acts on it at its next termination check, and only if the
+    parfile actually enables the file trigger. So the graceful path polls the
+    run — queue status, or the `running.lock` liveness marker for a foreground
+    run — for up to 30 s. Only a run that really left is finished; while it is
+    still there, cactup says so and leaves the restart **active**, because
+    deactivating it hides the live job from `stop -f` (whose `active_id` guard
+    would then report "nothing to stop") and from the live-job guard in
+    `delete` (§8.7). Corollary, enforced in `sim/start.rs`: cactup must never
+    create `TERMINATE` itself — its existence is the *evidence* that the run is
+    watching it, which a file we minted would destroy.
 - `cactup sim clean <sim>`: deactivate the active restart (remove the
   `-active` symlink), tighten `TERMINATE` perms, and run the Formaline tarball
   **hard-link dedup** across prior restarts. Dedup semantics are preserved verbatim from simfactory
