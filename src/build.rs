@@ -250,14 +250,14 @@ pub fn resolve_thornlist(
         // for the renamed one beside it before falling back to the snapshot,
         // so an installation the migration could not retarget (a config copied
         // in from elsewhere, say) still rebuilds from the live list.
-        if let Some(renamed) = renamed_legacy_thornlist(Path::new(stored_path)) {
-            if let Ok(text) = fs::read_to_string(&renamed) {
-                return Ok(ResolvedThornlist {
-                    recorded: renamed.display().to_string(),
-                    text,
-                    from_snapshot: false,
-                });
-            }
+        if let Some(renamed) = renamed_legacy_thornlist(Path::new(stored_path))
+            && let Ok(text) = fs::read_to_string(&renamed)
+        {
+            return Ok(ResolvedThornlist {
+                recorded: renamed.display().to_string(),
+                text,
+                from_snapshot: false,
+            });
         }
         let snapshot = config_file(cactus_root, name, THORNLIST_SNAPSHOT);
         let text = fs::read_to_string(&snapshot).with_context(|| {
@@ -1289,13 +1289,13 @@ pub fn build(
         // A wrapper universe may hand the build to the scheduler (e.g. an
         // srun prefix), which sits silently in the queue until it gets an
         // allocation — say so up front, or the wait looks like a hang.
-        if let (Some(uname), Some(u)) = (universe_name.as_deref(), universe) {
-            if u.wrapper.is_some() || u.wrapper_argv.is_some() {
-                println!(
-                    "Building inside universe \"{uname}\"; if its wrapper goes through the \
-                     scheduler, output stays silent until the job is allocated (check the queue)."
-                );
-            }
+        if let (Some(uname), Some(u)) = (universe_name.as_deref(), universe)
+            && (u.wrapper.is_some() || u.wrapper_argv.is_some())
+        {
+            println!(
+                "Building inside universe \"{uname}\"; if its wrapper goes through the \
+                 scheduler, output stays silent until the job is allocated (check the queue)."
+            );
         }
 
         // Build-phase env for the resolved universe (§6.1): universe env keys
@@ -1526,9 +1526,9 @@ mod tests {
         let list = "# comment out CarpetX/TestReal2 below (#DISABLED CarpetX/TestReal2).\n\
                     #   CarpetX/TestReal2 carries the REAL2 layer\n\
                     CarpetX/TestReal2\n";
-        let out = apply_thorn_toggles(&list, &["CarpetX/TestReal2".into()], &[]);
+        let out = apply_thorn_toggles(list, &["CarpetX/TestReal2".into()], &[]);
         assert_eq!(out, list, "enabling must not rewrite prose that names the thorn");
-        let off = apply_thorn_toggles(&list, &[], &["CarpetX/TestReal2".into()]);
+        let off = apply_thorn_toggles(list, &[], &["CarpetX/TestReal2".into()]);
         assert_eq!(
             off,
             "# comment out CarpetX/TestReal2 below (#DISABLED CarpetX/TestReal2).\n\

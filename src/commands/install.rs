@@ -66,11 +66,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // lock in `ctx.db.update`.
     let database = ctx.db.read()?;
 
-    if let Some(tags) = &tags {
-        if tags.is_empty() {
-            println!("No releases found.");
-            return Ok(());
-        }
+    if let Some(tags) = &tags && tags.is_empty() {
+        println!("No releases found.");
+        return Ok(());
     }
 
     let symlink_prefix_default = home_dir.as_path();

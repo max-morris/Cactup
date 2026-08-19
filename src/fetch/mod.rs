@@ -28,7 +28,8 @@ const WORKERS: usize = 4;
 ///  4. gix's per-phase bars (remote, read pack, create index file, checkout,
 ///     writing) — the actually-informative detail (byte counts, server
 ///     "remote" counts)
-///  5+. per-thread delta-resolution/decoding noise — not useful, hidden
+///  5. and deeper: per-thread delta-resolution/decoding noise — not useful,
+///     hidden
 const PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 4;
 
 /// A pure, read-only classification of everything the fetch would do.
@@ -286,18 +287,18 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         // flagged. A failure here is reported and dropped
                         // exactly like an align/clone failure — no fetch is
                         // attempted for an item whose remote we could not fix.
-                        if let Some(url) = &item.retarget {
-                            if let Err(e) = git::set_origin_url(&item.dir, url) {
-                                header.fail(format!("{}: {e:#}", item.repo));
-                                report.lock().expect("fetch report poisoned").failures.push(Failure {
-                                    what: item.repo.clone(),
-                                    error: format!("{e:#}"),
-                                });
-                                drop(gix_item);
-                                drop(header);
-                                top.lock().expect("fetch progress poisoned").inc();
-                                continue;
-                            }
+                        if let Some(url) = &item.retarget
+                            && let Err(e) = git::set_origin_url(&item.dir, url)
+                        {
+                            header.fail(format!("{}: {e:#}", item.repo));
+                            report.lock().expect("fetch report poisoned").failures.push(Failure {
+                                what: item.repo.clone(),
+                                error: format!("{e:#}"),
+                            });
+                            drop(gix_item);
+                            drop(header);
+                            top.lock().expect("fetch progress poisoned").inc();
+                            continue;
                         }
                         let before = match item.action {
                             GitAction::Clone => None,

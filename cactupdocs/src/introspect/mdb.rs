@@ -85,24 +85,23 @@ pub fn introspect(repo_root: &Path) -> Result<MdbModel> {
     // Process any remaining structs not in the dependency chain
     for (name, _) in meta_structs.iter() {
         if !processed.contains(name.as_str())
-            && is_public_deserialize(meta_structs.get(name).unwrap())
+            && let Some(s) = meta_structs.get(name)
+            && is_public_deserialize(s)
         {
-            if let Some(s) = meta_structs.get(name) {
-                let toml_path = map_struct_to_toml_path(name.as_str());
-                let table = process_struct_to_table(s, name, toml_path)?;
-                meta_tables.push(table);
-            }
+            let toml_path = map_struct_to_toml_path(name.as_str());
+            let table = process_struct_to_table(s, name, toml_path)?;
+            meta_tables.push(table);
         }
     }
 
     // Find OptionlistHeader in optionlist.rs
     let mut optionlist_header = MdbTable::default();
     for item in &optionlist_file.items {
-        if let syn::Item::Struct(s) = item {
-            if s.ident.to_string() == "OptionlistHeader" && is_public_deserialize(&s) {
-                optionlist_header =
-                    process_struct_to_table(s, "OptionlistHeader", Some("[cactup]"))?;
-            }
+        if let syn::Item::Struct(s) = item
+            && s.ident == "OptionlistHeader" && is_public_deserialize(s)
+        {
+            optionlist_header =
+                process_struct_to_table(s, "OptionlistHeader", Some("[cactup]"))?;
         }
     }
 
@@ -190,13 +189,7 @@ fn field_to_mdb_field(field: &Field, parent_struct: &syn::ItemStruct) -> Result<
     let optional = is_optional_type(&field.ty) || has_serde_default(field);
 
     // Extract default note
-    let default_note = if is_optional_type(&field.ty) {
-        Some("optional".to_string())
-    } else if has_serde_default(field) {
-        Some("optional".to_string())
-    } else {
-        None
-    };
+    let default_note = optional.then(|| "optional".to_string());
 
     // Extract doc comment
     let (doc, _) = extract_doc(&field.attrs);
@@ -217,42 +210,27 @@ fn extract_toml_key(field: &Field, parent_struct: &syn::ItemStruct) -> Result<St
 
     // Check for #[serde(rename = "...")]
     for attr in &field.attrs {
-        if let syn::Meta::List(list) = &attr.meta {
-            if list.path.is_ident("serde") {
-                if let Ok(syn::Meta::NameValue(nv)) = list.parse_args::<syn::Meta>() {
-                    if nv.path.is_ident("rename") {
-                        if let syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(lit_str),
-                            ..
-                        }) = &nv.value
-                        {
-                            return Ok(lit_str.value());
-                        }
-                    }
-                }
-            }
+        if let syn::Meta::List(list) = &attr.meta
+            && list.path.is_ident("serde")
+            && let Ok(syn::Meta::NameValue(nv)) = list.parse_args::<syn::Meta>()
+            && nv.path.is_ident("rename")
+            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit_str), .. }) = &nv.value
+        {
+            return Ok(lit_str.value());
         }
     }
 
     // Check parent struct for #[serde(rename_all = "kebab-case")]
     let mut rename_all_kebab = false;
     for attr in &parent_struct.attrs {
-        if let syn::Meta::List(list) = &attr.meta {
-            if list.path.is_ident("serde") {
-                if let Ok(syn::Meta::NameValue(nv)) = list.parse_args::<syn::Meta>() {
-                    if nv.path.is_ident("rename_all") {
-                        if let syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(lit_str),
-                            ..
-                        }) = &nv.value
-                        {
-                            if lit_str.value() == "kebab-case" {
-                                rename_all_kebab = true;
-                            }
-                        }
-                    }
-                }
-            }
+        if let syn::Meta::List(list) = &attr.meta
+            && list.path.is_ident("serde")
+            && let Ok(syn::Meta::NameValue(nv)) = list.parse_args::<syn::Meta>()
+            && nv.path.is_ident("rename_all")
+            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit_str), .. }) = &nv.value
+            && lit_str.value() == "kebab-case"
+        {
+            rename_all_kebab = true;
         }
     }
 
@@ -270,10 +248,8 @@ fn to_kebab_case(s: &str) -> String {
 
 /// Check if a field is Option<T>
 fn is_optional_type(ty: &Type) -> bool {
-    if let Type::Path(TypePath { path, .. }) = ty {
-        if let Some(segment) = path.segments.last() {
-            return segment.ident == "Option";
-        }
+    if let Type::Path(TypePath { path, .. }) = ty && let Some(segment) = path.segments.last() {
+        return segment.ident == "Option";
     }
     false
 }
@@ -281,18 +257,14 @@ fn is_optional_type(ty: &Type) -> bool {
 /// Check if field has #[serde(default)] or #[serde(default = "...")]
 fn has_serde_default(field: &Field) -> bool {
     for attr in &field.attrs {
-        if let syn::Meta::List(list) = &attr.meta {
-            if list.path.is_ident("serde") {
-                // Parse as a flat list of metas
-                if let Ok(meta) = list.parse_args::<syn::MetaNameValue>() {
-                    if meta.path.is_ident("default") {
-                        return true;
-                    }
-                } else if let Ok(meta) = list.parse_args::<syn::Ident>() {
-                    if meta == "default" {
-                        return true;
-                    }
+        if let syn::Meta::List(list) = &attr.meta && list.path.is_ident("serde") {
+            // Parse as a flat list of metas
+            if let Ok(meta) = list.parse_args::<syn::MetaNameValue>() {
+                if meta.path.is_ident("default") {
+                    return true;
                 }
+            } else if let Ok(meta) = list.parse_args::<syn::Ident>() && meta == "default" {
+                return true;
             }
         }
     }
@@ -301,16 +273,13 @@ fn has_serde_default(field: &Field) -> bool {
 
 /// Get the inner type of Option<T>
 fn get_option_inner_type(ty: &Type) -> Option<String> {
-    if let Type::Path(TypePath { path, .. }) = ty {
-        if let Some(segment) = path.segments.last() {
-            if segment.ident == "Option" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                        return Some(describe_type(inner));
-                    }
-                }
-            }
-        }
+    if let Type::Path(TypePath { path, .. }) = ty
+        && let Some(segment) = path.segments.last()
+        && segment.ident == "Option"
+        && let PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(describe_type(inner));
     }
     None
 }
@@ -327,29 +296,27 @@ fn format_type_name(ty: &Type) -> String {
             let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
 
             // Special handling for generic types
-            if let Some(segment) = path.segments.last() {
-                if segment.ident == "Option"
+            if let Some(segment) = path.segments.last()
+                && (segment.ident == "Option"
                     || segment.ident == "Vec"
-                    || segment.ident == "IndexMap"
-                {
-                    let mut result = segment.ident.to_string();
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        result.push_str(" < ");
-                        let arg_strs: Vec<String> = args
-                            .args
-                            .iter()
-                            .enumerate()
-                            .map(|(_i, arg)| match arg {
-                                GenericArgument::Type(t) => format_type_name(t),
-                                GenericArgument::Const(c) => format!("{}", quote_const(c)),
-                                _ => "?".to_string(),
-                            })
-                            .collect();
-                        result.push_str(&arg_strs.join(" , "));
-                        result.push_str(" >");
-                    }
-                    return result;
+                    || segment.ident == "IndexMap")
+            {
+                let mut result = segment.ident.to_string();
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    result.push_str(" < ");
+                    let arg_strs: Vec<String> = args
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            GenericArgument::Type(t) => format_type_name(t),
+                            GenericArgument::Const(c) => quote_const(c).to_string(),
+                            _ => "?".to_string(),
+                        })
+                        .collect();
+                    result.push_str(&arg_strs.join(" , "));
+                    result.push_str(" >");
                 }
+                return result;
             }
 
             // For non-generic types, just use the last segment
@@ -382,45 +349,40 @@ fn describe_type(ty: &Type) -> String {
             let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
 
             // Special case for Option<T>
-            if segments.len() == 1 && segments[0] == "Option" {
-                if let Some(inner) = get_option_inner_type(ty) {
-                    return inner;
-                }
+            if segments.len() == 1 && segments[0] == "Option"
+                && let Some(inner) = get_option_inner_type(ty)
+            {
+                return inner;
             }
 
             // Special case for Vec<T>
-            if segments.len() == 1 && segments[0] == "Vec" {
-                if let Type::Path(TypePath { path, .. }) = ty {
-                    if let Some(segment) = path.segments.last() {
-                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                                let inner_desc = describe_type(inner);
-                                return format!("list of {}", inner_desc);
-                            }
-                        }
-                    }
-                }
+            if segments.len() == 1 && segments[0] == "Vec"
+                && let Type::Path(TypePath { path, .. }) = ty
+                && let Some(segment) = path.segments.last()
+                && let PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(GenericArgument::Type(inner)) = args.args.first()
+            {
+                let inner_desc = describe_type(inner);
+                return format!("list of {}", inner_desc);
             }
 
             // Special case for IndexMap<K, V>
-            if segments.last().map(|s| s.as_str()) == Some("IndexMap") {
-                if let Type::Path(TypePath { path, .. }) = ty {
-                    if let Some(segment) = path.segments.last() {
-                        if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                            let mut type_args = args.args.iter().filter_map(|arg| {
-                                if let GenericArgument::Type(t) = arg {
-                                    Some(describe_type(t))
-                                } else {
-                                    None
-                                }
-                            });
-                            if let Some(_key_type) = type_args.next() {
-                                if let Some(value_type) = type_args.next() {
-                                    return format!("table of {}", value_type);
-                                }
-                            }
-                        }
+            if segments.last().map(|s| s.as_str()) == Some("IndexMap")
+                && let Type::Path(TypePath { path, .. }) = ty
+                && let Some(segment) = path.segments.last()
+                && let PathArguments::AngleBracketed(args) = &segment.arguments
+            {
+                let mut type_args = args.args.iter().filter_map(|arg| {
+                    if let GenericArgument::Type(t) = arg {
+                        Some(describe_type(t))
+                    } else {
+                        None
                     }
+                });
+                if let Some(_key_type) = type_args.next()
+                    && let Some(value_type) = type_args.next()
+                {
+                    return format!("table of {}", value_type);
                 }
             }
 
@@ -444,19 +406,14 @@ fn extract_doc(attrs: &[Attribute]) -> (Option<String>, Option<String>) {
     let mut doc_lines = Vec::new();
 
     for attr in attrs {
-        if let syn::Meta::NameValue(nv) = &attr.meta {
-            if nv.path.is_ident("doc") {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(lit_str),
-                    ..
-                }) = &nv.value
-                {
-                    let line = lit_str.value();
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        doc_lines.push(trimmed.to_string());
-                    }
-                }
+        if let syn::Meta::NameValue(nv) = &attr.meta
+            && nv.path.is_ident("doc")
+            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit_str), .. }) = &nv.value
+        {
+            let line = lit_str.value();
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                doc_lines.push(trimmed.to_string());
             }
         }
     }
@@ -477,14 +434,12 @@ fn is_public_deserialize(s: &syn::ItemStruct) -> bool {
 /// Check if a struct has #[derive(Deserialize)]
 fn has_deserialize_derive(attrs: &[Attribute]) -> bool {
     for attr in attrs {
-        if let syn::Meta::List(list) = &attr.meta {
-            if list.path.is_ident("derive") {
-                // Try parsing the derive contents
-                let tokens = &list.tokens;
-                let s = tokens.to_string();
-                if s.contains("Deserialize") {
-                    return true;
-                }
+        if let syn::Meta::List(list) = &attr.meta && list.path.is_ident("derive") {
+            // Try parsing the derive contents
+            let tokens = &list.tokens;
+            let s = tokens.to_string();
+            if s.contains("Deserialize") {
+                return true;
             }
         }
     }

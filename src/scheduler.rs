@@ -166,10 +166,10 @@ impl<'m> Scheduler<'m> {
         // One listing answers for every id when the machine offers one; a
         // machine that doesn't, or a listing that failed, falls back to the
         // per-job pool below.
-        if let Some(many) = self.meta.scheduler.get_status_many.as_deref() {
-            if let Ok(statuses) = self.status_listing(many, &ids) {
-                return statuses;
-            }
+        if let Some(many) = self.meta.scheduler.get_status_many.as_deref()
+            && let Ok(statuses) = self.status_listing(many, &ids)
+        {
+            return statuses;
         }
         if ids.len() == 1 {
             if let Ok(status) = self.get_status(ids[0]) {

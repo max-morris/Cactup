@@ -168,12 +168,10 @@ pub fn clean_active(sim: &Simulation) -> Res<()> {
     let rdir = restart::restart_dir(&sim.dir, id);
 
     // Mark the restart finished if its run never did.
-    if let Ok(mut r) = Restart::load(&sim.dir, id) {
-        if !r.meta.terminated {
-            r.meta.terminated = true;
-            r.meta.finished = Some(chrono::Utc::now());
-            let _ = r.store();
-        }
+    if let Ok(mut r) = Restart::load(&sim.dir, id) && !r.meta.terminated {
+        r.meta.terminated = true;
+        r.meta.finished = Some(chrono::Utc::now());
+        let _ = r.store();
     }
 
     // Tighten TERMINATE perms.
@@ -251,10 +249,8 @@ fn dedup_formaline(sim: &Simulation, id: u32) -> Res<()> {
             }
             // Byte-identical: replace ours with a hard link via .tmp rename.
             let tmp = ours.with_extension("gz.tmp");
-            if fs::hard_link(&theirs, &tmp).is_ok() {
-                if fs::rename(&tmp, &ours).is_err() {
-                    let _ = fs::remove_file(&tmp);
-                }
+            if fs::hard_link(&theirs, &tmp).is_ok() && fs::rename(&tmp, &ours).is_err() {
+                let _ = fs::remove_file(&tmp);
             }
             break;
         }
@@ -527,10 +523,10 @@ fn gather_rows(entries: &[(&String, &SimEntry)]) -> Vec<Row> {
 fn print_row(name: &str, row: &Row, statuses: &HashMap<String, JobStatus>, long: bool) {
     match row {
         Row::Missing(dir) => println!(
-            "  {:24} {:12} {}",
+            "  {:24} {:12} {} (prune with `cactup sim delete {name}`)",
             name.bold(),
             "MISSING".red(),
-            format!("{} (prune with `cactup sim delete {name}`)", dir.display())
+            dir.display()
         ),
         Row::Broken(e) => println!("  {:24} {:12} {e}", name.bold(), "BROKEN".red()),
         Row::Listed { config, restarts, dir, state } => {
@@ -683,10 +679,10 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
                         // The raw simfactory-letter scheduler status (§10),
                         // alongside the derived display state.
                         line.push_str(&format!(", sched {}", s.letter()));
-                        if s == JobStatus::Running {
-                            if let Ok(Some(host)) = sched.exec_host(&r.meta.job_id) {
-                                line.push_str(&format!(", host {host}"));
-                            }
+                        if s == JobStatus::Running
+                            && let Ok(Some(host)) = sched.exec_host(&r.meta.job_id)
+                        {
+                            line.push_str(&format!(", host {host}"));
                         }
                     }
                 }
@@ -755,8 +751,7 @@ mod tests {
     use crate::sim::SimulationMeta;
 
     fn sim_at(dir: &Path) -> Simulation {
-        let mut meta = SimulationMeta::default();
-        meta.parfile = "bbh.par".to_owned();
+        let meta = SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
         Simulation { name: "bbh".to_owned(), dir: dir.to_owned(), meta }
     }
 
@@ -826,8 +821,7 @@ mod tests {
         terminated: bool,
     ) -> SimEntry {
         let dir = root.join(name);
-        let mut meta = SimulationMeta::default();
-        meta.parfile = "bbh.par".to_owned();
+        let meta = SimulationMeta { parfile: "bbh.par".to_owned(), ..Default::default() };
         crate::installation::write_toml(&dir.join(".cactup").join("simulation.toml"), &meta).unwrap();
 
         let rdir = restart::restart_dir(&dir, 0);

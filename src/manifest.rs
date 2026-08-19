@@ -82,7 +82,8 @@ pub(crate) fn progress_level_filter(
 ///  2. the item(s) we hand gix, which it renames through fetch phases
 ///     ("negotiate (round N)", "receiving pack", ...)
 ///  3. gix's per-phase bars (remote, read pack, checkout, writing)
-///  4+. per-thread delta-resolution/decoding noise — not useful, hidden
+///  4. and deeper: per-thread delta-resolution/decoding noise — not useful,
+///     hidden
 const MANIFEST_PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 3;
 
 pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repository> {

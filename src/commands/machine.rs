@@ -111,6 +111,10 @@ pub fn ensure_local_machine_with(
     }
 }
 
+// Exactly one of these ever exists: `resolve_inner` returns it and `resolve`
+// consumes it immediately. Boxing `Machine` to even the variants out would buy
+// an allocation and a copy per call and save nothing.
+#[allow(clippy::large_enum_variant)]
 enum Resolution {
     Known(Machine),
     /// Zero discovery matches; carries the probed hostname.

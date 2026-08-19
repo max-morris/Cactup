@@ -217,10 +217,8 @@ pub fn list_results_ids(run_dir: &Path) -> Res<Vec<u32>> {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if let Some(id) = parse_results_name(name) {
-            if entry.file_type()?.is_dir() {
-                ids.push(id);
-            }
+        if let Some(id) = parse_results_name(name) && entry.file_type()?.is_dir() {
+            ids.push(id);
         }
     }
     ids.sort_unstable();
@@ -245,10 +243,10 @@ pub fn active_results_id(run_dir: &Path) -> Res<Option<u32>> {
     for entry in entries {
         let name = entry?.file_name();
         let Some(name) = name.to_str() else { continue };
-        if let Some(base) = name.strip_suffix("-active") {
-            if let Some(id) = parse_results_name(base) {
-                found.push(id);
-            }
+        if let Some(base) = name.strip_suffix("-active")
+            && let Some(id) = parse_results_name(base)
+        {
+            found.push(id);
         }
     }
     match found.as_slice() {

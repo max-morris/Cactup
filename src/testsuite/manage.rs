@@ -40,6 +40,10 @@ pub fn show(ctx: &Ctx, name: &str) -> Res<()> {
 }
 
 /// One registry entry, resolved from disk ahead of printing.
+// `Listed` is the overwhelmingly common variant and the Vec holds one row per
+// registered test run (tens, not thousands), so boxing `TestRun` would add an
+// allocation per row to save padding on the rare Missing/Broken one.
+#[allow(clippy::large_enum_variant)]
 enum Row {
     Missing(PathBuf),
     Broken(String),

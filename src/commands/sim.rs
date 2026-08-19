@@ -15,11 +15,13 @@ pub fn dispatch(ctx: &Ctx, cmd: SimCommand) -> Res<()> {
                 ctx,
                 &machine,
                 &inst,
-                force,
-                &sim,
-                &parfile,
-                config.as_deref(),
-                sim_dir.as_deref(),
+                &sim::CreateRequest {
+                    force,
+                    name: &sim,
+                    parfile: &parfile,
+                    config: config.as_deref(),
+                    sim_dir: sim_dir.as_deref(),
+                },
             )?;
             Ok(())
         }

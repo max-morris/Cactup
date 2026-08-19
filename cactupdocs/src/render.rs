@@ -95,7 +95,7 @@ pub fn build_site(cfg: &Config) -> Result<()> {
     let template_vars_html = generate_template_vars_html(&model)?;
 
     // Load minijinja template
-    let template_source = fs::read_to_string(&cfg.templates_dir.join("base.html"))
+    let template_source = fs::read_to_string(cfg.templates_dir.join("base.html"))
         .context("reading base.html template")?;
     let mut env = Environment::new();
     env.add_template("base", &template_source)
@@ -145,10 +145,9 @@ pub fn build_site(cfg: &Config) -> Result<()> {
                 for (p_idx, p) in arr.iter_mut().enumerate() {
                     if section_idx == page_idx / nav.sections.iter().map(|s| s.pages.len()).sum::<usize>() * nav.sections.len()
                         && p_idx == page_idx % nav.sections[section_idx].pages.len()
+                        && let Some(obj) = p.as_object_mut()
                     {
-                        if let Some(obj) = p.as_object_mut() {
-                            obj.insert("active".to_string(), Value::Bool(true));
-                        }
+                        obj.insert("active".to_string(), Value::Bool(true));
                     }
                 }
             }
@@ -163,13 +162,13 @@ pub fn build_site(cfg: &Config) -> Result<()> {
         for section in &nav_for_page {
             if let Some(pages) = section["pages"].as_array() {
                 for page in pages {
-                    if let Some(url) = page.get("url").and_then(|u| u.as_str()) {
-                        if url.ends_with(&current_html_path) {
-                            // Mark this page as active
-                            if let Some(obj) = page.as_object() {
-                                let mut updated = obj.clone();
-                                updated.insert("active".to_string(), Value::Bool(true));
-                            }
+                    if let Some(url) = page.get("url").and_then(|u| u.as_str())
+                        && url.ends_with(&current_html_path)
+                    {
+                        // Mark this page as active
+                        if let Some(obj) = page.as_object() {
+                            let mut updated = obj.clone();
+                            updated.insert("active".to_string(), Value::Bool(true));
                         }
                     }
                 }
@@ -185,7 +184,7 @@ pub fn build_site(cfg: &Config) -> Result<()> {
             });
             if let Some(pages_arr) = section_context["pages"].as_array_mut() {
                 for nav_page in section.pages.iter() {
-                    let is_current = &nav_page.file == &page_info.file;
+                    let is_current = nav_page.file == page_info.file;
                     pages_arr.push(json!({
                         "title": nav_page.title,
                         "url": format!("{}{}", base_url, nav_page.file.replace(".md", ".html")),
@@ -524,15 +523,15 @@ fn expand_tokens(
         &result,
         "cactup:cli",
         |attr: Option<&str>| -> Result<String> {
-            if let Some(attr_val) = attr {
-                if attr_val.starts_with("command=\"") && attr_val.ends_with("\"") {
-                    let cmd_path = &attr_val[9..attr_val.len() - 1];
-                    let parts: Vec<&str> = cmd_path.split(' ').collect();
-                    if let Some(html) = find_and_generate_command_html(&model.cli.root, &parts) {
-                        return Ok(html);
-                    }
-                    return Ok(String::new());
+            if let Some(attr_val) = attr
+                && attr_val.starts_with("command=\"") && attr_val.ends_with("\"")
+            {
+                let cmd_path = &attr_val[9..attr_val.len() - 1];
+                let parts: Vec<&str> = cmd_path.split(' ').collect();
+                if let Some(html) = find_and_generate_command_html(&model.cli.root, &parts) {
+                    return Ok(html);
                 }
+                return Ok(String::new());
             }
             Ok(cli_html.to_string())
         },
