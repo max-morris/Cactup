@@ -3,6 +3,7 @@
 use super::{machine, p2s, prompt_with_default, Ctx};
 use crate::args::InstallArgs;
 use crate::database::CactusInstallation;
+use crate::installation::validate_root_dir;
 use crate::{manifest, shell, Res};
 use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
@@ -73,7 +74,6 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
 
     let symlink_prefix_default = home_dir.as_path();
-    let symlink_name_default = "Cactus";
 
     let source = match custom_thornlist {
         Some((path, content)) => InstallSource::Custom { path, content },
@@ -104,6 +104,28 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
             InstallSource::Release(release_tag)
         }
     };
+
+    // Read and parse the thornlist now, before any prompting: the symlink-name
+    // default and every installed path below need `!DEFINE ROOT`, and failing
+    // fast on an unparseable thornlist before prompting the user is a
+    // deliberate improvement over discovering it after every question has
+    // already been answered.
+    let thorn_list: Vec<u8> = match &source {
+        InstallSource::Release(release_tag) => {
+            release_tag.read_file("einsteintoolkit.th")
+                       .with_context(|| format!("Failed to read einsteintoolkit.th from release {}", release_tag.short_name))?
+        }
+        InstallSource::Custom { content, .. } => content.clone().into_bytes(),
+    };
+    let thorn_list_text =
+        String::from_utf8(thorn_list.clone()).with_context(|| "the source thornlist is not UTF-8")?;
+    let list = crate::thornlist::parse(&thorn_list_text)
+        .with_context(|| "Failed to parse the source thornlist")?;
+    for w in list.warnings() {
+        println!("{}", format!("thornlist warning: {w}").yellow());
+    }
+    let root = list.root().to_owned();
+    validate_root_dir(&root)?;
 
     let (alias_default, alias_default_source) = match &source {
         InstallSource::Release(release_tag) => (release_tag.short_name.clone(), "the release name"),
@@ -187,12 +209,16 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     };
     let symlink_prefix = shell::expand_path(&symlink_prefix);
 
+    // The root dir's final component names the symlink by default; see
+    // `default_symlink_name`.
+    let symlink_name_default = default_symlink_name(&root, &alias);
+
     let symlink_name = match do_symlink {
         true => {
             match symlink_name {
                 Some(symlink_name) => symlink_name,
-                None if silent => symlink_name_default.to_owned(),
-                None => prompt_with_default("What should the symlink be called?", symlink_name_default)?
+                None if silent => symlink_name_default.clone(),
+                None => prompt_with_default("What should the symlink be called?", &symlink_name_default)?
             }
         },
         false => "".to_owned()
@@ -246,14 +272,6 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let install_dir = fs::canonicalize(install_dir)
        .with_context(|| format!("Failed to resolve installation directory {}", install_dir.display()))?;
 
-    let thorn_list: Vec<u8> = match &source {
-        InstallSource::Release(release_tag) => {
-            release_tag.read_file("einsteintoolkit.th")
-                       .with_context(|| format!("Failed to read einsteintoolkit.th from release {}", release_tag.short_name))?
-        }
-        InstallSource::Custom { content, .. } => content.clone().into_bytes(),
-    };
-
     // The pristine as-fetched copy (§3.2): the baseline `installation
     // refetch`'s hand-edit guard compares against.
     fs::write(install_dir.join(crate::installation::SOURCE_THORNLIST), &thorn_list).with_context(|| {
@@ -261,13 +279,6 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     })?;
 
     // --- Native component fetch (§3.2; GetComponents is gone) ---
-    let thorn_list_text =
-        String::from_utf8(thorn_list.clone()).with_context(|| "the source thornlist is not UTF-8")?;
-    let list = crate::thornlist::parse(&thorn_list_text)
-        .with_context(|| "Failed to parse the source thornlist")?;
-    for w in list.warnings() {
-        println!("{}", format!("thornlist warning: {w}").yellow());
-    }
     // Phase-scoped renderer: probing every repo (a gix status walk each) can
     // take a while, and without a bar that looks like a hang before
     // anything else appears. Shut down before any subsequent stdout print —
@@ -290,7 +301,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // The live, editable copy, where GetComponents' COMPONENTLIST_TARGET used
     // to land it (under its own name — the directory is inherited, the filename
     // is ours); build.rs::resolve_thornlist depends on it being here.
-    let live_dir = install_dir.join("Cactus").join("thornlists");
+    let live_dir = crate::installation::cactus_root_of(&install_dir, &root).join("thornlists");
     fs::create_dir_all(&live_dir)
         .with_context(|| format!("Failed to create {}", live_dir.display()))?;
     fs::write(live_dir.join(crate::installation::LIVE_THORNLIST), &thorn_list).with_context(|| {
@@ -301,7 +312,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         fs::create_dir_all(Path::new(&symlink_prefix))
            .with_context(|| format!("Failed to create symlink prefix {}", symlink_prefix))?;
         let link_path = Path::new(&symlink_prefix).join(&symlink_name);
-        let target = install_dir.join("Cactus");
+        let target = crate::installation::cactus_root_of(&install_dir, &root);
 
         // Replace a stale symlink from a previous run, but refuse to clobber a real file/dir.
         match fs::symlink_metadata(&link_path) {
@@ -333,7 +344,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // Fix sim-home/test-home into installation.toml now, from the machine's
     // [paths] (§8.1, §11.5) — every later sim/test command resolves against
     // these, and they are set exactly once, at install time.
-    crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine)?;
+    crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine, Some(&root))?;
 
     let release_name = match &source {
         InstallSource::Release(release_tag) => Some(release_tag.short_name.clone()),
@@ -371,12 +382,13 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         }
     })?;
 
+    let installed_root = crate::installation::cactus_root_of(&install_dir, &root);
     match &source {
         InstallSource::Release(release_tag) => {
-            println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, install_dir.join("Cactus").display()).bold().bright_green());
+            println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, installed_root.display()).bold().bright_green());
         }
         InstallSource::Custom { path, .. } => {
-            println!("{}", format!("Success! Installed custom thornlist {} into {}", path.display(), install_dir.join("Cactus").display()).bold().bright_green());
+            println!("{}", format!("Success! Installed custom thornlist {} into {}", path.display(), installed_root.display()).bold().bright_green());
         }
     }
     if do_symlink {
@@ -390,6 +402,15 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     Ok(())
 }
 
+/// The symlink name default: `root`'s final path component ("Cactus" for a
+/// stock thornlist, whatever a custom `!DEFINE ROOT` names for one that
+/// overrides it). `validate_root_dir` has already rejected `.`, "", and any
+/// other root with no real final component, so `file_name()` always finds
+/// one; falling back to `alias` is just a safety net.
+fn default_symlink_name(root: &str, alias: &str) -> String {
+    Path::new(root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| alias.to_owned())
+}
+
 /// An alias must be usable verbatim as a path component.
 fn valid_alias(alias: &str) -> bool {
     !alias.is_empty()
@@ -400,7 +421,7 @@ fn valid_alias(alias: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_alias;
+    use super::{default_symlink_name, valid_alias};
 
     #[test]
     fn alias_validation() {
@@ -410,5 +431,19 @@ mod tests {
         for bad in ["", ".", "..", "has space", "slash/y", "tilde~", "a\tb"] {
             assert!(!valid_alias(bad), "{bad:?} should be invalid");
         }
+    }
+
+    #[test]
+    fn default_symlink_name_uses_the_roots_final_component() {
+        assert_eq!(default_symlink_name("Cactus", "et-dev"), "Cactus");
+        assert_eq!(default_symlink_name("MyTree", "et-dev"), "MyTree");
+        assert_eq!(default_symlink_name("a/b", "et-dev"), "b");
+    }
+
+    #[test]
+    fn default_symlink_name_falls_back_to_the_alias_with_no_final_component() {
+        // `validate_root_dir` rejects "." before this is ever called in
+        // practice, but the fallback is a safety net worth pinning anyway.
+        assert_eq!(default_symlink_name(".", "et-dev"), "et-dev");
     }
 }

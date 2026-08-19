@@ -65,7 +65,11 @@ Non-goals (dropped per §0): remote/SSH execution, source-tree sync, archiving.
 
 - **Cactus installation** — a self-contained Cactus tree. Identified by a unique
   **alias**. Typically lives at `~/.cactup/cacti/<alias>/Cactus`; the
-  "installation directory" is one level above the Cactus root.
+  "installation directory" is one level above the Cactus root. `Cactus` is the
+  ordinary case, not a fixed name: it is the thornlist's `!DEFINE ROOT`
+  (`root-dir`, recorded once at install time — §8.1), which must name a real
+  subdirectory of the installation directory — a `!DEFINE ROOT` that is
+  absent, `.`, absolute, or contains `..` is a hard error at install.
 - **Active installation** — the default target for installation-local commands.
 - **config** — a particular build of Cactus within an installation (compile
   flags + thornlist). Each installation has an **active config**.
@@ -224,15 +228,15 @@ Required model (D11):
    per-installation writes are **not** covered by the global DB lock (the global
    DB does not hold per-installation state — D6).
 6. **Per-installation fetch lock.** `install`'s checkout and `installation
-   refetch` mutate `Cactus/repos/` and the arrangement symlinks for
+   refetch` mutate `<root-dir>/repos/` and the arrangement symlinks for
    minutes-to-an-hour. That is *not* a mutation of the item-5 TOML files, so it
    does not hold the per-installation lock (which would block `sim create`
    etc. for the whole fetch, against this section's premise). Instead a
-   `link()`-based lock at `<root>/.cactup/.cactup-fetch.lock`, held **with a
-   heartbeat** (like the item-4 build lock) for the duration of the fetch,
-   serializes concurrent fetches of one installation. If a refetch ultimately
-   changes a TOML or the DB, it acquires those locks briefly at the end, in the
-   item-1 field-scoped style.
+   `link()`-based lock at `<installation home>/.cactup/.cactup-fetch.lock`,
+   held **with a heartbeat** (like the item-4 build lock) for the duration of
+   the fetch, serializes concurrent fetches of one installation. If a refetch
+   ultimately changes a TOML or the DB, it acquires those locks briefly at the
+   end, in the item-1 field-scoped style.
 
 **NFS-safe locking (required).** `~/.cactup` and the sim-home are frequently on
 NFS/Lustre, where `flock`/POSIX advisory locks are unreliable or silently a
@@ -443,6 +447,30 @@ cactup owns the component fetch natively (`src/thornlist.rs` CRL 1.0 parser +
 invoking the system tool. The Perl `GetComponents` is neither downloaded nor
 invoked; `install` and `installation refetch` share this one fetch path.
 
+**Where the source tree lives.** The thornlist's `!DEFINE ROOT` names the
+source-tree directory, and must name a real subdirectory of the installation
+home: `install` validates the value before fetching anything, and a
+`!DEFINE ROOT` that is absent, `.`, absolute, or contains `..` is a hard
+error — the installation home holds `.cactup/` and the source tree side by
+side, which is why the source tree cannot be the home itself (and why
+escaping the home, via an absolute path or `..`, is likewise refused). The
+resolved value is recorded **once, at install time**, as `root-dir` in
+`installation.toml` (§8.1) and never re-derived — an installation's source
+tree cannot move; the remedy for a thornlist that wants a different one is a
+fresh install (and `installation refetch` runs the same validation, so a
+thornlist that newly omits `ROOT` fails there too, before the recorded-value
+comparison below). From here on this section writes `<root-dir>` for the
+resolved directory (`Cactus` in the ordinary Einstein Toolkit case) and
+`<installation home>` for the directory one level up. `install`'s optional
+convenience symlink (`--symlink-prefix`/`--symlink-name`/`--no-symlink`)
+follows suit: its default *name* is `<root-dir>`'s final component (every
+valid `root-dir` has one).
+
+Because `root-dir` cannot change after install, `installation refetch`
+refuses — before touching anything, `--dry-run` included — a thornlist whose
+`!DEFINE ROOT` differs from the recorded value; the error names both and
+points at a fresh install as the remedy.
+
 Refetch decisions come from **live git state only** (per-repo probe), never a
 diff against the previously recorded thornlist. Classification per repo:
 absent → clone; clean on the thornlist branch → fetch + fast-forward; clean
@@ -451,8 +479,9 @@ else — modified/staged/deleted tracked files, local commits, detached HEAD or
 mid-rebase/merge, HEAD on another branch, changed remote URL, or a failed
 probe — is **skipped and reported**, and fetched only under
 `--overwrite-modified` (every skipped repo) or a targeted `--overwrite NAMES`
-(just the named ones: a repo dir under `Cactus/repos/`, a full thorn checkout,
-or a bare thorn name — case-insensitive, comma/space-separated, repeatable).
+(just the named ones: a repo dir under `<root-dir>/repos/`, a full thorn
+checkout, or a bare thorn name — case-insensitive, comma/space-separated,
+repeatable).
 Either way modified files are backed up first, to
 `~/.cactup/refetch-backups/<alias>/<ts>/<repo>/`. Untracked files never block
 a fetch but do block `--prune`.
@@ -470,7 +499,7 @@ thornlist at a fork of a component, then `refetch --overwrite <that repo>`).
 
 **The arrangement link pass.** After every fetch, each git component's
 `$TARGET/$CHECKOUT` is materialized as a **relative symlink** into
-`<root>/repos/<repo>[/<REPO_PATH>]`. This is what actually puts a thorn into
+`<root-dir>/repos/<repo>[/<REPO_PATH>]`. This is what actually puts a thorn into
 the build — a repo checkout on its own does nothing — so the links are as much
 part of a conforming tree as the repos are. (Only git components get one:
 downloads and external checkouts land straight under their `!TARGET`.)
@@ -514,13 +543,14 @@ the same split with `FORCE:`/`SKIP:` labels rather than tagging a "SKIP:" line
 with a contradicting "would be fetched" suffix.
 
 A refetched thornlist (from `--release TAG` or a positional `THORNLIST`) is
-written verbatim to `Cactus/thornlists/installation-default.th` (the **live,
-editable copy** — what a build reads by default) and
-`<root>/installation-source.th` (the **pristine as-fetched copy** — the
-source the installation was fetched from); divergence of the live copy from
-the pristine one (compared as parsed component sets, not text) means a hand
-edit → refetch refuses to replace it without `--replace-thornlist`/`-f`. The
-DB records `current-release`/`current-thornlist` (§2.1) without touching
+written verbatim to `<root-dir>/thornlists/installation-default.th` (the
+**live, editable copy** — what a build reads by default) and
+`<installation home>/installation-source.th` (the **pristine as-fetched
+copy** — the source the installation was fetched from); divergence of the
+live copy from the pristine one (compared as parsed component sets, not
+text) means a hand edit → refetch refuses to replace it without
+`--replace-thornlist`/`-f`. The DB records `current-release`/
+`current-thornlist` (§2.1) without touching
 install-time provenance, and does so on adoption even when repos were skipped
 as dirty or failed; the shortfall is recorded in `unfetched-repos` (§2.1) and
 reported by `show`, `list`, and `config show` alike, in two tones: **failed**
@@ -547,10 +577,10 @@ believes about it". Neither takes a lock, writes anything, or touches the
 network. They differ in the **baseline** they compare against:
 
 - **`installation delta [<alias>]`** — against **the last fetch**
-  (`<root>/.cactup/fetch-state.toml`): *what have I changed since cactup put
-  these sources here*. An installation with no fetch record says so rather
-  than rendering every repo as diverged; local modifications are still
-  reported.
+  (`<installation home>/.cactup/fetch-state.toml`): *what have I changed
+  since cactup put these sources here*. An installation with no fetch record
+  says so rather than rendering every repo as diverged; local modifications
+  are still reported.
 - **`config delta [<name>]`** — against **the last build of that config**
   (`sources` in its metadata, §7.4): *what would rebuilding pick up*. This is
   exactly the input the rebuild decision acts on (§7.8 rule 5), so the two can
@@ -559,8 +589,8 @@ network. They differ in the **baseline** they compare against:
 **`installation delta` reports two independent things, because the tree can
 diverge in two independent ways.**
 
-1. **Per repo**, from a git status walk of `<root>/repos/<repo>`: a moved HEAD,
-   a changed branch, modified tracked files, untracked files (which never
+1. **Per repo**, from a git status walk of `<root-dir>/repos/<repo>`: a moved
+   HEAD, a changed branch, modified tracked files, untracked files (which never
    affect a build but do block `--prune`), a repo the fetch recorded that is no
    longer on disk, and a repo directory that **cannot be inspected as a git
    repo at all** — most often because someone replaced the checkout with a
@@ -1968,8 +1998,9 @@ the follow-up (after `--release`, `-f` outright — a release bump likely stales
 Configs recorded against a custom `--thornlist` path additionally keep building
 their own list — refetch never touches that file; the warning says so. The
 refetch post-pass records per-repo fetched HEADs in
-`<root>/.cactup/fetch-state.toml`; wiring those into the rebuild decision is a
-planned follow-up (TODO in `_impl_fetch.md`), which will retire the warning.
+`<installation home>/.cactup/fetch-state.toml`; wiring those into the rebuild
+decision is a planned follow-up (TODO in `_impl_fetch.md`), which will
+retire the warning.
 
 ### 7.6 Build precedence & flags
 
@@ -2145,6 +2176,15 @@ This is the port of simfactory's `GetBaseDir` (`simfactory-docs.txt` §13.1),
 except (a) the root comes from the renamed `simulation-home` key with a home-dir
 fallback, and (b) it is resolved once at install rather than per-command, so
 `sim` subcommands never re-derive it. There is **no `--basedir` flag**.
+
+**`root-dir` resolution (same discipline as sim-home).** `installation.toml`
+also records `root-dir` — the thornlist's `!DEFINE ROOT` directory name
+(§3.2) — resolved **once, at install time**, and never re-derived. A missing
+key (an installation from before root tracking landed) means the historical
+default, `Cactus`. `Installation::cactus_root()` resolves
+`<installation home>/<root-dir>` from this one recorded value, and every
+path that needs the source tree — build, sim, test, config, refetch,
+delta — goes through it rather than assuming a literal `Cactus`.
 
 **Per-simulation directory & the registry.** A simulation's directory defaults to
 `<sim-home>/<config>/<SimName>` (grouping simulations by the config that produced
@@ -3313,7 +3353,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` + `@ENV(NAME)@`** (unset/empty env = hard error); `.py` for logic (JSON-on-stdin convention, §6.1) |
 | cactup binary var | `@SIMFACTORY@` | `@CACTUP@` |
 | Machine detection | `aliaspattern` regex on hostname | `discover.py`; result cached in DB as a single `detected-machine` string (not per-hostname — §4.3) |
-| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<root>/installation-source.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
+| Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home, test-home, root-dir) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<installation home>/installation-source.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
 | Test-suite command | `sim create --testsuite` (overloads `sim`) | `cactup test run`/`submit` against any built config (own command tree — §11) |
 | Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |

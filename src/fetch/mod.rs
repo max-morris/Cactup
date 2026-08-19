@@ -1163,4 +1163,298 @@ mod tests {
             reprobe.state
         );
     }
+
+    /// Commit several files — including ones nested in subdirectories — in
+    /// one shot. `git::testrepo::commit_file` only supports a single flat
+    /// file per commit (each call's tree replaces, rather than extends, the
+    /// previous one), which is not enough to build a `cactusbase`-shaped
+    /// repo with real `CactusBase/Boundary` and `CactusBase/IOUtil` thorn
+    /// directories for the placement tests below — their arrangement
+    /// symlinks must resolve to *something*, and a repo whose git history
+    /// never actually contains the nested path can't provide that after a
+    /// real clone (unlike the working tree right after `commit_file`, a
+    /// clone only ever materializes what the last commit's tree records).
+    fn commit_files(dir: &Path, files: &[(&str, &str)]) -> gix::ObjectId {
+        let repo = gix::open(dir).expect("open repo");
+
+        #[derive(Default)]
+        struct Dir<'a> {
+            subdirs: std::collections::BTreeMap<&'a str, Dir<'a>>,
+            files: Vec<(&'a str, &'a str)>,
+        }
+        let mut root = Dir::default();
+        for (path, content) in files {
+            let mut node = &mut root;
+            let mut parts = path.split('/').peekable();
+            while let Some(part) = parts.next() {
+                if parts.peek().is_some() {
+                    node = node.subdirs.entry(part).or_default();
+                } else {
+                    node.files.push((part, content));
+                }
+            }
+        }
+
+        fn write_dir(repo: &gix::Repository, dir: &Dir) -> gix::ObjectId {
+            let mut tree = gix::objs::Tree::empty();
+            for (name, sub) in &dir.subdirs {
+                let sub_id = write_dir(repo, sub);
+                tree.entries.push(gix::objs::tree::Entry {
+                    mode: gix::objs::tree::EntryKind::Tree.into(),
+                    filename: (*name).into(),
+                    oid: sub_id,
+                });
+            }
+            for (name, content) in &dir.files {
+                let blob = repo.write_blob(content.as_bytes()).expect("write blob").detach();
+                tree.entries.push(gix::objs::tree::Entry {
+                    mode: gix::objs::tree::EntryKind::Blob.into(),
+                    filename: (*name).into(),
+                    oid: blob,
+                });
+            }
+            tree.entries.sort();
+            repo.write_object(&tree).expect("write tree").detach()
+        }
+
+        let tree_id = write_dir(&repo, &root);
+        let parents: Vec<gix::ObjectId> = repo
+            .head()
+            .ok()
+            .and_then(|mut h| h.peel_to_commit().ok())
+            .map(|c| vec![c.id])
+            .unwrap_or_default();
+        let id = repo.commit("HEAD", "add files", tree_id, parents).expect("commit");
+
+        let mut index = repo.index_from_tree(&tree_id).expect("index from tree");
+        let mut opts = repo
+            .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
+            .expect("checkout options");
+        opts.destination_is_initially_empty = false;
+        opts.overwrite_existing = true;
+        gix::worktree::state::checkout(
+            &mut index,
+            dir,
+            repo.objects.clone().into_arc().expect("reopen odb"),
+            &gix::progress::Discard,
+            &gix::progress::Discard,
+            &gix::interrupt::IS_INTERRUPTED,
+            opts,
+        )
+        .expect("checkout");
+        index.write(Default::default()).expect("write index");
+        id.detach()
+    }
+
+    /// Builds two upstream source repos in the real Einstein Toolkit shape —
+    /// upstream's own `expressions.th` uses `!DEFINE ROOT = CactusMin`, so a
+    /// non-`Cactus` root is a real configuration, not a hypothetical — and
+    /// returns thornlist text naming `root`: `core` is the flesh, checking
+    /// `doc`/`lib`/`Makefile`/`src` straight into `$ROOT` (a multi-item
+    /// `!CHECKOUT`, as the real flesh section has); `cactusbase` is an
+    /// arrangement repo whose `!CHECKOUT` names two thorns
+    /// (`CactusBase/Boundary`, `CactusBase/IOUtil`) from that one repo. Every
+    /// placement case below differs only in the `root` passed here, so a
+    /// helper keeps them from turning into copy-pasted setup blocks.
+    fn et_shaped_thornlist(sources: &Path, root: &str) -> String {
+        let core = sources.join("core");
+        git::testrepo::init(&core);
+        commit_files(&core, &[("doc", "d\n"), ("lib", "l\n"), ("Makefile", "m\n"), ("src", "s\n")]);
+
+        let cactusbase = sources.join("cactusbase");
+        git::testrepo::init(&cactusbase);
+        commit_files(
+            &cactusbase,
+            &[("CactusBase/Boundary/interface.ccl", "b\n"), ("CactusBase/IOUtil/interface.ccl", "i\n")],
+        );
+
+        format!(
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = {root}\n\n\
+             !TARGET   = $ROOT\n\
+             !TYPE     = git\n\
+             !URL      = {}\n\
+             !NAME     = core\n\
+             !CHECKOUT = doc lib Makefile src\n\n\
+             !TARGET   = $ROOT/arrangements\n\
+             !TYPE     = git\n\
+             !URL      = {}\n\
+             !CHECKOUT = CactusBase/Boundary CactusBase/IOUtil\n",
+            core.to_string_lossy(),
+            cactusbase.to_string_lossy(),
+        )
+    }
+
+    /// Parse `list_src` and run [`plan`] against it, with a throwaway
+    /// progress sink — the shared first half of every placement case below.
+    fn plan_for(list_src: &str, install_root: &Path) -> Plan {
+        let list = crate::thornlist::parse(list_src).unwrap();
+        let mut progress = prodash::tree::Root::new().add_child("test plan");
+        plan(&list, install_root, &mut progress).unwrap()
+    }
+
+    /// After a successful `execute()` of an [`et_shaped_thornlist`] plan:
+    /// the flesh checkout items sit directly under `<install_root>/<root>`,
+    /// and both arrangement thorns are symlinks that resolve to something
+    /// real inside `<install_root>/<root>/repos/cactusbase` — not merely
+    /// present, since a dangling symlink is exactly the failure mode that
+    /// matters here.
+    fn assert_tree_lands_under_root(install_root: &Path, root: &str) {
+        let root_dir = install_root.join(root);
+        let repos_dir = std::fs::canonicalize(root_dir.join("repos"))
+            .unwrap_or_else(|e| panic!("repos dir missing under {}: {e}", root_dir.display()));
+
+        for item in ["doc", "lib", "Makefile", "src"] {
+            let link = root_dir.join(item);
+            let resolved = std::fs::canonicalize(&link)
+                .unwrap_or_else(|e| panic!("flesh item {item} missing or dangling: {e}"));
+            assert!(
+                resolved.starts_with(repos_dir.join("core")),
+                "{item} resolved to {}, not inside {}",
+                resolved.display(),
+                repos_dir.join("core").display()
+            );
+        }
+
+        for thorn in ["Boundary", "IOUtil"] {
+            let link = root_dir.join("arrangements").join("CactusBase").join(thorn);
+            let meta = std::fs::symlink_metadata(&link)
+                .unwrap_or_else(|e| panic!("expected a symlink at {}: {e}", link.display()));
+            assert!(meta.file_type().is_symlink(), "{} should be a symlink", link.display());
+            let resolved = std::fs::canonicalize(&link)
+                .unwrap_or_else(|e| panic!("{} is a dangling symlink: {e}", link.display()));
+            assert!(
+                resolved.starts_with(repos_dir.join("cactusbase")),
+                "{} resolved to {}, not inside {}",
+                link.display(),
+                resolved.display(),
+                repos_dir.join("cactusbase").display()
+            );
+        }
+    }
+
+    /// No directory literally named `Cactus` exists anywhere under
+    /// `install_root` — the actual reported symptom of the split-installation
+    /// bug: fetching honored a custom `!DEFINE ROOT` while the rest of
+    /// `install` still assumed `Cactus`, so a stray `Cactus/` (empty, or half
+    /// the tree) showed up alongside the real root.
+    fn assert_no_cactus_dir_anywhere(install_root: &Path) {
+        fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.file_name().and_then(|n| n.to_str()) == Some("Cactus") {
+                    found.push(path.clone());
+                }
+                // Don't follow symlinks (arrangement thorns) or descend into
+                // `.git` — neither can contain a directory relevant here,
+                // and a symlink cycle back into a repo is otherwise possible.
+                if path.is_dir()
+                    && !path.is_symlink()
+                    && path.file_name().and_then(|n| n.to_str()) != Some(".git")
+                {
+                    walk(&path, found);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        if install_root.exists() {
+            walk(install_root, &mut found);
+        }
+        assert!(found.is_empty(), "found stray Cactus dir(s): {found:?}");
+    }
+
+    /// Regression pin for the split-installation bug's planning half:
+    /// `plan()` must place every repo under the thornlist's declared root,
+    /// not a hardcoded `Cactus` — before the fix, the fetcher already got
+    /// this right (it read `list.root()`), but nothing enforced it, so a
+    /// future regression here would silently reopen the exact same split
+    /// between where components are planned and where `install` looks.
+    #[test]
+    fn plan_places_every_repo_under_the_declared_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sources = tmp.path().join("sources");
+        let install_root = tmp.path().join("install");
+        let list_src = et_shaped_thornlist(&sources, "MyTree");
+
+        let plan = plan_for(&list_src, &install_root);
+
+        assert!(!plan.git.is_empty(), "the ET-shaped list must plan at least one repo");
+        let expected_repos_dir = install_root.join("MyTree").join("repos");
+        for repo in &plan.git {
+            assert!(
+                repo.dir.starts_with(&expected_repos_dir),
+                "{} planned at {}, not under {}",
+                repo.repo,
+                repo.dir.display(),
+                expected_repos_dir.display()
+            );
+            assert!(
+                !repo.dir.starts_with(install_root.join("Cactus")),
+                "{} must not be planned under Cactus/ when the declared root is MyTree",
+                repo.repo
+            );
+        }
+    }
+
+    /// Regression pin for the split-installation bug's execution half:
+    /// `execute()` must actually materialize repos, the flesh, and the
+    /// arrangement symlinks under the declared root — and must not leave a
+    /// stray `Cactus/` behind, which is the literal symptom a user saw (the
+    /// live thornlist and convenience symlink in `Cactus/`, the fetched
+    /// sources in `MyTree/`, one installation split across two directories).
+    #[test]
+    fn a_custom_root_places_the_whole_tree_under_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sources = tmp.path().join("sources");
+        let install_root = tmp.path().join("install");
+        let list_src = et_shaped_thornlist(&sources, "MyTree");
+
+        let plan = plan_for(&list_src, &install_root);
+        let report = execute(&plan, &install_root).unwrap();
+        assert!(report.failures.is_empty(), "unexpected failures: {:?}", report.failures);
+
+        assert!(install_root.join("MyTree/repos/core").is_dir());
+        assert!(install_root.join("MyTree/repos/cactusbase").is_dir());
+        assert_tree_lands_under_root(&install_root, "MyTree");
+        assert_no_cactus_dir_anywhere(&install_root);
+    }
+
+    /// Control case: the identical ET-shaped list, but with the ordinary
+    /// `!DEFINE ROOT = Cactus`, must still place everything under `Cactus/`
+    /// — proving the assertions above track the thornlist's declared root
+    /// rather than passing vacuously (e.g. because the helper always leaves
+    /// something under `Cactus/` regardless of what's asserted).
+    #[test]
+    fn the_stock_cactus_root_still_places_everything_under_cactus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sources = tmp.path().join("sources");
+        let install_root = tmp.path().join("install");
+        let list_src = et_shaped_thornlist(&sources, "Cactus");
+
+        let plan = plan_for(&list_src, &install_root);
+        let report = execute(&plan, &install_root).unwrap();
+        assert!(report.failures.is_empty(), "unexpected failures: {:?}", report.failures);
+
+        assert_tree_lands_under_root(&install_root, "Cactus");
+    }
+
+    /// A `!DEFINE ROOT` with more than one path component (upstream allows
+    /// this) must still be honored in full — `install_root.join(root)` has to
+    /// handle a multi-component root exactly like a single-component one, not
+    /// just happen to work for the common case.
+    #[test]
+    fn a_multi_component_root_lands_under_its_full_nested_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sources = tmp.path().join("sources");
+        let install_root = tmp.path().join("install");
+        let list_src = et_shaped_thornlist(&sources, "a/b");
+
+        let plan = plan_for(&list_src, &install_root);
+        let report = execute(&plan, &install_root).unwrap();
+        assert!(report.failures.is_empty(), "unexpected failures: {:?}", report.failures);
+
+        assert_tree_lands_under_root(&install_root, "a/b");
+        assert_no_cactus_dir_anywhere(&install_root);
+    }
 }

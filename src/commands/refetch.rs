@@ -3,8 +3,8 @@
 //! clobbering hand-modified thorns unless forced.
 //!
 //! Locking: holds only the per-installation *fetch* lock
-//! (`<root>/.cactup/.cactup-fetch.lock`, §2.3 item 6) with a heartbeat, so a
-//! long fetch never blocks `sim create`/`config use` (which take the
+//! (`<installation home>/.cactup/.cactup-fetch.lock`, §2.3 item 6) with a
+//! heartbeat, so a long fetch never blocks `sim create`/`config use` (which take the
 //! installation lock). Nothing here may call `Installation::locked()` or
 //! `ensure_meta` (non-reentrant); the only other lock taken is the global DB
 //! lock, briefly, inside `ctx.db.update` at the very end.
@@ -14,7 +14,7 @@ use crate::args::RefetchArgs;
 use crate::commands::installation::Tone;
 use crate::database::{UnfetchedReason, UnfetchedRepo};
 use crate::fetch::{self, link::LinkOutcome, GitAction};
-use crate::installation::Installation;
+use crate::installation::{validate_root_dir, Installation};
 use crate::lock::LinkLock;
 use crate::thornlist::{self, Thornlist};
 use crate::{manifest, shell, Res};
@@ -98,6 +98,23 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     for w in list.warnings() {
         println!("{}", format!("thornlist warning: {w}").yellow());
     }
+
+    // A thornlist that omits !DEFINE ROOT (or names it ".") would otherwise
+    // reach the mismatch check below as "." and get the misleading "source
+    // tree cannot move" message; reject it with the honest reason first.
+    // Same before-any-mutation / --dry-run-included placement as that check.
+    validate_root_dir(list.root())?;
+
+    // The root guard: `fetch::plan` derives the fetch root from `list.root()`
+    // (§3.2), so a thornlist naming a different `!DEFINE ROOT` than the one
+    // this installation was fetched into would fetch a second source tree
+    // alongside the recorded one instead of updating it in place. Checked
+    // before any mutation or fetching — including under --dry-run, which
+    // must report this rather than silently planning to fetch into the wrong
+    // directory.
+    let recorded_root =
+        inst.meta()?.root_dir.unwrap_or_else(|| crate::installation::DEFAULT_ROOT_DIR.to_owned());
+    check_root_unchanged(list.root(), &recorded_root)?;
 
     // The in-place-edit guard (§3.2): an explicit source is about to replace
     // the live thornlist. If the live copy diverged from the pristine
@@ -429,6 +446,21 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         bail!("refetch completed with {} failure(s)", report.failures.len());
     }
 
+    Ok(())
+}
+
+/// A thornlist's `!DEFINE ROOT` may never differ from the `root-dir` this
+/// installation was fetched into: an installation's source tree cannot move,
+/// so a mismatch here is always a hard error, with a fresh install as the
+/// remedy.
+fn check_root_unchanged(list_root: &str, recorded: &str) -> Res<()> {
+    if list_root != recorded {
+        bail!(
+            "this thornlist's !DEFINE ROOT is \"{list_root}\", but this installation's source \
+             tree lives at \"{recorded}\"; an installation's source tree cannot move — install \
+             the new thornlist as a fresh installation instead"
+        );
+    }
     Ok(())
 }
 
@@ -1497,5 +1529,20 @@ mod tests {
         // The error names the typo and lists what is actually available.
         assert!(err.to_string().contains("Typo"));
         assert!(err.to_string().contains("SpacetimeX"));
+    }
+
+    #[test]
+    fn check_root_unchanged_passes_when_the_roots_are_equal() {
+        assert!(check_root_unchanged("Cactus", "Cactus").is_ok());
+        assert!(check_root_unchanged("MyTree", "MyTree").is_ok());
+    }
+
+    #[test]
+    fn check_root_unchanged_fails_and_names_both_roots_when_they_differ() {
+        let err = check_root_unchanged("MyTree", "Cactus").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("MyTree"), "{msg}");
+        assert!(msg.contains("Cactus"), "{msg}");
+        assert!(msg.contains("cannot move"), "{msg}");
     }
 }

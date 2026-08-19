@@ -299,7 +299,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         return Ok(());
     }
 
-    let repos_dir = inst.root.join("Cactus").join("repos");
+    let repos_dir = inst.cactus_root().join("repos");
     // The per-repo detail (which commit, which files) is a second status walk
     // of just the changed repos; after a big refetch that can be most of the
     // tree, so it runs on the parallel pool before any of it is printed.

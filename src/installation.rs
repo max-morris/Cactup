@@ -44,6 +44,11 @@ pub struct InstallationMeta {
     /// Resolved at install time like sim-home (§11.5, §11.8).
     #[serde(default)]
     pub test_home: Option<PathBuf>,
+    /// The thornlist's `!DEFINE ROOT` — the source tree lives at
+    /// `<installation home>/<root-dir>`. Recorded once, at install time; a
+    /// missing value means the historical default, `Cactus`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_dir: Option<String>,
 }
 
 impl Default for InstallationMeta {
@@ -53,6 +58,7 @@ impl Default for InstallationMeta {
             active_config: None,
             sim_home: None,
             test_home: None,
+            root_dir: None,
         }
     }
 }
@@ -136,8 +142,9 @@ impl Default for TestRegistry {
 /// hand-edited.
 pub const SOURCE_THORNLIST: &str = "installation-source.th";
 
-/// The live, editable thornlist, in `Cactus/thornlists/` — what a build reads
-/// by default and what a user edits to add or drop a thorn.
+/// The live, editable thornlist, in `<root-dir>/thornlists/` (see
+/// [`Installation::cactus_root`]) — what a build reads by default and what a
+/// user edits to add or drop a thorn.
 pub const LIVE_THORNLIST: &str = "installation-default.th";
 
 /// The name both copies used before the rename, inherited from GetComponents'
@@ -148,6 +155,54 @@ pub const LIVE_THORNLIST: &str = "installation-default.th";
 /// back to this name in case that migration could not run (a read-only tree,
 /// say), so an un-migrated installation keeps working.
 pub const LEGACY_THORNLIST: &str = "einsteintoolkit.th";
+
+/// The `!DEFINE ROOT` an installation.toml without a `root-dir` key implies:
+/// the stock Einstein Toolkit value, and what every installation predating
+/// root tracking was fetched into.
+pub const DEFAULT_ROOT_DIR: &str = "Cactus";
+
+/// `<installation home>/<root-dir>`. `root_dir` is validated at install time
+/// ([`validate_root_dir`]) before it is ever recorded, so it is always a real
+/// relative subdirectory — never absolute, `.`, empty, or `..`-bearing.
+pub fn cactus_root_of(install_home: &Path, root_dir: &str) -> PathBuf {
+    install_home.join(root_dir)
+}
+
+/// A thornlist's `!DEFINE ROOT` must resolve to a real subdirectory of the
+/// installation home: an absolute path or any `..` component would put the
+/// source tree outside it, and `.`/empty would put the source tree AT the
+/// home, colliding with `.cactup/` and `installation-source.th` living there
+/// too (§3.2). A leading `./` is rejected too, even though it names the same
+/// directory as the plain form: left alone it would get recorded verbatim as
+/// `root-dir`, and a later refetch of the same list written without the
+/// `./` would then compare unequal and fail with the misleading "source tree
+/// cannot move" error.
+pub fn validate_root_dir(root: &str) -> Res<()> {
+    let path = Path::new(root);
+    if root.is_empty() || root == "." {
+        bail!(
+            "this thornlist does not name a source directory (its !DEFINE ROOT is absent or \"\
+             .\"); cactup needs the Cactus tree in a subdirectory of the installation home, so \
+             add a !DEFINE ROOT line naming one"
+        );
+    }
+    // `Path::components()` yields a leading `Component::CurDir` only for a
+    // leading `./` (interior `.` is normalized away, so "a/./b" never
+    // triggers this) — see `leading_curdir_component_is_only_from_a_leading_dot_slash`.
+    if path.components().next() == Some(std::path::Component::CurDir) {
+        bail!(
+            "thornlist !DEFINE ROOT \"{root}\" starts with \"./\"; write the plain directory \
+             name instead (e.g. \"Cactus\", not \"./Cactus\")"
+        );
+    }
+    if path.is_absolute() {
+        bail!("thornlist !DEFINE ROOT \"{root}\" is an absolute path; it must be relative to the installation home");
+    }
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        bail!("thornlist !DEFINE ROOT \"{root}\" contains \"..\"; it must stay inside the installation home");
+    }
+    Ok(())
+}
 
 /// `preferred` if it exists, else `legacy` if *that* exists, else `preferred`
 /// — so a caller that goes on to report a missing file names the new one.
@@ -162,13 +217,20 @@ fn prefer_existing(preferred: PathBuf, legacy: PathBuf) -> PathBuf {
 /// One Einstein Toolkit installation on disk.
 pub struct Installation {
     pub alias: String,
-    /// The installation home (contains `Cactus/` and `.cactup/`).
+    /// The installation home (contains `.cactup/` and the source tree, whose
+    /// directory name is the thornlist's `!DEFINE ROOT` — see
+    /// [`Installation::cactus_root`], not a literal `Cactus/`).
     pub root: PathBuf,
+    /// The recorded `!DEFINE ROOT` directory name, lazily read from
+    /// installation.toml at most once per `Installation` value. `OnceLock`
+    /// (not `OnceCell`): an `&Installation` is shared across
+    /// `par::parallel_map` worker threads and must stay `Sync`.
+    root_dir: std::sync::OnceLock<String>,
 }
 
 impl Installation {
     pub fn new(alias: impl Into<String>, root: impl Into<PathBuf>) -> Installation {
-        Installation { alias: alias.into(), root: root.into() }
+        Installation { alias: alias.into(), root: root.into(), root_dir: std::sync::OnceLock::new() }
     }
 
     /// The installation a command targets: `--installation <alias>` or the
@@ -195,9 +257,19 @@ impl Installation {
         Ok(inst)
     }
 
-    /// The Cactus source root of this installation.
+    /// The recorded `!DEFINE ROOT` directory name, read from
+    /// installation.toml once per `Installation` (a missing file or field
+    /// means `Cactus`).
+    fn root_dir_name(&self) -> &str {
+        self.root_dir.get_or_init(|| {
+            self.meta().ok().and_then(|m| m.root_dir).unwrap_or_else(|| DEFAULT_ROOT_DIR.to_owned())
+        })
+    }
+
+    /// The Cactus source root of this installation: the installation home
+    /// joined with the `!DEFINE ROOT` recorded at install time (§8.1).
     pub fn cactus_root(&self) -> PathBuf {
-        self.root.join("Cactus")
+        cactus_root_of(&self.root, self.root_dir_name())
     }
 
     /// The installation's live thornlist ([`LIVE_THORNLIST`]) — the canonical
@@ -265,8 +337,9 @@ impl Installation {
                 "{}",
                 format!(
                     "Renamed this installation's thornlists: the pristine as-fetched copy is now \
-                     {}, and the live, editable one is Cactus/thornlists/{LIVE_THORNLIST}.",
-                    self.source_thornlist().display()
+                     {}, and the live, editable one is {}.",
+                    self.source_thornlist().display(),
+                    self.live_thornlist().display()
                 )
                 .dimmed()
             ),
@@ -359,31 +432,44 @@ impl Installation {
     /// First-time setup (install-time, §8.1) and `cactup use` backfill:
     /// resolve sim-home/test-home from the machine's `[paths]` (resolved
     /// here at use time — @USER@/@ENV()@, §4.2; an unset env var is a hard
-    /// error) and write installation.toml. A home that is already recorded
-    /// is never changed (homes are fixed at install time); only missing ones
-    /// are filled.
-    pub fn ensure_meta(&self, machine: &Machine) -> Res<InstallationMeta> {
+    /// error), record the thornlist's `!DEFINE ROOT` directory (`root_dir`,
+    /// if supplied), and write installation.toml. A field that is already
+    /// recorded is never changed (homes and the root dir are fixed at
+    /// install time); only missing ones are filled.
+    pub fn ensure_meta(&self, machine: &Machine, root_dir: Option<&str>) -> Res<InstallationMeta> {
         let locked = self.locked()?;
         let mut meta = locked.meta()?;
-        if meta.sim_home.is_some() && meta.test_home.is_some() {
+        if meta.sim_home.is_some() && meta.test_home.is_some() && (root_dir.is_none() || meta.root_dir.is_some())
+        {
             return Ok(meta);
         }
-        let paths = machine.meta.resolved_paths()?;
-        if meta.sim_home.is_none() {
-            meta.sim_home = Some(resolve_home(
-                paths.simulation_home.as_deref(),
-                "simulations",
-                &self.alias,
-            ));
+        if meta.sim_home.is_none() || meta.test_home.is_none() {
+            let paths = machine.meta.resolved_paths()?;
+            if meta.sim_home.is_none() {
+                meta.sim_home = Some(resolve_home(
+                    paths.simulation_home.as_deref(),
+                    "simulations",
+                    &self.alias,
+                ));
+            }
+            if meta.test_home.is_none() {
+                meta.test_home = Some(resolve_home(
+                    paths.test_home.as_deref(),
+                    "tests",
+                    &self.alias,
+                ));
+            }
         }
-        if meta.test_home.is_none() {
-            meta.test_home = Some(resolve_home(
-                paths.test_home.as_deref(),
-                "tests",
-                &self.alias,
-            ));
+        if meta.root_dir.is_none() && let Some(root_dir) = root_dir {
+            meta.root_dir = Some(root_dir.to_owned());
         }
         locked.set_meta(&meta)?;
+        // Seed the OnceLock so this same `Installation` value doesn't go on
+        // to cache a stale `Cactus` from a `cactus_root()` call that raced
+        // this write (or ran before it, when the file did not exist yet).
+        if let Some(root_dir) = &meta.root_dir {
+            let _ = self.root_dir.set(root_dir.clone());
+        }
         Ok(meta)
     }
 }
@@ -666,7 +752,7 @@ mod tests {
         );
         let mel5 = mdb.load("mel5").unwrap();
 
-        let meta = inst.ensure_meta(&mel5).unwrap();
+        let meta = inst.ensure_meta(&mel5, None).unwrap();
         // mel5 sets simulation-home/test-home; per-alias subdirs (§8.1, §11.5).
         assert!(meta.sim_home().unwrap().ends_with("simulations/et-dev"));
         assert!(meta.test_home().unwrap().ends_with("tests/et-dev"));
@@ -674,7 +760,181 @@ mod tests {
         // Fixed at install time: a second ensure with a different machine
         // changes nothing.
         let generic = mdb.load("generic").unwrap();
-        let again = inst.ensure_meta(&generic).unwrap();
+        let again = inst.ensure_meta(&generic, None).unwrap();
         assert_eq!(again.sim_home().unwrap(), meta.sim_home().unwrap());
+    }
+
+    #[test]
+    fn cactus_root_honors_a_recorded_root_dir() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        std::fs::write(inst.meta_path(), "root-dir = \"Something\"\n").unwrap();
+        assert_eq!(inst.cactus_root(), inst.root.join("Something"));
+    }
+
+    #[test]
+    fn cactus_root_defaults_to_cactus_when_unrecorded() {
+        // No installation.toml at all.
+        let (_dir, no_meta) = inst();
+        assert_eq!(no_meta.cactus_root(), no_meta.root.join(DEFAULT_ROOT_DIR));
+
+        // installation.toml exists but omits root-dir.
+        let (_dir2, no_root_field) = inst();
+        std::fs::create_dir_all(no_root_field.cactup_dir()).unwrap();
+        std::fs::write(no_root_field.meta_path(), "schema = 1\n").unwrap();
+        assert_eq!(no_root_field.cactus_root(), no_root_field.root.join(DEFAULT_ROOT_DIR));
+    }
+
+    #[test]
+    fn cactus_root_of_joins_the_root_dir() {
+        let home = Path::new("/some/install/home");
+        assert_eq!(cactus_root_of(home, "a/b"), home.join("a/b"));
+        assert_eq!(cactus_root_of(home, "Cactus"), home.join("Cactus"));
+    }
+
+    #[test]
+    fn root_dir_validation() {
+        for good in ["Cactus", "CactusMin", "a/b", "Cactus.2"] {
+            assert!(validate_root_dir(good).is_ok(), "{good} should be valid");
+        }
+        for bad in [".", "", "./Cactus", "/abs", "../x", "a/../../x", ".."] {
+            assert!(validate_root_dir(bad).is_err(), "{bad:?} should be invalid");
+        }
+    }
+
+    /// Three different rules reject a root; each must give its own reason,
+    /// not collapse into one shared message that would leave a user unable
+    /// to tell which rule they tripped.
+    #[test]
+    fn root_dir_validation_gives_a_distinct_reason_per_rule() {
+        let reason = |root: &str| format!("{:#}", validate_root_dir(root).unwrap_err());
+
+        // The dot-family: absent/"." names no directory at all; a leading
+        // "./" names a real directory but is still rejected (§ above), with
+        // its own, different, message.
+        let dot = reason(".");
+        assert!(dot.contains("does not name a source directory"), "{dot}");
+        let empty = reason("");
+        assert!(empty.contains("does not name a source directory"), "{empty}");
+        let dot_slash = reason("./Cactus");
+        assert!(dot_slash.contains("starts with \"./\""), "{dot_slash}");
+        assert!(!dot_slash.contains("does not name a source directory"), "{dot_slash}");
+
+        // Absolute: a distinct rule from the dot-family above.
+        let abs = reason("/abs");
+        assert!(abs.contains("absolute path"), "{abs}");
+        assert!(!abs.contains("does not name a source directory"), "{abs}");
+        assert!(!abs.contains("starts with"), "{abs}");
+
+        // `..`, anywhere in the path: a third distinct rule.
+        for bad in ["../x", "a/../../x", ".."] {
+            let err = reason(bad);
+            assert!(err.contains("contains \"..\""), "{err}");
+            assert!(!err.contains("does not name a source directory") && !err.contains("absolute path"), "{err}");
+        }
+    }
+
+    /// The assumption `validate_root_dir`'s leading-`./` check rests on:
+    /// `Component::CurDir` shows up only for a leading `./` (or exactly
+    /// "."), never for an interior "." — those are normalized away.
+    #[test]
+    fn leading_curdir_component_is_only_from_a_leading_dot_slash() {
+        use std::path::Component;
+        assert_eq!(
+            Path::new("./Cactus").components().collect::<Vec<_>>(),
+            vec![Component::CurDir, Component::Normal("Cactus".as_ref())]
+        );
+        assert_eq!(Path::new(".").components().collect::<Vec<_>>(), vec![Component::CurDir]);
+        // Interior "." is normalized away: no CurDir survives.
+        assert_eq!(
+            Path::new("a/./b").components().collect::<Vec<_>>(),
+            vec![Component::Normal("a".as_ref()), Component::Normal("b".as_ref())]
+        );
+        assert_eq!(Path::new("Cactus/.").components().collect::<Vec<_>>(), vec![Component::Normal("Cactus".as_ref())]);
+    }
+
+    /// Every path that resolves the source tree must go through the
+    /// recorded `root-dir`, not a literal `Cactus` — this is what actually
+    /// makes a custom `!DEFINE ROOT` work end to end.
+    #[test]
+    fn paths_resolve_under_a_recorded_non_cactus_root() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        std::fs::write(inst.meta_path(), "root-dir = \"MyTree\"\n").unwrap();
+
+        let root = inst.root.join("MyTree");
+        assert_eq!(inst.cactus_root(), root);
+        assert_eq!(inst.live_thornlist(), root.join("thornlists").join(LIVE_THORNLIST));
+        assert_eq!(inst.legacy_live_thornlist(), root.join("thornlists").join(LEGACY_THORNLIST));
+        assert_eq!(inst.live_thornlist_to_read(), inst.live_thornlist());
+
+        // The pristine as-fetched copy lives at the installation home, NOT
+        // inside the source tree — an easy asymmetry to break by accident.
+        assert_eq!(inst.source_thornlist(), inst.root.join(SOURCE_THORNLIST));
+
+        assert!(inst.is_live_thornlist(&inst.live_thornlist().display().to_string()));
+    }
+
+    /// `cactup use`'s backfill call passes `root_dir: None`; it must never
+    /// invent a value for an installation that predates root tracking
+    /// (homes already recorded, `root-dir` absent) — `cactus_root()` keeps
+    /// falling back to the historical default.
+    #[test]
+    fn ensure_meta_backfill_never_invents_a_root_dir() {
+        let (_dir, inst) = inst();
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent"),
+        );
+        let mel5 = mdb.load("mel5").unwrap();
+
+        // First call resolves homes (as `install` or an earlier `use` would
+        // have), but records no root-dir — the pre-root-tracking state.
+        inst.ensure_meta(&mel5, None).unwrap();
+        assert!(inst.meta().unwrap().root_dir.is_none());
+
+        // A later `cactup use` backfill: homes are already set, and it still
+        // passes None.
+        let generic = mdb.load("generic").unwrap();
+        let meta = inst.ensure_meta(&generic, None).unwrap();
+        assert!(meta.root_dir.is_none());
+        assert_eq!(inst.cactus_root(), inst.root.join(DEFAULT_ROOT_DIR));
+    }
+
+    /// [`Installation::migrate_thornlist_names`] must move the legacy files
+    /// to `<root-dir>/thornlists/`, not to a hardcoded `Cactus/thornlists/`.
+    #[test]
+    fn migration_moves_thornlists_under_a_recorded_non_cactus_root() {
+        let (_dir, inst) = inst();
+        std::fs::create_dir_all(inst.cactup_dir()).unwrap();
+        std::fs::write(inst.meta_path(), "root-dir = \"MyTree\"\n").unwrap();
+        legacy_layout(&inst);
+
+        assert!(inst.migrate_thornlist_names().unwrap());
+        let root = inst.root.join("MyTree");
+        assert!(inst.live_thornlist().starts_with(&root), "{}", inst.live_thornlist().display());
+        assert_eq!(std::fs::read_to_string(inst.live_thornlist()).unwrap(), "A/B\nC/D\n");
+        assert!(!inst.legacy_live_thornlist().exists());
+        // Never under the historical default name.
+        assert!(!inst.root.join(DEFAULT_ROOT_DIR).exists());
+    }
+
+    #[test]
+    fn ensure_meta_records_root_dir_once() {
+        let (_dir, inst) = inst();
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent"),
+        );
+        let mel5 = mdb.load("mel5").unwrap();
+
+        let meta = inst.ensure_meta(&mel5, Some("Foo")).unwrap();
+        assert_eq!(meta.root_dir.as_deref(), Some("Foo"));
+        assert_eq!(inst.cactus_root(), inst.root.join("Foo"));
+
+        // Fixed at install time: a later ensure with a different root dir
+        // changes nothing.
+        let again = inst.ensure_meta(&mel5, Some("Bar")).unwrap();
+        assert_eq!(again.root_dir.as_deref(), Some("Foo"));
     }
 }
