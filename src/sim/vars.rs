@@ -902,12 +902,14 @@ mod tests {
     fn assembles_full_var_set() {
         let tmp = tempfile::tempdir().unwrap();
         let machine = test_machine();
-        let mut meta = SimulationMeta::default();
-        meta.parfile = "bbh.par".to_owned();
-        meta.configuration = "sim".to_owned();
-        meta.simulation_id = "simulation-bbh-x".to_owned();
-        meta.alias = "et".to_owned();
-        meta.sourcedir = PathBuf::from("/opt/Cactus");
+        let meta = SimulationMeta {
+            parfile: "bbh.par".to_owned(),
+            configuration: "sim".to_owned(),
+            simulation_id: "simulation-bbh-x".to_owned(),
+            alias: "et".to_owned(),
+            sourcedir: PathBuf::from("/opt/Cactus"),
+            ..Default::default()
+        };
         let sim = Simulation {
             name: "bbh".to_owned(),
             dir: tmp.path().join("sim").join("bbh"),

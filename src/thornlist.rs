@@ -338,14 +338,12 @@ fn collect_defines(body: &str, experimental: bool) -> crate::Res<(HashMap<String
         } else {
             raw_value.to_string()
         };
-        if let Some(existing) = defines.get(&key) {
-            if existing != &value {
-                if experimental {
-                    warnings.push(format!("Repeated definition of {key} on line {}, ignored", idx + 1));
-                    continue;
-                } else {
-                    bail!("Repeated definition of {key} on line {}", idx + 1);
-                }
+        if let Some(existing) = defines.get(&key) && existing != &value {
+            if experimental {
+                warnings.push(format!("Repeated definition of {key} on line {}, ignored", idx + 1));
+                continue;
+            } else {
+                bail!("Repeated definition of {key} on line {}", idx + 1);
             }
         }
         defines.insert(key, value);

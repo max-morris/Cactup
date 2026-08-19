@@ -43,11 +43,13 @@ fn obtain_sim(
             ctx,
             machine,
             inst,
-            false,
-            &args.sim,
-            par,
-            args.config.as_deref(),
-            None,
+            &crate::sim::CreateRequest {
+                force: false,
+                name: &args.sim,
+                parfile: par,
+                config: args.config.as_deref(),
+                sim_dir: None,
+            },
         ),
         (Some(par), true) => {
             if !(args.overwrite || args.force) {
@@ -57,7 +59,18 @@ fn obtain_sim(
                     args.sim
                 );
             }
-            crate::sim::create(ctx, machine, inst, true, &args.sim, par, args.config.as_deref(), None)
+            crate::sim::create(
+                ctx,
+                machine,
+                inst,
+                &crate::sim::CreateRequest {
+                    force: true,
+                    name: &args.sim,
+                    parfile: par,
+                    config: args.config.as_deref(),
+                    sim_dir: None,
+                },
+            )
         }
     }
 }
@@ -80,30 +93,24 @@ pub fn resolve_run_universe<'m>(
     if let Some(name) = &cli.universe {
         return Ok(Some((name.clone(), machine.meta.universe(name)?)));
     }
-    if let Some(build_uni) = &cfg.universe {
-        if cfg.coerce_run_universe {
+    if let Some(build_uni) = &cfg.universe && cfg.coerce_run_universe {
+        // §4.8
+        let u = machine.meta.universe(build_uni).with_context(|| {
+            format!(
+                "config \"{}\" was built in universe \"{build_uni}\", which this machine no \
+                 longer defines; pass --no-universe or rebuild",
+                cfg.name
+            )
+        })?;
+        if verbose && let Some(v) = variant_universe && v != build_uni {
             // §4.8
-            let u = machine.meta.universe(build_uni).with_context(|| {
-                format!(
-                    "config \"{}\" was built in universe \"{build_uni}\", which this machine no \
-                     longer defines; pass --no-universe or rebuild",
-                    cfg.name
-                )
-            })?;
-            if verbose {
-                if let Some(v) = variant_universe {
-                    if v != build_uni {
-                        // §4.8
-                        eprintln!(
-                            "{} runscript variant names universe \"{v}\" but the config's build \
-                             universe \"{build_uni}\" takes precedence",
-                            "note:".yellow()
-                        );
-                    }
-                }
-            }
-            return Ok(Some((build_uni.clone(), u)));
+            eprintln!(
+                "{} runscript variant names universe \"{v}\" but the config's build \
+                 universe \"{build_uni}\" takes precedence",
+                "note:".yellow()
+            );
         }
+        return Ok(Some((build_uni.clone(), u)));
     }
     let name = variant_universe.or(default_universe);
     match name {
@@ -920,6 +927,16 @@ mod tests {
         inst
     }
 
+    fn create_req(parfile: &Path) -> crate::sim::CreateRequest<'_> {
+        crate::sim::CreateRequest {
+            force: false,
+            name: "bbh",
+            parfile,
+            config: None,
+            sim_dir: None,
+        }
+    }
+
     fn fake_ctx(dir: &Path) -> Ctx {
         Ctx {
             globals: crate::args::GlobalOpts {
@@ -975,7 +992,7 @@ mod tests {
         // Create via the real path (registry + cache + metadata).
         let parfile = tmp.path().join("bbh.par");
         fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n# sim @SIMULATION_NAME@ t=@TASKS@ lit=@@\n").unwrap();
-        let sim = crate::sim::create(&ctx, &machine, &inst, false, "bbh", &parfile, None, None).unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
         assert!(sim.exe().is_file(), "frozen executable linked");
         assert!(inst.simulations().unwrap().simulations.contains_key("bbh"));
 
@@ -1085,7 +1102,7 @@ mod tests {
 
         let parfile = tmp.path().join("bbh.par");
         fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n").unwrap();
-        let sim = crate::sim::create(&ctx, &machine, &inst, false, "bbh", &parfile, None, None).unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
         let db = ctx.db.read().unwrap();
 
         // Two checkpoint-bearing restarts. Under the old model these drove a
@@ -1118,7 +1135,7 @@ mod tests {
         let ctx = fake_ctx(&tmp.path().join("db"));
         let parfile = tmp.path().join("bbh.par");
         fs::write(&parfile, "x\n").unwrap();
-        crate::sim::create(&ctx, &machine, &inst, false, "bbh", &parfile, None, None).unwrap();
+        crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
 
         // Existing sim + parfile → error without --overwrite (§8.3)…
         let mut args = start_args("bbh", "1:00:00");

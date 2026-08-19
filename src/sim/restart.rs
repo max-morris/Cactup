@@ -258,10 +258,10 @@ pub fn scan(sim_dir: &Path) -> Res<Scan> {
             if entry.file_type()?.is_dir() {
                 ids.push(id);
             }
-        } else if let Some(base) = name.strip_suffix("-active") {
-            if let Some(id) = parse_dir_name(base) {
-                actives.push(id);
-            }
+        } else if let Some(base) = name.strip_suffix("-active")
+            && let Some(id) = parse_dir_name(base)
+        {
+            actives.push(id);
         }
     }
     ids.sort_unstable();
@@ -406,13 +406,12 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
         return Ok(false);
     }
     // (c) heartbeat stale — unless the run itself recorded clean termination.
-    if !restart.meta.terminated {
-        if let Some(age) = age_secs(&restart.heartbeat_path()) {
-            if age < HEARTBEAT_STALE_SECS {
-                return Ok(false); // possibly a scheduler hiccup (transient U)
-            }
-        }
-        // No heartbeat at all = the run never started = dead.
+    // No heartbeat at all = the run never started = dead.
+    if !restart.meta.terminated
+        && let Some(age) = age_secs(&restart.heartbeat_path())
+        && age < HEARTBEAT_STALE_SECS
+    {
+        return Ok(false); // possibly a scheduler hiccup (transient U)
     }
 
     eprintln!(

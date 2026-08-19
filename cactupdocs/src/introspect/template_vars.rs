@@ -50,7 +50,7 @@ fn scan_for_vars(dir: &Path, names: &mut HashSet<String>) -> Result<()> {
     for entry in WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
     {
         let content = std::fs::read_to_string(entry.path())?;
         extract_var_names(&content, names);
@@ -68,16 +68,11 @@ fn extract_var_names(source: &str, names: &mut HashSet<String>) {
         pos = start;
 
         // Read characters until we hit a closing quote
-        let mut var_name = String::new();
-        let bytes = source.as_bytes();
-
-        for i in start..bytes.len() {
-            let ch = bytes[i] as char;
-            if ch == '"' {
-                break;
-            }
-            var_name.push(ch);
-        }
+        let var_name: String = source.as_bytes()[start..]
+            .iter()
+            .map(|&b| b as char)
+            .take_while(|&ch| ch != '"')
+            .collect();
 
         // Check if var_name matches [A-Z][A-Z0-9_]*
         if is_valid_var_name(&var_name) {

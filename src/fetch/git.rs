@@ -284,7 +284,7 @@ pub(crate) fn normalize_url(url: &str) -> String {
             // any `/` (so e.g. a Windows path with a slash before its drive
             // colon, which can't happen, or any path-then-colon shape, isn't
             // misread as scp-style).
-            Some(c) if slash.map_or(true, |s| c < s) => (&url[..c], &url[c + 1..]),
+            Some(c) if slash.is_none_or(|s| c < s) => (&url[..c], &url[c + 1..]),
             // No recognized scheme and no scp form: opaque, treat as a path.
             _ => return clean_path(url),
         }

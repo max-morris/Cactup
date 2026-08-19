@@ -34,10 +34,10 @@ pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
                 // The rebuild minted a new build-id and replaced the exe, so
                 // the previous build's CACHE/exe entry may now be
                 // unreferenced (§8.1). Best-effort.
-                if let Ok(inst_meta) = installation.meta() {
-                    if let Ok(sim_home) = inst_meta.sim_home() {
-                        let _ = cache::gc(sim_home, None);
-                    }
+                if let Ok(inst_meta) = installation.meta()
+                    && let Ok(sim_home) = inst_meta.sim_home()
+                {
+                    let _ = cache::gc(sim_home, None);
                 }
             }
             Ok(())

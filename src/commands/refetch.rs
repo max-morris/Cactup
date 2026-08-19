@@ -815,10 +815,8 @@ fn symlinks_into(arrangements: &Path, repos_dir: &Path, repo: &str) -> Res<Vec<P
     for entry in top.flatten() {
         let path = entry.path();
         candidates.push(path.clone());
-        if path.is_dir() && !path.is_symlink() {
-            if let Ok(inner) = fs::read_dir(&path) {
-                candidates.extend(inner.flatten().map(|e| e.path()));
-            }
+        if path.is_dir() && !path.is_symlink() && let Ok(inner) = fs::read_dir(&path) {
+            candidates.extend(inner.flatten().map(|e| e.path()));
         }
     }
     for path in candidates {

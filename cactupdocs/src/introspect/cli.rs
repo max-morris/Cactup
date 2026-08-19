@@ -44,18 +44,17 @@ pub fn introspect(repo_root: &Path) -> Result<CliModel> {
 
 fn has_derive_parser(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("derive") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    return metas.iter().any(|m| {
-                        if let Meta::Path(p) = m {
-                            p.is_ident("Parser")
-                        } else {
-                            false
-                        }
-                    });
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("derive")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            return metas.iter().any(|m| {
+                if let Meta::Path(p) = m {
+                    p.is_ident("Parser")
+                } else {
+                    false
                 }
-            }
+            });
         }
         false
     })
@@ -77,7 +76,7 @@ fn process_struct(
         for field in &fields.named {
             if let Some(flatten_struct_name) = get_flatten_attr(field) {
                 if let Some(flatten_struct) = structs.get(&flatten_struct_name) {
-                    let flattened = expand_flattened_struct(flatten_struct, structs, enums)?;
+                    let flattened = expand_flattened_struct(flatten_struct, structs)?;
                     args.extend(flattened);
                 }
             } else if is_subcommand_field(field) {
@@ -111,10 +110,11 @@ fn process_struct(
     })
 }
 
+// No `enums` parameter: subcommands inside a flattened struct are not
+// expanded here, so nothing in this recursion ever needs the enum table.
 fn expand_flattened_struct(
     s: &syn::ItemStruct,
     structs: &HashMap<String, &syn::ItemStruct>,
-    enums: &HashMap<String, &syn::ItemEnum>,
 ) -> Result<Vec<CliArg>> {
     let mut args = Vec::new();
 
@@ -122,7 +122,7 @@ fn expand_flattened_struct(
         for field in &fields.named {
             if let Some(flatten_struct_name) = get_flatten_attr(field) {
                 if let Some(flatten_struct) = structs.get(&flatten_struct_name) {
-                    let flattened = expand_flattened_struct(flatten_struct, structs, enums)?;
+                    let flattened = expand_flattened_struct(flatten_struct, structs)?;
                     args.extend(flattened);
                 }
             } else if is_subcommand_field(field) {
@@ -168,7 +168,7 @@ fn process_subcommand_variant(
             for field in &fields.named {
                 if let Some(flatten_struct_name) = get_flatten_attr(field) {
                     if let Some(flatten_struct) = structs.get(&flatten_struct_name) {
-                        let flattened = expand_flattened_struct(flatten_struct, structs, enums)?;
+                        let flattened = expand_flattened_struct(flatten_struct, structs)?;
                         args.extend(flattened);
                     }
                 } else if is_subcommand_field(field) {
@@ -212,7 +212,7 @@ fn process_subcommand_variant(
                             if let Some(flatten_struct_name) = get_flatten_attr(struct_field) {
                                 if let Some(flatten_struct) = structs.get(&flatten_struct_name) {
                                     let flattened =
-                                        expand_flattened_struct(flatten_struct, structs, enums)?;
+                                        expand_flattened_struct(flatten_struct, structs)?;
                                     args.extend(flattened);
                                 }
                             } else if is_subcommand_field(struct_field) {
@@ -273,17 +273,14 @@ fn process_subcommand_variant(
 
 fn get_flatten_attr(field: &Field) -> Option<String> {
     for attr in &field.attrs {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("clap") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    for meta in metas {
-                        if let Meta::Path(p) = meta {
-                            if p.is_ident("flatten") {
-                                // Return the type name to signal that this is a flatten field
-                                return extract_type_name(&field.ty).ok();
-                            }
-                        }
-                    }
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("clap")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            for meta in metas {
+                if let Meta::Path(p) = meta && p.is_ident("flatten") {
+                    // Return the type name to signal that this is a flatten field
+                    return extract_type_name(&field.ty).ok();
                 }
             }
         }
@@ -293,16 +290,13 @@ fn get_flatten_attr(field: &Field) -> Option<String> {
 
 fn is_subcommand_field(field: &Field) -> bool {
     for attr in &field.attrs {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("clap") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    for meta in metas {
-                        if let Meta::Path(p) = meta {
-                            if p.is_ident("subcommand") {
-                                return true;
-                            }
-                        }
-                    }
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("clap")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            for meta in metas {
+                if let Meta::Path(p) = meta && p.is_ident("subcommand") {
+                    return true;
                 }
             }
         }
@@ -312,10 +306,8 @@ fn is_subcommand_field(field: &Field) -> bool {
 
 
 fn extract_type_name(ty: &Type) -> Result<String> {
-    if let Type::Path(TypePath { path, .. }) = ty {
-        if let Some(segment) = path.segments.last() {
-            return Ok(segment.ident.to_string());
-        }
+    if let Type::Path(TypePath { path, .. }) = ty && let Some(segment) = path.segments.last() {
+        return Ok(segment.ident.to_string());
     }
     Err(anyhow!("Cannot extract type name"))
 }
@@ -390,27 +382,21 @@ fn extract_short_long(field_name: &str, attrs: &[Attribute]) -> Result<(Option<c
             // Try to parse all Meta items in the clap attribute
             if let Ok(metas) = parse_clap_metas(list) {
                 for meta in metas {
-                    match meta {
-                        Meta::NameValue(nv) => {
-                            if nv.path.is_ident("short") {
-                                if let syn::Expr::Lit(ExprLit {
-                                    lit: Lit::Char(lit_char),
-                                    ..
-                                }) = &nv.value
-                                {
-                                    short = Some(lit_char.value());
-                                }
-                            } else if nv.path.is_ident("long") {
-                                if let syn::Expr::Lit(ExprLit {
-                                    lit: Lit::Str(lit_str),
-                                    ..
-                                }) = &nv.value
-                                {
-                                    long = Some(lit_str.value());
-                                }
+                    if let Meta::NameValue(nv) = meta {
+                        if nv.path.is_ident("short") {
+                            if let syn::Expr::Lit(ExprLit {
+                                lit: Lit::Char(lit_char),
+                                ..
+                            }) = &nv.value
+                            {
+                                short = Some(lit_char.value());
                             }
+                        } else if nv.path.is_ident("long")
+                            && let syn::Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) =
+                                &nv.value
+                        {
+                            long = Some(lit_str.value());
                         }
-                        _ => {}
                     }
                 }
             }
@@ -423,10 +409,10 @@ fn extract_short_long(field_name: &str, attrs: &[Attribute]) -> Result<(Option<c
     }
 
     // If no short was found but we have a long, default to first char
-    if short.is_none() && long.is_some() {
-        if let Some(first_char) = long.as_ref().and_then(|s| s.chars().next()) {
-            short = Some(first_char);
-        }
+    if short.is_none() && long.is_some()
+        && let Some(first_char) = long.as_ref().and_then(|s| s.chars().next())
+    {
+        short = Some(first_char);
     }
 
     Ok((short, long))
@@ -443,11 +429,11 @@ fn analyze_type(ty: &Type) -> (bool, bool, bool) {
                 }
 
                 if ident == "Option" {
-                    if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let (inner_takes, _, _) = analyze_type(inner_ty);
-                            return (inner_takes || ident == "Option", false, false);
-                        }
+                    if let PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let (inner_takes, _, _) = analyze_type(inner_ty);
+                        return (inner_takes || ident == "Option", false, false);
                     }
                     return (true, false, false);
                 }
@@ -470,22 +456,16 @@ fn analyze_type(ty: &Type) -> (bool, bool, bool) {
 
 fn extract_default_value(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("clap") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    for meta in metas {
-                        if let Meta::NameValue(nv) = meta {
-                            if nv.path.is_ident("default_value") {
-                                if let syn::Expr::Lit(ExprLit {
-                                    lit: Lit::Str(lit_str),
-                                    ..
-                                }) = &nv.value
-                                {
-                                    return Some(lit_str.value());
-                                }
-                            }
-                        }
-                    }
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("clap")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            for meta in metas {
+                if let Meta::NameValue(nv) = meta
+                    && nv.path.is_ident("default_value")
+                    && let syn::Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value
+                {
+                    return Some(lit_str.value());
                 }
             }
         }
@@ -495,22 +475,16 @@ fn extract_default_value(attrs: &[Attribute]) -> Option<String> {
 
 fn is_global(attrs: &[Attribute]) -> bool {
     for attr in attrs {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("clap") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    for meta in metas {
-                        if let Meta::NameValue(nv) = meta {
-                            if nv.path.is_ident("global") {
-                                if let syn::Expr::Lit(ExprLit {
-                                    lit: Lit::Bool(lit_bool),
-                                    ..
-                                }) = &nv.value
-                                {
-                                    return lit_bool.value();
-                                }
-                            }
-                        }
-                    }
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("clap")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            for meta in metas {
+                if let Meta::NameValue(nv) = meta
+                    && nv.path.is_ident("global")
+                    && let syn::Expr::Lit(ExprLit { lit: Lit::Bool(lit_bool), .. }) = &nv.value
+                {
+                    return lit_bool.value();
                 }
             }
         }
@@ -520,22 +494,16 @@ fn is_global(attrs: &[Attribute]) -> bool {
 
 fn extract_value_name(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("clap") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    for meta in metas {
-                        if let Meta::NameValue(nv) = meta {
-                            if nv.path.is_ident("value_name") {
-                                if let syn::Expr::Lit(ExprLit {
-                                    lit: Lit::Str(lit_str),
-                                    ..
-                                }) = &nv.value
-                                {
-                                    return Some(lit_str.value());
-                                }
-                            }
-                        }
-                    }
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("clap")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            for meta in metas {
+                if let Meta::NameValue(nv) = meta
+                    && nv.path.is_ident("value_name")
+                    && let syn::Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value
+                {
+                    return Some(lit_str.value());
                 }
             }
         }
@@ -545,23 +513,17 @@ fn extract_value_name(attrs: &[Attribute]) -> Option<String> {
 
 fn extract_help(attrs: &[Attribute], doc: &(Option<String>, Option<String>)) -> (Option<String>, Option<String>) {
     for attr in attrs {
-        if let Meta::List(list) = &attr.meta {
-            if list.path.is_ident("clap") {
-                if let Ok(metas) = parse_clap_metas(list) {
-                    for meta in metas {
-                        if let Meta::NameValue(nv) = meta {
-                            if nv.path.is_ident("help") {
-                                if let syn::Expr::Lit(ExprLit {
-                                    lit: Lit::Str(lit_str),
-                                    ..
-                                }) = &nv.value
-                                {
-                                    let help = lit_str.value();
-                                    return (Some(help), doc.1.clone());
-                                }
-                            }
-                        }
-                    }
+        if let Meta::List(list) = &attr.meta
+            && list.path.is_ident("clap")
+            && let Ok(metas) = parse_clap_metas(list)
+        {
+            for meta in metas {
+                if let Meta::NameValue(nv) = meta
+                    && nv.path.is_ident("help")
+                    && let syn::Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value
+                {
+                    let help = lit_str.value();
+                    return (Some(help), doc.1.clone());
                 }
             }
         }
@@ -573,17 +535,12 @@ fn extract_doc(attrs: &[Attribute]) -> (Option<String>, Option<String>) {
     let mut doc_lines = Vec::new();
 
     for attr in attrs {
-        if attr.path().is_ident("doc") {
-            if let Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(ExprLit {
-                    lit: Lit::Str(lit_str),
-                    ..
-                }) = &nv.value
-                {
-                    let doc = lit_str.value();
-                    doc_lines.push(doc);
-                }
-            }
+        if attr.path().is_ident("doc")
+            && let Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value
+        {
+            let doc = lit_str.value();
+            doc_lines.push(doc);
         }
     }
 
@@ -639,7 +596,7 @@ mod tests {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir.parent().expect("No parent of manifest dir");
 
-        let result = introspect(&repo_root);
+        let result = introspect(repo_root);
         assert!(result.is_ok(), "Failed to introspect: {:?}", result.err());
 
         let model = result.unwrap();
@@ -699,7 +656,7 @@ mod tests {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir.parent().expect("No parent of manifest dir");
 
-        let model = introspect(&repo_root).expect("Failed to introspect");
+        let model = introspect(repo_root).expect("Failed to introspect");
 
         // Root should have args (the global flags)
         assert!(!model.root.args.is_empty(), "Root should have args (global flags)");
@@ -723,7 +680,7 @@ mod tests {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir.parent().expect("No parent of manifest dir");
 
-        let model = introspect(&repo_root).expect("Failed to introspect");
+        let model = introspect(repo_root).expect("Failed to introspect");
 
         let sim_cmd = model
             .root

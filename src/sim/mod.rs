@@ -236,18 +236,28 @@ fn simulation_id(name: &str, machine: &str, hostname: &str) -> String {
     format!("simulation-{name}-{machine}-{hostname}-{user}-{ts}-{pid}")
 }
 
-/// `sim create` (§8.2). `machine` must already be resolved; `config` defaults
-/// to the installation's active config.
+/// What a caller asked [`create`] for, apart from the already-resolved
+/// context (ctx / machine / installation). §8.2
+pub struct CreateRequest<'a> {
+    /// Replace an existing simulation of the same name.
+    pub force: bool,
+    pub name: &'a str,
+    pub parfile: &'a Path,
+    /// Config to attach; `None` means the installation's active config.
+    pub config: Option<&'a str>,
+    /// Simulation directory; `None` means under sim-home. §8.1
+    pub sim_dir: Option<&'a Path>,
+}
+
+/// `sim create` (§8.2). `machine` must already be resolved; `req.config`
+/// defaults to the installation's active config.
 pub fn create(
     ctx: &Ctx,
     machine: &Machine,
     inst: &Installation,
-    force: bool,
-    name: &str,
-    parfile: &Path,
-    config: Option<&str>,
-    sim_dir: Option<&Path>,
+    req: &CreateRequest,
 ) -> Res<Simulation> {
+    let CreateRequest { force, name, parfile, config, sim_dir } = *req;
     let inst_meta = inst.meta()?;
     let sim_home = inst_meta.sim_home()?.to_owned();
     let cactus_root = inst.cactus_root();
@@ -420,6 +430,6 @@ mod tests {
     fn simulation_id_format() {
         let id = simulation_id("bbh", "mel5", "mel5.cct.lsu.edu");
         assert!(id.starts_with("simulation-bbh-mel5-mel5.cct.lsu.edu-"), "{id}");
-        assert_eq!(id.split('-').count() >= 7, true, "{id}");
+        assert!(id.split('-').count() >= 7, "{id}");
     }
 }
