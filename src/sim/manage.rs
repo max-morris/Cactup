@@ -17,8 +17,73 @@ fn machine_and_inst(ctx: &Ctx) -> Res<(crate::mdb::Machine, Installation)> {
     Ok((crate::commands::machine::resolve(ctx)?, Installation::resolve(ctx)?))
 }
 
+/// How long `sim stop` watches a graceful termination before handing the
+/// decision back to the user. Cactus only reads `TERMINATE` at its next
+/// termination check and usually checkpoints on the way out, so this is a
+/// "did the request land" probe, not a wait for the run to finish.
+const GRACEFUL_WAIT_SECS: u64 = 30;
+
+/// Is the run behind `r` still alive? The queue is authoritative when the
+/// restart has a job; a foreground run has none, so its liveness marker
+/// answers instead (§9.3).
+fn run_is_live(sched: &Scheduler, r: &Restart) -> Res<bool> {
+    if r.meta.job_id != NO_JOB_ID {
+        return Ok(matches!(
+            sched.get_status(&r.meta.job_id)?,
+            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
+        ));
+    }
+    crate::lock::LinkLock::is_held_live(&r.running_lock_path())
+}
+
+/// Poll for up to [`GRACEFUL_WAIT_SECS`] until the run behind `r` is gone;
+/// `true` means it really left. Interrupt-aware (§2.3): Ctrl-C fails the wait
+/// rather than reporting a run gone that is still there.
+fn await_run_exit(sched: &Scheduler, r: &Restart) -> Res<bool> {
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let waiting = progress.add_child(if r.meta.job_id == NO_JOB_ID {
+        "waiting for the run to exit".to_owned()
+    } else {
+        format!("waiting for job {} to leave the queue", r.meta.job_id)
+    });
+    waiting.init(Some(GRACEFUL_WAIT_SECS as usize), Some(prodash::unit::label("s")));
+
+    let started = std::time::Instant::now();
+    let outcome = loop {
+        match run_is_live(sched, r) {
+            Ok(false) => break Ok(true),
+            Err(e) => break Err(e),
+            Ok(true) => {}
+        }
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= GRACEFUL_WAIT_SECS {
+            break Ok(false);
+        }
+        waiting.set(elapsed as usize);
+        // Sleep in short ticks so Ctrl-C stops us within a fraction of a second.
+        let tick = std::time::Instant::now();
+        while tick.elapsed() < std::time::Duration::from_secs(3) {
+            if gix::interrupt::is_triggered() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if gix::interrupt::is_triggered() {
+            break Err(anyhow::anyhow!("interrupted while waiting for the job to stop"));
+        }
+    };
+
+    drop(waiting);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    outcome
+}
+
 /// `sim stop` (§8.6): graceful via the `TERMINATE` trigger when present;
-/// forced (or `-f`) via the machine `stop` command. Both finish the restart.
+/// forced (or `-f`) via the machine `stop` command. Both finish the restart —
+/// but a graceful request that the run has not acted on yet leaves the restart
+/// active, so the user can escalate with `-f`.
 pub fn stop(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     let (machine, inst) = machine_and_inst(ctx)?;
     let sim = Simulation::locate(&inst, name)?;
@@ -39,6 +104,31 @@ pub fn stop(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
             restart::dir_name(active)
         );
         sim.log("stop", &format!("graceful termination of {} requested", restart::dir_name(active)));
+
+        // The trigger is a request, not a kill: report what actually happened
+        // instead of finishing the restart on faith. While the run is still
+        // there the restart stays active — deactivating it would hide the live
+        // job from `stop -f` and from the live-job guard in `delete` (§8.7).
+        let sched = Scheduler::new(&machine.meta);
+        if !await_run_exit(&sched, &r)? {
+            let what = if r.meta.job_id == NO_JOB_ID {
+                format!("{} is still running", restart::dir_name(active))
+            } else {
+                format!("job {} is still in the queue", r.meta.job_id)
+            };
+            println!(
+                "{what} after {GRACEFUL_WAIT_SECS}s: Cactus acts on the trigger at its next \
+                 termination check, often after a checkpoint. Leaving {} active — re-run \
+                 `cactup sim stop -f {name}` to kill it now.",
+                restart::dir_name(active)
+            );
+            sim.log(
+                "stop",
+                &format!("{} still live after the graceful request", restart::dir_name(active)),
+            );
+            return Ok(());
+        }
+        println!("{} stopped", restart::dir_name(active).bold());
     } else {
         if r.meta.job_id != NO_JOB_ID {
             let sched = Scheduler::new(&machine.meta);
@@ -865,6 +955,63 @@ mod tests {
 
         let nojob_state = listed_state(&rows[3]);
         assert_eq!(nojob_state.state(None), display_state(true, None, false, false));
+    }
+
+    /// The graceful path must confirm the run actually left before finishing
+    /// the restart: a `TERMINATE` the parfile never reads would otherwise be
+    /// reported as a stop while the job runs on (§8.6).
+    #[test]
+    fn graceful_stop_checks_whether_the_run_really_left() {
+        use crate::mdb::meta::Meta;
+
+        fn meta(get_status: &str) -> Meta {
+            toml::from_str(&format!(
+                r#"
+                [machine]
+                nickname = "fake"
+                [scheduler]
+                get-status = "{get_status}"
+                status-pattern = "^@JOB_ID@ "
+                running-pattern = " R"
+                [queues.local]
+                default = true
+                [variants.submitscript]
+                "default" = ["local"]
+                [variants.runscript]
+                "default" = ["local"]
+                [variants.optionlist]
+                variants = ["default"]
+                "#
+            ))
+            .unwrap()
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let entry = fake_sim(root, "queued", "200", true, None, false);
+        let r = Restart::load(&entry.dir, 0).unwrap();
+
+        // Still in the queue: the trigger has not been acted on.
+        let live_meta = meta("echo '@JOB_ID@ R'");
+        let live = Scheduler::new(&live_meta);
+        assert!(run_is_live(&live, &r).unwrap());
+
+        // Gone from the queue: the stop took effect, and the probe returns at
+        // once rather than sitting out GRACEFUL_WAIT_SECS.
+        let gone_meta = meta("true");
+        let gone = Scheduler::new(&gone_meta);
+        assert!(!run_is_live(&gone, &r).unwrap());
+        let waited = std::time::Instant::now();
+        assert!(await_run_exit(&gone, &r).unwrap());
+        assert!(waited.elapsed() < std::time::Duration::from_secs(GRACEFUL_WAIT_SECS));
+
+        // A foreground run has no job: its liveness marker decides instead.
+        let fg = fake_sim(root, "foreground", NO_JOB_ID, true, None, false);
+        let r = Restart::load(&fg.dir, 0).unwrap();
+        assert!(!run_is_live(&gone, &r).unwrap(), "no marker → nothing running");
+        let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
+        assert!(run_is_live(&gone, &r).unwrap(), "marker held by a live pid → running");
+        drop(held);
     }
 
     #[test]
