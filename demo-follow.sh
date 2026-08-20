@@ -13,6 +13,10 @@
 # periodic horizon finds and checkpoints, occasional stderr warnings, a
 # regridding burst every ~100 iterations (shows off the 50ms follow latency),
 # and the odd ANSI-colored / tab-ridden line (shows off TUI sanitization).
+# The -f side-by-side TUI also has vim-style line selection + copy (`v`,
+# `y`/`Y`, OSC 52) and per-pane regex search (`/`, `?`, `n`/`N`) — the "Try:"
+# list below points at real matches this writer produces (checkpoint dumps,
+# the periodic Dissipation warning) to poke at both.
 # The writer dies automatically when you quit (q / Esc / Ctrl-C).
 
 set -euo pipefail
@@ -142,6 +146,11 @@ case "$MODE" in
     echo "          Tab / click                  — switch pane focus (cyan border)"
     echo "          ←/→                          — pan the long checkpoint lines"
     echo "          q                            — quit (writer is cleaned up)"
+    echo "          v then j/k/G, y              — select lines in the focused pane, y copies them (OSC 52)"
+    echo "          y  /  Y                      — y copies the view; Y copies the whole 10k-line pane"
+    echo "          /checkpoint  then n/N        — search stdout, step through every checkpoint dump"
+    echo "          ?Dissipation                 — search stderr backwards for the order-lowered warning"
+    echo "          m                            — free the mouse — drag-select with your terminal instead"
     echo
     read -rp "    Press Enter to start…"
     HOME="$ROOT/home" "$BIN" sim log "$SIM" -f

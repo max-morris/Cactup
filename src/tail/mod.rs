@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod clipboard;
+mod search;
 mod tui;
 
 /// Adaptive poll-interval backoff shared by every follow loop and by the

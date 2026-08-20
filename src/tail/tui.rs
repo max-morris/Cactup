@@ -36,13 +36,28 @@
 //! intermediate one. [`FramePacer`] then paces each frame off the
 //! *completion* of the previous one, so how fast the terminal really is sets
 //! the frame rate.
+//!
+//! # Copying and searching
+//!
+//! Two things a plain `tail -f` gets for free from the terminal and a
+//! full-screen view has to hand back deliberately: copying a line, and
+//! finding one. Mouse capture is what takes copying away — the terminal
+//! gives us the drag instead of selecting with it — so both routes are
+//! offered. `m` releases capture outright, restoring the terminal's own
+//! selection, which works everywhere and is the fallback of record;
+//! otherwise a vim-style line selection (`v` then motions, or click-drag)
+//! copies through [`clipboard`]'s OSC 52 path, which also survives the SSH
+//! hop this tool is nearly always used across. Searching is vim's too:
+//! `/`, `?`, `n`, `N` over a [`search::Query`], per pane, incremental as
+//! you type, and centered on the hit when it lands.
 
-use super::{LogTail, PollBackoff, SEED_BYTES};
+use super::search::{self, Direction, Hit, Query};
+use super::{LogTail, PollBackoff, SEED_BYTES, clipboard};
 use crate::Res;
 use anyhow::Context;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEvent, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
@@ -51,7 +66,7 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -77,6 +92,23 @@ const TICK: Duration = Duration::from_millis(50);
 /// flags. `PollBackoff` can ask for up to a second; chunking the wait keeps
 /// the thread's join latency well inside the interrupt contract's budget.
 const READER_NAP: Duration = Duration::from_millis(25);
+/// How long a footer notice ("copied 12 lines", a rejected pattern, a
+/// wrapped search) stays up before the footer goes back to being a key
+/// hint.
+const STATUS_TTL: Duration = Duration::from_secs(3);
+/// Columns of context kept to the left of a search hit when the view has to
+/// pan sideways to show it.
+const HIT_MARGIN: u16 = 8;
+
+/// Every match of the active pattern in a pane.
+const MATCH_STYLE: Style = Style::new().bg(Color::Yellow).fg(Color::Black);
+/// The one match `n`/`N` are currently sitting on, picked out from the rest.
+const CURRENT_MATCH_STYLE: Style =
+    Style::new().bg(Color::Magenta).fg(Color::White).add_modifier(Modifier::BOLD);
+/// Lines inside a `v` selection. Reversing the whole line reads as a block
+/// however the user's palette is set up, where a background colour might
+/// not.
+const SELECT_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 // ---------------------------------------------------------------------
 // Scroll / follow state — pure, unit-tested.
@@ -136,6 +168,110 @@ impl ScrollState {
         }
         self.offset
     }
+}
+
+// ---------------------------------------------------------------------
+// Modes, notices and view math — pure, unit-tested.
+// ---------------------------------------------------------------------
+
+/// What keystrokes mean right now. `Normal` is the live-tailing view;
+/// anything else is a modal overlay the footer describes, which is what
+/// keeps the bindings from fighting each other — `q` quits in `Normal` and
+/// types a `q` into the pattern in `Search`, with no modifier gymnastics.
+enum Mode {
+    Normal,
+    /// vim's line-visual mode over the focused pane: an anchor line, a
+    /// moving cursor, and `y` to copy the span between them.
+    Select,
+    /// The `/` (or `?`) prompt is open in the footer.
+    Search(SearchPrompt),
+}
+
+/// A search being typed. The pattern lives here rather than on the pane so
+/// an abandoned search leaves nothing behind, and the `saved_*` fields hold
+/// everything Esc has to put back: incremental search moves the view (and
+/// replaces the pane's pattern) on every keystroke, and vim's contract is
+/// that giving up returns you to exactly where you started.
+struct SearchPrompt {
+    dir: Direction,
+    input: String,
+    saved_offset: u16,
+    saved_follow: bool,
+    saved_search: Option<PaneSearch>,
+    /// What to show beside the prompt: a `[3/17]` counter, `no match`, or
+    /// the regex error for a pattern that is still half-typed. Kept as text
+    /// because all three occupy the same spot and only one can be true.
+    note: String,
+}
+
+/// A transient one-line notice in the footer: what a copy did, why a
+/// pattern was rejected, that a search wrapped. Timed out rather than
+/// sticky, so the footer reverts to being a key hint on its own.
+struct Status {
+    text: String,
+    error: bool,
+    until: Instant,
+}
+
+impl Status {
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.until
+    }
+}
+
+/// Post a footer notice, replacing any current one — the newest thing the
+/// user did is always the thing worth telling them about.
+fn note(status: &mut Option<Status>, text: impl Into<String>, error: bool) {
+    *status = Some(Status { text: text.into(), error, until: Instant::now() + STATUS_TTL });
+}
+
+/// Inclusive line span of a selection, lowest first and clamped to `len`.
+/// `None` for an empty buffer, so callers can't build a span over nothing.
+fn selection_span(anchor: usize, cursor: usize, len: usize) -> Option<(usize, usize)> {
+    if len == 0 {
+        return None;
+    }
+    let (lo, hi) = if anchor <= cursor { (anchor, cursor) } else { (cursor, anchor) };
+    Some((lo.min(len - 1), hi.min(len - 1)))
+}
+
+/// Vertical offset that brings `line` into a viewport `height` tall,
+/// centered when there's room either side. Search jumps center rather than
+/// scroll minimally: a hit glued to the top or bottom edge is a hit without
+/// the context that makes it readable.
+fn center_offset(line: usize, height: u16, max: u16) -> u16 {
+    let half = usize::from(height / 2);
+    u16::try_from(line.saturating_sub(half)).unwrap_or(u16::MAX).min(max)
+}
+
+/// Vertical offset that keeps `cursor` on screen while moving it, scrolling
+/// by the minimum needed. Unlike a search jump this must *not* recenter —
+/// holding `j` through a selection would make the text crawl under a fixed
+/// cursor instead of the cursor walking down the text.
+fn scroll_to_show(cursor: usize, offset: u16, height: u16, max: u16) -> u16 {
+    let height = usize::from(height.max(1));
+    let cursor16 = u16::try_from(cursor).unwrap_or(u16::MAX);
+    let offset = if cursor16 < offset {
+        cursor16
+    } else if cursor + 1 > usize::from(offset) + height {
+        u16::try_from(cursor + 1 - height).unwrap_or(u16::MAX)
+    } else {
+        offset
+    };
+    offset.min(max)
+}
+
+/// Horizontal pan that brings char column `col` into a `width`-wide
+/// viewport, keeping [`HIT_MARGIN`] columns of context to its left when it
+/// has to move at all. A column that is already on screen returns `hscroll`
+/// untouched — landing on a hit must not jog a pane sideways for nothing.
+fn pan_to(col: usize, hscroll: u16, width: u16, max_hscroll: u16) -> u16 {
+    let lo = usize::from(hscroll);
+    if col >= lo && col < lo + usize::from(width) {
+        return hscroll;
+    }
+    let target = col.saturating_sub(usize::from(HIT_MARGIN));
+    u16::try_from(target).unwrap_or(u16::MAX).min(max_hscroll)
 }
 
 // ---------------------------------------------------------------------
@@ -323,13 +459,7 @@ struct PaneContent {
 
 impl PaneContent {
     fn new() -> Self {
-        PaneContent {
-            exists: false,
-            lines: VecDeque::new(),
-            open: false,
-            tab_col: 0,
-            evicted: 0,
-        }
+        PaneContent { exists: false, lines: VecDeque::new(), open: false, tab_col: 0, evicted: 0 }
     }
 
     /// Sanitize and append newly-read bytes, splitting into lines and
@@ -374,6 +504,20 @@ impl PaneContent {
     }
 }
 
+/// A pane's live search: what to look for, where in the buffer we are, and
+/// which way `n` travels. Per pane on purpose — stdout and stderr get
+/// independent searches, which is most of the point of having two panes.
+struct PaneSearch {
+    query: Query,
+    dir: Direction,
+    hit: Option<Hit>,
+    /// `(ordinal, total)` as of the last search step, for the `[3/17]`
+    /// counter. Recomputed when the pattern or the hit moves, never per
+    /// frame: scanning ten thousand lines is cheap but not free, and a
+    /// count that lags the newest arrivals is exactly what vim shows too.
+    count: (usize, usize),
+}
+
 /// One pane: the shared content above, plus the view state that only the
 /// main thread ever touches.
 struct Pane {
@@ -382,6 +526,12 @@ struct Pane {
     content: Arc<Mutex<PaneContent>>,
     scroll: ScrollState,
     hscroll: u16,
+    /// `(anchor, cursor)` line indices while a `v` selection is up. Held on
+    /// the pane rather than in [`Mode::Select`] so rendering needs to know
+    /// nothing about modes: a pane draws a selection exactly when it has
+    /// one, and leaving select mode clears it.
+    sel: Option<(usize, usize)>,
+    search: Option<PaneSearch>,
 }
 
 impl Pane {
@@ -417,6 +567,8 @@ impl Pane {
             content: Arc::new(Mutex::new(content)),
             scroll: ScrollState::new(),
             hscroll: 0,
+            sel: None,
+            search: None,
         };
         (pane, tail)
     }
@@ -425,16 +577,13 @@ impl Pane {
         lock(&self.content)
     }
 
-    /// Fold any lines the reader has evicted since the last call into the
-    /// scroll offset, so a paused view keeps showing the same text as the
-    /// buffer slides out from under it. Draining the counter makes this
+    /// Fold any lines the reader has evicted since the last call into this
+    /// pane's line indices, so a paused view keeps showing the same text as
+    /// the buffer slides out from under it. Draining the counter makes this
     /// idempotent, so it's safe to call as often as the loop likes.
     fn apply_evictions(&mut self) {
         let evicted = std::mem::take(&mut self.lock().evicted);
-        if evicted > 0 {
-            let by = u16::try_from(evicted).unwrap_or(u16::MAX);
-            self.scroll.offset = self.scroll.offset.saturating_sub(by);
-        }
+        shift_view(&mut self.scroll, &mut self.sel, &mut self.search, evicted);
     }
 
     fn max_scroll(&self, inner_height: u16) -> u16 {
@@ -444,6 +593,113 @@ impl Pane {
     fn max_line_width(&self) -> usize {
         max_line_width(&self.lock().lines)
     }
+
+    fn len(&self) -> usize {
+        lock(&self.content).lines.len()
+    }
+
+    /// Widest horizontal pan that still shows text, for an `inner_width`
+    /// content area.
+    fn max_hscroll(&self, inner_width: u16) -> u16 {
+        let widest = self.max_line_width();
+        u16::try_from(widest.saturating_sub(usize::from(inner_width))).unwrap_or(u16::MAX)
+    }
+
+    /// Pin the view on `hit` and record it as the current match: center it
+    /// vertically, pan sideways only if its column is off screen, and
+    /// release follow — a jump the user asked for must not be yanked away
+    /// by the next line of output.
+    fn focus_hit(&mut self, hit: Hit, inner: (u16, u16)) {
+        let (inner_height, inner_width) = inner;
+        let (len, col, widest) = {
+            let content = lock(&self.content);
+            let col = content.lines.get(hit.line).map_or(0, |l| char_col(l, hit.start));
+            (content.lines.len(), col, max_line_width(&content.lines))
+        };
+        let max = u16::try_from(len).unwrap_or(u16::MAX).saturating_sub(inner_height);
+        self.scroll.follow = false;
+        self.scroll.offset = center_offset(hit.line, inner_height, max);
+        let max_hscroll =
+            u16::try_from(widest.saturating_sub(usize::from(inner_width))).unwrap_or(u16::MAX);
+        self.hscroll = pan_to(col, self.hscroll, inner_width, max_hscroll);
+        if let Some(search) = &mut self.search {
+            search.hit = Some(hit);
+        }
+        self.refresh_count();
+    }
+
+    /// Recompute the `[3/17]` counter. Called after anything that moves the
+    /// hit or changes the pattern, and nowhere else (see [`PaneSearch`]).
+    fn refresh_count(&mut self) {
+        let Some(search) = &self.search else { return };
+        let count = match search.hit {
+            Some(hit) => search::hit_ordinal(&search.query, &lock(&self.content).lines, hit),
+            None => (0, 0),
+        };
+        if let Some(search) = &mut self.search {
+            search.count = count;
+        }
+    }
+
+    /// Where a search starts when there is no current hit: the top of what
+    /// is on screen going forward, the bottom going backward, so the first
+    /// hit landed on is the first one not already read.
+    fn view_origin(&self, dir: Direction, inner_height: u16) -> (usize, usize) {
+        match dir {
+            Direction::Forward => (usize::from(self.scroll.offset), 0),
+            Direction::Backward => {
+                let last = usize::from(self.scroll.offset)
+                    .saturating_add(usize::from(inner_height))
+                    .min(self.len())
+                    .saturating_sub(1);
+                (last, usize::MAX)
+            }
+        }
+    }
+
+    /// Clear the search on this pane: pattern, highlight and hit together.
+    fn clear_search(&mut self) {
+        self.search = None;
+    }
+}
+
+/// Slide every line index a pane's view holds down by `by` evicted lines:
+/// the scroll offset, the selection, and the current search hit all name
+/// positions in a buffer whose front just moved. Indices that fall off the
+/// front saturate at 0 rather than wrapping — the text they named is gone,
+/// and the oldest surviving line is the honest answer.
+///
+/// Taken field-by-field rather than as `&mut Pane` so it can also be called
+/// with the content lock held, which is how [`render_pane`] folds in an
+/// eviction and reads the lines it caused in one critical section.
+fn shift_view(
+    scroll: &mut ScrollState,
+    sel: &mut Option<(usize, usize)>,
+    search: &mut Option<PaneSearch>,
+    by: usize,
+) {
+    if by == 0 {
+        return;
+    }
+    scroll.offset = scroll.offset.saturating_sub(u16::try_from(by).unwrap_or(u16::MAX));
+    if let Some((anchor, cursor)) = sel {
+        *anchor = anchor.saturating_sub(by);
+        *cursor = cursor.saturating_sub(by);
+    }
+    if let Some(search) = search
+        && let Some(hit) = &mut search.hit
+    {
+        hit.line = hit.line.saturating_sub(by);
+    }
+}
+
+/// Char column of byte offset `at` within `line`. Tolerates an offset that
+/// no longer lands on a char boundary, which the last line of a pane can
+/// produce all by itself: the producer may extend it (mid-multibyte-char)
+/// between a search finding a hit and the frame that shows it, and slicing
+/// there would panic inside the TUI.
+fn char_col(line: &str, at: usize) -> usize {
+    line.char_indices().take_while(|(i, _)| *i < at).count()
 }
 
 /// Take a lock, tolerating poisoning. A panic in the reader thread must not
@@ -608,13 +864,22 @@ fn run_app(
     // Strip every escape before it goes anywhere near the title.
     let _ = queue!(
         std::io::stdout(),
-        crossterm::terminal::SetTitle(format!("cactup log — {}", sanitize(subject.as_bytes(), &mut 0)))
+        crossterm::terminal::SetTitle(format!(
+            "cactup log — {}",
+            sanitize(subject.as_bytes(), &mut 0)
+        ))
     );
 
     let mut focused = STDOUT;
     // Cached pane content-rects from the last draw, used to size PgUp/PgDn
     // and to hit-test mouse events between redraws.
     let mut layout = (Rect::default(), Rect::default());
+    let mut mode = Mode::Normal;
+    let mut status: Option<Status> = None;
+    // Mouse capture is on until the user hands the mouse back to the
+    // terminal with `m`.
+    let mut mouse = true;
+    let mut drag: Option<DragStart> = None;
 
     // Raised by the reader thread whenever bytes land. A *flag*, not a
     // queue: three arrivals during one slow repaint leave it set once, and
@@ -634,7 +899,7 @@ fn run_app(
     let mut view_dirty = false;
     let mut pacer = FramePacer::new();
     let started = Instant::now();
-    draw(terminal, &mut panes, focused, &mut layout)?;
+    draw(terminal, &mut panes, focused, &mut layout, &mode, &status, mouse)?;
     pacer.note_frame(started, Instant::now());
 
     loop {
@@ -643,6 +908,12 @@ fn run_app(
         }
         for pane in &mut panes {
             pane.apply_evictions();
+        }
+        // A notice that has timed out is a view change like any other: drop
+        // it, and the frame that follows puts the key hint back.
+        if status.as_ref().is_some_and(|s| s.expired(Instant::now())) {
+            status = None;
+            view_dirty = true;
         }
 
         // Block for input until the next frame is due (or TICK, whichever
@@ -653,13 +924,21 @@ fn run_app(
         if event::poll(timeout).context("polling terminal events")? {
             match event::read().context("reading a terminal event")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if handle_key(key, &mut panes, &mut focused, layout) {
+                    if handle_key(
+                        key,
+                        &mut panes,
+                        &mut focused,
+                        layout,
+                        &mut mode,
+                        &mut status,
+                        &mut mouse,
+                    )? {
                         return Ok(());
                     }
                     view_dirty = true;
                 }
-                Event::Mouse(mouse) => {
-                    handle_mouse(mouse, &mut panes, &mut focused, layout);
+                Event::Mouse(event) => {
+                    handle_mouse(event, &mut panes, &mut focused, layout, &mut mode, &mut drag);
                     view_dirty = true;
                 }
                 Event::Resize(..) => view_dirty = true,
@@ -678,7 +957,7 @@ fn run_app(
             for pane in &mut panes {
                 pane.apply_evictions();
             }
-            draw(terminal, &mut panes, focused, &mut layout)?;
+            draw(terminal, &mut panes, focused, &mut layout, &mode, &status, mouse)?;
             // Timed from `now` (before the draw) to the moment it lands, so
             // the pacer sees the true cost of a frame, blocking write and
             // all, and paces the next one off its completion.
@@ -688,18 +967,84 @@ fn run_app(
 }
 
 /// Handle one key press. Returns `true` if the app should quit.
-fn handle_key(key: KeyEvent, panes: &mut [Pane; 2], focused: &mut usize, layout: (Rect, Rect)) -> bool {
+///
+/// Dispatch is by mode first and binding second, which is what lets the `/`
+/// prompt accept `q`, `j` or `/` as plain text: while it is open the pane's
+/// own bindings simply aren't reachable. Only Ctrl-C outranks the mode.
+fn handle_key(
+    key: KeyEvent,
+    panes: &mut [Pane; 2],
+    focused: &mut usize,
+    layout: (Rect, Rect),
+    mode: &mut Mode,
+    status: &mut Option<Status>,
+    mouse: &mut bool,
+) -> Res<bool> {
+    // The interrupt contract doesn't get a modal exemption: Ctrl-C means
+    // "stop" from inside a half-typed pattern too.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return true;
+        return Ok(true);
     }
-    let pane_rect = if *focused == STDOUT { layout.0 } else { layout.1 };
-    let inner_height = pane_rect.height.saturating_sub(2);
+    let rect = if *focused == STDOUT { layout.0 } else { layout.1 };
+    // (height, width) of the pane's *content* area, borders excluded — what
+    // every page, centering and pan calculation below is relative to.
+    let inner = (rect.height.saturating_sub(2), rect.width.saturating_sub(2));
+    if matches!(mode, Mode::Search(_)) {
+        search_key(key, &mut panes[*focused], mode, inner, status);
+        return Ok(false);
+    }
+    if matches!(mode, Mode::Select) {
+        return select_key(key, &mut panes[*focused], mode, inner, status);
+    }
+    normal_key(key, panes, focused, mode, inner, status, mouse)
+}
+
+/// Live-tailing bindings: scroll, pan, focus, and the entry points into the
+/// search prompt and line selection.
+fn normal_key(
+    key: KeyEvent,
+    panes: &mut [Pane; 2],
+    focused: &mut usize,
+    mode: &mut Mode,
+    inner: (u16, u16),
+    status: &mut Option<Status>,
+    mouse: &mut bool,
+) -> Res<bool> {
+    let (inner_height, inner_width) = inner;
     let page = inner_height.saturating_sub(1).max(1);
+    // The two bindings that aren't about the focused pane.
+    match key.code {
+        KeyCode::Tab | KeyCode::BackTab => {
+            *focused = 1 - *focused;
+            return Ok(false);
+        }
+        KeyCode::Char('m') => {
+            *mouse = !*mouse;
+            set_mouse_capture(*mouse)?;
+            let msg: &str = if *mouse {
+                "mouse captured — wheel scrolls, drag selects lines"
+            } else {
+                "mouse released — select with your terminal as usual, m to take it back"
+            };
+            note(status, msg, false);
+            return Ok(false);
+        }
+        _ => {}
+    }
     let pane = &mut panes[*focused];
     let max = pane.max_scroll(inner_height);
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return true,
-        KeyCode::Tab | KeyCode::BackTab => *focused = 1 - *focused,
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Esc => {
+            // vim's `:nohlsearch` reflex: Esc dismisses what's up before it
+            // means "quit", so clearing a search can't drop you out of the
+            // TUI by accident.
+            if pane.search.is_some() {
+                pane.clear_search();
+            } else {
+                return Ok(true);
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => pane.scroll.up(1),
         KeyCode::Down | KeyCode::Char('j') => pane.scroll.down(1, max),
         KeyCode::PageUp => pane.scroll.up(page),
@@ -709,18 +1054,375 @@ fn handle_key(key: KeyEvent, panes: &mut [Pane; 2], focused: &mut usize, layout:
         KeyCode::End | KeyCode::Char('G') => pane.scroll.bottom(max),
         KeyCode::Left | KeyCode::Char('h') => pane.hscroll = pane.hscroll.saturating_sub(PAN_STEP),
         KeyCode::Right | KeyCode::Char('l') => {
-            let max_h = pane.max_line_width();
-            let inner_width = pane_rect.width.saturating_sub(2) as usize;
-            let max_hscroll = max_h.saturating_sub(inner_width).min(u16::MAX as usize) as u16;
-            pane.hscroll = (pane.hscroll + PAN_STEP).min(max_hscroll);
+            pane.hscroll = (pane.hscroll + PAN_STEP).min(pane.max_hscroll(inner_width));
+        }
+        KeyCode::Char('/') => *mode = open_prompt(pane, Direction::Forward),
+        KeyCode::Char('?') => *mode = open_prompt(pane, Direction::Backward),
+        KeyCode::Char('n') => step_along(pane, false, inner, status),
+        KeyCode::Char('N') => step_along(pane, true, inner, status),
+        KeyCode::Char('v') => {
+            if start_select(pane, inner_height) {
+                *mode = Mode::Select;
+            } else {
+                note(status, "nothing to select yet", true);
+            }
+        }
+        KeyCode::Char('y') => copy_view(pane, inner_height, status)?,
+        KeyCode::Char('Y') => copy_span(pane, None, "the pane", status)?,
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// One keystroke in line-selection mode. Motions move the cursor and extend
+/// the selection from its anchor — vim's visual mode, where there is no way
+/// to move without extending; press Esc and `v` again to start elsewhere.
+fn select_key(
+    key: KeyEvent,
+    pane: &mut Pane,
+    mode: &mut Mode,
+    inner: (u16, u16),
+    status: &mut Option<Status>,
+) -> Res<bool> {
+    let (inner_height, inner_width) = inner;
+    let page = inner_height.saturating_sub(1).max(1);
+    let len = pane.len();
+    let Some((anchor, cursor)) = pane.sel else {
+        // Nothing to be selecting: the buffer emptied out under us.
+        leave_select(pane, mode);
+        return Ok(false);
+    };
+    let last = len.saturating_sub(1);
+    let mut cursor = cursor.min(last);
+    match key.code {
+        // `q` still quits, from every mode: a cancel key that only sometimes
+        // exits the app is worse than losing a selection.
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Esc | KeyCode::Char('v') => {
+            leave_select(pane, mode);
+            return Ok(false);
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let span = selection_span(anchor, cursor, len);
+            copy_span(pane, span, "the selection", status)?;
+            leave_select(pane, mode);
+            return Ok(false);
+        }
+        KeyCode::Up | KeyCode::Char('k') => cursor = cursor.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1).min(last),
+        KeyCode::PageUp => cursor = cursor.saturating_sub(usize::from(page)),
+        KeyCode::PageDown => cursor = (cursor + usize::from(page)).min(last),
+        KeyCode::Home | KeyCode::Char('g') => cursor = 0,
+        KeyCode::End | KeyCode::Char('G') => cursor = last,
+        // Panning doesn't touch the selection — a long line still has to be
+        // readable before you decide to copy it.
+        KeyCode::Left | KeyCode::Char('h') => {
+            pane.hscroll = pane.hscroll.saturating_sub(PAN_STEP);
+            return Ok(false);
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            pane.hscroll = (pane.hscroll + PAN_STEP).min(pane.max_hscroll(inner_width));
+            return Ok(false);
+        }
+        _ => return Ok(false),
+    }
+    pane.sel = Some((anchor.min(last), cursor));
+    let max = pane.max_scroll(inner_height);
+    pane.scroll.offset = scroll_to_show(cursor, pane.scroll.offset, inner_height, max);
+    Ok(false)
+}
+
+/// Start a one-line selection on the newest visible line and pause follow —
+/// a selection whose lines scroll away under it is unusable. `false` if
+/// there is nothing in the pane to select yet.
+fn start_select(pane: &mut Pane, inner_height: u16) -> bool {
+    let len = pane.len();
+    if len == 0 {
+        return false;
+    }
+    let bottom = usize::from(pane.scroll.offset)
+        .saturating_add(usize::from(inner_height))
+        .min(len)
+        .saturating_sub(1);
+    pane.scroll.follow = false;
+    pane.sel = Some((bottom, bottom));
+    true
+}
+
+/// Drop the selection and return to the live-tailing bindings.
+fn leave_select(pane: &mut Pane, mode: &mut Mode) {
+    pane.sel = None;
+    *mode = Mode::Normal;
+}
+
+/// One keystroke while the `/` prompt is open: either it edits the pattern
+/// or it ends the prompt.
+fn search_key(
+    key: KeyEvent,
+    pane: &mut Pane,
+    mode: &mut Mode,
+    inner: (u16, u16),
+    status: &mut Option<Status>,
+) {
+    let Mode::Search(prompt) = mode else { return };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            abandon_search(pane, prompt);
+            *mode = Mode::Normal;
+        }
+        KeyCode::Enter => {
+            commit_search(pane, prompt, inner, status);
+            *mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            if prompt.input.pop().is_none() {
+                // Backspacing off the front of an empty pattern is how vim
+                // leaves the prompt, so it is how you leave this one.
+                abandon_search(pane, prompt);
+                *mode = Mode::Normal;
+            } else {
+                preview_search(pane, prompt, inner);
+            }
+        }
+        KeyCode::Char('u') if ctrl => {
+            prompt.input.clear();
+            preview_search(pane, prompt, inner);
+        }
+        KeyCode::Char(c) if !ctrl => {
+            prompt.input.push(c);
+            preview_search(pane, prompt, inner);
         }
         _ => {}
     }
-    false
 }
 
-fn handle_mouse(mouse: MouseEvent, panes: &mut [Pane; 2], focused: &mut usize, layout: (Rect, Rect)) {
-    let pos = (mouse.column, mouse.row);
+/// Open the `/` (or `?`) prompt, stashing everything Esc has to undo. The
+/// pane's current search comes along with it: the preview owns the
+/// highlight from here until the prompt closes, one way or the other.
+fn open_prompt(pane: &mut Pane, dir: Direction) -> Mode {
+    Mode::Search(SearchPrompt {
+        dir,
+        input: String::new(),
+        saved_offset: pane.scroll.offset,
+        saved_follow: pane.scroll.follow,
+        saved_search: pane.search.take(),
+        note: String::new(),
+    })
+}
+
+/// Put back everything an abandoned search disturbed — the previous pattern
+/// and hit, and the scroll position the preview moved.
+fn abandon_search(pane: &mut Pane, prompt: &mut SearchPrompt) {
+    pane.search = prompt.saved_search.take();
+    pane.scroll.offset = prompt.saved_offset;
+    pane.scroll.follow = prompt.saved_follow;
+}
+
+/// Re-run the search on every keystroke — vim's `incsearch` — so a pattern
+/// can be judged before it is committed. A pattern that doesn't compile yet
+/// (every prefix of `ERROR[0-9]` is one) shows no hit and raises no alarm:
+/// the reason sits quietly beside the prompt instead of flashing a notice.
+///
+/// The view is rewound to where the prompt was opened before each attempt,
+/// so the origin can't creep forward by a hit per keystroke.
+fn preview_search(pane: &mut Pane, prompt: &mut SearchPrompt, inner: (u16, u16)) {
+    pane.search = None;
+    pane.scroll.offset = prompt.saved_offset;
+    pane.scroll.follow = prompt.saved_follow;
+    if prompt.input.is_empty() {
+        prompt.note.clear();
+        return;
+    }
+    let query = match Query::new(&prompt.input) {
+        Ok(query) => query,
+        Err(msg) => {
+            prompt.note = msg;
+            return;
+        }
+    };
+    let from = pane.view_origin(prompt.dir, inner.0);
+    let found = query.find_from_inclusive(&lock(&pane.content).lines, from, prompt.dir);
+    pane.search = Some(PaneSearch { query, dir: prompt.dir, hit: None, count: (0, 0) });
+    match found {
+        Some(found) => {
+            pane.focus_hit(found.hit, inner);
+            let (ordinal, total) = pane.search.as_ref().map_or((0, 0), |s| s.count);
+            prompt.note = format!("[{ordinal}/{total}]");
+        }
+        None => prompt.note = "no match".to_string(),
+    }
+}
+
+/// Accept the typed pattern. An empty or uncompilable one leaves the pane
+/// exactly as the prompt found it. A valid pattern with no match anywhere
+/// is still *kept*: these are live logs, and the line being waited for may
+/// simply not have been written yet, so `n` can ask again later.
+fn commit_search(
+    pane: &mut Pane,
+    prompt: &mut SearchPrompt,
+    inner: (u16, u16),
+    status: &mut Option<Status>,
+) {
+    let query = match Query::new(&prompt.input) {
+        Ok(query) => query,
+        Err(msg) => {
+            abandon_search(pane, prompt);
+            note(status, msg, true);
+            return;
+        }
+    };
+    // Search from where the prompt was opened rather than from wherever the
+    // preview drifted to, so committing lands on the hit already on screen
+    // instead of the one after it.
+    pane.scroll.offset = prompt.saved_offset;
+    pane.scroll.follow = prompt.saved_follow;
+    pane.search = Some(PaneSearch { query, dir: prompt.dir, hit: None, count: (0, 0) });
+    step_search(pane, prompt.dir, inner, status);
+}
+
+/// `n` / `N`: step along the pane's search direction, or against it.
+fn step_along(pane: &mut Pane, reverse: bool, inner: (u16, u16), status: &mut Option<Status>) {
+    let Some(search) = &pane.search else {
+        note(status, "no search yet — press / to start one", true);
+        return;
+    };
+    let dir = if reverse { search.dir.reverse() } else { search.dir };
+    step_search(pane, dir, inner, status);
+}
+
+/// Move to the next hit in `dir`, wrapping around the buffer and saying so
+/// the way vim does. With no hit yet the search starts from what's on
+/// screen, not from the top of a ten-thousand-line buffer.
+fn step_search(pane: &mut Pane, dir: Direction, inner: (u16, u16), status: &mut Option<Status>) {
+    let (found, pattern) = {
+        let Some(search) = &pane.search else {
+            note(status, "no search yet — press / to start one", true);
+            return;
+        };
+        let content = lock(&pane.content);
+        let found = match search.hit {
+            Some(hit) => search.query.find(&content.lines, (hit.line, hit.start), dir),
+            None => {
+                let from = match dir {
+                    Direction::Forward => (usize::from(pane.scroll.offset), 0),
+                    Direction::Backward => {
+                        let last = usize::from(pane.scroll.offset)
+                            .saturating_add(usize::from(inner.0))
+                            .min(content.lines.len())
+                            .saturating_sub(1);
+                        (last, usize::MAX)
+                    }
+                };
+                search.query.find_from_inclusive(&content.lines, from, dir)
+            }
+        };
+        (found, search.query.pattern().to_string())
+    };
+    match found {
+        None => note(status, format!("pattern not found: {pattern}"), true),
+        Some(found) => {
+            pane.focus_hit(found.hit, inner);
+            if found.wrapped {
+                note(status, wrap_notice(dir), false);
+            }
+        }
+    }
+}
+
+fn wrap_notice(dir: Direction) -> &'static str {
+    match dir {
+        Direction::Forward => "search hit BOTTOM, continuing at TOP",
+        Direction::Backward => "search hit TOP, continuing at BOTTOM",
+    }
+}
+
+/// Copy `span` of a pane's lines — or the whole pane, for `None` — and
+/// report what went out.
+///
+/// A terminal that refuses OSC 52 pastes looks identical from in here to one
+/// that accepted it (see [`clipboard`]), so the notice says what was *sent*;
+/// `m` is the documented way out when it turns out the terminal dropped it.
+fn copy_span(
+    pane: &Pane,
+    span: Option<(usize, usize)>,
+    what: &str,
+    status: &mut Option<Status>,
+) -> Res<()> {
+    let lines: Vec<String> = {
+        let content = lock(&pane.content);
+        match span {
+            Some((lo, hi)) => content.lines.iter().skip(lo).take(hi + 1 - lo).cloned().collect(),
+            None => content.lines.iter().cloned().collect(),
+        }
+    };
+    if lines.is_empty() {
+        note(status, "nothing to copy yet", true);
+        return Ok(());
+    }
+    let copied = clipboard::copy_lines(&lines)?;
+    let plural = if copied.lines == 1 { "line" } else { "lines" };
+    let msg = if copied.truncated {
+        format!(
+            "copied {} {plural} of {what} — cut off at {} KB, past what terminals accept",
+            copied.lines,
+            clipboard::MAX_CLIP_BYTES / 1000
+        )
+    } else {
+        format!("copied {} {plural} of {what}", copied.lines)
+    };
+    note(status, msg, false);
+    Ok(())
+}
+
+/// `y` in Normal mode: copy exactly what is on screen in the focused pane.
+/// "Copy what I'm looking at" is the common case, and shouldn't need a
+/// selection made first.
+fn copy_view(pane: &Pane, inner_height: u16, status: &mut Option<Status>) -> Res<()> {
+    let len = pane.len();
+    let lo = usize::from(pane.scroll.offset).min(len);
+    let hi = lo.saturating_add(usize::from(inner_height)).min(len);
+    if hi <= lo {
+        note(status, "nothing to copy yet", true);
+        return Ok(());
+    }
+    copy_span(pane, Some((lo, hi - 1)), "the view", status)
+}
+
+/// Hand the mouse to the terminal, or take it back.
+///
+/// Capture is what makes the wheel and click-to-focus work, and at the same
+/// time what stops the terminal's own click-drag selection — the one copy
+/// route that works in every terminal, including those that refuse OSC 52
+/// and those behind a multiplexer that strips it. So it's a toggle, not a
+/// setting.
+fn set_mouse_capture(on: bool) -> Res<()> {
+    let mut out = std::io::stdout();
+    if on {
+        execute!(out, EnableMouseCapture).context("enabling mouse capture")
+    } else {
+        execute!(out, DisableMouseCapture).context("disabling mouse capture")
+    }
+}
+
+/// Where the left button went down, if it is still down: the anchor a drag
+/// would select from. A click on its own only focuses a pane — it takes
+/// actual movement to begin a selection, so click-to-focus keeps behaving
+/// exactly as it did.
+struct DragStart {
+    pane: usize,
+    line: usize,
+}
+
+fn handle_mouse(
+    event: MouseEvent,
+    panes: &mut [Pane; 2],
+    focused: &mut usize,
+    layout: (Rect, Rect),
+    mode: &mut Mode,
+    drag: &mut Option<DragStart>,
+) {
+    let pos = (event.column, event.row);
     let hit = if in_rect(pos, layout.0) {
         Some(STDOUT)
     } else if in_rect(pos, layout.1) {
@@ -731,8 +1433,29 @@ fn handle_mouse(mouse: MouseEvent, panes: &mut [Pane; 2], focused: &mut usize, l
     let Some(i) = hit else { return };
     let rect = if i == STDOUT { layout.0 } else { layout.1 };
     let inner_height = rect.height.saturating_sub(2);
-    match mouse.kind {
-        MouseEventKind::Down(_) => *focused = i,
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            *focused = i;
+            *drag = line_at(&panes[i], rect, event.row).map(|line| DragStart { pane: i, line });
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(start) = drag
+                && start.pane == i
+                && let Some(line) = line_at(&panes[i], rect, event.row)
+            {
+                // Dragging is a selection gesture; with capture on the
+                // terminal never sees it, so the TUI has to mean it.
+                panes[i].scroll.follow = false;
+                panes[i].sel = Some((start.line, line));
+                *mode = Mode::Select;
+            }
+        }
+        // The selection outlives the gesture — `y` comes after the release.
+        MouseEventKind::Up(MouseButton::Left) => *drag = None,
+        MouseEventKind::Down(_) => {
+            *focused = i;
+            *drag = None;
+        }
         MouseEventKind::ScrollUp => {
             *focused = i;
             panes[i].scroll.up(WHEEL_STEP);
@@ -744,6 +1467,27 @@ fn handle_mouse(mouse: MouseEvent, panes: &mut [Pane; 2], focused: &mut usize, l
         }
         _ => {}
     }
+}
+
+/// Retained-line index under mouse row `row` in `rect`, or `None` if that
+/// row is a border or the pane is still empty.
+///
+/// A row inside the text area but below the last retained line clamps to
+/// that last line rather than reporting `None`: those rows are blank only
+/// because the buffer is shorter than the viewport, and a drag that runs
+/// off the end of the text should select *to* the end — the same thing any
+/// editor does — instead of leaving the selection frozen wherever it last
+/// crossed real text.
+fn line_at(pane: &Pane, rect: Rect, row: u16) -> Option<usize> {
+    if rect.height < 3 || row <= rect.y || row + 1 >= rect.y + rect.height {
+        return None;
+    }
+    let len = pane.len();
+    if len == 0 {
+        return None;
+    }
+    let index = usize::from(pane.scroll.offset) + usize::from(row - rect.y - 1);
+    Some(index.min(len - 1))
 }
 
 fn in_rect(pos: (u16, u16), rect: Rect) -> bool {
@@ -758,11 +1502,11 @@ fn max_line_width(lines: &VecDeque<String>) -> usize {
 /// Split the full terminal area into (stdout pane, stderr pane, footer).
 fn compute_layout(area: Rect) -> (Rect, Rect, Rect) {
     let rows = Layout::default()
-        .direction(Direction::Vertical)
+        .direction(ratatui::layout::Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
     let cols = Layout::default()
-        .direction(Direction::Horizontal)
+        .direction(ratatui::layout::Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[0]);
     (cols[0], cols[1], rows[1])
@@ -773,6 +1517,9 @@ fn draw(
     panes: &mut [Pane; 2],
     focused: usize,
     layout: &mut (Rect, Rect),
+    mode: &Mode,
+    status: &Option<Status>,
+    mouse: bool,
 ) -> Res<()> {
     // ratatui-crossterm doesn't wrap draws in a synchronized update itself
     // (it just diffs and writes cells), so we do it here to avoid a
@@ -784,7 +1531,7 @@ fn draw(
             *layout = (left, right);
             render_pane(frame, left, &mut panes[STDOUT], focused == STDOUT);
             render_pane(frame, right, &mut panes[STDERR], focused == STDERR);
-            render_footer(frame, footer);
+            render_footer(frame, footer, mode, status, panes, focused, mouse);
         })
         .context("drawing the log-follow TUI")?;
     let _ = execute!(std::io::stdout(), EndSynchronizedUpdate);
@@ -800,18 +1547,19 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
     // path of the (potentially blocking) terminal write in `draw`.
     let (exists, line_count, visible) = {
         // Locked through the field rather than `pane.lock()` so the guard
-        // borrows only `pane.content`, leaving `pane.scroll` free to move.
+        // borrows only `pane.content`, leaving the view state free to move.
         let mut content = lock(&pane.content);
-        // Fold in anything evicted since the loop last looked, so `offset`
+        // Fold in anything evicted since the loop last looked, so every
+        // index resolved below — the offset, the selection, the search hit —
         // is resolved against the buffer as it is right now.
         let evicted = std::mem::take(&mut content.evicted);
-        if evicted > 0 {
-            let by = u16::try_from(evicted).unwrap_or(u16::MAX);
-            pane.scroll.offset = pane.scroll.offset.saturating_sub(by);
-        }
+        shift_view(&mut pane.scroll, &mut pane.sel, &mut pane.search, evicted);
         let count = content.lines.len();
         let max = (count as u16).saturating_sub(inner_height);
         let offset = pane.scroll.resolve(max);
+        let sel = pane.sel.and_then(|(anchor, cursor)| selection_span(anchor, cursor, count));
+        let query = pane.search.as_ref().map(|search| &search.query);
+        let current = pane.search.as_ref().and_then(|search| search.hit);
         // Hand the Paragraph only the visible slice — vertical scrolling is
         // done here by slicing at `offset` (building all MAX_LINES Lines per
         // frame just for Paragraph to skip them is wasted work), horizontal
@@ -819,20 +1567,18 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
         let visible: Vec<Line> = content
             .lines
             .iter()
+            .enumerate()
             .skip(offset as usize)
             .take(inner_height as usize)
-            .map(|l| Line::from(l.clone()))
+            .map(|(index, line)| render_line(line, index, sel, query, current))
             .collect();
         (content.exists, count, visible)
     };
     let max = (line_count as u16).saturating_sub(inner_height);
     let offset = pane.scroll.offset;
 
-    let indicator = if pane.scroll.follow {
-        "● live".to_string()
-    } else {
-        format!("⏸ +{}", max - offset)
-    };
+    let indicator =
+        if pane.scroll.follow { "● live".to_string() } else { format!("⏸ +{}", max - offset) };
     let file_name = pane
         .path
         .file_name()
@@ -844,11 +1590,24 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
     } else {
         Style::default()
     };
-    let block = Block::new()
+    let mut block = Block::new()
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Line::from(format!("{} — {file_name}", pane.label)).left_aligned())
         .title(Line::from(indicator).right_aligned());
+    // A pane's active pattern belongs on the pane, not in the footer: the
+    // two panes are searched independently, so which one a pattern applies
+    // to has to be visible at a glance.
+    if let Some(search) = &pane.search {
+        let (ordinal, total) = search.count;
+        let label = if total == 0 {
+            format!("/{} · no match", search.query.pattern())
+        } else {
+            format!("/{} [{ordinal}/{total}]", search.query.pattern())
+        };
+        block =
+            block.title(Line::from(Span::styled(label, Style::new().fg(Color::Yellow))).centered());
+    }
 
     if !exists && line_count == 0 {
         let waiting = Line::from(Span::styled(
@@ -863,10 +1622,119 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
     frame.render_widget(paragraph, area);
 }
 
-fn render_footer(frame: &mut ratatui::Frame, area: Rect) {
-    let footer = Paragraph::new("Tab focus · ↑/↓ PgUp/PgDn scroll · ←/→ pan · End follow · q quit")
-        .style(Style::default().add_modifier(Modifier::DIM));
-    frame.render_widget(footer, area);
+/// Build one display line: search matches picked out inside it, and the
+/// whole line reversed when it falls inside the selection.
+///
+/// Match positions are recomputed per visible line per frame rather than
+/// cached. Forty short lines against one regex is nothing beside the
+/// terminal write that follows, and it means a highlight can never disagree
+/// with the text drawn under it — a pane's last line grows under the view
+/// whenever the producer is mid-line.
+fn render_line(
+    text: &str,
+    index: usize,
+    sel: Option<(usize, usize)>,
+    query: Option<&Query>,
+    current: Option<Hit>,
+) -> Line<'static> {
+    let selected = sel.is_some_and(|(lo, hi)| index >= lo && index <= hi);
+    let base = if selected { SELECT_STYLE } else { Style::new() };
+    let hits = query.map(|q| q.hits_in(text)).unwrap_or_default();
+    if hits.is_empty() {
+        return Line::from(Span::styled(text.to_string(), base));
+    }
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(hits.len() * 2 + 1);
+    let mut at = 0;
+    for (start, end) in hits {
+        if start > at {
+            spans.push(Span::styled(text[at..start].to_string(), base));
+        }
+        let is_current = current.is_some_and(|hit| hit.line == index && hit.start == start);
+        // On a selected line the reverse video already belongs to the
+        // selection, so a match there is marked by weight instead of
+        // colour — two backgrounds fighting over one cell reads as neither.
+        let style = if selected && is_current {
+            base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else if selected {
+            base.add_modifier(Modifier::UNDERLINED)
+        } else if is_current {
+            CURRENT_MATCH_STYLE
+        } else {
+            MATCH_STYLE
+        };
+        spans.push(Span::styled(text[start..end].to_string(), style));
+        at = end;
+    }
+    if at < text.len() {
+        spans.push(Span::styled(text[at..].to_string(), base));
+    }
+    Line::from(spans)
+}
+
+/// The bottom line, whose job depends on the mode. Precedence: the search
+/// prompt is being typed into and must always win; a notice outranks the
+/// key hint, which is the fallback when nothing else needs the row.
+fn render_footer(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    mode: &Mode,
+    status: &Option<Status>,
+    panes: &[Pane; 2],
+    focused: usize,
+    mouse: bool,
+) {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let line = if let Mode::Search(prompt) = mode {
+        let mark = match prompt.dir {
+            Direction::Forward => '/',
+            Direction::Backward => '?',
+        };
+        let mut spans = vec![
+            Span::raw(format!("{mark}{}", prompt.input)),
+            // Raw mode leaves us no real cursor down here, so the prompt
+            // draws its own.
+            Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
+        ];
+        if !prompt.note.is_empty() {
+            spans.push(Span::styled(format!("  {}", prompt.note), dim));
+        }
+        Line::from(spans)
+    } else if let Some(status) = status {
+        let style =
+            if status.error { Style::new().fg(Color::Red) } else { Style::new().fg(Color::Green) };
+        Line::from(Span::styled(status.text.clone(), style))
+    } else if matches!(mode, Mode::Select) {
+        let pane = &panes[focused];
+        let selected = pane
+            .sel
+            .and_then(|(anchor, cursor)| selection_span(anchor, cursor, pane.len()))
+            .map_or(0, |(lo, hi)| hi + 1 - lo);
+        let plural = if selected == 1 { "line" } else { "lines" };
+        Line::from(Span::styled(
+            format!("{selected} {plural} selected · j/k G g extend · y copy · Esc cancel · q quit"),
+            dim,
+        ))
+    } else {
+        Line::from(Span::styled(hint(area.width, mouse), dim))
+    };
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The key hint, in two lengths. On a narrow terminal the long one would be
+/// truncated mid-word, so the short one keeps the bindings that can't be
+/// guessed — search and copy — and drops the ones an arrow key finds by
+/// itself.
+fn hint(width: u16, mouse: bool) -> String {
+    let mouse_key = if mouse { "m free mouse" } else { "m grab mouse" };
+    let full = format!(
+        "Tab focus · ↑/↓ PgUp/PgDn scroll · ←/→ pan · End follow · / search · n/N hits · \
+         v select · y copy view · Y copy pane · {mouse_key} · q quit"
+    );
+    if usize::from(width) >= full.chars().count() {
+        full
+    } else {
+        format!("/ search · n/N hits · v select · y copy · {mouse_key} · q quit")
+    }
 }
 
 #[cfg(test)]
@@ -930,6 +1798,196 @@ mod tests {
         let mut s = ScrollState { offset: 20, follow: false };
         assert_eq!(s.resolve(5), 5);
         assert_eq!(s.offset, 5);
+    }
+
+    // -- Status / note ------------------------------------------------------
+
+    #[test]
+    fn status_is_not_expired_before_its_deadline() {
+        let now = Instant::now();
+        let status = Status { text: "hi".to_string(), error: false, until: now + STATUS_TTL };
+        assert!(!status.expired(now));
+        assert!(!status.expired(now + STATUS_TTL - Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn status_is_expired_at_and_after_its_deadline() {
+        let now = Instant::now();
+        let status = Status { text: "hi".to_string(), error: false, until: now + STATUS_TTL };
+        assert!(status.expired(now + STATUS_TTL));
+        assert!(status.expired(now + STATUS_TTL + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn note_sets_a_status_that_is_not_yet_expired() {
+        let mut status = None;
+        note(&mut status, "copied 3 lines", false);
+        let status = status.expect("note always leaves Some");
+        assert_eq!(status.text, "copied 3 lines");
+        assert!(!status.error);
+        assert!(!status.expired(Instant::now()));
+    }
+
+    #[test]
+    fn note_replaces_any_existing_status_rather_than_stacking() {
+        let mut status = None;
+        note(&mut status, "first", false);
+        note(&mut status, "second", true);
+        let status = status.expect("note always leaves Some");
+        assert_eq!(status.text, "second");
+        assert!(status.error);
+    }
+
+    // -- selection_span / center_offset / scroll_to_show / pan_to / char_col ------
+
+    #[test]
+    fn selection_span_normal_order_returns_the_span_as_is() {
+        assert_eq!(selection_span(3, 7, 100), Some((3, 7)));
+    }
+
+    #[test]
+    fn selection_span_reversed_order_normalizes_low_first() {
+        // The cursor can end up above the anchor (selecting upward); the
+        // span is always reported lowest-first regardless.
+        assert_eq!(selection_span(7, 3, 100), Some((3, 7)));
+    }
+
+    #[test]
+    fn selection_span_on_an_empty_buffer_is_none() {
+        assert_eq!(selection_span(0, 0, 0), None);
+    }
+
+    #[test]
+    fn selection_span_clamps_indices_past_len() {
+        assert_eq!(selection_span(2, 50, 10), Some((2, 9)));
+        assert_eq!(selection_span(50, 2, 10), Some((2, 9)));
+    }
+
+    #[test]
+    fn center_offset_centers_with_room_either_side() {
+        assert_eq!(center_offset(50, 10, 1000), 45);
+    }
+
+    #[test]
+    fn center_offset_clamps_at_the_top_for_an_early_line() {
+        assert_eq!(center_offset(2, 10, 1000), 0);
+    }
+
+    #[test]
+    fn center_offset_clamps_at_max() {
+        assert_eq!(center_offset(50, 10, 40), 40);
+    }
+
+    #[test]
+    fn center_offset_handles_odd_and_even_heights() {
+        assert_eq!(center_offset(50, 9, 1000), 46); // half = 9/2 = 4
+        assert_eq!(center_offset(50, 10, 1000), 45); // half = 10/2 = 5
+    }
+
+    #[test]
+    fn scroll_to_show_leaves_a_visible_cursor_alone() {
+        // The key contract vs. center_offset: a cursor already on screen
+        // must not recenter the view, or holding `j` would make the text
+        // crawl under a fixed cursor instead of the cursor walking down it.
+        assert_eq!(scroll_to_show(10, 5, 10, 1000), 5);
+    }
+
+    #[test]
+    fn scroll_to_show_scrolls_up_minimally_when_the_cursor_is_above_the_view() {
+        assert_eq!(scroll_to_show(3, 10, 10, 1000), 3);
+    }
+
+    #[test]
+    fn scroll_to_show_scrolls_down_minimally_when_the_cursor_is_below_the_view() {
+        assert_eq!(scroll_to_show(15, 0, 10, 1000), 6);
+    }
+
+    #[test]
+    fn scroll_to_show_clamps_to_max() {
+        assert_eq!(scroll_to_show(15, 0, 10, 4), 4);
+    }
+
+    #[test]
+    fn scroll_to_show_treats_a_zero_height_as_one() {
+        assert_eq!(scroll_to_show(5, 0, 0, 100), 5);
+    }
+
+    #[test]
+    fn pan_to_leaves_an_onscreen_column_untouched() {
+        assert_eq!(pan_to(15, 10, 20, 1000), 10);
+    }
+
+    #[test]
+    fn pan_to_pans_back_when_the_column_is_left_of_the_view() {
+        // Saturates at 0 rather than going negative.
+        assert_eq!(pan_to(5, 20, 10, 1000), 0);
+    }
+
+    #[test]
+    fn pan_to_pans_right_keeping_hit_margin_columns_of_context() {
+        assert_eq!(pan_to(50, 0, 10, 1000), 50 - HIT_MARGIN);
+    }
+
+    #[test]
+    fn pan_to_clamps_at_max_hscroll() {
+        assert_eq!(pan_to(50, 0, 10, 20), 20);
+    }
+
+    #[test]
+    fn char_col_counts_ascii_columns() {
+        assert_eq!(char_col("hello", 3), 3);
+    }
+
+    #[test]
+    fn char_col_counts_chars_not_bytes_for_multibyte_text() {
+        // "café" is 5 bytes but 4 chars ('é' is 2 bytes); the byte offset
+        // at the end of the string is column 4, not 5.
+        assert_eq!(char_col("café", 5), 4);
+    }
+
+    #[test]
+    fn char_col_does_not_panic_off_a_char_boundary() {
+        // Byte 4 lands inside 'é' (which starts at byte 3), not on a char
+        // boundary — slicing there would panic, but char_col only counts.
+        assert_eq!(char_col("café", 4), 4);
+    }
+
+    #[test]
+    fn char_col_clamps_an_offset_past_the_end_of_the_line() {
+        assert_eq!(char_col("hi", 100), 2);
+    }
+
+    // -- wrap_notice ----------------------------------------------------------
+
+    #[test]
+    fn wrap_notice_forward_says_hit_bottom_continuing_at_top() {
+        assert_eq!(wrap_notice(Direction::Forward), "search hit BOTTOM, continuing at TOP");
+    }
+
+    #[test]
+    fn wrap_notice_backward_says_hit_top_continuing_at_bottom() {
+        assert_eq!(wrap_notice(Direction::Backward), "search hit TOP, continuing at BOTTOM");
+    }
+
+    // -- hint -------------------------------------------------------------
+
+    #[test]
+    fn hint_uses_the_full_text_when_it_fits() {
+        let full = hint(u16::MAX, false);
+        assert!(full.contains("Tab focus"));
+    }
+
+    #[test]
+    fn hint_switches_to_the_short_form_when_narrow() {
+        let short = hint(10, false);
+        assert!(!short.contains("Tab focus"));
+        assert!(short.contains("search"));
+    }
+
+    #[test]
+    fn hint_reflects_mouse_capture_state() {
+        assert!(hint(u16::MAX, true).contains("m free mouse"));
+        assert!(hint(u16::MAX, false).contains("m grab mouse"));
     }
 
     // -- sanitize ---------------------------------------------------------
@@ -1014,6 +2072,8 @@ mod tests {
             content: Arc::new(Mutex::new(content)),
             scroll: ScrollState::new(),
             hscroll: 0,
+            sel: None,
+            search: None,
         }
     }
 
@@ -1094,6 +2154,61 @@ mod tests {
         assert_eq!(pane.scroll.offset, 0);
     }
 
+    // -- shift_view ---------------------------------------------------------
+
+    #[test]
+    fn shift_view_by_zero_is_a_no_op() {
+        let mut scroll = ScrollState { offset: 5, follow: false };
+        let mut sel = Some((3, 7));
+        let mut search = Some(PaneSearch {
+            query: Query::new("x").unwrap(),
+            dir: Direction::Forward,
+            hit: Some(Hit { line: 4, start: 0, end: 1 }),
+            count: (1, 1),
+        });
+        shift_view(&mut scroll, &mut sel, &mut search, 0);
+        assert_eq!(scroll.offset, 5);
+        assert_eq!(sel, Some((3, 7)));
+        assert_eq!(search.as_ref().unwrap().hit.unwrap().line, 4);
+    }
+
+    #[test]
+    fn shift_view_slides_scroll_selection_and_search_hit_together() {
+        let mut scroll = ScrollState { offset: 10, follow: false };
+        let mut sel = Some((8, 12));
+        let mut search = Some(PaneSearch {
+            query: Query::new("x").unwrap(),
+            dir: Direction::Forward,
+            hit: Some(Hit { line: 9, start: 0, end: 1 }),
+            count: (1, 1),
+        });
+        shift_view(&mut scroll, &mut sel, &mut search, 3);
+        assert_eq!(scroll.offset, 7);
+        assert_eq!(sel, Some((5, 9)));
+        assert_eq!(search.as_ref().unwrap().hit.unwrap().line, 6);
+    }
+
+    #[test]
+    fn shift_view_saturates_at_zero_instead_of_wrapping() {
+        let mut scroll = ScrollState { offset: 2, follow: false };
+        let mut sel = Some((1, 3));
+        let mut search: Option<PaneSearch> = None;
+        shift_view(&mut scroll, &mut sel, &mut search, 10);
+        assert_eq!(scroll.offset, 0);
+        assert_eq!(sel, Some((0, 0)));
+    }
+
+    #[test]
+    fn shift_view_tolerates_no_selection_and_no_search() {
+        let mut scroll = ScrollState { offset: 5, follow: false };
+        let mut sel: Option<(usize, usize)> = None;
+        let mut search: Option<PaneSearch> = None;
+        shift_view(&mut scroll, &mut sel, &mut search, 2);
+        assert_eq!(scroll.offset, 3);
+        assert_eq!(sel, None);
+        assert!(search.is_none());
+    }
+
     // -- in_rect / layout hit-testing -------------------------------------
 
     #[test]
@@ -1104,6 +2219,49 @@ mod tests {
         assert!(!in_rect((15, 2), rect)); // one past the right edge
         assert!(!in_rect((5, 6), rect)); // one past the bottom edge
         assert!(!in_rect((4, 2), rect));
+    }
+
+    // -- line_at ------------------------------------------------------------
+
+    #[test]
+    fn line_at_maps_a_row_to_a_buffer_line_honoring_the_border_and_scroll() {
+        let mut content = test_content();
+        for i in 0..20 {
+            content.ingest(format!("line{i}\n").as_bytes());
+        }
+        let mut pane = test_pane(content);
+        pane.scroll.offset = 5;
+        let rect = Rect { x: 0, y: 0, width: 40, height: 10 };
+        // Row 0 is the top border, so row 1 is the first text row.
+        assert_eq!(line_at(&pane, rect, 1), Some(5));
+        assert_eq!(line_at(&pane, rect, 3), Some(7));
+    }
+
+    #[test]
+    fn line_at_returns_none_on_a_border_row() {
+        let mut content = test_content();
+        content.ingest(b"only line\n");
+        let pane = test_pane(content);
+        let rect = Rect { x: 0, y: 0, width: 40, height: 10 };
+        assert_eq!(line_at(&pane, rect, 0), None); // top border
+        assert_eq!(line_at(&pane, rect, 9), None); // bottom border
+    }
+
+    #[test]
+    fn line_at_returns_none_for_an_empty_pane() {
+        let pane = test_pane(test_content());
+        let rect = Rect { x: 0, y: 0, width: 40, height: 10 };
+        assert_eq!(line_at(&pane, rect, 1), None);
+    }
+
+    #[test]
+    fn line_at_clamps_a_row_past_the_last_line_to_the_end_of_the_buffer() {
+        let mut content = test_content();
+        content.ingest(b"one\ntwo\nthree\n");
+        let pane = test_pane(content);
+        let rect = Rect { x: 0, y: 0, width: 40, height: 10 };
+        // Row 8 would name index 7, but only 3 lines exist.
+        assert_eq!(line_at(&pane, rect, 8), Some(2));
     }
 
     // -- FramePacer -------------------------------------------------------
@@ -1323,6 +2481,167 @@ mod tests {
         );
         assert!(sim.frames >= 20, "{sim:?}");
         assert!(sim.worst_staleness <= 2 * Duration::from_millis(800) + MAX_FRAME_GAP, "{sim:?}");
+    }
+
+    // -- Pane::max_scroll / max_hscroll / len --------------------------------
+
+    fn twenty_line_pane() -> Pane {
+        let mut content = test_content();
+        for i in 0..20 {
+            content.ingest(format!("line{i}\n").as_bytes());
+        }
+        test_pane(content)
+    }
+
+    #[test]
+    fn pane_len_and_max_scroll_reflect_the_retained_lines() {
+        let pane = twenty_line_pane();
+        assert_eq!(pane.len(), 20);
+        assert_eq!(pane.max_scroll(6), 14);
+    }
+
+    #[test]
+    fn pane_max_scroll_floors_at_zero_when_the_viewport_is_taller_than_the_content() {
+        let mut content = test_content();
+        content.ingest(b"one\ntwo\n");
+        let pane = test_pane(content);
+        assert_eq!(pane.max_scroll(50), 0);
+    }
+
+    #[test]
+    fn pane_max_hscroll_is_the_widest_line_minus_the_viewport_width() {
+        let mut content = test_content();
+        content.ingest(b"short\n");
+        content.ingest(format!("{}\n", "x".repeat(30)).as_bytes());
+        let pane = test_pane(content);
+        assert_eq!(pane.max_hscroll(10), 20);
+    }
+
+    // -- Pane::view_origin ----------------------------------------------------
+
+    #[test]
+    fn view_origin_forward_starts_at_the_top_of_the_visible_view() {
+        let mut pane = twenty_line_pane();
+        pane.scroll.offset = 5;
+        assert_eq!(pane.view_origin(Direction::Forward, 10), (5, 0));
+    }
+
+    #[test]
+    fn view_origin_backward_starts_at_the_last_visible_line() {
+        let mut pane = twenty_line_pane();
+        pane.scroll.offset = 5;
+        assert_eq!(pane.view_origin(Direction::Backward, 10), (14, usize::MAX));
+    }
+
+    #[test]
+    fn view_origin_clamps_against_a_buffer_shorter_than_the_viewport() {
+        let mut content = test_content();
+        for i in 0..3 {
+            content.ingest(format!("line{i}\n").as_bytes());
+        }
+        let pane = test_pane(content);
+        assert_eq!(pane.view_origin(Direction::Forward, 10), (0, 0));
+        assert_eq!(pane.view_origin(Direction::Backward, 10), (2, usize::MAX));
+    }
+
+    // -- Pane::focus_hit / clear_search -----------------------------------
+
+    #[test]
+    fn focus_hit_releases_follow_and_centers_the_hit_line() {
+        let mut content = test_content();
+        for i in 0..40 {
+            content.ingest(format!("line{i}\n").as_bytes());
+        }
+        let mut pane = test_pane(content);
+        pane.scroll.follow = true;
+        pane.focus_hit(Hit { line: 30, start: 0, end: 1 }, (10, 80));
+        assert!(!pane.scroll.follow);
+        // max = len(40) - inner_height(10) = 30; centered = 30 - 5 = 25.
+        assert_eq!(pane.scroll.offset, 25);
+    }
+
+    #[test]
+    fn focus_hit_pans_horizontally_only_when_the_hit_column_is_off_screen() {
+        let mut content = test_content();
+        content.ingest(b"short\n");
+        content.ingest(format!("{}HIT\n", "x".repeat(100)).as_bytes());
+        let mut pane = test_pane(content);
+        pane.hscroll = 0;
+        pane.focus_hit(Hit { line: 1, start: 100, end: 103 }, (10, 20));
+        // widest = 103, max_hscroll = 103 - 20 = 83; pan_to(100, 0, 20, 83)
+        // targets 100 - HIT_MARGIN = 92, clamped to 83.
+        assert_eq!(pane.hscroll, 83);
+    }
+
+    #[test]
+    fn focus_hit_leaves_hscroll_untouched_when_the_column_is_already_onscreen() {
+        let mut content = test_content();
+        content.ingest(b"short line\n");
+        let mut pane = test_pane(content);
+        pane.hscroll = 0;
+        pane.focus_hit(Hit { line: 0, start: 2, end: 3 }, (10, 80));
+        assert_eq!(pane.hscroll, 0);
+    }
+
+    #[test]
+    fn focus_hit_stores_the_hit_on_the_panes_search() {
+        let mut content = test_content();
+        content.ingest(b"alpha\nbeta\n");
+        let mut pane = test_pane(content);
+        pane.search = Some(PaneSearch {
+            query: Query::new("beta").unwrap(),
+            dir: Direction::Forward,
+            hit: None,
+            count: (0, 0),
+        });
+        let hit = Hit { line: 1, start: 0, end: 4 };
+        pane.focus_hit(hit, (10, 80));
+        assert_eq!(pane.search.as_ref().unwrap().hit, Some(hit));
+    }
+
+    #[test]
+    fn clear_search_drops_the_pattern_highlight_and_hit_together() {
+        let mut content = test_content();
+        content.ingest(b"alpha\n");
+        let mut pane = test_pane(content);
+        pane.search = Some(PaneSearch {
+            query: Query::new("a").unwrap(),
+            dir: Direction::Forward,
+            hit: Some(Hit { line: 0, start: 0, end: 1 }),
+            count: (1, 1),
+        });
+        pane.clear_search();
+        assert!(pane.search.is_none());
+    }
+
+    // -- start_select / leave_select ---------------------------------------
+
+    #[test]
+    fn start_select_anchors_on_the_newest_visible_line_and_pauses_follow() {
+        let mut pane = twenty_line_pane();
+        pane.scroll.offset = 5;
+        pane.scroll.follow = true;
+        assert!(start_select(&mut pane, 10));
+        // bottom = min(offset + height, len) - 1 = min(15, 20) - 1 = 14.
+        assert_eq!(pane.sel, Some((14, 14)));
+        assert!(!pane.scroll.follow);
+    }
+
+    #[test]
+    fn start_select_on_an_empty_buffer_returns_false_and_sets_no_selection() {
+        let mut pane = test_pane(test_content());
+        assert!(!start_select(&mut pane, 10));
+        assert_eq!(pane.sel, None);
+    }
+
+    #[test]
+    fn leave_select_clears_the_selection_and_returns_to_normal_mode() {
+        let mut pane = test_pane(test_content());
+        pane.sel = Some((1, 2));
+        let mut mode = Mode::Select;
+        leave_select(&mut pane, &mut mode);
+        assert_eq!(pane.sel, None);
+        assert!(matches!(mode, Mode::Normal));
     }
 
     // -- reader thread ----------------------------------------------------

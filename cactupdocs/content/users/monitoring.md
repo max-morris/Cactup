@@ -100,18 +100,91 @@ cactup sim log mysim --follow
 Each pane scrolls independently:
 
 - `Tab` — switch focus between panes
-- Arrow keys, `PgUp`/`PgDn` — scroll the focused pane
-- `Left`/`Right` — pan long lines horizontally
-- `End` — jump to the bottom of the focused pane
+- Arrow keys or `j`/`k`, `PgUp`/`PgDn` — scroll the focused pane
+- `Left`/`Right` or `h`/`l` — pan long lines horizontally
+- `Home`/`g` — jump to the top; `End`/`G` — jump to the bottom
 - Mouse wheel also works
 
 Scrolling up pauses auto-follow for that pane, so new output doesn't yank
 you away while you're reading. Scroll back to the bottom (or press `End`)
-to resume following. Press `q` or `Ctrl-C` to quit.
+to resume following. Press `q` or `Ctrl-C` to quit; `Esc` also quits, unless
+a search is active, in which case it clears the search first.
 
 New output is picked up within about 50ms while the run is actively
 writing; once the log goes quiet, cactup backs off and polls less
 frequently, to be kind to shared filesystems like Lustre/NFS.
+
+### Copying
+
+A full-screen view takes away the one thing a plain `tail -f` gets for free
+from the terminal: selecting text with the mouse. The TUI gives it back two
+ways.
+
+By default the mouse is captured by the TUI (the wheel scrolls, clicking
+focuses a pane, and click-drag selects lines). Press `m` to release it back
+to the terminal, so your terminal's own click-drag selection and copy work
+exactly as they would outside the TUI; press `m` again to take the mouse
+back. This is the fallback of record — it works in every terminal.
+
+The TUI can also copy for you, through the system clipboard:
+
+- `y` in normal mode copies exactly what's on screen in the focused pane —
+  the quick "copy what I'm looking at."
+- `Y` copies the pane's whole retained buffer (up to 10,000 lines), not just
+  the visible slice.
+- `v` starts vim-style line-visual selection in the focused pane, anchored
+  on the newest visible line (and pausing that pane's follow). Extend it
+  with `j`/`k`, the arrow keys, `PgUp`/`PgDn`, or `g`/`G`; `y` copies the
+  selected span; `Esc` or `v` cancels without copying. `q` still quits even
+  mid-selection.
+- Click-drag with the mouse (while it's captured) makes the same kind of
+  selection — a plain click just focuses the pane, as before. The selection
+  survives releasing the mouse button, so `y` afterwards copies it.
+
+All of these go out via the terminal's OSC 52 escape sequence, which is
+what lets copying work over SSH and through tmux/screen — the bytes ride
+the same connection back to your local terminal, which is the one actually
+holding the clipboard.
+
+Inside tmux this needs no configuration: tmux understands OSC 52 itself and
+at its default `set-clipboard external` forwards the sequence out to the
+real terminal. Setting `set -g set-clipboard on` additionally drops the
+copied text into tmux's own paste buffer, so `prefix ]` pastes it without
+involving the outer terminal at all — worth turning on, but not required.
+(`allow-passthrough` is *not* involved; cactup deliberately doesn't use
+tmux's DCS passthrough, which would bypass exactly the handling that makes
+this work out of the box.) GNU screen doesn't interpret OSC 52, so cactup
+wraps the sequence in screen's passthrough for it automatically.
+
+The catch is the terminal at the far end: it has to be willing to take an
+OSC 52 clipboard write (xterm needs `allowWindowOps`; some terminals refuse
+it outright), and a terminal that refuses simply discards the sequence —
+there is no ack, so cactup can't tell you it failed. A copy that seems to
+do nothing is usually that. If it happens, `m` plus your terminal's own
+selection is the way around it. Very large copies are capped (100 KB); the
+footer says so when a copy gets cut off.
+
+### Searching
+
+Press `/` to search the focused pane forward, or `?` to search backward.
+The pattern is a regex (so `ERROR|WARN` lights up both), and matching is
+smart-case — case-insensitive unless the pattern contains an uppercase
+letter. Search is per pane: stdout and stderr each keep their own pattern,
+shown in that pane's border, so switching panes doesn't lose either search.
+
+The search is incremental: as you type, the view jumps to and highlights
+the nearest match, with a `[3/17]`-style counter next to the prompt.
+`Enter` commits the pattern; `Esc` abandons it and puts the view back where
+it was; `Backspace` on an already-empty pattern also backs out; `Ctrl-U`
+clears what's typed so far.
+
+Once a pattern is committed, `n`/`N` jump to the next/previous match,
+wrapping around the buffer with a "search hit BOTTOM, continuing at TOP"
+notice (vim's phrasing) when they do. All matches stay highlighted; the one
+you're on is picked out from the rest. Landing on a match centers it
+vertically and pans sideways if it's off-screen, and — like any other jump
+— pauses that pane's follow until you scroll back to the bottom or press
+`End`.
 
 If stdout isn't a terminal — for example, you've piped it to another
 command — `--follow` falls back to the old interleaved streaming instead
