@@ -1,0 +1,71 @@
+# Cactup is hand-formatted, and this file describes that style rather than
+# imposing a new one. It exists so an editor's format-on-save, or an agent
+# reaching for `cargo fmt`, produces something close to the surrounding code
+# instead of rewriting the tree.
+#
+# READ THIS BEFORE RUNNING `cargo fmt`: even with these settings, formatting
+# the whole workspace rewrites ~2700 lines across 53 of 63 files. That is not
+# drift waiting to be cleaned up — see "What this cannot capture" at the
+# bottom. Format the files you touched, never the workspace:
+#
+#     rustfmt --edition 2024 src/tail/tui.rs        # good
+#     cargo fmt                                      # rewrites 53 files
+#
+# For comparison: with no rustfmt.toml at all, `cargo fmt` rewrites ~7700
+# lines across 62 of 63 files. These settings cut that by roughly two thirds;
+# what remains is not expressible as rustfmt configuration.
+
+# This tree runs wider than rustfmt's default 100. Measured over all 63 tracked
+# .rs files: p99 = 101 chars, 341 lines past 100, with a tail to 235 (mostly
+# string literals and #[doc] attributes rustfmt cannot break anyway). 105 is
+# where the diff bottoms out. Going wider is *worse*, not better: rustfmt then
+# starts joining lines that were split by hand for readability.
+max_width = 105
+
+# Kept at the crate edition deliberately, though 2021 style would score ~226
+# lines better. That saving comes entirely from six closures whose body is a
+# bare `loop`/`match` (`scope.spawn(|| loop {…})` in fetch/mod.rs, par.rs and
+# scheduler.rs, and three `match` equivalents), which the 2024 style wraps in
+# an extra block, re-indenting each whole body. Against that, 2021 style
+# explodes any `if c { a } else { b }` used as a tail expression onto five
+# lines regardless of width — and there are 57 of those, up to 114 chars long.
+# Six constructs formatted unlike the tree beats fifty-seven, especially since
+# the if-else is the idiom that recurs when writing new code.
+style_edition = "2024"
+
+# The default `use_small_heuristics = "Default"` caps a call's arguments at 60%
+# of max_width, which is what drives most of a default-rustfmt reformat here:
+# this tree keeps a call on one line right up to the margin. The sub-widths are
+# spelled out rather than using `use_small_heuristics = "Max"` so that the one
+# which genuinely differs (chain_width, below) can be set independently.
+fn_call_width = 105
+attr_fn_like_width = 105
+struct_lit_width = 105
+struct_variant_width = 105
+array_width = 105
+single_line_if_else_max_width = 105
+single_line_let_else_max_width = 105
+
+# The exception to the above. Method chains break earlier than everything else:
+# a chain sitting near the margin is harder to follow than a plain call of the
+# same width, and the tree reflects that. Measured, 80 fits ~100 lines better
+# than tying it to max_width does.
+chain_width = 80
+
+# Imports are grouped by hand (std, external crates, crate-local) and are not
+# in rustfmt's sort order — src/tail/mod.rs, for one, has
+# `std::sync::atomic::{...}` ahead of `std::sync::Arc`. Reordering rewrites six
+# files and settles nothing.
+reorder_imports = false
+
+# What this cannot capture, and why `cargo fmt` still rewrites ~2700 lines:
+#
+#   - ~197 lines are deliberately past 105 chars. rustfmt has no "leave this
+#     line alone" escape hatch; it breaks every one into three or four.
+#   - Let-chains written on one line (13 of them) are always split onto
+#     separate lines. No width knob governs let-chains at any style edition.
+#   - Some call chains are hand-aligned under their receiver (visual indent);
+#     rustfmt only ever emits block indent.
+#
+# A fully formatted tree is therefore not a goal here, and `cargo fmt --check`
+# should not become a CI gate without doing that one-time reformat first.

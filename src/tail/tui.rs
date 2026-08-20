@@ -56,8 +56,8 @@ use super::{LogTail, PollBackoff, SEED_BYTES, clipboard};
 use crate::Res;
 use anyhow::Context;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
@@ -353,11 +353,7 @@ impl FramePacer {
     /// part we're actually pacing against.
     fn note_frame(&mut self, started: Instant, finished: Instant) {
         let sample = finished.saturating_duration_since(started);
-        self.cost = if sample > self.cost {
-            sample
-        } else {
-            (self.cost * 3 + sample) / 4
-        };
+        self.cost = if sample > self.cost { sample } else { (self.cost * 3 + sample) / 4 };
         self.last_finish = Some(finished);
     }
 }
@@ -864,10 +860,7 @@ fn run_app(
     // Strip every escape before it goes anywhere near the title.
     let _ = queue!(
         std::io::stdout(),
-        crossterm::terminal::SetTitle(format!(
-            "cactup log — {}",
-            sanitize(subject.as_bytes(), &mut 0)
-        ))
+        crossterm::terminal::SetTitle(format!("cactup log — {}", sanitize(subject.as_bytes(), &mut 0)))
     );
 
     let mut focused = STDOUT;
@@ -1605,8 +1598,7 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
         } else {
             format!("/{} [{ordinal}/{total}]", search.query.pattern())
         };
-        block =
-            block.title(Line::from(Span::styled(label, Style::new().fg(Color::Yellow))).centered());
+        block = block.title(Line::from(Span::styled(label, Style::new().fg(Color::Yellow))).centered());
     }
 
     if !exists && line_count == 0 {
@@ -2415,11 +2407,8 @@ mod tests {
         // loop) would mean ten frames queued per second of drawing; here
         // every arrival during a frame collapses into the single frame that
         // follows it.
-        let sim = simulate_frames(
-            Duration::from_millis(100),
-            Duration::from_secs(1),
-            Duration::from_secs(60),
-        );
+        let sim =
+            simulate_frames(Duration::from_millis(100), Duration::from_secs(1), Duration::from_secs(60));
         assert!(sim.arrivals > 500, "{sim:?}");
         assert!(
             sim.frames * 5 < sim.arrivals,
@@ -2441,11 +2430,8 @@ mod tests {
         // bytes landing just after a frame starts wait out the rest of that
         // frame, then the gap, then the whole frame that shows them.
         let bound = 2 * Duration::from_secs(1) + MAX_FRAME_GAP + Duration::from_millis(100);
-        let short = simulate_frames(
-            Duration::from_millis(100),
-            Duration::from_secs(1),
-            Duration::from_secs(30),
-        );
+        let short =
+            simulate_frames(Duration::from_millis(100), Duration::from_secs(1), Duration::from_secs(30));
         let long = simulate_frames(
             Duration::from_millis(100),
             Duration::from_secs(1),

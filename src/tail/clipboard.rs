@@ -92,8 +92,7 @@ fn detect_wrap() -> Wrap {
 }
 
 /// Standard base64 alphabet (RFC 4648 §4), padded with `=`.
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// A small hand-rolled base64 encoder so this module doesn't need to add a
 /// crate for the one encoding OSC 52 requires — the payload is opaque
@@ -201,7 +200,9 @@ pub(crate) fn copy_lines(lines: &[String]) -> Res<Copied> {
     let (text, truncated) = truncate_to_char_boundary(&joined, MAX_CLIP_BYTES);
     let sequence = osc52_sequence(text, detect_wrap());
     let mut stdout = std::io::stdout();
-    stdout.write_all(sequence.as_bytes()).context("writing the OSC 52 clipboard sequence")?;
+    stdout
+        .write_all(sequence.as_bytes())
+        .context("writing the OSC 52 clipboard sequence")?;
     stdout.flush().context("flushing the OSC 52 clipboard sequence")?;
     // Report what actually went out rather than what was asked for: a
     // truncated copy sends fewer lines than it was handed, and the notice in
