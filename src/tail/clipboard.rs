@@ -17,10 +17,11 @@
 //! terminals (xterm needs `allowWindowOps`; some terminals refuse it
 //! outright) and a terminal that refuses it simply discards the sequence —
 //! there is no ack, no error, nothing to detect. A copy can therefore
-//! silently do nothing. That is exactly why the TUI's yank binding must
-//! also offer a fallback: turn mouse capture off (so the terminal's own
-//! click-drag selection works) and let the user copy with their terminal's
-//! native selection instead.
+//! silently do nothing. That is exactly why this is the TUI's *second*
+//! copy route and not its only one: the TUI leaves the mouse to the
+//! terminal unless asked for it, so the user's own double-click,
+//! triple-click and drag selection — which needs nothing from us and works
+//! everywhere — stays available throughout.
 
 use crate::Res;
 use anyhow::Context;
