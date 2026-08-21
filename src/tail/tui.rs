@@ -41,15 +41,24 @@
 //!
 //! Two things a plain `tail -f` gets for free from the terminal and a
 //! full-screen view has to hand back deliberately: copying a line, and
-//! finding one. Mouse capture is what takes copying away — the terminal
-//! gives us the drag instead of selecting with it — so both routes are
-//! offered. `m` releases capture outright, restoring the terminal's own
-//! selection, which works everywhere and is the fallback of record;
-//! otherwise a vim-style line selection (`v` then motions, or click-drag)
-//! copies through [`clipboard`]'s OSC 52 path, which also survives the SSH
-//! hop this tool is nearly always used across. Searching is vim's too:
-//! `/`, `?`, `n`, `N` over a [`search::Query`], per pane, incremental as
-//! you type, and centered on the hit when it lands.
+//! finding one.
+//!
+//! Copying stays the terminal's job by default, because the terminal is
+//! better at it than we can be: the TUI does *not* capture the mouse at
+//! startup, so double-click a word, triple-click a line, drag a block and
+//! copy it with whatever chord (Ctrl-Shift-C, ⌘C, middle-click) that
+//! terminal already uses — all of it works untouched, and it works even
+//! where OSC 52 is refused. `m` is what hands the mouse to the TUI, for
+//! wheel scrolling, click-to-focus and drag-to-select-lines; the footer
+//! says which side currently holds it.
+//!
+//! On top of that the TUI copies its *own* buffer through [`clipboard`]'s
+//! OSC 52 path (which survives the SSH hop this tool is nearly always used
+//! across): `y` yanks the view, `Y` the pane, and `v` plus motions yanks a
+//! line selection. Ctrl-Shift-C does the same as `y` wherever the terminal
+//! lets us see it as its own chord — see [`enable_rich_keys`]. Searching
+//! is vim's: `/`, `?`, `n`, `N` over a [`search::Query`], per pane,
+//! incremental as you type, and centered on the hit when it lands.
 
 use super::search::{self, Direction, Hit, Query};
 use super::{LogTail, PollBackoff, SEED_BYTES, clipboard};
@@ -57,11 +66,12 @@ use crate::Res;
 use anyhow::Context;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
-    disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
 };
 use crossterm::{execute, queue};
 use ratatui::Terminal;
@@ -71,7 +81,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::collections::VecDeque;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -730,11 +740,68 @@ pub(crate) fn follow_tui(sources: &[(&str, PathBuf); 2], subject: &str) -> Res<(
     result
 }
 
+/// Turn the terminal's alternate-scroll mode on/off (DECSET 1007).
+///
+/// With mouse capture off — how the TUI starts — the terminal keeps the
+/// mouse, and this is what keeps the wheel working anyway: in the alternate
+/// screen the terminal turns wheel notches into ↑/↓ presses, which land in
+/// the normal-mode bindings like any other arrow key. Terminals that don't
+/// implement it ignore the sequence.
+const ALT_SCROLL_ON: &[u8] = b"\x1b[?1007h";
+const ALT_SCROLL_OFF: &[u8] = b"\x1b[?1007l";
+
+/// Set while the kitty keyboard protocol's disambiguation flag is pushed —
+/// see [`enable_rich_keys`]. A static because [`restore_terminal`], which
+/// has to pop exactly what was pushed, also runs from the panic hook, where
+/// there is no app state to consult.
+static RICH_KEYS: AtomicBool = AtomicBool::new(false);
+
+/// Whether this terminal reports Ctrl-Shift-C as a chord of its own, which
+/// is what makes [`is_copy_chord`] reachable and the footer's mention of it
+/// honest.
+fn rich_keys() -> bool {
+    RICH_KEYS.load(Ordering::Relaxed)
+}
+
+/// Ask for the kitty keyboard protocol's `DISAMBIGUATE_ESCAPE_CODES`, so
+/// Ctrl-Shift-C can be told apart from Ctrl-C.
+///
+/// Legacy key encoding has no way to spell Ctrl-Shift-C: the terminal sends
+/// the same 0x03 byte it sends for Ctrl-C, and an app that quits on Ctrl-C
+/// — as the interrupt contract requires — necessarily quits on the copy
+/// chord too. The disambiguating flag is the fix: with it, Ctrl-Shift-C
+/// arrives as `CSI 99;6u`, a distinct event [`is_copy_chord`] can match.
+///
+/// Best-effort: a push the terminal rejects (or never understood) leaves
+/// `RICH_KEYS` clear, and the chord stays unreachable and unadvertised.
+/// Only this one flag is asked for — key-release and alternate-key
+/// reporting would change events the TUI already handles. Must run *after*
+/// the switch to the alternate screen: the flag stack is per-screen, so a
+/// push on the main screen is not the one [`restore_terminal`] pops.
+fn enable_rich_keys(stdout: &mut std::io::Stdout) {
+    let pushed = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    RICH_KEYS.store(pushed.is_ok(), Ordering::Relaxed);
+}
+
 fn setup_terminal() -> Res<Terminal<Backend>> {
     enable_raw_mode().context("enabling raw mode")?;
+    // Detection before the screen is cleared, deliberately: it waits on a
+    // reply the terminal may never send (crossterm gives up after two
+    // seconds), and on the rare terminal that stays silent a pause on the
+    // shell's own screen looks far less like a hang than a blank one.
+    let rich = supports_keyboard_enhancement().unwrap_or(false);
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("entering the alternate screen")?;
+    // Note what is *not* here: mouse capture. The terminal keeps the mouse
+    // until `m` asks for it, so the user's own double-click, triple-click
+    // and drag-select keep working inside the panes.
+    execute!(stdout, EnterAlternateScreen).context("entering the alternate screen")?;
+    let _ = stdout.write_all(ALT_SCROLL_ON);
+    if rich {
+        enable_rich_keys(&mut stdout);
+    }
     Terminal::new(CrosstermBackend::new(stdout)).context("creating the ratatui terminal")
 }
 
@@ -742,8 +809,15 @@ fn setup_terminal() -> Res<Terminal<Backend>> {
 /// ignoring errors since this runs on every exit path, including after a
 /// panic or mid-error, when the terminal may already be in a mixed state.
 fn restore_terminal() {
+    let mut stdout = std::io::stdout();
+    // `swap` so the panic hook and the normal exit path can both run this
+    // without popping a second time off someone else's stack.
+    if RICH_KEYS.swap(false, Ordering::Relaxed) {
+        let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    }
+    let _ = stdout.write_all(ALT_SCROLL_OFF);
     let _ = disable_raw_mode();
-    let _ = execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
 }
 
 /// Chain onto the existing panic hook so a panic inside the TUI still
@@ -869,9 +943,9 @@ fn run_app(
     let mut layout = (Rect::default(), Rect::default());
     let mut mode = Mode::Normal;
     let mut status: Option<Status> = None;
-    // Mouse capture is on until the user hands the mouse back to the
-    // terminal with `m`.
-    let mut mouse = true;
+    // The terminal owns the mouse until the user hands it to the TUI with
+    // `m` — native selection is the copy route that works everywhere.
+    let mut mouse = false;
     let mut drag: Option<DragStart> = None;
 
     // Raised by the reader thread whenever bytes land. A *flag*, not a
@@ -963,7 +1037,8 @@ fn run_app(
 ///
 /// Dispatch is by mode first and binding second, which is what lets the `/`
 /// prompt accept `q`, `j` or `/` as plain text: while it is open the pane's
-/// own bindings simply aren't reachable. Only Ctrl-C outranks the mode.
+/// own bindings simply aren't reachable. Only the two chords outrank the
+/// mode: Ctrl-Shift-C copies and Ctrl-C quits.
 fn handle_key(
     key: KeyEvent,
     panes: &mut [Pane; 2],
@@ -973,15 +1048,25 @@ fn handle_key(
     status: &mut Option<Status>,
     mouse: &mut bool,
 ) -> Res<bool> {
+    let rect = if *focused == STDOUT { layout.0 } else { layout.1 };
+    // (height, width) of the pane's *content* area, borders excluded — what
+    // every page, centering and pan calculation below is relative to.
+    let inner = (rect.height.saturating_sub(2), rect.width.saturating_sub(2));
+    // Ctrl-Shift-C first, because the alternative is reading it as the
+    // Ctrl-C below and quitting on the user's copy. It is checked before
+    // the modes for the same reason `y` isn't enough on its own: the chord
+    // has to mean "copy" everywhere, including mid-pattern. Terminals that
+    // keep the chord for their own copy never send it here, and those that
+    // can't spell it (no `rich_keys`) send a bare Ctrl-C that we cannot
+    // tell apart — there, the terminal's own selection is the copy route.
+    if is_copy_chord(&key) {
+        return copy_current(&mut panes[*focused], mode, inner.0, status).map(|()| false);
+    }
     // The interrupt contract doesn't get a modal exemption: Ctrl-C means
     // "stop" from inside a half-typed pattern too.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(true);
     }
-    let rect = if *focused == STDOUT { layout.0 } else { layout.1 };
-    // (height, width) of the pane's *content* area, borders excluded — what
-    // every page, centering and pan calculation below is relative to.
-    let inner = (rect.height.saturating_sub(2), rect.width.saturating_sub(2));
     if matches!(mode, Mode::Search(_)) {
         search_key(key, &mut panes[*focused], mode, inner, status);
         return Ok(false);
@@ -990,6 +1075,41 @@ fn handle_key(
         return select_key(key, &mut panes[*focused], mode, inner, status);
     }
     normal_key(key, panes, focused, mode, inner, status, mouse)
+}
+
+/// Is this Ctrl-Shift-C, in either spelling a terminal may use for it?
+///
+/// With `DISAMBIGUATE_ESCAPE_CODES` alone the chord arrives as the base key
+/// plus both modifiers (`Char('c')` + CONTROL | SHIFT). A terminal that
+/// volunteers the shifted codepoint too — crossterm reads it and clears
+/// SHIFT — makes it `Char('C')` + CONTROL. Both are the same keypress.
+fn is_copy_chord(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && match key.code {
+            KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::SHIFT),
+            KeyCode::Char('C') => true,
+            _ => false,
+        }
+}
+
+/// Copy whatever the current mode means by "copy" — the selection while one
+/// is being made, otherwise the view. That is `y`'s meaning in each mode,
+/// and Ctrl-Shift-C is bound to it rather than to a mode of its own.
+fn copy_current(
+    pane: &mut Pane,
+    mode: &mut Mode,
+    inner_height: u16,
+    status: &mut Option<Status>,
+) -> Res<()> {
+    if matches!(mode, Mode::Select)
+        && let Some((anchor, cursor)) = pane.sel
+    {
+        let span = selection_span(anchor, cursor, pane.len());
+        copy_span(pane, span, "the selection", status)?;
+        leave_select(pane, mode);
+        return Ok(());
+    }
+    copy_view(pane, inner_height, status)
 }
 
 /// Live-tailing bindings: scroll, pan, focus, and the entry points into the
@@ -1015,9 +1135,11 @@ fn normal_key(
             *mouse = !*mouse;
             set_mouse_capture(*mouse)?;
             let msg: &str = if *mouse {
-                "mouse captured — wheel scrolls, drag selects lines"
+                "mouse captured — wheel scrolls, drag selects lines; \
+                 your terminal's own selection is off until m"
             } else {
-                "mouse released — select with your terminal as usual, m to take it back"
+                "mouse released — double-click, drag and copy with your terminal \
+                 as usual, m to take it back"
             };
             note(status, msg, false);
             return Ok(false);
@@ -1382,13 +1504,16 @@ fn copy_view(pane: &Pane, inner_height: u16, status: &mut Option<Status>) -> Res
     copy_span(pane, Some((lo, hi - 1)), "the view", status)
 }
 
-/// Hand the mouse to the terminal, or take it back.
+/// Take the mouse for the TUI, or hand it back to the terminal.
 ///
-/// Capture is what makes the wheel and click-to-focus work, and at the same
-/// time what stops the terminal's own click-drag selection — the one copy
-/// route that works in every terminal, including those that refuse OSC 52
-/// and those behind a multiplexer that strips it. So it's a toggle, not a
-/// setting.
+/// Capture is what makes drag-to-select-lines and click-to-focus work, and
+/// at the same time what takes away the terminal's own double-click,
+/// triple-click and drag selection — the copy route that works in every
+/// terminal, including those that refuse OSC 52 and those behind a
+/// multiplexer that strips it. So it's a toggle, and the terminal's side of
+/// it is the default; `ALT_SCROLL_ON` covers the wheel while capture is
+/// off, which leaves click-to-focus and line selection as the only reasons
+/// to reach for `m`.
 fn set_mouse_capture(on: bool) -> Res<()> {
     let mut out = std::io::stdout();
     if on {
@@ -1703,29 +1828,41 @@ fn render_footer(
             .map_or(0, |(lo, hi)| hi + 1 - lo);
         let plural = if selected == 1 { "line" } else { "lines" };
         Line::from(Span::styled(
-            format!("{selected} {plural} selected · j/k G g extend · y copy · Esc cancel · q quit"),
+            format!(
+                "{selected} {plural} selected · j/k G g extend · {} copy · Esc cancel · q quit",
+                copy_keys(rich_keys())
+            ),
             dim,
         ))
     } else {
-        Line::from(Span::styled(hint(area.width, mouse), dim))
+        Line::from(Span::styled(hint(area.width, mouse, rich_keys()), dim))
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// How to spell the copy binding for the user: Ctrl-Shift-C is only worth
+/// naming where the terminal can actually deliver it (see
+/// [`enable_rich_keys`]) — advertising it elsewhere would be advertising a
+/// key that quits.
+fn copy_keys(rich: bool) -> &'static str {
+    if rich { "y ^⇧C" } else { "y" }
 }
 
 /// The key hint, in two lengths. On a narrow terminal the long one would be
 /// truncated mid-word, so the short one keeps the bindings that can't be
 /// guessed — search and copy — and drops the ones an arrow key finds by
 /// itself.
-fn hint(width: u16, mouse: bool) -> String {
+fn hint(width: u16, mouse: bool, rich: bool) -> String {
     let mouse_key = if mouse { "m free mouse" } else { "m grab mouse" };
+    let copy = copy_keys(rich);
     let full = format!(
         "Tab focus · ↑/↓ PgUp/PgDn scroll · ←/→ pan · End follow · / search · n/N hits · \
-         v select · y copy view · Y copy pane · {mouse_key} · q quit"
+         v select · {copy} copy view · Y copy pane · {mouse_key} · q quit"
     );
     if usize::from(width) >= full.chars().count() {
         full
     } else {
-        format!("/ search · n/N hits · v select · y copy · {mouse_key} · q quit")
+        format!("/ search · n/N hits · v select · {copy} copy · {mouse_key} · q quit")
     }
 }
 
@@ -1961,25 +2098,62 @@ mod tests {
         assert_eq!(wrap_notice(Direction::Backward), "search hit TOP, continuing at BOTTOM");
     }
 
+    // -- is_copy_chord ------------------------------------------------------
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn copy_chord_matches_ctrl_shift_c_as_the_base_key_plus_both_modifiers() {
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert!(is_copy_chord(&key(KeyCode::Char('c'), ctrl_shift)));
+    }
+
+    #[test]
+    fn copy_chord_matches_the_shifted_spelling_a_terminal_may_send_instead() {
+        // Alternate-key reporting hands crossterm 'C' and clears SHIFT.
+        assert!(is_copy_chord(&key(KeyCode::Char('C'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn copy_chord_does_not_swallow_plain_ctrl_c() {
+        assert!(!is_copy_chord(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn copy_chord_needs_control() {
+        assert!(!is_copy_chord(&key(KeyCode::Char('C'), KeyModifiers::SHIFT)));
+        assert!(!is_copy_chord(&key(KeyCode::Char('c'), KeyModifiers::NONE)));
+    }
+
     // -- hint -------------------------------------------------------------
 
     #[test]
     fn hint_uses_the_full_text_when_it_fits() {
-        let full = hint(u16::MAX, false);
+        let full = hint(u16::MAX, false, false);
         assert!(full.contains("Tab focus"));
     }
 
     #[test]
     fn hint_switches_to_the_short_form_when_narrow() {
-        let short = hint(10, false);
+        let short = hint(10, false, false);
         assert!(!short.contains("Tab focus"));
         assert!(short.contains("search"));
     }
 
     #[test]
+    fn hint_names_the_copy_chord_only_where_the_terminal_can_send_it() {
+        assert!(hint(u16::MAX, false, true).contains("^⇧C"));
+        assert!(hint(10, false, true).contains("^⇧C"));
+        assert!(!hint(u16::MAX, false, false).contains("^⇧C"));
+        assert!(!hint(10, false, false).contains("^⇧C"));
+    }
+
+    #[test]
     fn hint_reflects_mouse_capture_state() {
-        assert!(hint(u16::MAX, true).contains("m free mouse"));
-        assert!(hint(u16::MAX, false).contains("m grab mouse"));
+        assert!(hint(u16::MAX, true, false).contains("m free mouse"));
+        assert!(hint(u16::MAX, false, false).contains("m grab mouse"));
     }
 
     // -- sanitize ---------------------------------------------------------

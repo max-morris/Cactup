@@ -103,7 +103,8 @@ Each pane scrolls independently:
 - Arrow keys or `j`/`k`, `PgUp`/`PgDn` — scroll the focused pane
 - `Left`/`Right` or `h`/`l` — pan long lines horizontally
 - `Home`/`g` — jump to the top; `End`/`G` — jump to the bottom
-- Mouse wheel also works
+- Mouse wheel also works (your terminal's own wheel-to-arrow handling while
+  the TUI leaves the mouse alone, the TUI's own once `m` grabs it)
 
 Scrolling up pauses auto-follow for that pane, so new output doesn't yank
 you away while you're reading. Scroll back to the bottom (or press `End`)
@@ -116,27 +117,31 @@ frequently, to be kind to shared filesystems like Lustre/NFS.
 
 ### Copying
 
-A full-screen view takes away the one thing a plain `tail -f` gets for free
-from the terminal: selecting text with the mouse. The TUI gives it back two
-ways.
+A full-screen view can take away the one thing a plain `tail -f` gets for
+free from the terminal: selecting text with the mouse. This one doesn't.
 
-By default the mouse is captured by the TUI (the wheel scrolls, clicking
-focuses a pane, and click-drag selects lines). Press `m` to release it back
-to the terminal, so your terminal's own click-drag selection and copy work
-exactly as they would outside the TUI; press `m` again to take the mouse
-back. This is the fallback of record — it works in every terminal.
+By default the TUI does not capture the mouse, so everything your terminal
+already does keeps working inside the panes: double-click a word,
+triple-click a line, drag out a block, and copy it with whatever your
+terminal uses (`Ctrl-Shift-C`, `⌘C`, middle-click paste). This route needs
+nothing from cactup and works in every terminal. Press `m` to hand the
+mouse to the TUI instead — then the wheel scrolls, clicking focuses a pane,
+and click-drag selects whole lines — and `m` again to give it back.
 
 The TUI can also copy for you, through the system clipboard:
 
 - `y` in normal mode copies exactly what's on screen in the focused pane —
-  the quick "copy what I'm looking at."
+  the quick "copy what I'm looking at." `Ctrl-Shift-C` does the same, in
+  terminals that let cactup see that chord rather than keeping it for their
+  own copy or sending it as a plain `Ctrl-C`; when it's available the footer
+  lists it next to `y`.
 - `Y` copies the pane's whole retained buffer (up to 10,000 lines), not just
   the visible slice.
 - `v` starts vim-style line-visual selection in the focused pane, anchored
   on the newest visible line (and pausing that pane's follow). Extend it
-  with `j`/`k`, the arrow keys, `PgUp`/`PgDn`, or `g`/`G`; `y` copies the
-  selected span; `Esc` or `v` cancels without copying. `q` still quits even
-  mid-selection.
+  with `j`/`k`, the arrow keys, `PgUp`/`PgDn`, or `g`/`G`; `y` (or
+  `Ctrl-Shift-C`) copies the selected span; `Esc` or `v` cancels without
+  copying. `q` still quits even mid-selection.
 - Click-drag with the mouse (while it's captured) makes the same kind of
   selection — a plain click just focuses the pane, as before. The selection
   survives releasing the mouse button, so `y` afterwards copies it.
@@ -160,8 +165,8 @@ The catch is the terminal at the far end: it has to be willing to take an
 OSC 52 clipboard write (xterm needs `allowWindowOps`; some terminals refuse
 it outright), and a terminal that refuses simply discards the sequence —
 there is no ack, so cactup can't tell you it failed. A copy that seems to
-do nothing is usually that. If it happens, `m` plus your terminal's own
-selection is the way around it. Very large copies are capped (100 KB); the
+do nothing is usually that. If it happens, your terminal's own selection —
+which is what the mouse does until you press `m` — is the way around it. Very large copies are capped (100 KB); the
 footer says so when a copy gets cut off.
 
 ### Searching
