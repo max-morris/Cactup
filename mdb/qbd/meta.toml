@@ -9,8 +9,12 @@
 # this is now a native CUDA build against the prebuilt externals under
 # /ddnB/project/sbrandt/externals-qbd. One we do NOT keep: that regeneration
 # also dropped the srun-wrapped `make` (builds farmed out to the queue). qbd
-# requires building on the compute nodes, so that behavior is restored as the
-# [universes.compute] build universe below (§4.8).
+# requires building on the compute nodes, so that behavior is restored — but as
+# a first-class queued build ([variants.buildsubmitscript] below, §7.9), not by
+# wrapping `make` in a universe. A universe says WHERE a command runs; the
+# scheduler says HOW work reaches a machine. Conflating them is what made the
+# old wrapper reimplement job-id parsing, status polling and log streaming in
+# sh; cactup does all three itself now.
 #
 # The upstream `queue` field was blank after the regeneration (an earlier
 # port carried that as a placeholder queue with an empty scheduler-facing
@@ -50,83 +54,24 @@ memory             = 514913    # MB per node
 [build]
 make      = "make -j@MAKEJOBS@"
 make-jobs = 64
-# qbd makes you build on the compute nodes: the build is farmed out to the
-# queue via the universe below, like the old ini's srun-wrapped `make`.
-universe  = "compute"
+# qbd makes you build on the compute nodes, so an unqualified `cactup build`
+# goes to the queue (§7.9). This is also what the auto-choice would pick — the
+# buildsubmitscript below plus [scheduler].submit make submitting possible —
+# but it is stated rather than inferred, because building on a QB4 login node
+# is a policy violation, not merely slow.
+default-action = "submit"
 
-# Build universe (§4.8). The old ini wrapped `make` in
-#   srun -p gpu2 --gpus-per-task 1 --gres=gpu:… -N @NODES@ -n @NUM_PROCS@
-#        --cpus-per-task $((MAKEJOBS > NUM_THREADS ? …)) -A @ALLOCATION@
-#        singularity exec --nv … make -j@MAKEJOBS@
-# The upstream regeneration dropped that along with the Singularity image, but
-# qbd still requires builds to run on a compute node, so the queue-farmed
-# build is restored here (minus the image — the build is native now).
-#
-# NOT an srun prefix, though: QB4's srun client aggregates task output when
-# its stdout is not a tty (a full build's output arrived as one slug at srun
-# exit), so builds looked hung for their whole duration. Instead the wrapper
-# submits via `sbatch --wait` with the job writing to a file, and streams that
-# file with `tail -f` — the same mechanism used to follow sim output, which
-# streams fine on these clusters. sbatch also prints "Submitted batch job N"
-# immediately, so a build waiting in the queue is visibly queued, and it shows
-# up in squeue as build-<config>. The final lines can lag the NFS attribute
-# cache; the raw sbatch log stays at ~/.cactup-build-<config>.log.
-#
-# Request shape, from the old wrapper collapsed to build time: one task,
-# cpus-per-task tracks @MAKEJOBS@ (the effective `make -j`, default 64 = a
-# full node). gpu2 caps CPUs per GPU at 32, so the full-node build must
-# request both of the node's GPUs even though compiling needs none — via
-# `--gres` (the old wrapper's form): the cap does not count GPUs asked for
-# with `--gpus-per-task`.
-#   - `-p gpu2` matches the old make wrapper and the default queue below.
-#   - `-A @ALLOCATION@` binds from the allocation knob (`cactup knob
-#     allocation <acct>`), required on LONI just like the submitscript's
-#     unconditional `#SBATCH -A`.
-# @COMMAND@ is the shell-quoted `env-setup + make` snippet; the wrapper's
-# shell unquotes it as sbatch's --wrap argument, so the snippet (including
-# the module loads) becomes the batch script and runs on the compute node.
-# The RUN is not coerced into this universe (the submitscript sbatch'es its
-# own job); the optionlist sets coerce-run-universe = false accordingly.
-# Exit status: we do NOT trust sbatch's own rc. On qbd2 the site fronts sbatch
-# with a lua shim (its banners: `sbatch: lua: Submitted job N`, SU estimates)
-# that returns 0 even when submission fails OR the wrapped job dies — a build
-# whose inner `make` failed would otherwise be reported as a success, and
-# cactup's completeness check would then misdiagnose it. So the wrapper derives
-# its own status: submission must yield a `Submitted batch job <id>` (no id ⇒
-# submission failed), and after `--wait` returns we ask the scheduler for the
-# job's real outcome (sacct, or scontrol as a fallback) rather than believing
-# the shim. Only State==COMPLETED with ExitCode 0:0 exits 0.
-[universes.compute]
-wrapper = """
-out="$HOME/.cactup-build-@CONFIGURATION@.log"
-subout="$HOME/.cactup-build-@CONFIGURATION@.submit.log"
-: > "$out"
-tail -f "$out" &
-tailpid=$!
-# --wait blocks until the job ends; sbatch's stdout (the "Submitted batch job N"
-# line and any shim banners) is teed so it stays visible live and parseable
-# after. The pipeline's exit status is tee's, not sbatch's — deliberately, see
-# the note above.
-sbatch --wait -A @ALLOCATION@ -p gpu2 --gres=gpu:2 -N 1 -n 1 --cpus-per-task @MAKEJOBS@ -J build-@CONFIGURATION@ -o "$out" -e "$out" --wrap @COMMAND@ 2>&1 | tee "$subout"
-sleep 5
-kill "$tailpid" 2>/dev/null || true
-echo "cactup: full sbatch log: $out"
-jobid=$(sed -n 's/.*Submitted batch job \\([0-9][0-9]*\\).*/\\1/p' "$subout" | head -n1)
-if [ -z "$jobid" ]; then
-  echo "cactup: sbatch reported no job id — submission failed (see above)" 1>&2
-  exit 1
-fi
-info=$(sacct -j "$jobid" --format=State,ExitCode -n -P 2>/dev/null | head -n1)
-if [ -z "$info" ]; then
-  info=$(scontrol show job "$jobid" 2>/dev/null | tr ' ' '\\n' \\
-         | awk -F= '/^JobState=/{s=$2} /^ExitCode=/{e=$2} END{if(s!="")print s"|"e}')
-fi
-echo "cactup: job $jobid outcome: ${info:-unknown}" 1>&2
-case "$info" in
-  COMPLETED'|'0:0*) exit 0 ;;
-  *) echo "cactup: build job did not complete cleanly (see $out)" 1>&2; exit 1 ;;
-esac
-"""
+# The build job's shape. One node, one task: `make -j` is shared-memory, so
+# extra nodes buy nothing. cpus-per-task tracks make-jobs (a full node's 64
+# cores) — the old wrapper's `--cpus-per-task @MAKEJOBS@`. Compiling needs no
+# GPU, but see the --gres note in buildsubmitscripts/default.py: QB4 counts
+# only GPUs asked for via --gres against its CPUs-per-GPU cap, so a full-node
+# build must reserve the node's whole GPU complement to be allowed its cores.
+queue         = "gpu2"
+walltime      = "4:00:00"
+nodes         = 1
+tasks         = 1
+cpus-per-task = 64
 
 [environment]
 # Verbatim from the upstream heredoc (including its leading indentation and the
@@ -192,6 +137,10 @@ default-cpus-per-task = 16
 [variants.runscript]
 "default" = { queues = ["gpu2", "gpu4"], default = true }
 "test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test run`
+
+# Both partitions can build; the script derives --gres per queue.
+[variants.buildsubmitscript]
+"default" = { queues = ["gpu2", "gpu4"], default = true }
 
 [variants.optionlist]
 variants = ["default"]

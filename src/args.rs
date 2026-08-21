@@ -110,8 +110,15 @@ pub(crate) enum Commands {
     /// Manage Cactus configurations in the active installation
     #[clap(subcommand)]
     Config(ConfigCommand),
-    /// Alias for `config build`
-    Build(ConfigBuildArgs),
+    /// Build (or rebuild) a config in the active installation, and manage
+    /// build attempts
+    #[command(args_conflicts_with_subcommands = true)]
+    Build {
+        #[clap(flatten)]
+        start: Box<BuildStartArgs>,
+        #[clap(subcommand)]
+        command: Option<BuildCommand>,
+    },
     // §8
     /// Manage simulations
     #[clap(subcommand)]
@@ -239,7 +246,7 @@ pub(crate) struct UniverseFlags {
 
 // §8.5
 /// The TOPOLOGY flag set, shared by `sim submit/run` and `test run/submit`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone)]
 pub(crate) struct TopologyFlags {
     /// Account/allocation to charge (default: knob).
     #[clap(short, long, value_name = "ACCOUNT")]
@@ -274,7 +281,10 @@ pub(crate) struct TopologyFlags {
     #[clap(short = 'G', long, value_name = "N")]
     pub gpus_per_task: Option<u32>,
     /// Job name (default: the simulation name).
-    #[clap(short, long, value_name = "NAME")]
+    // `-J` (not `-j`): `-j`/`--make-jobs` already claims `-j` in `BuildOpts`,
+    // which `build`'s subcommands flatten alongside this struct — `-J` is
+    // SLURM's own spelling for a job name, and free across this CLI.
+    #[clap(short = 'J', long, value_name = "NAME")]
     pub job_name: Option<String>,
     // §8.8
     /// Total walltime for the whole simulation; chained into per-job segments
@@ -290,7 +300,7 @@ pub(crate) struct TopologyFlags {
 }
 
 // §7.1, §7.6, §7.7
-/// Build flags for `config build`.
+/// Build flags for `cactup build`.
 #[derive(clap::Args, Debug)]
 pub(crate) struct BuildOpts {
     /// Rebuild even if the config is already built.
@@ -356,18 +366,85 @@ impl BuildOpts {
     }
 }
 
+// §7, §8.3.1
+/// Shared surface of the bare `cactup build`, `build run`, and `build submit`.
 #[derive(clap::Args, Debug)]
-pub(crate) struct ConfigBuildArgs {
-    /// The config to build (or rebuild, with -f).
-    pub name: String,
+pub(crate) struct BuildStartArgs {
+    /// The config to build (or rebuild, with -f); default: the active config.
+    pub name: Option<String>,
     #[clap(flatten)]
     pub opts: BuildOpts,
+    #[clap(flatten)]
+    pub topology: TopologyFlags,
+    // §8.3.1
+    /// Compute-node path: the config's on-disk directory, so the build needs
+    /// neither the global DB nor the registry. Requires --attempt-id.
+    #[clap(long, value_name = "PATH", requires = "attempt_id")]
+    pub config_dir: Option<PathBuf>,
+    /// Compute-node locator: drive exactly this build attempt
+    /// (`.cactup-builds/%04d`). Requires --config-dir.
+    #[clap(long, value_name = "N", requires = "config_dir")]
+    pub attempt_id: Option<u32>,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct BuildSubmitArgs {
+    #[clap(flatten)]
+    pub start: BuildStartArgs,
+    /// Stream the build's output until it finishes, or Ctrl-C.
+    #[clap(long)]
+    pub follow: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum BuildCommand {
+    /// Build (or rebuild, with -f) a config in the active installation
+    Run(BuildStartArgs),
+    /// Submit a build to the queue
+    Submit(BuildSubmitArgs),
+    /// List build attempts in the active installation
+    List {
+        #[clap(long, help = "Show extended per-attempt details.")]
+        long: bool,
+        #[clap(long, help = "List build attempts across every installation.")]
+        all: bool,
+    },
+    /// Show one config's most recent build attempt in detail
+    Show {
+        /// Config to inspect (default: the active config).
+        name: Option<String>,
+        #[clap(long, help = "Show extended per-attempt details.")]
+        long: bool,
+    },
+    /// Tail the build's stdout/stderr
+    Log {
+        /// Config to inspect (default: the active config).
+        name: Option<String>,
+        #[clap(short, long, conflicts_with_all = ["follow_out", "follow_err"], help = "Side-by-side live TUI of stdout and stderr, until Ctrl-C.")]
+        follow: bool,
+        #[clap(short = 'o', long, conflicts_with = "follow_err", help = "Stream only stdout (tail -f style), until Ctrl-C.")]
+        follow_out: bool,
+        #[clap(short = 'e', long, help = "Stream only stderr (tail -f style), until Ctrl-C.")]
+        follow_err: bool,
+    },
+    /// Stop a running/queued build
+    Stop {
+        /// Config to stop (default: the active config).
+        name: Option<String>,
+        #[clap(short, long, help = "Kill the build process directly instead of a graceful stop.")]
+        force: bool,
+    },
+    /// Remove old build attempts, keeping only the most recent ones
+    Prune {
+        /// Config to prune (default: the active config).
+        name: Option<String>,
+        #[clap(long, value_name = "N", help = "Number of most-recent attempts to keep.")]
+        keep: Option<u32>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ConfigCommand {
-    /// Build (or rebuild with -f) a config in the active installation
-    Build(ConfigBuildArgs),
     /// List configs in the active installation
     List,
     /// Show the active config, or a named one's stored metadata
@@ -685,8 +762,21 @@ mod tests {
             vec!["cactup", "install", "ET_2025_05", "--silent"],
             vec!["cactup", "install", "--thornlist", "my/list.th", "--silent"],
             vec!["cactup", "uninstall", "old", "-f"],
+            // A bare positional beside an optional subcommand is the likeliest
+            // thing to break here: "sim" must land as the config positional,
+            // not be mistaken for (or reported as) an unknown subcommand. See
+            // `build_bare_positional_is_not_mistaken_for_a_subcommand` below.
             vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
-            vec!["cactup", "config", "build", "sim", "--universe", "et-sif"],
+            vec!["cactup", "build", "run", "sim", "--variant", "cuda", "--universe", "et-sif"],
+            vec![
+                "cactup", "build", "run", "--config-dir", "/inst/configs/sim", "--attempt-id", "2",
+            ],
+            vec!["cactup", "build", "submit", "sim", "--follow"],
+            vec!["cactup", "build", "list", "--long", "--all"],
+            vec!["cactup", "build", "show", "sim", "--long"],
+            vec!["cactup", "build", "log", "sim", "--follow"],
+            vec!["cactup", "build", "stop", "sim", "-f"],
+            vec!["cactup", "build", "prune", "sim", "--keep", "3"],
             vec!["cactup", "config", "delete", "sim", "-f"],
             vec![
                 "cactup", "sim", "submit", "bbh", "bbh.par", "--config", "sim", "-n", "4", "-w",
@@ -734,10 +824,34 @@ mod tests {
         assert!(Args::try_parse_from(["cactup", "build", "sim", "-j", "nope"]).is_err());
     }
 
+    /// `Commands::Build`'s optional subcommand sits beside a positional
+    /// (`<config>`) — the likeliest spot for clap to mistake one for the
+    /// other. "sim" here must land as the config, not be treated as an
+    /// attempted (and unknown) subcommand name.
+    #[test]
+    fn build_bare_positional_is_not_mistaken_for_a_subcommand() {
+        let args =
+            Args::try_parse_from(["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"])
+                .unwrap_or_else(|e| panic!("failed to parse: {e}"));
+        match args.command {
+            Commands::Build { start, command: None } => {
+                assert_eq!(start.name.as_deref(), Some("sim"));
+                assert_eq!(start.opts.variant.as_deref(), Some("cuda"));
+                assert!(start.opts.unsafe_build);
+                assert_eq!(start.opts.make_jobs, Some(MakeJobs::Count(8)));
+            }
+            other => panic!("expected a bare build command, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_contradictory_flags() {
         // --universe and --no-universe are mutually exclusive (§4.8).
         assert!(Args::try_parse_from(["cactup", "build", "c", "--universe", "u", "--no-universe"]).is_err());
+        // The build compute-node pair is all-or-nothing (§8.3.1), same shape
+        // as sim run's below.
+        assert!(Args::try_parse_from(["cactup", "build", "run", "--config-dir", "/x"]).is_err());
+        assert!(Args::try_parse_from(["cactup", "build", "run", "--attempt-id", "3"]).is_err());
         // The compute-node pair is all-or-nothing (§8.3.1): --sim-dir needs a
         // locator, and run_compute is the only path that reads --restart-id, so
         // alone it would parse and then be ignored.

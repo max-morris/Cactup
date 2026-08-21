@@ -20,6 +20,87 @@ This creates a config named `myconfig` using:
 - The machine's default optionlist variant
 - Default compiler flags: **optimized** (optimization is the one build flag that is on by default), no debugging, no profiling
 
+On most machines that's the whole story: `make` runs right there in your
+terminal. Some clusters forbid compiling on the login node, though, and on
+those `cactup build` does something different — see the next section.
+
+## Foreground vs. queued builds
+
+Some clusters require building on a compute node, the same way they require
+*running* on one. `cactup build` handles both cases with the same command:
+
+```sh
+cactup build myconfig
+```
+
+- On a machine with no queued-build support, this compiles right here,
+  in the foreground, exactly like the basic build above.
+- On a machine that requires (or defaults to) building on the queue, this
+  **submits** the build as a batch job instead, prints the job id, and
+  returns immediately — your terminal is free while `make` runs on a
+  compute node.
+
+Which one happens is decided by the machine's definition, not by anything
+you typed — see [meta.toml Reference](meta-toml.html#mdb-build) for exactly
+how a machine opts into queued builds. If you want to force one or the other
+regardless of what the machine prefers:
+
+```sh
+cactup build run myconfig       # always foreground, even if the machine can submit
+cactup build submit myconfig    # always submit — errors if the machine can't
+```
+
+`build submit` accepts `--follow` to stream the build's output and block
+until it finishes, instead of returning as soon as the job is queued:
+
+```sh
+cactup build submit myconfig --follow
+```
+
+Every other build flag — `--variant`, `--universe`, `--optimize`, `-j`, and
+so on — works identically whether the build runs in the foreground or on the
+queue; the queue is a detail of *where* `make` runs, not of what gets built.
+`build submit` also accepts the same topology flags as `sim submit`/`sim
+run` (`-q`/`--queue`, `-w`/`--wall-time`, `-a`/`--allocation`, `-n`/`--nodes`,
+and so on — see [Running Simulations](running-simulations.html)) for
+overriding the machine's default build-job shape on a one-off basis. Note
+that `-j` still means `--make-jobs` here, not job name — use `-J`/`--job-name`
+if you need to set that.
+
+A queue-submitted build behaves like any other queued job: it can sit
+waiting for resources, and if you close your terminal or lose your
+connection, the build keeps running. Nothing about the *result* is
+scheduler-dependent, though — see the next section.
+
+### Where build output goes
+
+Every build — foreground or queued — creates a numbered **build attempt**
+under the config's own directory:
+
+```
+<Cactus root>/configs/myconfig/.cactup-builds/
+  0001/
+    build.toml    # what was built, with what flags, and the outcome
+    build-script  # the frozen build steps this attempt ran
+    build.out     # make's stdout
+    build.err     # make's stderr
+  0002/
+    ...
+```
+
+There's no separate build log file to go hunting for — `build.out`/
+`build.err` are always at a predictable path, and `cactup build log`
+(covered in [Monitoring & Logs](monitoring.html)) reads them for you without
+you needing to know the attempt number. The highest-numbered attempt is
+always the one that matters: the in-progress one if a build is currently
+running or queued, the most recent result otherwise.
+
+The build attempt's own record — not the scheduler's job exit status — is
+what determines success or failure. A batch job can "succeed" (exit 0)
+without the build actually finishing, so cactup checks completeness itself
+and writes that verdict into `build.toml`; `cactup build show` reports what
+cactup found, not what the scheduler thinks happened.
+
 ## Build options
 
 ### Optimization and debugging
@@ -217,7 +298,7 @@ For testing or special cases, copy a prebuilt `cactus_<config>` into place inste
 cactup build myconfig --virtual-executable /path/to/cactus_myconfig
 ```
 
-This skips `configure` and `make` entirely, useful when the executable was built elsewhere.
+This skips `configure` and `make` entirely, useful when the executable was built elsewhere. It's a plain file copy, not a build, so it's rejected together with `build submit` — combine it with `build run` (or the plain `cactup build` foreground form) instead.
 
 ## Optionlist variants
 
@@ -263,9 +344,18 @@ cactup build myconfig --no-universe
 
 The universe is **recorded** with your config and affects how simulations are submitted and run. See [Running Simulations](running-simulations.html) for how universe affects job submission.
 
+> [!NOTE]
+> A **universe** and a **queued build** (above) answer different questions,
+> and a machine can use either, both, or neither. A universe says *where*
+> `make` runs — inside a container or module-loaded shell, versus bare on the
+> host. Queued builds say *how the build reaches a machine at all* — through
+> the batch scheduler, versus running immediately in your terminal. A machine
+> that requires compute-node builds isn't declaring a universe; it's declaring
+> that `make` has to go through the same queue a simulation would.
+
 ## Viewing build status
 
-See all configs in the active installation:
+See all configs in the active installation, with each one's build status:
 
 ```sh
 cactup config list
@@ -282,6 +372,12 @@ Set the active config (the default for `sim` and `test` commands):
 ```sh
 cactup config use myconfig
 ```
+
+`config show`/`config list` describe the **config** — what it's built from,
+its variant and flags, whether it's complete. For the **build attempt**
+itself — whether one is currently queued or running, its job id, its output —
+use `cactup build show`/`cactup build list`/`cactup build log`, covered in
+[Monitoring & Logs](monitoring.html).
 
 ## Deleting configs
 
@@ -347,7 +443,9 @@ cactup build native-build --no-universe
 
 {{cactup:cli command="build"}}
 
-{{cactup:cli command="config build"}}
+{{cactup:cli command="build run"}}
+
+{{cactup:cli command="build submit"}}
 
 {{cactup:cli command="config list"}}
 
@@ -365,11 +463,14 @@ cactup build native-build --no-universe
 
 **"Variant not found"**: Check the spelling with `cactup machine show --variants`.
 
-**Build fails**: Check the build log in the config directory. Use `cactup show` to find the installation path, then look for `configs/myconfig/` inside it.
+**Build fails**: `cactup build show myconfig` reports the most recent attempt's outcome, and `cactup build log myconfig` shows its output. Both find the right attempt automatically — there's no build log path to remember (see "Where build output goes" above).
 
 **"Universe not found"**: If the machine defines optional universes, use `cactup machine show` to see available ones.
+
+**"cactup build submit is not possible on this machine"**: the machine needs both a `buildsubmitscript` variant and a scheduler `submit` command declared before it can queue a build — see [meta.toml Reference](meta-toml.html) or ask whoever ported the machine. `cactup build run` always works regardless.
 
 ## Next steps
 
 - [Running Simulations](running-simulations.html) — submit or run a simulation with your built config
 - [Test Suites](test-suites.html) — validate your config against the test suite
+- [Monitoring & Logs](monitoring.html) — track a queued build, tail its output, stop or prune old attempts

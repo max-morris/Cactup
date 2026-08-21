@@ -30,6 +30,10 @@ memory = 262144  # MB per node
 [build]
 make = "make -j@MAKEJOBS@"
 make-jobs = 128
+# default-action = "submit"     # optional: force `cactup build` to queue a
+                                 # build instead of running it in the
+                                 # foreground (see "Queue-submitted builds"
+                                 # below) — requires [variants.buildsubmitscript]
 
 [environment]
 env-setup = """export PATH="/opt/bin:$PATH" """
@@ -52,6 +56,10 @@ variants = ["default", "cuda"]
 
 [variants.runscript]
 "default" = { queues = ["default"], default = true }
+
+# Optional — only if your cluster forbids compiling on the login node:
+# [variants.buildsubmitscript]
+# "default" = { queues = ["default"], default = true }
 ```
 
 ## Detailed field reference
@@ -139,6 +147,38 @@ variants = ["default", "cuda"]
 [variants.runscript]
 "default" = { queues = ["cpu", "gpu"], default = true }
 ```
+
+### Queue-submitted builds
+
+A cluster that forbids compiling on the login node needs three things beyond
+a normal machine: a `buildsubmitscript` variant, `[build].default-action`,
+and (optionally) a build-specific job shape:
+
+```toml
+[build]
+make           = "make -j@MAKEJOBS@"
+make-jobs      = 64
+default-action = "submit"     # cactup build always queues on this machine
+queue          = "gpu"        # the build job's own queue — independent of
+walltime       = "4:00:00"    # any run's queue/walltime; all six of these
+nodes          = 1            # keys are optional and only ever consulted
+tasks          = 1            # for a SUBMITTED build (a foreground `build
+cpus-per-task  = 64           # run` ignores them entirely)
+
+[variants.buildsubmitscript]
+"default" = { queues = ["cpu", "gpu"], default = true }
+```
+
+`cpus-per-task` falls back to `make-jobs` when unset, so a machine that
+already tunes `make-jobs` to its node size gets a matching build-job shape
+for free. `default-action` is what makes an unqualified `cactup build`
+submit instead of trying (and failing) to compile locally; leaving it unset
+still lets cactup submit automatically whenever a `buildsubmitscript` variant
+and `[scheduler].submit` are both present — `default-action = "run"` is the
+escape hatch for a machine that *can* submit builds but shouldn't by default.
+See [Building Configs](../users/building-configs.html) for the user-facing
+side of this, and [Scripts & Variables](scripts-and-variables.html) for how
+to write the buildsubmitscript itself.
 
 ### Workstation with no batch system
 
@@ -298,6 +338,8 @@ The known knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, and `ema
 - `build-universes` lists (on queues and on `[variants.*]` entries) must name declared universes and may not be empty; omit the key for "all universes"
 - Variant names must match files in `optionlists/`, `submitscripts/`, and `runscripts/` directories
 - Test variants should be present in all `[variants.*]` sections (used by `cactup test run/submit`)
+- `[variants.buildsubmitscript]` is the one script kind that's allowed to be entirely absent — a machine that never queues a build simply omits the table (and the `buildsubmitscripts/` directory) rather than needing an empty one
+- `[build].default-action = "submit"` only works once a `buildsubmitscript` variant and `[scheduler].submit` are both declared; without either, `cactup build submit` errors naming what's missing (`cactup build run` always works regardless)
 
 ## Next steps
 

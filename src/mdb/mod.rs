@@ -9,7 +9,7 @@ pub mod meta;
 pub mod optionlist;
 
 // Convenience re-exports for the consuming subsystems.
-pub use meta::{Hardware, Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
+pub use meta::{BuildAction, Hardware, Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 pub use optionlist::Optionlist;
 
 use crate::Res;
@@ -253,7 +253,7 @@ impl Machine {
 
     /// §4.2's layout obligations: every declared variant must have its file.
     fn validate_files(&self) -> Res<()> {
-        for kind in [ScriptKind::Submit, ScriptKind::Run] {
+        for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             for variant in self.meta.script_variants(kind).variants.keys() {
                 self.script_path(kind, variant)?;
             }
@@ -500,6 +500,12 @@ mod tests {
             (hw.max_cpus_per_node, hw.default_cpus_per_task, hw.max_gpus_per_node),
             (Some(64), Some(16), Some(4))
         );
+        // QB4 makes you compile on the compute nodes: pin that the migration
+        // actually wired up `build submit` (a [variants.buildsubmitscript]
+        // variant, a [scheduler].submit command) and defaults to it, rather
+        // than merely parsing.
+        assert!(qbd.meta.can_submit_builds());
+        assert_eq!(qbd.meta.build.default_action, Some(BuildAction::Submit));
 
         // graham unifies one Compute Canada cluster's CPU (g++) and CUDA (nvcc)
         // build flavors into two optionlist variants. The CUDA variant carries

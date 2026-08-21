@@ -1,6 +1,7 @@
 //! `cactup config` — the config subsystem (spec §7).
 
-use super::{machine, Ctx};
+use super::build as build_cmd;
+use super::Ctx;
 use crate::args::ConfigCommand;
 use crate::build::{self, ConfigMeta};
 use crate::installation::Installation;
@@ -14,34 +15,6 @@ use std::path::Path;
 pub fn dispatch(ctx: &Ctx, cmd: ConfigCommand) -> Res<()> {
     let installation = Installation::resolve(ctx)?;
     match cmd {
-        ConfigCommand::Build(args) => {
-            let machine = machine::resolve(ctx)?;
-            let outcome = build::build(&installation, &machine, &args.name, &args.opts)?;
-            // First build becomes active; later builds keep the pointer (§7.1).
-            let locked = installation.locked()?;
-            let mut meta = locked.meta()?;
-            if meta.active_config.is_none() {
-                meta.active_config = Some(args.name.clone());
-                locked.set_meta(&meta)?;
-                println!("Config {} is now the active config.", args.name.bold());
-            }
-            if outcome.rebuilt {
-                println!(
-                    "{}",
-                    format!("Built config {} (build-id {}).", args.name.bold(), outcome.meta.build_id)
-                        .bright_green()
-                );
-                // The rebuild minted a new build-id and replaced the exe, so
-                // the previous build's CACHE/exe entry may now be
-                // unreferenced (§8.1). Best-effort.
-                if let Ok(inst_meta) = installation.meta()
-                    && let Ok(sim_home) = inst_meta.sim_home()
-                {
-                    let _ = cache::gc(sim_home, None);
-                }
-            }
-            Ok(())
-        }
         ConfigCommand::List => list(&installation),
         ConfigCommand::Show { name } => show(ctx, &installation, name.as_deref()),
         ConfigCommand::Use { name } => {
@@ -87,6 +60,27 @@ pub fn list_configs(cactus_root: &Path) -> Res<Vec<(String, Option<ConfigMeta>)>
     Ok(out)
 }
 
+/// The bracketed suffix `list` prints after a config's name — `[built …]`,
+/// `[built]`, `[incomplete]`, or, when a build is actually in flight for a
+/// config that has not completed one yet, the in-flight phrase instead of
+/// the bare "[incomplete]" that would otherwise wrongly suggest a rebuild.
+/// Takes no `Machine`: `list` renders every config in one pass and must
+/// never round-trip the scheduler per row (§7.9) — omitting the parameter
+/// makes that a compile-time guarantee rather than a convention to remember.
+fn list_suffix(cactus_root: &Path, name: &str, meta: Option<&ConfigMeta>) -> String {
+    if build::is_complete(cactus_root, name) {
+        return match meta.and_then(|m| m.built) {
+            Some(built) => format!(" [built {}]", built.format("%Y-%m-%d %H:%M")),
+            None => " [built]".to_owned(),
+        };
+    }
+    let config_dir = cactus_root.join("configs").join(name);
+    match build_cmd::in_flight_build(&config_dir, name, None) {
+        Some(phrase) => format!(" [{phrase}]"),
+        None => " [incomplete]".to_owned(),
+    }
+}
+
 /// `cactup config list`: every config in the active installation (port of
 /// list-configurations, §7.1).
 fn list(installation: &Installation) -> Res<()> {
@@ -98,15 +92,7 @@ fn list(installation: &Installation) -> Res<()> {
     }
     let active = installation.meta()?.active_config;
     for (name, meta) in configs {
-        print!("- {}", name.bold());
-        if build::is_complete(&cactus_root, &name) {
-            match meta.as_ref().and_then(|m| m.built) {
-                Some(built) => print!(" [built {}]", built.format("%Y-%m-%d %H:%M")),
-                None => print!(" [built]"),
-            }
-        } else {
-            print!(" [incomplete]");
-        }
+        print!("- {}{}", name.bold(), list_suffix(&cactus_root, &name, meta.as_ref()));
         if active.as_deref() == Some(&name) {
             print!("{}", " (active)".bold().bright_green());
         }
@@ -208,10 +194,17 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     if let Some(built) = meta.built {
         println!("  built: {built}");
     }
-    println!(
-        "  status: {}",
-        if build::is_complete(&cactus_root, name) { "complete" } else { "incomplete" }
-    );
+    if build::is_complete(&cactus_root, name) {
+        println!("  status: complete");
+    } else {
+        // No machine resolved for `config show` — the attempt's own
+        // recorded metadata is what answers §7.9's "in flight?" here.
+        let config_dir = cactus_root.join("configs").join(name);
+        match build_cmd::in_flight_build(&config_dir, name, None) {
+            Some(phrase) => println!("  status: incomplete — {phrase}"),
+            None => println!("  status: incomplete"),
+        }
+    }
     Ok(())
 }
 
@@ -254,6 +247,21 @@ fn delete(installation: &Installation, name: &str, force: bool) -> Res<()> {
              but re-running them needs the config rebuilt. Pass -f to delete anyway.",
             test_dependents.len(),
             test_dependents.join(", ")
+        );
+    }
+
+    // §7.9: a build attempt lives (and, while queued, may still be written
+    // by a compute node this process can't see) inside `config_dir` for the
+    // attempt's whole life — pulling it out from under a live build fails
+    // that build in a confusing way rather than a clear one. No machine is
+    // resolved for `config delete`, so this reads the attempt's own
+    // recorded metadata only, same as the guards above.
+    if let Some(phrase) = build_cmd::in_flight_build(&config_dir, name, None)
+        && !force
+    {
+        bail!(
+            "{phrase} — deleting this config out from under it would fail the build in a \
+             confusing way; `cactup build stop {name}` first, or pass -f to delete anyway."
         );
     }
 
@@ -438,5 +446,95 @@ mod tests {
         assert!(!exe.exists());
         assert!(!orphan.exists(), "the deleted config's cache entry is reaped");
         assert!(kept.exists(), "a sim-referenced cache entry survives");
+    }
+
+    /// A minimal in-flight (submitted, no outcome) build attempt for
+    /// `config`, reproduced here rather than shared from
+    /// `commands::build::tests` — that module's own fixtures are private to
+    /// it, same convention as `testsuite::run::tests::fake_machine` being
+    /// reproduced in `commands::build::tests` instead of exported.
+    fn make_in_flight_attempt(config_dir: &Path, cactus_root: &Path, config: &str, job_id: &str) {
+        let meta = crate::build::attempt::BuildMeta {
+            schema: crate::database::SCHEMA,
+            attempt_id: 0,
+            config: config.to_owned(),
+            variant: "default".to_owned(),
+            machine: "fake".to_owned(),
+            alias: "et".to_owned(),
+            config_dir: config_dir.to_owned(),
+            cactus_root: cactus_root.to_owned(),
+            install_root: cactus_root.to_owned(),
+            submitted: true,
+            job_id: job_id.to_owned(),
+            status: None,
+            reservation: None,
+            decision: "test decision".to_owned(),
+            full_rebuild: false,
+            make: None,
+            build_env: String::new(),
+            virtual_executable: None,
+            universe: None,
+            config_meta: toml::from_str(&format!(
+                r#"
+                schema = 1
+                name = "{config}"
+                variant = "default"
+                thornlist = "{config}.th"
+                machine = "fake"
+                config-id = "cfg-{config}"
+                build-id = "build-{config}"
+                "#
+            ))
+            .unwrap(),
+            vars: Default::default(),
+            timestamps: crate::build::attempt::Timestamps::default(),
+            outcome: None,
+        };
+        crate::build::attempt::BuildAttempt::create(
+            crate::build::attempt::BuildAttempt::attempt_dir(config_dir, 0),
+            meta,
+        )
+        .unwrap();
+    }
+
+    /// §7.9's second race: `execute` writes into `config_dir` for a build
+    /// attempt's whole life, including one still queued on a compute node
+    /// this process can't see — `delete` must refuse while that is true, and
+    /// `-f` still gets the job done.
+    #[test]
+    fn delete_refuses_while_a_build_is_live_and_succeeds_with_force() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("et", tmp.path().join("et"));
+        let root = inst.cactus_root();
+        let config_dir = root.join("configs").join("mp");
+        fs::create_dir_all(&config_dir).unwrap();
+        make_in_flight_attempt(&config_dir, &root, "mp", "JOB-1");
+
+        let err = delete(&inst, "mp", false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("JOB-1"), "{msg}");
+        assert!(config_dir.is_dir(), "a refused delete must leave the config directory alone");
+
+        delete(&inst, "mp", true).unwrap();
+        assert!(!config_dir.is_dir(), "-f proceeds with the delete");
+    }
+
+    /// `list_suffix` takes no `Machine` at all — `config list` renders every
+    /// config in one pass and must never round-trip the scheduler per row
+    /// (§7.9) — yet an in-flight attempt still replaces the bare
+    /// "[incomplete]" with something legible, from recorded metadata alone.
+    #[test]
+    fn list_suffix_reports_in_flight_without_a_machine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Cactus");
+        let config_dir = root.join("configs").join("mp");
+        fs::create_dir_all(&config_dir).unwrap();
+        // No cactup-config.toml — never finished a build — but an in-flight
+        // attempt sits queued.
+        make_in_flight_attempt(&config_dir, &root, "mp", "JOB-1");
+
+        let suffix = list_suffix(&root, "mp", None);
+        assert!(suffix.contains("JOB-1"), "{suffix}");
+        assert!(!suffix.contains("[incomplete]"), "{suffix}");
     }
 }

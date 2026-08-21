@@ -338,8 +338,17 @@ fn print_summary(machine: &Machine) -> Res<()> {
                 .unwrap_or_default(),
         );
     }
-    for (label, kind) in [("submitscripts", ScriptKind::Submit), ("runscripts", ScriptKind::Run)] {
+    for (label, kind) in [
+        ("submitscripts", ScriptKind::Submit),
+        ("runscripts", ScriptKind::Run),
+        ("buildsubmitscripts", ScriptKind::BuildSubmit),
+    ] {
         let sv = meta.script_variants(kind);
+        // buildsubmitscript is empty on every machine until `build submit`
+        // lands (Part B groundwork) — an empty section would just be noise.
+        if sv.variants.is_empty() {
+            continue;
+        }
         let names: Vec<String> = sv
             .variants
             .iter()

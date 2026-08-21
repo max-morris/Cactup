@@ -1272,9 +1272,12 @@ fn report_configs(
     // The per-thorn shape fingerprints, read off the tree the fetch just
     // left behind. Same best-effort caveat as the providers above, plus one
     // of its own: this walks every thorn (~0.2 s on the real list), which is
-    // nothing next to the fetch that just ran.
-    let fresh_shapes =
-        live_list.as_ref().map(|list| crate::build::thorn_shapes(&inst.cactus_root(), list));
+    // nothing next to the fetch that just ran. `.ok()` also swallows an
+    // interrupt here deliberately — this is a post-fetch report, not the
+    // fetch itself, and a report must never fail the refetch.
+    let fresh_shapes = live_list
+        .as_ref()
+        .and_then(|list| crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list).ok());
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {

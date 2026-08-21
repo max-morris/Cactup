@@ -18,6 +18,15 @@ It has two parts:
 Each machine can have multiple optionlist **variants** (e.g., `default`, `cuda`,
 `debug`). Users choose which variant when building with `--variant`.
 
+> [!NOTE]
+> An optionlist's `universe` field (below) and a machine's queue-submitted
+> builds (`[build].default-action`/`[variants.buildsubmitscript]`, covered in
+> [meta.toml Reference](meta-toml.html)) are independent. A universe says
+> *where* `make` runs — a container, a module-loaded shell, the bare host.
+> Queue submission says *how the build reaches a machine* — through the
+> batch scheduler instead of your terminal. A cluster can use either, both,
+> or neither.
+
 ## File structure
 
 Optionlists are TOML files in the `optionlists/` directory of your machine:

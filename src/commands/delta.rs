@@ -13,6 +13,7 @@
 //! Both are strictly read-only: no locks, no writes, no network.
 
 use crate::build::{self, ConfigMeta, SourceDelta};
+use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
 use crate::fetch::{self, git::SourceDiff, link::LinkState, FetchState};
 use crate::installation::Installation;
@@ -270,6 +271,13 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         })?,
     };
     let Some(meta) = ConfigMeta::load(&cactus_root, &name)? else {
+        // No machine at hand here (this command never resolves one) — the
+        // attempt's own recorded metadata is what answers §7.9's "in
+        // flight?" question instead of a scheduler round-trip.
+        let config_dir = cactus_root.join("configs").join(&name);
+        if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &name, None) {
+            bail!("{phrase} — wait for it, or check `cactup build show {name}`");
+        }
         bail!("config \"{name}\" has never been built (no cactup-config.toml)");
     };
 

@@ -4,13 +4,19 @@
 //! (§4.8), the rebuild-decision snapshot diff (§7.8), the per-config build
 //! lock (§2.3 item 4), and `cactup-config.toml` metadata (§7.4).
 
-use crate::args::{BuildOpts, MakeJobs};
+pub mod attempt;
+
+use crate::args::{BuildOpts, MakeJobs, TopologyFlags};
+use crate::build::attempt::{BuildAttempt, BuildMeta, BuildOutcomeRecord, Reservation, Timestamps};
 use crate::database::SCHEMA;
 use crate::fetch::SourceHeads;
 use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
 use crate::mdb::{Machine, Optionlist};
+use crate::sim::restart::{freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
+use crate::sim::start::{script_command, spawn_and_wait, write_executable};
+use crate::sim::vars::QueueFit;
 use crate::template::{VarSet, VarValue};
 use crate::thornlist::Thornlist;
 use crate::Res;
@@ -20,10 +26,8 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Make command used when a machine's `meta.toml` omits `[build].make`. It
 /// templates `@MAKEJOBS@` so `[build].make-jobs` (§7.6) is honored as the
@@ -687,9 +691,11 @@ fn shape_repo_dir(real: &Path, repos_root: &Path) -> Option<PathBuf> {
 /// calls: ~30 thorns can share one repo, and reopening it per thorn would be
 /// wasteful on a real ~400-thorn tree. `None` (unreadable repo, no `origin`,
 /// no fetch URL) is cached too, so a repo that fails once isn't retried for
-/// every thorn it provides.
-fn shape_repo_url(repo_dir: &Path, cache: &mut HashMap<PathBuf, Option<String>>) -> Option<String> {
-    if let Some(cached) = cache.get(repo_dir) {
+/// every thorn it provides. Takes the cache behind a `Mutex`, not `&mut`:
+/// `thorn_shapes` below fans this out across `par::parallel_map`'s worker
+/// pool, so several threads can look a repo's URL up concurrently.
+fn shape_repo_url(repo_dir: &Path, cache: &Mutex<HashMap<PathBuf, Option<String>>>) -> Option<String> {
+    if let Some(cached) = cache.lock().expect("thorn_shapes url cache poisoned").get(repo_dir) {
         return cached.clone();
     }
     let url = (|| {
@@ -698,7 +704,7 @@ fn shape_repo_url(repo_dir: &Path, cache: &mut HashMap<PathBuf, Option<String>>)
         let raw = remote.url(gix::remote::Direction::Fetch)?.to_bstring().to_string();
         Some(crate::fetch::git::normalize_url(&raw))
     })();
-    cache.insert(repo_dir.to_owned(), url.clone());
+    cache.lock().expect("thorn_shapes url cache poisoned").insert(repo_dir.to_owned(), url.clone());
     url
 }
 
@@ -767,58 +773,106 @@ fn feed(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 /// `shape_delta` treats stored-has-it/fresh-lacks-it as a change (a vanished
 /// thorn's stale build state is invalidated), while a thorn absent on *both*
 /// sides — the normal case in unit tests, and in a config whose fetch never
-/// ran — produces no spurious delta. `thorn_shapes` therefore never returns a
-/// `Result`: a build must never fail because a thorn directory happened to be
-/// unreadable.
-pub fn thorn_shapes(cactus_root: &Path, list: &Thornlist) -> BTreeMap<String, String> {
-    let repos_root = fs::canonicalize(cactus_root.join("repos")).ok();
-    let mut url_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
-    let mut out = BTreeMap::new();
+/// ran — produces no spurious delta. A single thorn's read failure therefore
+/// never surfaces as an `Err` from `thorn_shapes` — only an interrupt does
+/// (see below): a build must never fail merely because a thorn directory
+/// happened to be unreadable.
+fn shape_one_thorn(
+    cactus_root: &Path,
+    repos_root: Option<&Path>,
+    url_cache: &Mutex<HashMap<PathBuf, Option<String>>>,
+    provider: &str,
+) -> Option<String> {
+    let thorn_dir = cactus_root.join(provider);
 
-    'thorn: for (name, provider) in list.thorn_providers() {
-        let thorn_dir = cactus_root.join(&provider);
+    let files = shape_files(&thorn_dir).ok()?;
+    let link_meta = fs::symlink_metadata(&thorn_dir).ok()?;
+    let shape_marker: Vec<u8> = if link_meta.file_type().is_symlink() {
+        fs::read_link(&thorn_dir).ok()?.to_string_lossy().into_owned().into_bytes()
+    } else {
+        b"<dir>".to_vec()
+    };
 
-        let Ok(files) = shape_files(&thorn_dir) else { continue };
-        let Ok(link_meta) = fs::symlink_metadata(&thorn_dir) else { continue };
-        let shape_marker: Vec<u8> = if link_meta.file_type().is_symlink() {
-            match fs::read_link(&thorn_dir) {
-                Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
-                Err(_) => continue,
-            }
-        } else {
-            b"<dir>".to_vec()
-        };
+    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+    feed(&mut hasher, provider.as_bytes());
+    feed(&mut hasher, &shape_marker);
 
-        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
-        feed(&mut hasher, provider.as_bytes());
-        feed(&mut hasher, &shape_marker);
-
-        if let Some(repos_root) = &repos_root
-            && let Ok(real) = fs::canonicalize(&thorn_dir)
-            && let Some(repo_dir) = shape_repo_dir(&real, repos_root)
-            && let Some(url) = shape_repo_url(&repo_dir, &mut url_cache)
-        {
-            feed(&mut hasher, url.as_bytes());
-        }
-
-        for f in &files {
-            feed(&mut hasher, f.as_bytes());
-        }
-        for f in &files {
-            let basename = Path::new(f).file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !is_shape_qualifying(basename) {
-                continue;
-            }
-            let Ok(bytes) = fs::read(thorn_dir.join(f)) else { continue 'thorn };
-            feed(&mut hasher, f.as_bytes());
-            feed(&mut hasher, &bytes);
-        }
-
-        let Ok(id) = hasher.try_finalize() else { continue };
-        out.insert(name, id.to_hex_with_len(16).to_string());
+    if let Some(repos_root) = repos_root
+        && let Ok(real) = fs::canonicalize(&thorn_dir)
+        && let Some(repo_dir) = shape_repo_dir(&real, repos_root)
+        && let Some(url) = shape_repo_url(&repo_dir, url_cache)
+    {
+        feed(&mut hasher, url.as_bytes());
     }
 
-    out
+    for f in &files {
+        feed(&mut hasher, f.as_bytes());
+    }
+    for f in &files {
+        let basename = Path::new(f).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !is_shape_qualifying(basename) {
+            continue;
+        }
+        let bytes = fs::read(thorn_dir.join(f)).ok()?;
+        feed(&mut hasher, f.as_bytes());
+        feed(&mut hasher, &bytes);
+    }
+
+    let id = hasher.try_finalize().ok()?;
+    Some(id.to_hex_with_len(16).to_string())
+}
+
+/// Per-thorn "shape" fingerprints, fanned out across [`crate::par::parallel_map`]
+/// (§2.4's parallelism contract: each thorn's probe is its own handful of
+/// stats/reads, latency-bound on network filesystems, and a real tree carries
+/// ~400 of them — sequentially that is easily multi-second). `progress` is
+/// init'ed to the thorn count and driven exactly like
+/// [`crate::fetch::source_heads`]'s repo loop: a short-lived child per
+/// in-flight thorn, `inc()` per completion (§2.4's progress contract — this
+/// phase never calls `info`/`fail` on an item, only `init`/`add_child`/`inc`).
+///
+/// Returns `Err` only when interrupted (`par::parallel_map`'s "interrupted"
+/// failure, §2.4's interrupt contract) — see `shape_one_thorn`'s doc comment
+/// for why an individual unreadable thorn never causes one.
+pub fn thorn_shapes(
+    cactus_root: &Path,
+    list: &Thornlist,
+    progress: &mut prodash::tree::Item,
+) -> Res<BTreeMap<String, String>> {
+    let repos_root = fs::canonicalize(cactus_root.join("repos")).ok();
+    let url_cache: Mutex<HashMap<PathBuf, Option<String>>> = Mutex::new(HashMap::new());
+    let providers: Vec<(String, String)> = list.thorn_providers().into_iter().collect();
+
+    progress.init(Some(providers.len()), Some(prodash::unit::label("thorns")));
+    let progress = Mutex::new(progress);
+
+    let results = crate::par::parallel_map(&providers, |(name, provider)| {
+        let current = progress.lock().expect("thorn_shapes progress poisoned").add_child(name.clone());
+        let shape = shape_one_thorn(cactus_root, repos_root.as_deref(), &url_cache, provider);
+        drop(current);
+        progress.lock().expect("thorn_shapes progress poisoned").inc();
+        shape.map(|hash| (name.clone(), hash))
+    })?;
+
+    Ok(results.into_iter().flatten().collect())
+}
+
+/// [`thorn_shapes`] for a call site with no progress tree of its own to hang
+/// a child off — mirrors [`crate::fetch::source_heads_with_progress`]. Uses
+/// `setup_prodash_if_tty`: correct here specifically because `thorn_shapes`
+/// never calls `info`/`fail` on its progress item (see
+/// `manifest::setup_prodash_if_tty`'s doc comment on why that precondition
+/// matters — a phase that DID call them would lose those messages on a
+/// non-tty stderr).
+pub fn thorn_shapes_with_progress(cactus_root: &Path, list: &Thornlist) -> Res<BTreeMap<String, String>> {
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let mut probing = progress.add_child("probe thorn shapes");
+    let result = thorn_shapes(cactus_root, list, &mut probing);
+    drop(probing);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    result
 }
 
 /// The `thorn_shapes` counterpart to `provider_delta`: names present in
@@ -926,6 +980,99 @@ pub fn resolve_build_universe<'a>(
         .or(host_declared.then_some(crate::mdb::HOST_UNIVERSE))
 }
 
+/// The §4.4/D12 queue-compatibility facts for `name` on `machine`, resolved
+/// from the MDB alone: optionlist variant selection, `Optionlist::load`, and
+/// `resolve_build_universe`. `prepare` needs these as part of composing a
+/// config, and `build submit` needs them BEFORE `prepare` runs — a topology
+/// (and the reservation `prepare` must be handed) can't be resolved without
+/// knowing which queues this build is compatible with, but that compatibility
+/// is itself an optionlist-header fact `prepare` alone used to derive. Both
+/// paths route through this one function so they can never silently disagree
+/// about which queues a build may land on.
+pub fn queue_fit(machine: &Machine, name: &str, opts: &BuildOpts) -> Res<QueueFit> {
+    let variant = machine.select_optionlist(opts.variant.as_deref())?;
+    let optionlist = Optionlist::load(&machine.optionlist_path(&variant))?;
+    let universe = resolve_build_universe(
+        opts,
+        optionlist.header.universe.as_deref(),
+        machine.meta.build.universe.as_deref(),
+        machine.meta.declared_host().is_some(),
+    )
+    .map(str::to_owned);
+    Ok(QueueFit {
+        universe,
+        compatible_queues: optionlist.header.compatible_queues,
+        gpu: optionlist.header.gpu,
+        label: name.to_owned(),
+    })
+}
+
+/// Layer `[build]`'s topology defaults onto CLI flags for a build submission:
+/// CLI always wins, `[build]` fills in anything still unset. `cpus`
+/// (CPUS_PER_TASK) is deliberately excluded — `reconcile_make_jobs` owns it
+/// entirely, since it must stay coupled to MAKEJOBS rather than just falling
+/// back to a plain default (see its doc comment).
+pub fn apply_build_defaults(flags: &mut TopologyFlags, machine: &Machine) {
+    let build = &machine.meta.build;
+    flags.queue = flags.queue.take().or_else(|| build.queue.clone());
+    flags.wall_time = flags.wall_time.or(build.walltime);
+    flags.nodes = flags.nodes.or(build.nodes);
+    flags.tasks = flags.tasks.or(build.tasks);
+    flags.gpus_per_task = flags.gpus_per_task.or(build.gpus_per_task);
+}
+
+/// Resolve `@MAKEJOBS@` and `CPUS_PER_TASK` together for a build submission
+/// (§7.6/§8.5): a build reserves `CPUS_PER_TASK` cores for its one task and
+/// runs `make -j@MAKEJOBS@` inside that reservation, so the two must never
+/// diverge in the dangerous direction (more make parallelism than cores).
+/// Mutates `flags.cpus` so the ordinary topology chain (`resolve_topology`)
+/// resolves `CPUS_PER_TASK` correctly; returns the `MAKEJOBS` value to freeze.
+///
+/// | given       | MAKEJOBS               | CPUS_PER_TASK                                    |
+/// |-------------|-------------------------|---------------------------------------------------|
+/// | -j N, no -c | N                       | N                                                   |
+/// | -c N, no -j | N                       | N (unchanged)                                       |
+/// | -j max      | the shell `nproc` expr | -c → `[build].cpus-per-task` → queue default → 1   |
+/// | both        | as given (warn if j > cpus) | as given                                      |
+/// | neither     | `[build].make-jobs`    | `[build].cpus-per-task`, else `[build].make-jobs`  |
+pub fn reconcile_make_jobs(flags: &mut TopologyFlags, make_jobs: Option<MakeJobs>, machine: &Machine) -> VarValue {
+    let build = &machine.meta.build;
+    match (make_jobs, flags.cpus) {
+        (Some(MakeJobs::Count(n)), None) => {
+            flags.cpus = Some(n);
+            VarValue::Int(n as i64)
+        }
+        (None, Some(n)) => VarValue::Int(n as i64),
+        (Some(MakeJobs::Max), _) => {
+            flags.cpus = flags.cpus.or(build.cpus_per_task);
+            VarValue::Str(MAX_MAKEJOBS.to_owned())
+        }
+        (Some(MakeJobs::Count(n)), Some(c)) => {
+            if n > c {
+                eprintln!(
+                    "{} -j {n} exceeds --cpus {c}; make may oversubscribe the reservation",
+                    "warning:".yellow().bold()
+                );
+            }
+            VarValue::Int(n as i64)
+        }
+        (None, None) => {
+            flags.cpus = build.cpus_per_task.or(build.make_jobs);
+            VarValue::Int(build.make_jobs.unwrap_or(1) as i64)
+        }
+    }
+}
+
+/// Everything `build submit` resolves before `prepare` runs and must freeze
+/// into the attempt exactly as decided: the scheduler reservation, and the
+/// `MAKEJOBS` value `reconcile_make_jobs` derives alongside it. The
+/// store-submit-store order in the submit command (never lose a real job id
+/// to a crash) depends on this being frozen before submission, not after.
+pub struct SubmitReservation {
+    pub reservation: Reservation,
+    pub make_jobs: VarValue,
+}
+
 pub struct BuildOutcome {
     pub meta: ConfigMeta,
     pub rebuilt: bool,
@@ -942,15 +1089,53 @@ fn summarize(names: &[String]) -> String {
     }
 }
 
-/// Run `config build` for `name` (§7). Returns the stored
-/// metadata. The global DB is never touched here (§2.3); the caller updates
-/// the active-config pointer afterwards.
-pub fn build(
+/// The outcome of the decide phase (§7.8): either there is nothing to build,
+/// or a build has been staged and is ready for `execute` to run. Splitting
+/// `build()` at this seam is what lets the decision run on a login node
+/// while the (possibly much later, possibly elsewhere) `make` runs on a
+/// compute node — see `attempt.rs`'s module doc for the on-disk shape.
+// `prepare` is called at most once per `cactup build` invocation — not a hot
+// loop like a listing row — so boxing either variant to shave padding off
+// the other would only add indirection noise for no measurable benefit.
+#[allow(clippy::large_enum_variant)]
+pub enum Prepared {
+    /// §7.8 short-circuit: nothing to build. Carries the (possibly
+    /// baseline-refreshed) metadata, exactly as today's early return did.
+    UpToDate(ConfigMeta),
+    /// An attempt is staged on disk and ready to run.
+    Ready(BuildAttempt),
+}
+
+/// `RebuildDecision`'s reason, as a string for `build.toml`'s `decision`
+/// field — `build show` prose, not user-facing help text, so (unlike
+/// `bail!`/`println!` strings) it may carry §-refs freely; it doesn't here
+/// only because the reasons already do at their definition sites.
+fn decision_reason(decision: &RebuildDecision) -> &'static str {
+    match decision {
+        RebuildDecision::Fresh => "no existing build",
+        RebuildDecision::UpToDate => "up to date",
+        RebuildDecision::Incremental(why) | RebuildDecision::Full(why) => why,
+    }
+}
+
+/// Decide whether `name` needs a build and, if so, stage everything
+/// `execute` will need into a fresh [`BuildAttempt`] (§7.8). Reads the MDB,
+/// the global DB, and the installation registry — `execute` may not (D11).
+///
+/// CRITICAL: never mutates `configs/<name>/` itself. Today staging happened
+/// milliseconds before `make` ran; once a build can be queued, `prepare` may
+/// run hours before `execute` does — or never run at all, if the attempt is
+/// abandoned — so every file this function writes goes into the attempt
+/// directory instead. The stale-per-thorn-state deletion and the config-dir
+/// skeleton creation that used to happen here are deferred to `execute` for
+/// the same reason (see its doc comment).
+pub fn prepare(
     installation: &Installation,
     machine: &Machine,
     name: &str,
     opts: &BuildOpts,
-) -> Res<BuildOutcome> {
+    submit: Option<&SubmitReservation>,
+) -> Res<Prepared> {
     let cactus_root = installation.cactus_root();
     if !cactus_root.is_dir() {
         bail!("no Cactus tree at {}", cactus_root.display());
@@ -960,21 +1145,25 @@ pub fn build(
     // from, which feeds thornlist resolution below (§7.5).
     let stored_meta = ConfigMeta::load(&cactus_root, name)?;
 
-    // Selection & inputs (§4.4, §7.8).
+    // Selection & inputs (§4.4, §7.8). `queue_fit` resolves the universe name
+    // via the exact same call `build submit` makes before topology is even
+    // known (see its doc comment) — reused here rather than re-inlined, so
+    // the two can never silently disagree.
     let variant = machine.select_optionlist(opts.variant.as_deref())?;
     let optionlist = Optionlist::load(&machine.optionlist_path(&variant))?;
-    let universe_name = resolve_build_universe(
-        opts,
-        optionlist.header.universe.as_deref(),
-        machine.meta.build.universe.as_deref(),
-        machine.meta.declared_host().is_some(),
-    )
-    .map(str::to_owned);
+    let universe_name = queue_fit(machine, name, opts)?.universe;
     // Unknown universe = hard error listing the known ones (§4.8).
     let universe = universe_name
         .as_deref()
         .map(|u| machine.meta.universe(u))
         .transpose()?;
+    // Frozen for `execute` (D11): a config's recorded universe is only a
+    // *name* — the executing node must re-wrap the build command without
+    // reading the MDB.
+    let universe_spec = match (universe_name.as_deref(), universe) {
+        (Some(uname), Some(u)) => Some(UniverseSpec::from_universe(uname, u)),
+        _ => None,
+    };
 
     let thornlist =
         resolve_thornlist(&cactus_root, name, stored_meta.as_ref(), opts.thornlist.as_deref())?;
@@ -1049,7 +1238,12 @@ pub fn build(
     // Computed unconditionally, even under `-f`: the baseline must be
     // recorded on every build, or a config that always rebuilds with `-f`
     // could never acquire one to diff a later plain rebuild against.
-    let fresh_shapes = parsed_list.as_ref().map(|l| thorn_shapes(&cactus_root, l));
+    // `?` propagates only an interrupt (§2.4) — an individual unreadable
+    // thorn never fails `thorn_shapes` (see its doc comment).
+    let fresh_shapes = parsed_list
+        .as_ref()
+        .map(|l| thorn_shapes_with_progress(&cactus_root, l))
+        .transpose()?;
     let (sources, source_change) =
         source_delta(stored_meta.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
     // Which thorn names changed which directory provides them (§7.4) — the
@@ -1114,7 +1308,7 @@ pub fn build(
             }
             stored.store(&cactus_root)?;
         }
-        return Ok(BuildOutcome { meta: stored, rebuilt: false });
+        return Ok(Prepared::UpToDate(stored));
     }
     // Say which cheaper path is being taken, so a thornlist edit does not look
     // like it was ignored (it used to be) and a *reconfigure* is not mistaken
@@ -1151,56 +1345,35 @@ pub fn build(
     // Two incidents this exists for, both leaving a same-named build/<Thorn>/
     // holding state compiled from the wrong source: a provider swap (old
     // arrangement's stale `.d` files can name a bindings header the
-    // reconfigure below is about to delete — a hard make error) and a shape
-    // change (a `.ccl` REQUIRES edit or a removed source file, same failure
-    // modes — see `thorn_shapes`'s doc comment). Either way Cactus updates an
+    // reconfigure is about to delete — a hard make error) and a shape change
+    // (a `.ccl` REQUIRES edit or a removed source file, same failure modes —
+    // see `thorn_shapes`'s doc comment). Either way Cactus updates an
     // existing libthorn_<Thorn>.a in place with `ar`, so stale members can
-    // otherwise survive into the link without so much as a warning. Both
-    // must go before make runs. `Full` is excluded on purpose: `realclean`
-    // already wipes every config's build state, so this would just be
-    // redundant there.
-    let invalidated_thorns: Vec<String> = changed_providers
-        .iter()
-        .chain(&changed_shapes)
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    if matches!(decision, RebuildDecision::Incremental(_)) && !invalidated_thorns.is_empty() {
-        fn remove_stale(path: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) -> Res<()> {
-            match remove(path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e).with_context(|| {
-                    format!(
-                        "Failed to remove stale per-thorn build state {} — proceeding would risk \
-                         compiling or linking against a thorn's old provider",
-                        path.display()
-                    )
-                }),
-            }
-        }
-        if !changed_providers.is_empty() {
-            println!(
-                "  changed provider (removing their stale per-thorn build state): {}",
-                summarize(&changed_providers)
-            );
-        }
-        if !changed_shapes.is_empty() {
-            println!(
-                "  changed contents (removing their stale per-thorn build state): {}",
-                summarize(&changed_shapes)
-            );
-        }
-        for thorn in &invalidated_thorns {
-            remove_stale(&config_dir.join("build").join(thorn), |p| fs::remove_dir_all(p))?;
-            remove_stale(&config_dir.join("lib").join(format!("libthorn_{thorn}.a")), |p| fs::remove_file(p))?;
-        }
-    }
+    // otherwise survive into the link without so much as a warning. `Full` is
+    // excluded on purpose: `realclean` already wipes every config's build
+    // state, so per-thorn invalidation would just be redundant there.
+    //
+    // The deletion itself does NOT happen here — `execute` recomputes which
+    // thorns are invalidated from its OWN re-probe (not this one) and acts on
+    // it right before it actually needs the state gone (see `execute`'s doc
+    // comment: this is destructive, and an attempt that never runs must never
+    // have touched configs/<name>/; and a queued attempt's re-probe may find
+    // a different set of changed thorns than this one did).
+    let full_rebuild = !matches!(decision, RebuildDecision::Incremental(_));
 
-    // Build-context variables (§6.3, build-time set).
+    // Build-context variables (§6.3, build-time set). `submit` overrides
+    // MAKEJOBS with the §7.6 coupling `build submit` already resolved
+    // (against the CPUS_PER_TASK reservation it froze) — a plain foreground
+    // build reserves nothing, so it keeps the ordinary flag/machine-default
+    // chain.
     let mut vars = VarSet::new();
-    vars.set("MAKEJOBS", make_jobs_var(opts.make_jobs, machine.meta.build.make_jobs));
+    vars.set(
+        "MAKEJOBS",
+        match submit {
+            Some(s) => s.make_jobs.clone(),
+            None => make_jobs_var(opts.make_jobs, machine.meta.build.make_jobs),
+        },
+    );
     vars.set("USER", std::env::var("USER").unwrap_or_default());
     vars.set("SOURCEDIR", cactus_root.display().to_string());
     vars.set("CONFIGURATION", name);
@@ -1220,48 +1393,34 @@ pub fn build(
         .map(|db| db.knob("allocation").unwrap_or("").to_owned())
         .unwrap_or_default();
     vars.set("ALLOCATION", allocation);
+    // A future submit-script's `@CACTUP@` (mirrors the sim/testsuite paths).
+    // Not read by anything in this chunk, but login-node-only, so it must be
+    // frozen now — `execute` could never recover it otherwise (D11).
+    let cactup = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "cactup".to_owned());
+    vars.set("CACTUP", cactup);
 
     // Rendered native optionlist: render → inject flags → substitute (§7.8).
     let rendered = vars
         .substitute(&inject_build_flags(&optionlist.render(), flags))
         .context("substituting the rendered optionlist")?;
 
-    fs::create_dir_all(&config_dir)
-        .with_context(|| format!("Failed to create {}", config_dir.display()))?;
-    // Staging cactup's files makes configs/<name> exist before Cactus's
-    // setup_configuration.pl ever runs, so it takes its "Reconfiguring"
-    // branch — which chdirs into the skeleton only the new-config branch
-    // creates. Create that skeleton ourselves, or the first configure dies
-    // with "Internal error - couldn't enter '…/config-data'".
-    for sub in ["build", "lib", "scratch", "config-data"] {
-        fs::create_dir_all(config_dir.join(sub))
-            .with_context(|| format!("Failed to create {}", config_dir.join(sub).display()))?;
-    }
-    let rendered_path = config_dir.join("cactup-optionlist.cfg");
-    fs::write(&rendered_path, &rendered)?;
-    let thornlist_out = config_dir.join(THORNLIST_PROCESSED);
-    fs::write(&thornlist_out, &thornlist_processed)?;
-    // Snapshot the source verbatim, so a rebuild survives the file it came from
-    // moving or being deleted (resolve_thornlist step 3). Written from
-    // `thornlist.text`, not the processed copy: a rebuild must re-apply
-    // whatever the machine's thorn toggles say *then*, not replay old ones.
-    let thornlist_snapshot = config_dir.join(THORNLIST_SNAPSHOT);
-    fs::write(&thornlist_snapshot, &thornlist.text)
-        .with_context(|| format!("Failed to write {}", thornlist_snapshot.display()))?;
-    // Every build's combined output is teed here so a failure leaves something
-    // to read once the terminal scrollback is gone (§7.2).
-    let build_log = config_dir.join("cactup-build.log");
+    // §7.7: virtual/prebuilt executable — canonicalize now (a relative path
+    // would resolve against whatever directory `execute` happens to run
+    // from, possibly hours later and possibly not this one).
+    let virtual_executable =
+        opts.virtual_executable.as_ref().map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
 
-    // Per-config build lock, heartbeat-kept across the (long) make (§2.3 #4).
-    let _build_lock = LinkLock::acquire(&config_dir.join(".cactup-build.lock"))?.with_heartbeat();
-
-    if let Some(prebuilt) = &opts.virtual_executable {
-        // §7.7: virtual/prebuilt executable — copy into place, skip make.
-        let exe_dir = cactus_root.join("exe");
-        fs::create_dir_all(&exe_dir)?;
-        fs::copy(prebuilt, exe_dir.join(format!("cactus_{name}")))
-            .with_context(|| format!("Failed to copy {}", prebuilt.display()))?;
-    } else {
+    // The machine's resolved `make` invocation and build-phase env-setup —
+    // both MDB-derived (`machine.meta`), so both are frozen into `BuildMeta`
+    // for `execute` (D11) exactly like `universe`/`vars` are: `execute` may
+    // need to drive an extra `<name>-realclean` step of its own if a re-probe
+    // shows the flesh has moved since this decision was made (see its doc
+    // comment), and resolving either of these afresh there would mean
+    // reading the MDB. `None`/empty for a `--virtual-executable` build, which
+    // never runs `make` at all.
+    let (make, build_env) = if virtual_executable.is_none() {
         // The default (`DEFAULT_MAKE`) templates @MAKEJOBS@ so
         // `[build].make-jobs` (§7.6: --make-jobs > machine make-jobs > 1) is
         // honored as the default -j even on machines that don't hand-write a
@@ -1270,90 +1429,20 @@ pub fn build(
         let make = vars
             .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE))
             .context("substituting the machine make command")?;
-
-        let mut steps: Vec<String> = Vec::new();
-        if matches!(decision, RebuildDecision::Full(_)) && is_configured(&cactus_root, name) {
-            steps.push(format!("{make} {name}-realclean"));
-        }
-        steps.push(format!(
-            "echo yes | {make} {name}-config options={} THORNLIST={}",
-            sh_quote(&rendered_path),
-            sh_quote(&thornlist_out),
-        ));
-        if opts.clean {
-            steps.push(format!("{make} {name}-clean"));
-        }
-        steps.push(format!("{make} {name}"));
-        steps.push(format!("{make} {name}-utils"));
-
-        // A wrapper universe may hand the build to the scheduler (e.g. an
-        // srun prefix), which sits silently in the queue until it gets an
-        // allocation — say so up front, or the wait looks like a hang.
-        if let (Some(uname), Some(u)) = (universe_name.as_deref(), universe)
-            && (u.wrapper.is_some() || u.wrapper_argv.is_some())
-        {
-            println!(
-                "Building inside universe \"{uname}\"; if its wrapper goes through the \
-                 scheduler, output stays silent until the job is allocated (check the queue)."
-            );
-        }
-
         // Build-phase env for the resolved universe (§6.1): universe env keys
         // override the machine [environment] key-by-key.
-        let env = machine.meta.effective_env(universe_name.as_deref(), Phase::Build);
-        let snippet = format!(
-            "set -e\ncd {}\n{}{}",
-            sh_quote(&cactus_root),
-            if env.is_empty() { String::new() } else { format!("{env}\n") },
-            steps.join("\n")
-        );
-        run_build_snippet(&snippet, universe, &vars, &build_log)?;
-    }
+        let env = machine
+            .meta
+            .effective_env(universe_spec.as_ref().map(|u| u.name.as_str()), Phase::Build);
+        (Some(make), env)
+    } else {
+        (None, String::new())
+    };
 
-    if !is_complete(&cactus_root, name) {
-        // Report the component that is actually absent (§7.2). The two states
-        // point the operator at opposite ends of the log:
-        //   - configure never completed  → the marker is missing; look near
-        //     the TOP of the log (a CST/configure error).
-        //   - configure done, no exe     → the compile/link failed; look near
-        //     the END of the log. run_build_snippet did NOT see a failure, so
-        //     the build command reported success while the build failed —
-        //     usually a scheduler wrapper swallowing the job's exit status.
-        let (missing, hint) = if !is_configured(&cactus_root, name) {
-            (
-                completeness_marker(&cactus_root, name),
-                "the configure step did not complete — look near the top of the build log",
-            )
-        } else {
-            (
-                executable_path(&cactus_root, name),
-                "the compile/link step did not complete — look near the end of the build log; \
-                 note the build command reported success, so if this machine's build universe \
-                 goes through a scheduler its wrapper may be swallowing the job's exit status",
-            )
-        };
-        let log_hint = if build_log.exists() {
-            eprintln!(
-                "\n{} the build command finished but {} is missing — the config is incomplete\n  {}\n{} {}",
-                "✗".red().bold(),
-                missing.display(),
-                hint,
-                "→ build log:".red().bold(),
-                build_log.display(),
-            );
-            format!("; {hint}; see {}", build_log.display())
-        } else {
-            format!("; {hint}")
-        };
-        bail!(
-            "the build command finished but {} is missing — the config is incomplete{log_hint}",
-            missing.display(),
-        );
-    }
-
-    // Metadata + rebuild snapshot (§7.4, §7.8).
+    // The fully-formed config metadata to store on success, minus `built`
+    // (execute stamps that once the build actually finishes).
     let now = Utc::now();
-    let meta = ConfigMeta {
+    let config_meta = ConfigMeta {
         schema: SCHEMA,
         name: name.to_owned(),
         variant: variant.clone(),
@@ -1368,17 +1457,497 @@ pub fn build(
             .map(|m| m.config_id)
             .unwrap_or_else(|| generate_id("config", name, &machine.name, now)),
         build_id: generate_id("build", name, &machine.name, now),
-        built: Some(now),
+        built: None,
         flags,
         sources: fresh_sources.map(|s| s.heads),
         thorn_providers: fresh_providers,
         thorn_shapes: fresh_shapes,
     };
-    meta.store(&cactus_root)?;
-    fs::write(&snapshot_path, &optionlist.source)
-        .with_context(|| format!("Failed to write {}", snapshot_path.display()))?;
 
-    Ok(BuildOutcome { meta, rebuilt: true })
+    let attempt_id = BuildAttempt::next_id(&config_dir)?;
+    let attempt_dir = BuildAttempt::attempt_dir(&config_dir, attempt_id);
+    // Frozen now, not derived later: a later `build log` reads these back off
+    // the stored var set alone (D11), and the foreground path needs them too.
+    vars.set("STDOUT_FILE", attempt_dir.join("build.out").display().to_string());
+    vars.set("STDERR_FILE", attempt_dir.join("build.err").display().to_string());
+    let meta = BuildMeta {
+        schema: SCHEMA,
+        attempt_id,
+        config: name.to_owned(),
+        variant,
+        machine: machine.name.clone(),
+        alias: installation.alias.clone(),
+        config_dir: config_dir.clone(),
+        cactus_root: cactus_root.clone(),
+        install_root: installation.root.clone(),
+        submitted: false,
+        job_id: NO_JOB_ID.to_owned(),
+        status: None,
+        reservation: submit.map(|s| s.reservation.clone()),
+        decision: decision_reason(&decision).to_owned(),
+        full_rebuild,
+        make: make.clone(),
+        build_env: build_env.clone(),
+        virtual_executable,
+        universe: universe_spec,
+        config_meta,
+        vars: freeze_vars(&vars),
+        timestamps: Timestamps { created: Some(Utc::now()), submitted: None, started: None, finished: None },
+        outcome: None,
+    };
+    // Creates the attempt directory and writes build.toml; from here on the
+    // staged files below live under it, never under configs/<name>/.
+    let attempt = BuildAttempt::create(attempt_dir, meta)?;
+
+    // The composed build-script text, frozen for `execute` to run verbatim
+    // (see its doc comment for why recomposing there would be wrong). Not
+    // written at all for a virtual-executable build: that's a plain file
+    // copy, not a script (see `BuildMeta::virtual_executable`'s doc comment).
+    if let Some(make) = &make {
+        let mut steps: Vec<String> = Vec::new();
+        if matches!(decision, RebuildDecision::Full(_)) && is_configured(&cactus_root, name) {
+            steps.push(format!("{make} {name}-realclean"));
+        }
+        steps.push(format!(
+            "echo yes | {make} {name}-config options={} THORNLIST={}",
+            sh_quote(&attempt.optionlist_path()),
+            sh_quote(&attempt.thornlist_path()),
+        ));
+        if opts.clean {
+            steps.push(format!("{make} {name}-clean"));
+        }
+        steps.push(format!("{make} {name}"));
+        steps.push(format!("{make} {name}-utils"));
+
+        // `.cactup-builds/` is safe from `make <config>-realclean`: the flesh
+        // rule (Cactus/lib/make/make.configuration:298) removes only
+        // `piraha`, `build`, `bindings`, `config-data/make.thornlist`, `lib`,
+        // `scratch`, and `datestamp.o` — never the config dir wholesale,
+        // never dot-prefixed entries — so a live build.out survives even the
+        // realclean step above.
+        let script = format!(
+            "#!/bin/sh\nset -e\ncd {}\n{}{}\n",
+            sh_quote(&cactus_root),
+            if build_env.is_empty() { String::new() } else { format!("{build_env}\n") },
+            steps.join("\n"),
+        );
+        write_executable(&attempt.script_path(), &script)?;
+    }
+
+    // Stage cactup's own files into the attempt dir (never configs/<name>/ —
+    // see this function's doc comment). `execute` installs them into
+    // configs/<name>/ only once the build actually succeeds.
+    fs::write(attempt.optionlist_path(), &rendered)
+        .with_context(|| format!("Failed to write {}", attempt.optionlist_path().display()))?;
+    fs::write(attempt.optionlist_snapshot_path(), &optionlist.source)
+        .with_context(|| format!("Failed to write {}", attempt.optionlist_snapshot_path().display()))?;
+    fs::write(attempt.thornlist_path(), &thornlist_processed)
+        .with_context(|| format!("Failed to write {}", attempt.thornlist_path().display()))?;
+    // Snapshot the source verbatim, so a rebuild survives the file it came
+    // from moving or being deleted (resolve_thornlist step 3). Written from
+    // `thornlist.text`, not the processed copy: a rebuild must re-apply
+    // whatever the machine's thorn toggles say *then*, not replay old ones.
+    fs::write(attempt.thornlist_snapshot_path(), &thornlist.text)
+        .with_context(|| format!("Failed to write {}", attempt.thornlist_snapshot_path().display()))?;
+
+    Ok(Prepared::Ready(attempt))
+}
+
+/// Run a prepared attempt: acquire the per-config build lock, invoke `make`
+/// (or, for `--virtual-executable`, the prebuilt-binary copy), and record the
+/// outcome. Must not read the MDB, the global DB, the installation registry,
+/// or knobs (D11) — everything it needs was frozen into `attempt.meta` by
+/// `prepare`. `tee = true` mirrors the run to the terminal as well as
+/// `build.out`/`build.err` (a foreground build, `build()`'s only caller
+/// today); `tee = false` is for the future compute-node path, where the
+/// scheduler owns the output files.
+///
+/// The config-dir skeleton and the stale-per-thorn-build-state deletion both
+/// happen HERE, not in `prepare`: an attempt that is staged but never run —
+/// or queued and only run hours later — must not have touched
+/// `configs/<name>/` in the meantime (see `prepare`'s doc comment).
+///
+/// This is also where the §7.4 source/provider/shape fingerprints actually
+/// get taken, NOT `prepare` (regardless of what `prepare` observed for its
+/// own rebuild-DECISION purposes): a queued build can sit for hours between
+/// `prepare` staging it and `execute` finally running, long enough for a
+/// `cactup installation refetch`, a `git checkout`, or a hand edit to land
+/// underneath it. `ConfigMeta` is documented as recording "the source state
+/// this build compiled" — if that record were `prepare`'s stale copy, a
+/// refetch during the queue wait would go unrecorded, the next `cactup
+/// build` would diff stored-against-live, find them identical, print
+/// "up to date", and never rebuild a binary that is silently stale. The
+/// re-probe here is a second pass over the same ground `prepare` already
+/// covered — for a foreground build (`prepare`/`execute` seconds apart) that
+/// second pass finds nothing new and just costs one extra (parallel, fast)
+/// walk; for a queued build it is the difference between a true record and a
+/// false one. The invalidated-thorn set (`changed_providers`/
+/// `changed_shapes`) is likewise recomputed from THIS probe, never trusted
+/// from `prepare`'s frozen copy — see the per-thorn deletion block below.
+///
+/// Deliberately NOT re-run: the optionlist/thornlist/universe half of the
+/// §7.8 rebuild decision (`RebuildDecision::Full`/`Incremental` from an
+/// optionlist or thornlist edit). That half is genuinely MDB-derived
+/// (`machine.meta`, the optionlist variant) and D11 forbids reading the MDB
+/// here — it stays correctly frozen at `prepare` time. Only the
+/// source-derived half (`SourceDelta`) can plausibly change while a build
+/// sits queued, so only it is re-checked, via the `FLESH_NOT_AS_BUILT`
+/// upgrade below.
+pub fn execute(attempt: &mut BuildAttempt, tee: bool) -> Res<ConfigMeta> {
+    let config_dir = attempt.meta.config_dir.clone();
+    let cactus_root = attempt.meta.cactus_root.clone();
+    let install_root = attempt.meta.install_root.clone();
+    let name = attempt.meta.config.clone();
+
+    // D11/queued-build safety: `configs/<name>/` and this attempt's own
+    // directory both already exist by the time `prepare` returns — even for
+    // a brand-new config, since `BuildAttempt::create`'s
+    // `fs::create_dir_all` of `config_dir/.cactup-builds/<id>/` brings
+    // `config_dir` along with it as a parent. Their absence now can
+    // therefore only mean someone removed them while this attempt sat
+    // queued — most likely `cactup config delete`. Refuse rather than
+    // silently recreating (resurrecting) a deleted config.
+    if !config_dir.is_dir() || !attempt.dir.is_dir() {
+        bail!(
+            "config \"{name}\" (or this build's own attempt directory, {}) no longer exists — \
+             it was likely removed (e.g. by `cactup config delete`) while this build was \
+             queued; refusing to recreate it",
+            attempt.dir.display(),
+        );
+    }
+
+    // The per-repo/per-thorn skeleton subdirectories: makes configs/<name>
+    // ready for Cactus's setup_configuration.pl before it ever runs, so it
+    // takes its "Reconfiguring" branch — which chdirs into the skeleton only
+    // the new-config branch creates. Create that skeleton ourselves, or the
+    // first configure dies with "Internal error - couldn't enter
+    // '…/config-data'".
+    for sub in ["build", "lib", "scratch", "config-data"] {
+        fs::create_dir_all(config_dir.join(sub))
+            .with_context(|| format!("Failed to create {}", config_dir.join(sub).display()))?;
+    }
+
+    // Per-config build lock, heartbeat-kept across the (long) make (§2.3 #4).
+    let _build_lock = LinkLock::acquire(&config_dir.join(".cactup-build.lock"))?.with_heartbeat();
+    // This attempt's own liveness marker (mirrors Restart/TestRun's
+    // running.lock): a future `build show`/`build stop` reads THIS lock to
+    // ask "is this attempt still running", separate from the config-wide
+    // lock above, which only guards concurrent `make` invocations.
+    let running = LinkLock::acquire(&attempt.running_lock_path())?.with_heartbeat();
+    attempt.touch_heartbeat();
+
+    attempt.meta.timestamps.started = Some(Utc::now());
+    attempt.meta.status = Some("R".to_owned());
+    attempt.store_meta()?;
+
+    // §7.4/D11 re-probe (see this function's doc comment for why it must
+    // happen here, not just at `prepare` time). The processed thornlist is
+    // re-parsed from the copy `prepare` staged into the attempt dir — that,
+    // `install_root`, and `cactus_root` are all already frozen in
+    // `attempt.meta`, so this reads no MDB, global DB, installation
+    // registry, or knob (D11-clean).
+    let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
+        .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
+    let fresh_list = crate::thornlist::parse(&processed_thornlist).ok();
+    // Best-effort, matching `prepare`'s own tolerance: an unparseable
+    // thornlist or a tree with no inspectable repo yields no baseline rather
+    // than failing the build outright.
+    let fresh_sources = fresh_list
+        .as_ref()
+        .and_then(|l| crate::fetch::source_heads_with_progress(&install_root, l).ok().flatten());
+    let fresh_providers = fresh_list.as_ref().map(|l| l.thorn_providers());
+    // Unlike `fresh_sources` above, a `thorn_shapes` failure is NOT
+    // swallowed: since this chunk gave it proper interrupt support (§2.4),
+    // its only failure mode is the user having hit Ctrl-C, and that must
+    // abort this build rather than silently compiling against an incomplete
+    // shape probe.
+    let fresh_shapes = match &fresh_list {
+        Some(l) => Some(thorn_shapes_with_progress(&cactus_root, l)?),
+        None => None,
+    };
+
+    // What this config's LAST SUCCESSFUL build actually recorded, read fresh
+    // off disk rather than from `attempt.meta.config_meta` (`prepare`'s
+    // frozen copy of what IT saw there). Reading it fresh is what makes it
+    // fine for another build of this same config to have completed while
+    // this one sat queued: we diff against whatever baseline is on disk
+    // right now and proceed — we do not refuse just because it changed
+    // under us, since the user explicitly asked for THIS build.
+    let previous = ConfigMeta::load(&cactus_root, &name)?;
+    if let Some(prev) = &previous
+        && let (Some(prev_built), Some(staged)) = (prev.built, attempt.meta.timestamps.created)
+        && prev_built > staged
+    {
+        println!(
+            "Note: config {name} was rebuilt by another `cactup build` while this one was \
+             queued; proceeding anyway — this build was explicitly requested."
+        );
+    }
+    let (sources_now, _) =
+        source_delta(previous.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
+    let changed_providers = provider_delta(
+        previous.as_ref().and_then(|m| m.thorn_providers.as_ref()),
+        fresh_providers.as_ref(),
+    );
+    let changed_shapes =
+        shape_delta(previous.as_ref().and_then(|m| m.thorn_shapes.as_ref()), fresh_shapes.as_ref());
+
+    // Upgrade an incremental build to a from-scratch one if the re-probe now
+    // shows the flesh has moved since `prepare` decided — the
+    // `FLESH_NOT_AS_BUILT` condition, re-checked here because a queued build
+    // may have waited hours since `prepare` last looked. See this function's
+    // doc comment for why only this (source-derived) half of the rebuild
+    // decision is re-run.
+    let flesh_escalated = !attempt.meta.full_rebuild && sources_now == SourceDelta::Flesh;
+    if flesh_escalated {
+        attempt.meta.full_rebuild = true;
+        attempt.meta.decision = FLESH_NOT_AS_BUILT.to_owned();
+        println!(
+            "Escalating config {name} to a from-scratch rebuild: the Cactus flesh moved while \
+             this build was queued, so the make system and config-data must be regenerated."
+        );
+        attempt.store_meta()?;
+    }
+
+    // Two incidents this exists for, both leaving a same-named build/<Thorn>/
+    // holding state compiled from the wrong source: a provider swap (old
+    // arrangement's stale `.d` files can name a bindings header the
+    // reconfigure below is about to delete — a hard make error) and a shape
+    // change (a `.ccl` REQUIRES edit or a removed source file, same failure
+    // modes — see `thorn_shapes`'s doc comment). Either way Cactus updates an
+    // existing libthorn_<Thorn>.a in place with `ar`, so stale members can
+    // otherwise survive into the link without so much as a warning. Both
+    // must go before make runs. `full_rebuild` is excluded on purpose:
+    // `realclean` already wipes every config's build state, so this would
+    // just be redundant there.
+    if !attempt.meta.full_rebuild {
+        let invalidated: Vec<String> = changed_providers
+            .iter()
+            .chain(&changed_shapes)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !invalidated.is_empty() {
+            fn remove_stale(path: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) -> Res<()> {
+                match remove(path) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(e).with_context(|| {
+                        format!(
+                            "Failed to remove stale per-thorn build state {} — proceeding would risk \
+                             compiling or linking against a thorn's old provider",
+                            path.display()
+                        )
+                    }),
+                }
+            }
+            if !changed_providers.is_empty() {
+                println!(
+                    "  changed provider (removing their stale per-thorn build state): {}",
+                    summarize(&changed_providers)
+                );
+            }
+            if !changed_shapes.is_empty() {
+                println!(
+                    "  changed contents (removing their stale per-thorn build state): {}",
+                    summarize(&changed_shapes)
+                );
+            }
+            for thorn in &invalidated {
+                remove_stale(&config_dir.join("build").join(thorn), |p| fs::remove_dir_all(p))?;
+                remove_stale(&config_dir.join("lib").join(format!("libthorn_{thorn}.a")), |p| fs::remove_file(p))?;
+            }
+        }
+    }
+
+    let status: Option<std::process::ExitStatus> = if let Some(prebuilt) = &attempt.meta.virtual_executable {
+        // §7.7: virtual/prebuilt executable — copy into place, skip make.
+        // Not run through the build universe or a spawned shell: a plain
+        // in-process file copy, exactly as before this split.
+        let exe_dir = cactus_root.join("exe");
+        fs::create_dir_all(&exe_dir).with_context(|| format!("Failed to create {}", exe_dir.display()))?;
+        fs::copy(prebuilt, exe_dir.join(format!("cactus_{name}")))
+            .with_context(|| format!("Failed to copy {}", prebuilt.display()))?;
+        None
+    } else {
+        let vset = thaw_vars(&attempt.meta.vars)?;
+        // A wrapper universe may hand the build to the scheduler (e.g. an
+        // srun prefix), which sits silently in the queue until it gets an
+        // allocation — say so up front, or the wait looks like a hang.
+        if let Some(spec) = &attempt.meta.universe
+            && (spec.wrapper.is_some() || spec.wrapper_argv.is_some())
+        {
+            println!(
+                "Building inside universe \"{}\"; if its wrapper goes through the \
+                 scheduler, output stays silent until the job is allocated (check the queue).",
+                spec.name,
+            );
+        }
+        let universe = attempt.meta.universe.as_ref().map(UniverseSpec::to_universe);
+
+        // The re-probe above may have escalated this build to a from-scratch
+        // rebuild after `prepare` already composed (and froze) a script with
+        // no realclean step in it. Drive one of our own first, using the
+        // exact `make`/env `prepare` froze for exactly this (D11: resolving
+        // either afresh here would mean reading the MDB) — `is_configured`
+        // mirrors `prepare`'s own gating: nothing to clean on a config that
+        // was never configured to begin with.
+        if flesh_escalated && is_configured(&cactus_root, &name) {
+            let make = attempt.meta.make.as_deref().context(
+                "a from-scratch rebuild was needed but no `make` command was frozen for this attempt",
+            )?;
+            let realclean_script = format!(
+                "#!/bin/sh\nset -e\ncd {}\n{}{make} {name}-realclean\n",
+                sh_quote(&cactus_root),
+                if attempt.meta.build_env.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n", attempt.meta.build_env)
+                },
+            );
+            let realclean_path = attempt.dir.join("build-script-realclean");
+            write_executable(&realclean_path, &realclean_script)?;
+            let cmd = script_command(&realclean_path, universe.as_ref(), &vset, &cactus_root)?;
+            let (realclean_out, realclean_err) =
+                (attempt.dir.join("realclean.out"), attempt.dir.join("realclean.err"));
+            let tee_files = tee.then(|| (realclean_out.clone(), realclean_err.clone()));
+            let realclean_status = spawn_and_wait(cmd, &attempt.heartbeat_path(), tee_files)?;
+            if !realclean_status.success() {
+                bail!(
+                    "the escalated realclean step failed ({realclean_status}); see {} and {}",
+                    realclean_out.display(),
+                    realclean_err.display(),
+                );
+            }
+        }
+
+        let cmd = script_command(&attempt.script_path(), universe.as_ref(), &vset, &cactus_root)?;
+        let tee_files = tee.then(|| (attempt.out_path(), attempt.err_path()));
+        Some(spawn_and_wait(cmd, &attempt.heartbeat_path(), tee_files)?)
+    };
+
+    drop(running);
+    attempt.meta.timestamps.finished = Some(Utc::now());
+    attempt.meta.status = Some("U".to_owned());
+
+    if let Some(st) = status
+        && !st.success()
+    {
+        attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: st.code(), complete: false });
+        attempt.store_meta()?;
+        eprintln!(
+            "\n{} the build failed ({st})\n{} {} and {}",
+            "✗".red().bold(),
+            "→ build output:".red().bold(),
+            attempt.out_path().display(),
+            attempt.err_path().display(),
+        );
+        bail!(
+            "the build failed ({st}); see {} and {}",
+            attempt.out_path().display(),
+            attempt.err_path().display(),
+        );
+    }
+
+    if !is_complete(&cactus_root, &name) {
+        // Report the component that is actually absent (§7.2). The two states
+        // point the operator at opposite ends of the output:
+        //   - configure never completed  → the marker is missing; look near
+        //     the TOP of build.out/build.err (a CST/configure error).
+        //   - configure done, no exe     → the compile/link failed; look near
+        //     the END of build.out/build.err.
+        let (missing, hint) = if !is_configured(&cactus_root, &name) {
+            (
+                completeness_marker(&cactus_root, &name),
+                "the configure step did not complete — look near the top of build.out/build.err",
+            )
+        } else {
+            (
+                executable_path(&cactus_root, &name),
+                "the compile/link step did not complete — look near the end of build.out/build.err",
+            )
+        };
+        let (out, err) = (attempt.out_path(), attempt.err_path());
+        let log_hint = if out.exists() || err.exists() {
+            eprintln!(
+                "\n{} the build command finished but {} is missing — the config is incomplete\n  {}\n{} {} and {}",
+                "✗".red().bold(),
+                missing.display(),
+                hint,
+                "→ build output:".red().bold(),
+                out.display(),
+                err.display(),
+            );
+            format!("; {hint}; see {} and {}", out.display(), err.display())
+        } else {
+            format!("; {hint}")
+        };
+        attempt.meta.outcome =
+            Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: false });
+        attempt.store_meta()?;
+        bail!(
+            "the build command finished but {} is missing — the config is incomplete{log_hint}",
+            missing.display(),
+        );
+    }
+
+    // Success (§7.4, §7.8): stamp `built`, store into configs/<name>/, and —
+    // only now — install the processed thornlist and the optionlist source
+    // snapshot there too. Writing them any earlier (i.e. in `prepare`) would
+    // mean an abandoned or still-queued attempt could leave "thornlist
+    // unchanged" forever, so a real change would never trigger a rebuild —
+    // the whole reason this split keeps `prepare` from touching
+    // configs/<name>/ (see its doc comment).
+    let mut meta = attempt.meta.config_meta.clone();
+    meta.built = Some(Utc::now());
+    // §7.4/D11: overwrite whatever `prepare` froze here with what THIS
+    // function just re-probed above — see this function's doc comment. This
+    // is the whole point of the chunk: the recorded fingerprints must be
+    // "the source state this build compiled", not a possibly-hours-stale
+    // copy from staging time.
+    meta.sources = fresh_sources.map(|s| s.heads);
+    meta.thorn_providers = fresh_providers;
+    meta.thorn_shapes = fresh_shapes;
+    meta.store(&cactus_root)?;
+    fs::copy(attempt.optionlist_path(), config_dir.join("cactup-optionlist.cfg"))
+        .with_context(|| "Failed to install cactup-optionlist.cfg")?;
+    fs::copy(attempt.optionlist_snapshot_path(), config_dir.join("cactup-optionlist.toml"))
+        .with_context(|| "Failed to install cactup-optionlist.toml")?;
+    fs::copy(attempt.thornlist_path(), config_dir.join(THORNLIST_PROCESSED))
+        .with_context(|| format!("Failed to install {THORNLIST_PROCESSED}"))?;
+    fs::copy(attempt.thornlist_snapshot_path(), config_dir.join(THORNLIST_SNAPSHOT))
+        .with_context(|| format!("Failed to install {THORNLIST_SNAPSHOT}"))?;
+
+    attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: true });
+    attempt.meta.config_meta = meta.clone();
+    attempt.store_meta()?;
+
+    Ok(meta)
+}
+
+/// Run `config build` for `name` (§7): `prepare` then `execute`, exactly as
+/// before this split — `cactup build` still runs both back to back today;
+/// only a later submit-path chunk lets time pass between them. Returns the
+/// stored metadata. The global DB is never touched by `execute` (§2.3); the
+/// caller updates the active-config pointer afterwards.
+pub fn build(
+    installation: &Installation,
+    machine: &Machine,
+    name: &str,
+    opts: &BuildOpts,
+) -> Res<BuildOutcome> {
+    match prepare(installation, machine, name, opts, None)? {
+        Prepared::UpToDate(meta) => Ok(BuildOutcome { meta, rebuilt: false }),
+        Prepared::Ready(mut attempt) => {
+            // Foreground build: this process IS the job (mirrors the
+            // testsuite/sim foreground paths' `job_id = process::id()`).
+            attempt.meta.job_id = std::process::id().to_string();
+            attempt.store_meta()?;
+            let meta = execute(&mut attempt, true)?;
+            Ok(BuildOutcome { meta, rebuilt: true })
+        }
+    }
 }
 
 /// `config-data/cctk_Config.h` presence ⇒ configured; + executable ⇒ complete
@@ -1417,100 +1986,6 @@ fn generate_id(kind: &str, name: &str, machine: &str, now: DateTime<Utc>) -> Str
 
 fn sh_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
-}
-
-/// Run the env-setup'd make snippet, wrapped in the build universe when one
-/// is resolved (§7.2, §4.8). Build output streams to the terminal *and* is
-/// teed (stdout+stderr, combined) to `log_path`, so a failed build leaves a
-/// persistent record to read after the terminal scrollback is gone. On
-/// failure we point the user at that log loudly, on stderr, before bailing.
-fn run_build_snippet(
-    snippet: &str,
-    universe: Option<&crate::mdb::Universe>,
-    vars: &VarSet,
-    log_path: &Path,
-) -> Res<()> {
-    let mut cmd = match universe {
-        None => {
-            let mut c = Command::new("/bin/sh");
-            c.args(["-c", snippet]);
-            c
-        }
-        Some(u) => match u.wrap(vars, snippet)? {
-            crate::mdb::WrappedCommand::Shell(shell_cmd) => {
-                let mut c = Command::new("/bin/sh");
-                c.args(["-c", &shell_cmd]);
-                c
-            }
-            crate::mdb::WrappedCommand::Argv(argv) => {
-                let mut c = Command::new(&argv[0]);
-                c.args(&argv[1..]);
-                c
-            }
-        },
-    };
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    crate::shell::trace_command(&cmd);
-
-    // One combined log per build; File::create truncates any prior attempt.
-    let log = Arc::new(Mutex::new(
-        fs::File::create(log_path)
-            .with_context(|| format!("Failed to create build log {}", log_path.display()))?,
-    ));
-    let mut child = cmd.spawn().context("Failed to spawn the build shell")?;
-
-    // Mirror one child stream to a terminal fd and the shared log. stdout and
-    // stderr keep their own destinations on-screen; both interleave into the
-    // single log file (ordering approximate across the two streams, as in a
-    // shell `2>&1`-style tee).
-    fn tee(
-        mut src: impl std::io::Read + Send + 'static,
-        log: Arc<Mutex<fs::File>>,
-        to_stderr: bool,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match src.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let chunk = &buf[..n];
-                        if to_stderr {
-                            let _ = std::io::stderr().write_all(chunk);
-                        } else {
-                            let _ = std::io::stdout().write_all(chunk);
-                        }
-                        if let Ok(mut f) = log.lock() {
-                            let _ = f.write_all(chunk);
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    let copiers = [
-        tee(child.stdout.take().expect("stdout piped"), Arc::clone(&log), false),
-        tee(child.stderr.take().expect("stderr piped"), Arc::clone(&log), true),
-    ];
-    let status = child.wait().context("Failed to wait on the build shell")?;
-    crate::par::join_with_deadline(
-        copiers,
-        std::time::Duration::from_secs(2),
-        "note: a background process from the build still holds the output pipe; \
-         not waiting for it (its further output is not logged)",
-    );
-
-    if !status.success() {
-        eprintln!(
-            "\n{} the build failed ({status})\n{} {}",
-            "✗".red().bold(),
-            "→ build log:".red().bold(),
-            log_path.display(),
-        );
-        bail!("the build failed ({status}); see {}", log_path.display());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2088,11 +2563,11 @@ mod tests {
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.starts_with("VERSION = 1\n") && rendered.contains("OPTIMISE = yes"));
 
-        // Combined build output was teed to the per-config log.
-        let build_log =
-            fs::read_to_string(cactus.join("configs/sim/cactup-build.log")).unwrap();
-        assert!(build_log.contains("fake-make: -j4 sim-config"), "{build_log}");
-        assert!(build_log.contains("fake-make: -j4 sim\n"), "{build_log}");
+        // The build's stdout was teed to the first attempt's build.out.
+        let build_out =
+            fs::read_to_string(cactus.join("configs/sim/.cactup-builds/0000/build.out")).unwrap();
+        assert!(build_out.contains("fake-make: -j4 sim-config"), "{build_out}");
+        assert!(build_out.contains("fake-make: -j4 sim\n"), "{build_out}");
 
         // Second build with nothing changed: up-to-date short-circuit.
         let again = build(&inst, &machine, "sim", &opts).unwrap();
@@ -2187,15 +2662,57 @@ mod tests {
             Ok(_) => panic!("build should have failed"),
             Err(e) => e,
         };
-        let build_log = cactus.join("configs/sim/cactup-build.log");
-        // The error names the log path...
+        let attempt_dir = cactus.join("configs/sim/.cactup-builds/0000");
+        let build_out = attempt_dir.join("build.out");
+        let build_err = attempt_dir.join("build.err");
+        // The error names both output files...
         assert!(
-            err.to_string().contains(&build_log.display().to_string()),
-            "error should point at the log: {err}"
+            err.to_string().contains(&build_out.display().to_string())
+                && err.to_string().contains(&build_err.display().to_string()),
+            "error should point at build.out and build.err: {err}"
         );
-        // ...and the log captured make's stderr diagnostic.
-        let captured = fs::read_to_string(&build_log).unwrap();
+        // ...and build.err captured make's stderr diagnostic.
+        let captured = fs::read_to_string(&build_err).unwrap();
         assert!(captured.contains("no input files"), "{captured}");
+    }
+
+    /// The regression this whole chunk exists to prevent (see `prepare`'s doc
+    /// comment): staging a build must not install anything into
+    /// `configs/<name>/` — not the rendered optionlist, not the processed
+    /// thornlist, not their snapshots, not even the build skeleton. Only a
+    /// SUCCESSFUL `execute` may do that; an attempt that is staged and then
+    /// abandoned must leave the next rebuild decision exactly as it would
+    /// have been had `prepare` never run.
+    #[test]
+    fn prepare_without_execute_leaves_the_config_dir_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        // The make command is never invoked by this test — prepare() alone
+        // is under test — but fake_tree needs a body to stand up the tree.
+        let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
+
+        let attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+
+        // The attempt directory holds everything execute() will need...
+        assert!(attempt.optionlist_path().is_file());
+        assert!(attempt.optionlist_snapshot_path().is_file());
+        assert!(attempt.thornlist_path().is_file());
+        assert!(attempt.thornlist_snapshot_path().is_file());
+        assert!(attempt.script_path().is_file());
+
+        // ...but none of it, nor the build skeleton, has touched
+        // configs/sim/ itself.
+        let config_dir = cactus.join("configs/sim");
+        for f in ["cactup-optionlist.cfg", "cactup-optionlist.toml", THORNLIST_PROCESSED, THORNLIST_SNAPSHOT] {
+            assert!(!config_dir.join(f).exists(), "{f} must not exist before execute() runs");
+        }
+        for sub in ["build", "lib", "scratch", "config-data"] {
+            assert!(!config_dir.join(sub).exists(), "{sub}/ must not exist before execute() runs");
+        }
     }
 
     /// Stage a fake Cactus tree whose machine `make` is `make_body` (a `case
@@ -2254,11 +2771,126 @@ mod tests {
         (mdb, machine, inst, BuildOpts::default_for_tests())
     }
 
+    /// The whole point of this chunk (queued-build correctness, §7.4/D11):
+    /// `prepare` stages an attempt and freezes its own snapshot of the
+    /// source trees, but a `git checkout`/refetch/hand-edit can land
+    /// underneath it before `execute` finally runs `make` — the gap a
+    /// compute-node queue wait opens. The `ConfigMeta` `execute` writes on
+    /// success must record what IT sees at that later point, not `prepare`'s
+    /// now-stale copy: otherwise the next `cactup build` would diff
+    /// stored-against-live, find them identical, and never rebuild a binary
+    /// that is silently wrong.
+    #[test]
+    fn execute_records_the_source_state_as_of_execute_not_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, _opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;",
+                c = cactus.display()
+            ),
+        );
+
+        // A real CRL list with a flesh ("core") and a thorn repo
+        // ("cactusbase") — source tracking reads the live tree, not a replay
+        // of `fetch-state.toml`, so real repos are needed to mutate.
+        let list_path = root.join("crl.th");
+        fs::write(
+            &list_path,
+            "!CRL_VERSION = 1.0\n\
+             !DEFINE ROOT = Cactus\n\n\
+             !TARGET   = $ROOT\n!TYPE = git\n!URL = https://e.invalid/cactus.git\n\
+             !NAME = core\n!CHECKOUT = Makefile lib src\n\n\
+             !TARGET   = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/cactusbase.git\n\
+             !CHECKOUT = CactusBase/Boundary\n",
+        )
+        .unwrap();
+
+        let repos = cactus.join("repos");
+        for name in ["core", "cactusbase"] {
+            crate::fetch::git::testrepo::init(&repos.join(name));
+            crate::fetch::git::testrepo::commit_file(&repos.join(name), "thorn.cc", "int a;\n");
+        }
+
+        let mut opts = BuildOpts::default_for_tests();
+        opts.thornlist = Some(list_path.clone());
+
+        let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+
+        // What `prepare` observed and froze, before the mutation below —
+        // this is the value the bug this chunk fixes would have shipped.
+        let staged = attempt.meta.config_meta.sources.clone().expect("prepare must record a baseline");
+
+        // Simulate a refetch (or a manual checkout, or a hand edit) landing
+        // in the source tree while this build sat staged/queued.
+        crate::fetch::git::testrepo::commit(&repos.join("cactusbase"), "landed during the queue wait");
+
+        // Independently compute what the tree looks like NOW, off the exact
+        // processed thornlist `execute` will itself read (the copy `prepare`
+        // staged into the attempt dir), so this assertion does not just
+        // repeat `execute`'s own logic back at itself.
+        let processed = crate::thornlist::parse(&fs::read_to_string(attempt.thornlist_path()).unwrap()).unwrap();
+        let live = crate::fetch::source_heads_with_progress(&inst.root, &processed).unwrap().unwrap();
+
+        let result = execute(&mut attempt, true).unwrap();
+        let recorded = result.sources.expect("execute must record sources");
+        assert_ne!(
+            recorded["cactusbase"], staged["cactusbase"],
+            "the record must not be prepare's stale snapshot: {recorded:?} vs {staged:?}"
+        );
+        assert_eq!(
+            recorded["cactusbase"], live.heads["cactusbase"],
+            "the record must be exactly what execute itself observed"
+        );
+    }
+
+    /// D11/queued-build safety (item 4): if someone runs `cactup config
+    /// delete` while a staged attempt sits in the queue, `execute` must
+    /// refuse rather than silently recreating the config directory it (and
+    /// its own attempt subdirectory) used to live in — `fs::create_dir_all`
+    /// would otherwise resurrect a config the user explicitly deleted.
+    #[test]
+    fn execute_refuses_when_the_config_was_deleted_while_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        // The make command is never invoked — execute() must refuse before
+        // it ever gets there — but fake_tree needs a body to stand up the
+        // tree.
+        let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
+
+        let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+
+        let config_dir = cactus.join("configs/sim");
+        assert!(config_dir.is_dir(), "prepare must have brought the config dir along as a parent");
+        fs::remove_dir_all(&config_dir).unwrap();
+
+        let err = match execute(&mut attempt, true) {
+            Ok(_) => panic!("execute must refuse when the config directory vanished"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("sim"), "should name the config: {err}");
+        assert!(
+            !config_dir.exists(),
+            "must refuse rather than resurrecting the deleted config directory"
+        );
+    }
+
     /// Defect A, compile-failure branch: configure produced the marker but the
     /// make exited 0 without producing the executable (a scheduler wrapper
     /// swallowed the inner make's real exit status). The incompleteness error
-    /// must name the missing *executable* and flag the swallowed-status case —
-    /// not blame the configure marker, which is present.
+    /// must name the missing *executable* and point at the build output
+    /// files — not blame the configure marker, which is present.
     #[test]
     fn incomplete_after_configure_names_executable() {
         let dir = tempfile::tempdir().unwrap();
@@ -2282,7 +2914,12 @@ mod tests {
         let exe = executable_path(&cactus, "sim");
         assert!(err.contains(&exe.display().to_string()), "should name the exe: {err}");
         assert!(!err.contains("cctk_Config.h"), "must not blame the configure marker: {err}");
-        assert!(err.contains("exit status"), "should flag the swallowed-status case: {err}");
+        let attempt_dir = cactus.join("configs/sim/.cactup-builds/0000");
+        assert!(
+            err.contains(&attempt_dir.join("build.out").display().to_string())
+                && err.contains(&attempt_dir.join("build.err").display().to_string()),
+            "should point at build.out and build.err: {err}"
+        );
     }
 
     /// The thornlist is a real rebuild input (§7.8), is remembered across

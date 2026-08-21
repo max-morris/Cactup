@@ -50,6 +50,10 @@ This creates `~/.cactup/machines/myclu/` with:
   discover.py
 ```
 
+There's no `buildsubmitscripts/` directory yet — that one's optional, and only
+needed if your cluster forbids compiling on the login node. Step 4 below
+covers when and how to add it.
+
 ## Step 2: Edit meta.toml
 
 Open `~/.cactup/machines/myclu/meta.toml` and update the machine identity:
@@ -342,6 +346,78 @@ cd @RUNDIR@-active
 srun @EXECUTABLE@ @PARFILE@
 ```
 
+### Build submit scripts: does your cluster need one?
+
+Most clusters let you compile on the login node, and don't need anything
+here — skip this subsection entirely. Some clusters (often GPU clusters with
+a strict login-node policy) forbid it, the same way they'd forbid running a
+simulation there. If yours is one of them, add a fourth script directory
+alongside the three above:
+
+```
+~/.cactup/machines/myclu/
+  buildsubmitscripts/
+    default.sh
+```
+
+It's declared in meta.toml exactly like `submitscript`/`runscript`, as its
+own variant table:
+
+```toml
+[variants.buildsubmitscript]
+"default" = { queues = ["default", "gpu"], default = true }
+```
+
+And in `[build]`, tell cactup an unqualified `cactup build` should go to the
+queue rather than trying (and failing) to compile on the login node:
+
+```toml
+[build]
+default-action = "submit"
+queue          = "default"    # the build job's own queue/walltime/shape —
+walltime       = "2:00:00"    # all optional, and independent of a run's
+nodes          = 1
+tasks          = 1
+cpus-per-task  = 32
+```
+
+The script itself is structurally identical to `submitscripts/default.sh` —
+same `#SBATCH` directives, same `@ENV_SETUP@` — except the final line
+re-invokes cactup to build instead of to run:
+
+```bash
+#!/bin/bash
+
+#SBATCH --job-name=@JOB_NAME@
+#SBATCH --nodes=@NODES@
+#SBATCH --ntasks=@TASKS@
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
+#SBATCH --time=@WALLTIME@
+#SBATCH --output=@STDOUT_FILE@
+#SBATCH --error=@STDERR_FILE@
+#SBATCH --partition=@QUEUE@
+
+@ENV_SETUP@
+
+cd @SOURCEDIR@
+
+exec @CACTUP@ build run @CONFIGURATION@ \
+    --installation=@ALIAS@ --config-dir=@CONFIG_DIR@ --machine=@MACHINE@ \
+    --attempt-id=@ATTEMPT_ID@
+```
+
+`@CONFIG_DIR@` and `@ATTEMPT_ID@` are the build analogues of the run
+submitscript's `@SIMULATION_DIR@`/`@RESTART_ID@` (see
+[Scripts & Variables](scripts-and-variables.html)): they let the compute node
+locate exactly which build attempt to run without touching cactup's global
+state on this machine at all. Don't hand-write these two — they come from
+cactup itself when it generates the script, not from anything you configure.
+
+If your cluster needs the same GPU-reservation logic your run submitscript
+has (see the qbd example in [Scripts & Variables](scripts-and-variables.html)),
+write `buildsubmitscripts/default.py` instead of `.sh` — the calling
+convention is identical to a `submitscript` `.py` variant.
+
 ## Step 5: Update run scripts
 
 Edit `runscripts/default.sh`:
@@ -451,6 +527,18 @@ cactup sim run testsim testsim.par --config testconfig -n 1
 ```
 
 ## Step 9: Test batch submission (if applicable)
+
+If you added `buildsubmitscripts/` in Step 4, submit a build to the queue
+first — it exercises the buildsubmitscript, the job-id parsing, and the
+compute-node re-invocation before you've committed to a full run:
+
+```sh
+cactup build submit testconfig2 --follow
+cactup build show testconfig2
+```
+
+`--follow` streams `make`'s output until the job finishes, so you'll see a
+compile error immediately rather than having to go looking for it.
 
 Submit a test to the queue:
 
