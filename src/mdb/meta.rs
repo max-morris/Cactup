@@ -40,11 +40,14 @@ pub enum Phase {
     Run,
 }
 
-/// The two per-queue script kinds (§4.4).
+/// The per-queue script kinds (§4.4). `BuildSubmit` is the `build submit`
+/// groundwork (not yet wired to a command): no machine declares its variant
+/// table today, so it must validate and display as cleanly absent everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptKind {
     Submit,
     Run,
+    BuildSubmit,
 }
 
 impl ScriptKind {
@@ -53,6 +56,7 @@ impl ScriptKind {
         match self {
             ScriptKind::Submit => "submitscripts",
             ScriptKind::Run => "runscripts",
+            ScriptKind::BuildSubmit => "buildsubmitscripts",
         }
     }
 
@@ -60,6 +64,7 @@ impl ScriptKind {
         match self {
             ScriptKind::Submit => "variants.submitscript",
             ScriptKind::Run => "variants.runscript",
+            ScriptKind::BuildSubmit => "variants.buildsubmitscript",
         }
     }
 }
@@ -187,6 +192,36 @@ pub struct Build {
     pub disabled_thorns: Vec<String>,
     /// Machine-level build-phase default universe (§4.8 precedence step 4).
     pub universe: Option<String>,
+    /// `build submit` groundwork (not yet wired to a command): whether an
+    /// unqualified build should run in the foreground or go to the scheduler
+    /// when the machine can do both; absent leaves the choice to be decided
+    /// automatically.
+    // Pinned foundation API (build submit groundwork); only tests read these
+    // fields so far — the command that consumes them lands later.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub default_action: Option<BuildAction>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub queue: Option<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub walltime: Option<Walltime>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub nodes: Option<u32>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub tasks: Option<u32>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub cpus_per_task: Option<u32>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub gpus_per_task: Option<u32>,
+}
+
+/// `[build].default-action` (`build submit` groundwork, not yet wired to a
+/// command): whether an unqualified build runs in the foreground or is
+/// handed to the scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildAction {
+    Run,
+    Submit,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -327,6 +362,8 @@ pub struct Variants {
     pub submitscript: ScriptVariants,
     #[serde(default)]
     pub runscript: ScriptVariants,
+    #[serde(default)]
+    pub buildsubmitscript: ScriptVariants,
     #[serde(default)]
     pub optionlist: OptionlistVariants,
 }
@@ -649,7 +686,17 @@ impl Meta {
         match kind {
             ScriptKind::Submit => &self.variants.submitscript,
             ScriptKind::Run => &self.variants.runscript,
+            ScriptKind::BuildSubmit => &self.variants.buildsubmitscript,
         }
+    }
+
+    /// Whether this machine can hand a BUILD to its scheduler: it needs both a
+    /// buildsubmitscript variant to generate and a submit command to run.
+    // Pinned foundation API (build submit groundwork); only tests call this
+    // so far — the command that consumes it lands later.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn can_submit_builds(&self) -> bool {
+        !self.variants.buildsubmitscript.variants.is_empty() && self.scheduler.submit.is_some()
     }
 
     /// The queue used when -q is omitted, restricted to queues compatible with
@@ -816,7 +863,7 @@ impl Meta {
             bail!("[variants.optionlist] lists no variants; at least one optionlist is required");
         }
 
-        for kind in [ScriptKind::Submit, ScriptKind::Run] {
+        for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             self.validate_script_kind(kind)
                 .with_context(|| format!("in [{}]", kind.table_name()))?;
         }
@@ -847,7 +894,7 @@ impl Meta {
         // Every universe referenced by name must exist; "host" is always a
         // legal reference (§4.8), declared or implicit.
         let mut refs: Vec<(String, &Option<String>)> = vec![("[build].universe".into(), &self.build.universe)];
-        for kind in [ScriptKind::Submit, ScriptKind::Run] {
+        for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             let sv = self.script_variants(kind);
             refs.push((format!("[{}].default-universe", kind.table_name()), &sv.default_universe));
             for (vname, entry) in &sv.variants {
@@ -881,6 +928,15 @@ impl Meta {
     /// it is non-empty.
     fn validate_script_kind(&self, kind: ScriptKind) -> Res<()> {
         let sv = self.script_variants(kind);
+
+        // buildsubmitscript is opt-in: a machine that never hands builds to a
+        // scheduler declares no variants for it and owes no queue coverage, so
+        // an empty table is "not adopted", not "fails to cover its queues".
+        // Submit and Run stay mandatory — a machine that cannot run anything
+        // must still fail at load rather than at the first `sim run`.
+        if sv.variants.is_empty() && kind == ScriptKind::BuildSubmit {
+            return Ok(());
+        }
 
         for (name, entry) in &sv.variants {
             for queue in &entry.queues {
@@ -1286,6 +1342,93 @@ mod tests {
         let rs = meta.script_variants(ScriptKind::Run);
         assert_eq!(rs.default_universe.as_deref(), Some("et-sif"));
         assert!(!rs.variants.contains_key("default-universe"));
+    }
+
+    /// buildsubmitscript is the only OPTIONAL script kind. Skipping validation
+    /// for an empty table must not leak over to submitscript/runscript: a
+    /// machine that declares no runscript can never run anything, and has to
+    /// fail here at load rather than much later at the first `sim run`.
+    #[test]
+    fn only_buildsubmitscript_may_be_absent() {
+        // mike() itself declares no [variants.buildsubmitscript] and validates
+        // fine — that is the opt-in kind doing its job.
+        mike();
+
+        // Empty its runscript table and the machine must be rejected.
+        let no_runscripts = MIKE
+            .replace("\"cpu\" = { queues = [\"checkpt\", \"single\"], default = true }", "")
+            .replace("\"gpu-sing\" = { queues = [\"gpu\"], universe = \"et-sif\" }", "")
+            .replace(
+                "\"test-cpu\" = { queues = [\"checkpt\", \"single\"], test = true, default = true, tasks = 2 }",
+                "",
+            );
+        let meta: Meta = toml::from_str(&no_runscripts).unwrap();
+        assert!(meta.variants.runscript.variants.is_empty(), "fixture edit missed the runscript table");
+        let err = format!("{:#}", meta.validate("mike").unwrap_err());
+        assert!(err.contains("no normal variants declared"), "unexpected error: {err}");
+        assert!(err.contains("variants.runscript"), "unexpected error: {err}");
+    }
+
+    /// `build submit` groundwork (not yet wired to a command): a machine that
+    /// opts into [variants.buildsubmitscript] and the new [build] keys parses,
+    /// validates, and reports itself able to submit builds.
+    #[test]
+    fn build_submit_keys_parse_and_validate() {
+        let with_build_submit = MIKE
+            .replace(
+                "[variants.submitscript]",
+                "[variants.buildsubmitscript]\n\
+                 \"slurm-build\" = { queues = [\"checkpt\", \"single\"], default = true }\n\n\
+                 [variants.submitscript]",
+            )
+            .replace(
+                "[queues.checkpt]",
+                "[build]\n\
+                 default-action = \"submit\"\n\
+                 queue = \"gpu2\"\n\
+                 walltime = \"4:00:00\"\n\
+                 nodes = 1\n\
+                 tasks = 1\n\
+                 cpus-per-task = 64\n\
+                 gpus-per-task = 0\n\n\
+                 [queues.checkpt]",
+            );
+        let meta: Meta = toml::from_str(&with_build_submit).unwrap();
+        meta.validate("mike").unwrap();
+
+        assert_eq!(meta.build.default_action, Some(BuildAction::Submit));
+        assert_eq!(meta.build.queue.as_deref(), Some("gpu2"));
+        assert_eq!(meta.build.walltime, Some(Walltime(4 * 3600)));
+        assert_eq!((meta.build.nodes, meta.build.tasks), (Some(1), Some(1)));
+        assert_eq!((meta.build.cpus_per_task, meta.build.gpus_per_task), (Some(64), Some(0)));
+        assert!(meta.can_submit_builds());
+    }
+
+    #[test]
+    fn can_submit_builds_is_false_without_a_buildsubmitscript_variant() {
+        // MIKE never declares [variants.buildsubmitscript]; an empty table is
+        // exactly the state of all 37 bundled machines today, and must load
+        // and validate cleanly (it does — see `parses_and_validates_the_spec_example`).
+        assert!(!mike().can_submit_builds());
+    }
+
+    #[test]
+    fn can_submit_builds_is_false_without_a_scheduler_submit_command() {
+        let with_build_submit = MIKE
+            .replace(
+                "[variants.submitscript]",
+                "[variants.buildsubmitscript]\n\
+                 \"slurm-build\" = { queues = [\"checkpt\", \"single\"], default = true }\n\n\
+                 [variants.submitscript]",
+            )
+            // Drop [scheduler].submit: a buildsubmitscript variant with nothing
+            // to run it is not actually submit-capable.
+            .replace("submit = \"sbatch @SCRIPTFILE@ 2>&1\"\n        ", "");
+        let meta: Meta = toml::from_str(&with_build_submit).unwrap();
+        meta.validate("mike").unwrap();
+        assert!(!meta.variants.buildsubmitscript.variants.is_empty());
+        assert!(meta.scheduler.submit.is_none());
+        assert!(!meta.can_submit_builds());
     }
 
     #[test]

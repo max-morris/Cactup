@@ -211,6 +211,10 @@ A typical workflow:
    ```sh
    cactup build myconfig --optimize
    ```
+   (On a machine that requires compute-node builds, this submits and waits
+   for a job id rather than compiling immediately — see
+   [Building Configs](building-configs.html). Check `cactup build show
+   myconfig` before moving on if you're not sure it finished.)
 
 2. **Run the test suite** to validate it:
    ```sh

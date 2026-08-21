@@ -5,6 +5,7 @@
 
 use crate::args::TestStartArgs;
 use crate::build::{self, ConfigMeta};
+use crate::commands::build as build_cmd;
 use crate::commands::{machine, Ctx};
 use crate::database::{Database, SCHEMA};
 use crate::installation::{Installation, TestEntry};
@@ -18,7 +19,7 @@ use crate::sim::start::{
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
-    set_topology_vars, set_walltime_vars, Topology,
+    set_topology_vars, set_walltime_vars, QueueFit, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -26,7 +27,7 @@ use crate::testsuite::{
     ResultsSummary, TestMeta, TestRun, Timestamps,
 };
 use crate::Res;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{bail, Context};
 use chrono::Utc;
 use colored::Colorize;
 use regex::Regex;
@@ -182,10 +183,27 @@ fn start_impl(
         Some(c) => c.clone(),
         None => inst_meta.active_config()?.to_owned(),
     };
-    let cfg = ConfigMeta::load(&cactus_root, &cfg_name)?
-        .ok_or_else(|| anyhow!("config \"{cfg_name}\" has never been built (`cactup config build {cfg_name}`)"))?;
+    let config_dir = cactus_root.join("configs").join(&cfg_name);
+    let cfg = match ConfigMeta::load(&cactus_root, &cfg_name)? {
+        Some(cfg) => cfg,
+        None => {
+            if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
+                bail!(
+                    "{phrase} — wait for it, or watch with `cactup build log {cfg_name}` / \
+                     `cactup build show {cfg_name}`"
+                );
+            }
+            bail!("config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
+        }
+    };
     if !build::is_complete(&cactus_root, &cfg_name) {
-        bail!("config \"{cfg_name}\" is incomplete; rebuild it (`cactup config build {cfg_name} -f`)");
+        if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
+            bail!(
+                "{phrase} — wait for it, or watch with `cactup build log {cfg_name}` / \
+                 `cactup build show {cfg_name}`"
+            );
+        }
+        bail!("config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
     }
     // §11.5: a test run reads reference data straight from the live source
     // tree, so a tree that moved since the build matters here even more than
@@ -194,7 +212,8 @@ fn start_impl(
 
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
-    let mut topo = resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
+    let fit = QueueFit::from_config(&cfg);
+    let mut topo = resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
 
     // 3. TEST script variants for the queue (§11.2: prefer the test
@@ -715,6 +734,87 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("active config"), "guidance expected: {err}");
+    }
+
+    /// §7.9: a config that was genuinely never built still gets the ordinary
+    /// "has never been built" advice — but when a build attempt is actually
+    /// queued for it right now, telling the user to rebuild is exactly wrong.
+    /// `in_flight_build`'s phrase must replace that advice, not sit beside it.
+    #[test]
+    fn message_names_the_in_flight_build_instead_of_never_built_advice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut machine = fake_machine(&tmp.path().join("mdb-fake"));
+        // Force every job-status query to read as QUEUED, mirroring a build
+        // that really is sitting on the scheduler right now.
+        machine.meta.scheduler.get_status = Some("echo QUEUED".to_owned());
+        machine.meta.scheduler.status_pattern = Some("QUEUED".to_owned());
+        machine.meta.scheduler.queued_pattern = Some("QUEUED".to_owned());
+        machine.meta.scheduler.running_pattern = Some("$^".to_owned());
+        machine.meta.scheduler.holding_pattern = Some("$^".to_owned());
+
+        let inst = Installation::new("et", tmp.path().join("bare"));
+        {
+            let locked = inst.locked().unwrap();
+            let mut meta = locked.meta().unwrap();
+            meta.test_home = Some(tmp.path().join("testhome"));
+            locked.set_meta(&meta).unwrap();
+        }
+        let db = Database::new();
+
+        // No cactup-config.toml at all — genuinely never finished a build —
+        // but a submitted attempt with no recorded outcome sits queued.
+        let cactus_root = inst.cactus_root();
+        let config_dir = cactus_root.join("configs/tests");
+        let attempt_meta = crate::build::attempt::BuildMeta {
+            schema: crate::database::SCHEMA,
+            attempt_id: 0,
+            config: "tests".to_owned(),
+            variant: "default".to_owned(),
+            machine: "fake".to_owned(),
+            alias: "et".to_owned(),
+            config_dir: config_dir.clone(),
+            cactus_root: cactus_root.clone(),
+            install_root: cactus_root.clone(),
+            submitted: true,
+            job_id: "JOB-Q1".to_owned(),
+            status: None,
+            reservation: None,
+            decision: "test decision".to_owned(),
+            full_rebuild: false,
+            make: None,
+            build_env: String::new(),
+            virtual_executable: None,
+            universe: None,
+            config_meta: toml::from_str(
+                r#"
+                schema = 1
+                name = "tests"
+                variant = "default"
+                thornlist = "tests.th"
+                machine = "fake"
+                config-id = "cfg-tests"
+                build-id = "build-tests"
+                "#,
+            )
+            .unwrap(),
+            vars: Default::default(),
+            timestamps: crate::build::attempt::Timestamps::default(),
+            outcome: None,
+        };
+        crate::build::attempt::BuildAttempt::create(
+            crate::build::attempt::BuildAttempt::attempt_dir(&config_dir, 0),
+            attempt_meta,
+        )
+        .unwrap();
+
+        let mut args = test_args();
+        args.config = Some("tests".to_owned());
+        let err = start_impl(&inst, &machine, &db, &args, false, false, Some("h"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("QUEUED"), "{err}");
+        assert!(err.contains("JOB-Q1"), "{err}");
+        assert!(!err.contains("has never been built"), "advice not replaced: {err}");
     }
 
     #[test]

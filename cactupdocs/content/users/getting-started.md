@@ -65,7 +65,12 @@ Build a config with:
 cactup build myconfig
 ```
 
-This creates a Cactus config named `myconfig` with default settings. To customize the build:
+This creates a Cactus config named `myconfig` with default settings. On most
+machines it compiles right there in your terminal; on a cluster that
+requires building on a compute node, the same command submits the build to
+the queue instead and returns immediately — see
+[Building Configs](building-configs.html) for the details and for how to
+force one behavior or the other. To customize the build:
 
 ```sh
 cactup build myconfig \
@@ -149,7 +154,7 @@ See [Monitoring & Logs](monitoring.html) for more details.
 
 **"Machine not recognized"**: cactup discovers your machine automatically. If it fails, use `cactup --machine generic` or create a local machine entry — see [Cluster Authors](../authors/mdb-overview.html).
 
-**Build fails**: Check the build log in your installation directory. Run `cactup show` to see where things are installed.
+**Build fails**: Run `cactup build show myconfig` for the outcome and `cactup build log myconfig` for the output — no log path to hunt for.
 
 **Simulation won't start**: Verify the parfile exists and the config is built. Use `cactup config list` and `cactup config show`.
 

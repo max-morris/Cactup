@@ -21,7 +21,7 @@ mod walltime;
 #[cfg(test)]
 mod wisdom_parse;
 
-use crate::args::{Args, Commands, ConfigCommand, SimCommand, TestCommand};
+use crate::args::{Args, BuildCommand, Commands, SimCommand, TestCommand};
 use crate::commands::Ctx;
 use crate::database::Db;
 use clap::Parser;
@@ -72,8 +72,19 @@ fn main() -> Res<()> {
     // end via Ctrl-C, where a trailing aphorism reads as clutter.
     let suppress_wisdom = match &args.command {
         Commands::Sim(SimCommand::Run(run)) if run.sim_dir.is_some() => true,
+        Commands::Test(TestCommand::Run(run)) if run.test_dir.is_some() => true,
+        // The build compute-node path (D11), same as the two arms above —
+        // reachable either bare (`cactup build --config-dir …`) or through
+        // the explicit `build run` subcommand a generated submit script uses.
+        Commands::Build { start, command: None } if start.config_dir.is_some() => true,
+        Commands::Build { command: Some(BuildCommand::Run(run)), .. } if run.config_dir.is_some() => true,
         Commands::Sim(SimCommand::Log { follow, follow_out, follow_err, .. })
         | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. })
+            if *follow || *follow_out || *follow_err =>
+        {
+            true
+        }
+        Commands::Build { command: Some(BuildCommand::Log { follow, follow_out, follow_err, .. }), .. }
             if *follow || *follow_out || *follow_err =>
         {
             true
@@ -91,8 +102,7 @@ fn main() -> Res<()> {
         Commands::Uninstall { alias, force } => commands::uninstall::dispatch(&ctx, alias, force),
         Commands::Installation(cmd) | Commands::Inst(cmd) => commands::installation::dispatch(&ctx, cmd),
         Commands::Config(cmd) => commands::config::dispatch(&ctx, cmd),
-        // `cactup build …` is an alias for `cactup config build …` (§3).
-        Commands::Build(build) => commands::config::dispatch(&ctx, ConfigCommand::Build(build)),
+        Commands::Build { start, command } => commands::build::dispatch(&ctx, *start, command),
         Commands::Sim(cmd) => commands::sim::dispatch(&ctx, cmd),
         Commands::Test(cmd) => commands::test::dispatch(&ctx, cmd),
         Commands::Knob { name, value } => commands::knob::dispatch(&ctx, name, value),

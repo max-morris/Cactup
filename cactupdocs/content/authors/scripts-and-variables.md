@@ -5,7 +5,7 @@ description = "Write submit and run scripts with template variables"
 
 # Submit and Run Scripts
 
-**Submit scripts** generate batch job submissions (e.g., SLURM `sbatch` files). **Run scripts** generate interactive simulations or test runs. Both are templates that expand `@VAR@` tokens at runtime.
+**Submit scripts** generate batch job submissions (e.g., SLURM `sbatch` files). **Run scripts** generate interactive simulations or test runs. **Build submit scripts** are a third, optional kind, for clusters that require compiling on a compute node rather than the login node. All three are templates that expand `@VAR@` tokens at runtime.
 
 ## Scripts directory structure
 
@@ -19,9 +19,11 @@ Scripts are stored alongside meta.toml:
   runscripts/
     default.sh          # Run variant for interactive execution
     test.sh             # Special variant used by `cactup test run`
+  buildsubmitscripts/    # OPTIONAL — only if the cluster forbids
+    default.sh           # login-node compiling; used by `cactup build submit`
 ```
 
-Each script is typically 50-200 lines. cactup expands variables, then executes the script.
+Each script is typically 50-200 lines. cactup expands variables, then executes the script. `buildsubmitscripts/` is the one directory of the three that can be entirely absent: most clusters let you compile on the login node and never need it. See [Porting a Cluster](porting-a-cluster.html) for a worked example, and [meta.toml Reference](meta-toml.html) for the `[build]` keys that control when it's used.
 
 ## Script types
 
@@ -76,6 +78,45 @@ else
     @DEBUGGER@ --args @EXECUTABLE@ @PARFILE@
 fi
 ```
+
+### Build submit scripts (for queue-submitted builds)
+
+A build submit script is the third kind, structurally a sibling of a
+(simulation) submit script: same scheduler-directive header, same
+`submit-pattern` job-id parsing. The difference is the last line — instead of
+re-invoking `cactup sim run`, it re-invokes `cactup build run`:
+
+```bash
+#!/bin/bash
+
+#SBATCH --job-name=@JOB_NAME@
+#SBATCH --nodes=@NODES@
+#SBATCH --ntasks=@TASKS@
+#SBATCH --cpus-per-task=@CPUS_PER_TASK@
+#SBATCH --time=@WALLTIME@
+#SBATCH --output=@STDOUT_FILE@
+#SBATCH --error=@STDERR_FILE@
+#SBATCH --partition=@QUEUE@
+
+@ENV_SETUP@
+
+cd @SOURCEDIR@
+
+exec @CACTUP@ build run @CONFIGURATION@ \
+    --installation=@ALIAS@ --config-dir=@CONFIG_DIR@ --machine=@MACHINE@ \
+    --attempt-id=@ATTEMPT_ID@
+```
+
+`@CONFIG_DIR@`/`@ATTEMPT_ID@` are the build-submit-only variables (see below)
+that let the compute node locate exactly which build to run, without
+touching cactup's global state on this machine — the same role
+`@SIMULATION_DIR@`/`@RESTART_ID@` play for a simulation re-invocation. Most
+machines never need a build submit script at all; it exists only for
+clusters whose login-node policy forbids compiling there. See
+[Porting a Cluster](porting-a-cluster.html) for when to add one and
+[meta.toml Reference](meta-toml.html) for the `[build]` keys that control
+when it's used, and [Building Configs](../users/building-configs.html) for
+the user-facing `cactup build`/`build run`/`build submit` split this feeds.
 
 ## Template variables
 

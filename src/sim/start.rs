@@ -4,6 +4,7 @@
 
 use crate::args::{SimRunArgs, SimStartArgs, UniverseFlags};
 use crate::build::ConfigMeta;
+use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
 use crate::database::{Database, SCHEMA};
 use crate::installation::Installation;
@@ -132,6 +133,22 @@ pub(crate) fn resolve_submit_universe<'m>(
     }
 }
 
+/// `ConfigMeta::load` found nothing for `config` — almost always because it
+/// was deleted, but check for an in-flight build first (§7.9): a config
+/// delete guard closes the ordinary race, but this stays the accurate thing
+/// to say if metadata is ever unreadable for some other reason while a
+/// build is running. Shared by `submit_impl`/`run_interactive` below.
+fn config_missing_error(cactus_root: &Path, machine: &Machine, config: &str) -> anyhow::Error {
+    let config_dir = cactus_root.join("configs").join(config);
+    if let Some(phrase) = build_cmd::in_flight_build(&config_dir, config, Some(machine)) {
+        return anyhow!(
+            "{phrase} — this simulation's config is being (re)built; wait for it \
+             (`cactup build log {config}` / `cactup build show {config}`)"
+        );
+    }
+    anyhow!("config \"{config}\" (which created this simulation) no longer exists")
+}
+
 /// Insert the phase's effective env-setup into a substituted `.sh` script
 /// (§6.1 auto-prepend). Runscripts: right after the shebang. Submitscripts:
 /// after the leading run of `#`-or-blank lines (shebang + #SBATCH/#PBS
@@ -150,7 +167,7 @@ fn prepend_env(script: &str, env: &str, kind: ScriptKind) -> String {
             },
             None => format!("{env}\n{script}"),
         },
-        ScriptKind::Submit => {
+        ScriptKind::Submit | ScriptKind::BuildSubmit => {
             let mut idx = 0; // byte offset of the first substantive line
             for line in script.split_inclusive('\n') {
                 let t = line.trim();
@@ -268,15 +285,12 @@ fn submit_impl(
     hostname_override: Option<&str>,
 ) -> Res<()> {
     let cactus_root = inst.cactus_root();
-    let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?.ok_or_else(|| {
-        anyhow!(
-            "config \"{}\" (which created this simulation) no longer exists",
-            sim.meta.configuration
-        )
-    })?;
+    let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
+        .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
     let force_queue = args.force_queue || args.force;
-    let mut topo = vars::resolve_topology(&args.topology, machine, db, &cfg, force_queue)?;
+    let fit = vars::QueueFit::from_config(&cfg);
+    let mut topo = vars::resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
 
@@ -493,15 +507,12 @@ fn run_interactive(
     hostname_override: Option<&str>,
 ) -> Res<()> {
     let cactus_root = inst.cactus_root();
-    let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?.ok_or_else(|| {
-        anyhow!(
-            "config \"{}\" (which created this simulation) no longer exists",
-            sim.meta.configuration
-        )
-    })?;
+    let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
+        .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent);
     let force_queue = args.start.force_queue || args.start.force;
-    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &cfg, force_queue)?;
+    let fit = vars::QueueFit::from_config(&cfg);
+    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &fit, force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
 
@@ -1091,6 +1102,81 @@ mod tests {
         let log = fs::read_to_string(sim.log_path()).unwrap();
         assert!(log.contains("] create::"), "{log}");
         assert!(log.contains("] submit::submitted output-0000 as job JOB-0"), "{log}");
+    }
+
+    /// §7.9's build-submit feature opens a real corruption race at `sim
+    /// create`: it hard-links `exe/cactus_<config>` into the executable
+    /// cache, and a live build's `make` can be replacing those very bytes
+    /// right now. Unlike everywhere else `in_flight_build` is consulted,
+    /// this is a hard error — only `-f` may proceed anyway.
+    #[test]
+    fn create_refuses_while_a_build_is_live_for_its_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n").unwrap();
+
+        // A rebuild of "sim" is actively running right now — running.lock is
+        // held, exactly what `execute` holds for the whole life of a build.
+        let cactus_root = inst.cactus_root();
+        let config_dir = cactus_root.join("configs/sim");
+        let attempt = crate::build::attempt::BuildAttempt::create(
+            crate::build::attempt::BuildAttempt::attempt_dir(&config_dir, 0),
+            crate::build::attempt::BuildMeta {
+                schema: crate::database::SCHEMA,
+                attempt_id: 0,
+                config: "sim".to_owned(),
+                variant: "default".to_owned(),
+                machine: "fake".to_owned(),
+                alias: "et".to_owned(),
+                config_dir: config_dir.clone(),
+                cactus_root: cactus_root.clone(),
+                install_root: cactus_root.clone(),
+                submitted: false,
+                job_id: "999".to_owned(),
+                status: None,
+                reservation: None,
+                decision: "test decision".to_owned(),
+                full_rebuild: false,
+                make: None,
+                build_env: String::new(),
+                virtual_executable: None,
+                universe: None,
+                config_meta: toml::from_str(
+                    r#"
+                    schema = 1
+                    name = "sim"
+                    variant = "default"
+                    thornlist = "sim.th"
+                    machine = "fake"
+                    config-id = "cfg-sim"
+                    build-id = "build-sim"
+                    "#,
+                )
+                .unwrap(),
+                vars: Default::default(),
+                timestamps: crate::build::attempt::Timestamps::default(),
+                outcome: None,
+            },
+        )
+        .unwrap();
+        let _held = crate::lock::LinkLock::acquire(&attempt.running_lock_path()).unwrap();
+
+        let err = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("999"), "{msg}");
+        assert!(
+            !inst.simulations().unwrap().simulations.contains_key("bbh"),
+            "refused before anything was registered"
+        );
+
+        // -f proceeds despite the live build.
+        let mut req = create_req(&parfile);
+        req.force = true;
+        let sim = crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
+        assert!(sim.exe().is_file());
     }
 
     #[test]

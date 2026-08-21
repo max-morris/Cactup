@@ -219,6 +219,60 @@ OUTDIR=$(cactup sim show mysim --output-dir)
 find $OUTDIR -name "*.h5" | head  # Find HDF5 output
 ```
 
+## Monitoring builds
+
+A build — foreground or [queue-submitted](building-configs.html) — creates a
+numbered **build attempt**, and `cactup build list`/`show`/`log`/`stop`/
+`prune` manage those attempts the same way the commands above manage a
+simulation.
+
+List build attempts (one row per config, its most recent attempt):
+
+```sh
+cactup build list            # summary
+cactup build list --long     # extended per-attempt details
+cactup build list --all      # across every installation
+```
+
+Show one config's most recent build attempt in detail:
+
+```sh
+cactup build show myconfig
+cactup build show myconfig --long
+```
+
+This is the place to look for a build's outcome: whether it's still
+queued or running, its job id (if submitted), and — once it's finished —
+whether it actually completed, independent of what the scheduler thinks. A
+batch job can exit 0 without the build having finished; `build show` reports
+what cactup itself found when it checked, not the scheduler's own
+accounting.
+
+Stream a build's output the same way `sim log` streams a simulation's —
+`--follow`/`-f` opens the split-pane stdout/stderr TUI, or use
+`-o`/`--follow-out` and `-e`/`--follow-err` for a single stream:
+
+```sh
+cactup build log myconfig --follow
+```
+
+Stop a running or queued build:
+
+```sh
+cactup build stop myconfig
+cactup build stop myconfig -f     # kill it directly instead of a graceful stop
+```
+
+Old build attempts accumulate under `.cactup-builds/` inside the config
+directory; prune them, keeping only the most recent N (never automatic —
+cactup doesn't delete build history on its own):
+
+```sh
+cactup build prune myconfig --keep 5
+```
+
+`<name>` defaults to the active config for all five, matching `config show`.
+
 ## Monitoring test suites
 
 List test runs:
@@ -345,6 +399,16 @@ Each `output-NNNN/` directory contains the actual Cactus output files for that r
 
 {{cactup:cli command="sim clean"}}
 
+{{cactup:cli command="build list"}}
+
+{{cactup:cli command="build show"}}
+
+{{cactup:cli command="build log"}}
+
+{{cactup:cli command="build stop"}}
+
+{{cactup:cli command="build prune"}}
+
 {{cactup:cli command="test list"}}
 
 {{cactup:cli command="test show"}}
@@ -375,9 +439,19 @@ cactup sim clean mysim
 cactup sim submit mysim  # Re-submits, starting from the last checkpoint
 ```
 
+### Watch a queued build from submission to finish
+
+```sh
+cactup build submit myconfig
+cactup build show myconfig     # job id, live status
+cactup build log myconfig -f   # stream output until it finishes or you Ctrl-C
+```
+
 ## Troubleshooting
 
 **"Simulation not found"**: Use `cactup sim list` to see available simulations.
+
+**"No build attempts found"**: `cactup build list`/`show` only ever report on attempts that exist — build the config at least once with `cactup build myconfig` first.
 
 **"No output"**: Check the status with `cactup sim show mysim`. If still queued, wait for it to start. If running, the output directory may not exist yet.
 

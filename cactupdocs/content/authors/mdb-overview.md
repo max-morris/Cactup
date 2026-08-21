@@ -48,6 +48,8 @@ Each machine (in the system or user MDB) is a directory with:
   runscripts/
     default.sh                 # One shell script per run variant
     test.sh                    # Special variant for `test run`
+  buildsubmitscripts/          # OPTIONAL — only clusters that forbid
+    default.sh                 # login-node compiling need this one
   discover.py                  # Machine detection script
 ```
 
@@ -58,10 +60,10 @@ The **meta.toml** file defines:
 - Machine identity: name, nickname, location, description, status
 - Paths: install-home, simulation-home, test-home
 - Hardware: max CPUs per node, memory, autodetect settings
-- Build environment: make command, make-jobs default
+- Build environment: make command, make-jobs default, and (optional) queued-build defaults
 - Scheduler: submit, status, stop commands; queue patterns; environment setup
 - Queues: one `[queues.<name>]` section per queue (GPU yes/no, max walltime)
-- Variants: optionlist, submitscript, and runscript variants with metadata
+- Variants: optionlist, submitscript, and runscript variants with metadata, plus an optional buildsubmitscript variant for clusters that queue builds
 
 See [meta.toml Reference](meta-toml.html) for the full schema.
 
@@ -88,7 +90,9 @@ See [Optionlists](optionlists.html) for schema and template variables.
 
 **Run scripts** are similar but used for interactive runs — they don't submit to a queue, they execute directly (or under an allocation).
 
-Both are shell (`.sh`) or Python (`.py`) scripts. See [Scripts & Variables](scripts-and-variables.html).
+**Build submit scripts** are a third, optional kind: a sibling of a submit script that re-invokes `cactup build run` instead of `cactup sim run`. Only clusters that forbid compiling on the login node need one — most machines skip it entirely.
+
+All three are shell (`.sh`) or Python (`.py`) scripts. See [Scripts & Variables](scripts-and-variables.html).
 
 ### discover.py
 

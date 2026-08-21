@@ -178,7 +178,7 @@ in-repo `mdb/`. A `--mdb-path` global flag overrides for testing.
 
 **The existing `Database::load()` holds the exclusive lock for the entire
 process lifetime; this must change.** cactup now owns commands that run for
-minutes-to-days — `config build` (compiles Cactus) and `sim run` (runs the
+minutes-to-days — `cactup build` (compiles Cactus) and `sim run` (runs the
 simulation in the foreground) — and the generated submit script re-invokes
 `cactup sim run` on the **compute node** (§8.3). A machine-wide, whole-command
 lock would (a) serialize all cactup activity on the machine, and (b) let a
@@ -213,7 +213,7 @@ Required model (D11):
 3. Per-simulation mutual exclusion (two `submit`s racing the same simulation)
    uses a lock file inside the simulation's `.cactup/` dir, not the global lock,
    so unrelated simulations never contend.
-4. **Per-config build lock.** `config build` releases the global lock before
+4. **Per-config build lock.** `cactup build` releases the global lock before
    invoking `make`, so two `cactup build <name>` for the *same* config in one
    installation could otherwise both write `configs/<name>/` and corrupt it. A
    lock file at `configs/<name>/.cactup-build.lock` serializes builds of the same
@@ -377,8 +377,27 @@ cactup inst …                      (short form of `installation`, a duplicate
 cactup list [--all]                (top-level equivalent of `installation list`)
 cactup use <alias>                 (top-level equivalent of `installation use`)
 
-cactup config build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [build flags…]
-cactup build …                       (alias for `config build`)
+cactup build [<name>] [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [BUILD FLAGS] [BUILD TOPOLOGY]
+                                    (auto-selects foreground vs. queued per the
+                                    machine's MDB entry — §7.9)
+cactup build run    [<name>] …    [--config-dir P --attempt-id N]
+                                    (force foreground build; the flagged form is
+                                    the compute-node re-invocation — §7.9.1)
+cactup build submit [<name>] … [--follow]
+                                    (force a queued build — §7.9)
+cactup build list   [--long] [--all]
+cactup build show   [<name>] [--long]
+cactup build log    [<name>] [-f|--follow] [-o|--follow-out] [-e|--follow-err]
+cactup build stop   [<name>] [-f]
+cactup build prune  [<name>] [--keep N]
+                                    (`build run`/`submit`/`list`/`show`/`log`/
+                                    `stop`/`prune` monitor and manage a build
+                                    attempt exactly as the `sim` equivalents
+                                    monitor a simulation — §7.9. `<name>`
+                                    defaults to the active config everywhere,
+                                    like `config show`/`config delta`.
+                                    **`cactup config build` no longer exists** —
+                                    `cactup build` is the only spelling.)
 cactup config show [<name>]
 cactup config use <name>
 cactup config delete <name>
@@ -419,7 +438,7 @@ installation is active.
 
 | simfactory command | cactup equivalent | Notes |
 |--------------------|-------------------|-------|
-| `sim build` | `cactup config build` / `cactup build` | §7 |
+| `sim build` | `cactup build` (foreground or queued, auto-selected — §7.9) | §7, §7.9 |
 | `sim create` | `cactup sim create` | §8.2 |
 | `sim submit` | `cactup sim submit` | §8.3 |
 | `sim run` / `run-debug` | `cactup sim run [--debug]` | §8.4 |
@@ -775,6 +794,26 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   `disabled-thorns` arrays in TOML (the `-default`/`-local` split existed only
   for the `defs.local.ini` layering, which is gone — §5.3).
 - `make` / `make-jobs` kept (§7.7).
+- **Queued builds (§7.9): new `[build]` keys and a new script kind.** Some
+  clusters forbid `make` on a login node — the build itself has to go through
+  the batch queue, the same way a simulation does. `[build]` gains seven
+  optional keys for this: **`default-action`** (`"run"` or `"submit"`; forces
+  an unqualified `cactup build` to one or the other instead of the §7.9
+  auto-selection) and six job-shape defaults consulted only when a build is
+  submitted — **`queue`**, **`walltime`**, **`nodes`**, **`tasks`**,
+  **`cpus-per-task`** (falls back to `make-jobs` when unset, so a machine that
+  already tunes `make-jobs` for its node size gets a matching job shape for
+  free), and **`gpus-per-task`**. None of the six affect a foreground build.
+  Alongside them, a machine that can submit builds declares a
+  **`buildsubmitscript`** script kind — a fourth sibling of `optionlist` /
+  `submitscript` / `runscript`, with its own `buildsubmitscripts/<variant>.{sh,py}`
+  directory and `[variants.buildsubmitscript]` table (identical shape to
+  `[variants.submitscript]`: queues, an optional `universe`/`build-universes`,
+  a `default` marker — §4.4). It is the **only** optional script kind — a
+  machine that never hands a build to the scheduler declares no
+  `buildsubmitscript` variants at all, and MDB load validation skips the usual
+  queue-coverage check for a kind with none (§7.9 states the precise rule for
+  when submitting is even possible).
 
 **Key-naming convention (kebab-case everywhere).** Every user- and disk-facing
 identifier is **kebab-case**: TOML keys (`meta.toml`, optionlists, and cactup's
@@ -801,11 +840,15 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
 (`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`max-cpus-per-node`,
 `default-cpus-per-task`, `threads-per-cpu`, `memory` — machine-wide defaults, each overridable per-queue; see below), `[build]` (`make`, `make-jobs`,
-`enabled-thorns`, `disabled-thorns`), `[environment]` (`env-setup` and the
+`enabled-thorns`, `disabled-thorns`, and the queued-build keys `default-action`,
+`queue`, `walltime`, `nodes`, `tasks`, `cpus-per-task`, `gpus-per-task` — §7.9),
+`[environment]` (`env-setup` and the
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
-`*-pattern`s, `exec-host`, `stdout`/`stderr`), then `[queues.*]`, `[variants.*]`,
+`*-pattern`s, `exec-host`, `stdout`/`stderr`), then `[queues.*]`, `[variants.*]`
+(`optionlist`, `submitscript`, `runscript`, and — only on a machine that
+submits builds — `buildsubmitscript`, §7.9),
 and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
 `env-*-setup` overrides; the always-available `"host"` universe needs no table
 at all unless it is being customized).
@@ -826,6 +869,21 @@ memory = 196608                # MB per node
 # default-gpus-per-task = 1    # optional; default GPUS_PER_TASK when -G omitted
 # threads-per-cpu = 1          # optional; defaults to 1 (§8.5)
 
+[build]
+make = "make -j@MAKEJOBS@"
+make-jobs = 16
+# default-action = "submit"    # optional (§7.9): force `cactup build` to
+                                # submit even where running is also possible;
+                                # requires [variants.buildsubmitscript] below
+                                # AND [scheduler].submit — the queued-build job
+                                # shape a submitted build uses:
+# queue         = "checkpt"    # optional; else -q, else the default queue
+# walltime      = "4:00:00"    # optional; else -w, else the queue's ceiling
+# nodes         = 1            # optional; else -n, else 1
+# tasks         = 1            # optional; else -T
+# cpus-per-task = 16           # optional; else -c, else make-jobs, else 1
+# gpus-per-task = 0            # optional; else -G
+
 [scheduler]
 submit = "sbatch @SCRIPTFILE@ 2>&1"
 get-status = "squeue -j @JOB_ID@"
@@ -835,7 +893,7 @@ get-status = "squeue -j @JOB_ID@"
 env-setup = """
 module load gcc/11 openmpi/4
 """                            # applied to build, submit, AND run (§6.1)
-env-build-setup = "module load cmake/3.27"   # appended only for `config build`
+env-build-setup = "module load cmake/3.27"   # appended only for `cactup build`
 # env-submit-setup / env-run-setup: appended only for submit / run (optional)
 
 [queues.checkpt]               # one table per queue
@@ -884,6 +942,13 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
                                # route script selection (see the db1 MDB port)
 "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true }   # drives make <config>-testsuite (§11.6)
 # default-universe = "et-sif"          # optional: universe for runscript variants that omit one
+
+# OPTIONAL — only on a machine that hands builds to the scheduler (§7.9): same
+# shape as [variants.submitscript], one buildsubmitscripts/<variant>.{sh,py}
+# per key. Omitted entirely (no table at all) ⇒ this machine can never submit a
+# build; `cactup build`/`build submit` always run in the foreground.
+[variants.buildsubmitscript]
+"slurm-cpu" = { queues = ["checkpt", "single"], default = true }
 
 # Each variant just names the optionlist file under optionlists/<variant>.toml;
 # that file declares its own gpu flag, compatible queues, and an optional
@@ -1057,7 +1122,7 @@ them first-class within one machine.
 
 - **OptionList variants** select compile configuration. If a machine has exactly
   one optionlist variant, it is used implicitly. If it has more than one, the
-  user **must** pick one at `config build` time via `--variant`; there is no
+  user **must** pick one at `cactup build` time via `--variant`; there is no
   default. The chosen variant is recorded in the config metadata (§7.4).
 - **OptionList variant ↔ queue compatibility (D12).** Each optionlist TOML
   declares, in its `[cactup]` header (§7.8), a `compatible-queues` list and a
@@ -1128,7 +1193,7 @@ mdb/
                                  #   test-home under [paths] (§11.5)
     discover.py                  # is_machine(): FQDN == melete05.cct.lsu.edu
     optionlists/default.toml     # ported from mel5.cfg; [cactup] gpu=false + [options]
-    optionlists/debug.toml       # DEBUG optionlist; reached with config build --variant debug (§4.4)
+    optionlists/debug.toml       # DEBUG optionlist; reached with cactup build --variant debug (§4.4)
     runscripts/default.sh        # @NUM_PROCS@→@TASKS@, @NUM_THREADS@→@CPUS_PER_TASK@
     runscripts/test.sh           # test=true; drives make <config>-testsuite → test-home (§11.6)
     submitscripts/default.sh     # @SIMFACTORY@→@CACTUP@, +--installation, PID-wait chaining
@@ -1247,7 +1312,7 @@ directly.
 **Scope: the three execution seams cactup owns.** A universe can attach at any of
 the seams where *cactup itself* spawns a process:
 
-- **build** — the `make` invocations of `config build` (§7.2).
+- **build** — the `make` invocations of `cactup build` (§7.2).
 - **run** — the runscript execution of `sim run` (§8.4), both the interactive path
   and the compute-node `sim run --restart-id` (§8.3.1). This is the meaningful
   case for containerized simulations.
@@ -1381,7 +1446,7 @@ chain independently, highest first. `--no-universe` is a **true bare escape
 hatch**: at any phase it always resolves to no universe at all, skipping every
 step below — **even when the machine declares `[universes.host]`**.
 
-1. CLI `--universe <name>` / `--no-universe` (on `config build`, `sim run`, or
+1. CLI `--universe <name>` / `--no-universe` (on `cactup build`, `sim run`, or
    `sim submit`).
 2. **(run only) Config build-universe coercion.** If the config being run was
    *built* in a universe (§7.4 records it) and the optionlist did **not** opt out
@@ -1602,7 +1667,7 @@ variable (§6.3) always holds the **already-combined** effective block for the
 current phase, so scripts and `.py` authors never see the split. Injection then
 depends on the artifact:
 
-- **Build (`config build`, §7.2):** the build has no submit/run *script* — cactup
+- **Build (`cactup build`, §7.2):** the build has no submit/run *script* — cactup
   drives `make` directly. cactup sources the effective build env-setup
   (`env-setup` + `env-build-setup`) in the shell it spawns for the `make
   <config>-config` / `make <config>` / `make <config>-utils` invocations, so the
@@ -1688,7 +1753,7 @@ flags exactly** — this is the primary divergence from simfactory's names.
 `GPUS_PER_TASK` (`-G`/gpus-per-task; always `0` when `GPU` is `0`), `ALLOCATION` (`-a`),
 `QUEUE` (`-q`; the scheduler-facing name — the selected queue's `name` override
 when set, else its `[queues.<q>]` key — §4.2), `MAIL` (`-m`), `MAIL_TYPE` (`-M`),
-`JOB_NAME` (`-j`),
+`JOB_NAME` (`-J` — not `-j`; see below),
 `WALLTIME` (`-w`; the scheduler wall for **this job**, `(DD-)?HH:MM:SS`),
 `STDOUT_FILE` (`-o`), `STDERR_FILE` (`-e`).
 
@@ -1739,6 +1804,28 @@ already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
 
 **Build-time only** (optionlists/build): `MAKEJOBS`, `DEBUGGER`, `RUNDEBUG`.
 
+**Build-submit-only** (§7.9; present only for `buildsubmitscript` variants and
+the frozen var set a build attempt carries — never leaked into normal
+sim/config substitution): `CONFIG_DIR` (the config's absolute on-disk
+directory, `<Cactus root>/configs/<name>` — passed to the compute-node
+re-invocation as `--config-dir`, the build analogue of `SIMULATION_DIR`) and
+`ATTEMPT_ID` (this build attempt's `%04d` id under `CONFIG_DIR/.cactup-builds/`
+— passed as `--attempt-id`, the build analogue of `RESTART_ID`). A queued
+build otherwise reuses the **existing** §6.3 set rather than inventing
+parallel names: the whole TOPOLOGY block (`QUEUE`, `WALLTIME`, `NODES`,
+`TASKS`, `CPUS_PER_TASK`, `GPUS_PER_TASK`, `ALLOCATION`, `MAIL`, `MAIL_TYPE`,
+`JOB_NAME`, `STDOUT_FILE`, `STDERR_FILE`) and the identity/machine block
+(`MACHINE`, `HOSTNAME`, `USER`, `ALIAS`, `CACTUP`, `SOURCEDIR`,
+`CONFIGURATION`, `SCRIPTFILE`, `JOB_ID`, `EXECHOST`, `MAX_CPUS_PER_NODE`,
+`ENV_SETUP`, …) now reach a `buildsubmitscript` exactly as they reach a
+`submitscript` — a submitted build is a scheduler job like any other, so it
+gets the same job-shape and identity variables, just no `CHAINED_JOB_ID`
+(builds never chain — §7.9) and none of the simulation-only names: no
+`SIMULATION_NAME`/`SIMULATION_ID`/`SIMULATION_DIR`/`RUNDIR`/`RESTART_ID`/
+`PARFILE`/`SIM_HOME`, and none of the testsuite-only group below either. This
+mirrors the no-leak rule §11.9 states for test runs: each phase's variable set
+is exactly what that phase's scripts can legitimately consume.
+
 **Testsuite-only** (present only for `cactup test run`/`test submit` scripts and
 test runs — never leaked into normal sim/config substitution;
 §11.9): `TEST_HOME`, `TEST_DIR`, `TEST_NAME`, `RESULTS_ID`,
@@ -1760,8 +1847,8 @@ Local to the active installation. Replaces `sim-build` (`simfactory-docs.txt`
 ### 7.1 Commands
 
 ```
-cactup config build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [flags…]
-cactup build <name> …              # alias
+cactup build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [flags…]
+                                    # foreground or queued, auto-selected — §7.9
 cactup config show [<name>]
 cactup config use <name>
 cactup config delete <name>
@@ -1769,7 +1856,11 @@ cactup config delta [<name>]       # divergence from the last build (§3.3)
 ```
 
 - `build`: builds (or rebuilds with `-f`) config `<name>` in the active
-  installation. `--thornlist` defaults to the thornlist the config was last
+  installation, in the foreground or on the queue depending on the machine's
+  MDB entry (§7.9); `build run`/`build submit` force either, and
+  `build list`/`show`/`log`/`stop`/`prune` manage the resulting attempts. There
+  is no `config build` — `build` is the whole command family, not a `config`
+  subcommand. `--thornlist` defaults to the thornlist the config was last
   built from (§7.5), falling back to
   `<Cactus root>/thornlists/installation-default.th` for a fresh config.
   `--variant` selects the optionlist variant (required iff the machine has >1
@@ -1795,13 +1886,15 @@ cactup config delta [<name>]       # divergence from the last build (§3.3)
   `-f` accepts that).
 
 **Null-config state.** An installation has an **active config** only once one
-has been built and selected. Before the first successful `config build`, or after
+has been built and selected. Before the first successful `cactup build`, or after
 the last config is deleted, the installation is in the **null-config state**: its
 `installation.toml` records no active config. Any command that needs a config
 (`sim create`, and the implicit-create path of `sim submit`/`sim run` when
 `--config` is omitted) fails fast in this state with guidance to build or select
-one. `config build` and `config show` remain available (that is how you leave the
-state); the first build automatically becomes active. The null-config state is
+one. `build` and `config show` remain available (that is how you leave the
+state); the first build automatically becomes active — including a build that
+went through the queue (§7.9), reconciled once the compute-node attempt
+succeeds. The null-config state is
 **only** reachable with zero configs — cactup never leaves an installation that
 still has configs without an active one: deleting the active config while others
 remain re-points the active config to the **most-recently-built** remaining config
@@ -1822,6 +1915,13 @@ that has first sourced the effective **build** env-setup (`env-setup` +
 the run will. When a **universe** is resolved for the build (§4.8), that whole
 env-setup-plus-`make` shell snippet is what cactup wraps — i.e. the build runs
 inside the universe (container, chroot, …), with env-setup applied inside it.
+
+**Build output lives per attempt, not per config.** There is no
+`configs/<name>/cactup-build.log`: every `make` invocation — foreground or
+queued — runs under a **build attempt** directory,
+`configs/<name>/.cactup-builds/%04d/` (§7.9), and its stdout/stderr land at
+that attempt's `build.out`/`build.err`. `cactup build show`/`build log` (§7.9)
+locate the right attempt automatically; there is nothing to `tail` by hand.
 
 ### 7.3 What changed in build
 
@@ -2152,6 +2252,214 @@ to diff a later plain rebuild against.
 
 ---
 
+### 7.9 Queued builds
+
+Some clusters forbid `make` on a login node — the flesh has to be compiled on a
+compute node, exactly like a simulation. Before this section, cactup's answer
+was to abuse a **universe** (§4.8) for it: wrap the whole build-env-setup-plus-
+`make` snippet in a shell fragment that `sbatch`'d itself, `tail -f`'d its own
+log, and scraped `sacct`/`scontrol` for a truthful exit status because the
+site's `sbatch` wrapper returned 0 even when the job died. That is the wrong
+tool for the job, and the shape of the wrongness is worth stating precisely: **a
+universe describes *where* a command executes** — a container, a chroot, a
+module-loaded shell — **while a scheduler describes *how* work reaches a
+machine** — queued, given a job id, polled for status, eventually run somewhere
+the caller doesn't control the timing of. Conflating them is what forced the old
+wrapper to hand-roll job-id parsing, log tailing, and exit-status classification
+in `sh`, all of which `Scheduler` (§10) and `src/tail/` already do correctly for
+every other job cactup submits. Once building is a first-class job like any
+other, none of that reimplementation is needed: the compute-node process *is*
+cactup, so it runs `make`, checks completeness itself, and records the outcome
+directly — nothing has to trust a wrapper's relayed exit code or scrape a
+second command to find out what really happened.
+
+**Command surface.** `cactup build [<name>]` auto-selects between running in
+the foreground and submitting to the queue; `cactup build run` and `cactup
+build submit` force either explicitly. `build list`, `build show`, `build log`,
+`build stop`, and `build prune` monitor and manage the resulting **build
+attempts** the same way their `sim` equivalents (§8.6, §8.7) monitor a
+simulation — full command shapes are in §3. `<name>` defaults to the active
+config everywhere, matching `config show`/`config delta` (§3.3).
+
+**Auto-selection.** Submitting a build is *possible* on a machine iff it
+declares at least one `[variants.buildsubmitscript]` entry **and**
+`[scheduler].submit` (§4.2) — both are required, since a buildsubmitscript with
+nothing to hand it to is as useless as a submit command with nothing to run.
+`[build].default-action` then decides what an unqualified `cactup build` does:
+
+| `[build].default-action` | submitting possible | result |
+|---|---|---|
+| unset | yes | **submit** |
+| unset | no | **run** (the foreground fallback — nothing declared, nothing forced) |
+| `"run"` | either | **run** (forces the foreground path even where submitting would work) |
+| `"submit"` | yes | **submit** |
+| `"submit"` | no | hard error, naming which of the two prerequisites is missing |
+
+`build run` always works (it is exactly what `cactup build` did before this
+section existed); `build submit` on a machine where submitting is impossible is
+a hard error for the same reason, rather than a silent fallback to the
+foreground — a user who explicitly asked to submit should not be surprised by
+a login-node compile.
+
+**The prepare/execute split, and what is frozen at submit time.** A build's
+work splits into two phases with different privileges (D11):
+
+- **`prepare`** — everything that needs the MDB, the installation's git repos,
+  or the knobs: resolving the optionlist variant and universe, resolving the
+  thornlist and its machine/variant thorn toggles, making the rebuild decision
+  (§7.8), and staging the rendered optionlist, processed thornlist, and
+  assembled `make` step list. This runs **only on the login node**, whether the
+  build that follows is a foreground `build run` or a queued `build submit`.
+  Prepare allocates the attempt directory and stages every artifact *into it*
+  — never into the live `configs/<name>/` — so an abandoned or still-queued
+  submit can never poison the config's rebuild-decision baseline or clobber a
+  concurrent build's staged files.
+- **`execute`** — takes the per-config build lock, runs the frozen build
+  script, completeness-checks the result, and — only on success — installs the
+  thornlist/optionlist snapshot into the live config directory and stamps
+  `ConfigMeta`. This is the phase a submitted job's compute node actually runs,
+  via the re-invocation in §7.9.1; for a foreground build it runs immediately
+  after `prepare`, on the same node, with no queue wait between them.
+
+Because `execute` may run on a different node, hours after `prepare`, on a
+machine `prepare` never touches, everything it needs is **frozen into the
+attempt's `build.toml`** rather than re-derived: the resolved `make` invocation
+and effective build-phase `env-setup`, the frozen `UniverseSpec` (not just a
+universe *name* — the executing node must be able to re-wrap the build command
+without reading the MDB), the full variable set (§6.3) including things only a
+login node can produce (the allocation knob, `@ENV(NAME)@` resolutions, `USER`,
+`CACTUP` from the running binary's own path), and a fully-formed `ConfigMeta` to
+store on success. `install_root` is frozen **separately** from `cactus_root`
+because it cannot be derived from it — the thornlist's own recorded root need
+not match the Cactus tree's `!DEFINE ROOT`. Nothing about the *decision* to
+build is re-litigated on the compute node: prepare's rebuild decision, and the
+optionlist/thornlist resolution behind it, are MDB-derived and correctly
+frozen. What execute *does* re-check is the source tree, covered next.
+
+**Re-probing staleness at execute time.** A build queued for hours can outlive
+the source tree it was prepared against — a refetch, a manual `git checkout`,
+or a hand-edit can land during the wait. If `execute` simply trusted the
+sources/providers/shapes snapshot `prepare` recorded, that snapshot would
+become a **lie**: the next plain `cactup build` would diff stored-against-live,
+find them equal (because the frozen record already matches whatever the queued
+build compiled *against*, not what it actually compiled), and print "up to
+date" forever — a silently wrong binary, permanently. So `execute` re-probes
+sources, providers, and shapes itself, right before compiling, and:
+
+1. Records what it actually finds — not what `prepare` found — as this
+   attempt's baseline.
+2. Runs the `remove_stale` per-thorn cleanup (§7.4) against *that* baseline,
+   not prepare's.
+3. Upgrades an `Incremental` decision to `Full` if the re-probe shows the flesh
+   itself moved since prepare — but never re-runs the optionlist/thornlist half
+   of the decision, which is genuinely MDB-derived and does not need re-asking.
+4. Refuses outright if the config directory or the attempt directory has
+   vanished (a `config delete` landed while this was queued) — a queued build
+   must never resurrect a deleted config.
+5. Proceeds, and says so, if some *other* build of the same config succeeded
+   in the meantime — the user asked for this build, and a compute-node job
+   silently no-op'ing because someone else won a race would be more surprising
+   than just doing the work again.
+
+**The attempt's own record is the authority on the outcome — never the
+scheduler's exit status.** This is the structural payoff of running cactup
+itself on the compute node rather than wrapping `make` in a job: there is no
+"did the wrapper actually run `make`, and did `make` actually finish" gap to
+paper over with `sacct` scraping. The compute-node `execute` call runs the
+build, applies the same completeness check a foreground build does
+(§7.4/§7.8), and writes the verdict into `build.toml`'s `[outcome]` table
+itself. `build show`/`build log`/`build list` (and the login-node reconcile
+step below) read *that* record, never the scheduler's own accounting of
+whether the job "succeeded" — a scheduler's success/failure classification
+answers "did the job exit", not "did the build finish", and those are exactly
+the two things the old universe-based wrapper conflated.
+
+**Every build gets an attempt — foreground or queued, one per invocation.**
+`configs/<name>/.cactup-builds/%04d/` holds `build.toml` (the frozen metadata
+above), the frozen `build-script` (and a `submit-script` too, for a queued
+build), `build.out`/`build.err`, and a `running.lock`/`heartbeat` pair with the
+same liveness semantics as a simulation restart's (§9.3). There is
+deliberately **no `-active` symlink**: unlike a simulation's `output-NNNN`
+directories, a build attempt's whole directory is already cactup's own — never
+a user-visible workspace — a config has at most one build in flight at a time
+(enforced at submit, next), and there is no simfactory `output-NNNN-active`
+contract to preserve here the way §9.2 requires for restarts. The
+**highest-numbered attempt is always the subject**: the live one if a build is
+in flight, the most recent result otherwise. A pointer would only be a third
+source of truth free to go stale, so there isn't one; `build prune --keep N`
+(never automatic — surprising deletion is worse than disk use) simply removes
+the oldest attempt directories.
+
+**Builds never chain.** `sim submit`'s auto-chaining (§8.8) exists because a
+simulation's requested walltime can legitimately exceed one job's ceiling and
+still make sense as a sequence of checkpoint-and-resume jobs. A build has
+nothing to resume from — a half-finished `make` is not a checkpoint — so a
+requested `[build].walltime` (or `-w`) above the queue's ceiling is simply an
+error, not a split. Two queued builds of the same config are also never
+wanted: submitting refuses (unless `-f`) whenever an attempt is already live,
+using the same liveness protocol §8.3 uses to decide whether a restart is
+really dead — the per-config lock (below) held, or the attempt's
+`running.lock`/heartbeat still fresh, or its scheduler status still live.
+
+**Locking across submit → queue → execute.** `LinkLock::acquire` (§2.3) fails
+fast and never blocks, so it cannot span a queue wait — a build's lock
+discipline has to work around that rather than through it:
+
+- `prepare` takes the per-config build lock (`.cactup-build.lock`, §2.3 item 4)
+  only for its staging writes and attempt-id allocation, then **releases** it
+  before returning — whether or not what follows is a queue wait.
+- `execute` takes the same lock for the duration of the `make` invocation,
+  held with a heartbeat, regardless of which node runs it. If a compute-node
+  job happens to start while a foreground build still holds the lock, it fails
+  loudly and is recorded as a failed attempt — a correct outcome, not
+  corruption, since the alternative would be two `make` invocations racing the
+  same `configs/<name>/`.
+- The real guard against that ever happening in practice is the submit-time
+  liveness refusal above, not the lock: the lock is the last line of defense,
+  the refusal is the one that actually prevents the collision.
+
+**Login-node-only steps stay login-node-only (D11).** Two things a successful
+build does — pointing a null active config at its first successful build
+(§7.1), and best-effort `CACHE/exe` garbage collection (§8.1) — need the
+per-installation lock or the registry, so they cannot run inside `execute` on
+a compute node. They run as a login-node **reconcile** step instead, triggered
+by `build list`/`build show`/the next `cactup build` noticing a newly-finished
+attempt, keyed on the attempt's outcome having recorded a completed build. The
+active-config pointer is set only there — never at submit time — so a build
+that is later found to have failed never leaves the installation pointing at a
+config with no `cactup-config.toml`.
+
+#### 7.9.1 Compute-node re-invocation
+
+A generated buildsubmitscript re-invokes cactup to do the actual build, the
+same pattern §8.3.1 uses for a submitted simulation:
+
+```
+@CACTUP@ build run @CONFIGURATION@ \
+    --installation=@ALIAS@ --config-dir=@CONFIG_DIR@ --machine=@MACHINE@ \
+    --attempt-id=@ATTEMPT_ID@
+```
+
+`--config-dir` (the config's absolute directory) + `--attempt-id` fully locate
+the attempt (`@CONFIG_DIR@/.cactup-builds/<ATTEMPT_ID>`) with no registry
+lookup, exactly as `--sim-dir`/`--restart-id` locate a restart. `--installation`
+and `--machine` supply the alias and machine name without touching the global
+DB. `cactup build run --config-dir --attempt-id` reads everything else —
+variant, universe, the resolved `make` invocation, the full frozen variable
+set — from that attempt's on-disk `build.toml` (§7.9), satisfying the same D11
+rule §8.3.1 states for a compute-node `sim run`: the path a generated script
+takes never touches the global DB, the installation registry, the MDB, or
+knobs. `--config-dir` and `--attempt-id` are mutually required — like
+`--sim-dir`/`--restart-id`, this pair is all-or-nothing, since the
+compute-node branch is the only path that reads either.
+
+Scheduler stdout/stderr for the *submission* job itself go to `@STDOUT_FILE@`/
+`@STDERR_FILE@` as usual; the `make` invocation's own output — what a user
+watches with `build log` — is teed to the attempt's `build.out`/`build.err`
+directly by `execute`, not left to the scheduler's redirection.
+
+---
+
 ## 8. Simulation subsystem
 
 Local to the active installation. Replaces `sim-manage` + `simrestart`
@@ -2219,7 +2527,7 @@ and (2) the linked copy is frozen at create time, so **rebuilding the config nev
 disturbs an in-flight run**.
 
 **One build per config; orphan cleanup.** A config *is* a build: at most
-one `build-id` for a config exists at a time. When `config build` produces a new
+one `build-id` for a config exists at a time. When `cactup build` produces a new
 `build-id` for an existing config, the previous `CACHE/exe/<old-build-id>` entry
 is an orphan the moment nothing links it. cactup **garbage-collects** the cache:
 a `CACHE/exe/<build-id>` entry is removed once its on-disk link count shows no
@@ -2435,10 +2743,19 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | `-c/--cpus` * | CPUs (threads) per task | 1 |
 | `-g/--gpu` | use GPUs | inferred from the queue's `gpu` flag |
 | `-G/--gpus-per-task` * | GPUs per task (GPU runs only) | machine `default-gpus-per-task`, else 1 |
-| `-j/--job-name` * | job name | `<SimName>` |
+| `-J/--job-name` * | job name | `<SimName>` |
 | `-w/--wall-time` * | total walltime, canonical format below | machine/queue default |
 | `-o/--out` * | stdout filename | template default |
 | `-e/--err` * | stderr filename | template default |
+
+**`-J`, not `-j` (breaking change from earlier drafts of this spec).** This whole
+TOPOLOGY flag set is flattened into `cactup build`/`build submit` unchanged
+(§7.9), so it can no longer claim `-j` — `cactup build` already spends `-j` on
+`--make-jobs` (§7.6), matching `make -j`. `--job-name`'s short moves to `-J`
+(SLURM's own spelling) everywhere this flag set is used — `sim submit`/`sim
+run`, `test run`/`test submit`, and `build`/`build submit` alike — rather than
+carving out a build-only exception, so the flag means the same thing on every
+command line a user types.
 
 **Canonical walltime format.** Every walltime cactup accepts or emits —
 `--wall-time`, `[queues.<q>].max-walltime`, machine `max-walltime` — uses the
@@ -2960,13 +3277,13 @@ test-config kind** and **no separate active pointer** — only two concepts:
 - **the config under test** — any ordinary config on disk
   (`<Cactus root>/configs/<name>/`, §7). `make <config>-testsuite` runs that
   config's live built binary against the thorns' `test/` reference data, so a
-  test run needs nothing a normal `config build` doesn't already produce. `test
+  test run needs nothing a normal `cactup build` doesn't already produce. `test
   run`/`test submit` target `--config C`, defaulting to the installation's
   **active config** (§7.4) — the same config a bare `sim run` would use. There is
   no `test build`, no `test use`, and no `active-test-config`.
 
   A config built with a DEBUG optionlist (to surface assertion/bounds errors the
-  testsuite is meant to catch) is just a config built with `config build
+  testsuite is meant to catch) is just a config built with `cactup build
   --variant <debug>` — see §4.4 optionlist selection; the old test-optionlist
   partition is gone.
 - **test run** (a.k.a. **test-sim**) — one execution of a config's testsuite
@@ -2984,7 +3301,7 @@ and exports `CCTK_TESTSUITE_RUN_*`, §11.6, rather than `mpirun`-ing a parfile).
 cactup lets one machine ship both, keyed by a single `test = true` marker on the
 script variant, and resolves the right one by the rules the requirements specify.
 (Optionlists are **not** part of this: they are chosen purely by §4.4 — a config
-under test uses whatever optionlist its `config build` selected.)
+under test uses whatever optionlist its `cactup build` selected.)
 
 **Where the marker lives.** Run/submitscripts have no header of their own, so
 the marker goes on the `meta.toml` variant entry, using the inline-table form
@@ -3050,7 +3367,7 @@ cactup test show       <name>                      # show one test run in detail
 cactup test stop       <name> [-f]                # stop a queue-submitted test run
 cactup test delete     <name> [-f] [--purge]      # move a test run to test-home TRASH/ (--purge to remove)
 ```
-(A config is built with `cactup config build` — there is no `test build`.)
+(A config is built with `cactup build` — there is no `test build`.)
 
 Notes:
 - `[<test>…]` is the optional test selection (`test run` / `test submit`). Omitted
@@ -3059,7 +3376,7 @@ Notes:
   arrangement; cactup passes the resolved selection to the flesh harness (§11.6).
 - `--config C` defaults to the **active config** (§7.4); both `test run` and
   `test submit` fail fast in the null-config state with guidance to
-  `config build`. The config must be a complete build.
+  `cactup build`. The config must be a complete build.
 - Unlike `sim submit`/`sim run`, there is **no parfile argument and no implicit
   create** — a test run's "parfile" is the thorn test data, chosen by `[<test>…]`.
   (This is where simfactory's empty-parfile `""` sentinel goes away entirely.)
@@ -3068,7 +3385,7 @@ Notes:
 
 ### 11.4 Building the config under test
 
-There is no `test build`. A testsuite runs the binary that `cactup config build`
+There is no `test build`. A testsuite runs the binary that `cactup build`
 already produces (`make <config>-testsuite` invokes it), so any complete config
 is runnable as-is. Nothing about a build is test-specific: the `configs/<name>/`
 layout (§7.2), the make flow, the optionlist render (§7.8), and the metadata
@@ -3076,7 +3393,7 @@ layout (§7.2), the make flow, the optionlist render (§7.8), and the metadata
 
 If you want the testsuite to run against a DEBUG binary (assertions / bounds
 checking, to surface errors the tests exist to catch), build the config with a
-DEBUG optionlist variant: `cactup config build <name> --variant <debug>` (§4.4).
+DEBUG optionlist variant: `cactup build <name> --variant <debug>` (§4.4).
 mel5, for example, ships `default` (OPTIMISE, the implicit pick) and `debug`
 (DEBUG + OPTIMISE); the latter is just a normal variant reached with
 `--variant debug`.
@@ -3311,7 +3628,7 @@ normal sim/config substitution:
 `TASKS` (§6.3) feeds `CCTK_TESTSUITE_RUN_PROCESSORS`; `EXECUTABLE`, `SOURCEDIR`,
 `ENV_SETUP`, and the topology/scheduler variables are the existing §6.3 ones. No
 new *build-time* variables are needed — the config is built by ordinary
-`config build` (§7.8).
+`cactup build` (§7.8).
 
 ### 11.10 Deliberately not ported from simfactory's testsuite
 
@@ -3355,8 +3672,10 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<variant>.toml` (rendered to native `.cfg` before make — §7.8) |
 | SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<variant>.{sh,py}` |
 | RunScript | `mdb/runscripts/<m>.run` | `mdb/<m>/runscripts/<variant>.{sh,py}` |
+| BuildSubmitScript | n/a (`cactup build` always ran on the login node) | `mdb/<m>/buildsubmitscripts/<variant>.{sh,py}` — optional; only on machines that hand builds to the scheduler (§7.9) |
 | Parfile | user-supplied `.par` / executable `.rpar` | user-supplied `.par` (literal `@NAME@`) / `.py` variant (JSON-on-stdin, emits `.par` to stdout — §6.1/§6.2) |
 | Config metadata | `configs/<name>/properties.ini` | `configs/<name>/cactup-config.toml` |
+| Build attempt | n/a (build output went to `cactup-build.log` in the config dir) | `configs/<name>/.cactup-builds/%04d/build.toml` + frozen `build-script` (and `submit-script` when queued) + `build.out`/`build.err` — one per build, foreground or queued (§7.9) |
 | Sim metadata | `SIMFACTORY/properties.ini` | `.cactup/simulation.toml`, `.cactup/restart.toml` (schema-versioned) |
 | Sim detection | dir has `SIMFACTORY/properties.ini` | dir has `.cactup/simulation.toml` (greenfield — D10) |
 | Sim output dirs | `output-%04d/…` | **identical (preserved)** |
@@ -3373,7 +3692,8 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Test-script marking | separate faked machine defs | `test = true` on the meta.toml run/submitscript variant entry (§11.2) |
 | Install root key | machine `sourcebasedir` (source base; also sync/disambiguation) | machine `install-home` (optional default install prefix; falls back to `~/.cactup/cacti`; `--install-prefix` overrides) — §4.2 |
 | Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock + per-installation lock + per-installation fetch lock (heartbeat) (D11, §2.3) |
-| Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `config build`, `sim run`, and `sim submit` (§4.8) |
+| Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `cactup build`, `sim run`, and `sim submit` (§4.8) |
+| Queue-submitted build | faked via a `[universes.*]` wrapper around `make` (the qbd hack this design retires — §7.9) | first-class: `[build].default-action`/`queue`/`walltime`/… + `[variants.buildsubmitscript]` (§4.2); `build submit` goes through the same `Scheduler` abstraction as `sim submit` (§10) |
 
 ---
 
@@ -3419,7 +3739,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
     up-migration is deferred (§2.1, §9.3).
 13. Universes (§4.8): generic command-wrapper (`wrapper-argv` prefix form default,
     `wrapper`/`@COMMAND@` template power-form), wired for all three seams —
-    `config build`, `sim run`, and `sim submit` — via one `[universes.*]` registry
+    `cactup build`, `sim run`, and `sim submit` — via one `[universes.*]` registry
     and a uniform resolution rule. The **run** universe is the load-bearing one
     (containerized simulations); the **submit** universe is included for
     generality but is rarely useful (it wraps `sbatch`, not the job — see §4.8).

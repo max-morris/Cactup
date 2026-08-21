@@ -2,9 +2,9 @@
 # mdb/optionlists/qbd.cfg — regenerated upstream by simfactory-configure.py on
 # 2026-07-07 (native CUDA build: nvcc CUCC/LD, AMREX_ENABLE_CUDA = yes, built
 # against the prebuilt externals under /ddnB/project/sbrandt/externals-qbd).
-# The old Singularity-image build is gone, but the build still runs in the
-# queue: configs build inside the machine's "compute" universe (an srun
-# wrapper — see [universes.compute] in meta.toml).
+# The old Singularity-image build is gone. The build still runs in the queue —
+# QB4 requires it — but as a queued build in its own right (§7.9), not inside a
+# universe, so this variant needs no universe key at all.
 #
 # The [options] table is rendered back to the native Cactus "NAME = value"
 # optionlist before `make <config>-config` (design §7.8); every value is kept
@@ -13,10 +13,6 @@
 [cactup]
 gpu               = true
 compatible-queues = ["gpu2", "gpu4"]
-# Builds run inside the machine's "compute" universe (srun onto a compute
-# node — §4.8), but the run must NOT be coerced into it: the submitscript
-# sbatch'es its own job and the runscript does its own launching.
-coerce-run-universe = false
 
 [options]
 VERSION = "qbd-2026-07-07"
