@@ -28,8 +28,11 @@ use std::path::{Path, PathBuf};
 /// Where the thornlist being fetched came from; decides which files are
 /// rewritten and what the DB records (§3.2).
 enum Source {
-    /// `--release TAG`: bytes read from the manifest tag.
-    Release { tag: String, bytes: String },
+    /// `--release`: bytes read from the manifest — a release tag, or the
+    /// tip of master. `name` is what the DB records and what the user can pass
+    /// again; `described` is for printing, and additionally names master's
+    /// commit, which `name` deliberately does not.
+    Release { name: String, described: String, bytes: String },
     /// Positional THORNLIST file.
     File { path: PathBuf, bytes: String },
     /// No argument: the installation's own live thornlist.
@@ -45,7 +48,7 @@ impl Source {
 
     fn describe(&self) -> String {
         match self {
-            Source::Release { tag, .. } => format!("release {tag}"),
+            Source::Release { described, .. } => format!("release {described}"),
             Source::File { path, .. } => format!("thornlist {}", path.display()),
             Source::Live { path, .. } => format!("live thornlist {}", path.display()),
         }
@@ -356,7 +359,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
         // naturally computes an empty map and clears the marker.
         unfetched = unfetched_repos(&plan, &report);
         let explicit = match &source {
-            Source::Release { tag, .. } => Some((Some(tag.clone()), None::<String>)),
+            Source::Release { name, .. } => Some((Some(name.clone()), None::<String>)),
             Source::File { path, .. } => Some((None::<String>, Some(path.display().to_string()))),
             Source::Live { .. } => None,
         };
@@ -379,9 +382,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
         let clears_partial = was_partial && unfetched.is_empty();
         match &source {
-            Source::Release { tag, .. } => println!(
+            Source::Release { described, .. } => println!(
                 "This installation is now on {}.{}",
-                tag.bold(),
+                described.bold(),
                 if clears_partial { " (this clears the previous partial-adoption warning)" } else { "" }
             ),
             Source::File { path, .. } => println!(
@@ -464,21 +467,24 @@ fn check_root_unchanged(list_root: &str, recorded: &str) -> Res<()> {
     Ok(())
 }
 
-/// §3.2 source precedence: `--release TAG` → positional THORNLIST → the
+/// §3.2 source precedence: `--release RELEASE` → positional THORNLIST → the
 /// live `Cactus/thornlists/installation-default.th` (falling back to the
 /// pristine root copy on very old trees).
 fn resolve_source(ctx: &Ctx, inst: &Installation, args: &RefetchArgs) -> Res<Source> {
-    if let Some(tag_name) = &args.release {
+    if let Some(selector) = &args.release {
         let repo = manifest::ensure_manifest_repo(&crate::CACTUP_ROOT, &ctx.globals.manifest_url)?;
-        let tags = manifest::get_tags(&repo)?;
-        let tag = manifest::find_tag(&tags, tag_name)
-            .ok_or_else(|| anyhow!("{tag_name} is not a valid release (see `cactup releases`)"))?;
-        let bytes = tag
+        let releases = manifest::get_releases(&repo)?;
+        // `master` resolves to the tip just fetched above, not to a tag.
+        let release = manifest::resolve_release(&repo, &releases, selector)?.ok_or_else(|| {
+            anyhow!("{selector} is not a valid release (see `cactup releases`, or pass `master` for the manifest's master tip)")
+        })?;
+        let described = release.describe();
+        let bytes = release
             .read_file("einsteintoolkit.th")
-            .with_context(|| format!("release {tag_name} has no einsteintoolkit.th"))?;
+            .with_context(|| format!("release {described} has no einsteintoolkit.th"))?;
         let bytes = String::from_utf8(bytes)
-            .with_context(|| format!("release {tag_name}'s thornlist is not UTF-8"))?;
-        return Ok(Source::Release { tag: tag_name.clone(), bytes });
+            .with_context(|| format!("release {described}'s thornlist is not UTF-8"))?;
+        return Ok(Source::Release { name: release.name.clone(), described, bytes });
     }
     if let Some(path) = &args.thornlist {
         let expanded = shell::expand_path(&super::p2s(path.clone())?);

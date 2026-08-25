@@ -561,7 +561,20 @@ which therefore always names a repo the remedy still applies to. `-n` marks
 the same split with `FORCE:`/`SKIP:` labels rather than tagging a "SKIP:" line
 with a contradicting "would be fetched" suffix.
 
-A refetched thornlist (from `--release TAG` or a positional `THORNLIST`) is
+**Selecting what to fetch: releases and `master`.** `install`'s positional
+argument and `refetch --release` name a release tag in the manifest repo — or
+the literal `master`, the tip of the manifest's master branch, which is newer
+than every release. The manifest is fetched before either resolves, so
+`master` always means the newest commit; it resolves through
+`refs/remotes/origin/master`, never the local `master` that a clone leaves
+frozen at clone time. `master` is never a default: `install` with no argument
+— and the default its interactive prompt offers — is still the newest
+release, and `cactup releases` lists tags only, closing with a line saying
+master is there for the asking. The DB records the selector itself (the tag
+name, or `master`); printed messages additionally name master's commit, since
+`master` alone pins nothing.
+
+A refetched thornlist (from `--release` or a positional `THORNLIST`) is
 written verbatim to `<root-dir>/thornlists/installation-default.th` (the
 **live, editable copy** — what a build reads by default) and
 `<installation home>/installation-source.th` (the **pristine as-fetched

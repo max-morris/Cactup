@@ -35,6 +35,13 @@ Or install a specific release with minimal prompts:
 cactup install ET_2025_05 --silent
 ```
 
+To install the thornlist at the tip of the manifest's `master` branch — newer
+than every release, and never a default — name `master` instead of a release:
+
+```sh
+cactup install master --alias et-master --silent
+```
+
 You can also customize the install location and symlink:
 
 ```sh
@@ -158,4 +165,4 @@ See [Monitoring & Logs](monitoring.html) for more details.
 
 **Simulation won't start**: Verify the parfile exists and the config is built. Use `cactup config list` and `cactup config show`.
 
-**"N repo(s) skipped (local state preserved)"**: `cactup installation refetch` (or `inst refetch`) leaves alone any repo that has local modifications, local commits, a switched branch, a detached HEAD, or an in-progress rebase/merge, and reports which thorns are affected. Re-run with `--overwrite-modified` (or `-f`, which also implies it) to fetch over them anyway — the affected files are backed up first, to `~/.cactup/refetch-backups/<alias>/<timestamp>/`. To force only specific repos instead of all of them, use `--overwrite <name>` (a repo directory, a thorn checkout, or a bare thorn name; repeatable, or space-/comma-separated) — this also heals a repo whose remote URL genuinely changed by rewriting its `origin` to match the thornlist. Add `-s/--silent` to hide the detailed skip list and keep just the one-line count. If the refetch had an explicit source (`--release TAG` or a thornlist file), the new thornlist is adopted anyway, and the skipped repos are recorded so `cactup inst show` keeps reporting `conformance: PARTIAL` until they're fetched too. See [Installing Releases](installing-releases.html) for the full refetch contract.
+**"N repo(s) skipped (local state preserved)"**: `cactup installation refetch` (or `inst refetch`) leaves alone any repo that has local modifications, local commits, a switched branch, a detached HEAD, or an in-progress rebase/merge, and reports which thorns are affected. Re-run with `--overwrite-modified` (or `-f`, which also implies it) to fetch over them anyway — the affected files are backed up first, to `~/.cactup/refetch-backups/<alias>/<timestamp>/`. To force only specific repos instead of all of them, use `--overwrite <name>` (a repo directory, a thorn checkout, or a bare thorn name; repeatable, or space-/comma-separated) — this also heals a repo whose remote URL genuinely changed by rewriting its `origin` to match the thornlist. Add `-s/--silent` to hide the detailed skip list and keep just the one-line count. If the refetch had an explicit source (`--release` or a thornlist file), the new thornlist is adopted anyway, and the skipped repos are recorded so `cactup inst show` keeps reporting `conformance: PARTIAL` until they're fetched too. See [Installing Releases](installing-releases.html) for the full refetch contract.

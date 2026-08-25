@@ -21,6 +21,10 @@ See all available versions:
 cactup releases --all
 ```
 
+The listing is release tags only. Newer than all of them is the manifest's
+`master` branch, which `cactup releases` mentions in its closing line — see
+"Installing the master tip" below.
+
 ## Installing a release
 
 ### Simple installation
@@ -43,6 +47,31 @@ Install a particular version without prompts:
 ```sh
 cactup install ET_2025_05 --alias myrelease --silent
 ```
+
+### Installing the master tip
+
+Pass `master` instead of a release name to install the thornlist at the tip of
+the manifest repository's `master` branch — newer than every release, and where
+a component lands before it is ever part of one:
+
+```sh
+cactup install master --alias et-master
+```
+
+cactup fetches the manifest before resolving `master`, so this is always the
+latest commit on that branch, never a stale local copy. The commit it resolved
+to is printed with the success message.
+
+`master` is never a default. `cactup install` with no argument still installs
+the most recent release, and so does the default offered by the interactive
+prompt; you only get master by naming it. Bear in mind what that means: master
+moves, so two `install master` runs a week apart are two different thornlists,
+and its components can point at in-progress branches that no release has
+blessed.
+
+`cactup list` and `cactup inst show` render this installation's release as
+`master`. To move it to a newer master later, refetch it — see "Switching
+release or thornlist" under "Updating an installation" below.
 
 ### Custom paths
 
@@ -161,6 +190,13 @@ repo's branch:
 cactup inst refetch --release ET_2026_11
 ```
 
+`--release master` does the same for the tip of the manifest's `master` branch,
+which is also how you move a master installation forward onto a newer master:
+
+```sh
+cactup inst refetch --release master
+```
+
 Or adopt a thornlist file from somewhere else:
 
 ```sh
@@ -230,7 +266,7 @@ first.
 `-n`/`--dry-run` prints the full classification of what a refetch would do
 — fetched, skipped, pruned — and touches nothing.
 
-After `refetch --release TAG` or `refetch FILE`, `cactup list` and
+After `refetch --release RELEASE` or `refetch FILE`, `cactup list` and
 `cactup inst show` render "now on `<TAG>`" next to the install-time release,
 so you can tell an installation has moved on.
 

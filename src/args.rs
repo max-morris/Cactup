@@ -183,8 +183,9 @@ pub(crate) enum InstallationCommand {
 pub(crate) struct RefetchArgs {
     /// Thornlist file to adopt and fetch (default: the installation's live thornlist).
     pub thornlist: Option<PathBuf>,
-    /// Refetch to this Einstein Toolkit release tag (see `cactup releases`).
-    #[clap(long, value_name = "TAG", conflicts_with = "thornlist")]
+    /// Refetch to this Einstein Toolkit release tag, or to `master` for the
+    /// tip of the manifest's master branch (see `cactup releases`).
+    #[clap(long, value_name = "RELEASE", conflicts_with = "thornlist")]
     pub release: Option<String>,
     /// Bypass all nagging (implies --overwrite-modified and --replace-thornlist; also skips the --prune confirmation).
     #[clap(short, long)]
@@ -213,7 +214,7 @@ pub(crate) struct RefetchArgs {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct InstallArgs {
-    #[clap(help = "The release to install. If unspecified, the most recent release will be installed.")]
+    #[clap(help = "The release to install, or \"master\" for the tip of the manifest's master branch (newer than every release). If unspecified, the most recent release will be installed.")]
     pub release: Option<String>,
     #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release (a \"custom installation\").")]
     pub thornlist: Option<PathBuf>,
@@ -752,6 +753,7 @@ mod tests {
             vec!["cactup", "installation", "use", "et"],
             vec!["cactup", "inst", "refetch"],
             vec!["cactup", "inst", "refetch", "--release", "ET_2026_11", "-f"],
+            vec!["cactup", "inst", "refetch", "--release", "master", "-f"],
             vec!["cactup", "installation", "refetch", "new.th", "--overwrite-modified", "--prune", "-n"],
             vec!["cactup", "inst", "refetch", "--overwrite", "SpacetimeX Cottonmouth", "-n"],
             vec!["cactup", "inst", "refetch", "--overwrite", "SpacetimeX", "--overwrite", "Cottonmouth", "-n"],
@@ -760,6 +762,7 @@ mod tests {
             vec!["cactup", "config", "delta"],
             vec!["cactup", "config", "delta", "sim"],
             vec!["cactup", "install", "ET_2025_05", "--silent"],
+            vec!["cactup", "install", "master", "--silent"],
             vec!["cactup", "install", "--thornlist", "my/list.th", "--silent"],
             vec!["cactup", "uninstall", "old", "-f"],
             // A bare positional beside an optional subcommand is the likeliest

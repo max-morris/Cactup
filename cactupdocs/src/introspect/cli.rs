@@ -350,23 +350,36 @@ fn field_to_arg(field: &Field) -> Result<Option<CliArg>> {
 }
 
 fn parse_clap_metas(list: &syn::MetaList) -> Result<Vec<Meta>> {
-    let tokens = list.tokens.to_string();
     let mut metas = Vec::new();
+    let mut item = proc_macro2::TokenStream::new();
 
-    // Simple split on commas to get individual items, then parse each
-    for item in tokens.split(',') {
-        let item = item.trim();
-        if item.is_empty() {
-            continue;
-        }
-
-        // Try to parse as a Meta using syn::parse_str
-        if let Ok(meta) = syn::parse_str::<Meta>(item) {
-            metas.push(meta);
+    // Split on top-level commas of the token stream, never on the stringified
+    // attribute: a `help = "one thing, then another"` literal carries commas
+    // of its own, and cutting the text at them leaves two fragments that parse
+    // as nothing — silently dropping that flag's whole description.
+    for token in list.tokens.clone() {
+        match &token {
+            proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
+                push_meta(&mut metas, std::mem::take(&mut item));
+            }
+            _ => item.extend(std::iter::once(token)),
         }
     }
+    push_meta(&mut metas, item);
 
     Ok(metas)
+}
+
+/// Keep whatever parses and ignore the rest: a clap attribute may hold items
+/// that are not `Meta` at all (`num_args = 0..=1`), and one of those must not
+/// cost us the items beside it.
+fn push_meta(metas: &mut Vec<Meta>, tokens: proc_macro2::TokenStream) {
+    if tokens.is_empty() {
+        return;
+    }
+    if let Ok(meta) = syn::parse2::<Meta>(tokens) {
+        metas.push(meta);
+    }
 }
 
 fn extract_short_long(field_name: &str, attrs: &[Attribute]) -> Result<(Option<char>, Option<String>)> {

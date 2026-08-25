@@ -174,51 +174,114 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
     }
 }
 
-/// Look a release tag up by its short name (e.g. `ET_2026_05`). Shared by
-/// `install` (interactive selection) and `installation refetch --release`.
-pub fn find_tag<'t, 'repo>(tags: &'t [Tag<'repo>], short_name: &str) -> Option<&'t Tag<'repo>> {
-    tags.iter().find(|tag| tag.short_name == short_name)
+/// The release selector naming the tip of the manifest's master branch rather
+/// than a release tag. Master is newer than every release *and* moves under
+/// you, so it is never a default: the user has to ask for it by name.
+pub const MASTER: &str = "master";
+
+/// The ref [`Release::master`] reads. Deliberately NOT `refs/heads/master`:
+/// the initial clone writes a local `master` once and no later fetch touches
+/// it (a fetch only updates `refs/remotes/origin/*`), so the local branch is
+/// frozen at first-clone time while this ref is whatever
+/// [`ensure_manifest_repo`] just fetched — which is the whole point of
+/// selecting master.
+const MASTER_REF: &str = "refs/remotes/origin/master";
+
+/// Resolve a release selector against an already-fetched manifest: either
+/// [`MASTER`] or a release tag's short name (e.g. `ET_2026_05_v0`). `Ok(None)`
+/// means "no such release", which callers report and re-prompt on; an `Err`
+/// means the selector named something real that could not be read. Shared by
+/// `install` (positional/interactive selection) and `installation refetch
+/// --release`.
+pub fn resolve_release<'repo>(
+    repo: &'repo Repository,
+    releases: &[Release<'repo>],
+    selector: &str,
+) -> Res<Option<Release<'repo>>> {
+    if selector == MASTER {
+        return Release::master(repo).map(Some);
+    }
+    Ok(releases.iter().find(|release| release.name == selector).cloned())
 }
 
-pub fn get_tags(repo: &Repository) -> Res<Vec<Tag<'_>>> {
-    let mut tags: Vec<Tag<'_>> =
+/// Every release tag in the manifest, newest first. Master is deliberately
+/// absent: it is not a release, and `install`'s default is this list's head.
+pub fn get_releases(repo: &Repository) -> Res<Vec<Release<'_>>> {
+    let mut ranked: Vec<(usize, Release<'_>)> =
         repo.references()?
             .tags()?
             .filter_map(|t| t.ok())
-            .filter_map(|t| Tag::new(repo, t).ok())
+            .filter_map(|t| Release::from_tag(repo, t).ok())
+            .filter_map(|r| r.ancestry_rank().ok().map(|rank| (rank, r)))
             .collect();
 
-    tags.sort_by_key(|t| std::cmp::Reverse(t.ancestry_rank));
-    Ok(tags)
+    ranked.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+    Ok(ranked.into_iter().map(|(_, release)| release).collect())
 }
 
-pub struct Tag<'repo> {
+/// A point in the manifest's history whose tree holds the thornlist to
+/// install: a release tag, or the tip of master ([`MASTER`]).
+#[derive(Clone)]
+pub struct Release<'repo> {
     repo: &'repo Repository,
-    pub short_name: String,
-    ancestry_rank: usize,
+    /// What the user typed and what the database records: a tag's short name,
+    /// or `master`. Deliberately not the commit — it has to survive as an
+    /// alias default and be passable back on the command line.
+    pub name: String,
+    commit_id: gix::ObjectId,
     tree_id: gix::ObjectId
 }
 
-impl<'repo> Tag<'repo> {
-    pub fn new(repo: &'repo Repository, tag: Reference<'repo>) -> Res<Self> {
-        let short_name = tag.name().shorten().to_string();
-        let peeled_id = tag.into_fully_peeled_id()?;
-        let tree_id = peeled_id.object()?.peel_to_commit()?.tree_id()?.detach();
-        let commit_id = peeled_id.detach();
+impl<'repo> Release<'repo> {
+    /// A release tag, named by the tag's short name.
+    fn from_tag(repo: &'repo Repository, tag: Reference<'repo>) -> Res<Self> {
+        let name = tag.name().shorten().to_string();
+        Self::at(repo, name, tag)
+    }
 
-        // Number of commits between the tag and the root of the repository.
-        // We use this as a stand-in for commit time to determine the release order of the tags,
-        // since the git history has become too mangled for the former to work.
-        // I also do not trust that the current naming convention, where the release date is
-        // encoded in the tag name, will be followed in perpetuity. This method is more robust.
-        let ancestry_rank = repo.rev_walk(Some(commit_id)).all()?.count();
+    /// The tip of master, named [`MASTER`]. Always the just-fetched commit;
+    /// see [`MASTER_REF`].
+    fn master(repo: &'repo Repository) -> Res<Self> {
+        let master = repo.find_reference(MASTER_REF)
+                         .with_context(|| format!("the manifest repository has no {MASTER_REF}"))?;
+        Self::at(repo, MASTER.to_owned(), master)
+    }
+
+    fn at(repo: &'repo Repository, name: String, reference: Reference<'repo>) -> Res<Self> {
+        let peeled_id = reference.into_fully_peeled_id()?;
+        let tree_id = peeled_id.object()?.peel_to_commit()?.tree_id()?.detach();
 
         Ok(Self {
             repo,
-            short_name,
-            ancestry_rank,
+            name,
+            commit_id: peeled_id.detach(),
             tree_id
         })
+    }
+
+    /// Number of commits between this release and the root of the repository.
+    /// We use this as a stand-in for commit time to determine the release order
+    /// of the tags, since the git history has become too mangled for the former
+    /// to work. I also do not trust that the current naming convention, where
+    /// the release date is encoded in the tag name, will be followed in
+    /// perpetuity. This method is more robust.
+    fn ancestry_rank(&self) -> Res<usize> {
+        Ok(self.repo.rev_walk(Some(self.commit_id)).all()?.count())
+    }
+
+    fn is_master(&self) -> bool {
+        self.name == MASTER
+    }
+
+    /// How to name this release to the user. A tag names itself; master needs
+    /// its commit spelled out, because the name alone says nothing about which
+    /// tip of master this was.
+    pub fn describe(&self) -> String {
+        if self.is_master() {
+            format!("{} (commit {})", self.name, self.commit_id.to_hex_with_len(7))
+        } else {
+            self.name.clone()
+        }
     }
 
     pub fn read_file(&self, path: impl AsRef<Path>) -> Res<Vec<u8>> {
@@ -234,5 +297,105 @@ impl<'repo> Tag<'repo> {
                 .data
                 .clone()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gix::objs::tree::EntryKind;
+
+    fn sig() -> gix::actor::SignatureRef<'static> {
+        gix::actor::SignatureRef {
+            name: "cactup tests".into(),
+            email: "tests@example.invalid".into(),
+            time: "1700000000 +0000",
+        }
+    }
+
+    /// Commit a tree holding `einsteintoolkit.th` with `text` in it, and point
+    /// `refname` at the result.
+    fn commit(
+        repo: &Repository,
+        refname: &str,
+        text: &str,
+        parents: Vec<gix::ObjectId>,
+    ) -> gix::ObjectId {
+        let oid = repo.write_blob(text.as_bytes()).unwrap().detach();
+        let tree = repo
+            .write_object(&gix::objs::Tree {
+                entries: vec![gix::objs::tree::Entry {
+                    mode: EntryKind::Blob.into(),
+                    filename: "einsteintoolkit.th".into(),
+                    oid,
+                }],
+            })
+            .unwrap()
+            .detach();
+        repo.commit_as(sig(), sig(), refname, "manifest", tree, parents).unwrap().detach()
+    }
+
+    fn tag(repo: &Repository, name: &str, target: gix::ObjectId) {
+        let kind = gix::objs::Kind::Commit;
+        repo.tag(name, target, kind, Some(sig()), "release", PreviousValue::MustNotExist).unwrap();
+    }
+
+    #[test]
+    fn master_reads_the_fetched_origin_master_not_the_stale_local_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = gix::init(dir.path()).unwrap();
+        // Exactly the shape a clone leaves behind: a local `master` frozen at
+        // clone time, and an `origin/master` that later fetches move.
+        commit(&repo, "refs/heads/master", "AT CLONE TIME", vec![]);
+        commit(&repo, MASTER_REF, "JUST FETCHED", vec![]);
+
+        let master = resolve_release(&repo, &[], MASTER).unwrap().unwrap();
+
+        assert_eq!(master.name, MASTER);
+        assert!(master.is_master());
+        assert_eq!(master.read_file("einsteintoolkit.th").unwrap(), b"JUST FETCHED");
+        // "master" alone pins nothing, so the description names the commit.
+        assert!(master.describe().starts_with("master (commit "), "{}", master.describe());
+    }
+
+    #[test]
+    fn releases_are_the_tags_newest_first_and_never_master() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = gix::init(dir.path()).unwrap();
+        let old = commit(&repo, MASTER_REF, "OLD", vec![]);
+        tag(&repo, "ET_2026_05_v0", old);
+        let new = commit(&repo, MASTER_REF, "NEW", vec![old]);
+        tag(&repo, "ET_2026_11_v0", new);
+        // The tip is past the newest tag — where master's whole point lies.
+        commit(&repo, MASTER_REF, "UNRELEASED", vec![new]);
+
+        let releases = get_releases(&repo).unwrap();
+
+        assert_eq!(
+            releases.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["ET_2026_11_v0", "ET_2026_05_v0"]
+        );
+        assert_eq!(releases[0].describe(), "ET_2026_11_v0");
+        assert_eq!(releases[1].read_file("einsteintoolkit.th").unwrap(), b"OLD");
+
+        let selected = resolve_release(&repo, &releases, "ET_2026_05_v0").unwrap().unwrap();
+        assert_eq!(selected.read_file("einsteintoolkit.th").unwrap(), b"OLD");
+        let master = resolve_release(&repo, &releases, MASTER).unwrap().unwrap();
+        assert_eq!(master.read_file("einsteintoolkit.th").unwrap(), b"UNRELEASED");
+    }
+
+    #[test]
+    fn an_unknown_selector_is_no_release_while_a_missing_master_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = gix::init(dir.path()).unwrap();
+        commit(&repo, MASTER_REF, "TIP", vec![]);
+        let releases = get_releases(&repo).unwrap();
+
+        // Unknown names are reported and re-prompted on, so they are not errors...
+        assert!(resolve_release(&repo, &releases, "ET_1999_01").unwrap().is_none());
+        // ...but a manifest that cannot answer for master at all is.
+        let dir = tempfile::tempdir().unwrap();
+        let masterless = gix::init(dir.path()).unwrap();
+        assert!(resolve_release(&masterless, &[], MASTER).is_err());
     }
 }

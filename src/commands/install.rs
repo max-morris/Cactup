@@ -10,12 +10,12 @@ use colored::Colorize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A `cactup install` gets its thornlist either from a release tag in the
-/// manifest, or (with `--thornlist`) directly from a file — a "custom
-/// installation". Everything past thornlist resolution (alias, machine,
-/// prefixes, GetComponents, symlink, DB registration) is shared.
+/// A `cactup install` gets its thornlist either from the manifest — a release
+/// tag or the tip of master — or (with `--thornlist`) directly from a file, a
+/// "custom installation". Everything past thornlist resolution (alias,
+/// machine, prefixes, GetComponents, symlink, DB registration) is shared.
 enum InstallSource<'repo> {
-    Release(&'repo manifest::Tag<'repo>),
+    Release(manifest::Release<'repo>),
     Custom { path: PathBuf, content: String },
 }
 
@@ -59,14 +59,19 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     } else {
         Some(manifest::ensure_manifest_repo(cactup_root, &ctx.globals.manifest_url)?)
     };
-    let tags = repo.as_ref().map(manifest::get_tags).transpose()?;
+    let releases = repo.as_ref().map(manifest::get_releases).transpose()?;
 
     // §2.3: a snapshot for the prompt-time checks; the lock is NOT held across
     // the download/build below. The final registration re-checks under the
     // lock in `ctx.db.update`.
     let database = ctx.db.read()?;
 
-    if let Some(tags) = &tags && tags.is_empty() {
+    // A manifest with no tags still has a master to install from, so this is
+    // only fatal when the selection would have to come from the tag list.
+    if let Some(releases) = &releases
+        && releases.is_empty()
+        && release.as_deref() != Some(manifest::MASTER)
+    {
         println!("No releases found.");
         return Ok(());
     }
@@ -76,30 +81,40 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     let source = match custom_thornlist {
         Some((path, content)) => InstallSource::Custom { path, content },
         None => {
-            let tags = tags.as_ref().unwrap();
-            let release_default = tags.first().unwrap().short_name.clone();
+            let repo = repo.as_ref().unwrap();
+            let releases = releases.as_ref().unwrap();
+            // The default is always the newest *release*: master is newer, but
+            // it moves under you, so it is only ever installed on request.
+            let release_default = releases.first().map(|r| r.name.clone());
 
-            let release_tag = match release {
-                Some(release) => match manifest::find_tag(tags, &release) {
-                    Some(tag) => tag,
+            let selected = match release {
+                Some(release) => match manifest::resolve_release(repo, releases, &release)? {
+                    Some(selected) => selected,
                     None => {
-                        println!("{}", format!("{} is not a valid release.", release.bold()).bright_red());
+                        println!("{}", invalid_release(&release));
                         return Ok(());
                     }
                 },
-                None if silent => &tags[0],
+                None if silent => releases[0].clone(),
                 None => loop {
-                    let release_sel = prompt_with_default("Which release do you want to install?", &release_default)?;
-                    match manifest::find_tag(tags, &release_sel) {
-                        Some(tag) => break tag,
+                    let release_sel = prompt_with_default(
+                        // `master` is accepted here too, and this prompt is
+                        // where an interactive user decides — the flag help
+                        // and `cactup releases` are the only other places
+                        // that say so.
+                        "Which release do you want to install? (\"master\" installs the manifest's master tip)",
+                        release_default.as_deref().unwrap_or(manifest::MASTER),
+                    )?;
+                    match manifest::resolve_release(repo, releases, &release_sel)? {
+                        Some(selected) => break selected,
                         None => {
-                            println!("{}", format!("{} is not a valid release.", release_sel.bold()).bright_red());
+                            println!("{}", invalid_release(&release_sel));
                         }
                     }
                 },
             };
 
-            InstallSource::Release(release_tag)
+            InstallSource::Release(selected)
         }
     };
 
@@ -109,9 +124,9 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // deliberate improvement over discovering it after every question has
     // already been answered.
     let thorn_list: Vec<u8> = match &source {
-        InstallSource::Release(release_tag) => {
-            release_tag.read_file("einsteintoolkit.th")
-                       .with_context(|| format!("Failed to read einsteintoolkit.th from release {}", release_tag.short_name))?
+        InstallSource::Release(release) => {
+            release.read_file("einsteintoolkit.th")
+                   .with_context(|| format!("Failed to read einsteintoolkit.th from {}", release.describe()))?
         }
         InstallSource::Custom { content, .. } => content.clone().into_bytes(),
     };
@@ -126,7 +141,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     validate_root_dir(&root)?;
 
     let (alias_default, alias_default_source) = match &source {
-        InstallSource::Release(release_tag) => (release_tag.short_name.clone(), "the release name"),
+        InstallSource::Release(release) => (release.name.clone(), "the release name"),
         InstallSource::Custom { path, .. } => {
             (path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), "the thornlist file name")
         }
@@ -345,7 +360,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine, Some(&root))?;
 
     let release_name = match &source {
-        InstallSource::Release(release_tag) => Some(release_tag.short_name.clone()),
+        InstallSource::Release(release) => Some(release.name.clone()),
         InstallSource::Custom { .. } => None,
     };
     // A custom installation has no release name to show, so record the
@@ -382,8 +397,8 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
     let installed_root = crate::installation::cactus_root_of(&install_dir, &root);
     match &source {
-        InstallSource::Release(release_tag) => {
-            println!("{}", format!("Success! Installed release {} into {}", release_tag.short_name, installed_root.display()).bold().bright_green());
+        InstallSource::Release(release) => {
+            println!("{}", format!("Success! Installed release {} into {}", release.describe(), installed_root.display()).bold().bright_green());
         }
         InstallSource::Custom { path, .. } => {
             println!("{}", format!("Success! Installed custom thornlist {} into {}", path.display(), installed_root.display()).bold().bright_green());
@@ -398,6 +413,17 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     }
 
     Ok(())
+}
+
+/// What to print for a release selector that resolved to nothing. Names
+/// `master` explicitly: it is not in `cactup releases`' listing, so a user who
+/// has only seen tags has no way to know it is accepted.
+fn invalid_release(selector: &str) -> String {
+    format!(
+        "{} is not a valid release. Pass a release from `cactup releases`, or {} for the tip of the manifest's master branch.",
+        selector.bold(),
+        manifest::MASTER.bold()
+    ).bright_red().to_string()
 }
 
 /// The symlink name default: `root`'s final path component ("Cactus" for a
