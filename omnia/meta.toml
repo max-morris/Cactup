@@ -19,6 +19,9 @@
 #   - submit's hardcoded `> @RUNDIR@/@SIMULATION_NAME@.out 2> ....err` →
 #     @STDOUT_FILE@ / @STDERR_FILE@ — same default value, but honors -o/-e
 #     (design §8.3.1).
+#   - The old ini's `ppn = 1` / `num-threads = 1` / `makejobs = 1` are not
+#     carried over: the node has 72 cores, 144 hardware threads (two Xeon
+#     Platinum 8352V). See [hardware] and [build] below.
 #   - Dropped keys nothing consumes (design §4.2/§10): quota, nodes, min-ppn,
 #     max-num-threads, and stdout / stderr / stdout-follow (output filenames
 #     are template-owned; `log --follow` follows natively).
@@ -41,11 +44,22 @@ simulation-home = "/storage/users/sbrandt/omnia/simulations"
 test-home       = "/storage/users/sbrandt/omnia/tests"
 
 [hardware]
-# Old `ppn = 1`: the box has many cores (`nproc`), but this account's cgroup
-# allows exactly one, so one is what is available to a run.
-max-cpus-per-node     = 1
-# Old `num-threads = 1`: default CPUS_PER_TASK when -c is omitted (§8.5).
-default-cpus-per-task = 1
+# A CPU is always a *core* here, never a hardware thread — a run may have
+# hyperthreading turned off, and the layout must not change under it. So the box
+# is 72 CPUs: two Xeon Platinum 8352V, 2 sockets x 36 cores, 2 NUMA nodes. SMT
+# is declared separately as threads-per-cpu below (72 x 2 = the 144 CPUs lscpu
+# counts). The old ini's `ppn = 1` described nothing about the hardware.
+max-cpus-per-node     = 72
+# Old `num-threads = 1`: default CPUS_PER_TASK when -c is omitted (§8.5); the
+# runscript exports it straight as OMP_NUM_THREADS. Deliberately NOT the whole
+# node: this is one node of a shared closet cluster, and a no-flag GPU run has
+# no business taking every core for the host side of a single-MI210 job. That
+# does not underfill the GPU, because §8.5 bounds a *derived* TASKS_PER_NODE by
+# max-gpus-per-node below: one device, so one rank x 8 cores, not 72/8 = 9
+# ranks. Ask for more with -c (`-c 72` gives the old fill-the-node behavior).
+default-cpus-per-task = 8
+# Old `num-smt` (@THREADS_PER_CPU@): SMT is on, 2 threads per core.
+threads-per-cpu       = 2
 # NEW (design §4.2/§8.5): the single MI210. A ceiling — GPUS_PER_TASK still
 # defaults to 1 — so it pins the layout to one rank on this node.
 max-gpus-per-node     = 1
@@ -54,7 +68,10 @@ max-gpus-per-node     = 1
 
 [build]
 make      = "make -j@MAKEJOBS@"
-make-jobs = 1
+# Old `makejobs = 1` came from the same fiction as the old `ppn = 1`. 32 of the
+# node's 72 cores: enough to build CarpetX in a sensible time, restrained enough
+# to stay a good neighbor on a shared closet-cluster node.
+make-jobs = 32
 disabled-thorns = [
     "CarpetX/Algo",
     "CarpetX/PDESolvers",
@@ -125,8 +142,8 @@ gpu     = true
 default = true
 
 # One normal variant of each script plus the testsuite variant (design §11.2).
-# `tasks = 1` overrides the testsuite default of 2 ranks (§11.6): this node
-# offers one CPU and one GPU, so a second rank has nothing to run on.
+# `tasks = 1` overrides the testsuite default of 2 ranks (§11.6): this node has
+# one GPU, so a second rank has no device to run on.
 [variants.submitscript]
 "default" = { queues = ["local"], default = true }
 "test"    = { queues = ["local"], test = true, tasks = 1 }   # `cactup test submit`
