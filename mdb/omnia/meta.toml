@@ -1,0 +1,139 @@
+# omnia — shared workstation with one AMD Instinct MI210 (gfx90a), used for a
+# CarpetX/AMReX build targeting AMD GPUs via ROCm/HIP. There is no batch
+# system: "submit" backgrounds the script and echoes its PID as the job id;
+# status/stop use ps/pkill (the generic-workstation shape, cf. mdb/generic).
+# Ported from simfactory2 mdb/machines/omnia.ini.
+#
+# Deviations from the old ini:
+#   - The runscript's explicit `source .../Cactus/env-rocm.sh` is gone. It
+#     existed because simfactory's envsetup reached only the commands
+#     simfactory ran itself; cactup applies env-setup to build, submit AND run
+#     (design §4.2/§6.1), auto-prepending the block below to the runscript.
+#     env-rocm.sh (machine-local, not in version control) was checked against
+#     the envsetup heredoc: identical but for two extra exports,
+#     CACTUS_EXTERNALS / AMREX_INSTALL_DIR, which are folded into env-setup
+#     below — so nothing the runscript used to get is lost.
+#   - `source ${MPI_ROOT}/env/vars.sh` → `. ${MPI_ROOT}/env/vars.sh`: the
+#     effective env-setup is sourced in a `/bin/sh -c` shell for the build and
+#     submit phases (design §6.1), where `source` is not a builtin.
+#   - submit's hardcoded `> @RUNDIR@/@SIMULATION_NAME@.out 2> ....err` →
+#     @STDOUT_FILE@ / @STDERR_FILE@ — same default value, but honors -o/-e
+#     (design §8.3.1).
+#   - Dropped keys nothing consumes (design §4.2/§10): quota, nodes, min-ppn,
+#     max-num-threads, and stdout / stderr / stdout-follow (output filenames
+#     are template-owned; `log --follow` follows natively).
+
+[machine]
+name        = "omnia"
+nickname    = "omnia"
+location    = "local"
+description = "Shared workstation with one AMD Instinct MI210 GPU (gfx90a), used here for a CarpetX/AMReX build targeting AMD GPUs via ROCm/HIP."
+status      = "personal"
+hostname    = "omnia"
+
+[paths]
+# Old keys: sourcebasedir / basedir. Upstream hardcodes the owner's directory
+# rather than parameterizing on @USER@; kept verbatim — a different user sets
+# these in a per-user override (~/.cactup/machines/omnia).
+install-home    = "/storage/users/sbrandt/omnia"
+simulation-home = "/storage/users/sbrandt/omnia/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/storage/users/sbrandt/omnia/tests"
+
+[hardware]
+# Old `ppn = 1`: the box has many cores (`nproc`), but this account's cgroup
+# allows exactly one, so one is what is available to a run.
+max-cpus-per-node     = 1
+# Old `num-threads = 1`: default CPUS_PER_TASK when -c is omitted (§8.5).
+default-cpus-per-task = 1
+# NEW (design §4.2/§8.5): the single MI210. A ceiling — GPUS_PER_TASK still
+# defaults to 1 — so it pins the layout to one rank on this node.
+max-gpus-per-node     = 1
+# No `memory`: the old ini declared none, so §4.6 autodetect fills it from the
+# OS at load time (correct on omnia itself, which is where it is consumed).
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 1
+disabled-thorns = [
+    "CarpetX/Algo",
+    "CarpetX/PDESolvers",
+    "CarpetX/PoissonX",
+]
+# The old ini's `enabled-thorns` heredoc was empty; omitted.
+
+[environment]
+# The upstream envsetup heredoc verbatim, except `source` → `.` and the two
+# trailing externals exports lifted from env-rocm.sh (see the header).
+# Only Intel oneAPI MPI is installed (no system MPI package), so its
+# environment must be sourced for mpirun/headers/libs to be found at all. Its
+# OFI/PSM3 provider also tries (and fails) to use this host's RoCE NIC over
+# verbs, so the fabric is forced to shared memory.
+env-setup = """
+export ROCM_PATH=/opt/rocm
+export ROCM_ARCH=gfx90a
+export AMREX_AMD_ARCH=${ROCM_ARCH}
+
+export HIP_PLATFORM=amd
+export HIP_PATH=${ROCM_PATH}
+export HIPCC_COMPILE_FLAGS_APPEND="--offload-arch=${ROCM_ARCH} -Wno-unused-command-line-argument"
+export HIPCC_LINK_FLAGS_APPEND="-fgpu-rdc --hip-link"
+export ROCR_VISIBLE_DEVICES=0
+
+export PATH="${ROCM_PATH}/bin:${PATH}"
+export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${LD_LIBRARY_PATH}"
+
+export MPI_ROOT=/opt/intel/oneapi/mpi/latest
+. ${MPI_ROOT}/env/vars.sh > /dev/null
+
+export I_MPI_FABRICS=shm
+export FI_PROVIDER=tcp
+
+# Where externally-built dependencies (outside the Cactus build system) are
+# installed, e.g. AMReX with the HIP GPU backend. These two were in the
+# runscript's env-rocm.sh but NOT in the ini's envsetup, so simfactory had them
+# at run time only; here they reach build/submit/run alike, which is where the
+# externals build wants them. AMREX_INSTALL_DIR is the same path the
+# optionlist's AMREX_DIR names.
+export CACTUS_EXTERNALS=/storage/users/sbrandt/omnia/Cactus/externals
+export AMREX_INSTALL_DIR=${CACTUS_EXTERNALS}/install/amrex-hip
+"""
+
+[scheduler]
+# No batch system: background the script, echo its PID as the job id; ps/pkill
+# for status/stop. @STDOUT_FILE@/@STDERR_FILE@ default to
+# @RUNDIR@/@SIMULATION_NAME@.{out,err} unless -o/-e are given (design §8.3.1).
+submit            = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+get-status        = "ps @JOB_ID@"
+# Kill the whole set of processes descending from @JOB_ID@, not just the
+# top-level one.
+stop              = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern    = "(.*)"
+status-pattern    = "^ *@JOB_ID@ "
+queued-pattern    = "$^"          # never "queued"
+running-pattern   = "^"           # in ps => running
+holding-pattern   = "$^"          # never "held"
+exec-host         = "echo localhost"
+exec-host-pattern = "(.*)"
+# No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
+# No allocation-env: nothing allocates here, so `test run` needs no gate.
+
+# One local "queue". gpu = true: every build on this machine is the HIP/MI210
+# build, and D12 (§4.4) refuses a GPU binary on a non-GPU queue.
+[queues.local]
+gpu     = true
+default = true
+
+# One normal variant of each script plus the testsuite variant (design §11.2).
+# `tasks = 1` overrides the testsuite default of 2 ranks (§11.6): this node
+# offers one CPU and one GPU, so a second rank has nothing to run on.
+[variants.submitscript]
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true, tasks = 1 }   # `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["local"], default = true }
+"test"    = { queues = ["local"], test = true, tasks = 1 }   # `cactup test run`
+
+[variants.optionlist]
+variants = ["default"]

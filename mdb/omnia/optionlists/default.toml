@@ -1,0 +1,101 @@
+# omnia optionlist (variant "default"), ported from simfactory2
+# mdb/optionlists/omnia-hip.cfg — building CarpetX/AMReX on "omnia" using the
+# attached AMD Instinct MI210 (gfx90a) GPU via ROCm/HIP.
+#
+# AMReX itself is built OUTSIDE the Cactus build system (see
+# externals/build/amrex-25.11, installed under externals/install/amrex-hip)
+# with CMake+hipcc, AMReX_GPU_BACKEND=HIP, AMReX_AMD_ARCH=gfx90a. This
+# optionlist just points AMREX_DIR at that install; Cactus's own
+# ExternalLibraries/AMReX/src/detect.sh will find it via AMReX.H / libamrex and
+# skip its own bundled build.
+#
+# MPI: no system MPI package is installed on this host, but Intel oneAPI MPI is
+# (/opt/intel/oneapi/mpi/latest). We configure it manually
+# (MPI_INC_DIRS/MPI_LIB_DIRS/MPI_LIBS) rather than relying on Cactus's
+# mpicxx-wrapper auto-detection, since Intel's wrapper only substitutes real
+# paths for "-show", not the "-compile_info"/"--showme" flags that Cactus's
+# MPI/src/detect.pl tries first.
+#
+# yaml-cpp and zlib are picked up from the system packages (libyaml-cpp-dev,
+# zlib1g-dev), found automatically by find_lib.
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8); every value is kept
+# as a TOML string so the render is faithful to the original.
+
+[cactup]
+gpu               = true
+compatible-queues = ["local"]
+
+[options]
+
+# Whenever this version string changes, the application is configured
+# and rebuilt from scratch
+VERSION = "omnia-hip-2026-07-27"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "hipcc --offload-arch=gfx90a"
+CXX = "hipcc --offload-arch=gfx90a"
+F90 = "gfortran"
+LD  = "hipcc --offload-arch=gfx90a"
+
+CPPFLAGS = "-DSIMD_CPU"
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -std=gnu11 -Wno-unused-command-line-argument"
+CXXFLAGS = "-g -std=c++17 -Wno-unused-command-line-argument -Wno-pass-failed"
+F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+
+LDFLAGS = "-fgpu-rdc --hip-link"
+# gfortran: runtime needed by thorns with Fortran sources (e.g. TestArrayGroup),
+#   since the final link is done via hipcc/clang++, not gfortran.
+# hiprand/rocrand: AMReX's HIP backend (AMReX_Random.cpp) calls hipRAND directly.
+LIBS    = "stdc++fs gfortran hiprand rocrand"
+
+SYS_INC_DIRS = "/opt/rocm/include"
+# /usr/lib/gcc/x86_64-linux-gnu/11 carries the unversioned libgfortran.so
+# (link-time) symlink; it's not installed under the regular multiarch lib
+# dir, and hipcc/clang++ (used for the final link) doesn't search gcc's
+# private lib directories the way gfortran itself would.
+LIBDIRS      = "/opt/rocm/lib /usr/lib/gcc/x86_64-linux-gnu/11"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DISABLE_REAL16 = "yes"
+
+DEBUG = "no"
+CPP_DEBUG_FLAGS = ""
+C_DEBUG_FLAGS   = ""
+CXX_DEBUG_FLAGS = ""
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+F90_DEBUG_FLAGS = ""
+
+OPTIMISE = "yes"
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+OPENMP = "no"
+
+WARN = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = ""
+CXX_WARN_FLAGS = ""
+FPP_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = ""
+
+VECTORISE = "no"
+
+# AMReX: externally built, HIP GPU backend (see comment above)
+AMREX_DIR             = "/storage/users/sbrandt/omnia/Cactus/externals/install/amrex-hip"
+AMREX_ENABLE_HIP      = "yes"
+AMREX_AMD_ARCH        = "gfx90a"
+AMREX_ENABLE_FORTRAN  = "no"
+
+MPI_DIR      = "/opt/intel/oneapi/mpi/latest"
+MPI_INC_DIRS = "/opt/intel/oneapi/mpi/latest/include"
+MPI_LIB_DIRS = "/opt/intel/oneapi/mpi/latest/lib/release /opt/intel/oneapi/mpi/latest/lib"
+MPI_LIBS     = "mpicxx mpifort mpi rt pthread dl"
+
+PTHREADS_DIR = "NO_BUILD"
