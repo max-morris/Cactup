@@ -153,7 +153,28 @@ pub fn resolve_topology(
     // Request-side CPUS_PER_TASK: -c wins, else the machine/queue
     // `default-cpus-per-task` (simfactory's num-threads), else 1.
     let cpus = flags.cpus.or(hw.default_cpus_per_task).unwrap_or(1).max(1);
-    let mut tpn = flags.tpn.unwrap_or_else(|| (cpus_per_node / cpus).max(1));
+    // GPUS_PER_TASK is settled before the rank count because a derived rank
+    // count is bounded by it (below); it needs no layout of its own (§8.5).
+    let gpus_per_task = derive_gpus_per_task(flags, &hw, gpu);
+    // Fill the node — but a fully *derived* TASKS_PER_NODE is also bounded by
+    // the node's GPU budget (§8.5): with GPUs indivisible and one per rank, a
+    // node holding fewer devices than the CPU split implies cannot run that
+    // many ranks, and the ceiling below would refuse the layout outright.
+    // Bounding it here is what lets a GPU machine declare a polite
+    // `default-cpus-per-task` (a rank wanting 8 of omnia's 72 cores) without
+    // the CPU rule inferring 9 ranks for its single MI210. GPUs still never
+    // *build* a layout: an explicit `--tpn` is authoritative, and an explicit
+    // `--tasks` is a requested rank count — on a single-node machine with no
+    // batch system every one of those ranks lands on the node, so shrinking
+    // tpn under it would only bless a layout the node cannot run. Both keep
+    // the un-bounded CPU-rule value and reach the ceiling check instead.
+    let mut tpn = flags.tpn.unwrap_or_else(|| {
+        let by_cpu = (cpus_per_node / cpus).max(1);
+        match hw.max_gpus_per_node {
+            Some(max) if gpu && flags.tasks.is_none() => by_cpu.min((max / gpus_per_task).max(1)),
+            _ => by_cpu,
+        }
+    });
     let nodes = flags.nodes.unwrap_or(1);
     let tasks = flags.tasks.unwrap_or(nodes * tpn);
     // An explicit `--tasks` overrides the fill-the-node `TASKS`, so the derived
@@ -165,7 +186,7 @@ pub fn resolve_topology(
     if flags.tpn.is_none() {
         tpn = tpn.min(tasks.div_ceil(nodes).max(1));
     }
-    let gpus_per_task = derive_gpus_per_task(flags, &hw, gpu, tpn, &queue)?;
+    check_gpus_per_node(gpus_per_task, tpn, &hw, &queue)?;
 
     let total_wall = match flags.wall_time {
         Some(w) => w,
@@ -207,29 +228,53 @@ pub fn resolve_topology(
 /// rank count for unrelated reasons, and would fight any machine whose
 /// scheduler reserves GPUs on a different axis than it binds them.
 ///
-/// `max-gpus-per-node` therefore does not feed this at all — it is purely the
-/// ceiling checked below. That check is the one place the GPU chain is stricter
-/// than the CPU chain: CPUs oversubscribe harmlessly (threads time-share a
-/// core), while a job asking for GPUs a partition does not have either never
-/// schedules or lands with ranks fighting over one device.
-fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool, tpn: u32, queue: &str) -> Res<u32> {
+/// `max-gpus-per-node` therefore does not feed this at all — it is a ceiling
+/// (`check_gpus_per_node`) and a bound on a *derived* rank count
+/// (`resolve_topology`), never a source of GPUs per task. The ceiling is the one
+/// place the GPU chain is stricter than the CPU chain: CPUs oversubscribe
+/// harmlessly (threads time-share a core), while a job asking for GPUs a
+/// partition does not have either never schedules or lands with ranks fighting
+/// over one device.
+fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool) -> u32 {
     if !gpu {
-        return Ok(0);
+        return 0;
+    }
+    flags.gpus_per_task.or(hw.default_gpus_per_task).unwrap_or(1).max(1)
+}
+
+/// The GPUs-per-node ceiling (§8.5): `GPUS_PER_TASK × TASKS_PER_NODE` may not
+/// exceed `max-gpus-per-node`. Checked once the whole layout is settled, and
+/// only for a GPU run (`per_task` is 0 otherwise, so the product is 0).
+///
+/// A fully *derived* `TASKS_PER_NODE` (no `--tpn`, no `--tasks`) is already
+/// bounded by the GPU budget in `resolve_topology`, so what reaches here and
+/// fails is an explicitly requested layout: `--tpn`/`--tasks` asking for more
+/// ranks than the node has devices for, or a
+/// `--gpus-per-task`/`default-gpus-per-task` above the node's count.
+fn check_gpus_per_node(per_task: u32, tpn: u32, hw: &Hardware, queue: &str) -> Res<()> {
+    if per_task == 0 {
+        return Ok(());
     }
     let tpn = tpn.max(1);
-    let per_task = flags.gpus_per_task.or(hw.default_gpus_per_task).unwrap_or(1).max(1);
     if let Some(max) = hw.max_gpus_per_node {
         let needed = per_task * tpn;
         if needed > max {
-            // Point at whichever knob the user actually turned: telling someone
-            // who passed --gpus-per-task to "set --gpus-per-task" is noise, and
-            // at 1 GPU per rank there is nothing left to lower at all.
-            let fix = if per_task > 1 {
+            // Point at whichever knob can actually help: telling someone whose
+            // single rank already over-asks to lower the rank count is noise,
+            // and at 1 GPU per rank there is no per-task knob left to lower.
+            let fix = if max == 0 {
+                format!("queue \"{queue}\" has no GPUs at all; run without GPUs or pick another queue")
+            } else if per_task > max {
+                // No rank count helps — one rank already exceeds the node.
+                format!("--gpus-per-task {max} or lower fits this layout")
+            } else if per_task > 1 && max / tpn >= 1 {
                 format!("--gpus-per-task {} or lower fits this layout", max / tpn)
+            } else if per_task > 1 {
+                // Lowering GPUs per task cannot save this rank count: even 1
+                // per rank overshoots, so the rank count is what has to move.
+                format!("lower --tpn/--tasks to put at most {} ranks on a node", max / per_task)
             } else {
-                "each rank already takes one GPU, so lower --tpn/--tasks, or raise --cpus \
-                 so fewer ranks land on a node"
-                    .to_owned()
+                format!("each rank already takes one GPU, so lower --tpn/--tasks to put at most {max} on a node")
             };
             // §8.5
             bail!(
@@ -238,7 +283,7 @@ fn derive_gpus_per_task(flags: &TopologyFlags, hw: &Hardware, gpu: bool, tpn: u3
             );
         }
     }
-    Ok(per_task)
+    Ok(())
 }
 
 /// Apply the default-tasks chain to a resolved topology: the selected script
@@ -487,8 +532,9 @@ mod tests {
             gpu = true
             max-walltime = "24:00:00"
             # qbd-gpu4 shape: 64 CPUs at 32/task = 2 tasks/node, on a 4-GPU
-            # node. `max-gpus-per-node` is a ceiling only — it never feeds the
-            # §8.5 default, which is a flat 1 GPU/task.
+            # node. `max-gpus-per-node` never feeds the §8.5 GPUs-per-task
+            # default, which is a flat 1 GPU/task; it is a ceiling on the layout
+            # and a bound on a derived tasks-per-node (here 2 < 4, so no-op).
             max-cpus-per-node = 64
             default-cpus-per-task = 32
             max-gpus-per-node = 4
@@ -761,16 +807,25 @@ mod tests {
         // point at the layout instead of at --gpus-per-task.
         assert!(e.contains("already takes one GPU") && e.contains("--tpn"), "{e}");
 
-        // An explicit over-request is refused the same way, and there the
-        // advice DOES name the flag the user turned.
+        // An explicit `--gpus-per-task` the node can still honor is NOT an
+        // error any more: 3 each × the CPU rule's 2 ranks would need 6, but the
+        // derived rank count is bounded by the GPU budget (4/3 = 1 rank), so it
+        // resolves to a layout that fits instead of being refused.
         let mut f = flags();
         f.queue = Some("gpucap".to_owned());
-        f.gpus_per_task = Some(3); // × 2 tasks/node = 6 > 4
+        f.gpus_per_task = Some(3);
+        let t = resolve_topology(&f, &machine, &db, &cfg, false).unwrap();
+        assert_eq!((t.tpn, t.gpus_per_task), (1, 3));
+
+        // An over-request no layout can satisfy — more GPUs per rank than the
+        // whole node holds — is still refused, and there the advice DOES name
+        // the flag the user turned.
+        f.gpus_per_task = Some(5);
         let e = err(&f);
-        assert!(e.contains("6 GPUs per node") && e.contains("--gpus-per-task 2"), "{e}");
+        assert!(e.contains("5 GPUs per node") && e.contains("--gpus-per-task 4"), "{e}");
 
         // Exactly filling the node is fine — the check is a ceiling, not a cap
-        // on using everything.
+        // on using everything (2 each × 2 ranks = 4).
         f.gpus_per_task = Some(2);
         assert!(resolve_topology(&f, &machine, &db, &cfg, false).is_ok());
 
@@ -1031,6 +1086,108 @@ mod tests {
             // …and the node's cores split evenly among them, none left over.
             assert_eq!(t.tpn * t.cpus, hw.max_cpus_per_node.unwrap(), "{queue}: no idle cores");
         }
+
+        // qbd's queues derive exactly their GPU count of ranks, so the GPU
+        // bound on a derived tpn is a no-op here — and an explicit --tasks
+        // skips it entirely: a two-node rank count keeps the per-node fill and
+        // passes the ceiling exactly as it always did.
+        let mut f = flags();
+        f.queue = Some("gpu4".to_owned());
+        f.tasks = Some(8);
+        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (8, 4, 16, 1));
+    }
+
+    /// db1 (Deep Bayou) declares no `max-gpus-per-node` at all, so both the
+    /// GPU bound on a derived tpn and the §8.5 ceiling are inert there: the
+    /// CPU rule alone fills the node, with or without explicit rank flags.
+    #[test]
+    fn db1_layouts_are_untouched_by_the_gpu_bound() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let machine = mdb.load("db1.hpc.lsu.edu").unwrap();
+        let db = Database::new();
+        let cfg: ConfigMeta = toml::from_str(
+            "name=\"s\"\nvariant=\"default\"\ngpu=true\nthornlist=\"t.th\"\n\
+             machine=\"db1.hpc.lsu.edu\"\nconfig-id=\"c\"\nbuild-id=\"b\"",
+        )
+        .unwrap();
+        let fit = QueueFit::from_config(&cfg);
+        let hw = machine.meta.effective_hardware("gpu").unwrap();
+        assert_eq!(hw.max_gpus_per_node, None);
+
+        // No flags: 48 cores at 24/task = 2 ranks, one GPU each, no ceiling.
+        let t = resolve_topology(&flags(), &machine, &db, &fit, false).unwrap();
+        assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (2, 2, 24, 1));
+
+        // Explicit rank counts resolve as they always did, never refused on
+        // GPU grounds (nothing is declared to check against).
+        let mut f = flags();
+        f.tasks = Some(4);
+        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        assert_eq!((t.tasks, t.tpn), (4, 2));
+    }
+
+    /// The mirror case of `qbd_defaults_fill_each_partition`: a machine that
+    /// deliberately does NOT fill its node. omnia has 72 cores and one MI210,
+    /// and asks for 8 CPUs per rank — the CPU rule alone would infer 9 ranks
+    /// for one device and the §8.5 ceiling would refuse the submit outright, so
+    /// the derived rank count is bounded by the GPU budget instead.
+    #[test]
+    fn omnia_default_is_one_rank_and_does_not_fill_the_node() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let machine = mdb.load("omnia").unwrap();
+        let db = Database::new();
+        let cfg: ConfigMeta = toml::from_str(
+            "name=\"s\"\nvariant=\"default\"\ngpu=true\nthornlist=\"t.th\"\n\
+             machine=\"omnia\"\nconfig-id=\"c\"\nbuild-id=\"b\"",
+        )
+        .unwrap();
+        let fit = QueueFit::from_config(&cfg);
+        let hw = machine.meta.effective_hardware("local").unwrap();
+        assert_eq!(
+            (hw.max_cpus_per_node, hw.default_cpus_per_task, hw.max_gpus_per_node),
+            (Some(72), Some(8), Some(1))
+        );
+
+        // No flags: one rank on its one GPU, 8 of the node's 72 cores, the
+        // rest left for whoever else is on the box.
+        let t = resolve_topology(&flags(), &machine, &db, &fit, false).unwrap();
+        assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (1, 1, 8, 1));
+        assert!(t.tpn * t.cpus < hw.max_cpus_per_node.unwrap(), "the whole point: idle cores");
+
+        // -c still fills the node on request, and still lands on one rank.
+        let mut f = flags();
+        f.cpus = Some(72);
+        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        assert_eq!((t.tasks, t.tpn, t.cpus), (1, 1, 72));
+
+        // An explicit --tpn is authoritative, so it reaches the ceiling and is
+        // refused there rather than being silently bounded.
+        let mut f = flags();
+        f.tpn = Some(4);
+        let err = resolve_topology(&f, &machine, &db, &fit, false).unwrap_err().to_string();
+        assert!(err.contains("needs 4 GPUs per node") && err.contains("--tpn/--tasks"), "{err}");
+
+        // An explicit --tasks is a rank count too: on this no-batch single
+        // node every rank lands on the box, so it must not slip past the
+        // ceiling on the strength of a quietly-bounded derived tpn (which
+        // would let 10 ranks fight over the one MI210 via `mpirun -np 10`).
+        let mut f = flags();
+        f.tasks = Some(10);
+        let err = resolve_topology(&f, &machine, &db, &fit, false).unwrap_err().to_string();
+        assert!(err.contains("needs 9 GPUs per node") && err.contains("--tpn/--tasks"), "{err}");
+
+        // …while a --tasks the GPU budget can honor still resolves.
+        let mut f = flags();
+        f.tasks = Some(1);
+        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        assert_eq!((t.tasks, t.tpn), (1, 1));
     }
 
     /// The bundled `.sh` scripts are only checked at substitution time, so a

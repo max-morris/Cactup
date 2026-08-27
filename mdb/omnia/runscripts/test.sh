@@ -28,7 +28,7 @@ date
 # default ('mpirun -np $nprocs $exe $parfile' when MPI is built, plain
 # '$exe $parfile' otherwise), which is exactly what the normal runscript does.
 # Only the processor count is pinned to the requested topology — one rank here
-# (the test variants carry tasks = 1: one core, one GPU).
+# (the test variants carry tasks = 1: one rank for the one GPU).
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
 
 # Redirect testsuite output into test-home (design §11.6, step 6): the flesh

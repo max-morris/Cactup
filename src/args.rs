@@ -268,7 +268,8 @@ pub(crate) struct TopologyFlags {
     /// else nodes * tasks-per-node — but 2 for `test run`/`test submit`).
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,
-    /// Tasks per node (default: fill the node, floor(MAX_CPUS_PER_NODE / cpus)).
+    /// Tasks per node (default: fill the node, floor(MAX_CPUS_PER_NODE / cpus);
+    /// on a GPU run without --tasks, also bounded by the node's GPU count).
     #[clap(short, long, value_name = "N")]
     pub tpn: Option<u32>,
     /// CPUs (threads) per task (default: the machine/queue `default-cpus-per-task`, else 1).

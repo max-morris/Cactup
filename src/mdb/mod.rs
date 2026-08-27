@@ -226,10 +226,11 @@ impl Machine {
         // values always win, and a machine whose queues fully cover a key is
         // left alone even when the top-level key is absent.
         //
-        // `max-gpus-per-node` is filled opportunistically but deliberately does
-        // NOT join the `incomplete` test: most machines have no GPUs, so a
-        // missing value there is the normal case, not a gap to repair — and
-        // §8.5 already falls back to one GPU per task without it.
+        // `max-gpus-per-node` and `threads-per-cpu` are filled opportunistically
+        // but deliberately do NOT join the `incomplete` test: most machines have
+        // no GPUs and no SMT worth declaring, so a missing value there is the
+        // normal case, not a gap to repair — and §8.5 already falls back to one
+        // GPU per task and one thread per CPU without them.
         let incomplete = meta.queues.values().any(|q| {
             q.max_cpus_per_node.or(meta.hardware.max_cpus_per_node).is_none() || q.memory.or(meta.hardware.memory).is_none()
         });
@@ -239,6 +240,7 @@ impl Machine {
             hw.max_cpus_per_node = hw.max_cpus_per_node.or(Some(detected.cores));
             hw.memory = hw.memory.or(detected.memory_mb);
             hw.max_gpus_per_node = hw.max_gpus_per_node.or(detected.gpus);
+            hw.threads_per_cpu = hw.threads_per_cpu.or(detected.threads_per_cpu);
         }
 
         // [paths] values keep their @USER@/@ENV(NAME)@ tokens at load; they

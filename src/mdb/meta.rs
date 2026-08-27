@@ -131,9 +131,10 @@ pub struct Paths {
 /// - `default-cpus-per-task` (simfactory's `num-threads`; the request-side
 ///   default for `CPUS_PER_TASK` when `--cpus` is omitted — §8.5),
 /// - `max-gpus-per-node` (the GPUs available per node; a **ceiling** §8.5
-///   refuses to exceed, plus @MAX_GPUS_PER_NODE@ — it never sets
-///   `GPUS_PER_TASK`, which defaults to 1) and `default-gpus-per-task` (the
-///   machine's own per-task default, for the rare partition that is not 1),
+///   refuses to exceed and a bound on a *derived* `TASKS_PER_NODE`, plus
+///   @MAX_GPUS_PER_NODE@ — it never sets `GPUS_PER_TASK`, which defaults to 1)
+///   and `default-gpus-per-task` (the machine's own per-task default, for the
+///   rare partition that is not 1),
 /// - `memory` (@MEMORY@), and `threads-per-cpu` (simfactory's `num-smt`;
 ///   @THREADS_PER_CPU@).
 ///
@@ -155,15 +156,20 @@ pub struct Hardware {
     #[serde(default)]
     pub autodetect: bool,
     /// CPUs/cores available per node — the availability fact the fill-the-node
-    /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (§8.5).
+    /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (§8.5; on a GPU
+    /// run a fully derived result — no `--tpn`/`--tasks` — is bounded by
+    /// `max-gpus-per-node`, so a machine may declare a `default-cpus-per-task`
+    /// that deliberately leaves CPUs idle).
     pub max_cpus_per_node: Option<u32>,
     /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted (§8.5).
     pub default_cpus_per_task: Option<u32>,
-    /// GPUs available per node. Purely a ceiling: §8.5 refuses a layout whose
-    /// `GPUS_PER_TASK × TASKS_PER_NODE` exceeds it, but never derives from it
-    /// (GPUs are not oversubscribable the way CPUs are). Legitimately unset —
-    /// a queue, or a whole machine, may have no GPUs at all — in which case
-    /// nothing is checked.
+    /// GPUs available per node. Never a target: §8.5 refuses a layout whose
+    /// `GPUS_PER_TASK × TASKS_PER_NODE` exceeds it, and bounds a *derived*
+    /// `TASKS_PER_NODE` by it (a node cannot run more one-GPU ranks than it has
+    /// devices), but never derives `GPUS_PER_TASK` from it — GPUs are not
+    /// oversubscribable the way CPUs are. Legitimately unset — a queue, or a
+    /// whole machine, may have no GPUs at all — in which case nothing is
+    /// checked and nothing is bounded.
     pub max_gpus_per_node: Option<u32>,
     /// Request-side default for `GPUS_PER_TASK` when `--gpus-per-task` is
     /// omitted (§8.5). Only worth setting on a partition that wants something

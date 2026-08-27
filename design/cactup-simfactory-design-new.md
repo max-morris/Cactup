@@ -976,7 +976,9 @@ variants = ["cpu", "gpu", "cpu-debug"]   # selected at build time via --variant;
 **Hardware keys.** `[hardware]` carries **only** the keys cactup actually
 feeds to submit/run scripts, named for what they mean to cactup (task = MPI
 rank, CPU = core — §1.1): `max-cpus-per-node` (simfactory's `ppn`; the
-availability fact = CPUs/cores per node, **not** ranks; drives the §8.5
+availability fact = **cores** per node, **not** ranks and **not** hardware
+threads — a node may boot with SMT disabled and the process layout must not move
+under it, so SMT is the separate `threads-per-cpu`; drives the §8.5
 process-layout defaults and `@MAX_CPUS_PER_NODE@`), `default-cpus-per-task`
 (simfactory's `num-threads`; the request-side default for `CPUS_PER_TASK` when
 `--cpus` is omitted — §8.5), `max-gpus-per-node` (the GPUs available per node;
@@ -1243,13 +1245,24 @@ It describes a single-node workstation with **no batch system**:
 instead of fixed core/RAM counts. When a machine has `autodetect = true` (or
 some queue would otherwise resolve no `max-cpus-per-node`/`memory` value —
 counting both the top-level `[hardware]` keys and the per-queue overrides,
-§4.2), cactup fills the missing top-level values at load time from the OS:
+§4.2), cactup fills the missing top-level values at load time from the OS.
+A **CPU is a core** here as everywhere (§1.1), so a hyperthreaded node detects
+as its core count with the SMT factor recorded separately — a thread count would
+inflate every derived layout by it, and would move if the node rebooted with
+hyperthreading off:
 
 | Var | Linux | macOS |
 |-----|-------|-------|
-| `max-cpus-per-node` | `nproc` (or `/proc/cpuinfo`) | `sysctl -n hw.ncpu` |
+| `max-cpus-per-node` | `/proc/cpuinfo`, counted in **cores** — distinct `(physical id, core id)` pairs, not `processor` lines | `sysctl -n hw.physicalcpu` |
+| `threads-per-cpu` | `/proc/cpuinfo` threads ÷ cores, when it divides evenly | `sysctl -n hw.logicalcpu` ÷ cores |
 | `memory` (MB) | `/proc/meminfo` `MemTotal` | `sysctl -n hw.memsize` |
 | `max-gpus-per-node` | `/proc/driver/nvidia/gpus`, amdkfd topology, or PCI class `0x0302` | not detected |
+
+`threads-per-cpu` and `max-gpus-per-node` are filled *opportunistically* only:
+neither joins the "would some queue resolve no value" trigger, since no SMT and
+no GPUs is the ordinary case, and §8.5 already falls back to one thread per CPU
+and one GPU per task. A kernel that reports no CPU topology at all (some VMs)
+falls back to one core per thread and claims nothing about SMT.
 
 This is the same detection simfactory's `CREATE_MACHINE` did at setup time
 (`simfactory-docs.txt` §20), but done at runtime so the built-in `generic`
@@ -2792,7 +2805,23 @@ facts fill any topology the user left unset.
 - `TASKS_PER_NODE` = `--tpn` if given, else
   `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)`, min 1 (fill the node — divide the
   node's available CPUs among ranks) — using the queue-effective
-  `max-cpus-per-node` (§4.2).
+  `max-cpus-per-node` (§4.2) — and then, on a GPU run whose queue declares
+  `max-gpus-per-node`, additionally bounded by the node's GPU budget:
+  `min(that, max(1, floor(MAX_GPUS_PER_NODE / GPUS_PER_TASK)))`. The bound
+  applies **only to the fully derived value**: an explicit `--tpn` is
+  authoritative, and an explicit `--tasks` is a requested rank count — on a
+  single-node machine with no batch system every one of those ranks lands on
+  the node, so quietly shrinking `TASKS_PER_NODE` under it would bless a layout
+  the node cannot run. Both leave the CPU-rule value in place and are checked
+  against the ceiling below instead. With GPUs indivisible and one per rank, a
+  node holding fewer devices than the CPU split implies cannot run that many
+  ranks — deriving them anyway only produces a layout the ceiling refuses.
+  Bounding it here is what lets a GPU machine declare a *polite*
+  `default-cpus-per-task` (omnia: a rank wanting 8 of its 72 cores for the host
+  side of a single-MI210 job) without the CPU rule inferring 9 ranks for one
+  device. This costs the fill-the-node guarantee on such machines — CPUs may sit
+  idle, which is the machine's stated intent — and does not make GPUs *build* a
+  layout: the count comes from CPUs, GPUs only cap it.
 - `TASKS` = `--tasks` if given, else `NODES * TASKS_PER_NODE`. An explicit
   `--tasks` replaces the fill-the-node total, so a *derived* `TASKS_PER_NODE` is
   then capped to `ceil(TASKS / NODES)` to keep the layout self-consistent
@@ -2826,8 +2855,9 @@ facts fill any topology the user left unset.
   per-node and CPU-derived, `--gpus-per-task` is per-rank). A partition that
   genuinely wants otherwise says so with `default-gpus-per-task`.
 
-  Consequently GPUs never feed back into `TASKS_PER_NODE` either: CPUs alone
-  drive the process layout.
+  Consequently GPUs never *build* a `TASKS_PER_NODE`: CPUs alone drive the
+  process layout, and GPUs only ever bound a derived rank count downward (see
+  the `TASKS_PER_NODE` bullet) or refuse an explicitly requested one (below).
 - **GPUs are not oversubscribable.** `max-gpus-per-node` is therefore a
   **ceiling, never a target**: it does not set `GPUS_PER_TASK`, it bounds it.
   A layout needing more GPUs per node than the queue has — `GPUS_PER_TASK ×
@@ -2840,7 +2870,9 @@ facts fill any topology the user left unset.
   be checked and are therefore never refused on this ground.
 
   qbd is the worked example, and shows what a machine has to declare for a
-  no-flag job to fill its node. Its `gpu2` and `gpu4` partitions share a 64-CPU
+  no-flag job to fill its node — which the GPU bound on a derived
+  `TASKS_PER_NODE` makes a way to *fill* a node, no longer the only way to get a
+  schedulable layout out of one. Its `gpu2` and `gpu4` partitions share a 64-CPU
   node but hold 2 and 4 GPUs. With one GPU per rank fixed, the rank count is
   what has to move — so each partition sets `default-cpus-per-task` to its own
   `64 / GPUs`: 32 on `gpu2` (2 ranks) and 16 on `gpu4` (4 ranks). Both land on
