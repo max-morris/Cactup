@@ -49,6 +49,8 @@ disabled-thorns = [
 # output was never captured on this machine); stop kills only the top process
 # (also verbatim).
 submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & pid=$!; echo $pid; wait $pid"
 get-status      = "ps @JOB_ID@"
 stop            = "kill @JOB_ID@"
 submit-pattern   = "(.*)"

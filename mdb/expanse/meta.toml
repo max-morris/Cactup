@@ -55,6 +55,7 @@ export LIBZHOME=$(dirname $(dirname $(ldd $HDF5HOME/lib/libhdf5.so | awk '/libz.
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@; sleep 5"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"

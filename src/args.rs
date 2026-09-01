@@ -387,6 +387,14 @@ pub(crate) struct BuildStartArgs {
     /// (`.cactup-builds/%04d`). Requires --config-dir.
     #[clap(long, value_name = "N", requires = "config_dir")]
     pub attempt_id: Option<u32>,
+    // §7.9. Lives here rather than on `BuildSubmitArgs` so the bare `cactup
+    // build` — which only decides between running and submitting once it has
+    // read the MDB — can accept it too. `build run` accepts it as far as clap
+    // is concerned and then rejects it by hand, which is what lets the error
+    // say *why* there was no queue wait to do.
+    /// Wait for the queued build to finish before returning (submit only).
+    #[clap(long)]
+    pub block: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -394,7 +402,12 @@ pub(crate) struct BuildSubmitArgs {
     #[clap(flatten)]
     pub start: BuildStartArgs,
     /// Stream the build's output until it finishes, or Ctrl-C.
-    #[clap(long)]
+    // Conflicts with --block rather than composing with it: on a machine that
+    // declares [scheduler].blocking-submit the submit command holds the
+    // terminal for the whole build, so there is nothing to stream alongside
+    // it. A flag pair whose combinability depends on the MDB entry is worse
+    // than one that simply never combines — and `--follow` already waits.
+    #[clap(long, conflicts_with = "block")]
     pub follow: bool,
 }
 
@@ -776,6 +789,11 @@ mod tests {
                 "cactup", "build", "run", "--config-dir", "/inst/configs/sim", "--attempt-id", "2",
             ],
             vec!["cactup", "build", "submit", "sim", "--follow"],
+            vec!["cactup", "build", "submit", "sim", "--block"],
+            // §7.9: --block rides on the shared start args, so the bare form
+            // (which only learns whether it is submitting after reading the
+            // MDB) has to accept it at parse time too.
+            vec!["cactup", "build", "sim", "--block"],
             vec!["cactup", "build", "list", "--long", "--all"],
             vec!["cactup", "build", "show", "sim", "--long"],
             vec!["cactup", "build", "log", "sim", "--follow"],
@@ -852,6 +870,12 @@ mod tests {
     fn rejects_contradictory_flags() {
         // --universe and --no-universe are mutually exclusive (§4.8).
         assert!(Args::try_parse_from(["cactup", "build", "c", "--universe", "u", "--no-universe"]).is_err());
+        // --block and --follow both wait for the queued build; only --follow
+        // streams it, and on a machine with [scheduler].blocking-submit there
+        // is nothing to stream alongside the blocking command (§7.9).
+        assert!(
+            Args::try_parse_from(["cactup", "build", "submit", "c", "--block", "--follow"]).is_err()
+        );
         // The build compute-node pair is all-or-nothing (§8.3.1), same shape
         // as sim run's below.
         assert!(Args::try_parse_from(["cactup", "build", "run", "--config-dir", "/x"]).is_err());

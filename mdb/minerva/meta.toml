@@ -59,6 +59,7 @@ env-setup = "source /etc/profile && module purge && module load intel/compiler/2
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"

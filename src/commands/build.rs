@@ -53,11 +53,42 @@ fn auto(ctx: &Ctx, start: BuildStartArgs) -> Res<()> {
     let installation = Installation::resolve(ctx)?;
     if choose_submit(&machine, &start.opts)? {
         let db = ctx.db.read()?;
-        submit_impl(&installation, &machine, &db, &start, ctx.globals.hostname.as_deref())?;
-        Ok(())
+        let submitted =
+            submit_impl(&installation, &machine, &db, &start, ctx.globals.hostname.as_deref())?;
+        // `submitted` is None when the config was already up to date: there
+        // is no job, so there is nothing to block on either.
+        let Some((name, attempt_id)) = submitted.filter(|_| start.block) else { return Ok(()) };
+        let config_dir = installation.cactus_root().join("configs").join(&name);
+        watch_build(&machine, &config_dir, attempt_id, Watch::Block)
     } else {
+        if start.block {
+            return Err(no_queue_to_block_on(&machine, &start.opts));
+        }
         run_with(&machine, &installation, start)
     }
+}
+
+/// Why `--block` has nothing to wait for on a build that is about to run in
+/// the foreground (§7.9). These are exactly the three ways `choose_submit`
+/// says "run", said back to the user: "this build is not going to the queue"
+/// is useless without knowing *which* of them decided it, since the fix
+/// differs — drop the flag, drop `--virtual-executable`, say `build submit`
+/// explicitly, or fix the machine.
+fn no_queue_to_block_on(machine: &Machine, opts: &BuildOpts) -> anyhow::Error {
+    let why = if opts.virtual_executable.is_some() {
+        "a --virtual-executable build copies a prebuilt binary and is never queued".to_owned()
+    } else if machine.meta.build.default_action == Some(BuildAction::Run) {
+        format!("machine \"{}\" sets [build].default-action = \"run\"", machine.name)
+    } else {
+        format!(
+            "machine \"{}\" cannot submit builds to the queue — it is missing {}",
+            machine.name,
+            missing_to_submit_builds(machine).unwrap_or("nothing")
+        )
+    };
+    anyhow::anyhow!(
+        "--block waits for a queued build to finish, but this build runs in the foreground: {why}"
+    )
 }
 
 /// §7.9's auto-selection table:
@@ -92,18 +123,27 @@ fn choose_submit(machine: &Machine, opts: &BuildOpts) -> Res<bool> {
 /// shared by the auto-selection table's "submit" row and an explicit
 /// `cactup build submit` on a machine where it is impossible.
 fn require_can_submit_builds(machine: &Machine) -> Res<()> {
+    match missing_to_submit_builds(machine) {
+        None => Ok(()),
+        Some(missing) => bail!(
+            "machine \"{}\" cannot submit builds to the queue — it is missing {missing}",
+            machine.name
+        ),
+    }
+}
+
+/// What `machine` lacks in order to submit builds, or `None` when it lacks
+/// nothing — the naming half of [`require_can_submit_builds`], split out so
+/// [`no_queue_to_block_on`] can name the same gap without raising an error.
+fn missing_to_submit_builds(machine: &Machine) -> Option<&'static str> {
     let no_variant = machine.meta.script_variants(ScriptKind::BuildSubmit).variants.is_empty();
     let no_submit_cmd = machine.meta.scheduler.submit.is_none();
-    if !no_variant && !no_submit_cmd {
-        return Ok(());
+    match (no_variant, no_submit_cmd) {
+        (false, false) => None,
+        (true, true) => Some("a [variants.buildsubmitscript] variant and a [scheduler].submit command"),
+        (true, false) => Some("a [variants.buildsubmitscript] variant"),
+        (false, true) => Some("a [scheduler].submit command"),
     }
-    let missing = match (no_variant, no_submit_cmd) {
-        (true, true) => "a [variants.buildsubmitscript] variant and a [scheduler].submit command",
-        (true, false) => "a [variants.buildsubmitscript] variant",
-        (false, true) => "a [scheduler].submit command",
-        (false, false) => unreachable!(),
-    };
-    bail!("machine \"{}\" cannot submit builds to the queue — it is missing {missing}", machine.name);
 }
 
 /// Refuse when `name`'s latest build attempt is still live — running here
@@ -145,6 +185,16 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
 /// --attempt-id …`, what a generated submit script invokes, may never touch
 /// the global DB, the installation registry, the MDB, or knobs).
 fn run(ctx: &Ctx, args: BuildStartArgs) -> Res<()> {
+    // Ahead of the compute-node branch, and reading nothing (D11): a flag
+    // that cannot apply should be rejected before anything is done, not
+    // after.
+    if args.block {
+        bail!(
+            "--block waits for a queued build to finish; `cactup build run` builds here, in the \
+             foreground, and is already finished when it returns — drop the flag, or use \
+             `cactup build submit --block`"
+        );
+    }
     if let (Some(config_dir), Some(attempt_id)) = (args.config_dir.clone(), args.attempt_id) {
         let mut attempt = BuildAttempt::open(&config_dir, attempt_id)?;
         // tee = false: the scheduler owns the output files here, unlike a
@@ -250,11 +300,13 @@ fn submit(ctx: &Ctx, args: BuildSubmitArgs) -> Res<()> {
     let submitted =
         submit_impl(&installation, &machine, &db, &args.start, ctx.globals.hostname.as_deref())?;
     let Some((name, attempt_id)) = submitted else { return Ok(()) };
-    if !args.follow {
-        return Ok(());
-    }
+    let mode = match (args.start.block, args.follow) {
+        (true, _) => Watch::Block,
+        (false, true) => Watch::Follow,
+        (false, false) => return Ok(()),
+    };
     let config_dir = installation.cactus_root().join("configs").join(&name);
-    follow_build(&machine, &config_dir, attempt_id)
+    watch_build(&machine, &config_dir, attempt_id, mode)
 }
 
 /// Resolve the reservation/topology BEFORE `prepare` runs — the
@@ -355,10 +407,33 @@ fn submit_impl(
     write_executable(&attempt.submit_script_path(), &script)?;
     attempt.store_meta()?;
 
+    let uni = submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u));
+    let attempt_id = attempt.id;
+
+    // §7.9's `--block` on a machine that declares [scheduler].blocking-submit:
+    // the submit command itself does not return until the build is over, so
+    // the job id is recorded from *inside* the wait (the callback) rather than
+    // after it. Nothing may be stored once that call returns: by then the
+    // compute node's own cactup has written this attempt's outcome into the
+    // very `build.toml` a `store_meta` here would overwrite with our stale
+    // copy.
+    if args.block && machine.meta.scheduler.blocking_submit.is_some() {
+        let mut record = |job_id: &str| -> Res<()> {
+            attempt.meta.job_id = job_id.to_owned();
+            attempt.meta.submitted = true;
+            attempt.meta.timestamps.submitted = Some(Utc::now());
+            attempt.store_meta()?;
+            println!("Submitted build of {} as job {}", name.bold(), job_id.bold());
+            Ok(())
+        };
+        sched.submit_blocking(&vset, uni, &mut record)?;
+        return Ok(Some((name, attempt_id)));
+    }
+
     // Store-submit-store: the job id is only recorded once the submit
     // actually went through, so a crash between them can never masquerade a
     // failed submission as a successful one, nor lose a real job id.
-    let job_id = sched.submit(&vset, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
+    let job_id = sched.submit(&vset, uni)?;
     attempt.meta.job_id = job_id.clone();
     attempt.meta.submitted = true;
     attempt.meta.timestamps.submitted = Some(Utc::now());
@@ -380,15 +455,31 @@ fn detached_message(job_id: &str) {
     println!("Detached — job {job_id} keeps running in the queue.");
 }
 
-/// `cactup build submit --follow`: stream the freshly-queued attempt's output
-/// as it grows and report the outcome once it lands. Deliberately NOT
-/// `tail::tail_log` — that streams until Ctrl-C only, and its side-by-side
-/// mode needs a tty, neither of which fits "watch my build finish" — but
-/// built from the same two primitives it is itself built from: `LogTail`
-/// polls the two output files, `PollBackoff` paces how often (NFS-aware).
-/// Ctrl-C detaches without touching the queued job — it keeps running; only
-/// this local loop stops.
-fn follow_build(machine: &Machine, config_dir: &Path, attempt_id: u32) -> Res<()> {
+/// What [`watch_build`] does while it waits for a queued build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Watch {
+    /// `--follow`: stream the attempt's output as it grows.
+    Follow,
+    /// `--block`: wait in silence for the outcome. Also how a *native*
+    /// blocking submit finishes — by the time it returns the outcome is
+    /// already on disk, so the first round through the loop reads it and
+    /// returns, and the polling below never happens.
+    Block,
+}
+
+/// Wait for a freshly-queued attempt and report the outcome once it lands —
+/// `--follow` streaming its output as it grows, `--block` silent (§7.9).
+/// Deliberately NOT `tail::tail_log` — that streams until Ctrl-C only, and
+/// its side-by-side mode needs a tty, neither of which fits "watch my build
+/// finish" — but built from the same two primitives it is itself built from:
+/// `LogTail` polls the two output files, `PollBackoff` paces how often
+/// (NFS-aware). Ctrl-C detaches without touching the queued job — it keeps
+/// running; only this local loop stops.
+///
+/// The two modes differ only in what is printed: both derive the verdict from
+/// the attempt's own recorded outcome, which is the single authority on what
+/// a build did (§7.9) — never a relayed exit code.
+fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watch) -> Res<()> {
     let attempt = BuildAttempt::open(config_dir, attempt_id)?;
     let sched = Scheduler::new(&machine.meta);
     let job_id = attempt.meta.job_id.clone();
@@ -401,10 +492,23 @@ fn follow_build(machine: &Machine, config_dir: &Path, attempt_id: u32) -> Res<()
     if let Some(toml::Value::String(s)) = attempt.meta.vars.get("STDERR_FILE") {
         err_path = PathBuf::from(s);
     }
-    println!(
-        "Following build of {} (job {job_id}) — Ctrl-C detaches without stopping the queued job.",
-        config_name.bold()
-    );
+    // A native blocking submit has already waited; announcing a wait that is
+    // over would be a lie, so the banner waits for the first round to prove
+    // there is something left to wait for.
+    let mut announced = false;
+    let mut announce = || {
+        if std::mem::replace(&mut announced, true) {
+            return;
+        }
+        let what = match mode {
+            Watch::Follow => "Following",
+            Watch::Block => "Waiting for",
+        };
+        println!(
+            "{what} build of {} (job {job_id}) — Ctrl-C detaches without stopping the queued job.",
+            config_name.bold()
+        );
+    };
 
     let mut tails = [crate::tail::LogTail::new(out_path, 0), crate::tail::LogTail::new(err_path, 0)];
     let mut backoff = crate::tail::PollBackoff::new();
@@ -417,12 +521,14 @@ fn follow_build(machine: &Machine, config_dir: &Path, attempt_id: u32) -> Res<()
         }
 
         let mut had_data = false;
-        for tail in &mut tails {
-            if let Some(buf) = tail.poll() {
-                had_data = true;
-                let mut stdout = std::io::stdout();
-                let _ = stdout.write_all(&buf);
-                let _ = stdout.flush();
+        if mode == Watch::Follow {
+            for tail in &mut tails {
+                if let Some(buf) = tail.poll() {
+                    had_data = true;
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(&buf);
+                    let _ = stdout.flush();
+                }
             }
         }
 
@@ -430,11 +536,13 @@ fn follow_build(machine: &Machine, config_dir: &Path, attempt_id: u32) -> Res<()
         if let Some(outcome) = &fresh.meta.outcome {
             // Drain whatever landed between the poll above and the outcome
             // being written, so the tail never truncates the last lines.
-            for tail in &mut tails {
-                if let Some(buf) = tail.poll() {
-                    let mut stdout = std::io::stdout();
-                    let _ = stdout.write_all(&buf);
-                    let _ = stdout.flush();
+            if mode == Watch::Follow {
+                for tail in &mut tails {
+                    if let Some(buf) = tail.poll() {
+                        let mut stdout = std::io::stdout();
+                        let _ = stdout.write_all(&buf);
+                        let _ = stdout.flush();
+                    }
                 }
             }
             return if outcome.complete {
@@ -465,6 +573,7 @@ fn follow_build(machine: &Machine, config_dir: &Path, attempt_id: u32) -> Res<()
             }
         }
 
+        announce();
         backoff.note(had_data);
         let mut remaining = backoff.interval();
         while !remaining.is_zero() {
@@ -1131,6 +1240,7 @@ mod tests {
             topology: bare_topology(),
             config_dir,
             attempt_id,
+            block: false,
         }
     }
 
@@ -1301,6 +1411,7 @@ mod tests {
             topology,
             config_dir: None,
             attempt_id: None,
+            block: false,
         }
     }
 
@@ -1352,6 +1463,169 @@ mod tests {
         let built = crate::build::ConfigMeta::load(&cactus, "sim").unwrap().expect("config recorded");
         assert!(built.built.is_some());
         assert!(crate::build::is_complete(&cactus, "sim"));
+    }
+
+    // ---- build submit --block (§7.9) --------------------------------------
+
+    /// With `[scheduler].blocking-submit` declared, `--block` runs THAT
+    /// command, not `submit` — the two echo different job ids here precisely
+    /// so the recorded one proves which was taken.
+    #[test]
+    fn block_takes_the_machines_blocking_submit_when_it_has_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let mut machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            false,
+        );
+        machine.meta.scheduler.blocking_submit = Some("echo [JOB-WAITED@ATTEMPT_ID@]".to_owned());
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let db = Database::new();
+
+        let mut args = submit_args("sim", bare_topology());
+        args.block = true;
+        submit_impl(&inst, &machine, &db, &args, Some("h")).unwrap();
+
+        let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
+        assert_eq!(attempt.meta.job_id, "JOB-WAITED0");
+        // Recorded from inside the wait, so a Ctrl-C mid-build still leaves
+        // the queued job named on disk.
+        assert!(attempt.meta.submitted);
+        assert!(attempt.meta.timestamps.submitted.is_some());
+    }
+
+    /// Without the key, `--block` is not a different submission — it is the
+    /// ordinary one plus a wait the caller performs afterwards, so what
+    /// reaches the scheduler here is unchanged.
+    #[test]
+    fn block_without_a_blocking_submit_key_submits_normally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            false,
+        );
+        assert!(machine.meta.scheduler.blocking_submit.is_none());
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let db = Database::new();
+
+        let mut args = submit_args("sim", bare_topology());
+        args.block = true;
+        submit_impl(&inst, &machine, &db, &args, Some("h")).unwrap();
+
+        let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
+        assert_eq!(attempt.meta.job_id, "JOB-B0");
+        assert!(attempt.meta.submitted);
+    }
+
+    /// The emulated wait — what every machine without a `blocking-submit`
+    /// key gets — reads its verdict from the attempt's own recorded outcome,
+    /// exactly as the native route does once its command returns. Here the
+    /// build is already finished before the wait starts, which is precisely
+    /// the state a native blocking submit hands over, so this covers the tail
+    /// end of both routes.
+    #[test]
+    fn the_block_wait_reports_the_attempts_recorded_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            false,
+        );
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let db = Database::new();
+
+        let mut args = submit_args("sim", bare_topology());
+        args.block = true;
+        submit_impl(&inst, &machine, &db, &args, Some("h")).unwrap();
+
+        // The compute node runs and records a completed build...
+        let config_dir = cactus.join("configs/sim");
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        run(&ctx, start_args(Some(config_dir.clone()), Some(0))).unwrap();
+        assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_some());
+
+        // ...so the wait returns straight away, and says the build worked.
+        watch_build(&machine, &config_dir, 0, Watch::Block).unwrap();
+
+        // Flip that same outcome to a failure: the wait must now fail too,
+        // and point at the two files that say why. A relayed exit code is
+        // never consulted — there is none here at all.
+        let mut attempt = BuildAttempt::open(&config_dir, 0).unwrap();
+        attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: Some(2), complete: false });
+        attempt.store_meta().unwrap();
+
+        let err = format!("{:#}", watch_build(&machine, &config_dir, 0, Watch::Block).unwrap_err());
+        assert!(err.contains("build of sim failed"), "{err}");
+        assert!(err.contains("build.out"), "{err}");
+        assert!(err.contains("build.err"), "{err}");
+    }
+
+    /// `build run` never queues anything, so `--block` has nothing to wait
+    /// for. Refused before the compute-node branch and before any resolution
+    /// (D11), and the message points at the command that does support it.
+    #[test]
+    fn build_run_refuses_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let mut args = start_args(None, None);
+        args.block = true;
+
+        let err = dispatch(&ctx, start_args(None, None), Some(BuildCommand::Run(args))).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--block"), "{msg}");
+        assert!(msg.contains("build submit --block"), "{msg}");
+        // Nothing was resolved on the way to the refusal.
+        assert!(!msg.contains("no active installation"), "{msg}");
+    }
+
+    /// The bare `cactup build` can only discover that it is NOT submitting
+    /// after reading the MDB, so its refusal has to name which of the three
+    /// reasons decided it — the fix differs for each.
+    #[test]
+    fn block_on_a_foreground_build_names_the_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let mut machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            false,
+        );
+
+        // 1. A virtual-executable build is never queued (§7.7).
+        let mut opts = BuildOpts::default_for_tests();
+        opts.virtual_executable = Some(PathBuf::from("/bin/true"));
+        let msg = format!("{:#}", no_queue_to_block_on(&machine, &opts));
+        assert!(msg.contains("--virtual-executable"), "{msg}");
+
+        // 2. The machine forces the foreground path.
+        let opts = BuildOpts::default_for_tests();
+        machine.meta.build.default_action = Some(BuildAction::Run);
+        let msg = format!("{:#}", no_queue_to_block_on(&machine, &opts));
+        assert!(msg.contains("default-action"), "{msg}");
+
+        // 3. The machine cannot submit builds at all — named piece by piece,
+        // the same wording `build submit` itself refuses with.
+        machine.meta.build.default_action = None;
+        machine.meta.scheduler.submit = None;
+        let msg = format!("{:#}", no_queue_to_block_on(&machine, &opts));
+        assert!(msg.contains("[scheduler].submit"), "{msg}");
+
+        // Every one of them explains what --block was for.
+        assert!(msg.contains("runs in the foreground"), "{msg}");
     }
 
     /// §9.3's no-leak rule, mirrored for builds: a buildsubmitscript naming a

@@ -36,6 +36,8 @@ make = "make -j@MAKEJOBS@"
 # No real batch system: run the script in the background, echo its PID as the
 # "job id", and use ps/kill for status/stop.
 submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & pid=$!; echo $pid; wait $pid"
 get-status       = "ps @JOB_ID@"
 stop            = "kill @JOB_ID@"
 submit-pattern   = "(.*)"

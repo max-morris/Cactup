@@ -122,6 +122,7 @@ wrapper-argv = [
 [scheduler]
 # Grab stderr so we can see submit problems in the log.
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.

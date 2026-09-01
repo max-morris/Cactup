@@ -62,6 +62,7 @@ export MPICH_GPU_SUPPORT_ENABLED=1
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@; sleep 5"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"

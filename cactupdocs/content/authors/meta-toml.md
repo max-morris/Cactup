@@ -100,6 +100,7 @@ memory = 256000
 
 [scheduler]
 submit = "sbatch @SCRIPTFILE@"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
@@ -195,6 +196,7 @@ autodetect = true
 
 [scheduler]
 submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
 stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
@@ -221,6 +223,10 @@ variants = ["default"]
 "test" = { queues = ["local"], test = true }
 ```
 
+Note `blocking-submit` here has no `exec` and no `nohup`: the shell has to
+stay alive to reach `wait`, and the job id is echoed *before* the wait so it
+parses immediately instead of only after the job finishes.
+
 ## Scheduler configuration details
 
 The `[scheduler]` section defines how cactup interacts with your batch system. Here are the key patterns:
@@ -230,6 +236,7 @@ The `[scheduler]` section defines how cactup interacts with your batch system. H
 ```toml
 [scheduler]
 submit = "sbatch @SCRIPTFILE@"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
@@ -245,7 +252,19 @@ live job of `@USER@`, one per line, with the job id as the first field; the rest
 the line is classified by the same `status`/`queued`/`running`/`holding` patterns
 used for `get-status`. A job id absent from the listing is treated as not queued.
 
-### PBS/Torque (qsub)
+`blocking-submit` is optional too: the same submission, but expressed so the
+command doesn't return until the job has finished, for `cactup build submit
+--block`. It's scanned for the job id with the same `submit-pattern` as
+`submit` — the two must agree on format — and its own exit status is never
+consulted as a build verdict; only whether a job id was parsed at all, since
+that's the only way the submission itself can be said to have failed. A
+machine that omits `blocking-submit` still supports `--block`: cactup just
+submits normally and polls the build attempt instead of getting a free ride
+from the scheduler. If you carry a trailing `; sleep N` on `submit` (to let
+the scheduler register the job before an immediate status query), drop it
+here — a blocking submit doesn't return until long after that would matter.
+
+### PBS Pro / PBS/Torque (qsub)
 
 ```toml
 [scheduler]
@@ -257,6 +276,9 @@ submit-pattern = "([0-9.]+)"
 status-pattern = "@JOB_ID@"
 queued-pattern = " Q "
 running-pattern = " R "
+# PBS Pro only — Torque's qsub has no blocking mode. Omit the key on Torque
+# and cactup emulates --block by polling instead.
+# blocking-submit = "qsub -W block=true @SCRIPTFILE@"
 ```
 
 ### No batch system (background execution)
@@ -264,6 +286,7 @@ running-pattern = " R "
 ```toml
 [scheduler]
 submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
 stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
@@ -272,6 +295,10 @@ status-pattern = "^ *@JOB_ID@ "
 queued-pattern = "$^"
 running-pattern = "^"
 ```
+
+Note the shape change from `submit`: no `exec`, no `nohup` — the shell has
+to survive to reach `wait` — and the job id is echoed *before* the wait so
+it parses immediately instead of only once the job is already done.
 
 ## Environment variables
 
@@ -342,6 +369,7 @@ The known knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, and `ema
 - Test variants should be present in all `[variants.*]` sections (used by `cactup test run/submit`)
 - `[variants.buildsubmitscript]` is the one script kind that's allowed to be entirely absent — a machine that never queues a build simply omits the table (and the `buildsubmitscripts/` directory) rather than needing an empty one
 - `[build].default-action = "submit"` only works once a `buildsubmitscript` variant and `[scheduler].submit` are both declared; without either, `cactup build submit` errors naming what's missing (`cactup build run` always works regardless)
+- `[scheduler].blocking-submit` is optional and needs no matching table of its own — a machine that omits it still supports `cactup build submit --block`, just via emulated polling instead of a native blocking submit — but when present, its output must parse with the same `submit-pattern` as `submit`
 
 ## Next steps
 

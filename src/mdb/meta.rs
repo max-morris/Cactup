@@ -278,6 +278,15 @@ impl Environment {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Scheduler {
     pub submit: Option<String>,
+    /// Optional blocking form of `submit` (§10, a cactup addition): the same
+    /// submission, expressed so the command does not return until the job has
+    /// finished — `sbatch --wait`, `qsub -W block=true`. `cactup build submit
+    /// --block` prefers it; machines that omit it get the emulated wait (the
+    /// ordinary `submit`, then polling the attempt until it reports). Its
+    /// output is scanned with the same `submit-pattern`, line by line as it
+    /// arrives, so a command that prints the job id and only then blocks
+    /// still yields the id at submission time.
+    pub blocking_submit: Option<String>,
     pub get_status: Option<String>,
     /// Optional one-call form of `get-status` (§10, a cactup addition): lists
     /// every live job of `@USER@`, one per line, the job id as the first
@@ -935,6 +944,18 @@ impl Meta {
             bail!("[variants.optionlist] lists no variants; at least one optionlist is required");
         }
 
+        // §10: `blocking-submit` is an extra *flavour* of `submit`, never a
+        // replacement for it — only `build submit --block` reaches for it, and
+        // every other submission on the machine still goes through `submit`.
+        // Declaring one without the other is therefore always a mistake, and a
+        // silent one: it would surface as a machine that submits nothing.
+        if self.scheduler.blocking_submit.is_some() && self.scheduler.submit.is_none() {
+            bail!(
+                "[scheduler].blocking-submit is declared without [scheduler].submit; it is the \
+                 blocking flavour of that command, not a substitute for it"
+            );
+        }
+
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             self.validate_script_kind(kind)
                 .with_context(|| format!("in [{}]", kind.table_name()))?;
@@ -1522,6 +1543,57 @@ mod tests {
         // exactly the state of all 37 bundled machines today, and must load
         // and validate cleanly (it does — see `parses_and_validates_the_spec_example`).
         assert!(!mike().can_submit_builds());
+    }
+
+    /// §10: the blocking flavour of `submit` cannot stand in for it.
+    #[test]
+    fn blocking_submit_without_submit_is_rejected() {
+        let meta: Meta = toml::from_str(
+            &MIKE.replace(
+                "submit = \"sbatch @SCRIPTFILE@ 2>&1\"",
+                "blocking-submit = \"sbatch --wait @SCRIPTFILE@ 2>&1\"",
+            ),
+        )
+        .unwrap();
+        let err = format!("{:#}", meta.validate("mike").unwrap_err());
+        assert!(err.contains("blocking-submit"), "{err}");
+        assert!(err.contains("[scheduler].submit"), "{err}");
+
+        // Both together is the normal case, and the ordinary machine (which
+        // declares neither) stays valid.
+        mike().validate("mike").unwrap();
+    }
+
+    /// Every machine in the shipped MDB that declares a blocking submit also
+    /// declares the ordinary one, and both name @SCRIPTFILE@ — an mdb-wide
+    /// guard, so a future entry cannot quietly ship a `--block` that submits
+    /// a script it was never handed.
+    #[test]
+    fn every_blocking_submit_in_the_mdb_matches_its_submit() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            std::path::PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let mut found = 0;
+        for (name, _layer) in mdb.machines().unwrap() {
+            let machine = mdb.load(&name).unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
+            let Some(blocking) = machine.meta.scheduler.blocking_submit.as_deref() else { continue };
+            found += 1;
+            let submit = machine
+                .meta
+                .scheduler
+                .submit
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name}: blocking-submit without submit"));
+            assert!(submit.contains("@SCRIPTFILE@"), "{name}: submit names no @SCRIPTFILE@: {submit}");
+            assert!(
+                blocking.contains("@SCRIPTFILE@"),
+                "{name}: blocking-submit names no @SCRIPTFILE@: {blocking}"
+            );
+        }
+        // The mdb ships plenty of them; zero would mean this guard silently
+        // stopped guarding anything.
+        assert!(found > 10, "only {found} machines declare blocking-submit");
     }
 
     #[test]
