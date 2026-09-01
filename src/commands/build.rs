@@ -158,11 +158,57 @@ fn run(ctx: &Ctx, args: BuildStartArgs) -> Res<()> {
     run_with(&machine, &installation, args)
 }
 
+/// The config a nameless `cactup build` / `build run` / `build submit` acts
+/// on: the installation's active config.
+///
+/// The generic null-config error (`InstallationMeta::active_config`) reads as
+/// a dead end to someone building their *first* config, so the build paths
+/// spell out the naming rule it leaves implicit: with no name, `build`
+/// rebuilds whatever is already active, so a config nobody has built yet —
+/// and any config other than the active one — has to be named. §7.1
+fn start_name(inst: &Installation, name: Option<&str>) -> Res<String> {
+    if let Some(name) = name {
+        return Ok(name.to_owned());
+    }
+    if let Some(active) = inst.meta()?.active_config {
+        return Ok(active);
+    }
+    // Best-effort: the configs that do exist are exactly what the user needs
+    // to pick a name from, so listing them saves a `cactup config list` hop.
+    let existing: Vec<String> = super::config::list_configs(&inst.cactus_root())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    if existing.is_empty() {
+        bail!(
+            "nothing to build: `cactup build` with no name rebuilds the active config, and \
+             this installation has no active config yet. A config's first build has to name \
+             it — `cactup build <name>` creates the config and makes it active, and a bare \
+             `cactup build` rebuilds it from then on."
+        );
+    }
+    bail!(
+        "no active config to rebuild: `cactup build` with no name rebuilds the active config, \
+         and this installation has none selected. Name the config to build — `cactup build \
+         <name>`, which also creates it if it is new — or make one active with `cactup config \
+         use <name>`. Configs here: {} (see `cactup config list`).",
+        config_name_list(&existing)
+    )
+}
+
+/// The config names for `start_name`'s error, capped so a big installation
+/// doesn't bury the hint under the list.
+fn config_name_list(names: &[String]) -> String {
+    const MAX: usize = 6;
+    if names.len() <= MAX {
+        return names.join(", ");
+    }
+    format!("{}, and {} more", names[..MAX].join(", "), names.len() - MAX)
+}
+
 fn run_with(machine: &Machine, installation: &Installation, args: BuildStartArgs) -> Res<()> {
-    let name = match args.name {
-        Some(name) => name,
-        None => installation.meta()?.active_config()?.to_owned(),
-    };
+    let name = start_name(installation, args.name.as_deref())?;
 
     // Builds never chain (§7.9): a config with a live attempt already in
     // flight refuses a second one, foreground included.
@@ -233,10 +279,7 @@ fn submit_impl(
         );
     }
 
-    let name = match &args.name {
-        Some(n) => n.clone(),
-        None => inst.meta()?.active_config()?.to_owned(),
-    };
+    let name = start_name(inst, args.name.as_deref())?;
     let cactus_root = inst.cactus_root();
     let config_dir = cactus_root.join("configs").join(&name);
     let sched = Scheduler::new(&machine.meta);
@@ -1430,6 +1473,41 @@ mod tests {
         forced.opts.force = true;
         submit_impl(&inst, &machine, &db, &forced, Some("h")).unwrap();
         assert_eq!(BuildAttempt::latest_id(&cactus.join("configs/sim")).unwrap(), Some(1));
+    }
+
+    /// A nameless build in the null-config state explains the naming rule
+    /// rather than just reporting the absence — both the first-build case
+    /// (no configs at all) and the "configs exist, none active" one, on the
+    /// foreground and submit paths alike.
+    #[test]
+    fn nameless_build_in_null_config_state_explains_the_naming_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            false,
+        );
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let db = Database::new();
+
+        let err = format!("{:#}", run_with(&machine, &inst, start_args(None, None)).unwrap_err());
+        assert!(err.contains("first build has to name it"), "{err}");
+        assert!(err.contains("cactup build <name>"), "{err}");
+        let submitted = format!(
+            "{:#}",
+            submit_impl(&inst, &machine, &db, &start_args(None, None), Some("h")).unwrap_err()
+        );
+        assert_eq!(submitted, err, "both start paths must give the same hint");
+
+        // A config on disk with nothing active: point at it, not at creation.
+        fs::create_dir_all(cactus.join("configs/sim")).unwrap();
+        let err = format!("{:#}", run_with(&machine, &inst, start_args(None, None)).unwrap_err());
+        assert!(err.contains("Configs here: sim"), "{err}");
+        assert!(err.contains("cactup config use <name>"), "{err}");
     }
 
     /// §7.9's auto-selection table, exercised directly against `choose_submit`
