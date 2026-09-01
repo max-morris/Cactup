@@ -316,6 +316,12 @@ pub(crate) struct BuildOpts {
     /// Optionlist variant (required iff the machine has more than one).
     #[clap(long, value_name = "VARIANT")]
     pub variant: Option<String>,
+    // §4.4, §7.8
+    /// Build from this optionlist file instead of the machine's: an MDB-style
+    /// .toml (with its [cactup] header), an [options]-only .toml, or a native
+    /// Cactus .cfg.
+    #[clap(long, value_name = "PATH", conflicts_with = "variant")]
+    pub optionlist: Option<PathBuf>,
     #[clap(flatten)]
     pub universe: UniverseFlags,
     /// Debug build.
@@ -355,6 +361,7 @@ impl BuildOpts {
             force: false,
             thornlist: None,
             variant: None,
+            optionlist: None,
             universe: UniverseFlags { universe: None, no_universe: false },
             debug: false,
             optimize: false,
@@ -736,6 +743,7 @@ pub(crate) enum MachineCommand {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::path::Path;
 
     #[test]
     fn cli_is_well_formed() {
@@ -771,6 +779,7 @@ mod tests {
             // not be mistaken for (or reported as) an unknown subcommand. See
             // `build_bare_positional_is_not_mistaken_for_a_subcommand` below.
             vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
+            vec!["cactup", "build", "sim", "--optionlist", "/tmp/my.cfg"],
             vec!["cactup", "build", "run", "sim", "--variant", "cuda", "--universe", "et-sif"],
             vec![
                 "cactup", "build", "run", "--config-dir", "/inst/configs/sim", "--attempt-id", "2",
@@ -873,6 +882,29 @@ mod tests {
         );
         // --dry-run and --silent are mutually exclusive (§ RefetchArgs).
         assert!(Args::try_parse_from(["cactup", "inst", "refetch", "-n", "-s"]).is_err());
+        // --optionlist displaces the machine's variant selection entirely, so
+        // pairing it with --variant is a contradiction, not a refinement.
+        assert!(
+            Args::try_parse_from([
+                "cactup", "build", "sim", "--optionlist", "x.cfg", "--variant", "cuda"
+            ])
+            .is_err()
+        );
+    }
+
+    /// `--optionlist` names a user-supplied file in place of the machine's
+    /// own variants; it must land on `BuildOpts` untouched so `build/mod.rs`
+    /// can load it (§4.4, §7.8).
+    #[test]
+    fn optionlist_flag_parses_into_build_opts() {
+        let args = Args::try_parse_from(["cactup", "build", "sim", "--optionlist", "/tmp/my.cfg"])
+            .unwrap_or_else(|e| panic!("failed to parse: {e}"));
+        match args.command {
+            Commands::Build { start, command: None } => {
+                assert_eq!(start.opts.optionlist.as_deref(), Some(Path::new("/tmp/my.cfg")));
+            }
+            other => panic!("expected a bare build command, got {other:?}"),
+        }
     }
 
     /// `--overwrite` must collect one value per occurrence without swallowing

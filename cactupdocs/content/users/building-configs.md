@@ -322,6 +322,82 @@ cactup build myconfig --variant cuda
 
 If your machine has multiple variants, you must choose one explicitly (unless one is marked default). Each variant can have different compiler flags, GPU support, and compatible queues for job submission.
 
+The choice sticks. Once a config is built with `--variant cuda`, later rebuilds
+keep using `cuda` without the flag; you pass `--variant` again only to switch it
+to a different one — or `--optionlist` (below) to move the config off the
+machine's variants altogether. Editing that variant's optionlist in the machine
+definition is picked up by a plain `cactup build`, same as any other optionlist
+change.
+
+### Building from your own optionlist
+
+`--optionlist` builds from a file of your own instead of one of the machine's
+variants — useful when you are porting a machine, chasing a compiler bug, or
+trying a flag that does not yet deserve to live in the MDB:
+
+```sh
+cactup build myconfig --optionlist ~/my-experiment.cfg
+```
+
+It replaces variant selection entirely, so it cannot be combined with
+`--variant`. Three file formats are accepted, detected automatically:
+
+1. **A full optionlist**, exactly as the MDB writes them — a `[cactup]` header
+   plus an `[options]` table. The header is honored just as it would be inside
+   the MDB: `gpu` and `compatible-queues` still gate which queues a simulation
+   built from it may be submitted to, `universe` still selects a build
+   environment, and the per-variant thorn toggles still apply. (`default` means
+   nothing here — you named the file yourself — and is ignored.)
+2. **Just the options**, with or without the `[options]` header line:
+
+   ```toml
+   VERSION = "2026-09-01"
+   CC = "gcc"
+   CXXFLAGS = "-O2 -std=gnu++17"
+   ```
+
+   With no `[cactup]` header there is no GPU claim and no queue restriction.
+3. **A native Cactus `.cfg`** — the plain `NAME = value` format Cactus itself
+   consumes, which is what most optionlists in the wild already are:
+
+   ```
+   VERSION = 2026-09-01
+   CC  = gcc
+   CXXFLAGS = -g -std=gnu++17
+   DEBUG = no
+   ```
+
+   Values are passed through verbatim (`no` stays `no`), and as in (2) there is
+   no header, so no queue restriction.
+
+The difference between the two TOML forms and the `.cfg` is quoting: TOML quotes
+its strings, a `.cfg` does not. That is exactly how cactup tells them apart, so
+a file must pick one style and stick to it — mixing `CC = "gcc"` and
+`CFLAGS = -O2` in one file is rejected, naming both lines, rather than guessed
+at.
+
+Like `--thornlist`, `--optionlist` sticks: the config records the file it was
+built from, and later rebuilds keep using it, so you only pass the flag when you
+want to change something. Editing the file and running a bare `cactup build`
+picks the edit up and forces a full rebuild, just as editing an MDB optionlist
+does — which is what makes the edit/rebuild porting loop work:
+
+```sh
+cactup build myconfig --optionlist ~/my-experiment.cfg   # names the file
+$EDITOR ~/my-experiment.cfg
+cactup build myconfig                                    # rebuilds from it
+```
+
+Passing `--optionlist` again with a different file re-points the config at that
+one instead. To go back to one of the machine's own variants, pass `--variant`,
+which clears the recorded file.
+
+> [!NOTE]
+> If the file you built from is moved or deleted, the build does not break and
+> does not silently change: cactup falls back to the verbatim copy it
+> snapshotted inside the config and warns you. Pass `--optionlist` again to
+> point at the file's new home.
+
 ## Universes
 
 A **universe** is an optional build environment that wraps the build process. Common examples:
@@ -407,6 +483,7 @@ An **optionlist** is a TOML file specifying compiler flags, optimization levels,
 - You choose which variant when building with `--variant`
 - The variant determines the compiler environment and enabled features
 - Variants are configured per-machine in the machine definition
+- `--optionlist <path>` bypasses them and builds from a file of your own instead
 
 ### Universes
 
@@ -462,6 +539,12 @@ cactup build native-build --no-universe
 **"Must specify --variant"**: Your machine has multiple optionlist variants. Use `cactup machine show --variants` to list them, then `--variant <name>`.
 
 **"Variant not found"**: Check the spelling with `cactup machine show --variants`.
+
+**"was built with optionlist variant \<name\>, which machine \<m\> no longer has"**: this config records a variant the machine definition has since renamed or dropped, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--variant`, or build from your own file with `--optionlist`.
+
+**"mixes quoted and unquoted values"**: an `--optionlist` file has to be written in one of the three accepted formats, not a blend of two. Either quote every string (the TOML forms) or quote none of them (the native `.cfg` form) — the message names the two lines that disagree.
+
+**"was built from optionlist \<path\>, which is no longer readable"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--variant` to switch to one of the machine's own.
 
 **Build fails**: `cactup build show myconfig` reports the most recent attempt's outcome, and `cactup build log myconfig` shows its output. Both find the right attempt automatically — there's no build log path to remember (see "Where build output goes" above).
 

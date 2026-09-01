@@ -6,7 +6,7 @@
 use super::{machine, Ctx};
 use crate::args::{BuildCommand, BuildOpts, BuildStartArgs, BuildSubmitArgs};
 use crate::build::attempt::{BuildAttempt, BuildMeta, BuildOutcomeRecord, Reservation};
-use crate::build::{self, Prepared, SubmitReservation};
+use crate::build::{self, OptionlistSource, Prepared, SubmitReservation};
 use crate::database::Database;
 use crate::installation::Installation;
 use crate::lock::LinkLock;
@@ -248,7 +248,7 @@ fn submit_impl(
     let mut flags = args.topology.clone();
     build::apply_build_defaults(&mut flags, machine);
     let make_jobs = build::reconcile_make_jobs(&mut flags, args.opts.make_jobs, machine);
-    let fit = build::queue_fit(machine, &name, &args.opts)?;
+    let fit = build::queue_fit(&cactus_root, machine, &name, &args.opts)?;
     let topo = resolve_topology(&flags, machine, db, &fit, false)?;
 
     let reservation = Reservation {
@@ -838,7 +838,10 @@ fn show_impl(machine: &Machine, inst: &Installation, name: Option<&str>, long: b
                 fmt(t.finished)
             );
             if long {
-                println!("  variant:     {}", attempt.meta.variant);
+                match &attempt.meta.optionlist_source {
+                    OptionlistSource::Optionlist(p) => println!("  optionlist:  {p}"),
+                    OptionlistSource::Variant(v) => println!("  variant:     {v}"),
+                }
                 if let Some(u) = &attempt.meta.universe {
                     println!("  universe:    {}", u.name);
                 }
@@ -1574,7 +1577,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: id,
             config: config.to_owned(),
-            variant: "default".to_owned(),
+            optionlist_source: OptionlistSource::Variant("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.to_owned(),

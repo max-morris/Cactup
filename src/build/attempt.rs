@@ -12,7 +12,7 @@
 //! subject, and there is no simfactory `output-NNNN-active` contract to
 //! preserve the way there is for restarts (§9.2).
 
-use crate::build::ConfigMeta;
+use crate::build::{ConfigMeta, OptionlistSource};
 use crate::database::SCHEMA;
 use crate::installation::write_toml;
 use crate::sim::restart::UniverseSpec;
@@ -86,8 +86,10 @@ pub struct BuildMeta {
     pub schema: u32,
     pub attempt_id: u32,
     pub config: String,
-    /// Optionlist variant used.
-    pub variant: String,
+    /// Which optionlist this attempt was built from — the machine variant, or
+    /// the `--optionlist` file (§7.8). Flattened, as in [`ConfigMeta`].
+    #[serde(flatten)]
+    pub optionlist_source: OptionlistSource,
     pub machine: String,
     pub alias: String,
     pub config_dir: PathBuf,
@@ -353,7 +355,7 @@ mod tests {
             schema: SCHEMA,
             attempt_id: 0,
             config: "sim".to_owned(),
-            variant: "generic".to_owned(),
+            optionlist_source: OptionlistSource::Variant("generic".to_owned()),
             machine: "mike".to_owned(),
             alias: "et-dev".to_owned(),
             config_dir: PathBuf::from("/home/user/Cactus/configs/sim"),
@@ -440,7 +442,7 @@ mod tests {
         assert_eq!(reopened.id, 0);
         assert_eq!(reopened.dir, dir);
         assert_eq!(reopened.meta.config, meta.config);
-        assert_eq!(reopened.meta.variant, meta.variant);
+        assert_eq!(reopened.meta.optionlist_source, meta.optionlist_source);
         assert_eq!(reopened.meta.machine, meta.machine);
         assert_eq!(reopened.meta.job_id, meta.job_id);
         assert_eq!(reopened.meta.decision, meta.decision);

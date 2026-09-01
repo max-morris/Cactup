@@ -3,7 +3,7 @@
 use super::build as build_cmd;
 use super::Ctx;
 use crate::args::ConfigCommand;
-use crate::build::{self, ConfigMeta};
+use crate::build::{self, ConfigMeta, OptionlistSource};
 use crate::installation::Installation;
 use crate::sim::cache;
 use crate::Res;
@@ -153,7 +153,13 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
-    println!("  variant: {}", meta.variant);
+    // Labelled for what it actually is: "variant" would misdescribe a config
+    // built from a --optionlist file, and — now that the choice is sticky —
+    // that path is what the next bare rebuild will use, so it is worth naming.
+    match &meta.optionlist_source {
+        OptionlistSource::Optionlist(path) => println!("  optionlist: {path}"),
+        OptionlistSource::Variant(v) => println!("  variant: {v}"),
+    }
     // The bare path misleads on a custom installation: the live list's fixed
     // filename is `installation-default.th` whatever content it holds, so
     // the path alone can't say whether it's stock or custom. Say which
@@ -458,7 +464,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: config.to_owned(),
-            variant: "default".to_owned(),
+            optionlist_source: OptionlistSource::Variant("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.to_owned(),

@@ -1138,7 +1138,17 @@ them first-class within one machine.
 - **OptionList variants** select compile configuration. If a machine has exactly
   one optionlist variant, it is used implicitly. If it has more than one, the
   user **must** pick one at `cactup build` time via `--variant`; there is no
-  default. The chosen variant is recorded in the config metadata (§7.4).
+  default. The chosen variant is recorded in the config metadata (§7.4) and is
+  **sticky**: later rebuilds of that config reuse it without the flag, and
+  `--variant` is repeated only to switch flavors, or to move a config back off a
+  `--optionlist` file (§7.8). A recorded variant the machine has since dropped is
+  a hard error naming it, never a silent fallback.
+  `cactup build --optionlist PATH` displaces this selection entirely, building
+  from a file outside the MDB — an MDB-shaped `.toml`, an `[options]`-only
+  `.toml`, or a native Cactus `.cfg`. It is mutually exclusive with `--variant`,
+  and a file that carries a `[cactup]` header is validated by it exactly as an
+  MDB variant would be; §7.8 has the forms, the detection rule, and what gets
+  recorded.
 - **OptionList variant ↔ queue compatibility (D12).** Each optionlist TOML
   declares, in its `[cactup]` header (§7.8), a `compatible-queues` list and a
   `gpu` flag. At `sim submit`/`sim run`, cactup checks the chosen queue against
@@ -1970,7 +1980,10 @@ Stored next to the build, **not** in the global DB:
 ```toml
 schema = 1
 name = "sim-gpu"
-variant = "gpu"                 # optionlist variant used
+variant = "gpu"                 # which optionlist this config is built from: EXACTLY ONE of
+# optionlist = "/home/me/my.cfg"  # `variant` (an MDB variant) or `optionlist` (the file a
+                                 # --optionlist build came from), never both and never
+                                 # neither, and the one a bare rebuild uses (§7.8)
 gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
 compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
 thornlist = "thornlists/installation-default.th"
@@ -2208,6 +2221,91 @@ it is never diffed for the rebuild decision):**
    `VECTORISE`, `*_OPTIMISE_FLAGS`). Those are external Cactus build-system
    identifiers and are emitted **verbatim** — cactup maps `optimize` → `OPTIMISE`
    at render. Never Americanize keys inside `[options]`.
+
+**User-supplied optionlists (`cactup build --optionlist PATH`).** A build may be
+made from a file outside the MDB entirely. The porting loop (edit a `.cfg`,
+rebuild, read the error, repeat) and the one-off experiment both want an
+optionlist that does not yet deserve to be a machine variant, and requiring one
+to be installed into `mdb/<m>/optionlists/` first turns a two-minute iteration
+into an MDB edit. `--optionlist` displaces variant selection completely and is
+therefore mutually exclusive with `--variant`. Three spellings are accepted,
+auto-detected, and never intermixed within one file:
+
+1. **The MDB shape above** — a `[cactup]` table plus an `[options]` table. The
+   `[cactup]` keys are honored exactly as if the file sat in the MDB: `gpu` and
+   `compatible-queues` feed the D12 queue cross-check (§4.4), `universe` feeds
+   §4.8 resolution, and `enabled-thorns`/`disabled-thorns` apply on top of the
+   machine's. (`default` is meaningless here — the file was named explicitly —
+   and is ignored.)
+2. **The `[options]` table alone**, with or without its header line. There is no
+   `[cactup]` table, so the header defaults apply: no `gpu` claim, and an empty
+   `compatible-queues`, i.e. no queue restriction at all.
+3. **A native Cactus `.cfg`** — `NAME = value` lines with `#` comments, the
+   format simfactory consumed directly and the format every existing optionlist
+   in the wild is already written in. Header defaults as in (2). Every value is
+   taken as text and rendered back verbatim, so `DEBUG = no` stays `no` rather
+   than round-tripping through a TOML boolean; duplicate keys — which real
+   `.cfg` files carry and TOML forbids — resolve last-wins at the key's first
+   position.
+
+**Detection.** Forms 1 and 2 are TOML and form 3 is not, and the discriminator
+is quoting: a TOML string value is quoted, a `.cfg`'s is bare. Each
+`NAME = value` line is classified by its right-hand side — quoted, a bracketed
+array, or a bare `true`/`false` (TOML's boolean literals; Cactus spells these
+`yes`/`no`, so they can only mean TOML) ⇒ TOML; a bare integer ⇒ neutral, since
+it means and renders the same in either family and so discriminates nothing;
+anything else, an empty value included ⇒ `.cfg`. A file carrying both a TOML
+value and a `.cfg` value is **rejected**, naming both offending lines:
+intermixing is an authoring mistake, and guessing which half was meant would
+silently build the wrong binary. A `[cactup]` table decides form 1; an
+`[options]` header, or any quoted value, decides form 2; any other table header
+is an error, as is a file that declares no options at all.
+
+The config metadata (§7.4) records **which optionlist, of one kind or the
+other** — a `variant = "cuda"` naming an MDB variant, or an `optionlist =
+"/abs/path"` naming a user file, never both and never neither. The two are
+alternatives, not a fallback chain, because the flags that set them are mutually
+exclusive; the metadata is modelled as a sum so a config that is somehow both
+cannot be written down. The recorded path is canonicalized, so `config show`
+names the file the build came from wherever a later rebuild runs. The rebuild
+trigger's first input — the source snapshot — is the user's file text verbatim,
+exactly as it is for an MDB variant, so editing that file forces the same full
+rebuild an MDB optionlist edit does.
+
+**Stickiness.** A later bare `cactup build` rebuilds from whichever the config
+records — the flag does not have to be repeated, exactly as `--thornlist` does
+not (§7.5). This is true of `--variant` too: **all three** of the flags that say
+what a config is made of are remembered, so there is no rule to learn about
+which ones are. The resolution order is:
+
+1. `--optionlist PATH` — explicit; a hard error if unreadable.
+2. `--variant NAME` — explicit; how a config is deliberately moved onto, or
+   between, the machine's own variants.
+3. whichever of the two the config already records, since it records exactly
+   one:
+   - a **variant**, when the machine still lists it. When the machine has since
+     renamed or dropped it, this is a **hard error** naming the missing variant
+     and listing what the machine now offers — there is nothing to fall back on,
+     because a snapshot records the text one build used, not a standing
+     definition of a variant.
+   - the **`--optionlist` path**, falling back to that config's verbatim
+     snapshot when the path has since moved or been deleted, so the config stays
+     rebuildable and the file going away cannot quietly change what gets built.
+     Preferring the live file is deliberate: editing an optionlist in place and
+     rebuilding is the whole point of naming one.
+4. the machine's own variant selection (§4.4).
+
+Steps 1 and 2 are alternatives, and so are the two halves of step 3. Supplying
+either flag **displaces** what the config was on record as being — `--variant`
+on a config built from a file moves it onto the MDB, `--optionlist` on a config
+built from a variant moves it off. Whichever flag was passed most recently is
+what sticks, in both directions; neither ever falls back to the other.
+
+This replaces an earlier guard that refused a bare rebuild whenever the variant
+a config recorded differed from what the machine would now resolve to. The guard
+was there to stop a bare rebuild silently building a different flavor; step 3
+stops that by construction instead, by rebuilding what the config actually
+records, which is what the user meant both times.
 
 **Rebuild trigger.** The decision to rebuild diffs five inputs against what the
 config was last built with:

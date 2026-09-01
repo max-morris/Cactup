@@ -492,6 +492,7 @@ fn read_summary(results: &Path, config: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::OptionlistSource;
     use crate::args::{TopologyFlags, UniverseFlags};
     use crate::mdb::Layer;
     use crate::testsuite::list_results_ids;
@@ -769,7 +770,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
-            variant: "default".to_owned(),
+            optionlist_source: OptionlistSource::Variant("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.clone(),

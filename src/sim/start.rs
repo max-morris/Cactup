@@ -833,6 +833,7 @@ pub(crate) fn spawn_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::OptionlistSource;
     use crate::args::TopologyFlags;
     use crate::mdb::Layer;
     use crate::walltime::Walltime;
@@ -1128,7 +1129,7 @@ mod tests {
                 schema: crate::database::SCHEMA,
                 attempt_id: 0,
                 config: "sim".to_owned(),
-                variant: "default".to_owned(),
+                optionlist_source: OptionlistSource::Variant("default".to_owned()),
                 machine: "fake".to_owned(),
                 alias: "et".to_owned(),
                 config_dir: config_dir.clone(),

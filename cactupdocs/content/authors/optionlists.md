@@ -19,6 +19,15 @@ Each machine can have multiple optionlist **variants** (e.g., `default`, `cuda`,
 `debug`). Users choose which variant when building with `--variant`.
 
 > [!NOTE]
+> While porting a machine you do not have to install an optionlist into the MDB
+> to try it. `cactup build <config> --optionlist <path>` builds from any file —
+> a full optionlist like the ones below, an `[options]` table on its own, or the
+> native Cactus `.cfg` you are porting *from*. A file with a `[cactup]` header
+> is validated exactly as if it already lived in `optionlists/`, so you can
+> settle the header before committing it. See
+> [Building Configs](../users/building-configs.html) for the details.
+
+> [!NOTE]
 > An optionlist's `universe` field (below) and a machine's queue-submitted
 > builds (`[build].default-action`/`[variants.buildsubmitscript]`, covered in
 > [meta.toml Reference](meta-toml.html)) are independent. A universe says
