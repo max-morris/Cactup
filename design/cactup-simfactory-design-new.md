@@ -859,12 +859,21 @@ pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
-`*-pattern`s, `exec-host`, `stdout`/`stderr`), then `[queues.*]`, `[variants.*]`
+`*-pattern`s, `exec-host`, `max-walltime`), then `[queues.*]`, `[variants.*]`
 (`optionlist`, `submitscript`, `runscript`, and — only on a machine that
 submits builds — `buildsubmitscript`, §7.9),
 and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
 `env-*-setup` overrides; the always-available `"host"` universe needs no table
 at all unless it is being customized).
+
+**The schema is closed.** Every table above rejects keys it does not model: an
+unrecognized key is a load-time error naming it (and listing the accepted
+spellings), never a silent no-op — a typo'd `max-cpu-per-node` must not read as
+"do nothing". Keys kept purely for the human reader are therefore *modelled*
+rather than tolerated (`[machine].webpage`, `[universes.<name>].kind`), and
+anything simfactory carried that cactup dropped — `allocation` (a per-user knob,
+§5), `stdout`/`stderr`/`stdout-follow`, `max-queue-slots`, the capacity keys
+below — belongs in a TOML comment if it is worth recording at all, not in a key.
 
 ```toml
 [machine]

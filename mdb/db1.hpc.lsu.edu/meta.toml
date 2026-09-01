@@ -142,7 +142,7 @@ max-walltime    = "72:00:00"
 # (design §11.6). The compute-node re-entry and `test submit` are exempt.
 allocation-env  = "SLURM_JOB_ID"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 # Deep Bayou's one real SLURM partition. A sole queue is the implicit default
 # (design §4.2) — no `default = true` needed. Both GPU (native, et-sing) and

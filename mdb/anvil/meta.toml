@@ -63,7 +63,7 @@ exec-host-pattern = '^(\S+)'
 # Machine-level fallback ceiling (design §4.2). Upstream note: debug has 0:30:0.
 max-walltime    = "96:00:00"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 [queues.wholenode]
 gpu     = false

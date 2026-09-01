@@ -277,6 +277,7 @@ fn print_summary(machine: &Machine) -> Res<()> {
         ("status", &meta.machine.status),
         ("location", &meta.machine.location),
         ("description", &meta.machine.description),
+        ("webpage", &meta.machine.webpage),
     ] {
         if let Some(value) = value {
             println!("  {label}: {value}");

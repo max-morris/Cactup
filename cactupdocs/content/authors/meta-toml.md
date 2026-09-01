@@ -7,6 +7,8 @@ description = "Complete reference for the machine configuration file schema"
 
 The **meta.toml** file is the core configuration for a machine in the MDB. It defines machine identity, paths, hardware specs, scheduler commands, queue definitions, and variants.
 
+The schema is closed: every table below accepts only the keys listed for it, and an unrecognized key fails the load with `unknown field \`x\`` plus the accepted spellings. A misspelled key is never silently ignored — so if you want to record something cactup has no key for, write it as a `#` comment.
+
 ## File structure overview
 
 A typical meta.toml:

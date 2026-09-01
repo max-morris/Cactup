@@ -82,7 +82,8 @@ holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname"
 exec-host-pattern = '^(\S+)'
 max-walltime    = "24:00:00"
-allocation      = "def-@USER@"
+# historical default allocation; set the allocation knob instead
+# allocation      = "def-@USER@"
 
 # Two cactup queues over Compute Canada's account-scheduled (no-partition)
 # system. The keys carry the D12 gpu flag and route to the run/submit script

@@ -61,7 +61,7 @@ exec-host-pattern = 'exec_host = (\w+)/'
 max-walltime    = "168:00:00"
 # historical default allocation ("don't want this entry" — upstream); set the
 # allocation knob instead
-allocation      = "NOALLOCATION"
+# allocation      = "NOALLOCATION"
 
 # Upstream comment: or comm_small_day, etc.
 [queues.comm_small_week]

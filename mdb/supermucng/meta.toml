@@ -120,7 +120,7 @@ exec-host-pattern = '^(\S+)'
 # 0:30:0, large has 24:0:0.
 max-walltime    = "48:00:00"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 # Upstream noted the queues: test, micro, general, large
 # (https://doku.lrz.de/display/PUBLIC/Job+Processing+with+SLURM+on+SuperMUC-NG)
