@@ -67,6 +67,7 @@ module -q load openmpi/4.0.3
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@; sleep 1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
@@ -82,7 +83,8 @@ holding-pattern  = '\(JobHeldUser\)'
 exec-host        = "hostname"
 exec-host-pattern = '^(\S+)'
 max-walltime    = "24:00:00"
-allocation      = "def-@USER@"
+# historical default allocation; set the allocation knob instead
+# allocation      = "def-@USER@"
 
 # Two cactup queues over Compute Canada's account-scheduled (no-partition)
 # system. The keys carry the D12 gpu flag and route to the run/submit script

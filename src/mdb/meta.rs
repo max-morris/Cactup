@@ -1,8 +1,11 @@
 //! `<machine>/meta.toml` model, load-time validation, and variant/queue/
 //! universe resolution (spec §4.2, §4.4, §4.8, §11.2).
 //!
-//! serde is deliberately tolerant of unmodelled keys (simfactory carried many
-//! informational fields); everything cactup *acts on* is modelled below.
+//! Every table below is `deny_unknown_fields`: a key cactup does not model is
+//! a hard parse error naming it, so a typo (`max-cpu-per-node`) fails loudly
+//! at load instead of silently doing nothing. simfactory's informational-only
+//! keys were therefore either modelled here or dropped from the ported
+//! machines — a fact worth keeping is a TOML comment, not a dead key.
 
 use crate::template::VarSet;
 use crate::walltime::Walltime;
@@ -70,7 +73,7 @@ impl ScriptKind {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Meta {
     pub machine: MachineInfo,
     #[serde(default)]
@@ -95,7 +98,7 @@ pub struct Meta {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MachineInfo {
     pub name: Option<String>,
     pub nickname: Option<String>,
@@ -104,10 +107,14 @@ pub struct MachineInfo {
     pub hostname: Option<String>,
     pub location: Option<String>,
     pub description: Option<String>,
+    /// Purely informational (as are `location`/`description`) — modelled so a
+    /// ported machine can keep the fact rather than lose it to the strict
+    /// schema.
+    pub webpage: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Paths {
     /// Default install prefix; fallback `~/.cactup/cacti` (§4.2).
     pub install_home: Option<String>,
@@ -150,7 +157,7 @@ pub struct Paths {
 /// per-queue in `[queues.<name>]`; queue values override these machine-wide
 /// ones (`Meta::effective_hardware`).
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Hardware {
     /// Fill missing core/memory values from the OS at load time (§4.6).
     #[serde(default)]
@@ -188,7 +195,7 @@ impl Hardware {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Build {
     pub make: Option<String>,
     pub make_jobs: Option<u32>,
@@ -231,7 +238,7 @@ pub enum BuildAction {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Environment {
     pub env_setup: Option<String>,
     pub env_build_setup: Option<String>,
@@ -260,15 +267,26 @@ impl Environment {
 }
 
 /// §10 keeps simfactory's *consumed* scheduler keys verbatim. Its unconsumed
-/// ones were dropped outright (unknown keys parse as no-ops): `interactive`
-/// went with §3.1, `stdout`/`stderr`/`stdout-follow` because output filenames
-/// are template-owned via @STDOUT_FILE@/@STDERR_FILE@ (§8.3.1) and `log`
-/// follows natively, and `max-queue-slots` because chain sizing is
-/// walltime-only (§8.8).
+/// ones were dropped outright — and, the table being closed, a machine that
+/// still carries one now fails to load rather than parsing it as a no-op.
+/// `interactive` went with §3.1, `stdout`/`stderr`/`stdout-follow` because
+/// output filenames are template-owned via @STDOUT_FILE@/@STDERR_FILE@ (§8.3.1)
+/// and `log` follows natively, and `max-queue-slots` because chain sizing is
+/// walltime-only (§8.8). simfactory's `allocation` is likewise absent: the
+/// account to charge is a per-user knob (§5), not a machine fact.
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Scheduler {
     pub submit: Option<String>,
+    /// Optional blocking form of `submit` (§10, a cactup addition): the same
+    /// submission, expressed so the command does not return until the job has
+    /// finished — `sbatch --wait`, `qsub -W block=true`. `cactup build submit
+    /// --block` prefers it; machines that omit it get the emulated wait (the
+    /// ordinary `submit`, then polling the attempt until it reports). Its
+    /// output is scanned with the same `submit-pattern`, line by line as it
+    /// arrives, so a command that prints the job id and only then blocks
+    /// still yields the id at submission time.
+    pub blocking_submit: Option<String>,
     pub get_status: Option<String>,
     /// Optional one-call form of `get-status` (§10, a cactup addition): lists
     /// every live job of `@USER@`, one per line, the job id as the first
@@ -319,7 +337,7 @@ where
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Queue {
     #[serde(default)]
     pub gpu: bool,
@@ -362,7 +380,7 @@ impl Queue {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Variants {
     #[serde(default)]
     pub submitscript: ScriptVariants,
@@ -375,6 +393,7 @@ pub struct Variants {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OptionlistVariants {
     /// Names of `optionlists/<variant>.toml` files; selected at build time
     /// via --variant (§4.4). Their gpu/queue/test flags live in each file's
@@ -425,38 +444,34 @@ impl VariantEntry {
     }
 }
 
+/// The inline-table form of a variant entry. Deserialized on its own (rather
+/// than as one arm of an untagged enum) so that a mistyped key reports as
+/// serde's own "unknown field" error instead of a shapeless no-variant-matched
+/// one.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum VariantEntryRaw {
-    Queues(Vec<String>),
-    Full {
-        queues: Vec<String>,
-        universe: Option<String>,
-        #[serde(rename = "build-universes")]
-        build_universes: Option<Vec<String>>,
-        #[serde(default)]
-        test: bool,
-        #[serde(default)]
-        default: bool,
-        tasks: Option<u32>,
-    },
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct VariantEntryRaw {
+    queues: Vec<String>,
+    universe: Option<String>,
+    build_universes: Option<Vec<String>>,
+    #[serde(default)]
+    test: bool,
+    #[serde(default)]
+    default: bool,
+    tasks: Option<u32>,
 }
 
 impl From<VariantEntryRaw> for VariantEntry {
     fn from(raw: VariantEntryRaw) -> Self {
-        match raw {
-            VariantEntryRaw::Queues(queues) => VariantEntry {
-                queues,
-                universe: None,
-                build_universes: None,
-                test: false,
-                default: false,
-                tasks: None,
-            },
-            VariantEntryRaw::Full { queues, universe, build_universes, test, default, tasks } => {
-                VariantEntry { queues, universe, build_universes, test, default, tasks }
-            }
-        }
+        let VariantEntryRaw { queues, universe, build_universes, test, default, tasks } = raw;
+        VariantEntry { queues, universe, build_universes, test, default, tasks }
+    }
+}
+
+/// The array shorthand: queues only, every other field defaulted.
+impl From<Vec<String>> for VariantEntry {
+    fn from(queues: Vec<String>) -> Self {
+        VariantEntry { queues, universe: None, build_universes: None, test: false, default: false, tasks: None }
     }
 }
 
@@ -475,33 +490,93 @@ impl<'de> Deserialize<'de> for ScriptVariants {
                     .ok_or_else(|| D::Error::custom("default-universe must be a string"))?;
                 out.default_universe = Some(name.to_owned());
             } else {
-                let entry: VariantEntryRaw = value.try_into().map_err(|e| {
-                    D::Error::custom(format!(
-                        "variant \"{key}\" must be a [\"queue\", …] array or a \
-                         {{ queues = […], universe = \"…\", build-universes = […], test = …, default = …, tasks = … }} table: {e}"
-                    ))
-                })?;
-                out.variants.insert(key, entry.into());
+                // Dispatch on the shape first so the error can be specific:
+                // a wrong *shape* names both accepted forms, while a wrong key
+                // inside the table form is serde's own "unknown field" list.
+                let entry: VariantEntry = match &value {
+                    toml::Value::Array(_) => value
+                        .try_into::<Vec<String>>()
+                        .map(VariantEntry::from)
+                        .map_err(|e| D::Error::custom(format!("variant \"{key}\": {e}")))?,
+                    toml::Value::Table(_) => value
+                        .try_into::<VariantEntryRaw>()
+                        .map(VariantEntry::from)
+                        .map_err(|e| D::Error::custom(format!("variant \"{key}\": {e}")))?,
+                    _ => {
+                        return Err(D::Error::custom(format!(
+                            "variant \"{key}\" must be a [\"queue\", …] array or a \
+                             {{ queues = […], universe = \"…\", build-universes = […], test = …, default = …, tasks = … }} table"
+                        )))
+                    }
+                };
+                out.variants.insert(key, entry);
             }
         }
         Ok(out)
     }
 }
 
-/// A universe declaration (§4.8): at most one of the two wrapper forms.
-/// Neither wrapper = an identity universe (bare `sh -c` execution) — useful
-/// purely as a carrier for env-setup overrides (§4.8/§6.1).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// A universe (§4.8) as cactup holds it: at most one of the two wrapper forms,
+/// plus the env-setup overrides. Deserialized through [`UniverseRaw`], which is
+/// where the TOML schema — and the reference docs generated from it — lives.
+#[derive(Debug, Clone)]
 pub struct Universe {
     /// Prefix form: cactup runs `<wrapper-argv…> /bin/sh -c <inner>`.
     pub wrapper_argv: Option<Vec<String>>,
     /// Template form: one shell command containing exactly one `@COMMAND@`.
     pub wrapper: Option<String>,
-    /// Per-universe env-setup overrides (§6.1): each set key replaces the
-    /// machine `[environment]` key of the same name (`Meta::effective_env`).
-    #[serde(flatten)]
+    /// Per-universe env-setup overrides (§6.1).
     pub environment: Environment,
+}
+
+/// A universe declaration (§4.8): at most one of the two wrapper forms.
+/// Neither wrapper = an identity universe (bare `sh -c` execution) — useful
+/// purely as a carrier for env-setup overrides (§4.8/§6.1), which are written
+/// inline in the universe table, alongside the wrapper keys.
+// The wire form of `Universe`, and the struct the schema reference is
+// generated from: `#[serde(flatten)]` on an `environment` field would read
+// exactly the same TOML, but serde cannot combine `flatten` with
+// `deny_unknown_fields`, so the table is spelled out flat here and folded back
+// into `Universe` below.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct UniverseRaw {
+    /// Documentation only — a note to the reader ("apptainer", "docker", …);
+    /// cactup never switches on it, so it is accepted and then dropped.
+    #[allow(dead_code)]
+    kind: Option<String>,
+    /// Prefix form: cactup runs `<wrapper-argv…> /bin/sh -c <inner>`.
+    wrapper_argv: Option<Vec<String>>,
+    /// Template form: one shell command containing exactly one `@COMMAND@`.
+    wrapper: Option<String>,
+    /// Replaces the machine `[environment]` key of the same name for work run
+    /// in this universe (§6.1, `Meta::effective_env`).
+    env_setup: Option<String>,
+    /// Replaces the machine `[environment].env-build-setup` (§6.1).
+    env_build_setup: Option<String>,
+    /// Replaces the machine `[environment].env-submit-setup` (§6.1).
+    env_submit_setup: Option<String>,
+    /// Replaces the machine `[environment].env-run-setup` (§6.1).
+    env_run_setup: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Universe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = UniverseRaw::deserialize(deserializer)?;
+        Ok(Universe {
+            wrapper_argv: raw.wrapper_argv,
+            wrapper: raw.wrapper,
+            environment: Environment {
+                env_setup: raw.env_setup,
+                env_build_setup: raw.env_build_setup,
+                env_submit_setup: raw.env_submit_setup,
+                env_run_setup: raw.env_run_setup,
+            },
+        })
+    }
 }
 
 /// A universe-wrapped command, ready to spawn.
@@ -593,14 +668,14 @@ impl Universe {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CactupMeta {
     pub origin: Option<Origin>,
 }
 
 /// `--from-existing` provenance (§4.7).
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Origin {
     pub from: String,
     pub hash: String,
@@ -869,6 +944,18 @@ impl Meta {
             bail!("[variants.optionlist] lists no variants; at least one optionlist is required");
         }
 
+        // §10: `blocking-submit` is an extra *flavour* of `submit`, never a
+        // replacement for it — only `build submit --block` reaches for it, and
+        // every other submission on the machine still goes through `submit`.
+        // Declaring one without the other is therefore always a mistake, and a
+        // silent one: it would surface as a machine that submits nothing.
+        if self.scheduler.blocking_submit.is_some() && self.scheduler.submit.is_none() {
+            bail!(
+                "[scheduler].blocking-submit is declared without [scheduler].submit; it is the \
+                 blocking flavour of that command, not a substitute for it"
+            );
+        }
+
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
             self.validate_script_kind(kind)
                 .with_context(|| format!("in [{}]", kind.table_name()))?;
@@ -1127,6 +1214,46 @@ mod tests {
         assert_eq!(sv["slurm-gpu"].queues, ["gpu"]);
         assert!(!sv["slurm-gpu"].test && !sv["slurm-gpu"].default);
         assert!(sv["slurm-test"].test && sv["slurm-test"].default);
+    }
+
+    /// §4.2's schema is closed: a key cactup does not model is a parse error
+    /// naming it, not a silent no-op — so `ppn` (simfactory's spelling) or a
+    /// typo'd `tets` fails at load instead of quietly doing nothing.
+    #[test]
+    fn unknown_keys_are_rejected_by_every_table() {
+        let err = |text: String| toml::from_str::<Meta>(&text).expect_err("unknown key must not parse").to_string();
+
+        // Top level.
+        let msg = err(format!("{MIKE}\n[bogus]\nx = 1\n"));
+        assert!(msg.contains("unknown field `bogus`"), "{msg}");
+        // A modelled table — `allocation` is a knob, never a machine key.
+        let msg = err(MIKE.replace("[scheduler]", "[scheduler]\n        allocation = \"proj\""));
+        assert!(msg.contains("unknown field `allocation`"), "{msg}");
+        // Per-queue.
+        let msg = err(MIKE.replace("[queues.single]", "[queues.single]\n        ppn = 16"));
+        assert!(msg.contains("unknown field `ppn`"), "{msg}");
+        // Inside a variant's inline table: the message names the variant too,
+        // since the table itself is keyed by variant name.
+        let msg = err(MIKE.replace(r#""slurm-gpu" = ["gpu"]"#, r#""slurm-gpu" = { queues = ["gpu"], tets = true }"#));
+        assert!(msg.contains("unknown field `tets`") && msg.contains("slurm-gpu"), "{msg}");
+        // A wrong *shape* still reports as a shape problem, not a key one.
+        let msg = err(MIKE.replace(r#""slurm-gpu" = ["gpu"]"#, r#""slurm-gpu" = 3"#));
+        assert!(msg.contains("must be a") && !msg.contains("unknown field"), "{msg}");
+        // Inside a universe, whose env keys sit inline with the wrappers.
+        let msg = err(MIKE.replace(r#"kind = "apptainer""#, r#"wraper = "x""#));
+        assert!(msg.contains("unknown field `wraper`"), "{msg}");
+    }
+
+    /// The two keys §4.2/§4.8 keep for the human reader alone: a closed schema
+    /// means they have to be modelled to be writable at all.
+    #[test]
+    fn documentation_only_keys_still_parse() {
+        let text = MIKE.replace("[paths]", "webpage = \"https://hpc.lsu.edu/mike\"\n\n        [paths]");
+        let meta: Meta = toml::from_str(&text).unwrap();
+        meta.validate("mike").unwrap();
+        assert_eq!(meta.machine.webpage.as_deref(), Some("https://hpc.lsu.edu/mike"));
+        // `kind` (in MIKE) parses and is deliberately dropped: nothing switches on it.
+        assert!(meta.universes["et-sif"].wrapper_argv.is_some());
     }
 
     #[test]
@@ -1416,6 +1543,57 @@ mod tests {
         // exactly the state of all 37 bundled machines today, and must load
         // and validate cleanly (it does — see `parses_and_validates_the_spec_example`).
         assert!(!mike().can_submit_builds());
+    }
+
+    /// §10: the blocking flavour of `submit` cannot stand in for it.
+    #[test]
+    fn blocking_submit_without_submit_is_rejected() {
+        let meta: Meta = toml::from_str(
+            &MIKE.replace(
+                "submit = \"sbatch @SCRIPTFILE@ 2>&1\"",
+                "blocking-submit = \"sbatch --wait @SCRIPTFILE@ 2>&1\"",
+            ),
+        )
+        .unwrap();
+        let err = format!("{:#}", meta.validate("mike").unwrap_err());
+        assert!(err.contains("blocking-submit"), "{err}");
+        assert!(err.contains("[scheduler].submit"), "{err}");
+
+        // Both together is the normal case, and the ordinary machine (which
+        // declares neither) stays valid.
+        mike().validate("mike").unwrap();
+    }
+
+    /// Every machine in the shipped MDB that declares a blocking submit also
+    /// declares the ordinary one, and both name @SCRIPTFILE@ — an mdb-wide
+    /// guard, so a future entry cannot quietly ship a `--block` that submits
+    /// a script it was never handed.
+    #[test]
+    fn every_blocking_submit_in_the_mdb_matches_its_submit() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            std::path::PathBuf::from("/nonexistent-user-mdb"),
+        );
+        let mut found = 0;
+        for (name, _layer) in mdb.machines().unwrap() {
+            let machine = mdb.load(&name).unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
+            let Some(blocking) = machine.meta.scheduler.blocking_submit.as_deref() else { continue };
+            found += 1;
+            let submit = machine
+                .meta
+                .scheduler
+                .submit
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name}: blocking-submit without submit"));
+            assert!(submit.contains("@SCRIPTFILE@"), "{name}: submit names no @SCRIPTFILE@: {submit}");
+            assert!(
+                blocking.contains("@SCRIPTFILE@"),
+                "{name}: blocking-submit names no @SCRIPTFILE@: {blocking}"
+            );
+        }
+        // The mdb ships plenty of them; zero would mean this guard silently
+        // stopped guarding anything.
+        assert!(found > 10, "only {found} machines declare blocking-submit");
     }
 
     #[test]

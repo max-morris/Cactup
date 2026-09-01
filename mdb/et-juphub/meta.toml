@@ -37,6 +37,8 @@ export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
 # for status/stop. The old submit redirected to @RUNDIR@/@SIMULATION_NAME@.{out,err};
 # @STDOUT_FILE@/@STDERR_FILE@ carry the same defaults but honor -o/-e (§8.3.1).
 submit          = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 get-status      = "ps @JOB_ID@"
 # Kill the whole process group descending from @JOB_ID@, not just the top process.
 stop            = "pkill -g $(ps -o pgid= -p @JOB_ID@)"

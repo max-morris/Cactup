@@ -57,6 +57,18 @@ until it finishes, instead of returning as soon as the job is queued:
 cactup build submit myconfig --follow
 ```
 
+It also accepts `--block`, which waits for the queued build to finish
+before returning but — unlike `--follow` — prints no build output along the
+way; just the job id up front and the final verdict. Use `--block` in a
+script that must not continue until the build is done, and `--follow` when
+you want to watch it happen. The two are mutually exclusive. Either way,
+Ctrl-C only detaches your terminal — the queued build keeps running and you
+get its job id back:
+
+```sh
+cactup build submit myconfig --block
+```
+
 Every other build flag — `--variant`, `--universe`, `--optimize`, `-j`, and
 so on — works identically whether the build runs in the foreground or on the
 queue; the queue is a detail of *where* `make` runs, not of what gets built.
@@ -298,7 +310,7 @@ For testing or special cases, copy a prebuilt `cactus_<config>` into place inste
 cactup build myconfig --virtual-executable /path/to/cactus_myconfig
 ```
 
-This skips `configure` and `make` entirely, useful when the executable was built elsewhere. It's a plain file copy, not a build, so it's rejected together with `build submit` — combine it with `build run` (or the plain `cactup build` foreground form) instead.
+This skips `configure` and `make` entirely, useful when the executable was built elsewhere. It's a plain file copy, not a build, so it's rejected together with `build submit` — and, for the same reason, with `--block`, which has nothing queued to wait for — combine it with `build run` (or the plain `cactup build` foreground form) instead.
 
 ## Optionlist variants
 
@@ -551,6 +563,8 @@ cactup build native-build --no-universe
 **"Universe not found"**: If the machine defines optional universes, use `cactup machine show` to see available ones.
 
 **"cactup build submit is not possible on this machine"**: the machine needs both a `buildsubmitscript` variant and a scheduler `submit` command declared before it can queue a build — see [meta.toml Reference](meta-toml.html) or ask whoever ported the machine. `cactup build run` always works regardless.
+
+**"--block waits for a queued build to finish, but this build runs in the foreground"**: `--block` only makes sense for a build that's going to the queue, and a bare `cactup build` resolved to the foreground instead — because you passed `--virtual-executable`, because the machine sets `[build].default-action = "run"`, or because it can't submit builds at all. The rest of the message names which one applies. Drop `--block`, or use `cactup build submit --block` on a machine that can queue the build. (`cactup build run --block` gets its own, blunter version of the same complaint: that command never queues anything.)
 
 ## Next steps
 

@@ -383,7 +383,7 @@ cactup build [<name>] [-f] [--thornlist P] [--variant V] [--universe U | --no-un
 cactup build run    [<name>] …    [--config-dir P --attempt-id N]
                                     (force foreground build; the flagged form is
                                     the compute-node re-invocation — §7.9.1)
-cactup build submit [<name>] … [--follow]
+cactup build submit [<name>] … [--follow | --block]
                                     (force a queued build — §7.9)
 cactup build list   [--long] [--all]
 cactup build show   [<name>] [--long]
@@ -741,6 +741,18 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   `stop`, `submit-pattern`, `status-pattern`, `queued-pattern`, `running-pattern`,
   `holding-pattern`, `exec-host`, `exec-host-pattern`, `stdout`, `stderr`,
   `stdout-follow`, `max-queue-slots`.
+- One scheduler key is new, with no simfactory ancestor: **`blocking-submit`**
+  (§7.9, §10) — the exact analogue of `submit` except that it does not return
+  until the job it queues has *finished*: `sbatch --wait @SCRIPTFILE@` where
+  `submit` is plain `sbatch @SCRIPTFILE@`, `qsub -W block=true @SCRIPTFILE@` on
+  PBS Pro, or (on a machine whose `submit` backgrounds the script and echoes
+  `$!`) that same command with `wait $pid` appended. It is optional and read
+  only for `cactup build submit --block`; a machine that omits it still
+  supports `--block`, via the emulated poll-until-outcome loop instead of a
+  native blocking command. It is a *flavour* of `submit`, never a replacement:
+  every other submission on the machine still goes through `submit`, so
+  declaring `blocking-submit` without it fails validation rather than
+  producing a machine that submits nothing.
 - **Walltime ceiling (single, unambiguous rule):** the per-queue
   `[queues.<q>].max-walltime` is authoritative. The machine-level `max-walltime`
   (under `[scheduler]`) is the **fallback** used only for a queue that omits
@@ -859,12 +871,21 @@ pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
-`*-pattern`s, `exec-host`, `stdout`/`stderr`), then `[queues.*]`, `[variants.*]`
+`*-pattern`s, `exec-host`, `max-walltime`), then `[queues.*]`, `[variants.*]`
 (`optionlist`, `submitscript`, `runscript`, and — only on a machine that
 submits builds — `buildsubmitscript`, §7.9),
 and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
 `env-*-setup` overrides; the always-available `"host"` universe needs no table
 at all unless it is being customized).
+
+**The schema is closed.** Every table above rejects keys it does not model: an
+unrecognized key is a load-time error naming it (and listing the accepted
+spellings), never a silent no-op — a typo'd `max-cpu-per-node` must not read as
+"do nothing". Keys kept purely for the human reader are therefore *modelled*
+rather than tolerated (`[machine].webpage`, `[universes.<name>].kind`), and
+anything simfactory carried that cactup dropped — `allocation` (a per-user knob,
+§5), `stdout`/`stderr`/`stdout-follow`, `max-queue-slots`, the capacity keys
+below — belongs in a TOML comment if it is worth recording at all, not in a key.
 
 ```toml
 [machine]
@@ -2405,6 +2426,61 @@ attempts** the same way their `sim` equivalents (§8.6, §8.7) monitor a
 simulation — full command shapes are in §3. `<name>` defaults to the active
 config everywhere, matching `config show`/`config delta` (§3.3).
 
+**Blocking submission (`--block`).** `cactup build submit --block` (and a bare
+`cactup build` that auto-selects submit) waits for the queued build to finish
+instead of returning the moment the job is queued. There are two routes. When
+the machine declares the optional `[scheduler].blocking-submit` key (§4.2,
+§10) — the exact analogue of `submit`, but expressed so the command returns
+only once the job has *finished* (`sbatch --wait @SCRIPTFILE@` where `submit`
+is plain `sbatch @SCRIPTFILE@`; `qsub -W block=true @SCRIPTFILE@` on PBS Pro;
+on the generic/workstation machines whose `submit` backgrounds the script and
+echoes `$!`, the same thing plus `wait $pid`) — `--block` runs that instead.
+Its output is scanned with the same `submit-pattern` line by line as it
+arrives, rather than once at the end, so the job id is recorded while the job
+is still running: a blocking submit can sit there for hours, and a Ctrl-C or a
+crash must not leave a real queued job with nothing on disk naming it. How
+early the id actually appears is the submit command's own business — one that
+prints it and only then blocks holds it in its stdio buffer until it exits
+unless it flushes (piped stdout is block-buffered, and `sbatch --wait` does
+not flush), in which case the id simply arrives at the end; both orders work,
+only the recoverability window differs. The command's exit status is
+deliberately **not** the build's verdict: `sbatch --wait` relays the job's own
+exit code, but what the build actually did is whatever the cactup running on
+the compute node recorded in the attempt's `build.toml`, read back once the
+wait returns — a non-zero exit matters only when no job id ever appeared, in
+which case it is the *submission* that failed, not the build. Nothing about
+the attempt is stored after the blocking command returns, either: by then the
+compute node's own cactup has already written the outcome into the very
+`build.toml` a store here would overwrite with a stale copy.
+
+A machine with no `blocking-submit` key gets the ordinary `submit`, followed
+by polling the attempt until it reports an outcome — reusing the exact loop
+`--follow` already builds on `tail::LogTail` and `tail::PollBackoff` for, just
+in a silent mode that skips the output streaming. Ctrl-C detaches without
+touching the queued job, exactly as `--follow` does. Both routes derive the
+verdict identically, from the attempt's own recorded outcome and never a
+relayed exit code, so the only difference a user sees between them is that the
+native route has no polling.
+
+`--block` is an error when the submit path is not taken at all: on `cactup
+build run`; and on a bare `cactup build` that resolves to the foreground
+because `[build].default-action = "run"`, because the machine cannot submit
+builds (no `[variants.buildsubmitscript]` variant and/or no
+`[scheduler].submit`), or because `--virtual-executable` was given (which is
+never queued regardless of what the machine would otherwise pick). The error
+names *which* of those decided it, since the fix differs in each case — drop
+the flag, drop `--virtual-executable`, say `build submit` explicitly, or fix
+the machine. (`cactup build submit` on a machine that cannot submit builds
+already errored before `--block` existed, and still does, for the same
+reason.)
+
+`--block` and `--follow` are mutually exclusive, rejected by clap rather than
+composed: on a machine declaring `blocking-submit` the submit command holds
+the terminal for the whole build, so there is nothing left to stream
+alongside it, and a flag pair whose combinability depends on the MDB entry is
+worse than one that simply never combines. `--follow` already waits for the
+build; `--block` is what you use when you want the wait without the output.
+
 **Auto-selection.** Submitting a build is *possible* on a machine iff it
 declares at least one `[variants.buildsubmitscript]` entry **and**
 `[scheduler].submit` (§4.2) — both are required, since a buildsubmitscript with
@@ -3376,6 +3452,17 @@ machine `meta.toml` carries `submit`, `get-status`, `stop`, `submit-pattern`,
 
 - Submits via `submit` (with `@SCRIPTFILE@` = the substituted SubmitScript),
   parses the job id via `submit-pattern` (group 1).
+- For `cactup build submit --block` (§7.9), submits via the optional
+  `blocking-submit` instead, when the machine declares one — the same command
+  shape as `submit` except that it does not return until the job is over. The
+  same `submit-pattern` still parses the job id, but incrementally, matched
+  against the output line by line as it arrives rather than once at the end,
+  so the id is captured while the job may still be running for hours. The
+  command's exit status is not the build's verdict — only whether a job id
+  ever appeared is; the verdict itself comes from the attempt's own record,
+  read back after the wait. A machine with no `blocking-submit` still supports
+  `--block`: it submits normally via `submit` and polls the attempt for an
+  outcome instead of blocking natively.
 - Queries status via `get-status` (with `@JOB_ID@`) and classifies via the
   pattern regexes into `R`/`Q`/`H`/`U`/`E`.
 - Stops via `stop` (with `@JOB_ID@`).

@@ -74,7 +74,7 @@ pub fn introspect(repo_root: &Path) -> Result<MdbModel> {
         if processed.contains(struct_name) {
             continue;
         }
-        if let Some(s) = meta_structs.get(struct_name) {
+        if let Some(s) = wire_struct(&meta_structs, struct_name) {
             let toml_path = map_struct_to_toml_path(struct_name);
             let table = process_struct_to_table(s, struct_name, toml_path)?;
             meta_tables.push(table);
@@ -110,6 +110,20 @@ pub fn introspect(repo_root: &Path) -> Result<MdbModel> {
         optionlist_header,
         template_vars: Vec::new(),
     })
+}
+
+/// The struct that actually defines a table's TOML schema: the private
+/// `<Name>Raw` wire twin when meta.rs has one, else the struct itself. serde
+/// refuses to combine `deny_unknown_fields` with `flatten`, so `Universe`
+/// keeps its wire shape (and its key docs) in `UniverseRaw`.
+fn wire_struct<'a>(
+    structs: &HashMap<String, &'a syn::ItemStruct>,
+    name: &str,
+) -> Option<&'a syn::ItemStruct> {
+    structs
+        .get(&format!("{name}Raw"))
+        .or_else(|| structs.get(name))
+        .copied()
 }
 
 /// Map a struct name to its TOML path (for meta.rs structs)
@@ -208,37 +222,38 @@ fn field_to_mdb_field(field: &Field, parent_struct: &syn::ItemStruct) -> Result<
 fn extract_toml_key(field: &Field, parent_struct: &syn::ItemStruct) -> Result<String> {
     let field_name = field.ident.as_ref().unwrap().to_string();
 
-    // Check for #[serde(rename = "...")]
-    for attr in &field.attrs {
-        if let syn::Meta::List(list) = &attr.meta
-            && list.path.is_ident("serde")
-            && let Ok(syn::Meta::NameValue(nv)) = list.parse_args::<syn::Meta>()
-            && nv.path.is_ident("rename")
-            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit_str), .. }) = &nv.value
-        {
-            return Ok(lit_str.value());
-        }
+    // #[serde(rename = "...")] on the field wins outright.
+    if let Some(name) = serde_string_arg(&field.attrs, "rename") {
+        return Ok(name);
     }
 
-    // Check parent struct for #[serde(rename_all = "kebab-case")]
-    let mut rename_all_kebab = false;
-    for attr in &parent_struct.attrs {
+    // Otherwise the parent's #[serde(rename_all = "kebab-case")], which shares
+    // its attribute with siblings like `deny_unknown_fields`.
+    let kebab = serde_string_arg(&parent_struct.attrs, "rename_all").as_deref() == Some("kebab-case");
+    Ok(if kebab { to_kebab_case(&field_name) } else { field_name })
+}
+
+/// The string value of one `#[serde(<name> = "…")]` argument, wherever it sits
+/// in a multi-argument serde attribute.
+fn serde_string_arg(attrs: &[Attribute], name: &str) -> Option<String> {
+    for attr in attrs {
         if let syn::Meta::List(list) = &attr.meta
             && list.path.is_ident("serde")
-            && let Ok(syn::Meta::NameValue(nv)) = list.parse_args::<syn::Meta>()
-            && nv.path.is_ident("rename_all")
-            && let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit_str), .. }) = &nv.value
-            && lit_str.value() == "kebab-case"
+            && let Ok(args) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
         {
-            rename_all_kebab = true;
+            for arg in args {
+                if let syn::Meta::NameValue(nv) = arg
+                    && nv.path.is_ident(name)
+                    && let syn::Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value
+                {
+                    return Some(lit_str.value());
+                }
+            }
         }
     }
-
-    if rename_all_kebab {
-        Ok(to_kebab_case(&field_name))
-    } else {
-        Ok(field_name)
-    }
+    None
 }
 
 /// Convert snake_case to kebab-case

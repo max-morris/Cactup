@@ -1,9 +1,10 @@
 //! Job submission & scheduler abstraction (spec §10, §8.6).
 //!
 //! Everything is driven by the machine `meta.toml` scheduler keys: `submit`
-//! (job id parsed via `submit-pattern` group 1), `get-status` classified by
-//! the `*-pattern` regexes into R/Q/H/U/E, and `stop`. Status is queried
-//! live, never stored (D4).
+//! (job id parsed via `submit-pattern` group 1), its optional wait-for-the-job
+//! flavour `blocking-submit`, `get-status` classified by the `*-pattern`
+//! regexes into R/Q/H/U/E, and `stop`. Status is queried live, never stored
+//! (D4).
 
 // Consumed by the Phase-3 SIM/TEST streams; unused until then.
 
@@ -126,6 +127,78 @@ impl<'m> Scheduler<'m> {
                 anyhow!("could not parse a job id from the submit output via {pattern:?}:\n{output}")
             })?;
         Ok(job_id)
+    }
+
+    /// Submit and wait (§10): run the machine's `blocking-submit` command —
+    /// the analogue of `submit` that returns only once the job has *finished*
+    /// (`sbatch --wait`, `qsub -W block=true`) — handing the job id to
+    /// `on_job_id` the moment a line of output matches `submit-pattern`
+    /// rather than at the end. Reporting the id from inside the wait is what
+    /// keeps a blocking submission recoverable: the caller records it while
+    /// the job is still running, so a Ctrl-C or a crash partway through a
+    /// multi-hour build cannot leave a real queued job with nothing on disk
+    /// naming it.
+    ///
+    /// How early that happens is the submit command's own business. One that
+    /// prints the id and only then blocks keeps it in its stdio buffer until
+    /// it exits unless it flushes (piped stdout is block-buffered, and
+    /// `sbatch --wait` does not flush), in which case the id simply arrives at
+    /// the end. Both orders work; only the recoverability window differs.
+    ///
+    /// The command's exit status is deliberately NOT the job's verdict —
+    /// `sbatch --wait` relays the job's exit code, but what the job really did
+    /// is whatever the cactup running on the compute node recorded, which the
+    /// caller reads back from the attempt. A non-zero exit matters only when
+    /// no job id ever appeared: then the submission itself is what failed.
+    pub fn submit_blocking(
+        &self,
+        vars: &VarSet,
+        universe: Option<(&str, &Universe)>,
+        on_job_id: &mut dyn FnMut(&str) -> Res<()>,
+    ) -> Res<String> {
+        let submit = self.command_for(
+            "blocking-submit",
+            self.meta.scheduler.blocking_submit.as_deref(),
+            vars,
+            universe.map(|(name, _)| name),
+        )?;
+        let command = self.command_in(&submit, universe.map(|(_, u)| u), vars)?;
+
+        let pattern = self.meta.scheduler.submit_pattern.as_deref().unwrap_or("(.*)");
+        let regex = Regex::new(pattern).with_context(|| format!("invalid submit-pattern {pattern:?}"))?;
+
+        let mut job_id: Option<String> = None;
+        let waited = stream_until_exit(command, &submit, &mut |line| {
+            if job_id.is_some() {
+                return Ok(());
+            }
+            let Some(id) = regex
+                .captures(line.trim())
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim().to_owned())
+                .filter(|id| !id.is_empty())
+            else {
+                return Ok(());
+            };
+            on_job_id(&id)?;
+            job_id = Some(id);
+            Ok(())
+        })?;
+
+        if let Some(id) = job_id {
+            return Ok(id);
+        }
+        // No job id at all. Name which of the three ways it went wrong: the
+        // caller has nothing else left to go on.
+        match waited {
+            Waited::Interrupted => bail!("interrupted before the scheduler reported a job id"),
+            Waited::Exited { status, output } if !status.success() => {
+                bail!("the blocking submit exited unsuccessfully ({status}):\n{output}")
+            }
+            Waited::Exited { output, .. } => bail!(
+                "could not parse a job id from the blocking-submit output via {pattern:?}:\n{output}"
+            ),
+        }
     }
 
     /// The variables a scheduler query may reference: the job id, plus the
@@ -275,36 +348,143 @@ impl<'m> Scheduler<'m> {
         Ok(if env.is_empty() { cmd } else { format!("{env}\n{cmd}") })
     }
 
+    /// The `Command` that runs `inner`, optionally wrapped in a universe
+    /// (§4.8) — shared by the capturing [`Self::run`] and the streaming
+    /// [`Self::submit_blocking`], so both wrap a snippet identically.
+    fn command_in(&self, inner: &str, universe: Option<&Universe>, vars: &VarSet) -> Res<Command> {
+        Ok(match universe {
+            None => sh_command(inner),
+            Some(u) => match u.wrap(vars, inner)? {
+                WrappedCommand::Shell(cmd) => sh_command(&cmd),
+                WrappedCommand::Argv(argv) => {
+                    let mut command = Command::new(&argv[0]);
+                    command.args(&argv[1..]);
+                    command
+                }
+            },
+        })
+    }
+
     /// Run a snippet, optionally wrapped in a universe. stdout+stderr are
     /// captured together (submit templates conventionally end in `2>&1`, but
     /// a scheduler that ignores that convention still gets its message seen).
     fn run(&self, inner: &str, universe: Option<&Universe>, vars: &VarSet) -> Res<String> {
-        match universe {
-            None => self.spawn_sh(inner, false),
-            Some(u) => match u.wrap(vars, inner)? {
-                WrappedCommand::Shell(cmd) => self.spawn_sh(&cmd, false),
-                WrappedCommand::Argv(argv) => {
-                    let mut command = Command::new(&argv[0]);
-                    command.args(&argv[1..]);
-                    crate::shell::trace_command(&command);
-                    let output = command
-                        .output()
-                        .with_context(|| format!("Failed to run {}", argv[0]))?;
-                    collect_output(output, false)
-                }
-            },
-        }
+        let mut command = self.command_in(inner, universe, vars)?;
+        crate::shell::trace_command(&command);
+        let output = command
+            .output()
+            .with_context(|| format!("Failed to run: {inner}"))?;
+        collect_output(output, false)
     }
 
     fn spawn_sh(&self, cmd: &str, tolerate_failure: bool) -> Res<String> {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", cmd]);
+        let mut command = sh_command(cmd);
         crate::shell::trace_command(&command);
         let output = command
             .output()
             .with_context(|| format!("Failed to run: {cmd}"))?;
         collect_output(output, tolerate_failure)
     }
+}
+
+/// `/bin/sh -c <cmd>` — the one shape every scheduler snippet runs as.
+fn sh_command(cmd: &str) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", cmd]);
+    command
+}
+
+/// How a streamed child stopped being waited on.
+enum Waited {
+    Exited { status: std::process::ExitStatus, output: String },
+    /// Ctrl-C cut the wait short. Nothing was done to the job itself — only
+    /// the local process that was watching it went away.
+    Interrupted,
+}
+
+/// How often the wait loop wakes to drain output and re-check the child. A
+/// blocking submit sits here for as long as the job runs, so what a round
+/// costs is the wake-up alone — no filesystem or scheduler traffic — and
+/// 100 ms buys an instant interrupt response for nothing.
+const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Run `command` to completion, feeding every line it writes (stdout and
+/// stderr alike) to `line` as it arrives, and returning the exit status with
+/// the full combined output.
+///
+/// The wait is interrupt-aware, as any long-running child's must be: the flag
+/// is polled every [`WAIT_POLL`], and a child that has not taken the
+/// terminal's own SIGINT a couple of seconds later is killed — the same shape
+/// `sim::start::spawn_and_wait` uses. Interrupting stops only the *watching*:
+/// a queued job carries on regardless, which is why this reports
+/// `Interrupted` instead of failing, and leaves the verdict to the caller.
+fn stream_until_exit(
+    mut command: Command,
+    what: &str,
+    line: &mut dyn FnMut(&str) -> Res<()>,
+) -> Res<Waited> {
+    use std::io::BufRead;
+
+    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    crate::shell::trace_command(&command);
+    let mut child = command.spawn().with_context(|| format!("Failed to run: {what}"))?;
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut readers = Vec::new();
+    for src in [
+        Box::new(child.stdout.take().expect("stdout piped")) as Box<dyn std::io::Read + Send>,
+        Box::new(child.stderr.take().expect("stderr piped")),
+    ] {
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            for l in std::io::BufReader::new(src).lines() {
+                // A send fails only once the receiver is gone, i.e. nobody is
+                // listening any more — stop reading rather than spin.
+                if l.map(|l| tx.send(l).is_err()).unwrap_or(true) {
+                    break;
+                }
+            }
+        }));
+    }
+    // The parent's own sender has to go, or the final drain never ends.
+    drop(tx);
+
+    let mut output = String::new();
+    let mut interrupted_at: Option<std::time::Instant> = None;
+    let status = loop {
+        while let Ok(l) = rx.try_recv() {
+            output.push_str(&l);
+            output.push('\n');
+            line(&l)?;
+        }
+        if let Some(status) = child.try_wait().with_context(|| format!("waiting for: {what}"))? {
+            break status;
+        }
+        if gix::interrupt::is_triggered() {
+            let since = interrupted_at.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() > std::time::Duration::from_secs(2) {
+                let _ = child.kill();
+            }
+        }
+        std::thread::sleep(WAIT_POLL);
+    };
+
+    // The child is gone, so its readers see EOF and drop their senders: this
+    // blocking drain terminates on its own, and cannot lose the last lines.
+    while let Ok(l) = rx.recv() {
+        output.push_str(&l);
+        output.push('\n');
+        line(&l)?;
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+
+    Ok(if interrupted_at.is_some() {
+        Waited::Interrupted
+    } else {
+        Waited::Exited { status, output }
+    })
 }
 
 fn collect_output(output: std::process::Output, tolerate_failure: bool) -> Res<String> {
@@ -412,6 +592,123 @@ mod tests {
         assert_eq!(
             sched.submit(&vars, Some(("u", &m.universes["u"]))).unwrap(),
             "id=s.sh-uni"
+        );
+    }
+
+    /// The point of the streaming parse (§10): the job id has to reach the
+    /// caller while the job is still running, not once the blocking command
+    /// finally returns — that window is the whole reason a Ctrl-C during a
+    /// multi-hour blocking build does not orphan the job.
+    #[test]
+    fn blocking_submit_reports_the_job_id_before_the_command_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let done = dir.path().join("done");
+        let m = meta(&format!(
+            r#"
+            blocking-submit = "echo 'Submitted batch job 4242'; sleep 0.4; touch {done}"
+            submit-pattern = 'Submitted batch job ([0-9]+)'
+            "#,
+            done = done.display()
+        ));
+
+        let mut seen_while_running = None;
+        let job_id = Scheduler::new(&m)
+            .submit_blocking(&VarSet::new(), None, &mut |id| {
+                seen_while_running = Some((id.to_owned(), done.exists()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(job_id, "4242");
+        let (reported, finished_already) = seen_while_running.expect("the job id was never reported");
+        assert_eq!(reported, "4242");
+        assert!(!finished_already, "the id was only reported after the command had finished");
+        assert!(done.exists(), "submit_blocking returned before the command was done");
+    }
+
+    /// `sbatch --wait` relays the *job's* exit code, which says nothing about
+    /// whether cactup's own build on the compute node succeeded — the attempt's
+    /// recorded outcome is the only authority on that (§7.9). So a non-zero
+    /// exit with a job id in hand is not an error here.
+    #[test]
+    fn blocking_submit_ignores_a_nonzero_exit_once_it_has_a_job_id() {
+        let m = meta(
+            r#"
+            blocking-submit = "echo '[JOB-7]'; exit 3"
+            submit-pattern = '\[(JOB-[^\]]*)\]'
+            "#,
+        );
+        assert_eq!(
+            Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap(),
+            "JOB-7"
+        );
+    }
+
+    /// No job id AND a failed command is a failed *submission* — the one case
+    /// where the exit status does mean something. stderr is captured with
+    /// stdout so the scheduler's complaint actually reaches the user.
+    #[test]
+    fn blocking_submit_without_a_job_id_reports_the_submission_failure() {
+        let m = meta(
+            r#"
+            blocking-submit = "echo 'sbatch: error: invalid partition' >&2; exit 1"
+            submit-pattern = 'Submitted batch job ([0-9]+)'
+            "#,
+        );
+        let err = format!(
+            "{:#}",
+            Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap_err()
+        );
+        assert!(err.contains("exited unsuccessfully"), "{err}");
+        assert!(err.contains("invalid partition"), "{err}");
+    }
+
+    /// A command that succeeded but printed nothing the pattern matches is a
+    /// different failure, and says so.
+    #[test]
+    fn blocking_submit_that_prints_no_job_id_says_which_pattern_missed() {
+        let m = meta(
+            r#"
+            blocking-submit = "echo nothing useful here"
+            submit-pattern = 'Submitted batch job ([0-9]+)'
+            "#,
+        );
+        let err = format!(
+            "{:#}",
+            Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap_err()
+        );
+        assert!(err.contains("could not parse a job id"), "{err}");
+        assert!(err.contains("Submitted batch job"), "{err}");
+    }
+
+    /// The key is optional; a machine without it is asked to run a command it
+    /// never declared, and the error names the key rather than the scheduler.
+    #[test]
+    fn blocking_submit_names_the_missing_key() {
+        let m = meta(r#"submit = "echo 1""#);
+        let err = format!(
+            "{:#}",
+            Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap_err()
+        );
+        assert!(err.contains("[scheduler].blocking-submit"), "{err}");
+    }
+
+    /// Substitution and the submit-phase env-setup apply exactly as they do to
+    /// `submit` — the two keys are the same command in two flavours.
+    #[test]
+    fn blocking_submit_substitutes_and_prepends_env_like_submit() {
+        let mut m = meta(
+            r#"
+            blocking-submit = "echo submitted as $CACTUP_TEST_MARKER-@SCRIPTFILE@"
+            submit-pattern = "as (.*)"
+            "#,
+        );
+        m.environment.env_setup = Some("CACTUP_TEST_MARKER=77".to_owned());
+        let mut vars = VarSet::new();
+        vars.set("SCRIPTFILE", "build.sh");
+        assert_eq!(
+            Scheduler::new(&m).submit_blocking(&vars, None, &mut |_| Ok(())).unwrap(),
+            "77-build.sh"
         );
     }
 

@@ -122,6 +122,7 @@ wrapper-argv = [
 [scheduler]
 # Grab stderr so we can see submit problems in the log.
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
@@ -142,7 +143,7 @@ max-walltime    = "72:00:00"
 # (design §11.6). The compute-node re-entry and `test submit` are exempt.
 allocation-env  = "SLURM_JOB_ID"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 # Deep Bayou's one real SLURM partition. A sole queue is the implicit default
 # (design §4.2) — no `default = true` needed. Both GPU (native, et-sing) and

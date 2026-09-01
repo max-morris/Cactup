@@ -52,7 +52,7 @@ disabled-thorns = [
 #exechost        =
 #exechostpattern =
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 # Placeholder (the old ini declared no queue); override with a real partition.
 [queues.NO_QUEUE]

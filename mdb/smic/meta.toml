@@ -49,6 +49,7 @@ export PATH=/project/sbrandt/cmake-3.28.0-rc5/bin:$PATH
 
 [scheduler]
 submit          = "( cd $(dirname @SCRIPTFILE@) && qsub $(basename @SCRIPTFILE@) )"
+# No blocking-submit: Torque's qsub has no blocking mode (cactup emulates it).
 # set inside a PBS allocation; gates `test run` (design §11.6)
 allocation-env  = "PBS_JOBID"
 get-status      = "qstat @JOB_ID@"
@@ -63,7 +64,7 @@ exec-host-pattern = 'exec_host = (\w+)/'
 # Machine-level fallback ceiling (design §4.2); the single queue relies on it.
 max-walltime    = "72:00:00"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 [queues.checkpt]
 gpu     = false

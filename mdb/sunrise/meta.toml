@@ -50,6 +50,7 @@ export LD_LIBRARY_PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/lib64:/cfs/home/pedi549
 
 [scheduler]
 submit          = "sbatch @SCRIPTFILE@; sleep 5"
+blocking-submit = "sbatch --wait @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
@@ -66,7 +67,7 @@ exec-host        = "hostname"
 exec-host-pattern = '^(\S+)'
 # No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 [queues.rossw]
 gpu     = false

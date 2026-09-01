@@ -132,7 +132,11 @@ max-walltime = "24:00:00"
 
 > **Note:** `allocation` is **not** a `[scheduler]` key — the account to charge
 > is a per-user *knob* (`cactup knob allocation my_project`), not part of the
-> machine definition. Any unknown key here is silently ignored.
+> machine definition. Writing it here is an error, not a no-op: every
+> `meta.toml` table rejects keys cactup does not know, naming the offender and
+> listing the accepted spellings. That is deliberate — a typo like
+> `max-cpu-per-node` should fail loudly rather than silently do nothing. Keep a
+> value cactup has no key for in a `#` comment.
 
 Test each pattern against real scheduler output:
 
