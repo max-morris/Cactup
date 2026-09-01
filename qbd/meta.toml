@@ -86,6 +86,7 @@ env-setup = """
 [scheduler]
 # Grab stderr so we can see submit problems in the log.
 submit           = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit  = "sbatch --wait @SCRIPTFILE@ 2>&1"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status       = "squeue -j @JOB_ID@"

@@ -121,6 +121,8 @@ export AMREX_INSTALL_DIR=${CACTUS_EXTERNALS}/install/amrex-hip
 # for status/stop. @STDOUT_FILE@/@STDERR_FILE@ default to
 # @RUNDIR@/@SIMULATION_NAME@.{out,err} unless -o/-e are given (design §8.3.1).
 submit            = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit   = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 get-status        = "ps @JOB_ID@"
 # Kill the whole set of processes descending from @JOB_ID@, not just the
 # top-level one.
