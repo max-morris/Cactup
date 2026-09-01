@@ -80,7 +80,7 @@ exec-host-pattern = '^(\S+)'
 # has 0:30:0.
 max-walltime    = "48:00:00"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 [queues.cpu]
 gpu     = false

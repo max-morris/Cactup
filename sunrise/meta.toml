@@ -66,7 +66,7 @@ exec-host        = "hostname"
 exec-host-pattern = '^(\S+)'
 # No maxwalltime upstream: the built-in one-year fallback applies (§4.2).
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 [queues.rossw]
 gpu     = false

@@ -63,7 +63,7 @@ exec-host-pattern = '^(\S+)'
 # hours is likely more sensible.
 max-walltime    = "168:00:00"
 # historical default allocation; set the allocation knob instead
-allocation      = "NO_ALLOCATION"
+# allocation      = "NO_ALLOCATION"
 
 # The submitscript requests 1 GPU per MPI rank (up to 8 per node) and
 # 2T/112 of RAM per used core per node (upstream comments); CUDA build.
