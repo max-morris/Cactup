@@ -72,6 +72,9 @@ make      = "make -j@MAKEJOBS@"
 # node's 72 cores: enough to build CarpetX in a sensible time, restrained enough
 # to stay a good neighbor on a shared closet-cluster node.
 make-jobs = 32
+disabled-thorns = [
+    "ExternalLibraries/PAPI"  # currently does not build under hipcc
+]
 
 [environment]
 # The upstream envsetup heredoc verbatim, except `source` → `.` and the two
