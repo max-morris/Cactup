@@ -163,6 +163,16 @@ impl TestRun {
         LinkLock::acquire(&self.cactup_dir().join("test.lock"))
     }
 
+    /// The same lock, waiting for a live holder (the compute-node handoff can
+    /// start while the login-side `test submit` still holds it).
+    // §11.6
+    pub fn lock_wait(&self) -> Res<LinkLock> {
+        LinkLock::acquire_wait(
+            &self.cactup_dir().join("test.lock"),
+            std::time::Duration::from_secs(crate::lock::HANDOFF_WAIT_SECS),
+        )
+    }
+
     pub fn store_meta(&self) -> Res<()> {
         write_toml(&Self::meta_path(&self.dir), &self.meta)
     }

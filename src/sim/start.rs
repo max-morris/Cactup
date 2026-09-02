@@ -627,9 +627,10 @@ fn run_compute(args: &SimRunArgs, sim_dir: &Path, id: u32) -> Res<()> {
     let sim = Simulation::open(&args.start.sim, sim_dir)?;
     let mut r = Restart::load(&sim.dir, id)?;
 
-    // Chain handoff (§8.3.2), under the per-simulation lock.
+    // Chain handoff (§8.3.2), under the per-simulation lock — waiting for the
+    // submitter to let go of it if the job started that quickly.
     {
-        let _lock = sim.lock()?;
+        let _lock = sim.lock_wait()?;
         restart::handoff_active(&sim.dir, id)?;
     }
 

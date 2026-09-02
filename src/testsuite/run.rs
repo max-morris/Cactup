@@ -397,7 +397,7 @@ fn start_impl(
 fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
     let mut run = TestRun::open(dir)?;
     {
-        let _lock = run.lock()?;
+        let _lock = run.lock_wait()?;
         // The set was activated at submit time; re-assert defensively.
         fs::create_dir_all(results_dir(dir, results_id))?;
         activate_results(dir, results_id)?;

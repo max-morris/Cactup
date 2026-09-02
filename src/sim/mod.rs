@@ -180,6 +180,17 @@ impl Simulation {
         LinkLock::acquire(&self.cactup_dir().join("sim.lock"))
     }
 
+    /// The same lock, but waiting for a live holder: the compute-node handoff
+    /// can start while the login-side `submit` still holds it for its
+    /// post-submission bookkeeping.
+    // §8.3.1
+    pub fn lock_wait(&self) -> Res<LinkLock> {
+        LinkLock::acquire_wait(
+            &self.cactup_dir().join("sim.lock"),
+            std::time::Duration::from_secs(crate::lock::HANDOFF_WAIT_SECS),
+        )
+    }
+
     fn store_meta(&self) -> Res<()> {
         write_toml(&self.cactup_dir().join("simulation.toml"), &self.meta)
     }

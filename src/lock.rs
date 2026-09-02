@@ -32,6 +32,11 @@ pub const HEARTBEAT_SECS: u64 = 60;
 pub const HEARTBEAT_STALE_SECS: u64 = 300;
 /// A lock whose mtime has not advanced for this long may be broken (cross-host).
 pub const LOCK_STALE_SECS: u64 = 900;
+/// How long a compute-node handoff waits for the submitter to release the
+/// per-simulation / per-test-run lock (§8.3.1, §11.6) before giving up.
+/// Well under LOCK_STALE_SECS, so a genuinely dead holder is still only ever
+/// broken by the staleness rules, never by this wait running out.
+pub const HANDOFF_WAIT_SECS: u64 = 300;
 
 /// How often try_acquire retries after finding a vanished or breakable lock
 /// before giving up. Each retry re-runs the full link() protocol.
@@ -105,6 +110,38 @@ impl LinkLock {
                  {HEARTBEAT_SECS}s.",
                 path.display()
             ),
+        }
+    }
+
+    /// Acquire the lock at `path`, waiting up to `timeout` for a live holder to
+    /// release it (one probe per second, interrupt-aware). This is the form the
+    /// compute-node handoffs use: the submitter still holds the simulation's
+    /// (or test run's) lock for a moment after the scheduler has accepted the
+    /// job, and on an idle partition the job can start inside that window —
+    /// failing fast there aborted the run on nothing more than the submitter's
+    /// own bookkeeping. A holder that never releases still fails, naming it.
+    // §2.3 item 3, §8.3.1 handoff.
+    pub fn acquire_wait(path: &Path, timeout: Duration) -> Res<LinkLock> {
+        let started = std::time::Instant::now();
+        loop {
+            let holder = match Self::acquire_inner(path)? {
+                Ok(lock) => return Ok(lock),
+                Err(holder) => holder,
+            };
+            if gix::interrupt::is_triggered() {
+                bail!("interrupted while waiting for lock {}", path.display());
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                bail!(
+                    "{} is still locked by {holder} after waiting {}s. If that process \
+                     is gone, the lock will expire on its own; a live holder re-stamps \
+                     it every {HEARTBEAT_SECS}s.",
+                    path.display(),
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep((timeout - elapsed).min(Duration::from_secs(1)));
         }
     }
 
@@ -459,6 +496,39 @@ mod tests {
 
         let err = LinkLock::acquire(&path).unwrap_err().to_string();
         assert!(err.contains(&std::process::id().to_string()), "error names the pid: {err}");
+    }
+
+    #[test]
+    fn acquire_wait_outlasts_a_short_lived_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+
+        let held = LinkLock::acquire(&path).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        // Plain acquire fails fast while the holder is live ...
+        assert!(LinkLock::try_acquire(&path).unwrap().is_none());
+        // ... the waiting form outlasts it.
+        let lock = LinkLock::acquire_wait(&path, Duration::from_secs(10)).unwrap();
+        releaser.join().unwrap();
+        assert!(path.exists());
+        drop(lock);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn acquire_wait_times_out_on_a_live_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+
+        let _held = LinkLock::acquire(&path).unwrap();
+        let started = std::time::Instant::now();
+        let err = LinkLock::acquire_wait(&path, Duration::from_millis(250)).unwrap_err().to_string();
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(err.contains(&std::process::id().to_string()), "error names the holder: {err}");
+        assert!(err.contains("after waiting"), "error says it waited: {err}");
     }
 
     #[test]
