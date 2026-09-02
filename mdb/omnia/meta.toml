@@ -72,12 +72,6 @@ make      = "make -j@MAKEJOBS@"
 # node's 72 cores: enough to build CarpetX in a sensible time, restrained enough
 # to stay a good neighbor on a shared closet-cluster node.
 make-jobs = 32
-disabled-thorns = [
-    "CarpetX/Algo",
-    "CarpetX/PDESolvers",
-    "CarpetX/PoissonX",
-]
-# The old ini's `enabled-thorns` heredoc was empty; omitted.
 
 [environment]
 # The upstream envsetup heredoc verbatim, except `source` → `.` and the two
