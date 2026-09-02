@@ -193,7 +193,10 @@ copies, rewritten on every build, so your edits there would be overwritten:
 
 - `cactup-thornlist.th` — cactup's processed copy, with the machine's
   `disabled-thorns`/`enabled-thorns` toggles applied. This is what cactup hands
-  to Cactus.
+  to Cactus. If your thornlist enables a thorn that the machine (or the
+  optionlist variant you're building) lists in `disabled-thorns`, the build
+  prints a yellow warning naming the thorn and which of the two disabled it —
+  the thorn will *not* be built, and that warning is your only notice.
 - `ThornList` — Cactus's own copy of that file, made by its build system. This
   is the one Cactus compiles from.
 - `<installation root>/installation-source.th` — the pristine as-fetched copy

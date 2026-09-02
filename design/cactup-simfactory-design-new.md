@@ -2125,6 +2125,16 @@ is processed at build time: each thorn named in the machine's
 prefix. The machine arrays come from `meta.toml` (§4.2). This lets a cluster
 that can't build a given thorn opt it out without editing the shared thornlist.
 
+**The override is announced.** When the source thornlist *actively enables* a
+thorn (an uncommented thorn line — a line the list already carries as
+`#DISABLED` is not a conflict) that a `disabled-thorns` array then switches
+back off, `build prepare` prints a loud yellow warning naming each such thorn,
+the `disabled-thorns` entry that matched it, and which layer that entry came
+from: the machine (§7.5) or the selected optionlist variant (§7.8). Without it
+the drop is completely silent — the user asked for the thorn, the processed
+list quietly omits it, and the absence only surfaces much later as a missing
+thorn at runtime. The warning is informational; it never fails the build.
+
 **Two artifacts per config.** The processed text is written to
 `configs/<name>/cactup-thornlist.th` and handed to Cactus as `THORNLIST=`, which
 Cactus copies to its own `configs/<name>/ThornList` — the file its make rules

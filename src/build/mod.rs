@@ -396,14 +396,18 @@ pub fn retarget_recorded_thornlist(
     Ok(retargeted)
 }
 
+/// Whether an `enabled-thorns`/`disabled-thorns` entry names `thorn`: an
+/// entry matches a thorn line's full `arrangement/Thorn`, or its bare thorn
+/// name after the `/`.
+fn thorn_spec_matches(spec: &str, thorn: &str) -> bool {
+    thorn == spec || thorn.rsplit('/').next() == Some(spec)
+}
+
 /// Apply the §7.5 (D8) machine thorn toggles to a thornlist's contents:
 /// `disabled-thorns` entries get a `#DISABLED ` prefix, `enabled-thorns`
 /// entries get it removed. Entries match a thorn line's `arrangement/Thorn`
 /// (or bare thorn name after `/`).
 pub fn apply_thorn_toggles(thornlist: &str, enabled: &[String], disabled: &[String]) -> String {
-    let matches = |spec: &str, thorn: &str| -> bool {
-        thorn == spec || thorn.rsplit('/').next() == Some(spec)
-    };
     thornlist
         .lines()
         .map(|line| {
@@ -412,9 +416,11 @@ pub fn apply_thorn_toggles(thornlist: &str, enabled: &[String], disabled: &[Stri
             if thorn.is_empty() || thorn.starts_with('#') || thorn.starts_with('!') {
                 return line.to_owned();
             }
-            if disabled.iter().any(|d| matches(d, thorn)) {
+            if disabled.iter().any(|d| thorn_spec_matches(d, thorn)) {
                 format!("#DISABLED {bare}")
-            } else if line.starts_with("#DISABLED ") && enabled.iter().any(|e| matches(e, thorn)) {
+            } else if line.starts_with("#DISABLED ")
+                && enabled.iter().any(|e| thorn_spec_matches(e, thorn))
+            {
                 bare.to_owned()
             } else {
                 line.to_owned()
@@ -423,6 +429,108 @@ pub fn apply_thorn_toggles(thornlist: &str, enabled: &[String], disabled: &[Stri
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
+}
+
+/// Which source of a `disabled-thorns` entry (§7.5, §7.8) switched a thorn
+/// off — the two layers `prepare` merges, kept apart only so the warning can
+/// name the file to go edit.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DisabledBy {
+    /// The machine's own `[build].disabled-thorns` (§7.5).
+    Machine,
+    /// The selected optionlist variant's `[cactup].disabled-thorns` (§7.8).
+    Optionlist,
+}
+
+/// One thorn the source thornlist actively enables that a `disabled-thorns`
+/// entry is about to switch back off.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DisabledOverride {
+    /// The thorn as the thornlist spells it (`arrangement/Thorn`).
+    pub thorn: String,
+    /// The `disabled-thorns` entry that matched — not always equal to
+    /// `thorn`, since an entry may be a bare thorn name.
+    pub spec: String,
+    pub by: DisabledBy,
+}
+
+/// Thorns the source thornlist *explicitly enables* that the mdb then
+/// disables (§7.5 machine-level, §7.8 optionlist-level), in thornlist order.
+///
+/// `apply_thorn_toggles` performs this override silently, and a thorn the
+/// user deliberately put in their thornlist quietly missing from the built
+/// config is precisely the kind of thing that gets debugged for an hour —
+/// so `prepare` warns loudly about every one. A thorn the list already
+/// carries as `#DISABLED` is not a conflict: the list and the toggle agree.
+pub fn disabled_thorn_overrides(
+    thornlist: &str,
+    machine_disabled: &[String],
+    optionlist_disabled: &[String],
+) -> Vec<DisabledOverride> {
+    thornlist
+        .lines()
+        .filter_map(|line| {
+            // Same notion of "a thorn line" as apply_thorn_toggles, with
+            // `#DISABLED ` deliberately NOT stripped: a `#`-prefixed line is
+            // either prose or a thorn the list itself already turned off, and
+            // neither is the thornlist enabling anything.
+            let thorn = line.trim();
+            if thorn.is_empty() || thorn.starts_with('#') || thorn.starts_with('!') {
+                return None;
+            }
+            // Machine first: the variant layers on top of the machine list, so
+            // a thorn both of them disable is attributed to the machine.
+            let (spec, by) = machine_disabled
+                .iter()
+                .find(|d| thorn_spec_matches(d, thorn))
+                .map(|d| (d, DisabledBy::Machine))
+                .or_else(|| {
+                    optionlist_disabled
+                        .iter()
+                        .find(|d| thorn_spec_matches(d, thorn))
+                        .map(|d| (d, DisabledBy::Optionlist))
+                })?;
+            Some(DisabledOverride { thorn: thorn.to_owned(), spec: spec.clone(), by })
+        })
+        .collect()
+}
+
+/// Print the loud yellow warning for every thorn
+/// [`disabled_thorn_overrides`] found, naming the `disabled-thorns` entry
+/// and the layer it came from so the user knows which file to edit.
+/// Silent when there is no conflict.
+fn warn_disabled_overrides(
+    thornlist: &str,
+    machine_disabled: &[String],
+    optionlist_disabled: &[String],
+    machine_name: &str,
+    optionlist_source: &OptionlistSource,
+) {
+    let overrides = disabled_thorn_overrides(thornlist, machine_disabled, optionlist_disabled);
+    if overrides.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        format!(
+            "warning: the thornlist enables {} thorn(s) that the mdb disables — they will NOT \
+             be built:",
+            overrides.len(),
+        )
+        .yellow()
+        .bold()
+    );
+    for DisabledOverride { thorn, spec, by } in &overrides {
+        // §7.5 vs §7.8 — the two layers live in different files.
+        let source = match by {
+            DisabledBy::Machine => format!("machine {machine_name}"),
+            DisabledBy::Optionlist => format!("optionlist {optionlist_source}"),
+        };
+        println!(
+            "{}",
+            format!("  {thorn} — disabled-thorns = [\"{spec}\"] ({source})").yellow()
+        );
+    }
 }
 
 /// §7.8 rule 5: inject the effective build flags into the rendered native
@@ -1390,6 +1498,18 @@ pub fn prepare(
         .chain(&optionlist.header.disabled_thorns)
         .cloned()
         .collect();
+    // The override is silent in the processed list, so say it out loud: a
+    // thorn the user put in their thornlist on purpose, dropped from the
+    // config by the mdb, otherwise surfaces only as a mystery missing thorn
+    // at runtime. Both layers are named separately so the warning can point
+    // at the file to go edit (machine meta.toml vs. the variant's optionlist).
+    warn_disabled_overrides(
+        &thornlist.text,
+        &machine.meta.build.disabled_thorns,
+        &optionlist.header.disabled_thorns,
+        &machine.name,
+        optionlist_source,
+    );
     let thornlist_processed =
         apply_thorn_toggles(&thornlist.text, &enabled_thorns, &disabled_thorns);
 
@@ -2274,6 +2394,59 @@ mod tests {
             apply_thorn_toggles(&out, &["ML_BSSN".into()], &["CarpetX/CarpetX".into()]),
             out
         );
+    }
+
+    /// The loud-warning input: which thorns the thornlist asks for that the
+    /// mdb takes back. Only lines the list *actively* enables count, and the
+    /// layer that took it away is named so the warning can point at a file.
+    #[test]
+    fn disabled_overrides_only_count_thorns_the_list_actively_enables() {
+        let list = "!CRL_VERSION = 1.0\n\
+                    !TARGET = $ROOT\n\
+                    # ExternalLibraries/PAPI is prose here, not a thorn line\n\
+                    CactusBase/IOUtil\n\
+                    ExternalLibraries/PAPI\n\
+                    #DISABLED McLachlan/ML_BSSN\n\
+                    CarpetX/CarpetX\n\
+                    EinsteinInitialData/Meudon_Bin_BH\n";
+        let machine = ["ExternalLibraries/PAPI".to_owned(), "ML_BSSN".to_owned()];
+        let variant = ["CarpetX".to_owned(), "ExternalLibraries/PAPI".to_owned()];
+        let got = disabled_thorn_overrides(list, &machine, &variant);
+        assert_eq!(
+            got,
+            vec![
+                // Matched by its full path; the prose line above it and the
+                // `!` directives are not thorn lines.
+                DisabledOverride {
+                    thorn: "ExternalLibraries/PAPI".to_owned(),
+                    spec: "ExternalLibraries/PAPI".to_owned(),
+                    by: DisabledBy::Machine,
+                },
+                // Bare-name entry, and the variant is the only layer that
+                // disables it.
+                DisabledOverride {
+                    thorn: "CarpetX/CarpetX".to_owned(),
+                    spec: "CarpetX".to_owned(),
+                    by: DisabledBy::Optionlist,
+                },
+            ],
+            "ML_BSSN is already #DISABLED (no conflict), Meudon_Bin_BH is untouched, and PAPI \
+             is attributed to the machine even though the variant disables it too"
+        );
+        // Every reported thorn really does get switched off downstream.
+        let processed = apply_thorn_toggles(list, &[], &{
+            let mut all = machine.to_vec();
+            all.extend(variant.iter().cloned());
+            all
+        });
+        for o in &got {
+            assert!(
+                processed.lines().any(|l| l == format!("#DISABLED {}", o.thorn)),
+                "{} should be disabled in:\n{processed}",
+                o.thorn
+            );
+        }
+        assert!(disabled_thorn_overrides(list, &[], &[]).is_empty(), "no disabled-thorns, no warning");
     }
 
     #[test]
