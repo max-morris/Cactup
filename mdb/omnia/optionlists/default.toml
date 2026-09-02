@@ -31,14 +31,14 @@ compatible-queues = ["local"]
 
 # Whenever this version string changes, the application is configured
 # and rebuilt from scratch
-VERSION = "omnia-hip-2026-07-27"
+VERSION = "omnia-hip-2026-09-02"
 
 CPP = "cpp"
 FPP = "cpp"
-CC  = "hipcc --offload-arch=gfx90a"
-CXX = "hipcc --offload-arch=gfx90a"
+CC  = "hipcc"
+CXX = "hipcc"
 F90 = "gfortran"
-LD  = "hipcc --offload-arch=gfx90a"
+LD  = "hipcc"
 
 CPPFLAGS = "-DSIMD_CPU"
 FPPFLAGS = "-traditional"
@@ -46,7 +46,7 @@ CFLAGS   = "-g -std=gnu11 -Wno-unused-command-line-argument"
 CXXFLAGS = "-g -std=c++17 -Wno-unused-command-line-argument -Wno-pass-failed"
 F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
 
-LDFLAGS = "-fgpu-rdc --hip-link"
+LDFLAGS = "--offload-arch=gfx90a -fgpu-rdc --hip-link"
 # gfortran: runtime needed by thorns with Fortran sources (e.g. TestArrayGroup),
 #   since the final link is done via hipcc/clang++, not gfortran.
 # hiprand/rocrand: AMReX's HIP backend (AMReX_Random.cpp) calls hipRAND directly.
