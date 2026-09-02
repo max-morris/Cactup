@@ -15,7 +15,9 @@ gpu               = true
 compatible-queues = ["gpu2", "gpu4"]
 
 [options]
-VERSION = "qbd-2026-07-07"
+# -mf16c: hardware binary16<->binary32 conversion for the mixed-precision
+# CCTK_REAL2 host code; without it every _Float16 conversion is a libgcc call.
+VERSION = "qbd-2026-09-02"
 
 CPP = "cpp"
 FPP = "cpp"
@@ -24,9 +26,9 @@ CXX = "/usr/bin/g++"
 F90 = "/usr/bin/gfortran"
 
 FPPFLAGS = "-traditional"
-CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
-CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
-F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
 LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
 
 LIBS    = "stdc++fs gfortran cudart_static curand_static culibos dl rt pthread"

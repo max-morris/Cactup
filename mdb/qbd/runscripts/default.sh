@@ -34,6 +34,33 @@ export OMP_PLACES=cores
 export OMP_STACKSIZE=8192
 env | sort > .cactup/ENVIRONMENT
 
+# Optional profiler wrapper (mixed-precision performance work). Set the
+# variable in the shell that runs `cactup sim submit`; sbatch propagates the
+# environment to the job. Unset: this block is inert.
+#   CACTUP_PROFILE=nsys   one nsys report per task (CUDA + NVTX + MPI)
+#   CACTUP_PROFILE=ncu    ncu on task 0 only: 40 launches after skipping 20,
+#                         SpeedOfLight + MemoryWorkloadAnalysis sections;
+#                         CACTUP_NCU_KERNELS overrides the kernel-name regex
+PROF_WRAPPER=
+case "${CACTUP_PROFILE:-}" in
+  nsys)
+    PROF_WRAPPER="nsys profile --trace=cuda,nvtx,mpi --sample=none --cpuctxsw=none --cuda-memory-usage=true --force-overwrite=true -o profile.task%q{SLURM_PROCID}" ;;
+  ncu)
+    cat > ./prof-ncu.sh <<'EOS'
+#!/bin/bash
+if [ "${SLURM_PROCID:-0}" = 0 ]; then
+  exec ncu --target-processes all --launch-skip 20 --launch-count 40 \
+    --kernel-name "regex:${CACTUP_NCU_KERNELS:-copy|FillBoundary|ParallelFor}" \
+    --section SpeedOfLight --section MemoryWorkloadAnalysis \
+    --force-overwrite -o profile.ncu "$@@"
+else
+  exec "$@@"
+fi
+EOS
+    chmod +x ./prof-ncu.sh
+    PROF_WRAPPER=./prof-ncu.sh ;;
+esac
+
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
 
@@ -41,7 +68,7 @@ time srun -u --overlap -n @TASKS@ \
     --cpus-per-task=@CPUS_PER_TASK@ \
     --gpus-per-task=@GPUS_PER_TASK@ \
     --gres-flags=allow-task-sharing \
-    @EXECUTABLE@ -L 3 @PARFILE@
+    ${PROF_WRAPPER} @EXECUTABLE@ -L 3 @PARFILE@
 
 echo "Stopping:"
 date
