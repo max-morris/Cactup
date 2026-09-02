@@ -12,6 +12,7 @@
 
 [cactup]
 gpu               = true
+default           = true      # `cpu` is the other variant; this one stays the implicit choice
 compatible-queues = ["gpu2", "gpu4"]
 
 [options]

@@ -131,17 +131,51 @@ max-gpus-per-node = 4
 # 4-GPU complement the --gres branch below reserves regardless.
 default-cpus-per-task = 16
 
+# CPU partitions (sinfo, 2026-09-02): the 480 CPU nodes qbd[001-480] (64 cores,
+# 256 GB) are reachable through three overlapping partitions — `single` (7-day
+# limit; site policy: one node per job, enforced in submitscripts/cpu.py),
+# `workq` and `checkpt` (3-day limit, multi-node; checkpt is the higher-priority
+# but preemptable one, which a checkpointing Cactus run tolerates) — plus
+# `bigmem` (5 nodes, 2 TB). They serve the CPU-only optionlist variant `cpu`
+# (Carpet/McLachlan/IllinoisGRMHD-style builds, no nvcc). 8 threads per rank
+# gives 8 ranks per node, one per 8-core slice, which is the usual sweet spot
+# for Carpet; override with -c.
+[queues.single]
+gpu = false
+max-walltime = "7-00:00:00"
+default-cpus-per-task = 8
+
+[queues.workq]
+gpu = false
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 8
+
+[queues.checkpt]
+gpu = false
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 8
+
+[queues.bigmem]
+gpu = false
+max-walltime = "3-00:00:00"
+default-cpus-per-task = 8
+
 [variants.submitscript]
 "default" = { queues = ["gpu2", "gpu4"], default = true }
+"cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
 "test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test submit`
 
 [variants.runscript]
 "default" = { queues = ["gpu2", "gpu4"], default = true }
+"cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
 "test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test run`
 
-# Both partitions can build; the script derives --gres per queue.
+# Both GPU partitions can build; the script derives --gres per queue. CPU-only
+# configs build on `single` (`cactup build submit <cfg> -q single`), which
+# needs no --gres at all.
 [variants.buildsubmitscript]
 "default" = { queues = ["gpu2", "gpu4"], default = true }
+"cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
 
 [variants.optionlist]
-variants = ["default"]
+variants = ["default", "cpu"]
