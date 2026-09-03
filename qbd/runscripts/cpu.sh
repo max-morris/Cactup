@@ -31,13 +31,17 @@ export OMP_PROC_BIND=close
 export OMP_STACKSIZE=8192
 env | sort > .cactup/ENVIRONMENT
 
+# -r: keep stdout of MPI ranks > 0 as CCTK_Proc<n>.out next to the parfile
+#     (the flesh otherwise sends it to /dev/null, which hides errors that
+#     libraries such as Kadath print to stdout before abort()).
+# -b line: line-buffer stdout so those files are complete after a crash.
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
 
 time srun -u -n @TASKS@ \
     --cpus-per-task=@CPUS_PER_TASK@ \
     --cpu-bind=cores \
-    @EXECUTABLE@ -L 3 @PARFILE@
+    @EXECUTABLE@ -L 3 -r -b line @PARFILE@
 
 echo "Stopping:"
 date
