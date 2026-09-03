@@ -1396,9 +1396,42 @@ pub enum Prepared {
     /// §7.8 short-circuit: nothing to build. Carries the (possibly
     /// baseline-refreshed) metadata, exactly as today's early return did.
     UpToDate(ConfigMeta),
-    /// An attempt is staged on disk and ready to run.
-    Ready(BuildAttempt),
+    /// An attempt is staged on disk and ready to run, alongside the §7.4
+    /// probe `prepare` just took — see [`SourceProbe`].
+    Ready(BuildAttempt, SourceProbe),
 }
+
+/// The §7.4 source/provenance/shape reading of one moment, with the instant
+/// it was taken.
+///
+/// `prepare` takes one for its rebuild decision and `execute` needs the very
+/// same three readings to record what it actually compiled, so for a
+/// foreground build — `prepare` and `execute` seconds apart in one process —
+/// `prepare` hands its reading over rather than making `execute` walk ~80
+/// repos and ~400 thorns all over again. That second walk is what users saw
+/// as "probe sources" and "probe thorn shapes" each appearing twice in one
+/// build.
+///
+/// `taken` is what keeps the hand-off safe. `execute` reuses the reading
+/// only if it is still seconds old by the time it holds the build lock
+/// (`PROBE_REUSE_WINDOW`): a build that sat behind another build's lock, and
+/// a queued build (re-opened from disk, so it carries no probe at all), both
+/// fall back to probing themselves. See `execute`'s doc comment for why that
+/// record must never be a stale copy.
+pub struct SourceProbe {
+    pub sources: Option<crate::fetch::SourceHeads>,
+    pub providers: Option<BTreeMap<String, String>>,
+    pub shapes: Option<BTreeMap<String, String>>,
+    taken: std::time::Instant,
+}
+
+/// How old `prepare`'s [`SourceProbe`] may be, measured at the moment
+/// `execute` holds the build lock, to stand in for one of `execute`'s own.
+/// Sized to cover staging the attempt's files and taking an uncontended
+/// lock, and nothing more: any real wait — a scheduler queue, or another
+/// build of this config holding the lock — blows past it and earns a fresh
+/// probe.
+const PROBE_REUSE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `RebuildDecision`'s reason, as a string for `build.toml`'s `decision`
 /// field — `build show` prose, not user-facing help text, so (unlike
@@ -1538,6 +1571,11 @@ pub fn prepare(
     // the rebuild decision exactly as it was before source/provenance
     // tracking. A build must never fail over this.
     let parsed_list = crate::thornlist::parse(&thornlist_processed).ok();
+    // When this whole reading was taken, for the [`SourceProbe`] handed back
+    // below. Stamped BEFORE the walks, not after: the reading describes the
+    // tree as it was when the first walk started, so ageing it from then is
+    // the conservative end.
+    let probed_at = std::time::Instant::now();
     // How the source trees now differ from what this config was built with
     // (§7.4) — a refetch, a manual checkout, or a hand-edited thorn. None of
     // the text diffs above can see any of it: they all leave the thornlist
@@ -1772,9 +1810,9 @@ pub fn prepare(
         build_id: generate_id("build", name, &machine.name, now),
         built: None,
         flags,
-        sources: fresh_sources.map(|s| s.heads),
-        thorn_providers: fresh_providers,
-        thorn_shapes: fresh_shapes,
+        sources: fresh_sources.as_ref().map(|s| s.heads.clone()),
+        thorn_providers: fresh_providers.clone(),
+        thorn_shapes: fresh_shapes.clone(),
     };
 
     let attempt_id = BuildAttempt::next_id(&config_dir)?;
@@ -1863,7 +1901,15 @@ pub fn prepare(
     fs::write(attempt.thornlist_snapshot_path(), &thornlist.text)
         .with_context(|| format!("Failed to write {}", attempt.thornlist_snapshot_path().display()))?;
 
-    Ok(Prepared::Ready(attempt))
+    Ok(Prepared::Ready(
+        attempt,
+        SourceProbe {
+            sources: fresh_sources,
+            providers: fresh_providers,
+            shapes: fresh_shapes,
+            taken: probed_at,
+        },
+    ))
 }
 
 /// Run a prepared attempt: acquire the per-config build lock, invoke `make`
@@ -1891,12 +1937,19 @@ pub fn prepare(
 /// build` would diff stored-against-live, find them identical, print
 /// "up to date", and never rebuild a binary that is silently stale. The
 /// re-probe here is a second pass over the same ground `prepare` already
-/// covered — for a foreground build (`prepare`/`execute` seconds apart) that
-/// second pass finds nothing new and just costs one extra (parallel, fast)
-/// walk; for a queued build it is the difference between a true record and a
-/// false one. The invalidated-thorn set (`changed_providers`/
-/// `changed_shapes`) is likewise recomputed from THIS probe, never trusted
-/// from `prepare`'s frozen copy — see the per-thorn deletion block below.
+/// covered, and for a queued build it is the difference between a true
+/// record and a false one. A foreground build skips it: `prepare` hands its
+/// own reading over in `probe` and, as long as it is still seconds old once
+/// the build lock is held (`PROBE_REUSE_WINDOW`), nothing can have changed
+/// under it and walking the tree twice would only make one build print
+/// "probe sources" and "probe thorn shapes" twice apiece. `probe` is `None`
+/// for a build re-opened from disk, and a stale one is discarded, so either
+/// way a build that really did wait probes here.
+///
+/// The invalidated-thorn set (`changed_providers`/`changed_shapes`) is
+/// derived from whichever of the two readings ends up in hand, never from
+/// `prepare`'s frozen `config_meta` copy — see the per-thorn deletion block
+/// below.
 ///
 /// Deliberately NOT re-run: the optionlist/thornlist/universe half of the
 /// §7.8 rebuild decision (`RebuildDecision::Full`/`Incremental` from an
@@ -1906,7 +1959,7 @@ pub fn prepare(
 /// source-derived half (`SourceDelta`) can plausibly change while a build
 /// sits queued, so only it is re-checked, via the `FLESH_NOT_AS_BUILT`
 /// upgrade below.
-pub fn execute(attempt: &mut BuildAttempt, tee: bool) -> Res<ConfigMeta> {
+pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>) -> Res<ConfigMeta> {
     let config_dir = attempt.meta.config_dir.clone();
     let cactus_root = attempt.meta.cactus_root.clone();
     let install_root = attempt.meta.install_root.clone();
@@ -1954,30 +2007,43 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool) -> Res<ConfigMeta> {
     attempt.store_meta()?;
 
     // §7.4/D11 re-probe (see this function's doc comment for why it must
-    // happen here, not just at `prepare` time). The processed thornlist is
-    // re-parsed from the copy `prepare` staged into the attempt dir — that,
-    // `install_root`, and `cactus_root` are all already frozen in
-    // `attempt.meta`, so this reads no MDB, global DB, installation
-    // registry, or knob (D11-clean).
-    let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
-        .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
-    let fresh_list = crate::thornlist::parse(&processed_thornlist).ok();
-    // Best-effort, matching `prepare`'s own tolerance: an unparseable
-    // thornlist or a tree with no inspectable repo yields no baseline rather
-    // than failing the build outright.
-    let fresh_sources = fresh_list
-        .as_ref()
-        .and_then(|l| crate::fetch::source_heads_with_progress(&install_root, l).ok().flatten());
-    let fresh_providers = fresh_list.as_ref().map(|l| l.thorn_providers());
-    // Unlike `fresh_sources` above, a `thorn_shapes` failure is NOT
-    // swallowed: since this chunk gave it proper interrupt support (§2.4),
-    // its only failure mode is the user having hit Ctrl-C, and that must
-    // abort this build rather than silently compiling against an incomplete
-    // shape probe.
-    let fresh_shapes = match &fresh_list {
-        Some(l) => Some(thorn_shapes_with_progress(&cactus_root, l)?),
-        None => None,
-    };
+    // happen here, not just at `prepare` time), unless `prepare`'s own
+    // reading is still fresh enough to stand in for it — which, for a
+    // foreground build, it is: the only thing between the two is staging a
+    // handful of files and taking an uncontended lock. Aged only now, with
+    // both locks already held, so a build that waited for either of them
+    // probes for itself.
+    let (fresh_sources, fresh_providers, fresh_shapes) =
+        match probe.filter(|p| p.taken.elapsed() < PROBE_REUSE_WINDOW) {
+            Some(p) => (p.sources, p.providers, p.shapes),
+            None => {
+                // The processed thornlist is re-parsed from the copy
+                // `prepare` staged into the attempt dir — that,
+                // `install_root`, and `cactus_root` are all already frozen in
+                // `attempt.meta`, so this reads no MDB, global DB,
+                // installation registry, or knob (D11-clean).
+                let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
+                    .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
+                let fresh_list = crate::thornlist::parse(&processed_thornlist).ok();
+                // Best-effort, matching `prepare`'s own tolerance: an
+                // unparseable thornlist or a tree with no inspectable repo
+                // yields no baseline rather than failing the build outright.
+                let sources = fresh_list
+                    .as_ref()
+                    .and_then(|l| crate::fetch::source_heads_with_progress(&install_root, l).ok().flatten());
+                let providers = fresh_list.as_ref().map(|l| l.thorn_providers());
+                // Unlike `sources` above, a `thorn_shapes` failure is NOT
+                // swallowed: since this chunk gave it proper interrupt
+                // support (§2.4), its only failure mode is the user having
+                // hit Ctrl-C, and that must abort this build rather than
+                // silently compiling against an incomplete shape probe.
+                let shapes = match &fresh_list {
+                    Some(l) => Some(thorn_shapes_with_progress(&cactus_root, l)?),
+                    None => None,
+                };
+                (sources, providers, shapes)
+            }
+        };
 
     // What this config's LAST SUCCESSFUL build actually recorded, read fresh
     // off disk rather than from `attempt.meta.config_meta` (`prepare`'s
@@ -2252,12 +2318,12 @@ pub fn build(
 ) -> Res<BuildOutcome> {
     match prepare(installation, machine, name, opts, None)? {
         Prepared::UpToDate(meta) => Ok(BuildOutcome { meta, rebuilt: false }),
-        Prepared::Ready(mut attempt) => {
+        Prepared::Ready(mut attempt, probe) => {
             // Foreground build: this process IS the job (mirrors the
             // testsuite/sim foreground paths' `job_id = process::id()`).
             attempt.meta.job_id = std::process::id().to_string();
             attempt.store_meta()?;
-            let meta = execute(&mut attempt, true)?;
+            let meta = execute(&mut attempt, true, Some(probe))?;
             Ok(BuildOutcome { meta, rebuilt: true })
         }
     }
@@ -3417,7 +3483,7 @@ mod tests {
         let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
 
         let attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
-            Prepared::Ready(a) => a,
+            Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
         };
 
@@ -3495,21 +3561,14 @@ mod tests {
         (mdb, machine, inst, BuildOpts::default_for_tests())
     }
 
-    /// The whole point of this chunk (queued-build correctness, §7.4/D11):
-    /// `prepare` stages an attempt and freezes its own snapshot of the
-    /// source trees, but a `git checkout`/refetch/hand-edit can land
-    /// underneath it before `execute` finally runs `make` — the gap a
-    /// compute-node queue wait opens. The `ConfigMeta` `execute` writes on
-    /// success must record what IT sees at that later point, not `prepare`'s
-    /// now-stale copy: otherwise the next `cactup build` would diff
-    /// stored-against-live, find them identical, and never rebuild a binary
-    /// that is silently wrong.
-    #[test]
-    fn execute_records_the_source_state_as_of_execute_not_prepare() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+    /// Stand up a tree whose `make` fakes a successful configure+build, plus
+    /// a real CRL list with a flesh ("core") and a thorn repo ("cactusbase")
+    /// checked out under `repos/`. Source tracking reads the live tree, not
+    /// a replay of `fetch-state.toml`, so the source-tracking tests need real
+    /// repos they can mutate; returns the `repos/` directory for that.
+    fn source_tracking_tree(root: &Path) -> (Mdb, Machine, Installation, BuildOpts, PathBuf) {
         let cactus = root.join("inst/Cactus");
-        let (_mdb, machine, inst, _opts) = fake_tree(
+        let (mdb, machine, inst, _opts) = fake_tree(
             root,
             &format!(
                 "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
@@ -3518,9 +3577,6 @@ mod tests {
             ),
         );
 
-        // A real CRL list with a flesh ("core") and a thorn repo
-        // ("cactusbase") — source tracking reads the live tree, not a replay
-        // of `fetch-state.toml`, so real repos are needed to mutate.
         let list_path = root.join("crl.th");
         fs::write(
             &list_path,
@@ -3541,10 +3597,30 @@ mod tests {
         }
 
         let mut opts = BuildOpts::default_for_tests();
-        opts.thornlist = Some(list_path.clone());
+        opts.thornlist = Some(list_path);
+        (mdb, machine, inst, opts, repos)
+    }
+
+    /// The whole point of this chunk (queued-build correctness, §7.4/D11):
+    /// `prepare` stages an attempt and freezes its own snapshot of the
+    /// source trees, but a `git checkout`/refetch/hand-edit can land
+    /// underneath it before `execute` finally runs `make` — the gap a
+    /// compute-node queue wait opens. The `ConfigMeta` `execute` writes on
+    /// success must record what IT sees at that later point, not `prepare`'s
+    /// now-stale copy: otherwise the next `cactup build` would diff
+    /// stored-against-live, find them identical, and never rebuild a binary
+    /// that is silently wrong.
+    ///
+    /// `probe: None` is exactly what that path hands `execute`: an attempt
+    /// re-opened from disk on a compute node carries no in-memory probe.
+    #[test]
+    fn execute_records_the_source_state_as_of_execute_not_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (_mdb, machine, inst, opts, repos) = source_tracking_tree(root);
 
         let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
-            Prepared::Ready(a) => a,
+            Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
         };
 
@@ -3563,7 +3639,7 @@ mod tests {
         let processed = crate::thornlist::parse(&fs::read_to_string(attempt.thornlist_path()).unwrap()).unwrap();
         let live = crate::fetch::source_heads_with_progress(&inst.root, &processed).unwrap().unwrap();
 
-        let result = execute(&mut attempt, true).unwrap();
+        let result = execute(&mut attempt, true, None).unwrap();
         let recorded = result.sources.expect("execute must record sources");
         assert_ne!(
             recorded["cactusbase"], staged["cactusbase"],
@@ -3572,6 +3648,62 @@ mod tests {
         assert_eq!(
             recorded["cactusbase"], live.heads["cactusbase"],
             "the record must be exactly what execute itself observed"
+        );
+    }
+
+    /// The other side of that coin: a foreground build (`prepare` and
+    /// `execute` back to back in one process) must NOT walk every repo and
+    /// thorn a second time — that duplicate walk is what made one build
+    /// print "probe sources" and "probe thorn shapes" twice apiece. Proved
+    /// the only way it can be from outside: mutate the tree between the two
+    /// calls and require the record to be `prepare`'s reading, which is only
+    /// possible if `execute` never probed again.
+    #[test]
+    fn execute_reuses_a_fresh_probe_instead_of_walking_the_tree_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (_mdb, machine, inst, opts, repos) = source_tracking_tree(root);
+
+        let (mut attempt, probe) = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a, p) => (a, p),
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        let staged = attempt.meta.config_meta.sources.clone().expect("prepare must record a baseline");
+
+        // Would be picked up by a second probe, and only by a second probe.
+        crate::fetch::git::testrepo::commit(&repos.join("cactusbase"), "landed after prepare probed");
+
+        let result = execute(&mut attempt, true, Some(probe)).unwrap();
+        let recorded = result.sources.expect("execute must record sources");
+        assert_eq!(
+            recorded, staged,
+            "a seconds-old probe must be reused, not re-taken: {recorded:?} vs {staged:?}"
+        );
+    }
+
+    /// A probe older than `PROBE_REUSE_WINDOW` means real time passed — this
+    /// build sat behind another build's lock — so it must be discarded and
+    /// re-taken, exactly as if none had been handed over at all.
+    #[test]
+    fn execute_discards_a_stale_probe_and_re_probes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (_mdb, machine, inst, opts, repos) = source_tracking_tree(root);
+
+        let (mut attempt, mut probe) = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a, p) => (a, p),
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        let staged = attempt.meta.config_meta.sources.clone().expect("prepare must record a baseline");
+        probe.taken -= PROBE_REUSE_WINDOW + std::time::Duration::from_secs(1);
+
+        crate::fetch::git::testrepo::commit(&repos.join("cactusbase"), "landed during the lock wait");
+
+        let result = execute(&mut attempt, true, Some(probe)).unwrap();
+        let recorded = result.sources.expect("execute must record sources");
+        assert_ne!(
+            recorded["cactusbase"], staged["cactusbase"],
+            "a stale probe must not be trusted: {recorded:?} vs {staged:?}"
         );
     }
 
@@ -3591,7 +3723,7 @@ mod tests {
         let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
 
         let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
-            Prepared::Ready(a) => a,
+            Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
         };
 
@@ -3599,7 +3731,7 @@ mod tests {
         assert!(config_dir.is_dir(), "prepare must have brought the config dir along as a parent");
         fs::remove_dir_all(&config_dir).unwrap();
 
-        let err = match execute(&mut attempt, true) {
+        let err = match execute(&mut attempt, true, None) {
             Ok(_) => panic!("execute must refuse when the config directory vanished"),
             Err(e) => e.to_string(),
         };

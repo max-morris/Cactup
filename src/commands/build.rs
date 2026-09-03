@@ -199,7 +199,9 @@ fn run(ctx: &Ctx, args: BuildStartArgs) -> Res<()> {
         let mut attempt = BuildAttempt::open(&config_dir, attempt_id)?;
         // tee = false: the scheduler owns the output files here, unlike a
         // foreground build where cactup itself is the user's terminal.
-        build::execute(&mut attempt, false)?;
+        // No probe to inherit: this attempt came off disk, possibly hours
+        // after `prepare` staged it, so `execute` takes its own (§7.4).
+        build::execute(&mut attempt, false, None)?;
         return Ok(());
     }
 
@@ -363,7 +365,9 @@ fn submit_impl(
             println!("Config {} is up to date; nothing to submit.", name.bold());
             return Ok(None);
         }
-        Prepared::Ready(a) => a,
+        // `prepare`'s probe is dropped on the submit path on purpose: this
+        // attempt runs later, on a compute node, and must probe there.
+        Prepared::Ready(a, _) => a,
     };
 
     // §3: the build submit variable set — topology/walltime on top of what
