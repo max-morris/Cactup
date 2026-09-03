@@ -35,6 +35,10 @@ env | sort > .cactup/ENVIRONMENT
 #     (the flesh otherwise sends it to /dev/null, which hides errors that
 #     libraries such as Kadath print to stdout before abort()).
 # -b line: line-buffer stdout so those files are complete after a crash.
+
+export OMPI_MCA_pml=ucx
+export OMPI_MCA_btl=^openib
+
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
 

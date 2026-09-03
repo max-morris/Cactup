@@ -61,6 +61,9 @@ EOS
     PROF_WRAPPER=./prof-ncu.sh ;;
 esac
 
+export OMPI_MCA_pml=ucx
+export OMPI_MCA_btl=^openib
+
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
 
