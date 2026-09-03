@@ -31,7 +31,7 @@ compatible-queues = ["local"]
 
 # Whenever this version string changes, the application is configured
 # and rebuilt from scratch
-VERSION = "omnia-hip-2026-09-02"
+VERSION = "omnia-hip-2026-09-03"
 
 CPP = "cpp"
 FPP = "cpp"
@@ -48,9 +48,13 @@ LD  = "hipcc --offload-arch=gfx90a -fgpu-rdc --hip-link"
 
 CPPFLAGS = "-DSIMD_CPU"
 FPPFLAGS = "-traditional"
-CFLAGS   = "-g -std=gnu11 -Wno-unused-command-line-argument"
-CXXFLAGS = "-g -std=c++17 -Wno-unused-command-line-argument -Wno-pass-failed"
 F90FLAGS = "-g -fcray-pointer -ffixed-line-length-none"
+
+# -isystem, not SYS_INC_DIRS: Cactus renders SYS_INC_DIRS as -I, which clang
+# drops as a duplicate of a system dir. Without this, the Ubuntu HIP 5.7
+# headers in /usr/include/hip shadow the ROCm prefix (undeclared __hip_assert).
+CFLAGS   = "-g -std=gnu11 -isystem /opt/rocm/include -Wno-unused-command-line-argument"
+CXXFLAGS = "-g -std=c++17 -isystem /opt/rocm/include -Wno-unused-command-line-argument -Wno-pass-failed"
 
 # Deliberately empty -- see LD above.
 LDFLAGS = ""
