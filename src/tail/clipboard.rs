@@ -33,6 +33,10 @@ pub(crate) const MAX_CLIP_BYTES: usize = 100_000;
 /// Outcome of a copy attempt: how much actually went out.
 pub(crate) struct Copied {
     pub(crate) lines: usize,
+    /// Characters sent, for the copies a line count would misdescribe — a
+    /// mouse selection inside a single line, where "1 line" says nothing
+    /// about whether two characters went out or two hundred.
+    pub(crate) chars: usize,
     pub(crate) truncated: bool,
 }
 
@@ -213,7 +217,7 @@ pub(crate) fn copy_lines(lines: &[String]) -> Res<Copied> {
     } else {
         lines.len()
     };
-    Ok(Copied { lines: sent, truncated })
+    Ok(Copied { lines: sent, chars: text.chars().count(), truncated })
 }
 
 #[cfg(test)]

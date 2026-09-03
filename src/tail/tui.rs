@@ -43,22 +43,36 @@
 //! full-screen view has to hand back deliberately: copying a line, and
 //! finding one.
 //!
-//! Copying stays the terminal's job by default, because the terminal is
-//! better at it than we can be: the TUI does *not* capture the mouse at
-//! startup, so double-click a word, triple-click a line, drag a block and
-//! copy it with whatever chord (Ctrl-Shift-C, ⌘C, middle-click) that
-//! terminal already uses — all of it works untouched, and it works even
-//! where OSC 52 is refused. `m` is what hands the mouse to the TUI, for
-//! wheel scrolling, click-to-focus and drag-to-select-lines; the footer
-//! says which side currently holds it.
+//! The mouse is the TUI's from the first frame, because selecting inside a
+//! split view is the one thing the terminal *cannot* do for us: it has no
+//! idea the screen is two panes and a footer, so a drag it owns lights up
+//! one rectangle straight across all three and copies the two panes
+//! interleaved column-wise. Captured, a click focuses the pane under it and
+//! a drag selects that pane's text from the character it pressed on to the
+//! one under the pointer — the field out of the line, not the whole line.
 //!
-//! On top of that the TUI copies its *own* buffer through [`clipboard`]'s
-//! OSC 52 path (which survives the SSH hop this tool is nearly always used
-//! across): `y` yanks the view, `Y` the pane, and `v` plus motions yanks a
-//! line selection. Ctrl-Shift-C does the same as `y` wherever the terminal
-//! lets us see it as its own chord — see [`enable_rich_keys`]. Searching
-//! is vim's: `/`, `?`, `n`, `N` over a [`search::Query`], per pane,
-//! incremental as you type, and centered on the hit when it lands.
+//! Selections therefore come in two grains, and [`Selection`] carries which
+//! one it is: a drag makes `Grain::Chars` and `v` makes `Grain::Lines`,
+//! since the unit a log line is *read* in is the line but the unit it is
+//! copied in usually isn't. Everything downstream — the highlight
+//! ([`selected_bytes`]), the clipboard ([`copy_selection`]), the footer's
+//! count ([`selection_size`]) — reads the grain rather than assuming one,
+//! and the keyboard motions that extend a selection preserve it.
+//!
+//! What capture costs is the terminal's own double-click, triple-click and
+//! native copy, which is the copy route that needs nothing from us and
+//! works where OSC 52 is refused or a multiplexer strips it. So it is a
+//! toggle: `m` hands the mouse back (most terminals also lend it out for a
+//! single Shift-drag), `ALT_SCROLL_ON` keeps the wheel scrolling while it
+//! is gone, and the footer says which side holds it.
+//!
+//! The TUI's own copying goes through [`clipboard`]'s OSC 52 path (which
+//! survives the SSH hop this tool is nearly always used across): `y` yanks
+//! the view, `Y` the pane, and a selection of either grain. Ctrl-Shift-C
+//! does the same as `y` wherever the terminal lets us see it as its own
+//! chord — see [`enable_rich_keys`]. Searching is vim's: `/`, `?`, `n`,
+//! `N` over a [`search::Query`], per pane, incremental as you type, and
+//! centered on the hit when it lands.
 
 use super::search::{self, Direction, Hit, Query};
 use super::{LogTail, PollBackoff, SEED_BYTES, clipboard};
@@ -115,9 +129,10 @@ const MATCH_STYLE: Style = Style::new().bg(Color::Yellow).fg(Color::Black);
 /// The one match `n`/`N` are currently sitting on, picked out from the rest.
 const CURRENT_MATCH_STYLE: Style =
     Style::new().bg(Color::Magenta).fg(Color::White).add_modifier(Modifier::BOLD);
-/// Lines inside a `v` selection. Reversing the whole line reads as a block
-/// however the user's palette is set up, where a background colour might
-/// not.
+/// The selected characters. Reversing them reads as a block however the
+/// user's palette is set up, where a background colour might not — and it
+/// leaves the background free for a search match to keep using (see
+/// [`render_line`]).
 const SELECT_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 // ---------------------------------------------------------------------
@@ -243,6 +258,119 @@ fn selection_span(anchor: usize, cursor: usize, len: usize) -> Option<(usize, us
     }
     let (lo, hi) = if anchor <= cursor { (anchor, cursor) } else { (cursor, anchor) };
     Some((lo.min(len - 1), hi.min(len - 1)))
+}
+
+/// One end of a selection: which retained line, and how far into it.
+///
+/// `col` counts *characters* — not bytes, and not screen cells — which is
+/// the unit `hscroll`, [`char_col`] and [`max_line_width`] already work in,
+/// so a column derived from a mouse event is directly comparable with one
+/// stored here. It is deliberately *not* clamped to the line's length: a
+/// press in the blank space right of a short line is a real position, and
+/// which end of the selection it turns out to be is what decides its
+/// meaning (see [`selected_bytes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Point {
+    line: usize,
+    col: usize,
+}
+
+/// How much of the lines a selection reaches across is actually in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grain {
+    /// Whole lines; `col` is ignored. `v`'s vim line-visual selection,
+    /// where the unit that matters is the log line.
+    Lines,
+    /// Exactly the characters between the two ends, both included. What a
+    /// mouse drag means — pulling one field out of one line is the gesture
+    /// worth capturing the mouse for, since the terminal's own selection
+    /// cannot do it across a split screen.
+    Chars,
+}
+
+/// A standing selection in one pane: two ends, and what they enclose.
+///
+/// The ends are held in *gesture* order rather than document order —
+/// `anchor` is where it began, `cursor` is the end that moves — because
+/// that is what extending has to preserve. [`Selection::ordered`] is the
+/// document-order view that rendering and copying want.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    anchor: Point,
+    cursor: Point,
+    grain: Grain,
+}
+
+impl Selection {
+    /// The whole of line `line`, and nothing else — what `v` opens with.
+    fn line(line: usize) -> Self {
+        let at = Point { line, col: 0 };
+        Self { anchor: at, cursor: at, grain: Grain::Lines }
+    }
+
+    /// From the character at `anchor` to the character at `cursor`,
+    /// inclusive — what a drag makes.
+    fn chars(anchor: Point, cursor: Point) -> Self {
+        Self { anchor, cursor, grain: Grain::Chars }
+    }
+
+    /// The two ends in document order, lowest first.
+    fn ordered(&self) -> (Point, Point) {
+        if self.anchor <= self.cursor { (self.anchor, self.cursor) } else { (self.cursor, self.anchor) }
+    }
+
+    /// Inclusive span of lines the selection touches in a buffer of `len`
+    /// lines, or `None` when there are none.
+    fn line_span(&self, len: usize) -> Option<(usize, usize)> {
+        selection_span(self.anchor.line, self.cursor.line, len)
+    }
+
+    /// Slide both ends down by `by` evicted lines — see [`shift_view`].
+    fn shifted(self, by: usize) -> Self {
+        Self {
+            anchor: Point { line: self.anchor.line.saturating_sub(by), ..self.anchor },
+            cursor: Point { line: self.cursor.line.saturating_sub(by), ..self.cursor },
+            ..self
+        }
+    }
+}
+
+/// The byte range of `text` — the retained line at `index` — that `sel`
+/// covers, or `None` when the line is outside it entirely. Bytes rather
+/// than characters because slicing the line, for the screen and for the
+/// clipboard alike, is what the answer is for; a line inside the selection
+/// that contributes no characters still answers `Some` of an empty range,
+/// so a blank line in the middle of a selection copies as a blank line.
+///
+/// A `Grain::Chars` end past the end of its own line resolves to that
+/// line's end, which is what makes a drag through the ragged right edge of
+/// a log behave: the *low* end past its line contributes nothing (the press
+/// landed in blank space right of the text), while the *high* end past its
+/// line takes the line to its end.
+fn selected_bytes(text: &str, index: usize, sel: &Selection, len: usize) -> Option<(usize, usize)> {
+    let last = len.checked_sub(1)?;
+    let (lo, hi) = sel.ordered();
+    let (lo_line, hi_line) = (lo.line.min(last), hi.line.min(last));
+    if index < lo_line || index > hi_line {
+        return None;
+    }
+    if sel.grain == Grain::Lines {
+        return Some((0, text.len()));
+    }
+    let start = if index == lo_line { byte_of_char(text, lo.col) } else { 0 };
+    // Inclusive of the character under the cursor: vim's charwise rule, and
+    // the one a terminal drag follows too — the cell being pointed at is in.
+    let end = if index == hi_line { byte_of_char(text, hi.col.saturating_add(1)) } else { text.len() };
+    // `max` for the one case that can invert: both ends on lines past the
+    // buffer's end, clamped onto the same line from opposite sides.
+    Some((start, end.max(start)))
+}
+
+/// Byte offset of character `col` in `line`, or the line's length when the
+/// line is shorter than that. The inverse of [`char_col`], and equally
+/// unbothered by a line the producer is still extending mid-character.
+fn byte_of_char(line: &str, col: usize) -> usize {
+    line.char_indices().nth(col).map_or(line.len(), |(at, _)| at)
 }
 
 /// Vertical offset that brings `line` into a viewport `height` tall,
@@ -532,11 +660,11 @@ struct Pane {
     content: Arc<Mutex<PaneContent>>,
     scroll: ScrollState,
     hscroll: u16,
-    /// `(anchor, cursor)` line indices while a `v` selection is up. Held on
-    /// the pane rather than in [`Mode::Select`] so rendering needs to know
-    /// nothing about modes: a pane draws a selection exactly when it has
-    /// one, and leaving select mode clears it.
-    sel: Option<(usize, usize)>,
+    /// What is selected in this pane, if anything. Held on the pane rather
+    /// than in [`Mode::Select`] so rendering needs to know nothing about
+    /// modes: a pane draws a selection exactly when it has one, and leaving
+    /// select mode clears it.
+    sel: Option<Selection>,
     search: Option<PaneSearch>,
 }
 
@@ -680,7 +808,7 @@ impl Pane {
 /// eviction and reads the lines it caused in one critical section.
 fn shift_view(
     scroll: &mut ScrollState,
-    sel: &mut Option<(usize, usize)>,
+    sel: &mut Option<Selection>,
     search: &mut Option<PaneSearch>,
     by: usize,
 ) {
@@ -688,9 +816,8 @@ fn shift_view(
         return;
     }
     scroll.offset = scroll.offset.saturating_sub(u16::try_from(by).unwrap_or(u16::MAX));
-    if let Some((anchor, cursor)) = sel {
-        *anchor = anchor.saturating_sub(by);
-        *cursor = cursor.saturating_sub(by);
+    if let Some(sel) = sel {
+        *sel = sel.shifted(by);
     }
     if let Some(search) = search
         && let Some(hit) = &mut search.hit
@@ -742,11 +869,13 @@ pub(crate) fn follow_tui(sources: &[(&str, PathBuf); 2], subject: &str) -> Res<(
 
 /// Turn the terminal's alternate-scroll mode on/off (DECSET 1007).
 ///
-/// With mouse capture off — how the TUI starts — the terminal keeps the
-/// mouse, and this is what keeps the wheel working anyway: in the alternate
-/// screen the terminal turns wheel notches into ↑/↓ presses, which land in
-/// the normal-mode bindings like any other arrow key. Terminals that don't
-/// implement it ignore the sequence.
+/// Armed for the stretch after `m`, when the terminal has the mouse back
+/// and our own wheel handling never sees a notch: in the alternate screen
+/// the terminal turns notches into ↑/↓ presses, which land in the
+/// normal-mode bindings like any other arrow key. Inert while capture is
+/// on (a terminal that sees mouse reporting enabled stops synthesising the
+/// keys), so it is simply left set for the whole session; terminals that
+/// don't implement it ignore the sequence either way.
 const ALT_SCROLL_ON: &[u8] = b"\x1b[?1007h";
 const ALT_SCROLL_OFF: &[u8] = b"\x1b[?1007l";
 
@@ -794,10 +923,13 @@ fn setup_terminal() -> Res<Terminal<Backend>> {
     // shell's own screen looks far less like a hang than a blank one.
     let rich = supports_keyboard_enhancement().unwrap_or(false);
     let mut stdout = std::io::stdout();
-    // Note what is *not* here: mouse capture. The terminal keeps the mouse
-    // until `m` asks for it, so the user's own double-click, triple-click
-    // and drag-select keep working inside the panes.
-    execute!(stdout, EnterAlternateScreen).context("entering the alternate screen")?;
+    // Capture from the first frame: a side-by-side view can't leave
+    // selection to the terminal, which knows nothing about the split and
+    // drags a rectangle straight across both panes and the footer. `m`
+    // hands the mouse back for the terminals where that is the only copy
+    // route (see [`set_mouse_capture`]).
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("entering the alternate screen")?;
     let _ = stdout.write_all(ALT_SCROLL_ON);
     if rich {
         enable_rich_keys(&mut stdout);
@@ -943,9 +1075,10 @@ fn run_app(
     let mut layout = (Rect::default(), Rect::default());
     let mut mode = Mode::Normal;
     let mut status: Option<Status> = None;
-    // The terminal owns the mouse until the user hands it to the TUI with
-    // `m` — native selection is the copy route that works everywhere.
-    let mut mouse = false;
+    // The TUI owns the mouse until the user hands it back with `m`: the
+    // pane is the unit a click and a drag mean something in, and only we
+    // know where the panes are.
+    let mut mouse = true;
     let mut drag: Option<DragStart> = None;
 
     // Raised by the reader thread whenever bytes land. A *flag*, not a
@@ -1102,10 +1235,9 @@ fn copy_current(
     status: &mut Option<Status>,
 ) -> Res<()> {
     if matches!(mode, Mode::Select)
-        && let Some((anchor, cursor)) = pane.sel
+        && let Some(sel) = pane.sel
     {
-        let span = selection_span(anchor, cursor, pane.len());
-        copy_span(pane, span, "the selection", status)?;
+        copy_selection(pane, &sel, status)?;
         leave_select(pane, mode);
         return Ok(());
     }
@@ -1135,11 +1267,11 @@ fn normal_key(
             *mouse = !*mouse;
             set_mouse_capture(*mouse)?;
             let msg: &str = if *mouse {
-                "mouse captured — wheel scrolls, drag selects lines; \
+                "mouse captured — click focuses a pane, drag selects its text; \
                  your terminal's own selection is off until m"
             } else {
                 "mouse released — double-click, drag and copy with your terminal \
-                 as usual, m to take it back"
+                 as usual (it can't see the panes), m to take it back"
             };
             note(status, msg, false);
             return Ok(false);
@@ -1189,9 +1321,14 @@ fn normal_key(
     Ok(false)
 }
 
-/// One keystroke in line-selection mode. Motions move the cursor and extend
-/// the selection from its anchor — vim's visual mode, where there is no way
-/// to move without extending; press Esc and `v` again to start elsewhere.
+/// One keystroke in selection mode. Motions move the cursor and extend the
+/// selection from its anchor — vim's visual mode, where there is no way to
+/// move without extending; press Esc and `v` again to start elsewhere.
+///
+/// The motions here are all vertical, and they leave the grain alone: they
+/// extend a `v` selection by whole lines and a dragged one by characters
+/// from the same column, so picking up where the mouse left off doesn't
+/// silently coarsen what it selected.
 fn select_key(
     key: KeyEvent,
     pane: &mut Pane,
@@ -1202,13 +1339,13 @@ fn select_key(
     let (inner_height, inner_width) = inner;
     let page = inner_height.saturating_sub(1).max(1);
     let len = pane.len();
-    let Some((anchor, cursor)) = pane.sel else {
+    let Some(sel) = pane.sel else {
         // Nothing to be selecting: the buffer emptied out under us.
         leave_select(pane, mode);
         return Ok(false);
     };
     let last = len.saturating_sub(1);
-    let mut cursor = cursor.min(last);
+    let mut line = sel.cursor.line.min(last);
     match key.code {
         // `q` still quits, from every mode: a cancel key that only sometimes
         // exits the app is worse than losing a selection.
@@ -1218,17 +1355,16 @@ fn select_key(
             return Ok(false);
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            let span = selection_span(anchor, cursor, len);
-            copy_span(pane, span, "the selection", status)?;
+            copy_selection(pane, &sel, status)?;
             leave_select(pane, mode);
             return Ok(false);
         }
-        KeyCode::Up | KeyCode::Char('k') => cursor = cursor.saturating_sub(1),
-        KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1).min(last),
-        KeyCode::PageUp => cursor = cursor.saturating_sub(usize::from(page)),
-        KeyCode::PageDown => cursor = (cursor + usize::from(page)).min(last),
-        KeyCode::Home | KeyCode::Char('g') => cursor = 0,
-        KeyCode::End | KeyCode::Char('G') => cursor = last,
+        KeyCode::Up | KeyCode::Char('k') => line = line.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => line = (line + 1).min(last),
+        KeyCode::PageUp => line = line.saturating_sub(usize::from(page)),
+        KeyCode::PageDown => line = (line + usize::from(page)).min(last),
+        KeyCode::Home | KeyCode::Char('g') => line = 0,
+        KeyCode::End | KeyCode::Char('G') => line = last,
         // Panning doesn't touch the selection — a long line still has to be
         // readable before you decide to copy it.
         KeyCode::Left | KeyCode::Char('h') => {
@@ -1241,9 +1377,13 @@ fn select_key(
         }
         _ => return Ok(false),
     }
-    pane.sel = Some((anchor.min(last), cursor));
+    pane.sel = Some(Selection {
+        anchor: Point { line: sel.anchor.line.min(last), ..sel.anchor },
+        cursor: Point { line, ..sel.cursor },
+        ..sel
+    });
     let max = pane.max_scroll(inner_height);
-    pane.scroll.offset = scroll_to_show(cursor, pane.scroll.offset, inner_height, max);
+    pane.scroll.offset = scroll_to_show(line, pane.scroll.offset, inner_height, max);
     Ok(false)
 }
 
@@ -1260,7 +1400,7 @@ fn start_select(pane: &mut Pane, inner_height: u16) -> bool {
         .min(len)
         .saturating_sub(1);
     pane.scroll.follow = false;
-    pane.sel = Some((bottom, bottom));
+    pane.sel = Some(Selection::line(bottom));
     true
 }
 
@@ -1452,12 +1592,17 @@ fn wrap_notice(dir: Direction) -> &'static str {
     }
 }
 
-/// Copy `span` of a pane's lines — or the whole pane, for `None` — and
-/// report what went out.
-///
-/// A terminal that refuses OSC 52 pastes looks identical from in here to one
-/// that accepted it (see [`clipboard`]), so the notice says what was *sent*;
-/// `m` is the documented way out when it turns out the terminal dropped it.
+/// The unit a copy notice counts in. Lines for everything that copies
+/// whole ones; characters where a line count would be useless — a mouse
+/// selection inside one line is honestly "1 line" and tells the user
+/// nothing about whether two characters went out or two hundred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Counted {
+    Lines,
+    Chars,
+}
+
+/// Copy `span` of a pane's lines — or the whole pane, for `None`.
 fn copy_span(
     pane: &Pane,
     span: Option<(usize, usize)>,
@@ -1471,20 +1616,60 @@ fn copy_span(
             None => content.lines.iter().cloned().collect(),
         }
     };
+    copy_text(&lines, what, Counted::Lines, status)
+}
+
+/// Copy exactly what `sel` covers: whole lines for `Grain::Lines`, and for
+/// `Grain::Chars` the first and last clipped to the two ends.
+fn copy_selection(pane: &Pane, sel: &Selection, status: &mut Option<Status>) -> Res<()> {
+    let lines = selection_text(pane, sel);
+    // Counted in characters only where the whole selection sits inside one
+    // line; once it spans lines, lines are what the user is thinking in.
+    let counted =
+        if sel.grain == Grain::Chars && lines.len() == 1 { Counted::Chars } else { Counted::Lines };
+    copy_text(&lines, "the selection", counted, status)
+}
+
+/// The text a selection covers, one entry per line it touches.
+fn selection_text(pane: &Pane, sel: &Selection) -> Vec<String> {
+    let content = lock(&pane.content);
+    let len = content.lines.len();
+    let Some((lo, hi)) = sel.line_span(len) else { return Vec::new() };
+    content
+        .lines
+        .iter()
+        .enumerate()
+        .skip(lo)
+        .take(hi + 1 - lo)
+        .filter_map(|(index, line)| {
+            selected_bytes(line, index, sel, len).map(|(from, to)| line[from..to].to_string())
+        })
+        .collect()
+}
+
+/// Push `lines` out through OSC 52 and report what went, in `counted`'s
+/// unit.
+///
+/// A terminal that refuses OSC 52 pastes looks identical from in here to one
+/// that accepted it (see [`clipboard`]), so the notice says what was *sent*;
+/// `m` is the documented way out when it turns out the terminal dropped it.
+fn copy_text(lines: &[String], what: &str, counted: Counted, status: &mut Option<Status>) -> Res<()> {
     if lines.is_empty() {
         note(status, "nothing to copy yet", true);
         return Ok(());
     }
-    let copied = clipboard::copy_lines(&lines)?;
-    let plural = if copied.lines == 1 { "line" } else { "lines" };
+    let copied = clipboard::copy_lines(lines)?;
+    let (count, unit) = match counted {
+        Counted::Lines => (copied.lines, if copied.lines == 1 { "line" } else { "lines" }),
+        Counted::Chars => (copied.chars, if copied.chars == 1 { "character" } else { "characters" }),
+    };
     let msg = if copied.truncated {
         format!(
-            "copied {} {plural} of {what} — cut off at {} KB, past what terminals accept",
-            copied.lines,
+            "copied {count} {unit} of {what} — cut off at {} KB, past what terminals accept",
             clipboard::MAX_CLIP_BYTES / 1000
         )
     } else {
-        format!("copied {} {plural} of {what}", copied.lines)
+        format!("copied {count} {unit} of {what}")
     };
     note(status, msg, false);
     Ok(())
@@ -1506,14 +1691,16 @@ fn copy_view(pane: &Pane, inner_height: u16, status: &mut Option<Status>) -> Res
 
 /// Take the mouse for the TUI, or hand it back to the terminal.
 ///
-/// Capture is what makes drag-to-select-lines and click-to-focus work, and
-/// at the same time what takes away the terminal's own double-click,
-/// triple-click and drag selection — the copy route that works in every
-/// terminal, including those that refuse OSC 52 and those behind a
-/// multiplexer that strips it. So it's a toggle, and the terminal's side of
-/// it is the default; `ALT_SCROLL_ON` covers the wheel while capture is
-/// off, which leaves click-to-focus and line selection as the only reasons
-/// to reach for `m`.
+/// Capture is what makes click-to-focus and drag-to-select work, and it is
+/// the default because those are the gestures that respect the split:
+/// the terminal's own selection knows nothing about the panes and drags one
+/// rectangle across both of them and the footer. What capture costs is that
+/// same terminal-side selection with its double-click, triple-click and
+/// native copy — the copy route that works even where OSC 52 is refused or
+/// a multiplexer strips it. So it stays a toggle, `m` releases it, and
+/// `ALT_SCROLL_ON` keeps the wheel scrolling while it is released. (Most
+/// terminals also give it back for one gesture under Shift-drag, without
+/// the toggle.)
 fn set_mouse_capture(on: bool) -> Res<()> {
     let mut out = std::io::stdout();
     if on {
@@ -1524,12 +1711,12 @@ fn set_mouse_capture(on: bool) -> Res<()> {
 }
 
 /// Where the left button went down, if it is still down: the anchor a drag
-/// would select from. A click on its own only focuses a pane — it takes
-/// actual movement to begin a selection, so click-to-focus keeps behaving
-/// exactly as it did.
+/// selects from. A click on its own only focuses the pane and clears what
+/// was selected — it takes actual movement to *make* a selection, so
+/// click-to-focus stays a click, not a one-character selection.
 struct DragStart {
     pane: usize,
-    line: usize,
+    at: Point,
 }
 
 fn handle_mouse(
@@ -1540,6 +1727,45 @@ fn handle_mouse(
     mode: &mut Mode,
     drag: &mut Option<DragStart>,
 ) {
+    // A half-typed pattern is the one thing the mouse must not disturb: the
+    // prompt belongs to the pane that opened it, and `SearchPrompt` holds
+    // the view state Esc puts back. Moving focus or starting a selection
+    // out from under it would strand both, so while it is open the mouse
+    // does nothing at all — the pane a wheel notch would scroll is the
+    // pane being searched, and it is already scrolling to the hits. Any
+    // gesture in flight is abandoned with it, so it can't resume later
+    // against an anchor from before the prompt.
+    if matches!(mode, Mode::Search(_)) {
+        *drag = None;
+        return;
+    }
+    // The left button's own events are settled before the pane hit-test
+    // below, because a gesture in flight owns them wherever the pointer has
+    // got to: it belongs to the pane the press landed in, and running out
+    // of that pane — into the other one, or over the footer — should keep
+    // extending to the edge of its text, as any editor does, rather than
+    // freeze the selection where it last crossed the pane. The release is
+    // hoisted with it so that letting go out there still ends the gesture,
+    // instead of leaving an anchor standing for the next event to extend.
+    if event.kind == MouseEventKind::Drag(MouseButton::Left) {
+        if let Some(start) = drag {
+            let i = start.pane;
+            let rect = if i == STDOUT { layout.0 } else { layout.1 };
+            if let Some(at) = point_at(&panes[i], rect, event.column, clamp_row(rect, event.row)) {
+                // Dragging is a selection gesture; with capture on the
+                // terminal never sees it, so the TUI has to mean it.
+                panes[i].scroll.follow = false;
+                panes[i].sel = Some(Selection::chars(start.at, at));
+                *mode = Mode::Select;
+            }
+        }
+        return;
+    }
+    // The selection outlives the gesture — `y` comes after the release.
+    if event.kind == MouseEventKind::Up(MouseButton::Left) {
+        *drag = None;
+        return;
+    }
     let pos = (event.column, event.row);
     let hit = if in_rect(pos, layout.0) {
         Some(STDOUT)
@@ -1554,37 +1780,70 @@ fn handle_mouse(
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             *focused = i;
-            *drag = line_at(&panes[i], rect, event.row).map(|line| DragStart { pane: i, line });
+            // Pressing down begins a new gesture, so whatever the last one
+            // left highlighted goes: a click that only moved focus must not
+            // leave a stale selection lit in the pane behind it, and
+            // `Mode::Select` is global while `sel` is per-pane, so a click
+            // into the other pane would otherwise leave the mode pointing
+            // at a pane with nothing selected.
+            clear_selections(panes, mode);
+            *drag =
+                point_at(&panes[i], rect, event.column, event.row).map(|at| DragStart { pane: i, at });
         }
-        MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(start) = drag
-                && start.pane == i
-                && let Some(line) = line_at(&panes[i], rect, event.row)
-            {
-                // Dragging is a selection gesture; with capture on the
-                // terminal never sees it, so the TUI has to mean it.
-                panes[i].scroll.follow = false;
-                panes[i].sel = Some((start.line, line));
-                *mode = Mode::Select;
-            }
-        }
-        // The selection outlives the gesture — `y` comes after the release.
-        MouseEventKind::Up(MouseButton::Left) => *drag = None,
+        // Any other button: focus, and nothing else. Unlike the left one it
+        // starts no gesture of ours, so a middle-click paste or a
+        // right-click inside the focused pane leaves a selection standing.
         MouseEventKind::Down(_) => {
-            *focused = i;
+            focus_pane(i, focused, panes, mode);
             *drag = None;
         }
         MouseEventKind::ScrollUp => {
-            *focused = i;
+            focus_pane(i, focused, panes, mode);
             panes[i].scroll.up(WHEEL_STEP);
         }
         MouseEventKind::ScrollDown => {
-            *focused = i;
+            focus_pane(i, focused, panes, mode);
             let max = panes[i].max_scroll(inner_height);
             panes[i].scroll.down(WHEEL_STEP, max);
         }
         _ => {}
     }
+}
+
+/// Pull `row` onto one of `rect`'s content rows, for a drag that has left
+/// the pane vertically. Rows outside stay outside for a pane too short to
+/// have any — [`line_at`] rejects those anyway.
+fn clamp_row(rect: Rect, row: u16) -> u16 {
+    if rect.height < 3 {
+        return row;
+    }
+    row.clamp(rect.y + 1, rect.y + rect.height - 2)
+}
+
+/// Move focus to pane `i` on a gesture that isn't itself a selection.
+///
+/// Focus moving is what makes an existing selection untenable: `Mode::Select`
+/// is global and its bindings, its footer count and `copy_current` all read
+/// the *focused* pane's `sel`, so focus must never land on a pane that has
+/// none. Wheeling over the other pane therefore ends the selection, the
+/// same as Esc would.
+fn focus_pane(i: usize, focused: &mut usize, panes: &mut [Pane; 2], mode: &mut Mode) {
+    if i != *focused {
+        *focused = i;
+        clear_selections(panes, mode);
+    }
+}
+
+/// Drop any selection either pane is holding and leave `Mode::Select`.
+///
+/// The mouse equivalent of Esc, and the reason it takes both panes: `sel`
+/// lives on the pane so rendering needs to know nothing about modes, but
+/// the mode itself is global, so the two can only be cleared together.
+fn clear_selections(panes: &mut [Pane; 2], mode: &mut Mode) {
+    for pane in panes {
+        pane.sel = None;
+    }
+    *mode = Mode::Normal;
 }
 
 /// Retained-line index under mouse row `row` in `rect`, or `None` if that
@@ -1606,6 +1865,22 @@ fn line_at(pane: &Pane, rect: Rect, row: u16) -> Option<usize> {
     }
     let index = usize::from(pane.scroll.offset) + usize::from(row - rect.y - 1);
     Some(index.min(len - 1))
+}
+
+/// Buffer position under a mouse event at `(column, row)` in `rect`:
+/// [`line_at`]'s line, plus how far into it the column lands.
+///
+/// The column is measured in characters from the line's start, so the
+/// pane's horizontal pan is added back in — what is drawn in the leftmost
+/// content cell is character `hscroll`, not character 0. Unlike the row it
+/// clamps rather than failing on a border cell: the borders are one cell of
+/// slop either side of the text, and a press that lands on one means the
+/// near edge of the text, not "nowhere".
+fn point_at(pane: &Pane, rect: Rect, column: u16, row: u16) -> Option<Point> {
+    let line = line_at(pane, rect, row)?;
+    let rightmost = rect.width.saturating_sub(3);
+    let within = column.saturating_sub(rect.x.saturating_add(1)).min(rightmost);
+    Some(Point { line, col: usize::from(pane.hscroll) + usize::from(within) })
 }
 
 fn in_rect(pos: (u16, u16), rect: Rect) -> bool {
@@ -1675,7 +1950,7 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
         let count = content.lines.len();
         let max = (count as u16).saturating_sub(inner_height);
         let offset = pane.scroll.resolve(max);
-        let sel = pane.sel.and_then(|(anchor, cursor)| selection_span(anchor, cursor, count));
+        let sel = pane.sel;
         let query = pane.search.as_ref().map(|search| &search.query);
         let current = pane.search.as_ref().and_then(|search| search.hit);
         // Hand the Paragraph only the visible slice — vertical scrolling is
@@ -1688,7 +1963,10 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
             .enumerate()
             .skip(offset as usize)
             .take(inner_height as usize)
-            .map(|(index, line)| render_line(line, index, sel, query, current))
+            .map(|(index, line)| {
+                let selected = sel.and_then(|sel| selected_bytes(line, index, &sel, count));
+                render_line(line, index, selected, query, current)
+            })
             .collect();
         (content.exists, count, visible)
     };
@@ -1739,11 +2017,18 @@ fn render_pane(frame: &mut ratatui::Frame, area: Rect, pane: &mut Pane, focused:
     frame.render_widget(paragraph, area);
 }
 
-/// Build one display line: search matches picked out inside it, and the
-/// whole line reversed when it falls inside the selection.
+/// Build one display line: the selected characters reversed, the active
+/// pattern's matches picked out inside it.
 ///
+/// `sel` is the byte range of *this* line that the selection covers — the
+/// caller resolves it (see [`selected_bytes`]), which is what keeps this a
+/// pure function of one string and one range.
+///
+/// The two highlights are independent and can overlap part-way through a
+/// word, so rather than walking one and nesting the other the line is cut
+/// at every edge of either, and each piece styled from what covers it.
 /// Match positions are recomputed per visible line per frame rather than
-/// cached. Forty short lines against one regex is nothing beside the
+/// cached: forty short lines against one regex is nothing beside the
 /// terminal write that follows, and it means a highlight can never disagree
 /// with the text drawn under it — a pane's last line grows under the view
 /// whenever the producer is mid-line.
@@ -1754,36 +2039,61 @@ fn render_line(
     query: Option<&Query>,
     current: Option<Hit>,
 ) -> Line<'static> {
-    let selected = sel.is_some_and(|(lo, hi)| index >= lo && index <= hi);
-    let base = if selected { SELECT_STYLE } else { Style::new() };
     let hits = query.map(|q| q.hits_in(text)).unwrap_or_default();
-    if hits.is_empty() {
-        return Line::from(Span::styled(text.to_string(), base));
+    // An empty range is a line inside the selection that contributes no
+    // characters — real, and worth a blank line to the clipboard, but
+    // nothing to draw.
+    let sel = sel.filter(|(from, to)| from < to);
+    if hits.is_empty() && sel.is_none() {
+        return Line::from(Span::raw(text.to_string()));
     }
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(hits.len() * 2 + 1);
-    let mut at = 0;
-    for (start, end) in hits {
-        if start > at {
-            spans.push(Span::styled(text[at..start].to_string(), base));
+    let mut cuts: Vec<usize> = Vec::with_capacity(hits.len() * 2 + 4);
+    cuts.push(0);
+    cuts.push(text.len());
+    for &(start, end) in &hits {
+        cuts.push(start);
+        cuts.push(end);
+    }
+    if let Some((from, to)) = sel {
+        cuts.push(from);
+        cuts.push(to);
+    }
+    // Char boundaries only: an offset the producer has invalidated by
+    // extending the line mid-character is a cut we can do without, and
+    // slicing there would panic inside the TUI (see `char_col`).
+    cuts.retain(|&at| at <= text.len() && text.is_char_boundary(at));
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(cuts.len());
+    // Hits are ordered and disjoint, so one cursor walks them alongside the
+    // pieces instead of each piece rescanning the whole list.
+    let mut next = 0;
+    for piece in cuts.windows(2) {
+        let (from, to) = (piece[0], piece[1]);
+        while next < hits.len() && hits[next].1 <= from {
+            next += 1;
         }
-        let is_current = current.is_some_and(|hit| hit.line == index && hit.start == start);
-        // On a selected line the reverse video already belongs to the
-        // selection, so a match there is marked by weight instead of
-        // colour — two backgrounds fighting over one cell reads as neither.
-        let style = if selected && is_current {
-            base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else if selected {
-            base.add_modifier(Modifier::UNDERLINED)
-        } else if is_current {
-            CURRENT_MATCH_STYLE
-        } else {
-            MATCH_STYLE
+        let hit = hits.get(next).filter(|&&(start, end)| from >= start && to <= end);
+        let selected = sel.is_some_and(|(start, end)| from >= start && to <= end);
+        let is_current = hit.is_some_and(|&(start, _)| {
+            current.is_some_and(|hit| hit.line == index && hit.start == start)
+        });
+        // Inside the selection the reverse video is already spoken for, so
+        // a match there is marked by weight instead of colour — two
+        // backgrounds fighting over one cell reads as neither.
+        let style = match (selected, hit.is_some(), is_current) {
+            (true, _, true) => SELECT_STYLE.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            (true, true, false) => SELECT_STYLE.add_modifier(Modifier::UNDERLINED),
+            (true, false, false) => SELECT_STYLE,
+            (false, _, true) => CURRENT_MATCH_STYLE,
+            (false, true, false) => MATCH_STYLE,
+            (false, false, false) => Style::new(),
         };
-        spans.push(Span::styled(text[start..end].to_string(), style));
-        at = end;
+        spans.push(Span::styled(text[from..to].to_string(), style));
     }
-    if at < text.len() {
-        spans.push(Span::styled(text[at..].to_string(), base));
+    if spans.is_empty() {
+        // Nothing but zero-width matches on an empty line.
+        spans.push(Span::raw(text.to_string()));
     }
     Line::from(spans)
 }
@@ -1822,14 +2132,10 @@ fn render_footer(
         Line::from(Span::styled(status.text.clone(), style))
     } else if matches!(mode, Mode::Select) {
         let pane = &panes[focused];
-        let selected = pane
-            .sel
-            .and_then(|(anchor, cursor)| selection_span(anchor, cursor, pane.len()))
-            .map_or(0, |(lo, hi)| hi + 1 - lo);
-        let plural = if selected == 1 { "line" } else { "lines" };
         Line::from(Span::styled(
             format!(
-                "{selected} {plural} selected · j/k G g extend · {} copy · Esc cancel · q quit",
+                "{} selected · j/k G g extend · {} copy · Esc cancel · q quit",
+                pane.sel.map_or_else(|| "nothing".to_string(), |sel| selection_size(pane, &sel)),
                 copy_keys(rich_keys())
             ),
             dim,
@@ -1838,6 +2144,31 @@ fn render_footer(
         Line::from(Span::styled(hint(area.width, mouse, rich_keys()), dim))
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// How much is selected, phrased in the unit the selection was made in:
+/// characters where the whole of it sits inside one line, lines otherwise.
+/// Matches what the copy notice will go on to say it sent (see
+/// [`copy_selection`]) — a footer counting lines followed by a notice
+/// counting characters reads as two different copies.
+fn selection_size(pane: &Pane, sel: &Selection) -> String {
+    let content = lock(&pane.content);
+    let len = content.lines.len();
+    let Some((lo, hi)) = sel.line_span(len) else { return "nothing".to_string() };
+    if sel.grain == Grain::Chars && lo == hi {
+        let chars = content
+            .lines
+            .get(lo)
+            .and_then(|line| {
+                selected_bytes(line, lo, sel, len).map(|(from, to)| line[from..to].chars().count())
+            })
+            .unwrap_or(0);
+        let plural = if chars == 1 { "character" } else { "characters" };
+        return format!("{chars} {plural}");
+    }
+    let lines = hi + 1 - lo;
+    let plural = if lines == 1 { "line" } else { "lines" };
+    format!("{lines} {plural}")
 }
 
 /// How to spell the copy binding for the user: Ctrl-Shift-C is only worth
@@ -1857,12 +2188,12 @@ fn hint(width: u16, mouse: bool, rich: bool) -> String {
     let copy = copy_keys(rich);
     let full = format!(
         "Tab focus · ↑/↓ PgUp/PgDn scroll · ←/→ pan · End follow · / search · n/N hits · \
-         v select · {copy} copy view · Y copy pane · {mouse_key} · q quit"
+         drag or v select · {copy} copy view · Y copy pane · {mouse_key} · q quit"
     );
     if usize::from(width) >= full.chars().count() {
         full
     } else {
-        format!("/ search · n/N hits · v select · {copy} copy · {mouse_key} · q quit")
+        format!("/ search · n/N hits · drag/v select · {copy} copy · {mouse_key} · q quit")
     }
 }
 
@@ -2322,10 +2653,29 @@ mod tests {
 
     // -- shift_view ---------------------------------------------------------
 
+    /// A whole-line selection from `anchor` to `cursor` — `v`'s shape,
+    /// which is what most of these tests only need a pair of lines for.
+    fn lines_sel(anchor: usize, cursor: usize) -> Selection {
+        Selection {
+            anchor: Point { line: anchor, col: 0 },
+            cursor: Point { line: cursor, col: 0 },
+            grain: Grain::Lines,
+        }
+    }
+
+    /// A character selection from `(anchor_line, anchor_col)` to
+    /// `(cursor_line, cursor_col)` — what a drag makes.
+    fn chars_sel(anchor: (usize, usize), cursor: (usize, usize)) -> Selection {
+        Selection::chars(
+            Point { line: anchor.0, col: anchor.1 },
+            Point { line: cursor.0, col: cursor.1 },
+        )
+    }
+
     #[test]
     fn shift_view_by_zero_is_a_no_op() {
         let mut scroll = ScrollState { offset: 5, follow: false };
-        let mut sel = Some((3, 7));
+        let mut sel = Some(lines_sel(3, 7));
         let mut search = Some(PaneSearch {
             query: Query::new("x").unwrap(),
             dir: Direction::Forward,
@@ -2334,14 +2684,14 @@ mod tests {
         });
         shift_view(&mut scroll, &mut sel, &mut search, 0);
         assert_eq!(scroll.offset, 5);
-        assert_eq!(sel, Some((3, 7)));
+        assert_eq!(sel, Some(lines_sel(3, 7)));
         assert_eq!(search.as_ref().unwrap().hit.unwrap().line, 4);
     }
 
     #[test]
     fn shift_view_slides_scroll_selection_and_search_hit_together() {
         let mut scroll = ScrollState { offset: 10, follow: false };
-        let mut sel = Some((8, 12));
+        let mut sel = Some(lines_sel(8, 12));
         let mut search = Some(PaneSearch {
             query: Query::new("x").unwrap(),
             dir: Direction::Forward,
@@ -2350,24 +2700,24 @@ mod tests {
         });
         shift_view(&mut scroll, &mut sel, &mut search, 3);
         assert_eq!(scroll.offset, 7);
-        assert_eq!(sel, Some((5, 9)));
+        assert_eq!(sel, Some(lines_sel(5, 9)));
         assert_eq!(search.as_ref().unwrap().hit.unwrap().line, 6);
     }
 
     #[test]
     fn shift_view_saturates_at_zero_instead_of_wrapping() {
         let mut scroll = ScrollState { offset: 2, follow: false };
-        let mut sel = Some((1, 3));
+        let mut sel = Some(lines_sel(1, 3));
         let mut search: Option<PaneSearch> = None;
         shift_view(&mut scroll, &mut sel, &mut search, 10);
         assert_eq!(scroll.offset, 0);
-        assert_eq!(sel, Some((0, 0)));
+        assert_eq!(sel, Some(lines_sel(0, 0)));
     }
 
     #[test]
     fn shift_view_tolerates_no_selection_and_no_search() {
         let mut scroll = ScrollState { offset: 5, follow: false };
-        let mut sel: Option<(usize, usize)> = None;
+        let mut sel: Option<Selection> = None;
         let mut search: Option<PaneSearch> = None;
         shift_view(&mut scroll, &mut sel, &mut search, 2);
         assert_eq!(scroll.offset, 3);
@@ -2428,6 +2778,263 @@ mod tests {
         let rect = Rect { x: 0, y: 0, width: 40, height: 10 };
         // Row 8 would name index 7, but only 3 lines exist.
         assert_eq!(line_at(&pane, rect, 8), Some(2));
+    }
+
+    // -- point_at / clamp_row -----------------------------------------------
+
+    /// A pane holding one ten-character line, for the column math.
+    fn alphabet_pane() -> Pane {
+        let mut content = test_content();
+        content.ingest(b"abcdefghij\n");
+        test_pane(content)
+    }
+
+    #[test]
+    fn point_at_maps_a_column_to_a_character_offset_past_the_border() {
+        let pane = alphabet_pane();
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        // Column 0 is the left border, so column 1 holds character 0.
+        assert_eq!(point_at(&pane, rect, 1, 1), Some(Point { line: 0, col: 0 }));
+        assert_eq!(point_at(&pane, rect, 4, 1), Some(Point { line: 0, col: 3 }));
+    }
+
+    #[test]
+    fn point_at_adds_the_panes_horizontal_pan_back_in() {
+        let mut pane = alphabet_pane();
+        pane.hscroll = 20;
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert_eq!(point_at(&pane, rect, 1, 1), Some(Point { line: 0, col: 20 }));
+    }
+
+    #[test]
+    fn point_at_clamps_a_column_on_either_border_to_the_nearest_text() {
+        let pane = alphabet_pane();
+        // Content columns are 5..=14, i.e. characters 0..=9.
+        let rect = Rect { x: 4, y: 0, width: 12, height: 5 };
+        assert_eq!(point_at(&pane, rect, 4, 1), Some(Point { line: 0, col: 0 })); // left border
+        assert_eq!(point_at(&pane, rect, 0, 1), Some(Point { line: 0, col: 0 })); // further left
+        assert_eq!(point_at(&pane, rect, 15, 1), Some(Point { line: 0, col: 9 })); // right border
+        assert_eq!(point_at(&pane, rect, 99, 1), Some(Point { line: 0, col: 9 }));
+    }
+
+    #[test]
+    fn point_at_is_none_wherever_line_at_is() {
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert_eq!(point_at(&test_pane(test_content()), rect, 2, 1), None); // empty pane
+        assert_eq!(point_at(&alphabet_pane(), rect, 2, 0), None); // top border
+    }
+
+    #[test]
+    fn clamp_row_pulls_a_drag_that_left_the_pane_back_onto_its_text() {
+        // Content rows are 4..=9.
+        let rect = Rect { x: 0, y: 3, width: 20, height: 8 };
+        assert_eq!(clamp_row(rect, 0), 4);
+        assert_eq!(clamp_row(rect, 6), 6);
+        assert_eq!(clamp_row(rect, 40), 9);
+    }
+
+    #[test]
+    fn clamp_row_leaves_a_pane_with_no_text_rows_alone() {
+        let rect = Rect { x: 0, y: 0, width: 20, height: 2 };
+        assert_eq!(clamp_row(rect, 7), 7);
+    }
+
+    // -- Selection / byte_of_char / selected_bytes ---------------------------
+
+    /// Render `text` under `sel` and spell the highlight back out with `[]`
+    /// around the reversed run — the readable form of a character-granular
+    /// selection in an assertion.
+    fn marked(text: &str, sel: Option<(usize, usize)>) -> String {
+        let mut out = String::new();
+        for span in &render_line(text, 0, sel, None, None).spans {
+            if span.style.add_modifier.contains(Modifier::REVERSED) {
+                out.push('[');
+                out.push_str(&span.content);
+                out.push(']');
+            } else {
+                out.push_str(&span.content);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn byte_of_char_counts_chars_not_bytes() {
+        assert_eq!(byte_of_char("héllo", 0), 0);
+        assert_eq!(byte_of_char("héllo", 1), 1);
+        // The two-byte é sits between characters 1 and 2.
+        assert_eq!(byte_of_char("héllo", 2), 3);
+        assert_eq!(byte_of_char("héllo", 3), 4);
+    }
+
+    #[test]
+    fn byte_of_char_past_the_end_of_the_line_is_its_length() {
+        assert_eq!(byte_of_char("abc", 3), 3);
+        assert_eq!(byte_of_char("abc", 99), 3);
+        assert_eq!(byte_of_char("", 0), 0);
+    }
+
+    #[test]
+    fn ordered_puts_a_backwards_drag_into_document_order() {
+        assert_eq!(
+            chars_sel((7, 2), (3, 9)).ordered(),
+            (Point { line: 3, col: 9 }, Point { line: 7, col: 2 })
+        );
+        // Same line, cursor left of the anchor.
+        assert_eq!(
+            chars_sel((4, 8), (4, 2)).ordered(),
+            (Point { line: 4, col: 2 }, Point { line: 4, col: 8 })
+        );
+    }
+
+    #[test]
+    fn a_line_selection_covers_every_byte_of_every_line_it_spans() {
+        let sel = lines_sel(1, 2);
+        assert_eq!(selected_bytes("abc", 0, &sel, 4), None);
+        assert_eq!(selected_bytes("abc", 1, &sel, 4), Some((0, 3)));
+        assert_eq!(selected_bytes("abcdef", 2, &sel, 4), Some((0, 6)));
+        assert_eq!(selected_bytes("abc", 3, &sel, 4), None);
+    }
+
+    #[test]
+    fn a_character_selection_inside_one_line_includes_both_ends() {
+        // Columns 2..=4 of "abcdefg" are "cde": the character under the
+        // pointer is in, as it is in vim's charwise visual.
+        let sel = chars_sel((0, 2), (0, 4));
+        assert_eq!(selected_bytes("abcdefg", 0, &sel, 1), Some((2, 5)));
+        assert_eq!(marked("abcdefg", selected_bytes("abcdefg", 0, &sel, 1)), "ab[cde]fg");
+    }
+
+    #[test]
+    fn a_character_selection_reads_the_same_dragged_either_way() {
+        let there = chars_sel((0, 2), (0, 4));
+        let back = chars_sel((0, 4), (0, 2));
+        assert_eq!(selected_bytes("abcdefg", 0, &there, 1), selected_bytes("abcdefg", 0, &back, 1));
+    }
+
+    #[test]
+    fn a_character_selection_clips_only_its_first_and_last_lines() {
+        let sel = chars_sel((1, 4), (3, 1));
+        assert_eq!(selected_bytes("zero", 0, &sel, 5), None);
+        assert_eq!(selected_bytes("one-tail", 1, &sel, 5), Some((4, 8))); // col 4 to the end
+        assert_eq!(selected_bytes("two", 2, &sel, 5), Some((0, 3))); // a middle line, whole
+        assert_eq!(selected_bytes("three", 3, &sel, 5), Some((0, 2))); // through col 1
+        assert_eq!(selected_bytes("four", 4, &sel, 5), None);
+    }
+
+    #[test]
+    fn a_high_end_past_its_line_takes_that_line_to_its_end() {
+        // Dragging out past the ragged right edge of a log selects to the
+        // end of the line, which is what any editor does.
+        let sel = chars_sel((0, 1), (0, 99));
+        assert_eq!(selected_bytes("abc", 0, &sel, 1), Some((1, 3)));
+    }
+
+    #[test]
+    fn a_low_end_past_its_line_contributes_no_characters() {
+        // Pressing in the blank space right of a short line and dragging
+        // down: the line is in the selection but gives it nothing, which
+        // copies as the blank leading line an editor would give you.
+        let sel = chars_sel((0, 99), (1, 2));
+        assert_eq!(selected_bytes("abc", 0, &sel, 2), Some((3, 3)));
+        assert_eq!(selected_bytes("defgh", 1, &sel, 2), Some((0, 3)));
+    }
+
+    #[test]
+    fn a_character_selection_slices_multibyte_text_on_char_boundaries() {
+        // "héllo" is six bytes; columns 1..=2 are "él", bytes 1..4.
+        let sel = chars_sel((0, 1), (0, 2));
+        assert_eq!(selected_bytes("héllo", 0, &sel, 1), Some((1, 4)));
+        assert_eq!(marked("héllo", selected_bytes("héllo", 0, &sel, 1)), "h[él]lo");
+    }
+
+    #[test]
+    fn selected_bytes_on_an_empty_buffer_is_none() {
+        assert_eq!(selected_bytes("", 0, &chars_sel((0, 0), (0, 0)), 0), None);
+    }
+
+    #[test]
+    fn selected_bytes_cannot_come_out_inverted_by_clamping() {
+        // Both ends past the buffer's end land on its last line from
+        // opposite sides, which would otherwise read as end-before-start.
+        let sel = chars_sel((9, 4), (12, 1));
+        assert_eq!(selected_bytes("abcdef", 1, &sel, 2), Some((4, 4)));
+    }
+
+    // -- render_line's two overlapping highlights ---------------------------
+
+    #[test]
+    fn a_selection_and_a_match_can_overlap_part_way_through_a_word() {
+        let query = Query::new("cde").unwrap();
+        // The selection covers "bcd", the match "cde": the line is cut at
+        // both edges of both, and the pieces inside the selection keep its
+        // reverse video while the match there is marked by an underline.
+        let line = render_line("abcdef", 0, Some((1, 4)), Some(&query), None);
+        let pieces: Vec<(&str, Style)> =
+            line.spans.iter().map(|span| (span.content.as_ref(), span.style)).collect();
+        assert_eq!(
+            pieces,
+            vec![
+                ("a", Style::new()),
+                ("b", SELECT_STYLE),
+                ("cd", SELECT_STYLE.add_modifier(Modifier::UNDERLINED)),
+                ("e", MATCH_STYLE),
+                ("f", Style::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_current_match_inside_a_selection_is_marked_by_weight_not_colour() {
+        let query = Query::new("cd").unwrap();
+        let current = Some(Hit { line: 0, start: 2, end: 4 });
+        let line = render_line("abcdef", 0, Some((0, 6)), Some(&query), current);
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.add_modifier.contains(Modifier::REVERSED)),
+            "every piece of a fully selected line stays reversed"
+        );
+        let hit = &line.spans[1];
+        assert_eq!(hit.content.as_ref(), "cd");
+        assert!(hit.style.add_modifier.contains(Modifier::BOLD | Modifier::UNDERLINED));
+        assert_eq!(hit.style.bg, None, "no background to fight the selection's reverse video");
+    }
+
+    #[test]
+    fn an_empty_selected_range_draws_nothing() {
+        assert_eq!(marked("abc", Some((2, 2))), "abc");
+    }
+
+    // -- selection_text / selection_size ------------------------------------
+
+    fn phonetic_pane() -> Pane {
+        let mut content = test_content();
+        content.ingest(b"alpha\nbravo\ncharlie\n");
+        test_pane(content)
+    }
+
+    #[test]
+    fn selection_text_clips_the_first_and_last_lines_of_a_character_selection() {
+        let pane = phonetic_pane();
+        let sel = chars_sel((0, 2), (2, 3));
+        assert_eq!(selection_text(&pane, &sel), vec!["pha", "bravo", "char"]);
+    }
+
+    #[test]
+    fn selection_text_of_a_line_selection_is_the_lines_entire() {
+        let pane = phonetic_pane();
+        assert_eq!(selection_text(&pane, &lines_sel(0, 1)), vec!["alpha", "bravo"]);
+    }
+
+    #[test]
+    fn selection_size_counts_characters_inside_one_line_and_lines_across_them() {
+        let pane = phonetic_pane();
+        assert_eq!(selection_size(&pane, &chars_sel((0, 1), (0, 3))), "3 characters");
+        assert_eq!(selection_size(&pane, &chars_sel((0, 1), (0, 1))), "1 character");
+        assert_eq!(selection_size(&pane, &chars_sel((0, 1), (2, 1))), "3 lines");
+        // `v`'s selection is counted in lines even when it is only one.
+        assert_eq!(selection_size(&pane, &Selection::line(1)), "1 line");
     }
 
     // -- FramePacer -------------------------------------------------------
@@ -2783,7 +3390,7 @@ mod tests {
         pane.scroll.follow = true;
         assert!(start_select(&mut pane, 10));
         // bottom = min(offset + height, len) - 1 = min(15, 20) - 1 = 14.
-        assert_eq!(pane.sel, Some((14, 14)));
+        assert_eq!(pane.sel, Some(Selection::line(14)));
         assert!(!pane.scroll.follow);
     }
 
@@ -2797,7 +3404,7 @@ mod tests {
     #[test]
     fn leave_select_clears_the_selection_and_returns_to_normal_mode() {
         let mut pane = test_pane(test_content());
-        pane.sel = Some((1, 2));
+        pane.sel = Some(lines_sel(1, 2));
         let mut mode = Mode::Select;
         leave_select(&mut pane, &mut mode);
         assert_eq!(pane.sel, None);
