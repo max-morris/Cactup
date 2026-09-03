@@ -12,7 +12,7 @@
 # were built for the GPU nodes and are assumed to run on the CPU nodes too. If
 # MPI init fails there, point MPI_DIR at a site `module load openmpi` instead.
 # Kadath (KadathThorn) needs FFTW3, GSL, LAPACK and Boost: all four are set
-# below (FFTW3 through the MKL wrappers, GSL from the system).
+# below (FFTW3 built from source, GSL from the system).
 
 [cactup]
 gpu               = false
@@ -94,10 +94,9 @@ HDF5_LIB_DIRS = "/ddnB/project/sbrandt/externals-qbd/install/hdf5/lib"
 HDF5_LIBS = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
 HDF5_INSTALL_DIR = "/ddnB/project/sbrandt/externals-qbd/install/hdf5"
 
-FFTW3_DIR     = "/home/packages/compilers/intel/mkl/2022.0.2"
-FFTW3_INC_DIRS = "/home/packages/compilers/intel/mkl/2022.0.2/include/fftw"
-FFTW3_LIB_DIRS = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
-FFTW3_LIBS    = "mkl_intel_lp64 mkl_sequential mkl_core"
+# Previously we used Intel's MKL, but that only supports a subset of FFTW3's
+# functionality, breaking some codes (e.g., the BHNS gallery example)
+FFTW3_DIR = "BUILD"
 
 BLAS_DIR = "/home/packages/compilers/intel/mkl/2022.0.2/lib/intel64"
 BLAS_LIBS = "mkl_intel_lp64 mkl_sequential mkl_core"

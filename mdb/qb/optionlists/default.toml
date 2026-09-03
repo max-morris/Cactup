@@ -96,10 +96,9 @@ CU_DEPEND = "icpc -M -x c++ -DMPICH_IGNORE_CXX_SEEK -openmp"
 # (BLAS_LIBS = -mkl repeated in the original .cfg; deduplicated — TOML
 #  forbids duplicate keys and the value is identical.)
 
-# The installed FFTW3 does not support threads
-FFTW3_DIR = "NO_BUILD"
-FFTW3_LIBS = "-mkl"
-FFTW3_INC_DIRS = "${MKLROOT}/include/fftw/"
+# Previously we used Intel's MKL, but that only supports a subset of FFTW3's
+# functionality, breaking some codes (e.g., the BHNS gallery example)
+FFTW3_DIR = "BUILD"
 
 # GSL_DIR = NO_BUILD
 

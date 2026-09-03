@@ -81,9 +81,9 @@ BLAS_LIBS = "-mkl"
 
 BOOST_DIR = "BUILD"
 
-FFTW3_DIR = "NO_BUILD"
-FFTW3_INC_DIRS = "/usr/local/Intel/2016.3/compilers_and_libraries_2016.3.210/linux/mkl/include/fftw"
-FFTW3_LIBS = "-mkl"
+# Previously we used Intel's MKL, but that only supports a subset of FFTW3's
+# functionality, breaking some codes (e.g., the BHNS gallery example)
+FFTW3_DIR = "BUILD"
 
 CURL_DIR = "/usr/local/python/anaconda2-4.1.1"
 
