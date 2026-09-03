@@ -125,9 +125,14 @@ The TUI holds the mouse, because the panes are what a selection has to
 respect and your terminal can't see them — to it the screen is one grid, so
 a drag it owns highlights a rectangle across both panes and the footer and
 copies the two logs interleaved. Captured, a click focuses the pane under
-it and click-drag selects that pane's lines, the same selection `v` makes
-(see below), copied the same way. The selection survives releasing the
-button, so `y` afterwards copies it.
+it and click-drag selects that pane's text character by character: from the
+character you pressed on to the one under the pointer, so you can pull one
+field out of one line instead of taking the whole line. Drag past the right
+edge of a line and it runs to the end of it; drag off the top or bottom of
+the pane and it keeps extending to the edge of what's on screen. The
+selection survives releasing the button, so `y` afterwards copies it, and
+the footer counts what you have — characters inside a single line, lines
+once it spans more than one.
 
 What that gives up is your terminal's own double-click, triple-click and
 native copy — which is the route that needs nothing from cactup and works
@@ -151,8 +156,12 @@ The TUI copies through the system clipboard:
   with `j`/`k`, the arrow keys, `PgUp`/`PgDn`, or `g`/`G`; `y` (or
   `Ctrl-Shift-C`) copies the selected span; `Esc` or `v` cancels without
   copying. `q` still quits even mid-selection.
-  Click-drag makes the same selection with the mouse; a plain click, with
-  no drag, just focuses the pane and clears whatever was selected.
+  This is the line-granular counterpart to a mouse drag: `v` takes whole
+  lines, the mouse takes characters. Either way `j`/`k` and the rest extend
+  it without changing which of the two it is, so picking up a dragged
+  selection from the keyboard doesn't quietly widen it to whole lines. A
+  plain click, with no drag, just focuses the pane and clears whatever was
+  selected.
 
 All of these go out via the terminal's OSC 52 escape sequence, which is
 what lets copying work over SSH and through tmux/screen — the bytes ride
