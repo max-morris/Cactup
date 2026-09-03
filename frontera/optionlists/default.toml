@@ -113,10 +113,9 @@ MPI_INC_DIRS = "${TACC_IMPI_DIR}/include"
 MPI_LIB_DIRS = "${TACC_IMPI_DIR}/lib/release ${TACC_IMPI_DIR}/lib"
 MPI_LIBS = "mpicxx mpifort mpi dl rt pthread"
 
-FFTW3_DIR = "${MKLROOT}"
-FFTW3_LIB_DIRS = "${MKLROOT}/lib/intel64"
-FFTW3_INC_DIRS = "${MKLROOT}/include/fftw"
-FFTW3_LIBS = "mkl_intel_lp64 mkl_sequential mkl_core"
+# Previously we used Intel's MKL, but that only supports a subset of FFTW3's
+# functionality, breaking some codes (e.g., the BHNS gallery example)
+FFTW3_DIR = "BUILD"
 
 PAPI_DIR = "${TACC_PAPI_DIR}"
 

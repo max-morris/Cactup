@@ -131,10 +131,9 @@ AMREX_LIBS = "amrex"
 AMREX_LIB_DIRS = "/ddnA/project/sbrandt/Cactus/configs/ext/scratch/external/AMReX/lib"
 BLAS_DIR = "NO_BUILD"
 BLAS_LIBS = "mkl_intel_lp64 mkl_gnu_thread mkl_core"
-FFTW3_DIR = "NO_BUILD"
-FFTW3_INC_DIRS = "/usr/local/compilers/Intel/parallel_studio_xe_2020.4/mkl/include/fftw/"
-FFTW3_LIBS = "mkl_intel_lp64 mkl_gnu_thread mkl_core"
-FFTW3_LIB_DIRS = "/usr/local/compilers/Intel/parallel_studio_xe_2020.4/mkl/lib/intel64"
+# Previously we used Intel's MKL, but that only supports a subset of FFTW3's
+# functionality, breaking some codes (e.g., the BHNS gallery example)
+FFTW3_DIR = "BUILD"
 GSL_DIR = "/usr"
 GSL_LIBS = "gsl  gsl gslcblas m"
 HDF5_DIR = "/ddnA/project/sbrandt/Cactus/configs/ext/scratch/external/HDF5"

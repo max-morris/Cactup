@@ -82,8 +82,9 @@ F90_WARN_FLAGS = ""
 
 BOOST_DIR = "/cineca/prod/opt/libraries/boost/1.61.0/intelmpi--2017--binary"
 
-FFTW3_DIR = "/cineca/prod/opt/libraries/fftw/3.3.4/intelmpi--2017--binary"
-FFTW3_LIBS = "mkl_intel_lp64 mkl_core mkl_sequential"
+# Previously we used Intel's MKL, but that only supports a subset of FFTW3's
+# functionality, breaking some codes (e.g., the BHNS gallery example)
+FFTW3_DIR = "BUILD"
 
 GSL_DIR = "/cineca/prod/opt/libraries/gsl/2.2.1/intel--pe-xe-2017--binary"
 GSL_INC_DIRS = "/cineca/prod/opt/libraries/gsl/2.2.1/intel--pe-xe-2017--binary/include"
