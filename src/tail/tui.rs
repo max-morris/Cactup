@@ -50,6 +50,9 @@
 //! interleaved column-wise. Captured, a click focuses the pane under it and
 //! a drag selects that pane's text from the character it pressed on to the
 //! one under the pointer — the field out of the line, not the whole line.
+//! A drag that runs off an edge scrolls the pane after it ([`autoscroll`]),
+//! faster the further out it goes, so a selection can reach past what is on
+//! screen the way it would in the terminal's own scrollback.
 //!
 //! Selections therefore come in two grains, and [`Selection`] carries which
 //! one it is: a drag makes `Grain::Chars` and `v` makes `Grain::Lines`,
@@ -107,6 +110,14 @@ const MAX_LINES: usize = 10_000;
 const PAN_STEP: u16 = 8;
 /// Lines scrolled per mouse-wheel notch.
 const WHEEL_STEP: u16 = 3;
+/// How often a drag held off the edge of its pane scrolls the view another
+/// step. The mouse reports movement and nothing else, so a pointer parked
+/// out there has to be driven by the clock; [`TICK`] bounds how promptly
+/// that can happen, so there is no point asking for finer than it.
+const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
+/// Most cells one autoscroll step moves, however far outside its pane the
+/// pointer has been thrown.
+const AUTOSCROLL_MAX: u16 = 8;
 /// Longest the main loop ever blocks in one `event::poll`. File polling
 /// happens on the reader thread, so this only bounds two things: how long a
 /// keypress can sit unnoticed, and how long a Ctrl-C takes to wind the TUI
@@ -1146,6 +1157,26 @@ fn run_app(
             }
         }
 
+        // A drag parked off the edge of its pane keeps scrolling: the mouse
+        // reports movement only, so once the pointer stops out there
+        // nothing else would move the view after it. Skipped while the
+        // search prompt is up, which owns both the view and the mode a
+        // selection would take (`handle_mouse` drops the gesture for the
+        // same reason).
+        if let Some(start) = &mut drag
+            && !matches!(mode, Mode::Search(_))
+        {
+            let now = Instant::now();
+            if now >= start.due {
+                start.due = now + AUTOSCROLL_TICK;
+                let rect = pane_rect(start.pane, layout);
+                if autoscroll(&mut panes[start.pane], rect, start.pos) {
+                    extend_drag(&mut panes[start.pane], rect, start.at, start.pos, &mut mode);
+                    view_dirty = true;
+                }
+            }
+        }
+
         let dirty = view_dirty || content_dirty.load(Ordering::Acquire);
         let now = Instant::now();
         if dirty && pacer.due(now) {
@@ -1181,7 +1212,7 @@ fn handle_key(
     status: &mut Option<Status>,
     mouse: &mut bool,
 ) -> Res<bool> {
-    let rect = if *focused == STDOUT { layout.0 } else { layout.1 };
+    let rect = pane_rect(*focused, layout);
     // (height, width) of the pane's *content* area, borders excluded — what
     // every page, centering and pan calculation below is relative to.
     let inner = (rect.height.saturating_sub(2), rect.width.saturating_sub(2));
@@ -1717,6 +1748,13 @@ fn set_mouse_capture(on: bool) -> Res<()> {
 struct DragStart {
     pane: usize,
     at: Point,
+    /// Where the pointer was last seen, anywhere on the screen. Kept
+    /// because the mouse falls silent the moment it stops moving: this is
+    /// the position [`autoscroll`] goes on extending from while the button
+    /// is held outside the pane.
+    pos: (u16, u16),
+    /// When the next autoscroll step is due.
+    due: Instant,
 }
 
 fn handle_mouse(
@@ -1744,25 +1782,26 @@ fn handle_mouse(
     // got to: it belongs to the pane the press landed in, and running out
     // of that pane — into the other one, or over the footer — should keep
     // extending to the edge of its text, as any editor does, rather than
-    // freeze the selection where it last crossed the pane. The release is
-    // hoisted with it so that letting go out there still ends the gesture,
-    // instead of leaving an anchor standing for the next event to extend.
+    // freeze the selection where it last crossed the pane. Out there the
+    // pane also scrolls after the pointer, which is the clock's job rather
+    // than this function's — see [`autoscroll`]. The release is hoisted
+    // with it so that letting go out there still ends the gesture, instead
+    // of leaving an anchor standing for the next event to extend.
     if event.kind == MouseEventKind::Drag(MouseButton::Left) {
         if let Some(start) = drag {
-            let i = start.pane;
-            let rect = if i == STDOUT { layout.0 } else { layout.1 };
-            if let Some(at) = point_at(&panes[i], rect, event.column, clamp_row(rect, event.row)) {
-                // Dragging is a selection gesture; with capture on the
-                // terminal never sees it, so the TUI has to mean it.
-                panes[i].scroll.follow = false;
-                panes[i].sel = Some(Selection::chars(start.at, at));
-                *mode = Mode::Select;
-            }
+            start.pos = (event.column, event.row);
+            let rect = pane_rect(start.pane, layout);
+            extend_drag(&mut panes[start.pane], rect, start.at, start.pos, mode);
         }
         return;
     }
     // The selection outlives the gesture — `y` comes after the release.
-    if event.kind == MouseEventKind::Up(MouseButton::Left) {
+    // Bare motion ends it too: with button-event tracking the terminal
+    // reports movement only while a button is down, so a `Moved` is proof
+    // the release happened somewhere we couldn't see it (the pointer left
+    // the window). Without that the anchor would stand and the autoscroll
+    // clock would go on scrolling toward a pointer that isn't there.
+    if matches!(event.kind, MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Moved) {
         *drag = None;
         return;
     }
@@ -1775,7 +1814,7 @@ fn handle_mouse(
         None
     };
     let Some(i) = hit else { return };
-    let rect = if i == STDOUT { layout.0 } else { layout.1 };
+    let rect = pane_rect(i, layout);
     let inner_height = rect.height.saturating_sub(2);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -1787,8 +1826,12 @@ fn handle_mouse(
             // into the other pane would otherwise leave the mode pointing
             // at a pane with nothing selected.
             clear_selections(panes, mode);
-            *drag =
-                point_at(&panes[i], rect, event.column, event.row).map(|at| DragStart { pane: i, at });
+            *drag = point_at(&panes[i], rect, event.column, event.row).map(|at| DragStart {
+                pane: i,
+                at,
+                pos: (event.column, event.row),
+                due: Instant::now() + AUTOSCROLL_TICK,
+            });
         }
         // Any other button: focus, and nothing else. Unlike the left one it
         // starts no gesture of ours, so a middle-click paste or a
@@ -1818,6 +1861,102 @@ fn clamp_row(rect: Rect, row: u16) -> u16 {
         return row;
     }
     row.clamp(rect.y + 1, rect.y + rect.height - 2)
+}
+
+/// Extend the drag anchored at `start` to the pointer at `pos`, which may
+/// be anywhere on the screen: a gesture in flight owns the pointer wherever
+/// it has got to, so a position off the pane means the near edge of its
+/// text (see [`clamp_row`] and [`point_at`]'s column clamp), never
+/// "nowhere".
+fn extend_drag(pane: &mut Pane, rect: Rect, start: Point, pos: (u16, u16), mode: &mut Mode) {
+    let (column, row) = pos;
+    if let Some(at) = point_at(pane, rect, column, clamp_row(rect, row)) {
+        // Dragging is a selection gesture; with capture on the terminal
+        // never sees it, so the TUI has to mean it.
+        pane.scroll.follow = false;
+        pane.sel = Some(Selection::chars(start, at));
+        *mode = Mode::Select;
+    }
+}
+
+/// Scroll `pane` one step after a drag that has run off `rect`'s edges, and
+/// say whether the view actually moved.
+///
+/// Clamping the pointer back onto the text is only half of what a selection
+/// running off the edge should do — the other half is that the pane follows
+/// it, the way the terminal's own selection scrolls the scrollback when a
+/// drag reaches the top of the window. It can't be driven by mouse events,
+/// which stop the instant the pointer stops moving even though the button
+/// is still down and still outside; the main loop calls this every
+/// [`AUTOSCROLL_TICK`] instead, for as long as a drag is in flight, and
+/// re-extends the selection whenever it answers `true`.
+///
+/// A step that moves nothing is no reason to stop calling: a pane pinned at
+/// the bottom of its buffer starts moving again on its own as the log grows
+/// under it.
+fn autoscroll(pane: &mut Pane, rect: Rect, pos: (u16, u16)) -> bool {
+    let (dx, dy) = autoscroll_delta(rect, pos);
+    if (dx, dy) == (0, 0) {
+        return false;
+    }
+    let before = (pane.scroll.offset, pane.hscroll);
+    if dy != 0 {
+        let max = pane.max_scroll(rect.height.saturating_sub(2));
+        if dy < 0 {
+            pane.scroll.up(cells(dy));
+        } else {
+            pane.scroll.down(cells(dy), max);
+            // Reaching the bottom re-arms follow, which would slide the
+            // text out from under the selection being made. The gesture in
+            // flight outranks it; `End` is how the user asks for it back.
+            pane.scroll.follow = false;
+        }
+    }
+    if dx != 0 {
+        let max = pane.max_hscroll(rect.width.saturating_sub(2));
+        pane.hscroll = if dx < 0 {
+            pane.hscroll.saturating_sub(cells(dx))
+        } else {
+            pane.hscroll.saturating_add(cells(dx)).min(max)
+        };
+    }
+    (pane.scroll.offset, pane.hscroll) != before
+}
+
+/// One autoscroll step for a pointer at `pos`: signed columns and rows to
+/// move the view by, both zero while it is still over `rect`'s text.
+///
+/// Speed is the overshoot itself, so a pointer a cell past the edge crawls
+/// (and stays steerable, a character at a time) while one thrown well clear
+/// of the pane travels — the acceleration every terminal and editor gives a
+/// drag-selection, without needing to track how long it has been out there.
+fn autoscroll_delta(rect: Rect, pos: (u16, u16)) -> (i32, i32) {
+    let (x, y) = pos;
+    let span = |lo: u16, len: u16| (lo + 1, lo.saturating_add(len).saturating_sub(2));
+    // A pane too small to have any content cells has no edges to run off.
+    let dx = if rect.width < 3 { 0 } else { overshoot(span(rect.x, rect.width), x) };
+    let dy = if rect.height < 3 { 0 } else { overshoot(span(rect.y, rect.height), y) };
+    (dx, dy)
+}
+
+/// How far `at` is outside the inclusive range `lo..=hi`, signed toward the
+/// end it left and capped at [`AUTOSCROLL_MAX`]; zero inside.
+fn overshoot((lo, hi): (u16, u16), at: u16) -> i32 {
+    let cap = i32::from(AUTOSCROLL_MAX);
+    if at < lo {
+        -i32::from(lo - at).min(cap)
+    } else if at > hi {
+        i32::from(at - hi).min(cap)
+    } else {
+        0
+    }
+}
+
+/// The magnitude of one axis of an [`autoscroll_delta`], as the cell count
+/// the scroll and pan helpers take. Capped at [`AUTOSCROLL_MAX`] there, so
+/// the fallback is unreachable.
+fn cells(delta: i32) -> u16 {
+    u16::try_from(delta.unsigned_abs()).unwrap_or(u16::MAX)
 }
 
 /// Move focus to pane `i` on a gesture that isn't itself a selection.
@@ -1881,6 +2020,11 @@ fn point_at(pane: &Pane, rect: Rect, column: u16, row: u16) -> Option<Point> {
     let rightmost = rect.width.saturating_sub(3);
     let within = column.saturating_sub(rect.x.saturating_add(1)).min(rightmost);
     Some(Point { line, col: usize::from(pane.hscroll) + usize::from(within) })
+}
+
+/// The rect pane `i` was last drawn in.
+fn pane_rect(i: usize, layout: (Rect, Rect)) -> Rect {
+    if i == STDOUT { layout.0 } else { layout.1 }
 }
 
 fn in_rect(pos: (u16, u16), rect: Rect) -> bool {
@@ -2837,6 +2981,123 @@ mod tests {
     fn clamp_row_leaves_a_pane_with_no_text_rows_alone() {
         let rect = Rect { x: 0, y: 0, width: 20, height: 2 };
         assert_eq!(clamp_row(rect, 7), 7);
+    }
+
+    // -- autoscroll ----------------------------------------------------------
+
+    /// A pane holding `n` numbered lines padded to `width` characters —
+    /// enough text for a drag to scroll and pan through.
+    fn scrollable_pane(n: usize, width: usize) -> Pane {
+        let mut content = test_content();
+        for i in 0..n {
+            content.ingest(format!("{i:width$}\n").as_bytes());
+        }
+        test_pane(content)
+    }
+
+    #[test]
+    fn autoscroll_delta_is_zero_while_the_pointer_is_over_the_text() {
+        // Content cells are columns 5..=14, rows 4..=9.
+        let rect = Rect { x: 4, y: 3, width: 12, height: 8 };
+        assert_eq!(autoscroll_delta(rect, (5, 4)), (0, 0));
+        assert_eq!(autoscroll_delta(rect, (14, 9)), (0, 0));
+        assert_eq!(autoscroll_delta(rect, (9, 6)), (0, 0));
+    }
+
+    #[test]
+    fn autoscroll_delta_grows_with_the_overshoot_and_stops_at_the_cap() {
+        let rect = Rect { x: 4, y: 3, width: 12, height: 8 };
+        assert_eq!(autoscroll_delta(rect, (4, 6)), (-1, 0)); // one cell left
+        assert_eq!(autoscroll_delta(rect, (0, 6)), (-5, 0));
+        assert_eq!(autoscroll_delta(rect, (15, 10)), (1, 1)); // past both far edges
+        let cap = i32::from(AUTOSCROLL_MAX);
+        assert_eq!(autoscroll_delta(rect, (999, 999)), (cap, cap));
+        assert_eq!(autoscroll_delta(rect, (0, 0)), (-5, -4)); // out of the top corner
+    }
+
+    #[test]
+    fn autoscroll_delta_leaves_a_pane_with_no_text_cells_alone() {
+        let rect = Rect { x: 0, y: 0, width: 2, height: 2 };
+        assert_eq!(autoscroll_delta(rect, (9, 9)), (0, 0));
+    }
+
+    #[test]
+    fn a_drag_below_a_pane_scrolls_it_down_to_the_end_and_no_further() {
+        let mut pane = scrollable_pane(20, 4);
+        // Content rows are 1..=3; row 5 is two below the last of them.
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert!(autoscroll(&mut pane, rect, (5, 5)));
+        assert_eq!(pane.scroll.offset, 2);
+        assert!(!pane.scroll.follow, "a drag must not leave the view following");
+        for _ in 0..20 {
+            autoscroll(&mut pane, rect, (5, 5));
+        }
+        assert_eq!(pane.scroll.offset, pane.max_scroll(3)); // 20 lines, 3 rows
+        assert!(!autoscroll(&mut pane, rect, (5, 5)), "nothing left to scroll to");
+        assert!(!pane.scroll.follow, "hitting the bottom must not re-arm follow mid-drag");
+    }
+
+    #[test]
+    fn a_drag_above_a_pane_scrolls_it_up_to_the_top_and_no_further() {
+        let mut pane = scrollable_pane(20, 4);
+        pane.scroll.offset = 10;
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert!(autoscroll(&mut pane, rect, (5, 0)));
+        assert_eq!(pane.scroll.offset, 9);
+        for _ in 0..20 {
+            autoscroll(&mut pane, rect, (5, 0));
+        }
+        assert_eq!(pane.scroll.offset, 0);
+        assert!(!autoscroll(&mut pane, rect, (5, 0)));
+    }
+
+    #[test]
+    fn a_drag_off_the_side_of_a_pane_pans_it_within_the_widest_line() {
+        let mut pane = scrollable_pane(4, 40);
+        // Content columns are 1..=10; column 14 is four past the last.
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert!(autoscroll(&mut pane, rect, (14, 2)));
+        assert_eq!(pane.hscroll, 4);
+        for _ in 0..20 {
+            autoscroll(&mut pane, rect, (14, 2));
+        }
+        assert_eq!(pane.hscroll, pane.max_hscroll(10)); // 40 columns, 10 shown
+        assert!(!autoscroll(&mut pane, rect, (14, 2)), "no text left to pan to");
+        // ...and back the other way, a column at a time.
+        assert!(autoscroll(&mut pane, rect, (0, 2)));
+        assert_eq!(pane.hscroll, 29);
+    }
+
+    #[test]
+    fn a_drag_into_a_corner_scrolls_both_ways_at_once() {
+        let mut pane = scrollable_pane(20, 40);
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert!(autoscroll(&mut pane, rect, (13, 5)));
+        assert_eq!((pane.scroll.offset, pane.hscroll), (2, 3));
+    }
+
+    #[test]
+    fn autoscroll_does_nothing_while_the_pointer_is_still_inside() {
+        let mut pane = scrollable_pane(20, 40);
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        assert!(!autoscroll(&mut pane, rect, (5, 2)));
+        assert_eq!((pane.scroll.offset, pane.hscroll), (0, 0));
+        assert!(pane.scroll.follow, "hovering inside is not a scroll, so follow stands");
+    }
+
+    #[test]
+    fn an_autoscrolled_drag_extends_the_selection_to_the_line_it_scrolled_to() {
+        let mut pane = scrollable_pane(20, 4);
+        let rect = Rect { x: 0, y: 0, width: 12, height: 5 };
+        let start = Point { line: 0, col: 0 };
+        let pos = (5, 5);
+        assert!(autoscroll(&mut pane, rect, pos));
+        let mut mode = Mode::Normal;
+        extend_drag(&mut pane, rect, start, pos, &mut mode);
+        // Offset 2 puts line 4 on the last content row, which is where the
+        // clamped pointer lands.
+        assert_eq!(pane.sel.map(|s| s.cursor.line), Some(4));
+        assert!(matches!(mode, Mode::Select));
     }
 
     // -- Selection / byte_of_char / selected_bytes ---------------------------
