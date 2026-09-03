@@ -100,6 +100,8 @@ export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${LD_LIBRARY_PATH}"
 export MPI_ROOT=/opt/intel/oneapi/mpi/latest
 . ${MPI_ROOT}/env/vars.sh > /dev/null
 
+export MPI_HOME=/opt/intel/oneapi/mpi/latest
+
 export I_MPI_FABRICS=shm
 export FI_PROVIDER=tcp
 
