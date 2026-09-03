@@ -103,8 +103,9 @@ Each pane scrolls independently:
 - Arrow keys or `j`/`k`, `PgUp`/`PgDn` — scroll the focused pane
 - `Left`/`Right` or `h`/`l` — pan long lines horizontally
 - `Home`/`g` — jump to the top; `End`/`G` — jump to the bottom
-- Mouse wheel also works (your terminal's own wheel-to-arrow handling while
-  the TUI leaves the mouse alone, the TUI's own once `m` grabs it)
+- Click a pane to focus it; the mouse wheel scrolls the pane under the
+  pointer (and still works after `m` hands the mouse back to your terminal,
+  which turns wheel notches into arrow keys in this screen)
 
 Scrolling up pauses auto-follow for that pane, so new output doesn't yank
 you away while you're reading. Scroll back to the bottom (or press `End`)
@@ -120,15 +121,23 @@ frequently, to be kind to shared filesystems like Lustre/NFS.
 A full-screen view can take away the one thing a plain `tail -f` gets for
 free from the terminal: selecting text with the mouse. This one doesn't.
 
-By default the TUI does not capture the mouse, so everything your terminal
-already does keeps working inside the panes: double-click a word,
-triple-click a line, drag out a block, and copy it with whatever your
-terminal uses (`Ctrl-Shift-C`, `⌘C`, middle-click paste). This route needs
-nothing from cactup and works in every terminal. Press `m` to hand the
-mouse to the TUI instead — then the wheel scrolls, clicking focuses a pane,
-and click-drag selects whole lines — and `m` again to give it back.
+The TUI holds the mouse, because the panes are what a selection has to
+respect and your terminal can't see them — to it the screen is one grid, so
+a drag it owns highlights a rectangle across both panes and the footer and
+copies the two logs interleaved. Captured, a click focuses the pane under
+it and click-drag selects that pane's lines, the same selection `v` makes
+(see below), copied the same way. The selection survives releasing the
+button, so `y` afterwards copies it.
 
-The TUI can also copy for you, through the system clipboard:
+What that gives up is your terminal's own double-click, triple-click and
+native copy — which is the route that needs nothing from cactup and works
+even where OSC 52 is refused (see the caveat at the end of this section).
+Two ways to get it back: hold `Shift` while dragging, which most terminals
+read as "this gesture is mine" without any mode change, or press `m` to
+hand the mouse over for good (`m` again takes it back). The footer says
+which side currently holds it, and the wheel keeps scrolling either way.
+
+The TUI copies through the system clipboard:
 
 - `y` in normal mode copies exactly what's on screen in the focused pane —
   the quick "copy what I'm looking at." `Ctrl-Shift-C` does the same, in
@@ -142,9 +151,8 @@ The TUI can also copy for you, through the system clipboard:
   with `j`/`k`, the arrow keys, `PgUp`/`PgDn`, or `g`/`G`; `y` (or
   `Ctrl-Shift-C`) copies the selected span; `Esc` or `v` cancels without
   copying. `q` still quits even mid-selection.
-- Click-drag with the mouse (while it's captured) makes the same kind of
-  selection — a plain click just focuses the pane, as before. The selection
-  survives releasing the mouse button, so `y` afterwards copies it.
+  Click-drag makes the same selection with the mouse; a plain click, with
+  no drag, just focuses the pane and clears whatever was selected.
 
 All of these go out via the terminal's OSC 52 escape sequence, which is
 what lets copying work over SSH and through tmux/screen — the bytes ride
@@ -165,9 +173,10 @@ The catch is the terminal at the far end: it has to be willing to take an
 OSC 52 clipboard write (xterm needs `allowWindowOps`; some terminals refuse
 it outright), and a terminal that refuses simply discards the sequence —
 there is no ack, so cactup can't tell you it failed. A copy that seems to
-do nothing is usually that. If it happens, your terminal's own selection —
-which is what the mouse does until you press `m` — is the way around it. Very large copies are capped (100 KB); the
-footer says so when a copy gets cut off.
+do nothing is usually that. If it happens, your terminal's own selection is
+the way around it — `Shift`-drag, or `m` — since that never involves cactup
+at all. Very large copies are capped (100 KB); the footer says so when a
+copy gets cut off.
 
 ### Searching
 

@@ -43,22 +43,28 @@
 //! full-screen view has to hand back deliberately: copying a line, and
 //! finding one.
 //!
-//! Copying stays the terminal's job by default, because the terminal is
-//! better at it than we can be: the TUI does *not* capture the mouse at
-//! startup, so double-click a word, triple-click a line, drag a block and
-//! copy it with whatever chord (Ctrl-Shift-C, ⌘C, middle-click) that
-//! terminal already uses — all of it works untouched, and it works even
-//! where OSC 52 is refused. `m` is what hands the mouse to the TUI, for
-//! wheel scrolling, click-to-focus and drag-to-select-lines; the footer
-//! says which side currently holds it.
+//! The mouse is the TUI's from the first frame, because selecting inside a
+//! split view is the one thing the terminal *cannot* do for us: it has no
+//! idea the screen is two panes and a footer, so a drag it owns lights up
+//! one rectangle straight across all three and copies the two panes
+//! interleaved column-wise. Captured, a click focuses the pane under it and
+//! a drag selects that pane's lines — the same selection `v` makes, copied
+//! the same way.
 //!
-//! On top of that the TUI copies its *own* buffer through [`clipboard`]'s
-//! OSC 52 path (which survives the SSH hop this tool is nearly always used
-//! across): `y` yanks the view, `Y` the pane, and `v` plus motions yanks a
-//! line selection. Ctrl-Shift-C does the same as `y` wherever the terminal
-//! lets us see it as its own chord — see [`enable_rich_keys`]. Searching
-//! is vim's: `/`, `?`, `n`, `N` over a [`search::Query`], per pane,
-//! incremental as you type, and centered on the hit when it lands.
+//! What that costs is the terminal's own double-click, triple-click and
+//! native copy, which is the copy route that needs nothing from us and
+//! works where OSC 52 is refused or a multiplexer strips it. So it is a
+//! toggle: `m` hands the mouse back (most terminals also lend it out for a
+//! single Shift-drag), `ALT_SCROLL_ON` keeps the wheel scrolling while it
+//! is gone, and the footer says which side holds it.
+//!
+//! The TUI's own copying goes through [`clipboard`]'s OSC 52 path (which
+//! survives the SSH hop this tool is nearly always used across): `y` yanks
+//! the view, `Y` the pane, and `v` plus motions yanks a line selection.
+//! Ctrl-Shift-C does the same as `y` wherever the terminal lets us see it
+//! as its own chord — see [`enable_rich_keys`]. Searching is vim's: `/`,
+//! `?`, `n`, `N` over a [`search::Query`], per pane, incremental as you
+//! type, and centered on the hit when it lands.
 
 use super::search::{self, Direction, Hit, Query};
 use super::{LogTail, PollBackoff, SEED_BYTES, clipboard};
@@ -742,11 +748,13 @@ pub(crate) fn follow_tui(sources: &[(&str, PathBuf); 2], subject: &str) -> Res<(
 
 /// Turn the terminal's alternate-scroll mode on/off (DECSET 1007).
 ///
-/// With mouse capture off — how the TUI starts — the terminal keeps the
-/// mouse, and this is what keeps the wheel working anyway: in the alternate
-/// screen the terminal turns wheel notches into ↑/↓ presses, which land in
-/// the normal-mode bindings like any other arrow key. Terminals that don't
-/// implement it ignore the sequence.
+/// Armed for the stretch after `m`, when the terminal has the mouse back
+/// and our own wheel handling never sees a notch: in the alternate screen
+/// the terminal turns notches into ↑/↓ presses, which land in the
+/// normal-mode bindings like any other arrow key. Inert while capture is
+/// on (a terminal that sees mouse reporting enabled stops synthesising the
+/// keys), so it is simply left set for the whole session; terminals that
+/// don't implement it ignore the sequence either way.
 const ALT_SCROLL_ON: &[u8] = b"\x1b[?1007h";
 const ALT_SCROLL_OFF: &[u8] = b"\x1b[?1007l";
 
@@ -794,10 +802,13 @@ fn setup_terminal() -> Res<Terminal<Backend>> {
     // shell's own screen looks far less like a hang than a blank one.
     let rich = supports_keyboard_enhancement().unwrap_or(false);
     let mut stdout = std::io::stdout();
-    // Note what is *not* here: mouse capture. The terminal keeps the mouse
-    // until `m` asks for it, so the user's own double-click, triple-click
-    // and drag-select keep working inside the panes.
-    execute!(stdout, EnterAlternateScreen).context("entering the alternate screen")?;
+    // Capture from the first frame: a side-by-side view can't leave
+    // selection to the terminal, which knows nothing about the split and
+    // drags a rectangle straight across both panes and the footer. `m`
+    // hands the mouse back for the terminals where that is the only copy
+    // route (see [`set_mouse_capture`]).
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("entering the alternate screen")?;
     let _ = stdout.write_all(ALT_SCROLL_ON);
     if rich {
         enable_rich_keys(&mut stdout);
@@ -943,9 +954,10 @@ fn run_app(
     let mut layout = (Rect::default(), Rect::default());
     let mut mode = Mode::Normal;
     let mut status: Option<Status> = None;
-    // The terminal owns the mouse until the user hands it to the TUI with
-    // `m` — native selection is the copy route that works everywhere.
-    let mut mouse = false;
+    // The TUI owns the mouse until the user hands it back with `m`: the
+    // pane is the unit a click and a drag mean something in, and only we
+    // know where the panes are.
+    let mut mouse = true;
     let mut drag: Option<DragStart> = None;
 
     // Raised by the reader thread whenever bytes land. A *flag*, not a
@@ -1135,11 +1147,11 @@ fn normal_key(
             *mouse = !*mouse;
             set_mouse_capture(*mouse)?;
             let msg: &str = if *mouse {
-                "mouse captured — wheel scrolls, drag selects lines; \
+                "mouse captured — click focuses a pane, drag selects its lines; \
                  your terminal's own selection is off until m"
             } else {
                 "mouse released — double-click, drag and copy with your terminal \
-                 as usual, m to take it back"
+                 as usual (it can't see the panes), m to take it back"
             };
             note(status, msg, false);
             return Ok(false);
@@ -1506,14 +1518,16 @@ fn copy_view(pane: &Pane, inner_height: u16, status: &mut Option<Status>) -> Res
 
 /// Take the mouse for the TUI, or hand it back to the terminal.
 ///
-/// Capture is what makes drag-to-select-lines and click-to-focus work, and
-/// at the same time what takes away the terminal's own double-click,
-/// triple-click and drag selection — the copy route that works in every
-/// terminal, including those that refuse OSC 52 and those behind a
-/// multiplexer that strips it. So it's a toggle, and the terminal's side of
-/// it is the default; `ALT_SCROLL_ON` covers the wheel while capture is
-/// off, which leaves click-to-focus and line selection as the only reasons
-/// to reach for `m`.
+/// Capture is what makes click-to-focus and drag-to-select-lines work, and
+/// it is the default because those are the gestures that respect the split:
+/// the terminal's own selection knows nothing about the panes and drags one
+/// rectangle across both of them and the footer. What capture costs is that
+/// same terminal-side selection with its double-click, triple-click and
+/// native copy — the copy route that works even where OSC 52 is refused or
+/// a multiplexer strips it. So it stays a toggle, `m` releases it, and
+/// `ALT_SCROLL_ON` keeps the wheel scrolling while it is released. (Most
+/// terminals also give it back for one gesture under Shift-drag, without
+/// the toggle.)
 fn set_mouse_capture(on: bool) -> Res<()> {
     let mut out = std::io::stdout();
     if on {
@@ -1524,9 +1538,9 @@ fn set_mouse_capture(on: bool) -> Res<()> {
 }
 
 /// Where the left button went down, if it is still down: the anchor a drag
-/// would select from. A click on its own only focuses a pane — it takes
-/// actual movement to begin a selection, so click-to-focus keeps behaving
-/// exactly as it did.
+/// would select from. A click on its own only focuses the pane and clears
+/// what was selected — it takes actual movement to *make* a selection, so
+/// click-to-focus stays a click, not a one-line selection.
 struct DragStart {
     pane: usize,
     line: usize,
@@ -1549,11 +1563,27 @@ fn handle_mouse(
         None
     };
     let Some(i) = hit else { return };
+    // A half-typed pattern is the one thing the mouse must not disturb: the
+    // prompt belongs to the pane that opened it, and `SearchPrompt` holds
+    // the view state Esc puts back. Moving focus or starting a selection
+    // out from under it would strand both, so while it is open the mouse
+    // does nothing at all — the pane a wheel notch would scroll is the
+    // pane being searched, and it is already scrolling to the hits.
+    if matches!(mode, Mode::Search(_)) {
+        return;
+    }
     let rect = if i == STDOUT { layout.0 } else { layout.1 };
     let inner_height = rect.height.saturating_sub(2);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             *focused = i;
+            // Pressing down begins a new gesture, so whatever the last one
+            // left highlighted goes: a click that only moved focus must not
+            // leave a stale selection lit in the pane behind it, and
+            // `Mode::Select` is global while `sel` is per-pane, so a click
+            // into the other pane would otherwise leave the mode pointing
+            // at a pane with nothing selected.
+            clear_selections(panes, mode);
             *drag = line_at(&panes[i], rect, event.row).map(|line| DragStart { pane: i, line });
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -1570,21 +1600,50 @@ fn handle_mouse(
         }
         // The selection outlives the gesture — `y` comes after the release.
         MouseEventKind::Up(MouseButton::Left) => *drag = None,
+        // Any other button: focus, and nothing else. Unlike the left one it
+        // starts no gesture of ours, so a middle-click paste or a
+        // right-click inside the focused pane leaves a selection standing.
         MouseEventKind::Down(_) => {
-            *focused = i;
+            focus_pane(i, focused, panes, mode);
             *drag = None;
         }
         MouseEventKind::ScrollUp => {
-            *focused = i;
+            focus_pane(i, focused, panes, mode);
             panes[i].scroll.up(WHEEL_STEP);
         }
         MouseEventKind::ScrollDown => {
-            *focused = i;
+            focus_pane(i, focused, panes, mode);
             let max = panes[i].max_scroll(inner_height);
             panes[i].scroll.down(WHEEL_STEP, max);
         }
         _ => {}
     }
+}
+
+/// Move focus to pane `i` on a gesture that isn't itself a selection.
+///
+/// Focus moving is what makes an existing selection untenable: `Mode::Select`
+/// is global and its bindings, its footer count and `copy_current` all read
+/// the *focused* pane's `sel`, so focus must never land on a pane that has
+/// none. Wheeling over the other pane therefore ends the selection, the
+/// same as Esc would.
+fn focus_pane(i: usize, focused: &mut usize, panes: &mut [Pane; 2], mode: &mut Mode) {
+    if i != *focused {
+        *focused = i;
+        clear_selections(panes, mode);
+    }
+}
+
+/// Drop any selection either pane is holding and leave `Mode::Select`.
+///
+/// The mouse equivalent of Esc, and the reason it takes both panes: `sel`
+/// lives on the pane so rendering needs to know nothing about modes, but
+/// the mode itself is global, so the two can only be cleared together.
+fn clear_selections(panes: &mut [Pane; 2], mode: &mut Mode) {
+    for pane in panes {
+        pane.sel = None;
+    }
+    *mode = Mode::Normal;
 }
 
 /// Retained-line index under mouse row `row` in `rect`, or `None` if that

@@ -146,7 +146,7 @@ case "$MODE" in
     echo "          Tab / click                  — switch pane focus (cyan border)"
     echo "          ←/→                          — pan the long checkpoint lines"
     echo "          q                            — quit (writer is cleaned up)"
-    echo "          v then j/k/G, y              — select lines in the focused pane, y copies them (OSC 52)"
+    echo "          drag in a pane / v then j/k/G — select its lines (drag or vim-style), y copies them (OSC 52)"
     echo "          y  /  Y                      — y copies the view; Y copies the whole 10k-line pane"
     echo "          /checkpoint  then n/N        — search stdout, step through every checkpoint dump"
     echo "          ?Dissipation                 — search stderr backwards for the order-lowered warning"
