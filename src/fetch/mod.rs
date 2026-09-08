@@ -209,7 +209,7 @@ impl ExecReport {
 /// The line a finished git item leaves in the scrollback: green when the
 /// fetch left everything else alone, yellow when it did not — overwriting a
 /// dirty repo and re-pointing an `origin` are persistent changes to the
-/// user's tree, and a colour is how they get noticed in a run of eighty
+/// user's tree, and a color is how they get noticed in a run of eighty
 /// repos.
 ///
 /// A repo that was already at the wanted commit leaves *nothing*: in a
@@ -245,7 +245,7 @@ fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::Ob
 /// Progress renders via the crate's prodash line renderer, two levels deep
 /// (see [`PROGRESS_MAX_LEVEL`]): an overall "fetch components" bar counts
 /// finished items, and each in-flight component gets exactly one line —
-/// named for the component, labelled with the phase running right now, and
+/// named for the component, labeled with the phase running right now, and
 /// filled by that phase's own counter, so the same bar carries a repo from
 /// negotiating through receiving and indexing to checking out. Every
 /// component then leaves exactly one line in the scrollback on its way out:
@@ -266,8 +266,9 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
 
     // One name column for the whole batch, sized to the longest name it will
     // carry (the headline included, so its numbers line up with the lines
-    // below it): every component's phase, numbers and bar then start at the
-    // same column instead of shifting about as the phases change.
+    // below it): every component's phase then starts at the same column
+    // instead of shifting about as the phases change — and the headline
+    // holds the bar column still for every line under it.
     const HEADLINE: &str = "fetch components";
     let layout = crate::progress::Layout::for_names(
         std::iter::once(HEADLINE)
@@ -275,8 +276,13 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
             .chain(plan.downloads.iter().map(|c| c.checkout.as_str())),
     );
 
-    let top = progress.add_child(layout.headline(HEADLINE));
-    top.init(Some(plan.git.len() + plan.downloads.len()), Some(prodash::unit::label("components")));
+    let top = crate::progress::Headline::over(
+        progress.add_child(HEADLINE),
+        HEADLINE,
+        plan.git.len() + plan.downloads.len(),
+        "components",
+        layout.clone(),
+    );
     let top = std::sync::Mutex::new(top);
 
     let queue: std::sync::Mutex<std::collections::VecDeque<Work>> = std::sync::Mutex::new(
@@ -300,7 +306,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                 };
                 match work {
                     Work::Git(item) => {
-                        // The line is named for the repo alone and labelled
+                        // The line is named for the repo alone and labeled
                         // with what is happening to it right now — gix takes
                         // that label over as the fetch moves through its
                         // phases. Keeping the two apart is what lets the
@@ -309,7 +315,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         let mut line = crate::progress::Line::over(
                             top.lock().expect("fetch progress poisoned").add_child(item.repo.clone()),
                             &item.repo,
-                            layout,
+                            layout.clone(),
                         );
                         line.phase(if item.retarget.is_some() {
                             // Distinct phase: this item's `origin` is about
@@ -396,7 +402,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 .expect("fetch progress poisoned")
                                 .add_child(c.checkout.clone()),
                             &c.checkout,
-                            layout,
+                            layout.clone(),
                         );
                         line.phase("downloading");
                         let outcome = download::download_component(install_root, c, &mut line);

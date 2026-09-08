@@ -325,18 +325,29 @@ per-thread delta-resolution workers under those — and narrates throughput as
 `info` messages; drawn verbatim, four concurrent component fetches are a
 dozen flickering bars and a wall of `done 12.3MB in 1.2s` lines. Anything
 handed to gix is therefore wrapped in a `progress::Line`, which collapses
-that subtree onto its one item: labelled with the phase running now, filled
+that subtree onto its one item: labeled with the phase running now, filled
 by whichever phase is actually *moving* (the server's "Compressing objects"
 until the pack starts, then the pack's bytes, then the checkout's files),
 and silent about gix's own chatter. The renderer's level filter stops at the
-wrapped item. One `progress::Layout`, built per renderer from every name the
-batch will carry, fixes the width of the name column across all of its lines
-(the headline and the scrollback included), so the phase, the numbers and
-the bar start in the same place on every line rather than sliding about as
-the phases change; the same layout is what renders the component's name
-louder than the phase it is in, since prodash paints a task's whole name in
-one style and the only way to split the two is to end that style inside the
-string. Work that counts for itself with no phases — a plain download
+wrapped item. Every line is `<name>  <phase> <numbers>` anchored left, then
+a bar of one constant width anchored right. prodash cannot lay a line out
+that way on its own — it right-aligns each line's numbers against the widest
+line drawn and gives the bar whatever is left, so both drift as the phases
+change — so one `progress::Layout`, built per renderer from every name the
+batch will carry, composes the numbers into the item's name, padded or
+clipped to one text column, and gives the item a unit that prints nothing:
+prodash is left drawing the bar alone, from the item's own step and bound.
+The layout sizes the columns to the terminal (a third for the bar), fixes
+the width of the name column across all of its lines (the headline and the
+scrollback included), and renders the component's name louder than the
+phase it is in, since prodash paints a task's whole name in one style and
+the only way to split the two is to end that style inside the string. A
+layout's clock rewrites every live line's numbers ten times a second, which
+is what keeps gix's checkout current — it counts through the counter it
+takes, never through the handle. Lines under a headline hang from it by
+`├─`, the last one by `└─`: the headline numbers its children so the corner
+lands on the line prodash draws last, and it is passed on the moment that
+line finishes. Work that counts for itself with no phases — a plain download
 — uses `Line::counting` instead. Every finished unit of work leaves exactly
 one line in the scrollback: `succeeded` (green), `warned` (yellow: it
 changed something the user did not ask for, like overwriting a dirty repo or
