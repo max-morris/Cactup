@@ -560,15 +560,6 @@ are in the universe: the only elements in their construction are our
 concepts of space and time.
 — Subrahmanyan Chandrasekhar
 %
-# Source: Max Stirner, "Der Einzige und sein Eigentum" (1844), trans.
-# Steven Byington, "The Ego and Its Own" (1907), opening section.
-!zen
-The divine is God's concern; the human, man's. My concern is neither the
-divine nor the human, not the true, good, just, free, etc., but solely
-what is mine, and it is not a general one, but is — unique, as I am
-unique.
-— Max Stirner
-%
 # Source: Friedrich Nietzsche, "The Gay Science" (1882), §270.
 !zen
 What does your conscience say? — "You shall become the person you are."

@@ -27,7 +27,7 @@ These were settled during design review and are treated as fixed below.
 | D4 | Restart / chaining & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. Checkpoint recovery is **out of scope**: the parfile and Cactus own it end to end (§8.8). |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
-| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus the one computed form `@ENV(NAME)@`** (the named environment variable, read at substitution time; unset or empty = hard error), everywhere (TOML and shell templates). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
+| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
 | D8 | Machine-level thorn enable/disable toggles | **Kept** (see §7.5). |
 | D9 | Optionlist on-disk format | **TOML + render step.** Optionlists are authored as TOML; cactup renders them to the native Cactus `NAME = value` optionlist before `make`. Render rules, the `VERSION` semantics, and ordering are specified in §7.8. |
 | D10 | Pre-existing simfactory simulation dirs | **Greenfield / ignore.** cactup manages only simulations it created. A directory is recognized as a cactup simulation **iff** it contains `.cactup/simulation.toml`. cactup neither reads nor migrates legacy `SIMFACTORY/` simulations. |
@@ -362,7 +362,12 @@ files are internal and may carry §-refs freely.
 Top-level (clap, mirroring `src/args.rs` style). Global flags: `-v/--verbose`,
 `--manifest-url`, `--mdb-path` (new), `--machine <name>` (new; overrides
 discovery — §4.3), `--installation <alias>` (new; target a non-active
-installation for one command instead of `cactup use`-ing it first).
+installation for one command instead of `cactup use`-ing it first), and
+`-K/--knob NAME=VALUE` (new, repeatable; overlay a knob for this one command —
+§5.1). `-K` also accepts the two-token spelling `-K NAME VALUE`: a pre-pass
+over argv folds it into `NAME=VALUE` before clap parses (clap's own variable
+arity would swallow the subcommand name as the value), stopping at `--` and
+never pairing a flag-like next token.
 
 **`-f/--force` is per-command, not global.** The existing global `force` flag in
 `src/args.rs` is removed in favor of per-subcommand `-f`, because its meaning
@@ -1631,10 +1636,34 @@ Global default values, replacing simfactory's `defs.local.ini [default]`
 section and the per-run `GetMachineOption` overrides.
 
 ```
-cactup knob                       # print all knobs and values
+cactup knob                       # print all knobs and values (standard, then custom)
 cactup knob <name>                # print one knob
 cactup knob <name> <value>        # set one knob
+cactup knob -c <name> <value>     # create a CUSTOM knob (first time only)
+cactup knob delete <name>         # delete a custom knob / unset a standard one
+cactup -K <name>=<value> <cmd> …  # overlay a knob for one command (§5.1)
 ```
+
+**Two kinds of knob share one map.** The **standard** knobs below always
+exist and each has a `KnobSpec`. A **custom** knob is user-named: a
+free-form value that exists to be read by `@KNOB(name)@` in parfiles,
+scripts and optionlists (§6.1) — a path to initial data, a resolution tag,
+anything a user would otherwise hand-edit into a parfile per machine. Knob
+names (both kinds) are **kebab-case identifiers**: lowercase `a-z` only,
+digits allowed after the first character, dashes allowed anywhere but first
+or last (`validate_knob_name`). Creating a custom knob requires
+`-c/--custom`; setting a name that is neither standard nor an existing custom
+knob is an error naming the standard knobs and the `-c` form, so a typo can
+never quietly mint a knob nothing reads. Once a custom knob exists it is set
+like any other (no flag). `cactup knob delete <name>` **removes** a custom
+knob (creating it again needs `-c`); on a standard knob — which always exists
+— it only **unsets** the stored value, so the derived/built-in default applies
+again. Deleting a name that is neither standard nor an existing custom knob
+is an error, not a no-op. `delete` is a subcommand beside the positionals
+(`args_conflicts_with_subcommands`, as `build` does), so it is a reserved
+word no knob can be named (`validate_knob_name` rejects it, hence also
+`-K delete=…` and `@KNOB(delete)@`). `cactup knob` lists the two kinds under
+separate headings.
 
 Recognized knobs (from `cactup-simfactory-design.txt`): `allocation`, `mail`,
 `mail-type` (default `all`), `queue`. **ASSUMPTION:** also `account`-style
@@ -1658,8 +1687,9 @@ nothing to key them by. This is consistent with D4 (the global DB holds global
 cactup state).
 
 ```jsonc
-// database.json (excerpt)
-"knobs": { "allocation": "hpc_xxx", "mail": "me@lsu.edu", "mail-type": "all", "queue": "checkpt" }
+// database.json (excerpt) — standard and custom knobs side by side
+"knobs": { "allocation": "hpc_xxx", "mail": "me@lsu.edu", "mail-type": "all", "queue": "checkpt",
+           "kadath-initial-data": "/work/me/ID/BHNS.info" }
 ```
 
 ### 5.1 Value precedence
@@ -1668,9 +1698,30 @@ For any value that can come from several places (mirrors `simfactory-docs.txt`
 §6.2, adapted):
 
 1. Explicit CLI flag (e.g. `-q/--queue`, `-a/--allocation`) — highest.
-2. Knob.
-3. Machine `meta.toml` value / default.
-4. Built-in default.
+2. `-K name=value` overlay (this command only).
+3. Knob.
+4. Machine `meta.toml` value / default.
+5. Built-in default.
+
+**The `-K` overlay** is process-wide state installed by `main` from the parsed
+globals (`database::set_knob_overrides`) and applied by `Db::read()` to every
+snapshot it hands out — so *every* knob reader (topology resolution, identity,
+the build path's own `Db::open()`, wisdom) sees it without threading a
+parameter through — and never by `Db::update()`, which re-reads the disk
+state inside the lock, so an override can never be persisted. Values are
+validated at parse time exactly like `cactup knob` would (a standard knob's
+`validate`, a custom knob's name rule); a `-K` may name a custom knob that
+was never created, since nothing is stored. `cactup knob` marks overlaid
+values as "(-K override, not stored)".
+
+**The knob snapshot.** `Database::knob_snapshot()` is the effective knob map
+as `@KNOB(name)@` sees it (§6.1): every standard knob that has a stored or
+derived value, in *display* form (`wisdom-frequency` reads `normal`, not `2`),
+plus every custom knob, overlay included. It is attached to the variable set
+(`VarSet::set_knobs`) wherever one is assembled for submit/run/build/test,
+and **frozen** into the corresponding metadata — `restart.toml`, `build.toml`,
+`test.toml` `[knobs]` tables (§9.3) — so the compute node resolves
+`@KNOB(…)@` from disk and never opens the DB (D11).
 
 ### 5.2 No `defs.ini` / `defs.local.ini`
 
@@ -1690,18 +1741,49 @@ redistributed:
 
 ## 6. Templating / variable substitution
 
-Per D7, cactup implements **literal `@NAME@` replacement plus the one
-computed token form `@ENV(NAME)@`**: the value of environment variable
-`NAME`, read at substitution time — which always happens on the machine in
-question — with an unset or **empty** `NAME` being a hard error, never an
-empty splice. `@ENV()@` is the mechanism for machine paths only the machine's
-environment knows (TACC/LRZ-style hashed storage roots in `[paths]`, §4.2);
-because of it, `[paths]` values are resolved at **use time**
-(`Meta::resolved_paths`), not at MDB load, so entries for other machines
-still load and validate everywhere. There is no expression evaluation and no
-ternary sugar. Any MDB script that needs conditional logic (e.g. simfactory's
+Per D7, cactup implements **literal `@NAME@` replacement plus two computed
+token families**, `ENV` and `KNOB`, each in three forms:
+
+| Token | Value |
+|---|---|
+| `@ENV(NAME)@` | environment variable `NAME`; unset or **empty** is a hard error, never an empty splice |
+| `@ENV-OPTIONAL(NAME)@` | `NAME`, or the empty string when unset/empty |
+| `@ENV-OPTIONAL(NAME, default)@` | `NAME`, or `default` when unset/empty |
+| `@KNOB(name)@` | the knob `name` from the set's knob snapshot (§5.1); unset or empty is a hard error |
+| `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
+| `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+
+`ENV` arguments are `UPPER_SNAKE`, `KNOB` arguments are kebab-case knob
+identifiers (§5); blanks around the argument and default are tolerated; the
+required forms reject a default (it would defeat them); the only suffix is
+`-OPTIONAL`. The **default** is `"double-quoted"`, `'single-quoted'` — quotes
+dropped, `\"`/`\'`/`\\` escape the quote or backslash, any other backslash is
+literal — or a **bare** run of ASCII letters and digits; a bare default
+containing anything else (a space, `/`, `_`, `.`) is an error that names the
+offending character and says to quote it, and an empty default is spelled
+`""`. `ENV` is read at substitution time — which always happens on the
+machine in question (login node for a submit script or optionlist, compute
+node for a run script or parfile). `KNOB` reads the snapshot attached to the
+variable set; a set without one (MDB `[paths]`, ad-hoc sets) rejects every
+`KNOB` token, optional or not, as "not available in this context" rather than
+reading as unset.
+
+`@ENV()@` is the mechanism for machine paths only the machine's environment
+knows (TACC/LRZ-style hashed storage roots in `[paths]`, §4.2); because of
+it, `[paths]` values are resolved at **use time** (`Meta::resolved_paths`),
+not at MDB load, so entries for other machines still load and validate
+everywhere. There is no expression evaluation and no ternary sugar. Any MDB
+script that needs conditional logic (e.g. simfactory's
 `@("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@`) is
 rewritten as a Python `.py` variant.
+
+**Submit-time check (`VarSet::check`).** `sim submit`/`sim run` dry-run a
+`.par` parfile against the assembled variable set *before* creating the
+restart directory: every substitution error — stray `@`, unknown variable,
+malformed token, required `KNOB` unset — fails the submit on the spot with
+nothing left behind, instead of a queued job dying hours later. The one
+exemption is an unset required `@ENV(…)@`, which only the run-time
+environment can judge. `.py` parfiles are not checked.
 
 ### 6.1 The two template kinds
 
@@ -1727,8 +1809,13 @@ rewritten as a Python `.py` variant.
    script's stderr surfaced. **Types:** every value is provided in two forms —
    the canonical string (e.g. `NODES == "4"`, matching `.sh` semantics) and, for
    numeric/boolean variables, a typed companion under a `typed` dict
-   (`typed["NODES"] == 4`) so authors needn't re-parse. The JSON-on-stdin choice
-   keeps values out of the process table and argv length limits.
+   (`typed["NODES"] == 4`) so authors needn't re-parse. **Knobs:** the knob
+   snapshot (§5.1) arrives as the `knobs` dict, and the preamble defines
+   `knob(name)` / `knob(name, default)` mirroring `@KNOB(name)@` /
+   `@KNOB-OPTIONAL(name, default)@` — the no-default form raises `CactupError`
+   for an unset or empty knob, with the same message the token would produce.
+   The JSON-on-stdin choice keeps values out of the process table and argv
+   length limits.
 
    **Refusing the run.** A `.py` variant may `raise CactupError("…")` (the class
    is provided by the preamble) to reject the request outright: cactup prints the
@@ -1799,9 +1886,13 @@ depends on the artifact:
   in one of the two template kinds above — exactly like submit/run scripts, and
   chosen by the parfile's extension (§8.2):
   - A **`.par`** parfile is `@NAME@`-substituted with the full §6.3 variable set
-    and written as the ready-to-run `<basename>.par`. (Literal `@` in a `.par` is
-    written `@@`, which the run-time substitution collapses to a single `@` —
-    §6.1.)
+    — `@ENV(…)@` read from the compute node's environment, `@KNOB(…)@` from the
+    snapshot frozen in `restart.toml` at submit time (§5.1) — and written as
+    the ready-to-run `<basename>.par`. (Literal `@` in a `.par` is written
+    `@@`, which the run-time substitution collapses to a single `@` — §6.1.)
+    The parfile is also dry-run at submit time (`VarSet::check`, §6), so a
+    required knob it names must be set — or overlaid with `-K` — for the
+    submit to succeed.
   - A **`.py`** parfile is the escape hatch for computed/conditional parfiles
     (replacing simfactory's executable-`.rpar` mechanism, §8.4). It is invoked
     per the §6.1 `.py` calling convention — cactup runs `python3 <parfile>.py`
@@ -2612,7 +2703,9 @@ the two things the old universe-based wrapper conflated.
 
 **Every build gets an attempt — foreground or queued, one per invocation.**
 `configs/<name>/.cactup-builds/%04d/` holds `build.toml` (the frozen metadata
-above), the frozen `build-script` (and a `submit-script` too, for a queued
+above, including the `[vars]`/`[knobs]` tables that let `execute` and a build
+submit script resolve `@NAME@`/`@KNOB(…)@` without the DB — §5.1, §9.3), the
+frozen `build-script` (and a `submit-script` too, for a queued
 build), `build.out`/`build.err`, and a `running.lock`/`heartbeat` pair with the
 same liveness semantics as a simulation restart's (§9.3). There is
 deliberately **no `-active` symlink**: unlike a simulation's `output-NNNN`
@@ -3460,8 +3553,12 @@ subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carr
 `checkpt-buffer`, `job-id`, `chained-job-id`,
 the last observed `status`, the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
-without re-reading the MDB), and the creation/marking timestamps that simfactory
-kept in the separate `timestamp`/`simulation` mark files — folded in here).
+without re-reading the MDB), the frozen `[vars]` table (the §6.3 variable set)
+and `[knobs]` table (the effective knob snapshot, §5.1 — both so the compute
+node rebuilds its whole substitution context from disk, D11), and the
+creation/marking timestamps that simfactory kept in the separate
+`timestamp`/`simulation` mark files — folded in here). `build.toml` (§7.9) and
+`test.toml` (§11.8) carry the same `[vars]`/`[knobs]` pair for the same reason.
 Job id lives in `restart.toml` (`job-id`); there is no `job.ini` (D10 — no legacy
 fallback to read).
 
@@ -3858,6 +3955,10 @@ reads), the test subsystem adds:
   job-id = "…"
   status = "U"                      # last observed live status (cached; §8.6)
   universe = { name = "et-sif", wrapper = "…" }   # resolved run universe, or absent
+  [vars]                            # frozen §6.3 variable set (D11)
+  TASKS = 4
+  [knobs]                           # frozen knob snapshot for @KNOB(…)@ (§5.1, D11)
+  allocation = "hpc_xxx"
   [results]                         # written when a run completes (§11.6)
   passed = 42
   failed = 3
