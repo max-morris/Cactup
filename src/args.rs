@@ -2,8 +2,97 @@
 //! flags per §8.5, compute-node flags per §8.3.1, restart flags per §8.8.
 
 use crate::walltime::Walltime;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
+
+// §5.1
+/// One `-K NAME=VALUE` knob override, validated at parse time: the name must
+/// be a knob identifier and, for a standard knob, the value must pass that
+/// knob's own validation. `value` is the stored form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KnobOverride {
+    pub name: String,
+    pub value: String,
+}
+
+/// clap adapter for `-K`: `NAME=VALUE` (the `NAME VALUE` spelling is folded
+/// into this form by [`normalize_knob_args`] before clap sees it).
+fn parse_knob_override(s: &str) -> Result<KnobOverride, String> {
+    let Some((name, value)) = s.split_once('=') else {
+        return Err(format!(
+            "expected NAME=VALUE (or NAME VALUE), got \"{s}\"; e.g. -K allocation=hpc_xxx"
+        ));
+    };
+    let value = crate::database::knob_stored_form(name, value).map_err(|e| e.to_string())?;
+    Ok(KnobOverride { name: name.to_owned(), value })
+}
+
+/// Fold the two-token spelling of a knob override — `-K NAME VALUE`,
+/// `-KNAME VALUE`, `--knob NAME VALUE` — into the one-token `-K NAME=VALUE`
+/// clap parses. A `NAME` that already carries `=` is left alone, as is
+/// everything after a bare `--`. Non-UTF-8 arguments pass through untouched.
+pub(crate) fn normalize_knob_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut out = Vec::new();
+    let mut args = args.into_iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = args.next() {
+        if passthrough {
+            out.push(arg);
+            continue;
+        }
+        let Some(s) = arg.to_str() else {
+            out.push(arg);
+            continue;
+        };
+        if s == "--" {
+            passthrough = true;
+            out.push(arg);
+            continue;
+        }
+        // The flag and its NAME may be one token (`-Kfoo`) or two (`-K foo`,
+        // `--knob foo`); either way, a NAME without `=` takes the next
+        // token as its VALUE.
+        let (prefix, name) = if s == "-K" || s == "--knob" {
+            match args.peek().and_then(|n| n.to_str()) {
+                Some(n) if !n.contains('=') && !n.starts_with('-') => {
+                    let name = args.next().expect("peeked");
+                    (format!("{s} "), name.to_str().expect("checked utf-8").to_owned())
+                }
+                _ => {
+                    out.push(arg);
+                    continue;
+                }
+            }
+        } else if let Some(name) = s.strip_prefix("-K").filter(|n| !n.is_empty() && !n.contains('=')) {
+            ("-K".to_owned(), name.to_owned())
+        } else {
+            out.push(arg);
+            continue;
+        };
+        let Some(value) = args.peek().and_then(|v| v.to_str()).filter(|v| !v.starts_with('-')) else {
+            // No value to pair with: hand clap the pieces and let it complain.
+            match prefix.strip_suffix(' ') {
+                Some(flag) => {
+                    out.push(flag.into());
+                    out.push(name.into());
+                }
+                None => out.push(format!("{prefix}{name}").into()),
+            }
+            continue;
+        };
+        let value = value.to_owned();
+        args.next();
+        match prefix.strip_suffix(' ') {
+            Some(flag) => {
+                out.push(flag.into());
+                out.push(format!("{name}={value}").into());
+            }
+            None => out.push(format!("{prefix}{name}={value}").into()),
+        }
+    }
+    out
+}
 
 // §8.5
 /// clap adapter for the canonical walltime grammar.
@@ -70,6 +159,21 @@ pub(crate) struct GlobalOpts {
     /// and the system FQDN).
     #[clap(long, global = true, value_name = "HOSTNAME")]
     pub hostname: Option<String>,
+    // §5.1
+    /// Override a knob for this command only (NAME=VALUE or NAME VALUE; repeatable)
+    ///
+    /// Nothing is stored: the value applies wherever this command reads the
+    /// knob — topology defaults, and `@KNOB(name)@` in scripts, optionlists
+    /// and parfiles. A custom knob need not exist yet.
+    #[clap(
+        short = 'K',
+        long = "knob",
+        global = true,
+        value_name = "NAME=VALUE",
+        value_parser = parse_knob_override,
+        action = ArgAction::Append
+    )]
+    pub knob: Vec<KnobOverride>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -129,11 +233,25 @@ pub(crate) enum Commands {
     Test(TestCommand),
     // §5
     /// Print or set machine-global default values
+    ///
+    /// Standard knobs (allocation, queue, mail, …) always exist. A custom
+    /// knob has a name of your choosing — lowercase letters, digits after
+    /// the first character, dashes inside — and is read by @KNOB(name)@ in
+    /// parfiles, scripts and optionlists. Create one with -c; once it
+    /// exists, set it like any other knob, and remove it with `knob delete`.
+    #[command(args_conflicts_with_subcommands = true)]
     Knob {
         /// The knob to print or set; omit to print all knobs.
         name: Option<String>,
         /// The value to set; omit to print the knob.
         value: Option<String>,
+        /// Create a custom knob. Required the first time a non-standard
+        /// name is set; a typo in a knob name is otherwise an error, not a
+        /// new knob.
+        #[clap(short, long)]
+        custom: bool,
+        #[clap(subcommand)]
+        command: Option<KnobCommand>,
     },
     // §4
     /// Inspect and manage machine definitions
@@ -160,6 +278,16 @@ pub(crate) enum Commands {
     ///   cactup knob wisdom-kind relevant
     #[clap(verbatim_doc_comment)]
     Wisdom,
+}
+
+// §5
+#[derive(Subcommand, Debug)]
+pub(crate) enum KnobCommand {
+    /// Delete a custom knob, or unset a standard one (back to its default)
+    Delete {
+        /// The knob to delete or unset.
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -841,6 +969,104 @@ mod tests {
                 panic!("failed to parse {argv:?}: {e}");
             }
         }
+    }
+
+    fn normalized(argv: &[&str]) -> Vec<String> {
+        normalize_knob_args(argv.iter().map(OsString::from))
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn knob_override_spellings_normalize_to_name_equals_value() {
+        // Two-token spellings fold into one.
+        assert_eq!(
+            normalized(&["cactup", "-K", "queue", "gpu", "sim", "list"]),
+            ["cactup", "-K", "queue=gpu", "sim", "list"]
+        );
+        assert_eq!(
+            normalized(&["cactup", "-Kqueue", "gpu", "sim", "list"]),
+            ["cactup", "-Kqueue=gpu", "sim", "list"]
+        );
+        assert_eq!(
+            normalized(&["cactup", "--knob", "queue", "gpu", "x"]),
+            ["cactup", "--knob", "queue=gpu", "x"]
+        );
+        // Already-joined spellings are untouched — including a value that
+        // itself contains '='.
+        assert_eq!(
+            normalized(&["cactup", "-K", "queue=gpu", "sim"]),
+            ["cactup", "-K", "queue=gpu", "sim"]
+        );
+        assert_eq!(normalized(&["cactup", "-Kqueue=a=b", "sim"]), ["cactup", "-Kqueue=a=b", "sim"]);
+        assert_eq!(
+            normalized(&["cactup", "--knob=queue=gpu", "sim"]),
+            ["cactup", "--knob=queue=gpu", "sim"]
+        );
+        // A flag-like next token is never swallowed as the value, and `--`
+        // ends processing.
+        assert_eq!(normalized(&["cactup", "-K", "queue", "-v"]), ["cactup", "-K", "queue", "-v"]);
+        assert_eq!(
+            normalized(&["cactup", "--", "-K", "queue", "gpu"]),
+            ["cactup", "--", "-K", "queue", "gpu"]
+        );
+        // Repeatable, anywhere in the line.
+        assert_eq!(
+            normalized(&[
+                "cactup", "sim", "submit", "bbh", "-K", "queue", "gpu", "-K", "kadath-initial-data=/x",
+            ]),
+            ["cactup", "sim", "submit", "bbh", "-K", "queue=gpu", "-K", "kadath-initial-data=/x"]
+        );
+    }
+
+    #[test]
+    fn knob_override_parses_and_validates() {
+        let args = Args::try_parse_from([
+            "cactup", "-K", "queue=gpu", "-K", "kadath-initial-data=/x y", "sim", "list",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.globals.knob,
+            [
+                KnobOverride { name: "queue".into(), value: "gpu".into() },
+                KnobOverride { name: "kadath-initial-data".into(), value: "/x y".into() },
+            ]
+        );
+        // Global: accepted after the subcommand too.
+        assert!(Args::try_parse_from(["cactup", "sim", "list", "-K", "queue=gpu"]).is_ok());
+        // A standard knob's own validation applies; a bad name is rejected.
+        let parse_err = |argv: &[&str]| Args::try_parse_from(argv).unwrap_err().to_string();
+        let err = parse_err(&["cactup", "-K", "wisdom-frequency=loud", "wisdom"]);
+        assert!(err.contains("invalid wisdom-frequency value"), "{err}");
+        assert!(Args::try_parse_from(["cactup", "-K", "wisdom-frequency=chatty", "wisdom"]).is_ok());
+        let err = parse_err(&["cactup", "-K", "Bad_Name=1", "wisdom"]);
+        assert!(err.contains("not a valid knob name"), "{err}");
+        let err = parse_err(&["cactup", "-K", "queue", "wisdom"]);
+        assert!(err.contains("expected NAME=VALUE"), "{err}");
+        // `knob -c` creates a custom knob.
+        let parsed = Args::try_parse_from(["cactup", "knob", "-c", "kadath-initial-data", "/x"]).unwrap();
+        match parsed.command {
+            Commands::Knob { name, value, custom, command: None } => {
+                assert_eq!(
+                    (name.as_deref(), value.as_deref(), custom),
+                    (Some("kadath-initial-data"), Some("/x"), true)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // `knob delete` is a subcommand beside the positionals; a knob name
+        // that is not a subcommand still lands as the positional.
+        let parsed = Args::try_parse_from(["cactup", "knob", "delete", "kadath-initial-data"]).unwrap();
+        match parsed.command {
+            Commands::Knob { command: Some(KnobCommand::Delete { name }), .. } => {
+                assert_eq!(name, "kadath-initial-data");
+            }
+            other => panic!("{other:?}"),
+        }
+        let parsed = Args::try_parse_from(["cactup", "knob", "allocation", "hpc_xxx"]).unwrap();
+        assert!(matches!(parsed.command, Commands::Knob { command: None, .. }));
+        assert!(Args::try_parse_from(["cactup", "knob", "delete", "x", "-c"]).is_err());
     }
 
     #[test]

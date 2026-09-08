@@ -378,7 +378,7 @@ fn submit_impl(
     // must never see (§9.3's no-leak rule, mirrored here).
     let identity = Identity::resolve(db, hostname_override);
     let build_universe = attempt.meta.universe.as_ref().map(|u| u.name.as_str());
-    let mut vset = thaw_vars(&attempt.meta.vars)?;
+    let mut vset = thaw_vars(&attempt.meta.vars, &attempt.meta.knobs)?;
     set_topology_vars(&mut vset, &topo, &format!("build-{name}"));
     set_wall_only_vars(&mut vset, topo.total_wall);
     vset.set("SCRIPTFILE", attempt.submit_script_path().display().to_string());
@@ -1235,6 +1235,7 @@ mod tests {
                 machine: None,
                 installation: None,
                 hostname: None,
+                knob: Vec::new(),
             },
             db: crate::database::Db::in_dir(dir),
         }
@@ -1951,6 +1952,7 @@ mod tests {
             universe: None,
             config_meta: sample_config_meta_named(config),
             vars: Default::default(),
+            knobs: Default::default(),
             timestamps: crate::build::attempt::Timestamps::default(),
             outcome,
         }

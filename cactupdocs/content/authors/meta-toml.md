@@ -356,9 +356,22 @@ cactup knob allocation my_project
 cactup knob queue default
 ```
 
-The known knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, and `email`
-(`mail-type`, `user`, and `email` fall back to derived defaults when unset). See the
-[CLI reference](../reference/cli.html) for `cactup knob`.
+The standard knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, `email`,
+`wisdom-frequency` and `wisdom-kind` (`mail-type`, `user`, and `email` fall back to
+derived defaults when unset). Users can also create **custom knobs**
+(`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and
+override any knob for one command with `-K name=value`.
+
+Scripts and optionlists may read knobs with `@KNOB(name)@` /
+`@KNOB-OPTIONAL(name, default)@` — see
+[Scripts & Variables](scripts-and-variables.html#substitution-rules). A machine
+definition should not *depend* on a custom knob existing: the MDB is shared, and
+a required `@KNOB(name)@` in a submit script fails for every user who has not
+set it. Prefer `@KNOB-OPTIONAL(...)@` with a sensible default there, and reserve
+the required form for the user's own parfiles. Knobs are **not** available in
+`[paths]`, which resolve before any knob context exists. See the
+[CLI reference](../reference/cli.html) for `cactup knob` and
+[Running Simulations](../users/running-simulations.html#knobs) for the user's view.
 
 ## Validation tips
 

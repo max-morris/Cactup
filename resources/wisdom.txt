@@ -83,6 +83,17 @@ resolved machine.
 Tired of typing -a on every submit? Persist a default once:
 cactup knob allocation <account>
 %
+Stop hand-editing paths into parfiles per machine. Make a custom knob and
+read it: cactup knob -c initial-data /path/to/id.info, then
+@KNOB(initial-data)@ in the parfile.
+%
+Override any knob for just one command with -K, nothing stored:
+cactup -K queue=gpu sim submit <name>
+%
+A parfile's @ENV(NAME)@ must be set on the compute node. If the variable is
+sometimes missing, @ENV-OPTIONAL(NAME, "fallback")@ substitutes a default
+instead of failing.
+%
 Target another installation for a single command instead of switching:
 cactup --installation <alias> sim list
 %

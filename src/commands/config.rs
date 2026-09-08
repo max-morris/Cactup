@@ -493,6 +493,7 @@ mod tests {
             ))
             .unwrap(),
             vars: Default::default(),
+            knobs: Default::default(),
             timestamps: crate::build::attempt::Timestamps::default(),
             outcome: None,
         };

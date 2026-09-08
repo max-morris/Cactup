@@ -14,7 +14,7 @@ use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
 use crate::mdb::{Machine, Optionlist};
-use crate::sim::restart::{freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
+use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{script_command, spawn_and_wait, write_executable};
 use crate::sim::vars::QueueFit;
 use crate::template::{VarSet, VarValue};
@@ -1737,11 +1737,16 @@ pub fn prepare(
     // @ALLOCATION@ (e.g. mike's and Deep Bayou's `srun … singularity exec`
     // build wrappers); bind it from the allocation knob the way the sim path
     // does, empty when unset.
-    let allocation = crate::database::Db::open()
-        .and_then(|db| db.read())
+    let db = crate::database::Db::open().and_then(|db| db.read());
+    let allocation = db
+        .as_ref()
         .map(|db| db.knob("allocation").unwrap_or("").to_owned())
         .unwrap_or_default();
     vars.set("ALLOCATION", allocation);
+    // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
+    // optionlist, make command and a build submit script — frozen into
+    // `build.toml` with the vars, so `execute` never opens the DB (§5, D11).
+    vars.set_knobs(db.map(|db| db.knob_snapshot()).unwrap_or_default());
     // A future submit-script's `@CACTUP@` (mirrors the sim/testsuite paths).
     // Not read by anything in this chunk, but login-node-only, so it must be
     // frozen now — `execute` could never recover it otherwise (D11).
@@ -1843,6 +1848,7 @@ pub fn prepare(
         universe: universe_spec,
         config_meta,
         vars: freeze_vars(&vars),
+        knobs: freeze_knobs(&vars),
         timestamps: Timestamps { created: Some(Utc::now()), submitted: None, started: None, finished: None },
         outcome: None,
     };
@@ -2150,7 +2156,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             .with_context(|| format!("Failed to copy {}", prebuilt.display()))?;
         None
     } else {
-        let vset = thaw_vars(&attempt.meta.vars)?;
+        let vset = thaw_vars(&attempt.meta.vars, &attempt.meta.knobs)?;
         // A wrapper universe may hand the build to the scheduler (e.g. an
         // srun prefix), which sits silently in the queue until it gets an
         // allocation — say so up front, or the wait looks like a hang.

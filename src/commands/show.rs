@@ -48,6 +48,7 @@ mod tests {
                 machine: None,
                 installation: None,
                 hostname: None,
+                knob: Vec::new(),
             },
             db: Db::in_dir(dbdir.path()),
         };

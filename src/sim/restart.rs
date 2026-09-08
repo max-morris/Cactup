@@ -106,6 +106,11 @@ pub struct RestartMeta {
     /// The frozen §6.3 variable set (run-phase `ENV_SETUP`).
     #[serde(default)]
     pub vars: IndexMap<String, toml::Value>,
+    /// The effective knob snapshot as of submit time (§5, §6.1) — what
+    /// `@KNOB(…)@` in the parfile and run-script reads on the compute node,
+    /// which never opens the global DB (D11).
+    #[serde(default)]
+    pub knobs: IndexMap<String, String>,
 }
 
 /// One restart on disk.
@@ -178,9 +183,18 @@ pub fn freeze_vars(vars: &VarSet) -> IndexMap<String, toml::Value> {
         .collect()
 }
 
-/// Rebuild the VarSet from a frozen `[vars]` table. Non-scalar values (which
-/// cactup never writes) are an error naming the key.
-pub fn thaw_vars(frozen: &IndexMap<String, toml::Value>) -> Res<VarSet> {
+/// The knob snapshot a VarSet carries, as the TOML `[knobs]` table (empty
+/// when the set has none).
+pub fn freeze_knobs(vars: &VarSet) -> IndexMap<String, String> {
+    vars.knobs().cloned().unwrap_or_default()
+}
+
+/// Rebuild the VarSet from frozen `[vars]` and `[knobs]` tables. Non-scalar
+/// values (which cactup never writes) are an error naming the key.
+pub fn thaw_vars(
+    frozen: &IndexMap<String, toml::Value>,
+    knobs: &IndexMap<String, String>,
+) -> Res<VarSet> {
     let mut vars = VarSet::new();
     for (name, value) in frozen {
         match value {
@@ -190,6 +204,7 @@ pub fn thaw_vars(frozen: &IndexMap<String, toml::Value>) -> Res<VarSet> {
             other => bail!("restart.toml var {name} has unsupported type {}", other.type_str()),
         }
     }
+    vars.set_knobs(knobs.clone());
     Ok(vars)
 }
 
@@ -521,7 +536,7 @@ mod tests {
         vars.set("QUEUE", "checkpt");
         vars.set("GPU", false);
         let frozen = freeze_vars(&vars);
-        let thawed = thaw_vars(&frozen).unwrap();
+        let thawed = thaw_vars(&frozen, &Default::default()).unwrap();
         assert_eq!(thawed.get("NODES"), Some(&VarValue::Int(4)));
         assert_eq!(thawed.get("QUEUE"), Some(&VarValue::Str("checkpt".into())));
         assert_eq!(thawed.get("GPU"), Some(&VarValue::Bool(false)));

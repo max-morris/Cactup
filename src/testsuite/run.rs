@@ -12,7 +12,7 @@ use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::{Machine, Phase, ScriptKind, Universe, HOST_UNIVERSE};
 use crate::scheduler::{JobStatus, Scheduler};
-use crate::sim::restart::{freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
+use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{
     generate_script, resolve_run_universe, resolve_submit_universe, script_command,
     spawn_and_wait, write_executable, Identity,
@@ -328,6 +328,7 @@ fn start_impl(
             results: None,
             timestamps: Timestamps { created: Some(Utc::now()), ..Default::default() },
             vars: Default::default(),
+            knobs: Default::default(),
         },
     };
     let lock = run.lock()?;
@@ -340,7 +341,7 @@ fn start_impl(
     activate_results(&run_dir, results_id)?;
 
     // Topology variable set (§8.5) + the §11.9 test-only group.
-    let vset = assemble_test_vars(
+    let mut vset = assemble_test_vars(
         &name,
         &run_dir,
         results_id,
@@ -354,7 +355,10 @@ fn start_impl(
         &inst.alias,
         run_uni_name,
     )?;
+    // Effective knobs, `-K` overlay included, frozen for the compute node (§5, D11).
+    vset.set_knobs(db.knob_snapshot());
     run.meta.vars = freeze_vars(&vset);
+    run.meta.knobs = freeze_knobs(&vset);
 
     // 5. Scripts at the run root (§11.5): run-script always (the compute node
     //    executes it), submit-script for `test submit`.
@@ -410,7 +414,7 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
 /// the frozen run universe, holding `running.lock` + heartbeat; then parse
 /// the harness summary, record it, and exit non-zero on failures.
 fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
-    let vset = thaw_vars(&run.meta.vars)?;
+    let vset = thaw_vars(&run.meta.vars, &run.meta.knobs)?;
     // Re-assert the arrangements link like the results dir above: a run dir
     // from an older cactup may predate it.
     if let Some(src) = vset.get("SOURCEDIR") {
@@ -799,6 +803,7 @@ mod tests {
             )
             .unwrap(),
             vars: Default::default(),
+            knobs: Default::default(),
             timestamps: crate::build::attempt::Timestamps::default(),
             outcome: None,
         };

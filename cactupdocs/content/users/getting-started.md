@@ -152,7 +152,7 @@ See [Monitoring & Logs](monitoring.html) for more details.
 - **Explore build variants**: Some machines offer multiple optionlists (e.g., CPU vs GPU). See [Building Configs](building-configs.html).
 - **Learn about universes**: Advanced build environments (Singularity, module-loaded shells). See [Building Configs](building-configs.html).
 - **Run test suites**: Validate your config. See [Test Suites](test-suites.html).
-- **Set machine defaults**: Use the `knob` command to set allocation, queue, and other defaults for your machine.
+- **Set machine defaults**: Use the `knob` command to set allocation, queue, and other defaults for your machine — and to define custom knobs your parfiles can read with `@KNOB(name)@`. See [Running Simulations](running-simulations.html#knobs).
 - **Cluster-specific setup**: If you're on an HPC system, check the [Cluster Authors](../authors/mdb-overview.html) guide to understand your machine's configuration.
 
 ## Troubleshooting

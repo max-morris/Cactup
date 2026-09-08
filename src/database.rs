@@ -17,6 +17,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, OnceLock};
 
 use crate::lock::LinkLock;
 use crate::Res;
@@ -74,6 +75,70 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
 /// The spec for a knob name, if cactup recognizes it.
 pub fn knob_spec(name: &str) -> Option<&'static KnobSpec> {
     KNOWN_KNOBS.iter().find(|s| s.name == name)
+}
+
+/// Check a knob identifier (§5): kebab-case — lowercase `a-z` only, digits
+/// allowed after the first character, dashes allowed anywhere but first and
+/// last. Every standard knob name satisfies this; custom knobs must.
+pub fn validate_knob_name(name: &str) -> Res<()> {
+    let bytes = name.as_bytes();
+    let ok = !bytes.is_empty()
+        && bytes[0].is_ascii_lowercase()
+        && bytes[bytes.len() - 1] != b'-'
+        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    if !ok {
+        bail!(
+            "\"{name}\" is not a valid knob name: lowercase letters a-z, digits after the first \
+             character, and dashes anywhere but first or last"
+        );
+    }
+    // `cactup knob <subcommand>` shares the positional slot with knob names,
+    // so a knob by that name could be created but never read or deleted.
+    if RESERVED_KNOB_NAMES.contains(&name) {
+        bail!("\"{name}\" is a `cactup knob` subcommand and cannot be used as a knob name");
+    }
+    Ok(())
+}
+
+/// Knob names taken by `cactup knob` subcommands (§5).
+const RESERVED_KNOB_NAMES: &[&str] = &["delete"];
+
+/// Turn a user-supplied `-K`/`cactup knob` value into the stored form: a
+/// standard knob's `validate` (which rejects bad values and normalizes),
+/// verbatim for a custom knob (after checking the name).
+pub fn knob_stored_form(name: &str, value: &str) -> Res<String> {
+    match knob_spec(name) {
+        Some(spec) => (spec.validate)(value),
+        None => {
+            validate_knob_name(name)?;
+            Ok(value.to_owned())
+        }
+    }
+}
+
+/// The stored form for display: a standard knob's `render`, verbatim for a
+/// custom knob.
+pub fn knob_display_form(name: &str, stored: &str) -> String {
+    match knob_spec(name) {
+        Some(spec) => (spec.render)(stored),
+        None => stored.to_owned(),
+    }
+}
+
+/// The `-K NAME=VALUE` overlay for this process (§5.1): stored-form values,
+/// applied to every snapshot [`Db::read`] hands out and never persisted.
+/// Installed once by `main` before the first read.
+static KNOB_OVERRIDES: OnceLock<IndexMap<String, String>> = OnceLock::new();
+
+/// Install the `-K` overlay. A second call is a no-op (`main` calls it once).
+pub fn set_knob_overrides(overrides: IndexMap<String, String>) {
+    let _ = KNOB_OVERRIDES.set(overrides);
+}
+
+/// The `-K` overlay, empty when none was given.
+pub fn knob_overrides() -> &'static IndexMap<String, String> {
+    static EMPTY: LazyLock<IndexMap<String, String>> = LazyLock::new(IndexMap::new);
+    KNOB_OVERRIDES.get().unwrap_or(&EMPTY)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -220,6 +285,41 @@ impl Database {
         self.knobs.insert(name.to_owned(), value);
     }
 
+    /// The stored custom knobs (§5) — every entry that is not a standard
+    /// knob — in insertion order.
+    pub fn custom_knobs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.knobs
+            .iter()
+            .filter(|(name, _)| knob_spec(name).is_none())
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+
+    /// Lay the `-K` overlay (§5.1) over the stored knobs. Applied to read
+    /// snapshots only — a `Db::update` closure sees the disk state, so an
+    /// override is never written back.
+    fn apply_knob_overrides(&mut self) {
+        for (name, value) in knob_overrides() {
+            self.knobs.insert(name.clone(), value.clone());
+        }
+    }
+
+    /// The effective knob values as `@KNOB(name)@` sees them (§6.1): every
+    /// standard knob that has a stored or derived value, in display form,
+    /// plus every custom knob. Frozen into restart/build/test metadata at
+    /// submit time so the compute node never reads the DB (D11).
+    pub fn knob_snapshot(&self) -> IndexMap<String, String> {
+        let mut out = IndexMap::new();
+        for spec in KNOWN_KNOBS {
+            if let Some(stored) = self.knob_or_default(spec.name) {
+                out.insert(spec.name.to_owned(), (spec.render)(&stored));
+            }
+        }
+        for (name, value) in self.custom_knobs().filter(|(_, v)| !v.is_empty()) {
+            out.insert(name.to_owned(), value.to_owned());
+        }
+        out
+    }
+
     /// Deserialize from `path`, or build a fresh one if the file doesn't
     /// exist. Enforces the §2.1 schema guard.
     fn read_from(path: &Path) -> Res<Self> {
@@ -288,7 +388,11 @@ impl Db {
     pub fn read(&self) -> Res<Database> {
         self.ensure_dir()?;
         let _lock = LinkLock::acquire(&self.lock_path)?;
-        Database::read_from(&self.path)
+        let mut db = Database::read_from(&self.path)?;
+        // The `-K` overlay (§5.1) lives on snapshots only: `update` below
+        // re-reads the disk state, so an override can never be persisted.
+        db.apply_knob_overrides();
+        Ok(db)
     }
 
     /// The §2.3 field-scoped read-modify-write: acquire the lock, re-read the
@@ -512,5 +616,54 @@ mod tests {
         let mut db = db;
         db.set_knob("mail-type", "none".to_owned());
         assert_eq!(db.knob_or_default("mail-type").as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn knob_names_are_kebab_case() {
+        for ok in ["a", "queue", "mail-type", "kadath-initial-data", "x1", "a-1-b", "wisdom-frequency"] {
+            validate_knob_name(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in ["", "1a", "-a", "a-", "Queue", "mail_type", "a b", "ünï", "a.b", "a/b", "delete"] {
+            assert!(validate_knob_name(bad).is_err(), "{bad:?} accepted");
+        }
+        // Every standard knob passes its own rule.
+        for spec in KNOWN_KNOBS {
+            validate_knob_name(spec.name).unwrap();
+        }
+    }
+
+    #[test]
+    fn stored_and_display_forms() {
+        // Standard knobs go through their spec both ways.
+        assert_eq!(knob_stored_form("wisdom-frequency", "chatty").unwrap(), "3");
+        assert_eq!(knob_display_form("wisdom-frequency", "3"), "chatty");
+        assert!(knob_stored_form("wisdom-frequency", "loud").is_err());
+        // Custom knobs are verbatim, but the name must be valid.
+        assert_eq!(knob_stored_form("kadath-initial-data", "/x y").unwrap(), "/x y");
+        assert_eq!(knob_display_form("kadath-initial-data", "/x y"), "/x y");
+        assert!(knob_stored_form("Bad", "v").is_err());
+    }
+
+    #[test]
+    fn knob_snapshot_covers_standard_and_custom() {
+        let mut db = Database::new();
+        db.set_knob("allocation", "hpc_xxx".to_owned());
+        db.set_knob("wisdom-frequency", "3".to_owned());
+        db.set_knob("kadath-initial-data", "/scratch/id.info".to_owned());
+        let custom: Vec<_> = db.custom_knobs().collect();
+        assert_eq!(custom, [("kadath-initial-data", "/scratch/id.info")]);
+        let snap = db.knob_snapshot();
+        // Stored, derived-default and custom values, all in display form;
+        // knobs with no value at all are absent.
+        assert_eq!(snap["allocation"], "hpc_xxx");
+        assert_eq!(snap["mail-type"], "all");
+        assert_eq!(snap["wisdom-frequency"], "chatty");
+        assert_eq!(snap["kadath-initial-data"], "/scratch/id.info");
+        assert!(!snap.contains_key("mail"));
+        assert!(!snap.contains_key("queue"));
+        // An empty value (`cactup knob x ""`) is no value: it leaves the
+        // snapshot, so @KNOB(…)@ sees it as unset rather than as "".
+        db.set_knob("kadath-initial-data", String::new());
+        assert!(!db.knob_snapshot().contains_key("kadath-initial-data"));
     }
 }

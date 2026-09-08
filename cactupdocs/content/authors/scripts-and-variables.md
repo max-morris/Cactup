@@ -124,10 +124,56 @@ cactup expands `@VAR@` tokens in scripts at runtime. Variables include:
 
 ### Substitution rules
 
-- `@NAME@` — substituted with the variable value
-- `@@` — escapes to a literal `@` in output
-- `@ENV(VARNAME)@` — reads the environment variable `VARNAME`
-- Unknown `@NAME@` tokens cause an error
+The same engine expands submit/run scripts, build submit scripts, optionlists,
+`[scheduler]` commands and `.par` parfiles, in one left-to-right pass:
+
+- `@NAME@` — the variable's value. An unknown name is an error, never a
+  silent leak (this catches the `@QEUEUE@` class of typo).
+- `@@` — a literal `@`. The result is never re-scanned, so `@@NAME@@` yields
+  the literal text `@NAME@`.
+- A lone `@` that is neither of the above is an error.
+
+Two **computed** token families read values that are not variables. Each has a
+required form and two optional forms:
+
+| Token | Expands to |
+|---|---|
+| `@ENV(NAME)@` | environment variable `NAME`; **error** if unset or empty |
+| `@ENV-OPTIONAL(NAME)@` | `NAME`, or the empty string if unset or empty |
+| `@ENV-OPTIONAL(NAME, default)@` | `NAME`, or `default` if unset or empty |
+| `@KNOB(name)@` | the knob `name`; **error** if unset or empty |
+| `@KNOB-OPTIONAL(name)@` | the knob, or the empty string |
+| `@KNOB-OPTIONAL(name, default)@` | the knob, or `default` |
+
+Environment variable names are `UPPER_SNAKE`; knob names are kebab-case
+(lowercase letters, digits after the first character, dashes inside). The
+required forms take no default — that would defeat them — and blanks around
+the pieces are fine.
+
+The **default value** is written one of three ways:
+
+```
+@ENV-OPTIONAL(SCRATCH, "/tmp/scratch dir")@     double-quoted
+@ENV-OPTIONAL(SCRATCH, '/tmp/scratch dir')@     single-quoted
+@ENV-OPTIONAL(NTHREADS, 4)@                     bare: letters and digits only
+```
+
+Quotes are not part of the output. Inside quotes, `\"`, `\'` and `\\` stand
+for the quote or backslash itself; any other backslash is kept literally. A
+bare default may contain nothing but ASCII letters and digits — a space, `/`,
+`_` or `.` in one is an error that tells you to quote it — and an empty
+default must be spelled `""`.
+
+**Where the value comes from.** `@ENV(…)@` reads the environment of the
+process doing the substitution: the login node for a submit script or
+optionlist, the compute node for a run script or parfile. `@KNOB(…)@` reads
+the knobs as they were when the command ran — stored knobs, their derived
+defaults, and any `-K NAME=VALUE` overlay — and that snapshot is frozen into
+the restart/build/test metadata, so a compute-node run sees the same values
+without touching cactup's database. Knobs are available in scripts,
+optionlists and parfiles, not in `meta.toml` `[paths]` (which resolve before
+any knob context exists). See [Running Simulations](../users/running-simulations.html#knobs)
+for standard vs. custom knobs and `-K`.
 
 ### Variable reference
 
@@ -271,9 +317,10 @@ block for submitscripts), and that expanded text *is* the script.
 `python3`, handing it the variable set as JSON on stdin; a prelude binds every
 variable as a **module global in canonical string form** (named exactly like the
 tokens — `JOB_NAME`, `NODES`, `TASKS`, uppercase), plus a `typed` dict carrying
-native ints/bools under the **same uppercase keys**. Whatever the script writes
-to **stdout** becomes the produced script — you don't open or write files
-yourself, and you own where env-setup goes.
+native ints/bools under the **same uppercase keys**, and a `knobs` dict holding
+the knob snapshot. Whatever the script writes to **stdout** becomes the produced
+script — you don't open or write files yourself, and you own where env-setup
+goes.
 
 ```python
 import sys
@@ -284,11 +331,18 @@ lines = [
     f"#SBATCH --job-name={JOB_NAME}",
     f"#SBATCH --nodes={NODES}",
     f"#SBATCH --ntasks={typed['TASKS']}",   # an int, not a string
+    f"#SBATCH --account={knob('allocation')}",  # like @KNOB(allocation)@
     ENV_SETUP,                               # the resolved env-setup block
     f"srun {EXECUTABLE} {PARFILE}",
 ]
 sys.stdout.write("\n".join(lines) + "\n")    # stdout is the generated script
 ```
+
+`knob(name)` is the Python counterpart of `@KNOB(name)@`: an unset or empty
+knob refuses the run with the same message cactup would print for the token.
+`knob(name, default)` mirrors `@KNOB-OPTIONAL(name, default)@`, and the raw
+`knobs` dict is there when you want `in`/`.get()`. Environment variables are
+plain `os.environ`. The same conventions hold for a `.py` **parfile**.
 
 Python is useful for complex script generation, but shell is simpler for most machines.
 

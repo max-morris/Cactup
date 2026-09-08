@@ -59,8 +59,14 @@ fn main() -> Res<()> {
         gix::interrupt::init_handler(1, announce)?;
     }
 
-    let args = Args::parse();
+    // `-K NAME VALUE` is folded into `-K NAME=VALUE` before clap parses.
+    let args = Args::parse_from(args::normalize_knob_args(std::env::args_os()));
     shell::set_trace(args.globals.trace);
+    // The `-K` overlay (§5.1): every DB snapshot this command reads carries
+    // these values, nothing persists them.
+    database::set_knob_overrides(
+        args.globals.knob.iter().map(|k| (k.name.clone(), k.value.clone())).collect(),
+    );
 
     let ctx = Ctx {
         globals: args.globals,
@@ -105,7 +111,10 @@ fn main() -> Res<()> {
         Commands::Build { start, command } => commands::build::dispatch(&ctx, *start, command),
         Commands::Sim(cmd) => commands::sim::dispatch(&ctx, cmd),
         Commands::Test(cmd) => commands::test::dispatch(&ctx, cmd),
-        Commands::Knob { name, value } => commands::knob::dispatch(&ctx, name, value),
+        Commands::Knob { command: Some(cmd), .. } => commands::knob::dispatch_sub(&ctx, cmd),
+        Commands::Knob { name, value, custom, command: None } => {
+            commands::knob::dispatch(&ctx, name, value, custom)
+        }
         Commands::Machine(cmd) => commands::machine::dispatch(&ctx, cmd),
         Commands::Wisdom => commands::wisdom::dispatch(&ctx),
     };

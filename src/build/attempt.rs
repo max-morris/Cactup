@@ -153,6 +153,11 @@ pub struct BuildMeta {
     pub config_meta: ConfigMeta,
     #[serde(default)]
     pub vars: IndexMap<String, toml::Value>,
+    /// The effective knob snapshot as of `prepare` (§5, §6.1), frozen for
+    /// the same D11 reason as `vars`: `@KNOB(…)@` in a build submit script
+    /// must resolve on the compute node without the global DB.
+    #[serde(default)]
+    pub knobs: IndexMap<String, String>,
     #[serde(default)]
     pub timestamps: Timestamps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,7 +348,7 @@ fn parse_attempt_dir_name(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::restart::{freeze_vars, thaw_vars};
+    use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars};
     use crate::template::VarSet;
 
     fn sample_meta() -> BuildMeta {
@@ -386,6 +391,7 @@ mod tests {
             }),
             config_meta: sample_config_meta(),
             vars: freeze_vars(&vars),
+            knobs: freeze_knobs(&vars),
             timestamps: Timestamps {
                 created: Some(Utc::now()),
                 submitted: None,
@@ -451,8 +457,8 @@ mod tests {
 
         // The frozen universe and vars survive the round trip intact.
         assert_eq!(reopened.meta.universe.as_ref().unwrap().name, "et-sif");
-        let thawed = thaw_vars(&reopened.meta.vars).unwrap();
-        let original = thaw_vars(&meta.vars).unwrap();
+        let thawed = thaw_vars(&reopened.meta.vars, &reopened.meta.knobs).unwrap();
+        let original = thaw_vars(&meta.vars, &meta.knobs).unwrap();
         assert_eq!(thawed.get("MAKEJOBS"), original.get("MAKEJOBS"));
         assert_eq!(thawed.get("SOURCEBASEDIR"), original.get("SOURCEBASEDIR"));
 

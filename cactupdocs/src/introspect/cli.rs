@@ -305,9 +305,19 @@ fn is_subcommand_field(field: &Field) -> bool {
 }
 
 
+/// The innermost type name, looking through `Option<…>` and `Box<…>`: an
+/// optional subcommand beside positionals (`build`, `knob`) is declared as
+/// `Option<BuildCommand>`, and the enum is what we need to descend into.
 fn extract_type_name(ty: &Type) -> Result<String> {
     if let Type::Path(TypePath { path, .. }) = ty && let Some(segment) = path.segments.last() {
-        return Ok(segment.ident.to_string());
+        let ident = segment.ident.to_string();
+        if (ident == "Option" || ident == "Box")
+            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+        {
+            return extract_type_name(inner);
+        }
+        return Ok(ident);
     }
     Err(anyhow!("Cannot extract type name"))
 }

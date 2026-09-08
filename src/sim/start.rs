@@ -222,6 +222,23 @@ pub(crate) fn write_executable(path: &Path, content: &str) -> Res<()> {
     Ok(())
 }
 
+/// Dry-run a `.par` parfile against the variable set at submit time (§6.2):
+/// a stray `@`, an unknown variable or a required `@KNOB(…)@` that is unset
+/// is reported now, before the job is queued. `@ENV(…)@` is exempt — only
+/// the compute node's environment can judge it — and a `.py` parfile is not
+/// checked (its logic runs at run time). The real substitution happens in
+/// `resolve_parfile`, on the compute node.
+fn check_parfile(sim: &Simulation, vars: &VarSet) -> Res<()> {
+    if sim.is_python_parfile() {
+        return Ok(());
+    }
+    let master = sim.master_parfile();
+    let template = fs::read_to_string(&master)
+        .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
+    vars.check(&template)
+        .with_context(|| format!("parfile {} cannot be substituted", master.display()))
+}
+
 /// Resolve the parfile into the restart (§6.2/§8.4): `.par` is
 /// `@NAME@`-substituted; `.py` is invoked per §6.1 and its stdout used as-is.
 /// Returns the ready-to-run parfile path.
@@ -369,11 +386,9 @@ fn submit_impl(
         // active restart, so `next_id` advances the chain.
         let id = restart::next_id(&sim.dir)?;
         let rdir = restart::restart_dir(&sim.dir, id);
-        fs::create_dir_all(rdir.join(".cactup"))
-            .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
         let chained = prev_job.clone();
-        let vset = vars::assemble(&vars::RestartVarsInput {
+        let mut vset = vars::assemble(&vars::RestartVarsInput {
             sim,
             machine,
             topo: &topo,
@@ -388,6 +403,15 @@ fn submit_impl(
             run_universe: run_uni_name,
             debug: false,
         })?;
+        // The effective knobs, `-K` overlay included, frozen with the vars so the
+        // compute node resolves @KNOB(…)@ without the DB (§5, D11).
+        vset.set_knobs(db.knob_snapshot());
+        // Before the restart dir exists: a parfile that cannot substitute
+        // (a required knob unset, a typo'd token) fails the submit here,
+        // leaving nothing behind, not the queued job hours from now.
+        check_parfile(sim, &vset)?;
+        fs::create_dir_all(rdir.join(".cactup"))
+            .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
@@ -424,6 +448,7 @@ fn submit_impl(
                 terminated: false,
                 universe: run_uni_spec.clone(),
                 vars: restart::freeze_vars(&vset),
+                knobs: restart::freeze_knobs(&vset),
             },
         };
         r.store()?;
@@ -556,10 +581,8 @@ fn run_interactive(
     // stale active restart.
     let id = restart::next_id(&sim.dir)?;
     let rdir = restart::restart_dir(&sim.dir, id);
-    fs::create_dir_all(rdir.join(".cactup"))
-        .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
-    let vset = vars::assemble(&vars::RestartVarsInput {
+    let mut vset = vars::assemble(&vars::RestartVarsInput {
         sim,
         machine,
         topo: &topo,
@@ -574,6 +597,12 @@ fn run_interactive(
         run_universe: run_uni_name,
         debug: args.debug,
     })?;
+    vset.set_knobs(db.knob_snapshot());
+    // As in submit: a parfile that cannot substitute fails before any
+    // restart directory exists.
+    check_parfile(sim, &vset)?;
+    fs::create_dir_all(rdir.join(".cactup"))
+        .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
     let run_script = generate_script(machine, ScriptKind::Run, run_variant, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
@@ -603,6 +632,7 @@ fn run_interactive(
             terminated: false,
             universe: run_uni_spec,
             vars: restart::freeze_vars(&vset),
+            knobs: restart::freeze_knobs(&vset),
         },
     };
     r.store()?;
@@ -690,7 +720,7 @@ pub(crate) fn script_command(
 /// `<SimName>.{out,err}` (the §8.4 foreground behavior).
 fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     // The frozen variable set drives parfile resolution and universe wrapping.
-    let vset = restart::thaw_vars(&r.meta.vars)?;
+    let vset = restart::thaw_vars(&r.meta.vars, &r.meta.knobs)?;
 
     let parfile = resolve_parfile(sim, &r.dir, &vset)?;
     let workdir = restart::workdir(sim, r.id);
@@ -960,6 +990,7 @@ mod tests {
                 machine: Some("fake".to_owned()),
                 installation: Some("et".to_owned()),
                 hostname: Some("testhost".to_owned()),
+                knob: Vec::new(),
             },
             db: crate::database::Db::in_dir(dir),
         }
@@ -1002,10 +1033,34 @@ mod tests {
         let inst = fake_installation(&tmp.path().join("inst"));
         let ctx = fake_ctx(&tmp.path().join("db"));
 
-        // Create via the real path (registry + cache + metadata).
+        // Create via the real path (registry + cache + metadata). The parfile
+        // reads a custom knob (required) and a standard one (optional, with
+        // a default) — §6.1/§6.2.
         let parfile = tmp.path().join("bbh.par");
-        fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n# sim @SIMULATION_NAME@ t=@TASKS@ lit=@@\n").unwrap();
+        fs::write(
+            &parfile,
+            "ActiveThorns = \"IOUtil\"\n# sim @SIMULATION_NAME@ t=@TASKS@ lit=@@\n\
+             kadathimporter::filename = \"@KNOB(kadath-initial-data)@\"\n\
+             # mail=@KNOB-OPTIONAL(mail, \"none\")@\n",
+        )
+        .unwrap();
         let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+
+        // The required knob is unset: submit refuses up front, naming the
+        // knob and how to set it, and leaves no restart directory behind.
+        let db = ctx.db.read().unwrap();
+        let args = start_args("bbh", "50:00:00");
+        let err = submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("knob kadath-initial-data is unset"), "{msg}");
+        assert!(msg.contains("-K kadath-initial-data=VALUE"), "{msg}");
+        assert!(restart::list_ids(&sim.dir).unwrap().is_empty(), "no restart dir left behind");
+        ctx.db
+            .update(|db| {
+                db.set_knob("kadath-initial-data", "/scratch/id/bhns.info".to_owned());
+                Ok(())
+            })
+            .unwrap();
         assert!(sim.exe().is_file(), "frozen executable linked");
         assert!(inst.simulations().unwrap().simulations.contains_key("bbh"));
 
@@ -1060,11 +1115,15 @@ mod tests {
             "env after the directive block: {script}"
         );
 
-        // Frozen vars allow full reconstruction (D11).
-        let vars = restart::thaw_vars(&r2.meta.vars).unwrap();
+        // Frozen vars allow full reconstruction (D11) — the knob snapshot
+        // included, so the compute node never needs the DB for @KNOB(…)@.
+        let vars = restart::thaw_vars(&r2.meta.vars, &r2.meta.knobs).unwrap();
         assert_eq!(vars.get("RESTART_ID").unwrap().canonical(), "2");
         assert_eq!(vars.get("QUEUE").unwrap().canonical(), "batch");
         assert_eq!(vars.get("TASKS").unwrap().canonical(), "8", "fill-the-node default");
+        assert_eq!(r2.meta.knobs["kadath-initial-data"], "/scratch/id/bhns.info");
+        assert_eq!(r2.meta.knobs["mail-type"], "all", "derived defaults are part of the snapshot");
+        assert!(!r2.meta.knobs.contains_key("mail"));
 
         // Fake a checkpoint in restart 0, then run restart 1 on the "compute
         // node": handoff + run-script execution. cactup must leave the
@@ -1090,9 +1149,12 @@ mod tests {
         // The runscript ran in the restart dir via the -active symlink.
         let ran = fs::read_to_string(r1.dir.join("ran.txt")).unwrap();
         assert_eq!(ran.trim(), "ran bbh tasks=8");
-        // Parfile resolved with substitution and the @@ escape (§6.1/§6.2).
+        // Parfile resolved with substitution and the @@ escape (§6.1/§6.2),
+        // knobs read from the frozen snapshot.
         let par = fs::read_to_string(r1.dir.join("bbh.par")).unwrap();
         assert!(par.contains("# sim bbh t=8 lit=@"), "{par}");
+        assert!(par.contains("kadathimporter::filename = \"/scratch/id/bhns.info\""), "{par}");
+        assert!(par.contains("# mail=none"), "{par}");
         // Completion recorded; the heartbeat exists (§9.3). TERMINATE does
         // not: only a real Cactus run creates it (§8.6), and `sim stop` reads
         // its absence as "no graceful trigger, kill via the scheduler".
@@ -1159,6 +1221,7 @@ mod tests {
                 )
                 .unwrap(),
                 vars: Default::default(),
+                knobs: Default::default(),
                 timestamps: crate::build::attempt::Timestamps::default(),
                 outcome: None,
             },
@@ -1208,7 +1271,8 @@ mod tests {
         assert_eq!(restart::list_ids(&sim.dir).unwrap(), vec![0, 1, 2]);
         assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(2));
         let r = Restart::load(&sim.dir, 2).unwrap();
-        assert_eq!(restart::thaw_vars(&r.meta.vars).unwrap().get("RESTART_ID").unwrap().canonical(), "2");
+        let thawed = restart::thaw_vars(&r.meta.vars, &r.meta.knobs).unwrap();
+        assert_eq!(thawed.get("RESTART_ID").unwrap().canonical(), "2");
         // Nothing was copied or linked forward, and the originals are untouched.
         assert!(!restart::workdir(&sim, 2).join("bbh.chkpt.it_10.h5").exists());
         assert!(restart::workdir(&sim, 0).join("bbh.chkpt.it_00.h5").is_file());

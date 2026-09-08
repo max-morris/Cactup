@@ -23,7 +23,16 @@ Global options (available on every subcommand) are listed first, followed by eve
 
 - `HOME` — Locates cactup's root directory (`~/.cactup`).
 - Scheduler variables (e.g. `SLURM_JOB_ID`, `PBS_JOBID`) — how cactup detects whether it is running inside a job allocation. Which variables matter is declared per machine via `[scheduler].allocation-env`.
-- `@ENV(NAME)@` tokens in MDB templates and paths read arbitrary environment variables at use time — see [Scripts & Variables](../authors/scripts-and-variables.html).
+- `@ENV(NAME)@` tokens in MDB templates, parfiles and paths read arbitrary environment variables at use time; `@ENV-OPTIONAL(NAME)@` and `@ENV-OPTIONAL(NAME, default)@` tolerate an unset one — see [Scripts & Variables](../authors/scripts-and-variables.html#substitution-rules).
+
+## Knobs and `-K`
+
+Knobs are per-machine default values stored in `~/.cactup/database.json` and
+managed with `cactup knob` (standard knobs such as `allocation` and `queue`, plus
+user-defined custom knobs created with `-c`). The global `-K NAME=VALUE` flag —
+also spelled `-K NAME VALUE`, repeatable, accepted before or after the
+subcommand — overlays a knob for one command without storing it. Templates read
+knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulations.html#knobs).
 
 ## Directory layout
 

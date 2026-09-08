@@ -90,6 +90,10 @@ pub struct TestMeta {
     pub timestamps: Timestamps,
     #[serde(default)]
     pub vars: IndexMap<String, toml::Value>,
+    /// The effective knob snapshot as of submit time (§5, §6.1), frozen
+    /// alongside `vars` so `@KNOB(…)@` resolves on the compute node (D11).
+    #[serde(default)]
+    pub knobs: IndexMap<String, String>,
 }
 
 /// A located test run.

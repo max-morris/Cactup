@@ -33,6 +33,44 @@ To replace an existing simulation:
 cactup sim create mysim mysim.par --force
 ```
 
+### Parfile substitution
+
+A `.par` parfile is a template: cactup expands `@NAME@` tokens in it when the
+restart starts, using the same variables submit and run scripts see. A copy of
+your parfile is kept as the master; each restart gets its own expanded
+`<name>.par` next to its output.
+
+```
+# Every variable from the variable reference is available:
+IO::out_dir           = "@RUNDIR@"
+Cactus::cctk_run_title = "@SIMULATION_NAME@ restart @RESTART_ID@"
+
+# Read a knob (see Knobs below). The plain form is REQUIRED: submitting with
+# the knob unset is an error. -OPTIONAL falls back to empty or a default.
+kadathimporter::filename = "@KNOB(kadath-initial-data)@"
+IO::checkpoint_dir       = "@KNOB-OPTIONAL(checkpoint-root, "checkpoints")@"
+
+# Read an environment variable — resolved on the compute node, not where you
+# typed `submit`.
+IO::out_dir = "@ENV(SCRATCH)@/@SIMULATION_NAME@"
+
+# A literal @ is written @@.
+ADMBase::comment = "email me@@example.org"
+```
+
+`cactup sim submit` checks the parfile before anything is queued: a stray `@`,
+an unknown variable or a required knob that is unset fail the submit on the
+spot. Environment variables are the one thing it cannot check — their values
+belong to the compute node — so `@ENV(NAME)@` is only judged when the job
+runs.
+
+A `.py` parfile is the escape hatch for computed parfiles: cactup runs it with
+`python3` and its stdout becomes the parfile. Every variable is a Python
+global, and knobs are available as the `knobs` dict and the
+`knob(name, default)` helper. See
+[Scripts & Variables](../authors/scripts-and-variables.html) for the complete
+token grammar, the variable reference, and the Python conventions.
+
 ## Running simulations
 
 ### Quick run (interactive)
@@ -198,6 +236,66 @@ By default, the job name is the simulation name. Override it:
 ```sh
 cactup sim submit mysim --job-name my-run-123
 ```
+
+## Knobs
+
+A **knob** is a value cactup remembers for you on this machine. The
+**standard knobs** — `allocation`, `queue`, `mail`, `mail-type`, `user`,
+`email`, `wisdom-frequency`, `wisdom-kind` — are the defaults behind the
+flags above: `-a` beats the `allocation` knob, which beats the machine's
+default.
+
+```sh
+cactup knob                        # show every knob
+cactup knob allocation             # show one
+cactup knob allocation hpc_xxx     # set one
+```
+
+### Custom knobs
+
+You can also define your own. A custom knob is a named value for your
+parfiles, scripts and optionlists to read through `@KNOB(name)@` — a path to
+initial data, a resolution tag, anything you would otherwise edit into the
+parfile by hand on every machine. Names are kebab-case: lowercase letters,
+digits after the first character, dashes inside.
+
+```sh
+# The first time, -c/--custom says "yes, make a new knob":
+cactup knob -c kadath-initial-data /work/me/ID/BHNS.info
+
+# From then on, set it like any other knob:
+cactup knob kadath-initial-data /work/me/ID/BHNS_v2.info
+```
+
+Setting a name that is neither standard nor an existing custom knob is an
+error, so a typo cannot quietly create a knob nothing reads. `cactup knob`
+lists standard and custom knobs separately. To get rid of a custom knob:
+
+```sh
+cactup knob delete kadath-initial-data
+```
+
+On a standard knob, `delete` only clears the stored value: the knob goes back
+to its default (standard knobs always exist).
+
+### Overriding a knob for one command: `-K`
+
+`-K NAME=VALUE` (or `-K NAME VALUE`) is a global flag that overlays a knob for
+the duration of one command. Nothing is stored; the value applies everywhere
+the command would have read the knob — the topology defaults, and every
+`@KNOB(name)@` in the scripts, optionlist or parfile it processes. The knob
+need not exist yet.
+
+```sh
+cactup -K queue=gpu sim submit mysim                       # like -q gpu
+cactup sim submit bhns bhns.par -K kadath-initial-data /work/me/ID/other.info
+cactup -K allocation=hpc_yyy -K mail-type=none sim submit mysim
+```
+
+Flags placed after the subcommand work too, and the flag repeats. The
+effective knob values — overlay included — are frozen into the restart when
+you submit, so the job sees exactly what you saw, even if you change a knob
+while it waits in the queue.
 
 ## Notifications
 
@@ -375,6 +473,14 @@ This automatically chains jobs and restarts as needed to reach 24 hours total ru
 ## Troubleshooting
 
 **"Parfile not found"**: Check the path to your `.par` file.
+
+**"knob NAME is unset or empty"**: The parfile reads `@KNOB(NAME)@` and the
+knob has no value on this machine. Set it once with `cactup knob NAME VALUE`
+(`-c` first if it is a new custom knob), or pass `-K NAME=VALUE` to this
+command.
+
+**"stray '@'"**: A `.par` parfile is a template, so a literal `@` must be
+written `@@`.
 
 **"Config not found"**: Build the config first with `cactup build myconfig`.
 
