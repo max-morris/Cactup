@@ -7,7 +7,7 @@ use gix::protocol::fetch::Tags;
 use gix::refs::transaction::{Change, PreviousValue, RefEdit, RefLog};
 use gix::remote::Direction;
 use prodash::render::line::{JoinHandle, StreamKind};
-use prodash::{Progress, Root};
+use prodash::Root;
 use crate::Res;
 
 type ProgressHandle = Arc<prodash::tree::Root>;
@@ -77,14 +77,13 @@ pub(crate) fn progress_level_filter(
     1..=max
 }
 
-/// How deep [`ensure_manifest_repo`]'s renderer draws. Levels:
-///  1. our own stable headline ("release manifest"), never handed to gix
-///  2. the item(s) we hand gix, which it renames through fetch phases
-///     ("negotiate (round N)", "receiving pack", ...)
-///  3. gix's per-phase bars (remote, read pack, checkout, writing)
-///  4. and deeper: per-thread delta-resolution/decoding noise — not useful,
-///     hidden
-const MANIFEST_PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 3;
+/// How deep [`ensure_manifest_repo`]'s renderer draws: one level, the single
+/// "release manifest" line. Everything gix would report below it (the phase
+/// status line it renames as it goes, the per-phase bars, the per-thread
+/// delta-resolution workers) is collapsed onto that line by
+/// [`crate::progress::Line`], which also keeps gix's throughput chatter out
+/// of the scrollback.
+const MANIFEST_PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 1;
 
 pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repository> {
     let (progress, progress_renderer) = setup_prodash_with(
@@ -93,7 +92,9 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
     );
 
     let manifest_dir = cactup_root.join("manifest");
-    let mut headline = progress.add_child("release manifest");
+    const HEADLINE: &str = "release manifest";
+    let layout = crate::progress::Layout::for_names([HEADLINE]);
+    let mut headline = crate::progress::Line::over(progress.add_child(HEADLINE), HEADLINE, layout);
 
     if manifest_dir.exists() && !manifest_dir.is_dir() {
         return Err(anyhow!("Manifest directory exists but is not a directory"));
@@ -105,7 +106,7 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
                        .unwrap_or(true);
 
     if need_clone {
-        headline.info("Fetching the manifest for the first time.".to_string());
+        headline.phase("fetching for the first time");
 
         fs::create_dir_all(&manifest_dir)
            .with_context(|| "Failed to create manifest directory")?;
@@ -117,21 +118,19 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
                 });
 
         // gix renames whatever item it's given as the fetch moves through
-        // phases — it cannot carry our own headline, so the headline lives
-        // one level above the item handed to it here.
-        let gix_item = headline.add_child("connecting");
+        // phases and hangs its own bars off it; the Line keeps all of that
+        // on the one headline, so the label follows the phase and the bar
+        // never splits in two.
         let (repo, _) = prepare.fetch_only(
-            gix_item,
+            &mut headline,
             &gix::interrupt::IS_INTERRUPTED
         ).with_context(|| "Failed to fetch manifest")?;
 
+        headline.succeeded("fetched");
         progress_renderer.shutdown_and_wait();
         Ok(repo)
     } else {
-        headline.info("Checking for updates.".to_string());
-
-        let fetch_progress_1 = headline.add_child("Checking for updates");
-        let fetch_progress_2 = headline.add_child("Fetching updates");
+        headline.phase("checking for updates");
 
         let mut repo =
             gix::open(&manifest_dir)
@@ -165,10 +164,10 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
                 .with_fetch_tags(Tags::All);
 
         remote.connect(Direction::Fetch)?
-              .prepare_fetch(fetch_progress_1, Default::default())?
-              .receive(fetch_progress_2, &gix::interrupt::IS_INTERRUPTED)?;
+              .prepare_fetch(&mut headline, Default::default())?
+              .receive(&mut headline, &gix::interrupt::IS_INTERRUPTED)?;
 
-        headline.done("Manifest is up to date.".to_string());
+        headline.succeeded("up to date");
         progress_renderer.shutdown_and_wait();
         Ok(repo)
     }

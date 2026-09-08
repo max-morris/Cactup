@@ -318,6 +318,31 @@ to skip it. `setup_prodash_if_tty` is only for phases whose items never call
 `info()`/`fail()` — those messages are printed by the render thread even on
 a non-tty, and skipping the renderer would drop them.
 
+One line per unit of work, and no nested bars. gix reports a whole progress
+subtree — a status line it renames per fetch phase, a bar per phase, and
+per-thread delta-resolution workers under those — and narrates throughput as
+`info` messages; drawn verbatim, four concurrent component fetches are a
+dozen flickering bars and a wall of `done 12.3MB in 1.2s` lines. Anything
+handed to gix is therefore wrapped in a `progress::Line`, which collapses
+that subtree onto its one item: labelled with the phase running now, filled
+by whichever phase is actually *moving* (the server's "Compressing objects"
+until the pack starts, then the pack's bytes, then the checkout's files),
+and silent about gix's own chatter. The renderer's level filter stops at the
+wrapped item. One `progress::Layout`, built per renderer from every name the
+batch will carry, fixes the width of the name column across all of its lines
+(the headline and the scrollback included), so the phase, the numbers and
+the bar start in the same place on every line rather than sliding about as
+the phases change; the same layout is what renders the component's name
+louder than the phase it is in, since prodash paints a task's whole name in
+one style and the only way to split the two is to end that style inside the
+string. Work that counts for itself with no phases — a plain download
+— uses `Line::counting` instead. Every finished unit of work leaves exactly
+one line in the scrollback: `succeeded` (green), `warned` (yellow: it
+changed something the user did not ask for, like overwriting a dirty repo or
+re-pointing an `origin`) or `failed` (red). Work that did nothing — a repo
+already at the wanted commit — leaves nothing; the command's summary reports
+those counts.
+
 **§-reference hygiene.** Annotate code with spec section references (`§8.5`)
 liberally — they are how contributors (human or agent) jump from a feature to
 its contract here. But they are internal navigation, never user-facing: no

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 pub fn download_component(
     install_root: &Path,
     component: &Component,
-    progress: &mut prodash::tree::Item,
+    progress: &mut impl prodash::Progress,
 ) -> crate::Res<PathBuf> {
     if component.ty == ComponentType::Ftp {
         let dest_dir = install_root.join(&component.target);

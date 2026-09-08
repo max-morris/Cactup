@@ -8,6 +8,7 @@ mod lock;
 mod manifest;
 mod mdb;
 mod par;
+mod progress;
 mod scheduler;
 mod shell;
 mod sim;
