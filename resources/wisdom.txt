@@ -38,8 +38,8 @@ cd "$(cactup sim show <name> --output-dir)"
 What was this binary compiled from? The thornlist and optionlist are frozen
 into every simulation at create time: cactup sim show <name> --long
 %
-Plain `cactup sim stop` asks Cactus to wind down and checkpoint; only -f
-goes straight to the scheduler's kill. Graceful first.
+Plain `cactup sim stop` asks Cactus to wind the simulation down and checkpoint. Pass -f
+to kill it immediately.
 %
 `cactup sim delete` is a trash can — the simulation moves to TRASH/ and is
 recoverable. Only -f purges it for real.
