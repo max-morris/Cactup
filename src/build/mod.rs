@@ -17,7 +17,7 @@ use crate::mdb::{Machine, Optionlist};
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{script_command, spawn_and_wait, write_executable};
 use crate::sim::vars::QueueFit;
-use crate::template::{VarSet, VarValue};
+use crate::template::{Syntax, VarSet, VarValue};
 use crate::thornlist::Thornlist;
 use crate::Res;
 use anyhow::{bail, Context};
@@ -1757,7 +1757,7 @@ pub fn prepare(
 
     // Rendered native optionlist: render → inject flags → substitute (§7.8).
     let rendered = vars
-        .substitute(&inject_build_flags(&optionlist.render(), flags))
+        .substitute(&inject_build_flags(&optionlist.render(), flags), Syntax::Hash)
         .context("substituting the rendered optionlist")?;
 
     // §7.7: virtual/prebuilt executable — canonicalize now (a relative path
@@ -1781,7 +1781,7 @@ pub fn prepare(
         // custom `make` key. A machine that sets its own `make` keeps full
         // control of parallelism.
         let make = vars
-            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE))
+            .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::Shell)
             .context("substituting the machine make command")?;
         // Build-phase env for the resolved universe (§6.1): universe env keys
         // override the machine [environment] key-by-key.
@@ -2538,7 +2538,7 @@ mod tests {
         // so the resolved -j tracks `[build].make-jobs` (here, 6).
         let mut vars = VarSet::new();
         vars.set("MAKEJOBS", 6u64);
-        assert_eq!(vars.substitute(DEFAULT_MAKE).unwrap(), "make -j6");
+        assert_eq!(vars.substitute(DEFAULT_MAKE, Syntax::Shell).unwrap(), "make -j6");
     }
 
     #[test]
@@ -2556,7 +2556,7 @@ mod tests {
         let mut vars = VarSet::new();
         vars.set("MAKEJOBS", make_jobs_var(Some(MakeJobs::Max), None));
         assert_eq!(
-            vars.substitute(DEFAULT_MAKE).unwrap(),
+            vars.substitute(DEFAULT_MAKE, Syntax::Shell).unwrap(),
             "make -j$(nproc 2>/dev/null || echo 1)"
         );
     }

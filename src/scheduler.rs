@@ -9,7 +9,7 @@
 // Consumed by the Phase-3 SIM/TEST streams; unused until then.
 
 use crate::mdb::meta::{Meta, Phase, Universe, WrappedCommand};
-use crate::template::VarSet;
+use crate::template::{Syntax, VarSet};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use regex::Regex;
@@ -342,7 +342,7 @@ impl<'m> Scheduler<'m> {
         let template = template
             .ok_or_else(|| anyhow!("this machine's meta.toml defines no [scheduler].{what} command"))?;
         let cmd = vars
-            .substitute(template)
+            .substitute(template, Syntax::Shell)
             .with_context(|| format!("substituting the [scheduler].{what} command"))?;
         let env = self.meta.effective_env(env_universe, Phase::Submit);
         Ok(if env.is_empty() { cmd } else { format!("{env}\n{cmd}") })

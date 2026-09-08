@@ -54,7 +54,8 @@ IO::checkpoint_dir       = "@KNOB-OPTIONAL(checkpoint-root, "checkpoints")@"
 # typed `submit`.
 IO::out_dir = "@ENV(SCRATCH)@/@SIMULATION_NAME@"
 
-# A literal @ is written @@.
+# A literal @ in a value is written @@. Comments are copied through as they
+# are, so this line's @ and the @NAME@ above need nothing: email me@example.org
 ADMBase::comment = "email me@@example.org"
 ```
 
@@ -479,8 +480,8 @@ knob has no value on this machine. Set it once with `cactup knob NAME VALUE`
 (`-c` first if it is a new custom knob), or pass `-K NAME=VALUE` to this
 command.
 
-**"stray '@'"**: A `.par` parfile is a template, so a literal `@` must be
-written `@@`.
+**"stray '@'"**: A `.par` parfile is a template, so a literal `@` outside a
+`#` comment must be written `@@`. The message names the line.
 
 **"Config not found"**: Build the config first with `cactup build myconfig`.
 

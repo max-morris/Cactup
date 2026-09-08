@@ -77,7 +77,9 @@ When values in meta.toml contain `@VAR@` tokens, they are substituted at runtime
 - `@MAKEJOBS@` — number of parallel make jobs
 - Variables from optionlists and scripts (see [Scripts & Variables](scripts-and-variables.html))
 
-To include a literal `@` character, use `@@`.
+To include a literal `@` character, use `@@`. Comments are left alone: a `#`
+comment in a shell snippet is copied through verbatim, so a `@` there needs
+no escape (see [Substitution rules](scripts-and-variables.html#substitution-rules)).
 
 ## Common patterns
 

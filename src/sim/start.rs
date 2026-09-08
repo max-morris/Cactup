@@ -13,7 +13,7 @@ use crate::mdb::{discover, Machine, Phase, ScriptKind, Universe, WrappedCommand,
 use crate::scheduler::Scheduler;
 use crate::sim::restart::{self, Restart, RestartMeta, UniverseSpec, NO_JOB_ID};
 use crate::sim::{vars, Simulation};
-use crate::template::VarSet;
+use crate::template::{Syntax, VarSet};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
 use chrono::Utc;
@@ -207,7 +207,7 @@ pub(crate) fn generate_script(
         let template = fs::read_to_string(&script.path)
             .with_context(|| format!("Failed to read {}", script.path.display()))?;
         let substituted = vars
-            .substitute(&template)
+            .substitute(&template, Syntax::Shell)
             .with_context(|| format!("substituting {}", script.path.display()))?;
         Ok(prepend_env(&substituted, &machine.meta.effective_env(universe, phase), kind))
     }
@@ -235,7 +235,7 @@ fn check_parfile(sim: &Simulation, vars: &VarSet) -> Res<()> {
     let master = sim.master_parfile();
     let template = fs::read_to_string(&master)
         .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
-    vars.check(&template)
+    vars.check(&template, Syntax::Parfile)
         .with_context(|| format!("parfile {} cannot be substituted", master.display()))
 }
 
@@ -250,7 +250,7 @@ fn resolve_parfile(sim: &Simulation, restart_dir: &Path, vars: &VarSet) -> Res<P
     } else {
         let template = fs::read_to_string(&master)
             .with_context(|| format!("Failed to read parfile master copy {}", master.display()))?;
-        vars.substitute(&template)
+        vars.substitute(&template, Syntax::Parfile)
             .with_context(|| format!("substituting parfile {}", master.display()))?
     };
     fs::write(&out, content).with_context(|| format!("Failed to write {}", out.display()))?;
@@ -876,7 +876,7 @@ mod tests {
         fs::create_dir_all(dir.join("runscripts")).unwrap();
         fs::write(
             dir.join("submitscripts/default.sh"),
-            "#!/bin/sh\n# chained: @CHAINED_JOB_ID@\n\
+            "#!/bin/sh\n#SBATCH --dependency=afterany:@CHAINED_JOB_ID@\n# chained (a comment: not substituted): @CHAINED_JOB_ID@\n\
              exec @CACTUP@ sim run @SIMULATION_NAME@ --installation=@ALIAS@ \
              --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@\n",
         )
@@ -1039,9 +1039,10 @@ mod tests {
         let parfile = tmp.path().join("bbh.par");
         fs::write(
             &parfile,
-            "ActiveThorns = \"IOUtil\"\n# sim @SIMULATION_NAME@ t=@TASKS@ lit=@@\n\
+            "ActiveThorns = \"IOUtil\"\n\
+             IO::out_dir = \"sim @SIMULATION_NAME@ t=@TASKS@ lit=@@\" # @SIMULATION_NAME@ me@host\n\
              kadathimporter::filename = \"@KNOB(kadath-initial-data)@\"\n\
-             # mail=@KNOB-OPTIONAL(mail, \"none\")@\n",
+             IO::checkpoint_dir = \"@KNOB-OPTIONAL(mail, none)@\"\n",
         )
         .unwrap();
         let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
@@ -1107,11 +1108,13 @@ mod tests {
         let script = fs::read_to_string(r1.dir.join(".cactup/submit-script")).unwrap();
         assert!(script.contains("--restart-id=1"), "{script}");
         assert!(script.contains("--sim-dir="), "{script}");
-        assert!(script.contains("# chained: JOB-0"), "{script}");
+        assert!(script.contains("#SBATCH --dependency=afterany:JOB-0"), "{script}");
+        // A directive substitutes; a comment beside it stays verbatim (§6.1).
+        assert!(script.contains("# chained (a comment: not substituted): @CHAINED_JOB_ID@"), "{script}");
         // Submit-script env goes after the whole '#' header block (§6.1), not
         // right after the shebang, so scheduler directives stay on top.
         assert!(
-            script.starts_with("#!/bin/sh\n# chained: JOB-0\nexport CACTUP_TEST_ENV=1\nexec"),
+            script.starts_with("#!/bin/sh\n#SBATCH --dependency=afterany:JOB-0\n# chained (a comment: not substituted): @CHAINED_JOB_ID@\nexport CACTUP_TEST_ENV=1\nexec"),
             "env after the directive block: {script}"
         );
 
@@ -1149,12 +1152,12 @@ mod tests {
         // The runscript ran in the restart dir via the -active symlink.
         let ran = fs::read_to_string(r1.dir.join("ran.txt")).unwrap();
         assert_eq!(ran.trim(), "ran bbh tasks=8");
-        // Parfile resolved with substitution and the @@ escape (§6.1/§6.2),
-        // knobs read from the frozen snapshot.
+        // Parfile resolved with substitution and the @@ escape, its comment
+        // verbatim (§6.1/§6.2), knobs read from the frozen snapshot.
         let par = fs::read_to_string(r1.dir.join("bbh.par")).unwrap();
-        assert!(par.contains("# sim bbh t=8 lit=@"), "{par}");
+        assert!(par.contains("IO::out_dir = \"sim bbh t=8 lit=@\" # @SIMULATION_NAME@ me@host"), "{par}");
         assert!(par.contains("kadathimporter::filename = \"/scratch/id/bhns.info\""), "{par}");
-        assert!(par.contains("# mail=none"), "{par}");
+        assert!(par.contains("IO::checkpoint_dir = \"none\""), "{par}");
         // Completion recorded; the heartbeat exists (§9.3). TERMINATE does
         // not: only a real Cactus run creates it (§8.6), and `sim stop` reads
         // its absence as "no graceful trigger, kill via the scheduler".

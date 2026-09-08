@@ -494,6 +494,7 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::template::Syntax;
     use crate::mdb::{Layer, Machine, Meta};
     use crate::sim::SimulationMeta;
     use std::path::PathBuf;
@@ -1038,6 +1039,7 @@ mod tests {
                  --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ --restart-id=@RESTART_ID@ \
                  # @WALLTIME@ @CHECKPOINT_WALLTIME@ w=@WALLTIME_HH@:@WALLTIME_MM@ \
                  q=@QUEUE@ n=@NODES@ t=@TASKS@ chained=@CHAINED_JOB_ID@ smt=@THREADS_PER_CPU@ mem=@MEMORY@",
+                Syntax::Plain, // the `#` is part of the probe, not a comment
             )
             .unwrap();
         assert!(line.contains("sim run bbh --installation=et"), "{line}");
@@ -1236,7 +1238,7 @@ mod tests {
                             v.set(token, "x");
                         }
                     }
-                    v.substitute(&body).unwrap_or_else(|e| {
+                    v.substitute(&body, Syntax::Shell).unwrap_or_else(|e| {
                         panic!("{name} {kind:?} {variant} failed to substitute: {e:#}")
                     });
                     checked += 1;

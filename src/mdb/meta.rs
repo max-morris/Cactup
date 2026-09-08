@@ -7,7 +7,7 @@
 //! keys were therefore either modelled here or dropped from the ported
 //! machines — a fact worth keeping is a TOML comment, not a dead key.
 
-use crate::template::VarSet;
+use crate::template::{Syntax, VarSet};
 use crate::walltime::Walltime;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -642,7 +642,7 @@ impl Universe {
             (Some(argv), None) => {
                 let mut cmd = argv
                     .iter()
-                    .map(|arg| vars.substitute(arg))
+                    .map(|arg| vars.substitute(arg, Syntax::Plain))
                     .collect::<Res<Vec<_>>>()
                     .context("Failed to substitute universe wrapper-argv")?;
                 cmd.extend(["/bin/sh".to_owned(), "-c".to_owned(), inner.to_owned()]);
@@ -654,7 +654,7 @@ impl Universe {
                 let mut vars = vars.clone();
                 vars.set("COMMAND", shell_quote(inner));
                 Ok(WrappedCommand::Shell(
-                    vars.substitute(template)
+                    vars.substitute(template, Syntax::Shell)
                         .context("Failed to substitute universe wrapper template")?,
                 ))
             }
@@ -1126,7 +1126,7 @@ impl Meta {
         ] {
             if let Some(value) = path {
                 *value = vars
-                    .substitute(value)
+                    .substitute(value, Syntax::Plain)
                     .with_context(|| format!("in [paths].{key}"))?;
             }
         }

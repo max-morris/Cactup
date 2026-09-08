@@ -13,7 +13,7 @@
 #     @SIMULATION_NAME@.{out,err} (submission-cwd-relative); the canonical
 #     @RUNDIR@-based defaults are where the machine's stdout/stderr commands
 #     look for them.
-#   @@SIMFACTORY@@ run --basedir=… -> @CACTUP@ sim run --installation/--sim-dir/
+#   @SIMFACTORY@ run --basedir=… -> @CACTUP@ sim run --installation/--sim-dir/
 #     --machine (the compute-node re-invocation locator)
 # Kept verbatim: --tasks-per-node=@MAX_CPUS_PER_NODE@ and the (sic) --jobname spelling.
 #SBATCH --partition @QUEUE@

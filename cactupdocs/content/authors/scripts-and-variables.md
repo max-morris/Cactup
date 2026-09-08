@@ -132,6 +132,24 @@ The same engine expands submit/run scripts, build submit scripts, optionlists,
 - `@@` — a literal `@`. The result is never re-scanned, so `@@NAME@@` yields
   the literal text `@NAME@`.
 - A lone `@` that is neither of the above is an error.
+- **Comments are skipped.** A comment is copied through verbatim: no token
+  expands in it, a lone `@` (an email address, a `@NAME@` mentioned in prose)
+  needs no escape, and `@@` in a comment stays `@@`. What counts as a comment
+  follows the file's own syntax:
+  - *Shell* (`.sh` scripts, `[scheduler]` commands, `[build].make`, universe
+    `wrapper`): a `#` that begins a word, outside quotes and heredoc bodies,
+    to the end of the line. A scheduler directive is **not** a comment: a
+    line whose first non-blank character is a `#` glued to a word (`#SBATCH`,
+    `#PBS`, `#$`) is substituted like code. A commented-out command has the
+    same shape (`#module load foo`) and is scanned too, so write comments as
+    `# ` with a space.
+  - *Parfile* (`.par`): a `#` outside a `"…"` string, to the end of the line.
+    Inside a multi-line string such as an `ActiveThorns` list, a `#` on any
+    line after the first is also a comment, exactly as Cactus reads it.
+  - *Optionlist* (the rendered native file): a `#` anywhere, to the end of
+    the line, since Cactus strips it before reading the line.
+  - `[paths]` values and universe `wrapper-argv` words have no comments;
+    every character is scanned.
 
 Two **computed** token families read values that are not variables. Each has a
 required form and two optional forms:

@@ -43,7 +43,7 @@ AMREX_ENABLE_CUDA = "yes"
 # - We use "--objdir-as-tempdir" to prevent errors such as
 #   Call parameter type does not match function signature!
 #     %tmp = load double, double* %x.addr, align 8, !dbg !1483
-#     float  %1 = call i32 @@__isnanf(double %tmp), !dbg !1483
+#     float  %1 = call i32 @__isnanf(double %tmp), !dbg !1483
 CPPFLAGS = "-DSIMD_CPU"
 CFLAGS = "-pipe -g -march=native"
 CUCCFLAGS = "-forward-unknown-to-host-compiler -std=c++17 --expt-relaxed-constexpr --extended-lambda -x cu --relocatable-device-code=true -Xcudafe --diag_suppress=20012 --keep --ptxas-options=-v"
