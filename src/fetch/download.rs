@@ -12,6 +12,9 @@
 //! real thornlist entry, without trying to replicate wget's exact
 //! `Content-Disposition`/redirect-chain heuristics.
 //!
+//! Every request carries a `User-Agent` ([`USER_AGENT`]) — `wget` sent its
+//! own, reqwest sends none, and some mirrors 403 a request without one.
+//!
 //! Deliberate divergence from GetComponents: `!TYPE = ftp` is rejected
 //! outright. `reqwest` (rustls-backed, see `Cargo.toml`) speaks http/https
 //! only; GetComponents' own `ftp` support was really just `wget`'s (line
@@ -23,6 +26,32 @@
 use crate::thornlist::{Component, ComponentType};
 use anyhow::{anyhow, bail, Context};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// The `User-Agent` every cactup download presents. reqwest sends none by
+/// default, and a bare request is not merely impolite: some mirrors reject
+/// it outright — `ftp.gnu.org`, which real thornlists do point at, answers
+/// one with a 403 that reads like the file is gone.
+///
+/// Identifies cactup and its version, the two things a mirror operator
+/// looking at a log needs. Built from `CARGO_PKG_VERSION`, the same source
+/// as [`crate::VERSION`], so the two cannot drift.
+const USER_AGENT: &str = concat!("cactup/", env!("CARGO_PKG_VERSION"));
+
+/// One client for every download in a run, built once. Downloads run four
+/// at a time and a thornlist's downloads often share a host, so this is also
+/// what lets them reuse a connection instead of repeating a TLS handshake
+/// per file — and it builds rustls' root store once rather than per URL.
+///
+/// A failure here means the process cannot speak HTTPS at all (no usable TLS
+/// backend), which no individual download could recover from, so it panics
+/// rather than making every call site carry the error.
+static CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("failed to build the HTTP client")
+});
 
 /// Download one http/https component into `<install_root>/<target>/`,
 /// overwriting whatever is already there (refetch semantics: downloads are
@@ -69,7 +98,9 @@ pub fn download_component(
     let dest_path = dest_dir.join(&filename);
     let tmp_path = dest_dir.join(format!("{filename}.part"));
 
-    let mut response = reqwest::blocking::get(&fetch_url)
+    let mut response = CLIENT
+        .get(&fetch_url)
+        .send()
         .and_then(|r| r.error_for_status())
         .with_context(|| format!("Failed to download {fetch_url}"))?;
     progress.init(
@@ -145,6 +176,60 @@ mod tests {
     /// `download_component` writes to.
     fn test_progress() -> prodash::tree::Item {
         prodash::tree::Root::new().add_child("test")
+    }
+
+    /// A one-shot HTTP server on loopback. Answers the first request with
+    /// `body` and returns the request head it received, so a test can assert
+    /// what actually went out on the wire rather than what we meant to send.
+    /// Hand-rolled on `std::net`: proving one header is sent does not justify
+    /// a dev-dependency on an HTTP server.
+    fn serve_once(body: &'static [u8]) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 512];
+            // Read to the end of the request head; a GET has no body to wait for.
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let status = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(status.as_bytes()).expect("write status");
+            stream.write_all(body).expect("write body");
+            String::from_utf8_lossy(&head).into_owned()
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    #[test]
+    fn a_download_identifies_itself_by_name_and_version() {
+        // The header itself: reqwest sends none by default, and a mirror that
+        // rejects that (ftp.gnu.org 403s it) fails in a way that reads like
+        // the file is missing.
+        assert_eq!(USER_AGENT, format!("cactup/{}", crate::VERSION));
+
+        let (base, server) = serve_once(b"payload");
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = http_component("file.txt", None);
+        c.url = Some(base);
+        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+
+        let head = server.join().expect("server thread");
+        let sent = head
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+            .map(|(_, value)| value.trim().to_owned());
+        assert_eq!(sent.as_deref(), Some(USER_AGENT), "request head was:\n{head}");
     }
 
     fn http_component(checkout: &str, name: Option<&str>) -> Component {
