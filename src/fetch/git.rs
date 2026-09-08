@@ -332,7 +332,7 @@ pub fn clone(
     url: &str,
     branch: Option<&str>,
     dest: &Path,
-    progress: &mut prodash::tree::Item,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
 ) -> Res<()> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("Failed to create {}", dest.display()))?;
@@ -368,7 +368,11 @@ pub fn clone(
 /// silently no-ops), point `refs/heads/<branch>` and `HEAD` at it, then check
 /// out the tree, deleting files the old checkout tracked that the new one
 /// doesn't. Returns the commit the repo ends on.
-pub fn align(repo_dir: &Path, branch: &str, progress: &mut prodash::tree::Item) -> Res<ObjectId> {
+pub fn align(
+    repo_dir: &Path,
+    branch: &str,
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+) -> Res<ObjectId> {
     let mut repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
     // Every ref the fetch below moves gets a reflog entry, and gix refuses
@@ -460,6 +464,10 @@ pub fn align(repo_dir: &Path, branch: &str, progress: &mut prodash::tree::Item) 
     opts.destination_is_initially_empty = false;
     opts.overwrite_existing = true;
 
+    // Named exactly as gix names its own checkout progress, so both paths
+    // collapse onto a component's one line the same way (see
+    // `progress::role_of`): the bounded file count draws the bar, the
+    // unbounded byte count beside it is dropped.
     let files = progress.add_child("checkout");
     let bytes = progress.add_child("writing");
     gix::worktree::state::checkout(

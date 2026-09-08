@@ -23,14 +23,12 @@ const WORKERS: usize = 4;
 
 /// How deep [`execute`]'s renderer draws into the progress tree. Levels:
 ///  1. the overall "fetch components" bar
-///  2. our own per-component headline ("clone foo", "download bar", ...)
-///  3. gix's phase status line ("negotiate (round N)", "receiving pack", ...)
-///  4. gix's per-phase bars (remote, read pack, create index file, checkout,
-///     writing) — the actually-informative detail (byte counts, server
-///     "remote" counts)
-///  5. and deeper: per-thread delta-resolution/decoding noise — not useful,
-///     hidden
-const PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 4;
+///  2. one line per in-flight component, and no more: everything gix would
+///     report below it (phase status, per-phase bars, per-thread
+///     delta-resolution workers) is collapsed onto that one line by
+///     [`crate::progress::Line`], which is also what keeps gix's throughput
+///     chatter out of the scrollback
+const PROGRESS_MAX_LEVEL: prodash::progress::key::Level = 2;
 
 /// A pure, read-only classification of everything the fetch would do.
 /// Produced by [`plan`]; nothing on disk changes until [`execute`].
@@ -208,18 +206,53 @@ impl ExecReport {
     }
 }
 
+/// The line a finished git item leaves in the scrollback: green when the
+/// fetch left everything else alone, yellow when it did not — overwriting a
+/// dirty repo and re-pointing an `origin` are persistent changes to the
+/// user's tree, and a colour is how they get noticed in a run of eighty
+/// repos.
+///
+/// A repo that was already at the wanted commit leaves *nothing*: in a
+/// typical refetch that is most of the tree, and eighty lines of "already up
+/// to date" would bury the handful that moved. The caller's summary reports
+/// how many were already current; the scrollback is for what happened.
+fn announce_repo(line: &crate::progress::Line, item: &GitRepoPlan, head: gix::ObjectId, changed: bool) {
+    let head = head.to_string();
+    let short = &head[..12.min(head.len())];
+    let what = match (&item.action, item.branch.as_deref()) {
+        (GitAction::Clone, Some(branch)) => format!("cloned {branch} at {short}"),
+        (GitAction::Clone, None) => format!("cloned at {short}"),
+        (_, Some(branch)) if changed => format!("{branch} now at {short}"),
+        (_, None) if changed => format!("now at {short}"),
+        // Unchanged, but something else about the repo was: say what, since
+        // the fetch itself has nothing to report.
+        _ if item.forced.is_some() || item.retarget.is_some() => {
+            format!("already at {short}")
+        }
+        _ => return,
+    };
+    match (&item.forced, &item.retarget) {
+        (Some(reason), _) => line.warned(format!("{what} — overwrote {reason}")),
+        (None, Some(url)) => line.warned(format!("{what} — origin re-pointed at {url}")),
+        (None, None) => line.succeeded(what),
+    }
+}
+
 /// Run the plan: git repos and downloads on a [`WORKERS`]-wide pool keyed by
 /// repo (one repo is only ever touched by one worker), externals
-/// sequentially, then the symlink pass. Progress renders via the crate's
-/// prodash line renderer, four levels deep (see [`PROGRESS_MAX_LEVEL`]): an
-/// overall "fetch components" bar (level 1) counts finished items; each
-/// in-flight git work item gets a stable headline naming it (level 2, e.g.
-/// "clone foo") plus a child gix actually writes to (level 3/4 — see the
-/// worker loop for why those are split); downloads get one child (level 2)
-/// with bytes progress. Errors are collected per item, never fatal to the
-/// rest of the fetch, but a failing item's headline is left as a permanent
-/// red line before it's dropped, so a failure is visible live and not just
-/// in the final report.
+/// sequentially, then the symlink pass.
+///
+/// Progress renders via the crate's prodash line renderer, two levels deep
+/// (see [`PROGRESS_MAX_LEVEL`]): an overall "fetch components" bar counts
+/// finished items, and each in-flight component gets exactly one line —
+/// named for the component, labelled with the phase running right now, and
+/// filled by that phase's own counter, so the same bar carries a repo from
+/// negotiating through receiving and indexing to checking out. Every
+/// component then leaves exactly one line in the scrollback on its way out:
+/// green for a clean fetch, yellow when it overwrote something, red when it
+/// failed. Errors are collected per item, never fatal to the rest of the
+/// fetch; the red line is what makes a failure visible live, next to the
+/// work going on around it, rather than only in the final report.
 pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     enum Work<'p> {
         Git(&'p GitRepoPlan),
@@ -231,7 +264,18 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         true,
     );
 
-    let top = progress.add_child("fetch components");
+    // One name column for the whole batch, sized to the longest name it will
+    // carry (the headline included, so its numbers line up with the lines
+    // below it): every component's phase, numbers and bar then start at the
+    // same column instead of shifting about as the phases change.
+    const HEADLINE: &str = "fetch components";
+    let layout = crate::progress::Layout::for_names(
+        std::iter::once(HEADLINE)
+            .chain(plan.git.iter().map(|item| item.repo.as_str()))
+            .chain(plan.downloads.iter().map(|c| c.checkout.as_str())),
+    );
+
+    let top = progress.add_child(layout.headline(HEADLINE));
     top.init(Some(plan.git.len() + plan.downloads.len()), Some(prodash::unit::label("components")));
     let top = std::sync::Mutex::new(top);
 
@@ -256,30 +300,30 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                 };
                 match work {
                     Work::Git(item) => {
-                        let name = if let Some(url) = &item.retarget {
-                            // Distinct headline: this item's `origin` is about
+                        // The line is named for the repo alone and labelled
+                        // with what is happening to it right now — gix takes
+                        // that label over as the fetch moves through its
+                        // phases. Keeping the two apart is what lets the
+                        // history line below read as "cactusbase  cloned at
+                        // a1b2c3d…" instead of repeating the action twice.
+                        let mut line = crate::progress::Line::over(
+                            top.lock().expect("fetch progress poisoned").add_child(item.repo.clone()),
+                            &item.repo,
+                            layout,
+                        );
+                        line.phase(if item.retarget.is_some() {
+                            // Distinct phase: this item's `origin` is about
                             // to be rewritten before anything is fetched, not
                             // a normal clone/update/switch.
-                            format!("repoint {} at {url}", item.repo)
+                            "repointing".to_string()
                         } else {
                             match (&item.action, item.branch.as_deref()) {
-                                (GitAction::Clone, _) => format!("clone {}", item.repo),
-                                (GitAction::Update, _) => format!("update {}", item.repo),
-                                (GitAction::Align, Some(branch)) => {
-                                    format!("switch {} to {branch}", item.repo)
-                                }
-                                (GitAction::Align, None) => format!("switch {}", item.repo),
+                                (GitAction::Clone, _) => "cloning".to_string(),
+                                (GitAction::Update, _) => "updating".to_string(),
+                                (GitAction::Align, Some(branch)) => format!("switching to {branch}"),
+                                (GitAction::Align, None) => "switching".to_string(),
                             }
-                        };
-                        let mut header =
-                            top.lock().expect("fetch progress poisoned").add_child(name);
-                        // gix renames whatever item it's given as the fetch
-                        // moves through phases ("negotiate (round N)",
-                        // "receiving pack", ...) — it cannot carry our own
-                        // "clone/update/switch <repo>" headline, so that
-                        // headline lives one level above the item we hand
-                        // gix, which is never displayed directly.
-                        let mut gix_item = header.add_child("connecting");
+                        });
 
                         // Rewrite `origin` before anything else touches the
                         // repo: `align` (below) re-opens it and must see the
@@ -290,13 +334,12 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         if let Some(url) = &item.retarget
                             && let Err(e) = git::set_origin_url(&item.dir, url)
                         {
-                            header.fail(format!("{}: {e:#}", item.repo));
+                            line.failed(format!("{e:#}"));
                             report.lock().expect("fetch report poisoned").failures.push(Failure {
                                 what: item.repo.clone(),
                                 error: format!("{e:#}"),
                             });
-                            drop(gix_item);
-                            drop(header);
+                            drop(line);
                             top.lock().expect("fetch progress poisoned").inc();
                             continue;
                         }
@@ -306,10 +349,10 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         };
                         let outcome = match (&item.action, item.branch.as_deref()) {
                             (GitAction::Clone, branch) => {
-                                git::clone(&item.url, branch, &item.dir, &mut gix_item)
+                                git::clone(&item.url, branch, &item.dir, &mut line)
                                     .and_then(|()| git::head_of(&item.dir).map(|(_, id)| id))
                             }
-                            (_, Some(branch)) => git::align(&item.dir, branch, &mut gix_item),
+                            (_, Some(branch)) => git::align(&item.dir, branch, &mut line),
                             (_, None) => {
                                 // plan() always fills in the probed head
                                 // branch for existing repos; this is a bug
@@ -319,17 +362,21 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                         };
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
-                            Ok(head) => report.repos.push(RepoResult {
-                                repo: item.repo.clone(),
-                                url: item.url.clone(),
-                                branch: item.branch.clone(),
-                                head: head.to_string(),
-                                changed: before != Some(head),
-                                forced: item.forced.clone(),
-                                retargeted: item.retarget.clone(),
-                            }),
+                            Ok(head) => {
+                                let changed = before != Some(head);
+                                announce_repo(&line, item, head, changed);
+                                report.repos.push(RepoResult {
+                                    repo: item.repo.clone(),
+                                    url: item.url.clone(),
+                                    branch: item.branch.clone(),
+                                    head: head.to_string(),
+                                    changed,
+                                    forced: item.forced.clone(),
+                                    retargeted: item.retarget.clone(),
+                                })
+                            }
                             Err(e) => {
-                                header.fail(format!("{}: {e:#}", item.repo));
+                                line.failed(format!("{e:#}"));
                                 report.failures.push(Failure {
                                     what: item.repo.clone(),
                                     error: format!("{e:#}"),
@@ -337,21 +384,39 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             }
                         }
                         drop(report);
-                        drop(gix_item);
-                        drop(header);
+                        drop(line);
                         top.lock().expect("fetch progress poisoned").inc();
                     }
                     Work::Download(c) => {
-                        let mut child = top
-                            .lock()
-                            .expect("fetch progress poisoned")
-                            .add_child(format!("download {}", c.checkout));
-                        let outcome = download::download_component(install_root, c, &mut child);
+                        // `counting`, not `over`: a download has no phases
+                        // of its own to report, it just fills the bar with
+                        // the bytes it has taken.
+                        let mut line = crate::progress::Line::counting(
+                            top.lock()
+                                .expect("fetch progress poisoned")
+                                .add_child(c.checkout.clone()),
+                            &c.checkout,
+                            layout,
+                        );
+                        line.phase("downloading");
+                        let outcome = download::download_component(install_root, c, &mut line);
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
-                            Ok(path) => report.downloads.push(path),
+                            Ok(path) => {
+                                let size = crate::progress::bytes(prodash::Count::step(&line));
+                                let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                                // The line is already named for the
+                                // checkout; name the file only when the two
+                                // differ (a `!NAME`, or a `.`-checkout).
+                                line.succeeded(if *name == *c.checkout {
+                                    format!("downloaded {size}")
+                                } else {
+                                    format!("downloaded {size} as {name}")
+                                });
+                                report.downloads.push(path)
+                            }
                             Err(e) => {
-                                child.fail(format!("{}: {e:#}", c.checkout));
+                                line.failed(format!("{e:#}"));
                                 report.failures.push(Failure {
                                     what: c.checkout.clone(),
                                     error: format!("{e:#}"),
@@ -359,7 +424,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                             }
                         }
                         drop(report);
-                        drop(child);
+                        drop(line);
                         top.lock().expect("fetch progress poisoned").inc();
                     }
                 }
