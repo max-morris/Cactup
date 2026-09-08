@@ -27,7 +27,7 @@ These were settled during design review and are treated as fixed below.
 | D4 | Restart / chaining & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. Checkpoint recovery is **out of scope**: the parfile and Cactus own it end to end (§8.8). |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
-| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
+| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. Comments (as the target file kind spells them) are copied through untouched. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
 | D8 | Machine-level thorn enable/disable toggles | **Kept** (see §7.5). |
 | D9 | Optionlist on-disk format | **TOML + render step.** Optionlists are authored as TOML; cactup renders them to the native Cactus `NAME = value` optionlist before `make`. Render rules, the `VERSION` semantics, and ordering are specified in §7.8. |
 | D10 | Pre-existing simfactory simulation dirs | **Greenfield / ignore.** cactup manages only simulations it created. A directory is recognized as a cactup simulation **iff** it contains `.cactup/simulation.toml`. cactup neither reads nor migrates legacy `SIMFACTORY/` simulations. |
@@ -1799,6 +1799,40 @@ environment can judge. `.py` parfiles are not checked.
    replacement (so `@@NAME@@` yields the literal `@NAME@`, not a substitution).
    A lone `@` that is neither part of `@@` nor a well-formed `@NAME@` token is an
    error, so accidental stray `@`s are still caught rather than passed through.
+
+   **Comments are opaque.** A comment is copied through byte for byte: no
+   token expands in it, `@@` there stays `@@`, and a lone `@` (an email
+   address, a `@NAME@` mentioned in prose) is not an error. What a comment
+   *is* depends on what will read the substituted text, so every caller
+   names the file kind (`template::Syntax`) — the engine does not guess:
+   - **Shell** (`.sh` submit/run/build-submit scripts, `[scheduler]` and
+     `[build].make` command lines, a universe `wrapper` string): a `#` that
+     begins a word — at the start of the text or after whitespace, `;`,
+     `&`, `|` or `(` — outside `'…'`/`"…"` quotes and heredoc bodies, to the
+     end of the line. A **scheduler directive is not a comment**: a line
+     whose first non-blank character is a `#` glued straight to a word
+     (`#SBATCH`, `#PBS`, `#$`) is substituted like code. A commented-out
+     command (`#module load @X@`) has that same shape and is scanned too;
+     the stray-`@` error on such a line says to write `# ` with a space.
+     Backticks and `$(…)` are not modeled — a `#` after whitespace inside
+     them is a comment to the shell as well, and a `#` inside double quotes
+     is scanned as code, which errs toward substituting.
+   - **Parfile** (`.par`, per the flesh's `par.peg`): a `#` outside a `"…"`
+     string, to the end of the line. Inside a string, a `#` on any line
+     after the string's first also starts a comment (the grammar's
+     `stringcomment` — how `ActiveThorns` lists are annotated), ending at
+     the end of the line or the closing quote, whichever comes first;
+     backslash escapes the next character inside a string.
+   - **Optionlist** (the rendered native `NAME = value` file): a `#`
+     anywhere, to the end of the line — `setup_configuration.pl` strips
+     `#.*` before it even splits the line, and there is no quoting to hide
+     behind.
+   - **Plain** (`[paths]` values, universe `wrapper-argv` words): no comment
+     syntax; every byte is scanned.
+   The newline ending a comment is code, so line counting is unaffected;
+   substitution errors name the **line**, not a byte offset. The bundled
+   MDB comments that had doubled their `@` to survive the old rule were
+   un-doubled when this landed.
 2. **`.py` script variants**: the escape hatch for conditional/computed logic.
    **Calling convention (interface contract for MDB authors):** cactup invokes
    `python3 <variant>.py` once, passing the entire variable set as a single JSON
@@ -1888,8 +1922,10 @@ depends on the artifact:
   - A **`.par`** parfile is `@NAME@`-substituted with the full §6.3 variable set
     — `@ENV(…)@` read from the compute node's environment, `@KNOB(…)@` from the
     snapshot frozen in `restart.toml` at submit time (§5.1) — and written as
-    the ready-to-run `<basename>.par`. (Literal `@` in a `.par` is written
-    `@@`, which the run-time substitution collapses to a single `@` — §6.1.)
+    the ready-to-run `<basename>.par`. (Literal `@` in a `.par` *value* is
+    written `@@`, which the run-time substitution collapses to a single `@`;
+    inside a `#` comment nothing is scanned, so a bare `@` there is fine —
+    §6.1.)
     The parfile is also dry-run at submit time (`VarSet::check`, §6), so a
     required knob it names must be set — or overlaid with `-K` — for the
     submit to succeed.
