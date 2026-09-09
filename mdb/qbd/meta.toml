@@ -74,20 +74,26 @@ tasks         = 1
 cpus-per-task = 64
 
 [environment]
-# Verbatim from the upstream heredoc (including its leading indentation and the
-# trailing `&&` on the module-purge line).
-# gcc/13.2.0: the system gcc is too old for _Float16 (CCTK_REAL2). Everything
-# C++ is compiled by nvcc anyway (ExternalLibraries/AMReX's detect.sh sets
-# CXX = $(CUCC)), so the module matters for three things: the flesh's C code,
-# the configure probe (CC and CXX both have to accept _Float16), and nvcc's
-# host compiler (--compiler-bindir g++; see optionlists/default.toml). The
-# runscripts inherit this too, which is what puts gcc 13's libstdc++ and
-# libgfortran on the run-time LD_LIBRARY_PATH.
+# Compilers. The system gcc (8.5) has no _Float16, so CCTK_REAL2 was being
+# configured away; gcc 13.2.0 exists only as a module. But nvcc 12.2 supports
+# host gcc only up to 12, and with a gcc-13 host it also trips over glibc's
+# floatn.h (the typedefs for _Float32 & co. are withheld from a compiler that
+# claims __GNUC__ >= 13, which nvcc's front end does without knowing the
+# types). ExternalLibraries/AMReX's detect.sh compiles every C++ file with
+# nvcc, and under nvcc the flesh maps CCTK_REAL2 to __half, so the C++ side
+# never needs _Float16 at all. Hence the split:
+#   - gcc/11.4.0 (module): nvcc's host compiler (--compiler-bindir g++) and
+#     gfortran, both within nvcc 12.2's supported range;
+#   - gcc 13.2.0 (absolute path, optionlists/default.toml): CC for the flesh's
+#     C code, and CXX for the configure-time _Float16 probe only;
+#   - gcc 13's lib64 first on LD_LIBRARY_PATH and in LIBDIRS: the C objects
+#     need libgcc >= 12 for the half<->double helpers (__extendhfdf2), and
+#     libstdc++ 13 is a superset of 11 for everything nvcc/g++ 11 produced.
 env-setup = """
   module purge &&
-  module load cuda/12.2.1 gcc/13.2.0
+  module load cuda/12.2.1 gcc/11.4.0
   export PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/bin:$PATH"
-  export LD_LIBRARY_PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH="/usr/local/packages/compilers/gcc/13.2.0/lib64:/ddnB/project/sbrandt/externals-qbd/install/mpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 """
 
 [scheduler]

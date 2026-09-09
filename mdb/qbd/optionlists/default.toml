@@ -18,17 +18,17 @@ compatible-queues = ["gpu2", "gpu4"]
 [options]
 # -mf16c: hardware binary16<->binary32 conversion for the mixed-precision
 # CCTK_REAL2 host code; without it every _Float16 conversion is a libgcc call.
-# CC/CXX/F90 are bare names: they resolve to the gcc/13.2.0 module that
-# meta.toml's env-setup loads (the system /usr/bin/gcc has no _Float16, so
-# CCTK_REAL2 was configured away). nvcc 12.2 officially supports host gcc up
-# to 12, hence -allow-unsupported-compiler on CUCCFLAGS and LD; drop it if a
-# CUDA >= 12.4 module is loaded instead.
-VERSION = "qbd-2026-09-09"
+# Compilers: see the env-setup comment in meta.toml. gcc 13 (absolute path)
+# compiles the flesh's C and answers configure's _Float16 probe; everything
+# C++ goes through nvcc with the gcc/11.4.0 module as host compiler (bare
+# g++ / gfortran resolve to that module). LIBDIRS puts gcc 13's runtime
+# first so the link picks up libgcc's half<->double helpers and libstdc++ 13.
+VERSION = "qbd-2026-09-09b"
 
 CPP = "cpp"
 FPP = "cpp"
-CC  = "gcc"
-CXX = "g++"
+CC  = "/usr/local/packages/compilers/gcc/13.2.0/bin/gcc"
+CXX = "/usr/local/packages/compilers/gcc/13.2.0/bin/g++"
 F90 = "gfortran"
 
 FPPFLAGS = "-traditional"
@@ -38,7 +38,7 @@ F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd 
 LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
 
 LIBS    = "stdc++fs gfortran cudart_static curand_static culibos dl rt pthread"
-LIBDIRS = "/home/packages/cuda/12.2.1/jd2fi7s/lib64"
+LIBDIRS = "/home/packages/cuda/12.2.1/jd2fi7s/lib64 /usr/local/packages/compilers/gcc/13.2.0/lib64 /usr/local/packages/compilers/gcc/13.2.0/lib/gcc/x86_64-pc-linux-gnu/13.2.0"
 
 C_LINE_DIRECTIVES = "yes"
 F_LINE_DIRECTIVES = "yes"
@@ -80,8 +80,8 @@ VECTORISE_ALIGNED_ARRAYS = "no"
 VECTORISE_INLINE         = "yes"
 
 CUCC  = "nvcc"
-CUCCFLAGS = "--compiler-bindir g++ -allow-unsupported-compiler -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
-LD = "nvcc --compiler-bindir g++ -allow-unsupported-compiler -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
+CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
+LD = "nvcc --compiler-bindir g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
 CUCC_DEBUG_FLAGS    = "-g3"
 CUCC_OPTIMISE_FLAGS = "-O3"
 CUCC_WARN_FLAGS     = "-Xcompiler -Wall"
