@@ -23,7 +23,7 @@ compatible-queues = ["gpu2", "gpu4"]
 # C++ goes through nvcc with the gcc/11.4.0 module as host compiler (bare
 # g++ / gfortran resolve to that module). LIBDIRS puts gcc 13's runtime
 # first so the link picks up libgcc's half<->double helpers and libstdc++ 13.
-VERSION = "qbd-2026-09-09b"
+VERSION = "qbd-2026-09-09c"
 
 CPP = "cpp"
 FPP = "cpp"
@@ -35,7 +35,13 @@ FPPFLAGS = "-traditional"
 CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
 CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
 F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
-LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
+# --enable-new-dtags: the Spack gcc 11 driver bakes a DT_RPATH to its own
+# lib64 into every executable, and DT_RPATH beats LD_LIBRARY_PATH, so the run
+# picked gcc 11's libgcc_s (no GCC_12.0.0 symbols: "version `GCC_12.0.0' not
+# found"). New-style tags make it a DT_RUNPATH, which LD_LIBRARY_PATH (gcc 13
+# first, see meta.toml) overrides; the explicit -rpath is the fallback for a
+# shell without env-setup.
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition -Wl,--enable-new-dtags -Wl,-rpath,/usr/local/packages/compilers/gcc/13.2.0/lib64"
 
 LIBS    = "stdc++fs gfortran cudart_static curand_static culibos dl rt pthread"
 LIBDIRS = "/home/packages/cuda/12.2.1/jd2fi7s/lib64 /usr/local/packages/compilers/gcc/13.2.0/lib64 /usr/local/packages/compilers/gcc/13.2.0/lib/gcc/x86_64-pc-linux-gnu/13.2.0"
