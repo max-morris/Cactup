@@ -152,7 +152,7 @@ pub(crate) struct GlobalOpts {
     #[clap(long, global = true, value_name = "NAME")]
     pub machine: Option<String>,
     /// Target this installation for one command instead of the active one.
-    #[clap(long, global = true, value_name = "ALIAS")]
+    #[clap(short = 'I', long, global = true, value_name = "ALIAS")]
     pub installation: Option<String>,
     // §4.3
     /// Hostname to use for machine discovery (overrides ~/.hostname

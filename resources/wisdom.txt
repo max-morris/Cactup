@@ -95,7 +95,7 @@ sometimes missing, @ENV-OPTIONAL(NAME, "fallback")@ substitutes a default
 instead of failing.
 %
 Target another installation for a single command instead of switching:
-cactup --installation <alias> sim list
+cactup -I/--installation <alias> sim list
 %
 See every shell command cactup runs, as it runs it — the fastest way to
 debug a scheduler rejection: cactup --trace sim submit <name>
