@@ -2,7 +2,7 @@
 #
 # Used as the zero-match fallback for unrecognized hosts (design §4.3/§4.6) and
 # as the base template for `cactup machine create` (§4.7). It describes a
-# single-node workstation with NO batch system. Its discover.py returns False:
+# single-node workstation with NO batch system. It ships no matcher file:
 # `generic` is never auto-matched, only used as the explicit fallback or via
 # `--machine generic`.
 

@@ -46,6 +46,7 @@ fn obtain_sim(
             inst,
             &crate::sim::CreateRequest {
                 force: false,
+                ignore_machine: args.ignore_machine || args.force,
                 name: &args.sim,
                 parfile: par,
                 config: args.config.as_deref(),
@@ -66,6 +67,7 @@ fn obtain_sim(
                 inst,
                 &crate::sim::CreateRequest {
                     force: true,
+                    ignore_machine: args.ignore_machine || args.force,
                     name: &args.sim,
                     parfile: par,
                     config: args.config.as_deref(),
@@ -304,6 +306,7 @@ fn submit_impl(
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
+    check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
     let force_queue = args.force_queue || args.force;
     let fit = vars::QueueFit::from_config(&cfg);
@@ -522,6 +525,13 @@ pub fn run(ctx: &Ctx, args: SimRunArgs) -> Res<()> {
 
 /// The interactive foreground path (§8.4): fresh restart, run universe
 /// resolved on the spot, stdout/stderr teed to `<SimName>.{out,err}`.
+/// §7.4 for a start: both the config and the simulation itself (created on
+/// one machine, submitted from another) must be this machine's.
+fn check_sim_machine(machine: &Machine, sim: &Simulation, cfg: &ConfigMeta, ignore: bool) -> Res<()> {
+    crate::commands::delta::check_machine(machine, &cfg.machine, &format!("config \"{}\"", cfg.name), ignore)?;
+    crate::commands::delta::check_machine(machine, &sim.meta.machine, &format!("simulation \"{}\"", sim.name), ignore)
+}
+
 fn run_interactive(
     inst: &Installation,
     machine: &Machine,
@@ -534,6 +544,7 @@ fn run_interactive(
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
+    check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent);
     let force_queue = args.start.force_queue || args.start.force;
     let fit = vars::QueueFit::from_config(&cfg);
@@ -973,6 +984,7 @@ mod tests {
     fn create_req(parfile: &Path) -> crate::sim::CreateRequest<'_> {
         crate::sim::CreateRequest {
             force: false,
+            ignore_machine: false,
             name: "bbh",
             parfile,
             config: None,
@@ -1005,6 +1017,7 @@ mod tests {
             force: false,
             overwrite: false,
             force_queue: false,
+            ignore_machine: false,
             universe: UniverseFlags { universe: None, no_universe: false },
             topology: TopologyFlags {
                 allocation: None,
@@ -1280,6 +1293,62 @@ mod tests {
         assert!(!restart::workdir(&sim, 2).join("bbh.chkpt.it_10.h5").exists());
         assert!(restart::workdir(&sim, 0).join("bbh.chkpt.it_00.h5").is_file());
         assert!(restart::workdir(&sim, 1).join("bbh.chkpt.it_10.h5").is_file());
+    }
+
+    /// §7.4: a config or simulation recorded for another machine is refused
+    /// at create and at submit; `--ignore-machine` (or `-f`) lets it through.
+    #[test]
+    fn foreign_machine_config_or_sim_is_refused_unless_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "x\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+
+        // The config now claims another machine.
+        let cfg_path = inst.cactus_root().join("configs/sim/cactup-config.toml");
+        let text = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("machine = \"fake\"", "machine = \"elsewhere\"");
+        fs::write(&cfg_path, text).unwrap();
+
+        let db = ctx.db.read().unwrap();
+        let args = start_args("bbh", "1:00:00");
+        let err = format!(
+            "{:#}",
+            submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap_err()
+        );
+        assert!(err.contains("config \"sim\" was built for machine \"elsewhere\""), "{err}");
+        let mut req = create_req(&parfile);
+        req.force = true;
+        let err = format!("{:#}", crate::sim::create(&ctx, &machine, &inst, &req).unwrap_err());
+        assert!(err.contains("built for machine \"elsewhere\""), "{err}");
+        req.ignore_machine = true;
+        crate::sim::create(&ctx, &machine, &inst, &req).unwrap();
+        let mut args = start_args("bbh", "1:00:00");
+        args.ignore_machine = true;
+        submit_impl(&inst, &machine, &db, &sim, &args, false, Some("testhost")).unwrap();
+
+        // A simulation created elsewhere is refused on its own account, and
+        // -f covers it like every other nag.
+        fs::write(
+            &cfg_path,
+            fs::read_to_string(&cfg_path).unwrap().replace("\"elsewhere\"", "\"fake\""),
+        )
+        .unwrap();
+        let mut foreign = crate::sim::Simulation::open("bbh", &sim.dir).unwrap();
+        foreign.meta.machine = "elsewhere".to_owned();
+        let args = start_args("bbh", "1:00:00");
+        let err = format!(
+            "{:#}",
+            submit_impl(&inst, &machine, &db, &foreign, &args, false, Some("testhost")).unwrap_err()
+        );
+        assert!(err.contains("simulation \"bbh\" was built for machine \"elsewhere\""), "{err}");
+        let mut args = start_args("bbh", "1:00:00");
+        args.force = true;
+        submit_impl(&inst, &machine, &db, &foreign, &args, false, Some("testhost")).unwrap();
     }
 
     #[test]

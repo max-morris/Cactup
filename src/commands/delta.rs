@@ -17,6 +17,7 @@ use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
 use crate::fetch::{self, git::SourceDiff, link::LinkState, FetchState};
 use crate::installation::Installation;
+use crate::mdb::Machine;
 use crate::thornlist::ComponentType;
 use crate::Res;
 use anyhow::{bail, Context};
@@ -417,6 +418,32 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         meta.name,
         meta.name
     );
+}
+
+/// A build is not portable across machines (§7.4): refuse to use `what` (a
+/// config or simulation whose metadata records `recorded` as its machine)
+/// while resolved to a different one, unless the caller was told to ignore
+/// the mismatch — then say so and proceed. Every path that turns a config
+/// into a job (sim create/submit/run, test run/submit, build of an existing
+/// config) goes through this, before anything is written.
+pub fn check_machine(current: &Machine, recorded: &str, what: &str, ignore: bool) -> Res<()> {
+    if recorded == current.name {
+        return Ok(());
+    }
+    if !ignore {
+        bail!(
+            "{what} was built for machine \"{recorded}\" but this is machine \"{}\"; \
+             pass --ignore-machine (or -f) to use it anyway, at your own risk",
+            current.name
+        );
+    }
+    println!(
+        "{} {what} was built for machine {} but this is machine {}; proceeding as asked.",
+        "note:".yellow().bold(),
+        recorded.bold(),
+        current.name.bold()
+    );
+    Ok(())
 }
 
 /// Shared "what changed in the worktree" block.

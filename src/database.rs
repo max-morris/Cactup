@@ -1,7 +1,8 @@
 //! The global database, `~/.cactup/database.json` (spec §2.1) — the ONLY
 //! global mutable state: installations, the active installation, knobs (§5),
-//! and the detected-machine cache (§4.3). Config metadata and simulation
-//! state live on disk next to what they describe (D4, D6), never here.
+//! and the detected-machine cache with its verification stamp (§4.3). Config
+//! metadata and simulation state live on disk next to what they describe
+//! (D4, D6), never here.
 //!
 //! Locking follows §2.3 (D11): every mutation is a self-contained
 //! lock → re-read → mutate → persist → unlock via [`Db::update`], so the lock
@@ -242,10 +243,38 @@ pub struct Database {
     /// machine, so knobs are a single flat map, not keyed by machine.
     #[serde(default)]
     pub knobs: IndexMap<String, String>,
-    /// The resolved machine for *this* `~/.cactup` — a single string, not
-    /// keyed by hostname (§4.3).
-    #[serde(default)]
-    pub detected_machine: Option<String>,
+    /// The discovered machine, stamped with where it was last verified
+    /// (§4.3). Absent until discovery first succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected: Option<DetectedMachine>,
+}
+
+/// The discovery cache (§4.3): which machine this `~/.cactup` resolved to,
+/// and the host and login session that last confirmed it. A command whose
+/// hostname and session both match the stamp trusts the name outright;
+/// anything else re-verifies it against the machine's own matcher first, so
+/// a `~/.cactup` shared between clusters cannot carry one cluster's machine
+/// onto another unnoticed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DetectedMachine {
+    pub name: String,
+    /// The discovery hostname (`--hostname` → `~/.hostname` → system) the
+    /// name was last verified for.
+    pub hostname: String,
+    /// The login session (`<session-id>:<leader-start-time>`, from /proc)
+    /// that verification happened in; absent when /proc has no answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+impl DetectedMachine {
+    /// Was this record stamped for exactly this host and login session? An
+    /// unknown session on either side never counts as current: it costs one
+    /// regex (or one python3) to be sure, and being wrong costs a job.
+    pub fn is_current(&self, hostname: &str, session: Option<&str>) -> bool {
+        self.hostname == hostname && session.is_some() && self.session.as_deref() == session
+    }
 }
 
 impl Database {
@@ -256,7 +285,7 @@ impl Database {
             installations: IndexMap::new(),
             active_installation: None,
             knobs: IndexMap::new(),
-            detected_machine: None,
+            detected: None,
         }
     }
 
@@ -456,6 +485,41 @@ mod tests {
         assert_eq!(snapshot.schema, SCHEMA);
         // No lock is left behind by read/update.
         assert!(!dir.path().join("database.lock").exists());
+    }
+
+    /// The stamped record round-trips, and a DB written before the stamp
+    /// existed (a bare `detected-machine` string) reads as "not detected" —
+    /// discovery simply runs again; no migration (§2.1).
+    #[test]
+    fn detected_machine_record_round_trips_and_old_key_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        fs::write(
+            dir.path().join("database.json"),
+            r#"{ "cactup-version": "0.1.0", "detected-machine": "mike" }"#,
+        )
+        .unwrap();
+        assert_eq!(db.read().unwrap().detected, None);
+
+        let record = DetectedMachine {
+            name: "mike".into(),
+            hostname: "mike1.hpc.lsu.edu".into(),
+            session: Some("7:42".into()),
+        };
+        db.update(|d| {
+            d.detected = Some(record.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.read().unwrap().detected, Some(record.clone()));
+        let text = fs::read_to_string(dir.path().join("database.json")).unwrap();
+        assert!(text.contains("\"detected\": {") && !text.contains("detected-machine"), "{text}");
+        assert!(record.is_current("mike1.hpc.lsu.edu", Some("7:42")));
+        assert!(!record.is_current("mike2.hpc.lsu.edu", Some("7:42")));
+        assert!(!record.is_current("mike1.hpc.lsu.edu", Some("8:42")));
+        assert!(!record.is_current("mike1.hpc.lsu.edu", None));
+        let unknown = DetectedMachine { session: None, ..record };
+        assert!(!unknown.is_current("mike1.hpc.lsu.edu", None));
     }
 
     #[test]

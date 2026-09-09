@@ -4,7 +4,7 @@
 
 use super::{prompt_with_default, Ctx};
 use crate::args::MachineCommand;
-use crate::database::Db;
+use crate::database::{Db, DetectedMachine};
 use crate::mdb::{discover, meta::ScriptKind, optionlist, Layer, Machine, Mdb};
 use crate::Res;
 use anyhow::{bail, Context};
@@ -30,9 +30,9 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
         .map(|_| ()),
         MachineCommand::Delete { name } => delete_machine(&ctx.db, &mdb, &name),
         MachineCommand::Forget => {
-            let forgotten = ctx.db.update(|db| Ok(db.detected_machine.take()))?;
+            let forgotten = ctx.db.update(|db| Ok(db.detected.take()))?;
             match forgotten {
-                Some(name) => println!("Forgot the cached detected machine ({}).", name.bold()),
+                Some(cached) => println!("Forgot the cached detected machine ({}).", cached.name.bold()),
                 None => println!("No detected machine was cached."),
             }
             Ok(())
@@ -41,9 +41,11 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
 }
 
 /// Resolve the machine this command runs on (§4.3): `--machine` override →
-/// `detected-machine` cache → discovery (prompting to disambiguate; `generic`
-/// on zero matches). Real matches are cached; the zero-match fallback is not,
-/// so a later `machine create` is picked up.
+/// the cached machine, trusted outright when its stamp names this host and
+/// login session and re-verified against its own matcher otherwise →
+/// discovery (prompting to disambiguate; `generic` on zero matches). Real
+/// matches are cached; the zero-match fallback is not, so a later `machine
+/// create` is picked up.
 pub fn resolve(ctx: &Ctx) -> Res<Machine> {
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
     resolve_with(
@@ -132,21 +134,64 @@ fn resolve_inner(
         return load_checked(mdb, name).map(Resolution::Known);
     }
 
-    if let Some(name) = db.read()?.detected_machine {
-        return load_checked(mdb, &name)
-            .with_context(|| {
-                format!(
-                    "the cached detected machine \"{name}\" failed to load; \
-                     `cactup machine forget` clears the cache, --machine overrides it"
-                )
-            })
-            .map(Resolution::Known);
+    let hostname = discover::resolve_hostname(hostname_override);
+    let session = session_key();
+    let cached_failed = |name: &str, e: anyhow::Error| {
+        e.context(format!(
+            "the cached detected machine \"{name}\" failed to load; \
+             `cactup machine forget` clears the cache, --machine overrides it"
+        ))
+    };
+
+    // The cache: trusted as-is within the session that stamped it, re-checked
+    // against the machine's own matcher the first time a new host or login
+    // shell sees it (§4.3). Only a failed re-check reaches discovery.
+    let mut previous = None;
+    if let Some(cached) = db.read()?.detected {
+        if cached.is_current(&hostname, session.as_deref()) {
+            return load_checked(mdb, &cached.name)
+                .map_err(|e| cached_failed(&cached.name, e))
+                .map(Resolution::Known);
+        }
+        if mdb.verify(&cached.name, &hostname, verbose)? {
+            if verbose {
+                eprintln!("Machine {} still claims host {hostname}; keeping it.", cached.name.bold());
+            }
+            remember(db, &cached.name, &hostname, session.clone())?;
+            return load_checked(mdb, &cached.name)
+                .map_err(|e| cached_failed(&cached.name, e))
+                .map(Resolution::Known);
+        }
+        println!(
+            "{} the cached machine {} does not claim host {}; re-running discovery.",
+            "note:".yellow().bold(),
+            cached.name.bold(),
+            hostname.bold()
+        );
+        previous = Some(cached.name);
     }
 
-    let hostname = discover::resolve_hostname(hostname_override);
     let matches = mdb.discover(&hostname, verbose)?;
     let name = match matches.as_slice() {
-        [] => return Ok(Resolution::Unrecognized(hostname)),
+        [] => match previous {
+            // An interactive allocation puts the user on a compute-node
+            // hostname that a login-only pattern never claims. That is not
+            // a different machine, so the last positive answer stands —
+            // silently from now on in this session — rather than dropping
+            // to `generic` (§4.3).
+            Some(previous) => {
+                println!(
+                    "{} no machine claims host {}; keeping {} (`cactup machine forget` re-detects, \
+                     --machine overrides).",
+                    "note:".yellow().bold(),
+                    hostname.bold(),
+                    previous.bold()
+                );
+                remember(db, &previous, &hostname, session)?;
+                return load_checked(mdb, &previous).map_err(|e| cached_failed(&previous, e)).map(Resolution::Known);
+            }
+            None => return Ok(Resolution::Unrecognized(hostname)),
+        },
         [only] => only.clone(),
         several => {
             if !std::io::stdin().is_terminal() {
@@ -169,12 +214,33 @@ fn resolve_inner(
             }
         }
     };
+    if let Some(previous) = &previous
+        && *previous != name
+    {
+        println!("Detected machine changed from {} to {}.", previous.bold(), name.bold());
+    }
 
-    db.update(|db| {
-        db.detected_machine = Some(name.clone());
-        Ok(())
-    })?;
+    remember(db, &name, &hostname, session)?;
     load_checked(mdb, &name).map(Resolution::Known)
+}
+
+/// Cache `name` as the detected machine, stamped for `hostname` and the
+/// current login session (§4.3).
+fn remember(db: &Db, name: &str, hostname: &str, session: Option<String>) -> Res<()> {
+    let record = DetectedMachine { name: name.to_owned(), hostname: hostname.to_owned(), session };
+    db.update(|db| {
+        db.detected = Some(record);
+        Ok(())
+    })
+}
+
+/// This login session's identity for the verification stamp: the session
+/// leader's pid and start time, from /proc (never libc — D13). `None` when
+/// /proc cannot say, which the stamp comparison treats as "never current".
+fn session_key() -> Option<String> {
+    let sid = crate::lock::proc_session(std::process::id())?;
+    let start = crate::lock::proc_starttime(sid)?;
+    Some(format!("{sid}:{start}"))
 }
 
 /// Load a machine and apply the §4.7 origin-staleness warning: an override
@@ -215,7 +281,7 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
         println!("{}", "No machines in the MDB.".bright_red());
         return Ok(());
     }
-    let detected = ctx.db.read()?.detected_machine;
+    let detected = ctx.db.read()?.detected.map(|d| d.name);
     for (name, layer) in machines {
         let machine = mdb.load(&name)?;
         print!("- {}", name.bold());
@@ -253,9 +319,12 @@ fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
 /// `--machine` override, otherwise uses only the **cached** `detected-machine`
 /// — never discovery — so it cannot prompt, block on stdin, or write the DB.
 pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
-    let name = match ctx.globals.machine.clone() {
-        Some(name) => Some(name),
-        None => ctx.db.read()?.detected_machine,
+    let (name, verified_for) = match ctx.globals.machine.clone() {
+        Some(name) => (Some(name), None),
+        None => match ctx.db.read()?.detected {
+            Some(cached) => (Some(cached.name), Some(cached.hostname)),
+            None => (None, None),
+        },
     };
     let Some(name) = name else {
         println!("{}", "(machine not yet detected — run `cactup machine show`)".yellow());
@@ -263,7 +332,11 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
     };
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
     let machine = load_checked(&mdb, &name)?;
-    print_summary(&machine)
+    print_summary(&machine)?;
+    if let Some(hostname) = verified_for {
+        println!("  detected for host: {hostname}");
+    }
+    Ok(())
 }
 
 /// The `machine show` summary block for an already-loaded machine.
@@ -441,7 +514,7 @@ fn create_machine(
         None => "generic".to_owned(),
         Some(Some(base)) => base.clone(),
         Some(None) => {
-            let detected = db.read()?.detected_machine;
+            let detected = db.read()?.detected.map(|d| d.name);
             match detected {
                 Some(machine) => machine,
                 None => {
@@ -470,6 +543,18 @@ fn create_machine(
     }
 
     copy_dir(&base_dir, &target)?;
+    // The base's matchers must not come along: a clone of `mike` is not
+    // claimed by `^mike\d+`. The new machine gets its own below (or none).
+    for matcher in ["discover.py", "hostname.regexp"] {
+        match fs::remove_file(target.join(matcher)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Failed to remove {}", target.join(matcher).display()));
+            }
+        }
+    }
 
     // Patch the copied meta.toml: identity, concrete autodetected hardware
     // (§4.6 done once, at create time), homes, and origin provenance (D2).
@@ -524,26 +609,15 @@ fn create_machine(
     fs::write(&meta_path, toml::to_string_pretty(&table)?)
         .with_context(|| format!("Failed to write {}", meta_path.display()))?;
 
-    if no_discover {
-        // Selectable only via --machine: make the copied discover.py never match.
-        fs::write(
-            target.join("discover.py"),
-            "\"\"\"Created with --no-discover: selectable only via --machine.\"\"\"\n\n\n\
-             def is_machine(hostname: str) -> bool:\n    return False\n",
-        )?;
-    } else {
-        fs::write(
-            target.join("discover.py"),
-            format!(
-                "\"\"\"Auto-generated by `cactup machine create` for {name}.\"\"\"\n\n\n\
-                 def is_machine(hostname: str) -> bool:\n    \
-                 return hostname == \"{hostname}\" or hostname.split(\".\")[0] == \"{short}\"\n"
-            ),
-        )?;
-        db.update(|db| {
-            db.detected_machine = Some(name.clone());
-            Ok(())
-        })?;
+    // Selectable only via --machine when --no-discover: no matcher file at
+    // all. Otherwise a hostname.regexp claiming this host's FQDN or short
+    // name (the regexp is tested against both forms — §4.3), and the new
+    // machine becomes the detected one for this host and session.
+    if !no_discover {
+        let regexp_path = target.join("hostname.regexp");
+        fs::write(&regexp_path, format!("^(?:{}|{})$\n", regex::escape(&hostname), regex::escape(&short)))
+            .with_context(|| format!("Failed to write {}", regexp_path.display()))?;
+        remember(db, &name, &hostname, session_key())?;
     }
 
     // The user/email/allocation knobs (§4.7, §5) — global, since this
@@ -593,8 +667,8 @@ fn delete_machine(db: &Db, mdb: &Mdb, name: &str) -> Res<()> {
             fs::remove_dir_all(&dir)
                 .with_context(|| format!("Failed to remove {}", dir.display()))?;
             db.update(|db| {
-                if db.detected_machine.as_deref() == Some(name) {
-                    db.detected_machine = None;
+                if db.detected.as_ref().is_some_and(|d| d.name == name) {
+                    db.detected = None;
                 }
                 Ok(())
             })?;
@@ -710,6 +784,14 @@ mod tests {
         assert_ne!(a, hash_machine_dir(&dev_system_root().join("generic")).unwrap());
     }
 
+    fn cached(sb: &Sandbox) -> Option<DetectedMachine> {
+        sb.db.read().unwrap().detected
+    }
+
+    fn cached_name(sb: &Sandbox) -> Option<String> {
+        cached(sb).map(|d| d.name)
+    }
+
     #[test]
     fn resolve_uses_flag_then_cache_then_discovery() {
         let sb = sandbox();
@@ -717,34 +799,76 @@ mod tests {
         // --machine wins outright and does not touch the cache.
         let m = resolve_with(&sb.db, &sb.mdb, Some("mel5"), None, false).unwrap();
         assert_eq!(m.name, "mel5");
-        assert_eq!(sb.db.read().unwrap().detected_machine, None);
+        assert_eq!(cached(&sb), None);
 
-        if std::process::Command::new("python3").arg("--version").output().is_err() {
-            eprintln!("skipping discovery half: python3 not on PATH");
-            return;
-        }
-
-        // Discovery match is cached (§4.3).
+        // Discovery match is cached, stamped for this host and session (§4.3).
         let m = resolve_with(&sb.db, &sb.mdb, None, Some("melete05.cct.lsu.edu"), false).unwrap();
         assert_eq!(m.name, "mel5");
-        assert_eq!(sb.db.read().unwrap().detected_machine.as_deref(), Some("mel5"));
+        let stamp = cached(&sb).unwrap();
+        assert_eq!(stamp.name, "mel5");
+        assert_eq!(stamp.hostname, "melete05.cct.lsu.edu");
+        assert_eq!(stamp.session, session_key());
 
-        // Cache hit skips discovery: a different hostname changes nothing.
-        let m = resolve_with(&sb.db, &sb.mdb, None, Some("unrelated.host"), false).unwrap();
+        // A new hostname re-verifies the cached machine against its own
+        // matcher: the short name still claims mel5, so only the stamp moves.
+        let m = resolve_with(&sb.db, &sb.mdb, None, Some("melete05"), false).unwrap();
+        assert_eq!(m.name, "mel5");
+        assert_eq!(cached(&sb).unwrap().hostname, "melete05");
+
+        // A host nobody claims keeps the last positive answer (an interactive
+        // allocation is not a different machine), restamped so it stays quiet.
+        let m = resolve_with(&sb.db, &sb.mdb, None, Some("c123.compute.internal"), false).unwrap();
+        assert_eq!(m.name, "mel5");
+        assert_eq!(cached(&sb).unwrap().hostname, "c123.compute.internal");
+
+        // A host another machine claims replaces it.
+        let m = resolve_with(&sb.db, &sb.mdb, None, Some("mike2.hpc.lsu.edu"), false).unwrap();
+        assert_eq!(m.name, "mike");
+        assert_eq!(cached_name(&sb).as_deref(), Some("mike"));
+    }
+
+    #[test]
+    fn cache_hit_needs_same_hostname_and_session() {
+        let sb = sandbox();
+        // A user machine whose matcher is then removed: only a genuine
+        // stamp hit can resolve it without discovery.
+        create_machine(
+            &sb.db,
+            &sb.mdb,
+            Some("mybox".into()),
+            None,
+            true,
+            false,
+            Some("mybox.example.org"),
+        )
+        .unwrap();
+        let dir = sb.mdb.machine_dir("mybox").unwrap().0;
+        fs::remove_file(dir.join("hostname.regexp")).unwrap();
+
+        if session_key().is_some() {
+            // Same host, same session: trusted as-is.
+            let m = resolve_with(&sb.db, &sb.mdb, None, Some("mybox.example.org"), false).unwrap();
+            assert_eq!(m.name, "mybox");
+            // A stamp from another session is never current.
+            remember(&sb.db, "mybox", "mybox.example.org", Some("1:1".into())).unwrap();
+        }
+        // Verification fails (no matcher), discovery finds nobody: kept.
+        let m = resolve_with(&sb.db, &sb.mdb, None, Some("mybox.example.org"), false).unwrap();
+        assert_eq!(m.name, "mybox");
+        assert_eq!(cached(&sb).unwrap().session, session_key());
+        // A stale stamp for an unknown session is re-verified, not trusted.
+        remember(&sb.db, "mybox", "mybox.example.org", None).unwrap();
+        let m = resolve_with(&sb.db, &sb.mdb, None, Some("melete05.cct.lsu.edu"), false).unwrap();
         assert_eq!(m.name, "mel5");
     }
 
     #[test]
     fn zero_match_falls_back_to_generic_uncached() {
         let sb = sandbox();
-        if std::process::Command::new("python3").arg("--version").output().is_err() {
-            eprintln!("skipping: python3 not on PATH");
-            return;
-        }
         let m = resolve_with(&sb.db, &sb.mdb, None, Some("nobodys.laptop"), false).unwrap();
         assert_eq!(m.name, "generic");
         // NOT cached, so a later `machine create` gets discovered.
-        assert_eq!(sb.db.read().unwrap().detected_machine, None);
+        assert_eq!(cached(&sb), None);
     }
 
     #[test]
@@ -773,46 +897,47 @@ mod tests {
         assert_eq!(origin.hash, hash_machine_dir(&dev_system_root().join("mel5")).unwrap());
         // Homes written explicitly (silent defaults).
         assert!(machine.meta.paths.simulation_home.as_deref().unwrap().ends_with("simulations"));
-        // detected-machine now points at the new machine.
-        assert_eq!(sb.db.read().unwrap().detected_machine.as_deref(), Some("mybox"));
+        // The cache now points at the new machine, stamped for its host.
+        let stamp = cached(&sb).unwrap();
+        assert_eq!((stamp.name.as_str(), stamp.hostname.as_str()), ("mybox", "mybox.example.org"));
 
-        // The generated discover.py matches FQDN and short name.
-        if std::process::Command::new("python3").arg("--version").output().is_ok() {
-            let dp = machine.dir.join("discover.py");
-            assert!(discover::is_machine(&dp, "mybox.example.org").unwrap());
-            assert!(discover::is_machine(&dp, "mybox").unwrap());
-            assert!(!discover::is_machine(&dp, "elsewhere.org").unwrap());
-        }
+        // The generated hostname.regexp claims the FQDN and the short name —
+        // and the base's matcher did not come along, so mel5's host is not
+        // claimed by the clone.
+        assert!(sb.mdb.verify("mybox", "mybox.example.org", false).unwrap());
+        assert!(sb.mdb.verify("mybox", "mybox", false).unwrap());
+        assert!(!sb.mdb.verify("mybox", "elsewhere.org", false).unwrap());
+        assert!(!sb.mdb.verify("mybox", "melete05.cct.lsu.edu", false).unwrap());
+        assert_eq!(sb.mdb.discover("melete05.cct.lsu.edu", false).unwrap(), ["mel5"]);
 
         // Deleting a system machine is refused; a user machine works and
         // clears the cache.
         assert!(delete_machine(&sb.db, &sb.mdb, "mel5").is_err());
         delete_machine(&sb.db, &sb.mdb, "mybox").unwrap();
         assert!(sb.mdb.machine_dir("mybox").is_none());
-        assert_eq!(sb.db.read().unwrap().detected_machine, None);
+        assert_eq!(cached(&sb), None);
     }
 
     #[test]
     fn ensure_local_machine_creates_on_unknown_host_only() {
-        if std::process::Command::new("python3").arg("--version").output().is_err() {
-            eprintln!("skipping: python3 not on PATH");
-            return;
-        }
-
         // Unknown host: a user-MDB machine is persisted silently and cached
         // (the setup-silent successor, §4.7).
         let sb = sandbox();
-        let m = ensure_local_machine_with(&sb.db, &sb.mdb, None, Some("newlaptop.example.org"), false).unwrap();
+        let m = ensure_local_machine_with(&sb.db, &sb.mdb, None, Some("newlaptop.example.org"), false)
+            .unwrap();
         assert_eq!(m.name, "newlaptop");
         assert_eq!(m.layer, Layer::User);
-        assert_eq!(sb.db.read().unwrap().detected_machine.as_deref(), Some("newlaptop"));
-        // The generated discover.py matches, so the next resolve finds it too.
+        assert_eq!(cached_name(&sb).as_deref(), Some("newlaptop"));
+        // The generated hostname.regexp claims it, so a resolve from another
+        // session (a stale stamp) re-verifies and finds it too.
+        remember(&sb.db, "newlaptop", "newlaptop.example.org", None).unwrap();
         let m = resolve_with(&sb.db, &sb.mdb, None, Some("newlaptop.example.org"), false).unwrap();
         assert_eq!(m.name, "newlaptop");
 
         // Known host: resolves the existing machine, creates nothing.
         let sb = sandbox();
-        let m = ensure_local_machine_with(&sb.db, &sb.mdb, None, Some("melete05.cct.lsu.edu"), false).unwrap();
+        let m = ensure_local_machine_with(&sb.db, &sb.mdb, None, Some("melete05.cct.lsu.edu"), false)
+            .unwrap();
         assert_eq!(m.name, "mel5");
         assert!(sb.mdb.machine_dir("mel5").is_some_and(|(_, layer)| layer == Layer::System));
     }
@@ -822,11 +947,21 @@ mod tests {
         let sb = sandbox();
         create_machine(&sb.db, &sb.mdb, Some("ghost".into()), None, true, true, Some("ghost.example"))
             .unwrap();
-        assert_eq!(sb.db.read().unwrap().detected_machine, None);
+        assert_eq!(cached(&sb), None);
         let machine = sb.mdb.load("ghost").unwrap();
         assert!(machine.meta.cactup.origin.is_none(), "plain create records no origin");
-        if std::process::Command::new("python3").arg("--version").output().is_ok() {
-            assert!(!discover::is_machine(&machine.dir.join("discover.py"), "ghost.example").unwrap());
-        }
+        assert!(!machine.dir.join("hostname.regexp").exists());
+        assert!(!machine.dir.join("discover.py").exists());
+        assert!(!sb.mdb.verify("ghost", "ghost.example", false).unwrap());
+        assert!(sb.mdb.discover("ghost.example", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn forget_clears_the_record() {
+        let sb = sandbox();
+        remember(&sb.db, "mel5", "melete05", session_key()).unwrap();
+        let forgotten = sb.db.update(|db| Ok(db.detected.take())).unwrap();
+        assert_eq!(forgotten.unwrap().name, "mel5");
+        assert_eq!(cached(&sb), None);
     }
 }

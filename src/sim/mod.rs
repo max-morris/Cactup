@@ -253,6 +253,8 @@ fn simulation_id(name: &str, machine: &str, hostname: &str) -> String {
 pub struct CreateRequest<'a> {
     /// Replace an existing simulation of the same name.
     pub force: bool,
+    /// Attach a config built for another machine anyway (§7.4).
+    pub ignore_machine: bool,
     pub name: &'a str,
     pub parfile: &'a Path,
     /// Config to attach; `None` means the installation's active config.
@@ -269,7 +271,7 @@ pub fn create(
     inst: &Installation,
     req: &CreateRequest,
 ) -> Res<Simulation> {
-    let CreateRequest { force, name, parfile, config, sim_dir } = *req;
+    let CreateRequest { force, ignore_machine, name, parfile, config, sim_dir } = *req;
     let inst_meta = inst.meta()?;
     let sim_home = inst_meta.sim_home()?.to_owned();
     let cactus_root = inst.cactus_root();
@@ -292,6 +294,8 @@ pub fn create(
             bail!("config \"{config}\" has never been built (see `cactup config list`)");
         }
     };
+    // §7.4: a build is not portable across machines.
+    crate::commands::delta::check_machine(machine, &cfg.machine, &format!("config \"{config}\""), ignore_machine)?;
     let exe_src = build::executable_path(&cactus_root, &config);
     if !exe_src.is_file() {
         if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &config, Some(machine)) {

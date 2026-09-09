@@ -47,7 +47,7 @@ This creates `~/.cactup/machines/myclu/` with:
   runscripts/
     default.sh
     test.sh
-  discover.py
+  hostname.regexp
 ```
 
 There's no `buildsubmitscripts/` directory yet — that one's optional, and only
@@ -456,17 +456,19 @@ cd @RUNDIR@-active
 @EXECUTABLE@ @PARFILE@
 ```
 
-## Step 6: Write discover.py
+## Step 6: Write hostname.regexp
 
-Create `discover.py` to auto-detect your machine:
+Create `hostname.regexp` to auto-detect your machine. The whole file is one
+regular expression; it claims a host when it matches the full hostname or its
+short form:
 
-```python
-def is_machine(hostname):
-    """Return True if this host is on myclu."""
-    return hostname.startswith("login") and hostname.endswith(".myclu.edu")
+```
+^login\d+\.myclu\.edu$
 ```
 
-Or use a more robust check:
+If the hostname alone cannot identify the cluster, add a `discover.py`
+instead of (or as well as) the regexp; it only runs when the regexp does not
+match:
 
 ```python
 import os
@@ -502,6 +504,7 @@ Test machine discovery:
 ```sh
 cactup machine forget       # Clear cache
 cactup machine show         # Should auto-detect myclu
+cactup --hostname login3.myclu.edu machine show   # Try other hostnames
 ```
 
 ## Step 8: Test with a build and small simulation
@@ -588,14 +591,20 @@ cactup sim delete mysim
 
 ### Machine not detected
 
-Check discover.py logic:
+Check what hostname cactup sees and whether your pattern claims it:
+
+```sh
+cactup -v machine show                       # warns about a regexp that failed to compile
+cactup --hostname "$(hostname -f)" -v machine show
+```
+
+If you use a `discover.py`, `-v` also prints its traceback when it raises.
+At the Python prompt:
 
 ```python
-# Test your function
 def is_machine(hostname):
     return hostname == "login.myclu.edu"
 
-# At the Python prompt:
 import socket
 hostname = socket.getfqdn()
 print(f"Current FQDN: {hostname}")
@@ -644,6 +653,6 @@ Once your machine is working:
 
 ## Next steps
 
-- [Machine Discovery](machine-discovery.html) — refine your discover.py
+- [Machine Discovery](machine-discovery.html) — refine your hostname.regexp
 - [meta.toml Reference](meta-toml.html) — advanced configuration options
 - [Scripts & Variables](scripts-and-variables.html) — customize submit/run scripts for special cases

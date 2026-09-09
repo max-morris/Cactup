@@ -8,7 +8,7 @@ use crate::Res;
 
 pub fn dispatch(ctx: &Ctx, cmd: SimCommand) -> Res<()> {
     match cmd {
-        SimCommand::Create { force, sim, parfile, config, sim_dir } => {
+        SimCommand::Create { force, ignore_machine, sim, parfile, config, sim_dir } => {
             let machine = super::machine::resolve(ctx)?;
             let inst = Installation::resolve(ctx)?;
             sim::create(
@@ -17,6 +17,7 @@ pub fn dispatch(ctx: &Ctx, cmd: SimCommand) -> Res<()> {
                 &inst,
                 &sim::CreateRequest {
                     force,
+                    ignore_machine: ignore_machine || force,
                     name: &sim,
                     parfile: &parfile,
                     config: config.as_deref(),

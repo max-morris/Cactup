@@ -60,9 +60,24 @@ fn stamp_for(hostname: &str, pid: u32) -> String {
 /// The process start time (clock ticks since boot) from `/proc/<pid>/stat`
 /// field 22 — the standard pid-reuse discriminator. `comm` (field 2) may
 /// contain spaces and parentheses, so fields are counted after the last `)`.
-fn proc_starttime(pid: u32) -> Option<u64> {
+pub(crate) fn proc_starttime(pid: u32) -> Option<u64> {
+    proc_stat_field(pid, 22)
+}
+
+/// The session id from `/proc/<pid>/stat` field 6: the pid of the session
+/// leader, which for an interactive login is the login shell. Together with
+/// that leader's start time it names one login session (§4.3's verification
+/// stamp).
+pub(crate) fn proc_session(pid: u32) -> Option<u32> {
+    proc_stat_field(pid, 6)
+}
+
+/// Field `n` (1-based, as `proc(5)` numbers them) of `/proc/<pid>/stat`.
+/// Fields are counted after the last `)` because `comm` (field 2) may hold
+/// spaces and parentheses, so field 3 is index 0 of the remainder.
+fn proc_stat_field<T: std::str::FromStr>(pid: u32, n: usize) -> Option<T> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    stat.rsplit_once(')')?.1.split_whitespace().nth(n - 3)?.parse().ok()
 }
 
 /// What we concluded about the current holder of a lock file.

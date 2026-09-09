@@ -1297,8 +1297,22 @@ pub fn queue_fit(cactus_root: &Path, machine: &Machine, name: &str, opts: &Build
     // metadata is what makes a `--optionlist` choice sticky (rule 3), and
     // `build submit` calls this before it has any reason to have read it.
     let stored = ConfigMeta::load(cactus_root, name)?;
+    if let Some(stored) = &stored {
+        check_config_machine(machine, stored, opts)?;
+    }
     let resolved = resolve_optionlist(cactus_root, name, machine, stored.as_ref(), opts)?;
     Ok(fit_from(machine, name, opts, &resolved.optionlist))
+}
+
+/// §7.4 for a build of an existing config: it must have been built for this
+/// machine, unless `--ignore-machine` (or `-f`) says to rebuild it here.
+fn check_config_machine(machine: &Machine, stored: &ConfigMeta, opts: &BuildOpts) -> Res<()> {
+    crate::commands::delta::check_machine(
+        machine,
+        &stored.machine,
+        &format!("config \"{}\"", stored.name),
+        opts.ignore_machine || opts.force,
+    )
 }
 
 /// Layer `[build]`'s topology defaults onto CLI flags for a build submission:
@@ -1471,6 +1485,9 @@ pub fn prepare(
     // Loaded up front: it carries the thornlist this config was last built
     // from, which feeds thornlist resolution below (§7.5).
     let stored_meta = ConfigMeta::load(&cactus_root, name)?;
+    if let Some(stored) = &stored_meta {
+        check_config_machine(machine, stored, opts)?;
+    }
 
     // Selection & inputs (§4.4, §7.8). The universe name comes off the same
     // `fit_from` that `queue_fit` uses, so this and the pre-topology call
@@ -1622,6 +1639,11 @@ pub fn prepare(
     );
     if opts.force || opts.reconfig {
         decision = RebuildDecision::Full("-f/--reconfig given");
+    } else if stored_meta.as_ref().is_some_and(|m| m.machine != machine.name) {
+        // Only reachable with --ignore-machine (the check above refused
+        // otherwise): nothing built for the other machine may be reused,
+        // and the metadata written below re-records this one.
+        decision = RebuildDecision::Full("the machine changed");
     } else if decision == RebuildDecision::UpToDate
         && is_complete(&cactus_root, name)
         && let Some(stored) = stored_meta.clone()
@@ -3753,6 +3775,60 @@ mod tests {
     /// swallowed the inner make's real exit status). The incompleteness error
     /// must name the missing *executable* and point at the build output
     /// files — not blame the configure marker, which is present.
+    /// §7.4: a config built for another machine is refused by both entry
+    /// points (`queue_fit` for `build submit`, `prepare` for everything);
+    /// `--ignore-machine` turns that into a forced full rebuild whose
+    /// metadata then names this machine.
+    #[test]
+    fn foreign_machine_config_bails_unless_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, mut opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {}/exe && touch {}/exe/cactus_sim ;;",
+                cactus.display(),
+                cactus.display(),
+                cactus.display()
+            ),
+        );
+        build(&inst, &machine, "sim", &opts).unwrap();
+
+        // Pretend the build came from another machine's cactup.
+        let mut stored = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        stored.machine = "elsewhere".to_owned();
+        stored.store(&cactus).unwrap();
+
+        let err = match prepare(&inst, &machine, "sim", &opts, None) {
+            Ok(_) => panic!("a foreign build must be refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("built for machine \"elsewhere\"") && err.contains("--ignore-machine"),
+            "{err}"
+        );
+        let err = match queue_fit(&cactus, &machine, "sim", &opts) {
+            Ok(_) => panic!("a foreign build must be refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("built for machine \"elsewhere\""), "{err}");
+
+        opts.ignore_machine = true;
+        queue_fit(&cactus, &machine, "sim", &opts).unwrap();
+        let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a, _) => a,
+            Prepared::UpToDate(_) => panic!("a foreign build must never read as up to date"),
+        };
+        assert_eq!(attempt.meta.decision, "the machine changed");
+        execute(&mut attempt, true, None).unwrap();
+        assert_eq!(ConfigMeta::load(&cactus, "sim").unwrap().unwrap().machine, "fake");
+        // Back on its own machine, the usual short-circuit applies again.
+        opts.ignore_machine = false;
+        assert!(matches!(prepare(&inst, &machine, "sim", &opts, None).unwrap(), Prepared::UpToDate(_)));
+    }
+
     #[test]
     fn incomplete_after_configure_names_executable() {
         let dir = tempfile::tempdir().unwrap();

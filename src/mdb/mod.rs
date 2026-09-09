@@ -1,5 +1,6 @@
 //! The machine database (MDB) — spec §4 (layout, meta.toml model, two-layer
-//! system/user resolution with name-shadowing, `discover.py` discovery,
+//! system/user resolution with name-shadowing, `hostname.regexp` /
+//! `discover.py` discovery,
 //! variants/queues/universes and their validation), §7.8 (optionlist TOML +
 //! render), §11.2 (test-partition marking & resolution).
 
@@ -31,7 +32,7 @@ static GENERIC_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/mdb/generic
 /// Materialize the embedded `generic` to `~/.cactup/mdb-builtin/<version>/generic`
 /// (once per process) and return its path, or `None` if extraction fails. It is
 /// written to disk rather than served from memory because the rest of the MDB
-/// machinery — running `discover.py`, `copy_dir` in `machine create` — expects a
+/// machinery — matcher files, `copy_dir` in `machine create` — expects a
 /// real directory. The path is version-scoped so a binary upgrade re-extracts.
 fn builtin_generic_dir() -> Option<PathBuf> {
     static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -172,33 +173,73 @@ impl Mdb {
         Machine::load(name, dir, layer)
     }
 
-    /// Run every machine's `discover.py` against `hostname` and return the
-    /// (sorted) names that claim it (§4.3). Shadowing is applied first, so an
-    /// overridden machine never double-matches against its system original.
-    /// A machine whose discover.py is missing or raises is treated as "did
-    /// not match", with a warning under `verbose`.
+    /// Every machine that claims `hostname`, sorted by name (§4.3).
+    /// Shadowing is applied first, so an overridden machine never
+    /// double-matches against its system original. Per machine,
+    /// `hostname.regexp` is consulted first (in Rust); `discover.py` only
+    /// when there is no regexp or it did not match — and all of those run
+    /// in one `python3`. A machine with neither file is simply not
+    /// discoverable (`--machine` still selects it); one whose discover.py
+    /// raises is treated as "did not match", with a warning under `verbose`.
     pub fn discover(&self, hostname: &str, verbose: bool) -> Res<Vec<String>> {
         let mut matches = Vec::new();
+        let mut pending: Vec<(String, PathBuf)> = Vec::new();
         for (name, _layer) in self.machines()? {
             let (dir, _) = self.machine_dir(&name).expect("machine enumerated but no dir");
-            let discover_py = dir.join("discover.py");
-            if !discover_py.is_file() {
-                if verbose {
-                    eprintln!("{}", format!("Warning: machine {name} has no discover.py; skipping it in discovery").yellow());
-                }
-                continue;
-            }
-            match discover::is_machine(&discover_py, hostname) {
-                Ok(true) => matches.push(name),
-                Ok(false) => {}
-                Err(e) => {
-                    if verbose {
-                        eprintln!("{}", format!("Warning: treating machine {name} as non-matching: {e:#}").yellow());
+            match discover::regexp_verdict(&name, &dir, hostname) {
+                Some(true) => matches.push(name),
+                Some(false) | None => {
+                    let discover_py = dir.join("discover.py");
+                    if discover_py.is_file() {
+                        pending.push((name, discover_py));
                     }
                 }
             }
         }
+        let scripts: Vec<PathBuf> = pending.iter().map(|(_, path)| path.clone()).collect();
+        for ((name, _), verdict) in pending.into_iter().zip(discover::probe_all(&scripts, hostname)?) {
+            match verdict {
+                Ok(true) => matches.push(name),
+                Ok(false) => {}
+                Err(e) => {
+                    if verbose {
+                        eprintln!(
+                            "{}",
+                            format!("Warning: treating machine {name} as non-matching: {e:#}").yellow()
+                        );
+                    }
+                }
+            }
+        }
+        matches.sort();
         Ok(matches)
+    }
+
+    /// Does machine `name` (alone) claim `hostname`? The same regexp-first,
+    /// discover.py-second test `discover` applies, for re-verifying a cached
+    /// machine (§4.3). A machine that no longer exists does not claim
+    /// anything.
+    pub fn verify(&self, name: &str, hostname: &str, verbose: bool) -> Res<bool> {
+        let Some((dir, _)) = self.machine_dir(name) else { return Ok(false) };
+        if discover::regexp_verdict(name, &dir, hostname) == Some(true) {
+            return Ok(true);
+        }
+        let discover_py = dir.join("discover.py");
+        if !discover_py.is_file() {
+            return Ok(false);
+        }
+        match discover::is_machine(&discover_py, hostname) {
+            Ok(claims) => Ok(claims),
+            Err(e) => {
+                if verbose {
+                    eprintln!(
+                        "{}",
+                        format!("Warning: treating machine {name} as non-matching: {e:#}").yellow()
+                    );
+                }
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -621,12 +662,61 @@ mod tests {
 
     #[test]
     fn discovery_sweep_matches_mel5_only() {
+        let mdb = dev_mdb();
+        assert_eq!(mdb.discover("melete05.cct.lsu.edu", false).unwrap(), ["mel5"]);
+        assert_eq!(mdb.discover("melete05", false).unwrap(), ["mel5"]);
+        assert_eq!(mdb.discover("mike3", false).unwrap(), ["mike"]);
+        assert!(mdb.discover("someone-elses-laptop", false).unwrap().is_empty());
+        assert!(mdb.verify("mel5", "melete05.cct.lsu.edu", false).unwrap());
+        assert!(!mdb.verify("mel5", "mike3.hpc.lsu.edu", false).unwrap());
+        assert!(!mdb.verify("no-such-machine", "melete05", false).unwrap());
+    }
+
+    /// Every shipped matcher is a regexp (no python on the discovery path),
+    /// every regexp compiles, and the two undiscoverable machines ship no
+    /// matcher at all (§4.3, §4.6).
+    #[test]
+    fn every_dev_machine_regexp_compiles() {
+        let mdb = dev_mdb();
+        for (name, _) in mdb.machines().unwrap() {
+            let (dir, _) = mdb.machine_dir(&name).unwrap();
+            assert!(!dir.join("discover.py").exists(), "{name} still ships a discover.py");
+            let regexp = dir.join("hostname.regexp");
+            if matches!(name.as_str(), "generic" | "et-juphub") {
+                assert!(!regexp.exists(), "{name} must not be discoverable");
+                continue;
+            }
+            discover::load_regexp(&regexp).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+        }
+    }
+
+    /// The regexp is the fast path: a matching regexp means the machine's
+    /// discover.py is never run; a non-matching one hands over to it.
+    #[test]
+    fn regexp_short_circuits_discover_py() {
         if std::process::Command::new("python3").arg("--version").output().is_err() {
             eprintln!("skipping: python3 not on PATH");
             return;
         }
-        let mdb = dev_mdb();
-        assert_eq!(mdb.discover("melete05.cct.lsu.edu", false).unwrap(), ["mel5"]);
-        assert!(mdb.discover("someone-elses-laptop", false).unwrap().is_empty());
+        let system = tempfile::tempdir().unwrap();
+        let sentinel = system.path().join("ran");
+        let dir = system.path().join("box");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(dev_mdb().system_root.join("generic/meta.toml"), dir.join("meta.toml")).unwrap();
+        std::fs::write(dir.join("hostname.regexp"), "^fast\\.example$\n").unwrap();
+        std::fs::write(
+            dir.join("discover.py"),
+            format!(
+                "import pathlib\npathlib.Path({:?}).write_text('x')\ndef is_machine(h):\n    return h == 'slow.example'\n",
+                sentinel.display().to_string()
+            ),
+        )
+        .unwrap();
+        let mdb = Mdb::with_roots(system.path().to_owned(), tempfile::tempdir().unwrap().path().to_owned());
+        assert_eq!(mdb.discover("fast.example", false).unwrap(), ["box"]);
+        assert!(!sentinel.exists(), "regexp matched, python must not run");
+        assert_eq!(mdb.discover("slow.example", false).unwrap(), ["box"]);
+        assert!(sentinel.exists(), "regexp missed, discover.py decides");
+        assert!(mdb.discover("neither.example", false).unwrap().is_empty());
     }
 }

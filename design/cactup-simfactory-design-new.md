@@ -133,10 +133,14 @@ and is concerned **exclusively** with global cactup state:
 - `active-installation`
 - **knobs** (new; see §5) — global defaults, one flat map (a `~/.cactup` lives
   on exactly one machine).
-- **`detected-machine`** (new; see §4.3) — the resolved machine name for *this*
-  machine, a single string (**not** keyed by hostname). A given
-  `~/.cactup` logically lives on one machine, so login and compute nodes of a
-  cluster share one value transparently.
+- **`detected`** (new; see §4.3) — the discovered machine, stamped with the
+  hostname and login session that last verified it:
+  `{ "name": "mike", "hostname": "mike1.hpc.lsu.edu", "session": "19840:590094" }`.
+  One record, not one per hostname: a `~/.cactup` logically lives on one
+  machine, and login and compute nodes of a cluster share it — but a
+  `~/.cactup` on a filesystem shared between clusters does not get to carry
+  one cluster's machine onto another unnoticed, because the stamp is what
+  decides whether the name is trusted or re-verified.
 
 **Version guard & on-disk schema policy (backward compatibility
 required).** On-disk state is versioned by an integer **`schema`** (the DB and
@@ -704,7 +708,8 @@ below.
 mdb/
   <machine>/
     meta.toml                       # machine metadata (TOML + literal @templating@)
-    discover.py                     # def is_machine(hostname: str) -> bool
+    hostname.regexp                 # one Rust regex claiming this machine's hosts (optional)
+    discover.py                     # def is_machine(hostname: str) -> bool (optional)
     optionlists/
       <variant>.toml                # build option lists (TOML + @templating@)
     runscripts/
@@ -732,7 +737,7 @@ A machine present in **both** layers resolves from the **user MDB** (it wins),
 so a user can override a shipped machine without editing the cloned repo (which
 would be clobbered on update). Discovery (§4.3) and `machine show` scan both
 layers, but name-shadowing is applied **first**: when a machine name exists in
-both layers, only the user-MDB copy participates — only its `discover.py` is run
+both layers, only the user-MDB copy participates — only its matchers are run
 for that name, and only it is listed — so overriding a shipped machine never
 produces a spurious double-match (§4.3) against its own system-layer original.
 Each layer has the same internal structure (per-machine directories; no
@@ -747,8 +752,8 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   `trampoline`, `rsynccmd`, `rsyncopts`, `sshcmd`, `sshopts`, `localssh*`,
   `archivetype`, `archiveuser`, `archivebasepath`, `archivehostname`,
   `archivetoolspath`. (Remote/archive are gone — D1, D2.)
-- `aliaspattern` (hostname regex) is **removed**; replaced by `discover.py`
-  (§4.3).
+- `aliaspattern` (hostname regex) is **removed**; replaced by the
+  `hostname.regexp` / `discover.py` matcher files (§4.3).
 - `submitscript` / `runscript` / `optionlist` single-filename keys are
   **replaced** by the per-machine `optionlists/`, `runscripts/`,
   `submitscripts/` directories and the **variant→queue mapping** described in
@@ -1132,65 +1137,104 @@ The `@templating@` inside `meta.toml` values uses **literal `@NAME@`
 substitution only** (D7): the only variables meaningful here are the install-
 context ones (`@USER@`, etc.). Example: `simulation-home = "/work/@USER@/simulations"`.
 
-### 4.3 Discovery functions (`discover.py`)
+### 4.3 Discovery: `hostname.regexp` and `discover.py`
 
 Replaces simfactory's `aliaspattern` hostname regex (`simfactory-docs.txt` §9).
 
-- Each machine ships `mdb/<machine>/discover.py` containing
-  `def is_machine(hostname: str) -> bool:`.
 - cactup determines the local `hostname` (`--hostname` override → `~/.hostname` →
-  system FQDN) and **passes it as the argument** to every machine's
-  `is_machine(hostname)`. The implementation may use the supplied string or
-  ignore it and do its own probing (e.g. read an env var, check a sentinel
-  file). Exactly one `True` → that machine. More than one → **prompt the user to
+  system FQDN) and asks each machine whether it claims that host. A machine
+  may ship either or both of two **matcher files**:
+  - `mdb/<machine>/hostname.regexp` — the whole file, trimmed, is one pattern
+    in the Rust `regex` dialect (there is no comment syntax; a `#` is part of
+    the pattern). It claims the host when it matches the hostname as resolved
+    **or** its short form (the first label), so `^ln[1-4]$` claims both `ln1`
+    and `ln1.cosma.dur.ac.uk` — the two probes every ported simfactory pattern
+    made. A file that is empty or not a valid regex is an authoring bug: cactup
+    warns (always, not only under `-v`) and treats it as "did not match".
+  - `mdb/<machine>/discover.py` — `def is_machine(hostname: str) -> bool:`.
+    The implementation may use the supplied string or ignore it and do its own
+    probing (e.g. read an env var, check a sentinel file). A script that raises
+    (or calls `sys.exit`) is "did not match", with a warning under `-v`.
+- The regexp is tried first and is decisive when it matches; `discover.py` runs
+  only for machines whose regexp is absent or did not match. Every shipped
+  machine's pattern is a regexp, so a stock MDB never spawns Python for
+  discovery; `discover.py` is the escape hatch for a site that needs more than
+  the hostname. A machine with neither file is simply not discoverable — it is
+  selectable only via `--machine`.
+- Exactly one claim → that machine. More than one → **prompt the user to
   disambiguate** — **except in non-interactive mode** (`--silent`, or no tty),
   where cactup cannot prompt: it then **errors and requires `--machine <name>`**
   to pick one explicitly. (Recall name-shadowing already removes the
   common self-collision, §4.1, so a genuine multi-match means two distinct
   machines both claim this host.)
-- **Zero matches → fall back to `generic`, do not fail (§4.6).** An unrecognized
+- **Zero claims → fall back to `generic`, do not fail (§4.6).** An unrecognized
   host (e.g. a personal laptop with no scheduler) is the *common* case for
   newcomers, not an error. cactup uses the built-in `generic` machine — with
   hardware autodetected at runtime — so the command works out of the box, and
   prints a one-line notice suggesting `cactup machine create` (§4.7) to persist a
-  tuned local machine. (The `generic` machine's own `discover.py` returns
-  `False`, so it never participates in matching; it is *only* the zero-match
-  fallback.)
+  tuned local machine. (`generic` ships no matcher file, so it never
+  participates in matching; it is *only* the zero-match fallback.)
 - `--machine <name>` overrides outright and skips discovery entirely (e.g.
   `--machine generic`).
 
-**Discovery result is cached persistently, not "per session."** cactup is a
-one-shot CLI — there is no session to remember a choice in. The resolved machine
-(including a disambiguation choice) is cached in the global DB as a **single
-string** — **not** keyed by hostname:
+**The result is cached persistently, with a verification stamp.** The resolved
+machine (including a disambiguation choice) is one record in the global DB —
+**not** one per hostname — stamped with the hostname it was resolved for and
+the login session that did it:
 
 ```jsonc
 // database.json
-"detected-machine": "mike"
+"detected": { "name": "mike", "hostname": "mike1.hpc.lsu.edu", "session": "19840:590094" }
 ```
 
-Rationale: a given `~/.cactup` logically belongs to one machine and does not
-move, so keying by hostname would only fragment the cache across a cluster's
-many login/compute node FQDNs (`mike1`, `mike2`, …) and re-prompt on each. A
-single value makes all of a cluster's nodes resolve transparently. (Edge case: a
-`~/.cactup` on a home filesystem *shared* between two genuinely distinct
-clusters would need `--machine` or `machine forget`; this is rare and accepted.)
-A cache hit skips re-running discovery (and re-prompting). `--machine` and
-`cactup machine forget` bypass/clear the cache.
+The session is the session leader's pid and start time from `/proc/self/stat`
+(field 6, then field 22 of the leader) — for an interactive login that is the
+login shell; a `setsid`/cron/`nohup` invocation is its own session, and a
+platform without `/proc` records none, which never compares equal. On every
+resolution:
+
+1. `--machine` given → use it; the cache is neither read nor written.
+2. The stamp names this hostname **and** this session → trust the name. No
+   matcher runs; this is every command after the first in a shell.
+3. Otherwise **re-verify**: run only the cached machine's own matchers against
+   the current hostname. Still claimed → restamp and use it. That is what a new
+   login shell, or the first command on another node, costs: one regex, or one
+   `python3` if the machine only has a `discover.py`.
+4. Not claimed → say so and run full discovery. A *different* machine claiming
+   the host replaces the cached one ("Detected machine changed from A to B").
+   **Nobody** claiming it keeps the cached machine, with a one-time note and a
+   restamp so the session stays quiet: an interactive allocation puts the user
+   on a compute-node hostname that a login-only pattern never claims, and that
+   is not a different machine — dropping to `generic` there would be wrong.
+   `cactup machine forget` is the way out when it really is one.
+
+Rationale for one record: a given `~/.cactup` logically belongs to one machine,
+so keying by hostname would only fragment the cache across a cluster's many
+login/compute node FQDNs (`mike1`, `mike2`, …) and re-prompt on each. The stamp
+is what closes the gap that a bare string left open: a `~/.cactup` on a home
+filesystem *shared* between two distinct clusters used to carry cluster A's
+machine onto cluster B silently; now the first command on B re-verifies, finds
+A does not claim B's host, and discovers B. `cactup machine forget` clears the
+record.
 
 **ASSUMPTION (Python runtime):** cactup shells out to a `python3` on `PATH` to
-evaluate discovery and `.py` script variants (cactup is Rust; embedding CPython
-is heavier than needed). A machine whose `discover.py` raises is treated as "did
-not match" with a warning under `-v`.
+evaluate `discover.py` and `.py` script variants (cactup is Rust; embedding
+CPython is heavier than needed).
 
 **Security & cost note.** `discover.py` (and `.py` script variants) are arbitrary
 code from the MDB git repo, executed on the user's machine. The MDB repo is
 therefore a **trust boundary**: cactup runs only the MDB it cloned from the
-configured `manifest`/MDB URL, and the spec assumes that repo is trusted. To
-avoid spawning Python on every command, discovery runs **only** on a
-`detected-machine` cache miss (or `--machine` absence), and the `.py` calling
-convention (§6.1) batches all variable injection into a single `python3`
-invocation per script.
+configured `manifest`/MDB URL, and the spec assumes that repo is trusted. Cost:
+the regexps are evaluated in-process; every `discover.py` that still needs to
+run is evaluated in **one** `python3` process (each script in its own `runpy`
+namespace, its stdout diverted to stderr so it cannot corrupt the protocol) —
+interpreter start-up is the whole cost (~15 ms per spawn against well under a
+millisecond per module; 38 machines went from ~570 ms to ~20 ms), so there is
+nothing to gain from stitching the scripts into one module and a lot of
+fragility (name collisions, imports, error isolation) to lose. And matchers run
+only on a stamp miss (step 3 above), never on the steady-state command. The
+`.py` calling convention (§6.1) likewise batches all variable injection into a
+single `python3` invocation per script.
 
 ### 4.4 Variants (the headline new feature)
 
@@ -1279,7 +1323,7 @@ mdb/
     meta.toml                    # grouped tables (§4.2); single "local" queue;
                                  #   normal + test-marked script/optionlist variants (§11.2);
                                  #   test-home under [paths] (§11.5)
-    discover.py                  # is_machine(): FQDN == melete05.cct.lsu.edu
+    hostname.regexp              # ^melete05(\.cct\.lsu\.edu)?$
     optionlists/default.toml     # ported from mel5.cfg; [cactup] gpu=false + [options]
     optionlists/debug.toml       # DEBUG optionlist; reached with cactup build --variant debug (§4.4)
     runscripts/default.sh        # @NUM_PROCS@→@TASKS@, @NUM_THREADS@→@CPUS_PER_TASK@
@@ -1288,7 +1332,7 @@ mdb/
     submitscripts/test.sh        # test=true; re-invokes `cactup test run`, no chaining (§11.6)
 ```
 
-It exercises every load-bearing new mechanism: discovery function, grouped
+It exercises every load-bearing new mechanism: discovery matcher, grouped
 `meta.toml`, single-queue/single-variant resolution, the optionlist
 TOML→native render (§7.8), the renamed topology variables (§6.3), the
 compute-node re-invocation locator (§8.3.1), and — via the `test`-marked
@@ -1310,7 +1354,7 @@ It describes a single-node workstation with **no batch system**:
   id), `get-status` = `ps @JOB_ID@`, `stop` = `pkill` the process group.
 - A single `local` queue (`gpu = false`, `default = true`) and single `default`
   variant of each script.
-- Its `discover.py` returns `False` — `generic` is never auto-matched; it is the
+- It ships no matcher file — `generic` is never auto-matched; it is the
   explicit zero-match fallback (§4.3) and is always selectable via
   `--machine generic`.
 
@@ -1377,10 +1421,12 @@ cactup machine delete <name>
   `~/.cactup/simulations` and `~/.cactup/cacti` fallbacks, §4.2) and prompts for
   `user`/`email`/`allocation` knobs unless `--silent` (which takes defaults — the
   successor to `setup-silent`).
-- **Generates a `discover.py`** that matches the current host (exact FQDN, plus
-  short-name match) so the machine is auto-detected on subsequent runs, *and*
-  sets the `detected-machine` value (§4.3). Pass `--no-discover` to create a
-  machine that is only selectable via `--machine` (useful for cloning a remote
+- **Generates a `hostname.regexp`** claiming the current host (exact FQDN or
+  short name, escaped) so the machine is auto-detected on subsequent runs,
+  *and* sets the `detected` record for this host and session (§4.3). The
+  base's own matcher files are never copied — a clone of `mike` must not be
+  claimed by `^mike\d+`. Pass `--no-discover` to write no matcher at all: the
+  machine is then only selectable via `--machine` (useful for cloning a remote
   cluster's def to inspect/edit locally).
 - `machine delete <name>` removes a **user-MDB** machine (refuses to delete a
   system-MDB machine; suggest overriding instead).
@@ -2189,7 +2235,14 @@ profile = false
 variant's `[cactup]` header at build time (§7.8) so that `sim submit` can
 enforce queue compatibility (§4.4) without re-reading the MDB. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
-portable across machines). The resolved build **`universe`** (§4.8) is recorded
+portable across machines) and **enforced**: `build` of an existing config,
+`sim create`/`submit`/`run` and `test run`/`submit` refuse a config whose
+recorded machine is not the resolved one (`config "sim" was built for machine
+"mike" but this is machine "qbd"`), and `sim submit`/`run` likewise refuse a
+simulation whose own `machine` (§9.3) is not. `--ignore-machine` — implied by
+each command's `-f` — turns the refusal into a note and proceeds at the user's
+own risk; for `build` that means a forced full rebuild whose metadata then
+names the current machine. The resolved build **`universe`** (§4.8) is recorded
 so `config show` reports it, the rebuild decision (below) can detect a universe
 change, and — unless the optionlist opted out — `sim run`/`sim submit` can coerce
 simulations of this config into the same universe (§4.8 precedence step 2); it is
@@ -2919,12 +2972,14 @@ live sim *and* no trashed sim references it.
 ### 8.2 `sim create`
 
 ```
-cactup sim create [-f] <sim> <parfile> [--config C] [--sim-dir P]
+cactup sim create [-f] [--ignore-machine] <sim> <parfile> [--config C] [--sim-dir P]
 ```
 
 Port of `create()` (`simfactory-docs.txt` §14.1):
 1. Resolve config = `--config` or the installation's active config; locate
-   `<Cactus root>/exe/cactus_<config>` (fatal if missing).
+   `<Cactus root>/exe/cactus_<config>` (fatal if missing). The config must
+   have been built for the resolved machine (§7.4); `--ignore-machine`/`-f`
+   overrides.
 2. **Validate `<parfile>`'s name (collision guard).** The parfile must end
    in `.par` (literal `@NAME@` substitution) or `.py` (Python variant —
    §6.1/§6.2). cactup strips that one extension to derive the working-directory
@@ -2959,8 +3014,8 @@ No restart is created yet (matches simfactory).
 ### 8.3 `sim submit`
 
 ```
-cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <TOPOLOGY…>
-cactup sim submit [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>   # implicit create
+cactup sim submit [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] <sim> <TOPOLOGY…>
+cactup sim submit [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>   # implicit create
 ```
 
 Port of `submit()` (`simfactory-docs.txt` §14.2):
@@ -2969,7 +3024,9 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   given, that is an **error** unless `--overwrite`/`-f` is passed — cactup
   will not silently ignore a parfile that contradicts an existing sim.
 - Validate the built config's `compatible-queues` against the chosen queue
-  (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`.
+  (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`. Before that,
+  the config and the simulation must both have been built for the resolved
+  machine (§7.4); error on mismatch unless `--ignore-machine`/`-f`.
 - **Reap a stale active restart (port of simfactory `initRestart`).** Before
   allocating a new restart, if an `output-NNNN-active` symlink exists cactup
   decides whether its run is truly dead using the **liveness protocol**, not
@@ -3069,8 +3126,8 @@ job starts, or mid-run — leaves at most one stale symlink, which the next
 ### 8.4 `sim run`
 
 ```
-cactup sim run [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <TOPOLOGY…> [--debug]
-cactup sim run [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>
+cactup sim run [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] <sim> <TOPOLOGY…> [--debug]
+cactup sim run [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>
 ```
 
 Port of `run()` / `userRun` / `submitRun` (`simfactory-docs.txt` §14.3): runs
@@ -3882,7 +3939,9 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
    Locate its built binary in `<Cactus root>/configs/<config>/` (fatal if the
    config is incomplete — no `config-data/cctk_Config.h`, §7.2).
 2. Enforce the built config's `compatible-queues` against the chosen queue (§4.4 /
-   D12) exactly as a sim does; `--force-queue`/`-f` overrides.
+   D12) exactly as a sim does; `--force-queue`/`-f` overrides. The config
+   must have been built for the resolved machine (§7.4);
+   `--ignore-machine`/`-f` overrides.
 3. Resolve the **test** submit/run script variants for the chosen queue (§11.2)
    and the **run universe** (§4.8, same precedence as §8.3), recording the run
    universe in the test-run metadata so a queued run applies it on the compute
@@ -4081,7 +4140,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 |----------|-----------|--------|
 | Global state | n/a (per-tree) | `~/.cactup/database.json` (JSON) — installs, active install, knobs |
 | Machine def | `mdb/machines/<m>.ini` | `mdb/<m>/meta.toml` (TOML) |
-| Machine discovery | `aliaspattern` regex | `mdb/<m>/discover.py` |
+| Machine discovery | `aliaspattern` regex | `mdb/<m>/hostname.regexp` (Rust regex), then `mdb/<m>/discover.py` |
 | Config DB / defs | `etc/defs.ini` + `etc/defs.local.ini` | **removed**; → knobs + machine meta |
 | OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<variant>.toml` (rendered to native `.cfg` before make — §7.8) |
 | SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<variant>.{sh,py}` |
@@ -4096,7 +4155,7 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Active restart | `output-NNNN-active` symlink | **identical (preserved)** |
 | Substitution | `@NAME@` + `@(expr)@` + `@ENV()@` | **`@NAME@` + `@ENV(NAME)@`** (unset/empty env = hard error); `.py` for logic (JSON-on-stdin convention, §6.1) |
 | cactup binary var | `@SIMFACTORY@` | `@CACTUP@` |
-| Machine detection | `aliaspattern` regex on hostname | `discover.py`; result cached in DB as a single `detected-machine` string (not per-hostname — §4.3) |
+| Machine detection | `aliaspattern` regex on hostname | `hostname.regexp` first, `discover.py` second (all scripts in one `python3`); result cached in DB as one `detected` record stamped with hostname + login session, re-verified when either changes (§4.3) |
 | Per-installation state | n/a | `<installation home>/.cactup/installation.toml` (active config, sim-home, test-home, root-dir) + `simulations.toml` (name→dir registry) + `fetch-state.toml` (per-repo URL/branch/HEAD from the last fetch — §3.2) + `<installation home>/installation-source.th` (pristine as-fetched thornlist, the hand-edit guard baseline — §3.2) |
 | Sim root key | machine `basedir` | machine `simulation-home` (optional; falls back to `~/.cactup/simulations`) — §8.1 |
 | Test-suite command | `sim create --testsuite` (overloads `sim`) | `cactup test run`/`submit` against any built config (own command tree — §11) |
@@ -4117,8 +4176,8 @@ Each is marked **ASSUMPTION** inline above; collected here:
 
 1. MDB source: git clone into `~/.cactup/mdb` (prod) vs hard-coded dev path; a
    `--mdb-path` override (§2.2, §4).
-2. Python runtime: shell out to `python3` for `discover.py` and `.py` script
-   variants rather than embedding CPython (§4.3).
+2. Python runtime: shell out to `python3` for `discover.py` (one process for
+   all of them) and `.py` script variants rather than embedding CPython (§4.3).
 3. `interactive` command dropped for v1 (§3.1).
 4. `--virtual` prebuilt-executable build kept (§7.7).
 5. `sim delete` moves to `TRASH/` by default; permanent removal behind an
@@ -4174,7 +4233,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
 | 5–6 option system/precedence | clap + knob precedence (§5.1) |
 | 7 INI parser | TOML (serde) |
 | 8 machine DB keys | `meta.toml` (§4.2), remote/archive keys dropped |
-| 9 machine detection | `discover.py` (§4.3) |
+| 9 machine detection | `hostname.regexp` / `discover.py` (§4.3) |
 | 10 defs layering | removed; → knobs/meta (§5.2) |
 | 11 `@VAR@` engine | literal `@NAME@` + `.py` escape hatch (§6) |
 | 12 optionlists/run/submit | variants (§4.4, §6.2); test-marked variants (§11.2) |

@@ -26,11 +26,11 @@ Machine **name shadowing**: if you define `mylab.local` in the user MDB, it take
 When you run cactup, it discovers which machine you're on:
 
 1. If you specify `--machine myclu`, use that machine (skip discovery)
-2. If you've run discovery before, use the cached result (reusable across commands)
-3. Run `discover.py` scripts (in both system and user MDB) to find a match
+2. If you've run discovery before in this login shell on this host, use the cached result
+3. Otherwise re-check the cached machine against the current hostname; if it no longer claims the host, run every machine's matcher (`hostname.regexp`, then `discover.py`; both MDB layers) to find one that does
 4. If no match, fall back to `generic` (the built-in single-node workstation machine)
 
-See [Machine Discovery](machine-discovery.html) for details on writing `discover.py` scripts.
+See [Machine Discovery](machine-discovery.html) for details on writing `hostname.regexp` and `discover.py`.
 
 ## Per-machine directory layout
 
@@ -50,7 +50,8 @@ Each machine (in the system or user MDB) is a directory with:
     test.sh                    # Special variant for `test run`
   buildsubmitscripts/          # OPTIONAL — only clusters that forbid
     default.sh                 # login-node compiling need this one
-  discover.py                  # Machine detection script
+  hostname.regexp              # Machine detection: one regex (optional)
+  discover.py                  # Machine detection: Python fallback (optional)
 ```
 
 ### meta.toml
@@ -94,16 +95,22 @@ See [Optionlists](optionlists.html) for schema and template variables.
 
 All three are shell (`.sh`) or Python (`.py`) scripts. See [Scripts & Variables](scripts-and-variables.html).
 
-### discover.py
+### hostname.regexp and discover.py
 
-The **discover.py** script determines whether a machine matches the current host. Examples:
+The **hostname.regexp** file holds one regular expression; the machine claims every host it matches (tested against the full hostname and its short form):
+
+```
+^mike\d+(\.hpc\.lsu\.edu)?$
+```
+
+A **discover.py** script is the fallback for sites where the hostname is not enough:
 
 ```python
 def is_machine(hostname):
     return hostname.startswith("mike2.hpc.lsu.edu")
 ```
 
-cactup runs all discover.py scripts (system + user MDB) and uses the first to return True. Generic's discover.py returns False (it's the fallback).
+cactup checks every machine's regexp first and only runs the `discover.py` of machines whose regexp did not match (all of them in one `python3`). Exactly one claim wins; several make cactup ask. `generic` ships neither file, which is what makes it the fallback.
 
 ## Viewing machines
 
@@ -141,7 +148,7 @@ If you manage an HPC cluster or workstation, you can add it to cactup:
 
 4. **Write submit and run scripts** that format jobs for your scheduler (SLURM, PBS, etc.)
 
-5. **Write discover.py** so your machine auto-detects (optional)
+5. **Write hostname.regexp** so your machine auto-detects (optional)
 
 6. **Test with**:
    ```sh
@@ -207,5 +214,5 @@ Users submit to a specific queue with `-q <queue>`, and cactup validates that th
 - [meta.toml Reference](meta-toml.html) — detailed field documentation
 - [Optionlists](optionlists.html) — compiler settings and thornlist configuration
 - [Scripts & Variables](scripts-and-variables.html) — submit/run script templates
-- [Machine Discovery](machine-discovery.html) — writing discover.py
+- [Machine Discovery](machine-discovery.html) — writing hostname.regexp / discover.py
 - [Porting a Cluster](porting-a-cluster.html) — complete walkthrough of adding a machine

@@ -433,9 +433,13 @@ pub(crate) struct TopologyFlags {
 /// Build flags for `cactup build`.
 #[derive(clap::Args, Debug)]
 pub(crate) struct BuildOpts {
-    /// Rebuild even if the config is already built.
+    /// Rebuild even if the config is already built (implies --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
+    // §7.4
+    /// Rebuild a config that was built for another machine, at your own risk.
+    #[clap(long)]
+    pub ignore_machine: bool,
     /// Thornlist path (default: the one this config was last built from, else
     /// <Cactus root>/thornlists/installation-default.th).
     #[clap(long, value_name = "PATH")]
@@ -487,6 +491,7 @@ impl BuildOpts {
     pub(crate) fn default_for_tests() -> BuildOpts {
         BuildOpts {
             force: false,
+            ignore_machine: false,
             thornlist: None,
             variant: None,
             optionlist: None,
@@ -620,8 +625,12 @@ pub(crate) enum SimCommand {
     // §8.2
     /// Create a simulation from a parfile
     Create {
-        #[clap(short, long, help = "Replace an existing simulation of the same name.")]
+        #[clap(short, long, help = "Replace an existing simulation of the same name (implies --ignore-machine).")]
         force: bool,
+        // §7.4
+        /// Use a config that was built for another machine, at your own risk.
+        #[clap(long)]
+        ignore_machine: bool,
         /// The simulation name.
         sim: String,
         // §6.2
@@ -700,7 +709,7 @@ pub(crate) struct SimStartArgs {
     /// Config for the implicit create (default: active config).
     #[clap(long, value_name = "CONFIG")]
     pub config: Option<String>,
-    /// Bypass all nagging (implies --overwrite and --force-queue).
+    /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
     /// Replace an existing simulation on implicit create.
@@ -710,6 +719,11 @@ pub(crate) struct SimStartArgs {
     /// Bypass the optionlist↔queue compatibility check.
     #[clap(long)]
     pub force_queue: bool,
+    // §7.4
+    /// Use a config or simulation that was built for another machine, at
+    /// your own risk.
+    #[clap(long)]
+    pub ignore_machine: bool,
     /// Suppress the notice that the source tree has moved since this config
     /// was built. Never affects what runs — a run always uses the executable
     /// as it was built.
@@ -809,7 +823,7 @@ pub(crate) struct TestStartArgs {
     /// Runscript variant override.
     #[clap(long, value_name = "VARIANT")]
     pub variant: Option<String>,
-    /// Bypass all nagging (implies --overwrite and --force-queue).
+    /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
     /// Replace an existing test run of the same name.
@@ -819,6 +833,10 @@ pub(crate) struct TestStartArgs {
     /// Bypass the optionlist↔queue compatibility check.
     #[clap(long)]
     pub force_queue: bool,
+    // §7.4
+    /// Use a config that was built for another machine, at your own risk.
+    #[clap(long)]
+    pub ignore_machine: bool,
     /// Suppress the notice that the source tree has moved since this config
     /// was built. Never affects what runs — a run always uses the executable
     /// as it was built.
@@ -868,7 +886,7 @@ pub(crate) enum MachineCommand {
         /// Take defaults instead of prompting (successor to setup-silent).
         #[clap(long)]
         silent: bool,
-        /// Skip generating discover.py (machine only selectable via --machine).
+        /// Skip generating hostname.regexp (machine only selectable via --machine).
         #[clap(long)]
         no_discover: bool,
     },
@@ -921,6 +939,7 @@ mod tests {
             // `build_bare_positional_is_not_mistaken_for_a_subcommand` below.
             vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
             vec!["cactup", "build", "sim", "--optionlist", "/tmp/my.cfg"],
+            vec!["cactup", "build", "sim", "--ignore-machine"],
             vec!["cactup", "build", "run", "sim", "--variant", "cuda", "--universe", "et-sif"],
             vec![
                 "cactup", "build", "run", "--config-dir", "/inst/configs/sim", "--attempt-id", "2",

@@ -196,6 +196,13 @@ fn start_impl(
             bail!("config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
         }
     };
+    // §7.4: a build is not portable across machines.
+    crate::commands::delta::check_machine(
+        machine,
+        &cfg.machine,
+        &format!("config \"{cfg_name}\""),
+        args.ignore_machine || args.force,
+    )?;
     if !build::is_complete(&cactus_root, &cfg_name) {
         if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
             bail!(
@@ -610,6 +617,7 @@ mod tests {
             force: false,
             overwrite: false,
             force_queue: false,
+            ignore_machine: false,
             universe: UniverseFlags { universe: None, no_universe: false },
             topology: TopologyFlags {
                 allocation: None,
@@ -721,6 +729,32 @@ mod tests {
         // `test submit` hands the suite to a compute node, so it is exempt even
         // outside an allocation.
         start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap();
+    }
+
+    /// §7.4: a config built for another machine is refused before anything
+    /// is registered; `--ignore-machine` lets the run proceed.
+    #[test]
+    fn foreign_machine_config_is_refused_unless_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let db = Database::new();
+        fs::write(inst.cactus_root().join("failcount"), "0").unwrap();
+        let cfg_path = inst.cactus_root().join("configs/tests/cactup-config.toml");
+        let text = fs::read_to_string(&cfg_path)
+            .unwrap()
+            .replace("machine = \"fake\"", "machine = \"elsewhere\"");
+        fs::write(&cfg_path, text).unwrap();
+
+        let err = format!(
+            "{:#}",
+            start_impl(&inst, &machine, &db, &test_args(), true, false, Some("h")).unwrap_err()
+        );
+        assert!(err.contains("config \"tests\" was built for machine \"elsewhere\""), "{err}");
+        assert!(inst.tests().unwrap().tests.is_empty(), "nothing registered");
+        let mut args = test_args();
+        args.ignore_machine = true;
+        start_impl(&inst, &machine, &db, &args, true, false, Some("h")).unwrap();
     }
 
     #[test]
