@@ -76,9 +76,16 @@ cpus-per-task = 64
 [environment]
 # Verbatim from the upstream heredoc (including its leading indentation and the
 # trailing `&&` on the module-purge line).
+# gcc/13.2.0: the system gcc is too old for _Float16 (CCTK_REAL2). Everything
+# C++ is compiled by nvcc anyway (ExternalLibraries/AMReX's detect.sh sets
+# CXX = $(CUCC)), so the module matters for three things: the flesh's C code,
+# the configure probe (CC and CXX both have to accept _Float16), and nvcc's
+# host compiler (--compiler-bindir g++; see optionlists/default.toml). The
+# runscripts inherit this too, which is what puts gcc 13's libstdc++ and
+# libgfortran on the run-time LD_LIBRARY_PATH.
 env-setup = """
   module purge &&
-  module load cuda/12.2.1
+  module load cuda/12.2.1 gcc/13.2.0
   export PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/bin:$PATH"
   export LD_LIBRARY_PATH="/ddnB/project/sbrandt/externals-qbd/install/mpi/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 """
