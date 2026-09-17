@@ -86,7 +86,7 @@ VECTORISE_ALIGNED_ARRAYS = "no"
 VECTORISE_INLINE         = "yes"
 
 CUCC  = "nvcc"
-CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
+CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE -mf16c"
 LD = "nvcc --compiler-bindir g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
 CUCC_DEBUG_FLAGS    = "-g3"
 CUCC_OPTIMISE_FLAGS = "-O3"
