@@ -37,21 +37,45 @@ env | sort > .cactup/ENVIRONMENT
 # Optional profiler wrapper (mixed-precision performance work). Set the
 # variable in the shell that runs `cactup sim submit`; sbatch propagates the
 # environment to the job. Unset: this block is inert.
-#   CACTUP_PROFILE=nsys   one nsys report per task (CUDA + NVTX + MPI)
-#   CACTUP_PROFILE=ncu    ncu on task 0 only: 40 launches after skipping 20,
-#                         SpeedOfLight + MemoryWorkloadAnalysis sections;
-#                         CACTUP_NCU_KERNELS overrides the kernel-name regex
+#   CACTUP_PROFILE=nsys   one nsys report per task (CUDA + NVTX + MPI, plus
+#                         unified-memory page faults on both sides, since
+#                         CarpetX's host-side reductions read managed memory)
+#   CACTUP_PROFILE=ncu    ncu on task 0 only: CACTUP_NCU_COUNT launches
+#                         (default 60) after skipping CACTUP_NCU_SKIP
+#                         (default 300), counted among launches whose
+#                         DEMANGLED name matches CACTUP_NCU_KERNELS (a
+#                         regex; unset = every launch). Sections
+#                         SpeedOfLight + MemoryWorkloadAnalysis, or the
+#                         comma-separated CACTUP_NCU_METRICS instead when
+#                         that is set (metrics replace the sections).
+# Either way the run is bracketed by `nvidia-smi -q -d CLOCK,TEMPERATURE`
+# so a timing can be checked against clock throttling afterwards.
 PROF_WRAPPER=
 case "${CACTUP_PROFILE:-}" in
   nsys)
-    PROF_WRAPPER="nsys profile --trace=cuda,nvtx,mpi --sample=none --cpuctxsw=none --cuda-memory-usage=true --force-overwrite=true -o profile.task%q{SLURM_PROCID}" ;;
+    PROF_WRAPPER="nsys profile --trace=cuda,nvtx,mpi --sample=none --cpuctxsw=none --cuda-memory-usage=true --cuda-um-cpu-page-faults=true --cuda-um-gpu-page-faults=true --force-overwrite=true -o profile.task%q{SLURM_PROCID}" ;;
   ncu)
     cat > ./prof-ncu.sh <<'EOS'
 #!/bin/bash
 if [ "${SLURM_PROCID:-0}" = 0 ]; then
-  exec ncu --target-processes all --launch-skip 20 --launch-count 40 \
-    --kernel-name "regex:${CACTUP_NCU_KERNELS:-copy|FillBoundary|ParallelFor}" \
-    --section SpeedOfLight --section MemoryWorkloadAnalysis \
+  # Kernel names are matched on the DEMANGLED symbol. ncu's default name
+  # base ("function") sees only `launch_global` for every AMReX-launched
+  # kernel (CarpetX has no __global__ of its own), so a regex like
+  # "ParallelFor" or "prolongate" profiles nothing under the default
+  # (2026-09-09: "==WARNING== No kernels were profiled"); with the demangled
+  # base the template arguments (element type, centering, order) are part
+  # of the name and the regex can select them. --launch-skip/--launch-count
+  # then count only launches that match the regex. No regex = every launch.
+  # CACTUP_NCU_METRICS (comma-separated) replaces the two sections when set.
+  if [ -n "${CACTUP_NCU_METRICS:-}" ]; then
+    NCU_WHAT="--metrics ${CACTUP_NCU_METRICS}"
+  else
+    NCU_WHAT="--section SpeedOfLight --section MemoryWorkloadAnalysis"
+  fi
+  exec ncu --target-processes all --kernel-name-base demangled \
+    --launch-skip "${CACTUP_NCU_SKIP:-300}" --launch-count "${CACTUP_NCU_COUNT:-60}" \
+    ${CACTUP_NCU_KERNELS:+--kernel-name "regex:${CACTUP_NCU_KERNELS}"} \
+    ${NCU_WHAT} \
     --force-overwrite -o profile.ncu "$@@"
 else
   exec "$@@"
@@ -67,11 +91,31 @@ export OMPI_MCA_btl=^openib
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
 
+# GPU clocks and temperatures before and after, on the node the batch script
+# runs on (the first allocated node), so a timing run can be checked for
+# thermal or power throttling after the fact.
+nvidia-smi -q -d CLOCK,TEMPERATURE > nvidia-smi.before.txt 2>&1 || true
+
 time srun -u --overlap -n @TASKS@ \
     --cpus-per-task=@CPUS_PER_TASK@ \
     --gpus-per-task=@GPUS_PER_TASK@ \
     --gres-flags=allow-task-sharing \
     ${PROF_WRAPPER} @EXECUTABLE@ -L 3 @PARFILE@
+
+nvidia-smi -q -d CLOCK,TEMPERATURE > nvidia-smi.after.txt 2>&1 || true
+
+# Text summaries next to the binary reports, so a results bundle can be read
+# without the profiler installed: per-kernel, per-API-call and memory-transfer
+# totals (CSV) for each nsys report, and the ncu sections as text.
+case "${CACTUP_PROFILE:-}" in
+  nsys) for rep in profile.task*.nsys-rep; do
+          [ -f "$rep" ] || continue
+          nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum,cuda_gpu_mem_size_sum,nvtx_sum \
+               --format csv --force-export=true -o "${rep%.nsys-rep}" "$rep" >/dev/null 2>&1 || echo "nsys stats failed for $rep"
+        done ;;
+  ncu)  [ -f profile.ncu.ncu-rep ] && { ncu --import profile.ncu.ncu-rep --page details > prof-ncu-details.txt 2>&1
+                                       ncu --import profile.ncu.ncu-rep --page raw --csv > prof-ncu-raw.csv 2>/dev/null; } ;;
+esac
 
 echo "Stopping:"
 date

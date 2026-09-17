@@ -131,14 +131,21 @@ max-walltime     = "24:00:00"
 # needing more GPUs per node than the partition has — e.g. `-c 16` on gpu2,
 # which puts 4 ranks over 2 GPUs — is refused before anything is submitted
 # rather than queued forever.
+# Both GPU partitions accept 72 h jobs (`scontrol show partition gpu2`,
+# 2026-09-15: MaxTime=3-00:00:00), so a long simulation chains in 72 h
+# segments rather than the machine-level 24 h fallback above. The parfile
+# still has to leave before the segment ends (Cactus::max_runtime) and point
+# every restart at one shared checkpoint directory.
 [queues.gpu2]
 gpu     = true    # native CUDA build (nvcc, AMREX_ENABLE_CUDA = yes)
 default = true
 max-gpus-per-node = 2
+max-walltime = "3-00:00:00"
 
 [queues.gpu4]
 gpu = true
 max-gpus-per-node = 4
+max-walltime = "3-00:00:00"
 # 64/4: four ranks, one per GPU, 16 cores each. Inheriting [hardware]'s 32
 # would give 2 ranks — half a node's worth of work on a node whose whole
 # 4-GPU complement the --gres branch below reserves regardless.
