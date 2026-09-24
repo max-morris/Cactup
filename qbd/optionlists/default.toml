@@ -16,8 +16,11 @@ default           = true      # `cpu` is the other variant; this one stays the i
 compatible-queues = ["gpu2", "gpu4"]
 
 [options]
-# -mf16c: hardware binary16<->binary32 conversion for the mixed-precision
-# CCTK_REAL2 host code; without it every _Float16 conversion is a libgcc call.
+# -mf16c (CFLAGS/CXXFLAGS/F90FLAGS only): hardware binary16<->binary32
+# conversion for gcc's _Float16 in the flesh's C code; without it every
+# conversion is a libgcc call. It is deliberately NOT in CUCCFLAGS: under
+# nvcc CCTK_REAL2 is __half and cuda_fp16.hpp converts on the host in
+# software regardless of the flag, so it would buy nothing there.
 # Compilers: see the env-setup comment in meta.toml. gcc 13 (absolute path)
 # compiles the flesh's C and answers configure's _Float16 probe; everything
 # C++ goes through nvcc with the gcc/11.4.0 module as host compiler (bare
@@ -86,7 +89,7 @@ VECTORISE_ALIGNED_ARRAYS = "no"
 VECTORISE_INLINE         = "yes"
 
 CUCC  = "nvcc"
-CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE -mf16c"
+CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
 LD = "nvcc --compiler-bindir g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
 CUCC_DEBUG_FLAGS    = "-g3"
 CUCC_OPTIMISE_FLAGS = "-O3"
