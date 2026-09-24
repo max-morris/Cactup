@@ -14,13 +14,15 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
+    // Opened per subcommand: `forget` only edits the DB and must not sync
+    // the system MDB.
+    let mdb = || Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db);
     match cmd {
-        MachineCommand::List => list(ctx, &mdb),
-        MachineCommand::Show { name, variants } => show(ctx, &mdb, name, variants),
+        MachineCommand::List => list(ctx, &mdb()?),
+        MachineCommand::Show { name, variants } => show(ctx, &mdb()?, name, variants),
         MachineCommand::Create { name, from_existing, silent, no_discover } => create_machine(
             &ctx.db,
-            &mdb,
+            &mdb()?,
             name,
             from_existing,
             silent,
@@ -28,7 +30,7 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
             ctx.globals.hostname.as_deref(),
         )
         .map(|_| ()),
-        MachineCommand::Delete { name } => delete_machine(&ctx.db, &mdb, &name),
+        MachineCommand::Delete { name } => delete_machine(&ctx.db, &mdb()?, &name),
         MachineCommand::Forget => {
             let forgotten = ctx.db.update(|db| Ok(db.detected.take()))?;
             match forgotten {
@@ -47,7 +49,7 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
 /// matches are cached; the zero-match fallback is not, so a later `machine
 /// create` is picked up.
 pub fn resolve(ctx: &Ctx) -> Res<Machine> {
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
     resolve_with(
         &ctx.db,
         &mdb,
@@ -83,7 +85,7 @@ pub fn resolve_with(
 /// machine created silently (and cached) instead of the in-place `generic`
 /// fallback.
 pub fn ensure_local_machine(ctx: &Ctx) -> Res<Machine> {
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
     ensure_local_machine_with(
         &ctx.db,
         &mdb,
@@ -346,7 +348,7 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
         println!("{}", "(machine not yet detected — run `cactup machine show`)".yellow());
         return Ok(());
     };
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
     let machine = load_checked(&mdb, &name)?;
     print_summary(&machine)?;
     if let Some(hostname) = verified_for {

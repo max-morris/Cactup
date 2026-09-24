@@ -8,6 +8,7 @@ pub mod autodetect;
 pub mod discover;
 pub mod meta;
 pub mod optionlist;
+pub mod sync;
 
 // Convenience re-exports for the consuming subsystems.
 pub use meta::{BuildAction, Hardware, Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
@@ -104,11 +105,18 @@ pub struct Mdb {
 impl Mdb {
     /// Resolve the MDB roots: `--mdb-path` override → the build-selected
     /// system root (§2.2: a dev build reads `<project root>/mdb`, a
-    /// distribution build `~/.cactup/mdb`); the user overlay is always
-    /// `~/.cactup/machines`. An override that carries a `GENERATION` file must
-    /// be of this binary's generation; one without it (a test fixture) is
-    /// taken as is.
-    pub fn open(mdb_path_override: Option<&Path>) -> Res<Mdb> {
+    /// distribution build the synced copy under `~/.cactup/mdb`, fetching it
+    /// first when the throttle says so — see [`sync`]); the user overlay is
+    /// always `~/.cactup/machines`. An override that carries a `GENERATION`
+    /// file must be of this binary's generation; one without it (a test
+    /// fixture) is taken as is. `db` supplies the `mdb-url` knob.
+    //
+    // D11: compute-node runs never get here, so a job never syncs (or reads
+    // the global DB for the knob). `sim run --sim-dir` (sim/start.rs `run`),
+    // the build `--config-dir` form (commands/build.rs `auto`/`run`) and
+    // `test run --test-dir` (testsuite/run.rs `start`) all return into their
+    // compute paths before anything calls `Mdb::open`.
+    pub fn open(mdb_path_override: Option<&Path>, db: &crate::database::Db) -> Res<Mdb> {
         let system_root = match mdb_path_override {
             Some(path) => {
                 check_root_generation(path)?;
@@ -117,7 +125,7 @@ impl Mdb {
             None if !crate::build_info::is_dist() => {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb")
             }
-            None => crate::CACTUP_ROOT.join("mdb"),
+            None => sync::system_root(&crate::CACTUP_ROOT.join("mdb"), db, sync::Mode::Throttled)?,
         };
         Ok(Mdb { system_root, user_root: crate::CACTUP_ROOT.join("machines") })
     }
@@ -989,19 +997,20 @@ mod tests {
     fn an_mdb_path_override_must_match_the_generation() {
         let want = crate::build_info::MDB_GENERATION;
         let root = tempfile::tempdir().unwrap();
+        let db = crate::database::Db::in_dir(root.path());
         // No GENERATION file (a fixture): accepted silently.
-        assert_eq!(Mdb::open(Some(root.path())).unwrap().system_root, root.path());
+        assert_eq!(Mdb::open(Some(root.path()), &db).unwrap().system_root, root.path());
         fs::write(root.path().join("GENERATION"), format!("{want}\n")).unwrap();
-        Mdb::open(Some(root.path())).unwrap();
+        Mdb::open(Some(root.path()), &db).unwrap();
         // Generation 0 is not a generation, so "older" exists only past 1.
         let others = [Some((want + 1, true)), (want > 1).then(|| (want - 1, false))];
         for (other, hint) in others.into_iter().flatten() {
             fs::write(root.path().join("GENERATION"), format!("{other}\n")).unwrap();
-            let err = Mdb::open(Some(root.path())).err().unwrap().to_string();
+            let err = Mdb::open(Some(root.path()), &db).err().unwrap().to_string();
             assert!(err.contains(&format!("generation {other}")), "{err}");
             assert_eq!(err.contains("cactup update"), hint, "{err}");
         }
         fs::write(root.path().join("GENERATION"), "garbage").unwrap();
-        assert!(Mdb::open(Some(root.path())).is_err());
+        assert!(Mdb::open(Some(root.path()), &db).is_err());
     }
 }

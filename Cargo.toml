@@ -40,6 +40,9 @@ chrono = { version = "0.4.45", features = ["serde"] }
 crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
 
+[dev-dependencies]
+gix = { version = "0.85.0", features = ["tree-editor"] }
+
 [[bin]]
 name = "cactup"
 path = "src/main.rs"
