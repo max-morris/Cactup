@@ -109,10 +109,7 @@ fn assemble_test_vars(
     // literally (single-pass substitution). Matches the sim path.
     v.set("SCRATCH_HOME", machine.meta.resolved_paths()?.scratch_home.unwrap_or_default());
     v.set("ALIAS", alias);
-    let cactup = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "cactup".to_owned());
-    v.set("CACTUP", cactup);
+    v.set("CACTUP", crate::freeze::frozen_cactup());
 
     v.set("MACHINE", machine.name.as_str());
     v.set("HOSTNAME", identity.hostname.as_str());

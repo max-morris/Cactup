@@ -34,9 +34,9 @@ use std::sync::LazyLock;
 /// one with a 403 that reads like the file is gone.
 ///
 /// Identifies cactup and its version, the two things a mirror operator
-/// looking at a log needs. Built from `CARGO_PKG_VERSION`, the same source
-/// as [`crate::VERSION`], so the two cannot drift.
-const USER_AGENT: &str = concat!("cactup/", env!("CARGO_PKG_VERSION"));
+/// looking at a log needs: `cactup/<version>+<build id>`, or `+dev` for a
+/// dev build (see [`crate::build_info`]).
+const USER_AGENT: &str = crate::build_info::USER_AGENT;
 
 /// One client for every download in a run, built once. Downloads run four
 /// at a time and a thornlist's downloads often share a host, so this is also
@@ -214,7 +214,7 @@ mod tests {
         // The header itself: reqwest sends none by default, and a mirror that
         // rejects that (ftp.gnu.org 403s it) fails in a way that reads like
         // the file is missing.
-        assert_eq!(USER_AGENT, format!("cactup/{}", crate::VERSION));
+        assert!(USER_AGENT.starts_with(&format!("cactup/{}+", crate::VERSION)), "{USER_AGENT}");
 
         let (base, server) = serve_once(b"payload");
         let dir = tempfile::tempdir().unwrap();

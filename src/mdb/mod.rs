@@ -22,18 +22,20 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The built-in `generic` machine, embedded in the binary so it is always
-/// available — even in a release build before the system MDB (`~/.cactup/mdb`)
-/// has been deployed. It is the zero-match fallback for unrecognized hosts and
-/// the base template for `cactup machine create` (§4.3/§4.6/§4.7), so it must
-/// never be able to go missing. Debug builds read the on-disk copy from the
-/// repo `mdb/` and never touch this.
+/// available — even in a distribution build before the system MDB
+/// (`~/.cactup/mdb`) has been deployed. It is the zero-match fallback for
+/// unrecognized hosts and the base template for `cactup machine create`
+/// (§4.3/§4.6/§4.7), so it must never be able to go missing. Dev builds read
+/// the on-disk copy from the repo `mdb/` and never touch this.
 static GENERIC_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/mdb/generic");
 
-/// Materialize the embedded `generic` to `~/.cactup/mdb-builtin/<version>/generic`
+/// Materialize the embedded `generic` to `~/.cactup/mdb-builtin/<hash>/generic`
 /// (once per process) and return its path, or `None` if extraction fails. It is
 /// written to disk rather than served from memory because the rest of the MDB
 /// machinery — matcher files, `copy_dir` in `machine create` — expects a
-/// real directory. The path is version-scoped so a binary upgrade re-extracts.
+/// real directory. The path is keyed by a content hash of the embedded tree,
+/// so a binary whose `generic` differs re-extracts, and builds that embed the
+/// same one share a copy.
 fn builtin_generic_dir() -> Option<PathBuf> {
     static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
     CACHED
@@ -54,10 +56,10 @@ fn builtin_generic_dir() -> Option<PathBuf> {
 fn extract_builtin_generic() -> Res<PathBuf> {
     let dir = crate::CACTUP_ROOT
         .join("mdb-builtin")
-        .join(crate::VERSION)
+        .join(crate::build_info::GENERIC_HASH)
         .join("generic");
     // Extract only when absent: identical embedded contents, so a leftover copy
-    // from an earlier run of this version is already correct.
+    // under the same hash is already correct.
     if !dir.join("meta.toml").is_file() {
         extract_embedded_dir(&GENERIC_DIR, &dir)?;
     }
@@ -100,16 +102,24 @@ pub struct Mdb {
 }
 
 impl Mdb {
-    /// Resolve the MDB roots: `--mdb-path` override → the compile-time-selected
-    /// system root (§2.2: dev = `<project root>/mdb`, prod = `~/.cactup/mdb`);
-    /// the user overlay is always `~/.cactup/machines`.
-    pub fn open(mdb_path_override: Option<&Path>) -> Mdb {
+    /// Resolve the MDB roots: `--mdb-path` override → the build-selected
+    /// system root (§2.2: a dev build reads `<project root>/mdb`, a
+    /// distribution build `~/.cactup/mdb`); the user overlay is always
+    /// `~/.cactup/machines`. An override that carries a `GENERATION` file must
+    /// be of this binary's generation; one without it (a test fixture) is
+    /// taken as is.
+    pub fn open(mdb_path_override: Option<&Path>) -> Res<Mdb> {
         let system_root = match mdb_path_override {
-            Some(path) => path.to_owned(),
-            None if cfg!(debug_assertions) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            Some(path) => {
+                check_root_generation(path)?;
+                path.to_owned()
+            }
+            None if !crate::build_info::is_dist() => {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb")
+            }
             None => crate::CACTUP_ROOT.join("mdb"),
         };
-        Mdb { system_root, user_root: crate::CACTUP_ROOT.join("machines") }
+        Ok(Mdb { system_root, user_root: crate::CACTUP_ROOT.join("machines") })
     }
 
     /// Explicit roots, for tests and tools.
@@ -170,7 +180,30 @@ impl Mdb {
         let (dir, layer) = self
             .machine_dir(name)
             .ok_or_else(|| anyhow!("no machine named \"{name}\" in the MDB (try `cactup machine list`)"))?;
-        Machine::load(name, dir, layer)
+        Machine::load(name, dir, layer, &self.generations_guide())
+    }
+
+    /// Where a user reads what changed between MDB generations: the
+    /// `GENERATIONS.md` shipped in the system MDB when it has one, else the
+    /// documentation site.
+    pub fn generations_guide(&self) -> String {
+        let local = self.system_root.join("GENERATIONS.md");
+        if local.is_file() {
+            local.display().to_string()
+        } else {
+            format!("{}/authors/mdb-generations.html", crate::update::DEFAULT_UPDATE_URL)
+        }
+    }
+
+    /// Gate a user-MDB overlay's `meta.toml` on its recorded generation
+    /// without loading the machine (the `--from-existing` base check in
+    /// `machine create`). Loading a user-layer machine applies the same gate.
+    pub fn check_overlay(&self, name: &str, dir: &Path) -> Res<()> {
+        let meta_path = dir.join("meta.toml");
+        let text = std::fs::read_to_string(&meta_path)
+            .with_context(|| format!("Failed to read {}", meta_path.display()))?;
+        check_overlay_generation(name, &meta_path, &text, &self.generations_guide())?;
+        Ok(())
     }
 
     /// Every machine that claims `hostname`, sorted by name (§4.3).
@@ -243,6 +276,152 @@ impl Mdb {
     }
 }
 
+/// Parse the contents of an MDB `GENERATION` file: one positive integer.
+pub fn parse_generation(text: &str) -> Option<u32> {
+    text.trim().parse().ok().filter(|&n| n >= 1)
+}
+
+/// The generation recorded in `<root>/GENERATION`, or `None` when the file
+/// does not exist. A file that exists but does not hold a generation is an
+/// error.
+pub fn read_generation(root: &Path) -> Res<Option<u32>> {
+    let path = root.join("GENERATION");
+    let text = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        other => other.with_context(|| format!("Failed to read {}", path.display()))?,
+    };
+    match parse_generation(&text) {
+        Some(generation) => Ok(Some(generation)),
+        None => {
+            bail!("{} does not hold an MDB generation (one positive integer): {text:?}", path.display())
+        }
+    }
+}
+
+/// `--mdb-path` points at a system MDB: when it says which generation it is,
+/// that must be this binary's. A tree without `GENERATION` (a test fixture)
+/// is accepted silently.
+fn check_root_generation(root: &Path) -> Res<()> {
+    let want = crate::build_info::MDB_GENERATION;
+    match read_generation(root)? {
+        Some(found) if found != want => bail!(
+            "the MDB at {} is generation {found}, but this cactup reads generation {want}; \
+             point --mdb-path at a generation-{want} MDB{}",
+            root.display(),
+            if found > want { " or run `cactup update`" } else { "" }
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// A user-MDB overlay written for a different MDB generation than this
+/// cactup reads (its `[cactup] mdb-generation`). An older overlay needs the
+/// changes `GENERATIONS.md` lists for each newer generation; a newer one
+/// needs a newer cactup.
+#[derive(Debug)]
+pub struct OverlayGenerationError {
+    /// The machine name.
+    pub name: String,
+    /// The overlay's `meta.toml`.
+    pub path: PathBuf,
+    /// The generation the overlay records.
+    pub found: u32,
+    /// This binary's generation.
+    pub want: u32,
+    /// Where the generation changes are described: a local `GENERATIONS.md`
+    /// or the documentation page.
+    pub guide: String,
+}
+
+impl OverlayGenerationError {
+    /// The short form for a one-line listing (`machine list`).
+    pub fn brief(&self) -> String {
+        if self.found < self.want {
+            format!(
+                "written for MDB generation {}, this cactup reads {}; `cactup machine show {}` explains",
+                self.found, self.want, self.name
+            )
+        } else {
+            format!("needs MDB generation {}; run `cactup update`", self.found)
+        }
+    }
+}
+
+impl std::fmt::Display for OverlayGenerationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { name, path, found, want, guide } = self;
+        if found < want {
+            write!(
+                f,
+                "user-MDB machine \"{name}\" ({}) was written for MDB generation {found}, but this cactup \
+                 reads generation {want}. Bring it forward as described in {guide} and then set \
+                 `mdb-generation = {want}` under [cactup], or re-create it with `cactup machine delete {name}` \
+                 followed by `cactup machine create {name}`.",
+                path.display()
+            )
+        } else {
+            write!(
+                f,
+                "user-MDB machine \"{name}\" ({}) was written for MDB generation {found}, which requires a \
+                 newer cactup than this one (generation {want}); run `cactup update`.",
+                path.display()
+            )
+        }
+    }
+}
+
+impl std::error::Error for OverlayGenerationError {}
+
+/// Gate a user-MDB overlay on the generation its raw `meta.toml` records.
+/// A missing `[cactup] mdb-generation` is assumed to be this binary's, with
+/// a warning printed once per machine per process. Text that does not parse,
+/// or a value that is not a generation, passes: the typed parse that follows
+/// reports it properly.
+fn check_overlay_generation(
+    name: &str,
+    meta_path: &Path,
+    text: &str,
+    guide: &str,
+) -> Result<(), OverlayGenerationError> {
+    let want = crate::build_info::MDB_GENERATION;
+    let Ok(table) = text.parse::<toml::Table>() else { return Ok(()) };
+    let recorded = table.get("cactup").and_then(|c| c.get("mdb-generation"));
+    let found = match recorded {
+        Some(toml::Value::Integer(n)) => match u32::try_from(*n) {
+            Ok(n) => n,
+            Err(_) => return Ok(()),
+        },
+        Some(_) => return Ok(()),
+        None => {
+            static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+                std::sync::Mutex::new(std::collections::BTreeSet::new());
+            let first = WARNED.lock().map(|mut warned| warned.insert(name.to_owned())).unwrap_or(false);
+            if first {
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Warning: user-MDB machine \"{name}\" ({}) records no MDB generation; assuming \
+                         generation {want}. Add `mdb-generation = {want}` under [cactup] to silence this.",
+                        meta_path.display()
+                    )
+                    .yellow()
+                );
+            }
+            return Ok(());
+        }
+    };
+    if found == want {
+        return Ok(());
+    }
+    Err(OverlayGenerationError {
+        name: name.to_owned(),
+        path: meta_path.to_owned(),
+        found,
+        want,
+        guide: guide.to_owned(),
+    })
+}
+
 /// A loaded, validated machine.
 #[derive(Debug)]
 pub struct Machine {
@@ -253,10 +432,16 @@ pub struct Machine {
 }
 
 impl Machine {
-    fn load(name: &str, dir: PathBuf, layer: Layer) -> Res<Machine> {
+    fn load(name: &str, dir: PathBuf, layer: Layer, generations_guide: &str) -> Res<Machine> {
         let meta_path = dir.join("meta.toml");
         let text = std::fs::read_to_string(&meta_path)
             .with_context(|| format!("Failed to read {}", meta_path.display()))?;
+        // An overlay of another generation may not even parse under this
+        // binary's closed schema, so its generation is checked first, on the
+        // raw table, to report the real problem.
+        if layer == Layer::User {
+            check_overlay_generation(name, &meta_path, &text, generations_guide)?;
+        }
         let mut meta: Meta = toml::from_str(&text)
             .with_context(|| format!("Failed to parse {}", meta_path.display()))?;
         meta.validate(name)?;
@@ -718,5 +903,105 @@ mod tests {
         assert_eq!(mdb.discover("slow.example", false).unwrap(), ["box"]);
         assert!(sentinel.exists(), "regexp missed, discover.py decides");
         assert!(mdb.discover("neither.example", false).unwrap().is_empty());
+    }
+
+    /// A loadable machine `name` under `root` whose meta.toml ends with `extra`.
+    fn write_minimal_machine(root: &Path, name: &str, extra: &str) {
+        let dir = root.join(name);
+        for sub in ["optionlists", "runscripts", "submitscripts"] {
+            fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let meta = format!(
+            "[machine]\nnickname = \"{name}\"\n[queues.local]\ndefault = true\n\
+             [variants.submitscript]\n\"default\" = [\"local\"]\n\
+             [variants.runscript]\n\"default\" = [\"local\"]\n\
+             [variants.optionlist]\nvariants = [\"default\"]\n{extra}"
+        );
+        fs::write(dir.join("meta.toml"), meta).unwrap();
+        fs::write(dir.join("optionlists/default.toml"), "[options]\nVERSION = \"1\"\n").unwrap();
+        fs::write(dir.join("runscripts/default.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(dir.join("submitscripts/default.sh"), "#!/bin/sh\n").unwrap();
+    }
+
+    fn overlay_error(e: &anyhow::Error) -> &OverlayGenerationError {
+        e.downcast_ref::<OverlayGenerationError>()
+            .unwrap_or_else(|| panic!("not a generation error: {e:#}"))
+    }
+
+    #[test]
+    fn user_overlays_are_gated_on_their_generation() {
+        let want = crate::build_info::MDB_GENERATION;
+        let system = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let generation = |n: u32| format!("[cactup]\nmdb-generation = {n}\n");
+        write_minimal_machine(user.path(), "current", &generation(want));
+        write_minimal_machine(user.path(), "unmarked", "");
+        // Older, and with a key this generation's closed schema rejects: the
+        // generation is what gets reported, not the parse error.
+        write_minimal_machine(user.path(), "older", "[cactup]\nmdb-generation = 0\nretired-key = 1\n");
+        write_minimal_machine(user.path(), "newer", &generation(want + 1));
+        // The system layer carries no per-machine generation and is not gated.
+        write_minimal_machine(system.path(), "sys", &generation(0));
+        let mdb = Mdb::with_roots(system.path().to_owned(), user.path().to_owned());
+
+        assert_eq!(mdb.load("current").unwrap().meta.cactup.mdb_generation, Some(want));
+        assert_eq!(mdb.load("unmarked").unwrap().meta.cactup.mdb_generation, None);
+        mdb.load("sys").unwrap();
+
+        let e = mdb.load("older").unwrap_err();
+        let stale = overlay_error(&e);
+        assert_eq!((stale.found, stale.want), (0, want));
+        assert_eq!(stale.path, user.path().join("older/meta.toml"));
+        // No GENERATIONS.md in this system root: the docs page is named.
+        let text = e.to_string();
+        assert!(text.contains("authors/mdb-generations.html"), "{text}");
+        assert!(text.contains(&format!("mdb-generation = {want}")), "{text}");
+
+        let e = mdb.load("newer").unwrap_err();
+        assert_eq!(overlay_error(&e).found, want + 1);
+        assert!(e.to_string().contains("cactup update"), "{e}");
+
+        // A system MDB that ships GENERATIONS.md is pointed at locally, and
+        // the machine-create base check applies the same gate.
+        let dev = Mdb::with_roots(dev_mdb().system_root, user.path().to_owned());
+        let e = dev.check_overlay("older", &user.path().join("older")).unwrap_err();
+        assert_eq!(
+            overlay_error(&e).guide,
+            dev.system_root.join("GENERATIONS.md").display().to_string()
+        );
+        dev.check_overlay("unmarked", &user.path().join("unmarked")).unwrap();
+    }
+
+    #[test]
+    fn a_generation_file_is_one_positive_integer() {
+        assert_eq!(parse_generation("1\n"), Some(1));
+        assert_eq!(parse_generation(" 12 "), Some(12));
+        for bad in ["", "0", "-1", "one", "1 2"] {
+            assert_eq!(parse_generation(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            read_generation(&dev_mdb().system_root).unwrap(),
+            Some(crate::build_info::MDB_GENERATION)
+        );
+    }
+
+    #[test]
+    fn an_mdb_path_override_must_match_the_generation() {
+        let want = crate::build_info::MDB_GENERATION;
+        let root = tempfile::tempdir().unwrap();
+        // No GENERATION file (a fixture): accepted silently.
+        assert_eq!(Mdb::open(Some(root.path())).unwrap().system_root, root.path());
+        fs::write(root.path().join("GENERATION"), format!("{want}\n")).unwrap();
+        Mdb::open(Some(root.path())).unwrap();
+        // Generation 0 is not a generation, so "older" exists only past 1.
+        let others = [Some((want + 1, true)), (want > 1).then(|| (want - 1, false))];
+        for (other, hint) in others.into_iter().flatten() {
+            fs::write(root.path().join("GENERATION"), format!("{other}\n")).unwrap();
+            let err = Mdb::open(Some(root.path())).err().unwrap().to_string();
+            assert!(err.contains(&format!("generation {other}")), "{err}");
+            assert_eq!(err.contains("cactup update"), hint, "{err}");
+        }
+        fs::write(root.path().join("GENERATION"), "garbage").unwrap();
+        assert!(Mdb::open(Some(root.path())).is_err());
     }
 }

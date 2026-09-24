@@ -44,11 +44,21 @@ pub struct KnobSpec {
     pub validate: fn(&str) -> Res<String>,
     /// Render the stored form for display.
     pub render: fn(&str) -> String,
+    /// Part of [`Database::knob_snapshot`], i.e. visible to `@KNOB(name)@`
+    /// and frozen into restart/build/test metadata. False only for the
+    /// maintenance knobs ([`KnobSpec::maintenance`]).
+    pub snapshot: bool,
 }
 
 impl KnobSpec {
     const fn free_form(name: &'static str) -> Self {
-        Self { name, validate: |v| Ok(v.to_owned()), render: str::to_owned }
+        Self { name, validate: |v| Ok(v.to_owned()), render: str::to_owned, snapshot: true }
+    }
+
+    /// A knob that configures cactup itself (self-update, MDB sync) rather
+    /// than anything a job sees, so it never enters the knob snapshot.
+    const fn maintenance(name: &'static str, validate: fn(&str) -> Res<String>) -> Self {
+        Self { name, validate, render: str::to_owned, snapshot: false }
     }
 }
 
@@ -65,12 +75,17 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
         name: "wisdom-frequency",
         validate: crate::commands::wisdom::validate_frequency,
         render: crate::commands::wisdom::render_frequency,
+        snapshot: true,
     },
     KnobSpec {
         name: "wisdom-kind",
         validate: crate::commands::wisdom::validate_kind,
         render: str::to_owned,
+        snapshot: true,
     },
+    KnobSpec::maintenance("autoupdate", crate::update::validate_autoupdate),
+    KnobSpec::maintenance("update-url", crate::update::validate_update_url),
+    KnobSpec::maintenance("mdb-url", crate::update::validate_mdb_url),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
@@ -306,6 +321,9 @@ impl Database {
             // Stored form (§5): frequency is an ordinal, 2 = "normal".
             "wisdom-frequency" => Some("2".to_owned()),
             "wisdom-kind" => Some("all".to_owned()),
+            "autoupdate" => Some(crate::update::AutoUpdate::Auto.name().to_owned()),
+            "update-url" => Some(crate::update::DEFAULT_UPDATE_URL.to_owned()),
+            "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
             _ => None,
         }
     }
@@ -335,10 +353,11 @@ impl Database {
     /// The effective knob values as `@KNOB(name)@` sees them (§6.1): every
     /// standard knob that has a stored or derived value, in display form,
     /// plus every custom knob. Frozen into restart/build/test metadata at
-    /// submit time so the compute node never reads the DB (D11).
+    /// submit time so the compute node never reads the DB (D11). The
+    /// maintenance knobs (self-update, MDB sync) are left out.
     pub fn knob_snapshot(&self) -> IndexMap<String, String> {
         let mut out = IndexMap::new();
-        for spec in KNOWN_KNOBS {
+        for spec in KNOWN_KNOBS.iter().filter(|spec| spec.snapshot) {
             if let Some(stored) = self.knob_or_default(spec.name) {
                 out.insert(spec.name.to_owned(), (spec.render)(&stored));
             }

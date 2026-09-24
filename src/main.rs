@@ -1,8 +1,10 @@
 mod args;
 mod build;
+mod build_info;
 mod commands;
 mod database;
 mod fetch;
+mod freeze;
 mod installation;
 mod lock;
 mod manifest;
@@ -16,6 +18,7 @@ mod tail;
 mod template;
 mod testsuite;
 mod thornlist;
+mod update;
 mod walltime;
 // The corpus parser: used by build.rs (via include!) at build time, and by
 // the crate only in tests — hence cfg(test).
@@ -32,7 +35,21 @@ use std::sync::LazyLock;
 type Res<T> = anyhow::Result<T>;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// cactup's home: `$CACTUP_HOME` when it is set to an absolute path (the
+/// installer honors the same variable), else `~/.cactup`.
 pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+    match std::env::var_os("CACTUP_HOME").filter(|v| !v.is_empty()).map(PathBuf::from) {
+        Some(home) if home.is_absolute() => return home,
+        Some(home) => {
+            use colored::Colorize;
+            eprintln!(
+                "{}",
+                format!("Warning: ignoring CACTUP_HOME={} (not an absolute path)", home.display())
+                    .yellow()
+            );
+        }
+        None => {}
+    }
     let home_dir = std::env::home_dir().expect("Failed to get home directory");
     home_dir.join(".cactup")
 });

@@ -671,6 +671,13 @@ impl Universe {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CactupMeta {
     pub origin: Option<Origin>,
+    /// The MDB generation a user-MDB machine was written for. `cactup machine
+    /// create` records it; a user machine from an older generation is refused
+    /// at load, with a pointer to what changed since. Absent means "this
+    /// cactup's generation", with a warning. System-MDB machines do not carry
+    /// it: their generation is the MDB's own.
+    #[serde(default)]
+    pub mdb_generation: Option<u32>,
 }
 
 /// `--from-existing` provenance (§4.7).

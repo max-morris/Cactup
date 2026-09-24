@@ -5,7 +5,7 @@
 use super::{prompt_with_default, Ctx};
 use crate::args::MachineCommand;
 use crate::database::{Db, DetectedMachine};
-use crate::mdb::{discover, meta::ScriptKind, optionlist, Layer, Machine, Mdb};
+use crate::mdb::{discover, meta::ScriptKind, optionlist, Layer, Machine, Mdb, OverlayGenerationError};
 use crate::Res;
 use anyhow::{bail, Context};
 use colored::Colorize;
@@ -14,7 +14,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
     match cmd {
         MachineCommand::List => list(ctx, &mdb),
         MachineCommand::Show { name, variants } => show(ctx, &mdb, name, variants),
@@ -47,7 +47,7 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
 /// matches are cached; the zero-match fallback is not, so a later `machine
 /// create` is picked up.
 pub fn resolve(ctx: &Ctx) -> Res<Machine> {
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
     resolve_with(
         &ctx.db,
         &mdb,
@@ -83,7 +83,7 @@ pub fn resolve_with(
 /// machine created silently (and cached) instead of the in-place `generic`
 /// fallback.
 pub fn ensure_local_machine(ctx: &Ctx) -> Res<Machine> {
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
     ensure_local_machine_with(
         &ctx.db,
         &mdb,
@@ -283,7 +283,23 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
     }
     let detected = ctx.db.read()?.detected.map(|d| d.name);
     for (name, layer) in machines {
-        let machine = mdb.load(&name)?;
+        // One overlay of another MDB generation must not hide the rest of
+        // the list: it is shown, annotated, instead of failing the command.
+        let machine = match mdb.load(&name) {
+            Ok(machine) => machine,
+            Err(e) => match e.downcast_ref::<OverlayGenerationError>() {
+                Some(stale) => {
+                    println!(
+                        "- {}{} {}",
+                        name.bold(),
+                        " (user MDB)".cyan(),
+                        format!("[unusable: {}]", stale.brief()).yellow()
+                    );
+                    continue;
+                }
+                None => return Err(e),
+            },
+        };
         print!("- {}", name.bold());
         if let Some(nickname) = &machine.meta.machine.name {
             print!(" ({nickname})");
@@ -330,7 +346,7 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
         println!("{}", "(machine not yet detected — run `cactup machine show`)".yellow());
         return Ok(());
     };
-    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref());
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref())?;
     let machine = load_checked(&mdb, &name)?;
     print_summary(&machine)?;
     if let Some(hostname) = verified_for {
@@ -358,6 +374,9 @@ fn print_summary(machine: &Machine) -> Res<()> {
     }
     if let Some(origin) = &meta.cactup.origin {
         println!("  created from: {} (hash {})", origin.from, origin.hash);
+    }
+    if let Some(generation) = meta.cactup.mdb_generation {
+        println!("  mdb generation: {generation}");
     }
     println!(
         "  hardware: max-cpus-per-node={} default-cpus-per-task={} max-gpus-per-node={} \
@@ -531,9 +550,14 @@ fn create_machine(
         }
     };
 
-    let (base_dir, _) = mdb
+    let (base_dir, base_layer) = mdb
         .machine_dir(&base)
         .ok_or_else(|| anyhow::anyhow!("base machine \"{base}\" does not exist in the MDB"))?;
+    // A user-MDB base of another generation would be copied forward under a
+    // generation stamp it does not deserve.
+    if base_layer == Layer::User {
+        mdb.check_overlay(&base, &base_dir)?;
+    }
     let target = mdb.user_root.join(&name);
     if target.exists() {
         bail!(
@@ -596,6 +620,10 @@ fn create_machine(
     let paths_tbl = subtable(&mut table, "paths");
     paths_tbl.insert("simulation-home".into(), sim_home.into());
     paths_tbl.insert("install-home".into(), install_home.into());
+
+    // The generation this overlay is written for, checked at every load.
+    subtable(&mut table, "cactup")
+        .insert("mdb-generation".into(), i64::from(crate::build_info::MDB_GENERATION).into());
 
     if from_existing.is_some() {
         let hash = hash_machine_dir(&base_dir)?;
@@ -897,6 +925,8 @@ mod tests {
         assert_eq!(origin.hash, hash_machine_dir(&dev_system_root().join("mel5")).unwrap());
         // Homes written explicitly (silent defaults).
         assert!(machine.meta.paths.simulation_home.as_deref().unwrap().ends_with("simulations"));
+        // Stamped with the MDB generation it was written for.
+        assert_eq!(machine.meta.cactup.mdb_generation, Some(crate::build_info::MDB_GENERATION));
         // The cache now points at the new machine, stamped for its host.
         let stamp = cached(&sb).unwrap();
         assert_eq!((stamp.name.as_str(), stamp.hostname.as_str()), ("mybox", "mybox.example.org"));
@@ -954,6 +984,49 @@ mod tests {
         assert!(!machine.dir.join("discover.py").exists());
         assert!(!sb.mdb.verify("ghost", "ghost.example", false).unwrap());
         assert!(sb.mdb.discover("ghost.example", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn overlays_of_another_generation_are_refused_as_bases_and_annotated_in_lists() {
+        let sb = sandbox();
+        create_machine(&sb.db, &sb.mdb, Some("old".into()), None, true, true, Some("old.example"))
+            .unwrap();
+        let meta_path = sb.mdb.user_root.join("old/meta.toml");
+        let text = fs::read_to_string(&meta_path).unwrap();
+        let stamp = format!("mdb-generation = {}", crate::build_info::MDB_GENERATION);
+        assert!(text.contains(&stamp), "create writes the generation:\n{text}");
+        fs::write(&meta_path, text.replace(&stamp, "mdb-generation = 0")).unwrap();
+
+        // A user-MDB base of an older generation cannot be cloned forward.
+        let e = create_machine(
+            &sb.db,
+            &sb.mdb,
+            Some("copy".into()),
+            Some(Some("old".into())),
+            true,
+            true,
+            Some("copy.example"),
+        )
+        .unwrap_err();
+        assert!(e.downcast_ref::<OverlayGenerationError>().is_some(), "{e:#}");
+        assert!(sb.mdb.machine_dir("copy").is_none());
+
+        // The list shows it, annotated, rather than failing as a whole.
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: None,
+                hostname: None,
+                knob: Vec::new(),
+            },
+            db: Db::in_dir(sb._dbdir.path()),
+        };
+        list(&ctx, &sb.mdb).unwrap();
+        assert!(sb.mdb.load("old").is_err());
     }
 
     #[test]

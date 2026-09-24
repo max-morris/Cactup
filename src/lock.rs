@@ -42,6 +42,52 @@ pub const HANDOFF_WAIT_SECS: u64 = 300;
 /// before giving up. Each retry re-runs the full link() protocol.
 const ACQUIRE_ATTEMPTS: u32 = 8;
 
+/// The fileserver's "now" for `dir`: the mtime of a file freshly created in
+/// it. Every age cactup compares against an on-disk mtime (lock staleness,
+/// throttle stamps) must be measured from this, never from the local clock,
+/// which may be skewed from the clock that stamped the mtime (§2.3).
+pub fn fileserver_now(dir: &Path) -> Res<SystemTime> {
+    let probe = tempfile::Builder::new()
+        .prefix(".cactup-clock.")
+        .tempfile_in(dir)
+        .with_context(|| format!("Failed to create clock probe file in {}", dir.display()))?;
+    file_mtime(probe.as_file())
+        .with_context(|| format!("Failed to read the mtime of {}", probe.path().display()))
+}
+
+/// How long ago `path` was last modified, in the fileserver's clock domain
+/// ([`fileserver_now`] in its directory). `None` when it does not exist or
+/// either time cannot be read — callers treat that as "never stamped". A
+/// file from the future reads as age zero.
+#[cfg_attr(not(test), allow(dead_code))] // the MDB sync and update throttles
+pub fn mtime_age(path: &Path) -> Option<Duration> {
+    let mtime = fs::symlink_metadata(path).and_then(|m| m.modified()).ok()?;
+    let now = fileserver_now(lock_dir(path).ok()?).ok()?;
+    Some(now.duration_since(mtime).unwrap_or(Duration::ZERO))
+}
+
+/// Write `bytes` to `path` atomically (a sibling temp file renamed over it),
+/// which also stamps its mtime with the fileserver's clock. Never
+/// `set_modified(now)`: that is the local clock (§2.3).
+#[cfg_attr(not(test), allow(dead_code))] // the MDB sync and update throttles
+pub fn write_stamp(path: &Path, bytes: &[u8]) -> Res<()> {
+    let dir = lock_dir(path)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".cactup-stamp.")
+        .tempfile_in(dir)
+        .with_context(|| format!("Failed to create a temp file in {}", dir.display()))?;
+    temp.write_all(bytes)
+        .with_context(|| format!("Failed to write {}", temp.path().display()))?;
+    temp.persist(path)
+        .with_context(|| format!("Failed to move a stamp into place at {}", path.display()))?;
+    Ok(())
+}
+
+/// An open file's mtime.
+fn file_mtime(file: &fs::File) -> std::io::Result<SystemTime> {
+    file.metadata().and_then(|m| m.modified())
+}
+
 fn our_hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
@@ -201,10 +247,7 @@ impl LinkLock {
                     // The temp file was just written, so its mtime is the
                     // fileserver's "now" — the same clock that stamped the
                     // existing lock's mtime.
-                    let fs_now = temp
-                        .as_file()
-                        .metadata()
-                        .and_then(|m| m.modified())
+                    let fs_now = file_mtime(temp.as_file())
                         .with_context(|| "Failed to read lock temp file mtime")?;
                     match assess_holder(path, fs_now)? {
                         Holder::Vanished => continue, // released under us; retry
@@ -246,16 +289,7 @@ impl LinkLock {
         if !path.exists() {
             return Ok(false);
         }
-        let dir = lock_dir(path)?;
-        let temp = tempfile::Builder::new()
-            .prefix(".cactup-lock.")
-            .tempfile_in(dir)
-            .with_context(|| format!("Failed to create probe temp file in {}", dir.display()))?;
-        let fs_now = temp
-            .as_file()
-            .metadata()
-            .and_then(|m| m.modified())
-            .with_context(|| "Failed to read probe temp file mtime")?;
+        let fs_now = fileserver_now(lock_dir(path)?)?;
         Ok(matches!(assess_holder(path, fs_now)?, Holder::Live(_)))
     }
 }
@@ -684,6 +718,45 @@ mod tests {
         fs::write(&path, stamp_for("thief-host", 42)).unwrap();
         drop(lock);
         assert!(path.exists(), "drop must not unlink a lock that is no longer ours");
+    }
+
+    /// Backdate (or postdate) a file's mtime, as a test fixture only.
+    fn set_mtime(path: &Path, when: SystemTime) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn stamps_are_aged_in_the_fileserver_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamp = dir.path().join("stamp");
+        assert_eq!(mtime_age(&stamp), None, "a missing stamp has no age");
+
+        write_stamp(&stamp, b"first").unwrap();
+        assert_eq!(fs::read(&stamp).unwrap(), b"first");
+        assert!(mtime_age(&stamp).unwrap() < Duration::from_secs(60));
+
+        // Aged by an hour, then re-stamped: the rewrite moves the mtime back
+        // to "now" and replaces the contents.
+        set_mtime(&stamp, SystemTime::now() - Duration::from_secs(3600));
+        assert!(mtime_age(&stamp).unwrap() >= Duration::from_secs(3500));
+        write_stamp(&stamp, b"second").unwrap();
+        assert_eq!(fs::read(&stamp).unwrap(), b"second");
+        assert!(mtime_age(&stamp).unwrap() < Duration::from_secs(60));
+
+        // A stamp from the future is simply fresh.
+        set_mtime(&stamp, SystemTime::now() + Duration::from_secs(3600));
+        assert_eq!(mtime_age(&stamp), Some(Duration::ZERO));
+
+        // No probe or temp files are left behind.
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["stamp"]);
+        let now = fileserver_now(dir.path()).unwrap();
+        assert!(now.duration_since(SystemTime::now() - Duration::from_secs(60)).is_ok());
     }
 
     #[test]

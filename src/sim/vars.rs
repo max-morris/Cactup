@@ -468,10 +468,9 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
         machine.meta.resolved_paths()?.scratch_home.unwrap_or_default(),
     );
     v.set("ALIAS", sim.meta.alias.as_str());
-    let cactup = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "cactup".to_owned());
-    v.set("CACTUP", cactup);
+    // A distribution build names its versioned binary, so the job keeps the
+    // exact build it was submitted with across a self-update.
+    v.set("CACTUP", crate::freeze::frozen_cactup());
 
     // Identity / machine.
     v.set("MACHINE", machine.name.as_str());

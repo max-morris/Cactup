@@ -124,7 +124,7 @@ fn parse_make_jobs(s: &str) -> Result<MakeJobs, String> {
 
 #[derive(Parser, Debug)]
 #[command(name = "cactup")]
-#[command(version)]
+#[command(version = crate::build_info::LONG_VERSION)]
 #[command(about = "The best way to install Cactus", long_about = None)]
 pub(crate) struct Args {
     #[clap(flatten)]

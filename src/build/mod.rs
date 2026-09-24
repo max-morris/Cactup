@@ -1772,10 +1772,7 @@ pub fn prepare(
     // A future submit-script's `@CACTUP@` (mirrors the sim/testsuite paths).
     // Not read by anything in this chunk, but login-node-only, so it must be
     // frozen now — `execute` could never recover it otherwise (D11).
-    let cactup = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "cactup".to_owned());
-    vars.set("CACTUP", cactup);
+    vars.set("CACTUP", crate::freeze::frozen_cactup());
 
     // Rendered native optionlist: render → inject flags → substitute (§7.8).
     let rendered = vars
