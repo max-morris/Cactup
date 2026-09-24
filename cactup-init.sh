@@ -47,7 +47,7 @@ set -u
 # stable <target>/cactup alias can serve the previous release for minutes
 # after the checksum file has moved on. Override with the CACTUP_UPDATE_ROOT
 # environment variable (a mirror, or a local test server: plain http is
-# accepted for 127.0.0.1 and localhost only).
+# accepted for 127.0.0.1, localhost and [::1] only).
 CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT:-https://max-morris.github.io/Cactup}"
 CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT%/}"
 
@@ -578,8 +578,8 @@ ignore() {
 }
 
 # Wraps curl or wget, preferring curl. Enforces HTTPS and TLS 1.2 where the
-# tool supports it, except for a local test server (plain http to 127.0.0.1 or
-# localhost). Usage:
+# tool supports it, except for a local test server (plain http to 127.0.0.1,
+# localhost or [::1]). Usage:
 #   downloader --check               # verify a downloader exists
 #   downloader URL OUTFILE MISSING   # download URL to OUTFILE; on a 404,
 #                                    # print MISSING as the error and exit
@@ -592,7 +592,7 @@ downloader() {
     local _status
     local _secure=yes
     case "$1" in
-        http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]*)
+        http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]* | 'http://[::1]' | 'http://[::1]'[:/]*)
             _secure=no
             ;;
     esac
