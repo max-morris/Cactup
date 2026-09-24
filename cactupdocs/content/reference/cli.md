@@ -22,6 +22,7 @@ Global options (available on every subcommand) are listed first, followed by eve
 ## Environment variables
 
 - `HOME` — Locates cactup's root directory (`~/.cactup`).
+- `CACTUP_HOME` — An absolute path that replaces `~/.cactup` as cactup's root directory (the installer honors it too). Every `~/.cactup` below means this directory when it is set. See [Updating cactup](../users/updating.html#moving-cactups-home-cactup_home).
 - Scheduler variables (e.g. `SLURM_JOB_ID`, `PBS_JOBID`) — how cactup detects whether it is running inside a job allocation. Which variables matter is declared per machine via `[scheduler].allocation-env`.
 - `@ENV(NAME)@` tokens in MDB templates, parfiles and paths read arbitrary environment variables at use time; `@ENV-OPTIONAL(NAME)@` and `@ENV-OPTIONAL(NAME, default)@` tolerate an unset one — see [Scripts & Variables](../authors/scripts-and-variables.html#substitution-rules).
 
@@ -37,7 +38,21 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
 ## Directory layout
 
 - `~/.cactup/` — cactup's root: metadata, database, and caches.
-- `~/.cactup/mdb/` — the system machine database (git-managed by cactup).
+- `~/.cactup/bin/cactup` — a symbolic link to the current build,
+  `~/.cactup/bin/cactup-<build>`. Every build keeps its own file so that jobs
+  run the build they were submitted with; a build replaced by an update is
+  marked by `cactup-<build>.retired` and deleted 30 days later. See
+  [Updating cactup](../users/updating.html).
+- `~/.cactup/update-check` — when cactup last checked for a new build (at most
+  once every 24 hours).
+- `~/.cactup/mdb/` — the system machine database, managed by cactup; never
+  edit it:
+  - `repo/` — a git repository holding the published `mdb` branch;
+  - `<commit>/` — one exported revision per commit in use;
+  - `gen-<N>` — a symbolic link to the revision that cactup builds of
+    generation `N` use, refreshed at most every 6 hours.
+- `~/.cactup/mdb-builtin/` — the built-in `generic` machine, unpacked from
+  the binary when no system machine database provides one.
 - `~/.cactup/machines/` — your own machine definitions (the user overlay).
 - `~/.cactup/refetch-backups/<alias>/<timestamp>/` — files backed up before
   `cactup installation refetch --overwrite-modified` (or `-f`, or a targeted

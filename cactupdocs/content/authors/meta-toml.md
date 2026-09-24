@@ -62,7 +62,15 @@ variants = ["default", "cuda"]
 # Optional — only if your cluster forbids compiling on the login node:
 # [variants.buildsubmitscript]
 # "default" = { queues = ["default"], default = true }
+
+# Overlay machines only (~/.cactup/machines/<name>/): the MDB generation
+# this file was written for. `cactup machine create` fills it in.
+[cactup]
+mdb-generation = 1
 ```
+
+See [MDB Generations](mdb-generations.html) for what `mdb-generation` means
+and how to update a machine written for an older generation.
 
 ## Detailed field reference
 
@@ -360,7 +368,10 @@ cactup knob queue default
 
 The standard knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, `email`,
 `wisdom-frequency` and `wisdom-kind` (`mail-type`, `user`, and `email` fall back to
-derived defaults when unset). Users can also create **custom knobs**
+derived defaults when unset), plus three that configure cactup itself rather
+than a job — `autoupdate`, `update-url` and `mdb-url` (see
+[Updating cactup](../users/updating.html)); those three are never recorded with
+a simulation. Users can also create **custom knobs**
 (`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and
 override any knob for one command with `-K name=value`.
 

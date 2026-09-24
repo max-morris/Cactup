@@ -26,13 +26,29 @@ cactup handles:
 
 ## Quick start
 
-Install cactup:
+<div class="install-box">
+
+To install cactup, run this in your terminal:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://cct.lsu.edu/~mmorris/cactup/cactup-init.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://max-morris.github.io/Cactup/cactup-init.sh | sh
 ```
 
-Then:
+<details>
+<summary>No <code>curl</code>? Use <code>wget</code> instead</summary>
+
+```sh
+wget -qO- https://max-morris.github.io/Cactup/cactup-init.sh | sh
+```
+
+</details>
+
+<p class="install-note">Linux x86_64 or aarch64, any distribution; installs to <code>~/.cactup/bin</code>.</p>
+
+</div>
+
+cactup keeps itself and its machine database up to date; see
+[Updating cactup](users/updating.html). Then:
 
 ```sh
 cactup releases      # See available Einstein Toolkit releases

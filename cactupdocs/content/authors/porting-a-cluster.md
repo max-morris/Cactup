@@ -410,7 +410,7 @@ exec @CACTUP@ build run @CONFIGURATION@ \
     --attempt-id=@ATTEMPT_ID@
 ```
 
-`@CONFIG_DIR@` and `@ATTEMPT_ID@` are the build analogues of the run
+`@CONFIG_DIR@` and `@ATTEMPT_ID@` are the build analogs of the run
 submitscript's `@SIMULATION_DIR@`/`@RESTART_ID@` (see
 [Scripts & Variables](scripts-and-variables.html)): they let the compute node
 locate exactly which build attempt to run without touching cactup's global
@@ -648,8 +648,15 @@ This shows the full script before submission. Run it manually to debug.
 Once your machine is working:
 
 1. **Share with your team**: Copy `~/.cactup/machines/myclu/` to colleagues
-2. **Merge to system MDB**: Submit your machine definition to the cactup project (GitHub)
+2. **Merge to system MDB**: Submit your machine definition to the cactup project (GitHub), as a directory under `mdb/`. The `mdb-generation` key under `[cactup]` in its `meta.toml` only matters in your overlay (the system MDB's generation is `mdb/GENERATION`), so you can remove it from the copy you submit
 3. **Document**: Add a README or notes about your cluster setup
+
+A new machine that uses only what existing machines already use merges as it
+is. If it needs something new from cactup — a `meta.toml` key, a template
+variable, a changed default — the published MDB would stop loading in cactup
+builds users already have, and the change must come with a **generation
+bump**. See [MDB Generations](mdb-generations.html) for the rule and the
+procedure.
 
 ## Next steps
 

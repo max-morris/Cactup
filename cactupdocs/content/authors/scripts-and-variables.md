@@ -12,7 +12,7 @@ description = "Write submit and run scripts with template variables"
 Scripts are stored alongside meta.toml:
 
 ```
-<mdb>/machines/<machine>/
+<mdb>/<machine>/
   submitscripts/
     default.sh          # Submit variant for queued jobs
     test.sh             # Special variant used by `cactup test submit`
@@ -194,6 +194,14 @@ any knob context exists). See [Running Simulations](../users/running-simulations
 for standard vs. custom knobs and `-K`.
 
 ### Variable reference
+
+`@CACTUP@`, which every re-invocation line above uses, is the absolute path of
+the exact cactup build that rendered the script — the versioned file
+`~/.cactup/bin/cactup-<build>`, not the `~/.cactup/bin/cactup` link on the
+user's `PATH`. A job therefore runs the build it was submitted with, even if
+cactup updates itself while the job is queued (see
+[Updating cactup](../users/updating.html#where-builds-live-and-why-jobs-are-safe)).
+Always call cactup through `@CACTUP@` in scripts, never by a bare `cactup`.
 
 {{cactup:template-vars}}
 

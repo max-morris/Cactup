@@ -240,6 +240,8 @@ a:hover { text-decoration: underline; }
 .content h1 { font-size: 2rem; letter-spacing: -.02em; margin: 0 0 1rem; }
 .content h2 { font-size: 1.4rem; margin: 2.2rem 0 .8rem; padding-bottom: .3rem; border-bottom: 1px solid var(--border); }
 .content h3 { font-size: 1.15rem; margin: 1.6rem 0 .6rem; }
+/* Headings carry anchor ids; keep a linked one clear of the sticky header. */
+.content h2, .content h3, .content h4 { scroll-margin-top: 4.5rem; }
 .content p { margin: .8rem 0; }
 .content ul, .content ol { padding-left: 1.4rem; }
 .content li { margin: .3rem 0; }
@@ -281,6 +283,33 @@ pre code { background: none; border: 0; padding: 0; font-size: .85rem; line-heig
 pre:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { color: var(--accent-strong); border-color: var(--accent); }
 
+/* ---------- Home-page install box ----------
+   Raw HTML in content/index.md wraps the install one-liner. docs.js gives the
+   <pre> its Copy button like any other; here it is always visible and larger. */
+.install-box {
+  margin: 1.4rem 0;
+  padding: 1.1rem 1.2rem .6rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  box-shadow: var(--shadow);
+}
+.install-box > p:first-child { margin-top: 0; font-weight: 600; }
+.install-box pre { margin: .6rem 0; padding: 1.1rem 5.5rem 1.1rem 1.2rem; }
+.install-box pre code { font-size: 1rem; }
+.install-box pre .copy-btn {
+  opacity: 1;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: .85rem;
+  padding: .3rem .8rem;
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+.install-box details { margin: .4rem 0; }
+.install-box summary { cursor: pointer; color: var(--text-muted); font-size: .92rem; }
+.install-box .install-note { color: var(--text-muted); font-size: .9rem; margin: .5rem 0; }
+
 blockquote {
   margin: 1rem 0;
   padding: .1rem 1rem;
@@ -288,9 +317,10 @@ blockquote {
   color: var(--text-muted);
 }
 
-/* ---------- Reference tables ---------- */
+/* ---------- Reference tables ----------
+   Generated .ref-table fragments and plain Markdown pipe tables share one look. */
 .table-scroll, .content table { display: block; overflow-x: auto; }
-.ref-table {
+.ref-table, .content table {
   border-collapse: collapse;
   width: 100%;
   margin: 1rem 0;
@@ -298,21 +328,24 @@ blockquote {
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
-.ref-table th, .ref-table td {
+.ref-table th, .ref-table td,
+.content table th, .content table td {
   text-align: left;
   padding: .55rem .7rem;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
-.ref-table thead th {
+.ref-table thead th, .content table thead th {
   background: var(--bg-elev);
   font-size: .78rem;
   text-transform: uppercase;
   letter-spacing: .04em;
   color: var(--text-muted);
 }
-.ref-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg-elev) 55%, transparent); }
-.ref-table tbody tr:last-child td { border-bottom: 0; }
+.ref-table tbody tr:nth-child(even),
+.content table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg-elev) 55%, transparent); }
+.ref-table tbody tr:last-child td,
+.content table tbody tr:last-child td { border-bottom: 0; }
 .ref-table code { white-space: nowrap; }
 .hint { color: var(--text-muted); font-size: .82em; }
 

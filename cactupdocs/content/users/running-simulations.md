@@ -246,6 +246,11 @@ A **knob** is a value cactup remembers for you on this machine. The
 flags above: `-a` beats the `allocation` knob, which beats the machine's
 default.
 
+Three more standard knobs configure how cactup updates itself —
+`autoupdate` (`auto`, the default, `notify` or `off`), `update-url` and
+`mdb-url`. They are described in [Updating cactup](updating.html) and, unlike
+the others, are not frozen into the simulations you submit.
+
 ```sh
 cactup knob                        # show every knob
 cactup knob allocation             # show one

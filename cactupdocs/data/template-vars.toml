@@ -23,7 +23,7 @@ description = "Reserved: inner command a universe wrapper wraps"
 description = "Cactus configuration name"
 
 [CACTUP]
-description = "Path to the cactup installation"
+description = "Absolute path of the exact cactup build rendering the script (~/.cactup/bin/cactup-<build>), so a job re-invokes the build it was submitted with"
 
 [CPUS_PER_TASK]
 description = "Threads (CPUs) per MPI task"

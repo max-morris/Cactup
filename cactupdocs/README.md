@@ -86,13 +86,12 @@ Additional data (like template variable descriptions) is in `data/`.
 
 ## Deployment via GitHub Pages
 
-The site is automatically built and deployed to GitHub Pages via the `.github/workflows/docs.yml` workflow whenever changes are pushed to `master` affecting the documentation sources or Cactup crate.
+The site is built and deployed by the repository's single CI workflow, `.github/workflows/ci.yml`. Its `docs` job builds this site with `--base-url "/<repo>/"` (derived from the repository name) on every push and pull request; the `site` job adds the release artifacts next to it at the Pages root (the static cactup binaries under `<target>/`, `cactup-init.sh`, and `latest.json`, which installed binaries read to update themselves); on `master` the `deploy` job publishes the result to `https://<owner>.github.io/<repo>/`, after `publish-mdb` has published the machine database branch.
 
-To enable deployment:
+So the docs are the project's home page: `content/index.md` carries the install one-liner, and there is no separate landing page.
 
-1. Go to your GitHub repository settings
-2. Navigate to **Pages**
-3. Set the source to **Deploy from a branch** → **GitHub Actions** (or keep the default if already set to GitHub Actions)
-4. The workflow will automatically deploy to `https://<username>.github.io/<repo>/` (or your custom domain)
+To enable deployment (once per repository): **Settings → Pages → Source: GitHub Actions**. To build exactly what CI builds, locally:
 
-The workflow automatically detects the site's base URL path and configures the generator accordingly.
+```bash
+cargo run -p CactupDocs --release -- build --out _site --base-url /Cactup/
+```
