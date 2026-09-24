@@ -1,0 +1,273 @@
+# CI and release: test, build static musl binaries, build the docs, assemble
+# the site, and on master publish the MDB branch and deploy GitHub Pages.
+#
+# Release order on master: publish-mdb runs before deploy, so the MDB commit
+# of a new generation exists before any binary that expects it goes live.
+#
+# Binary reuse: the build id is the last commit that touched a build input.
+# A push that changes only docs or the MDB keeps the id, and the build job
+# republishes the binaries the live site already serves instead of rebuilding.
+
+name: CI
+
+on:
+  push:
+    branches-ignore: ['mdb']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref at a time. Master runs are never canceled, so two pushes
+# deploy in order; any other ref cancels its superseded run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stamp:
+    runs-on: ubuntu-24.04
+    outputs:
+      build_id: ${{ steps.stamp.outputs.build_id }}
+      build_date: ${{ steps.stamp.outputs.build_date }}
+      site_root: ${{ steps.stamp.outputs.site_root }}
+      generation: ${{ steps.stamp.outputs.generation }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute the build stamp
+        id: stamp
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -eu
+          # Keep this path list in sync with ci/mdb-generation-guard.sh.
+          inputs="src build.rs Cargo.toml Cargo.lock resources mdb/GENERATION mdb/generic"
+          # shellcheck disable=SC2086
+          build_id=$(git log -1 --format=%h --abbrev=7 -- $inputs)
+          # shellcheck disable=SC2086
+          build_date=$(git log -1 --format=%cI -- $inputs)
+          generation=$(tr -d ' \t\r\n' < mdb/GENERATION)
+          case $generation in
+            '' | *[!0-9]* | 0?*) echo "::error::mdb/GENERATION is not a plain integer: '$generation'"; exit 1 ;;
+          esac
+          if [ -z "$build_id" ] || [ -z "$build_date" ]; then
+            echo "::error::cannot derive the build id from history"; exit 1
+          fi
+          {
+            echo "build_id=$build_id"
+            echo "build_date=$build_date"
+            echo "site_root=https://$OWNER.github.io/$REPO"
+            echo "generation=$generation"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: shellcheck
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          command -v shellcheck > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
+          shellcheck --version
+          shellcheck cactup-init.sh ci/*.sh
+
+  mdb-compat:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: MDB generation guard
+        run: ci/mdb-generation-guard.sh
+
+  build:
+    needs: stamp
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      BUILD_ID: ${{ needs.stamp.outputs.build_id }}
+      BUILD_DATE: ${{ needs.stamp.outputs.build_date }}
+      SITE_ROOT: ${{ needs.stamp.outputs.site_root }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reuse the live binary
+        id: reuse
+        run: |
+          if ci/fetch-live-binary.sh "$SITE_ROOT" "$TARGET" "$BUILD_ID" dist/cactup; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the musl toolchain
+        if: steps.reuse.outputs.hit != 'true'
+        # aws-lc-sys and ring compile C. On the arm64 runner musl-tools
+        # provides the native aarch64 musl-gcc, so both targets build natively.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools cmake
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.reuse.outputs.hit != 'true'
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        if: steps.reuse.outputs.hit != 'true'
+        with:
+          key: ${{ matrix.target }}
+      - name: cargo build (dist)
+        if: steps.reuse.outputs.hit != 'true'
+        # The stamp makes this a dist build; it is set for this step only so
+        # no other step (tests, docs) ever produces a dist binary.
+        env:
+          CACTUP_DIST: '1'
+          CACTUP_BUILD_ID: ${{ needs.stamp.outputs.build_id }}
+          CACTUP_BUILD_DATE: ${{ needs.stamp.outputs.build_date }}
+        run: |
+          set -eu
+          # cc-rs would look for <triple>-gcc; musl-gcc is the native musl
+          # wrapper on both runners.
+          export "CC_$(printf '%s' "$TARGET" | tr - _)=musl-gcc"
+          cargo build --release --locked --target "$TARGET"
+          mkdir -p dist
+          cp "target/$TARGET/release/cactup" dist/cactup
+      - name: Verify the binary is static and stamped
+        run: |
+          set -eu
+          bin=dist/cactup
+          chmod 0755 "$bin"
+          info=$(file "$bin")
+          echo "$info"
+          if ! printf '%s\n' "$info" | grep -Eq 'statically linked|static-pie linked'; then
+            echo "::error::$TARGET binary is not statically linked"; exit 1
+          fi
+          if readelf -l "$bin" | grep -q 'program interpreter'; then
+            echo "::error::$TARGET binary requests a program interpreter"; exit 1
+          fi
+          if readelf -d "$bin" | grep -q '(NEEDED)'; then
+            echo "::error::$TARGET binary needs shared libraries"; exit 1
+          fi
+          version=$("$bin" --version)
+          echo "$version"
+          case $version in
+            *"$BUILD_ID"*) ;;
+            *) echo "::error::$TARGET --version does not name build $BUILD_ID"; exit 1 ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/cactup
+          if-no-files-found: error
+
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the docs
+        run: |
+          set -eu
+          cargo run -p CactupDocs --release --locked -- build --out _site --base-url "/${GITHUB_REPOSITORY#*/}/"
+          test -f _site/index.html
+          test -f _site/search-index.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs
+          path: _site
+          if-no-files-found: error
+
+  # Runs on pull requests too, so a broken assembly shows up before merge.
+  site:
+    needs: [stamp, build, docs]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: docs
+          path: _site
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+      - name: Assemble the site
+        env:
+          CACTUP_BUILD_ID: ${{ needs.stamp.outputs.build_id }}
+          CACTUP_BUILD_DATE: ${{ needs.stamp.outputs.build_date }}
+        run: |
+          set -eu
+          ci/assemble-site.sh _site dist
+          jq . _site/latest.json
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  publish-mdb:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: [test, mdb-compat, site]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish mdb/ to the mdb branch
+        # The split is deterministic and append-only, so this force push is
+        # normally a fast-forward. Pushes made with GITHUB_TOKEN never trigger
+        # workflow runs (and the push trigger ignores the mdb branch anyway).
+        run: |
+          set -eu
+          split=$(git subtree split -q --prefix=mdb HEAD)
+          echo "mdb branch -> $split"
+          git push --force origin "$split:refs/heads/mdb"
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: publish-mdb
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

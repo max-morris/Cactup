@@ -7,12 +7,18 @@
 # This little script is meant to be downloaded from the internet and piped
 # straight into a shell, e.g.
 #
-#     curl --proto '=https' --tlsv1.2 -sSf https://<host>/cactup-init.sh | sh
+#     curl --proto '=https' --tlsv1.2 -sSf https://max-morris.github.io/Cactup/cactup-init.sh | sh
 #
 # It performs platform detection, downloads the prebuilt `cactup` binary for
-# the host platform, installs it under $CACTUP_HOME/bin, and (unless told not
-# to) wires that directory onto the user's PATH. From then on the user manages
-# their Einstein Toolkit installations with `cactup` directly.
+# the host platform, verifies its checksum, installs it under $CACTUP_HOME/bin,
+# and (unless told not to) wires that directory onto the user's PATH. From then
+# on the user manages their Einstein Toolkit installations with `cactup`
+# directly, and cactup keeps itself up to date.
+#
+# Install layout: every build lives at $CACTUP_HOME/bin/cactup-<build>, and
+# $CACTUP_HOME/bin/cactup is a symlink to the current one. Jobs run the exact
+# build they were submitted with, so a later update never swaps the binary
+# under a queued job.
 #
 # It is written to run on any of the common Unix shells -- {a,ba,da,k,z}sh --
 # and leans only on the widely-supported `local` extension. Note: most shells
@@ -34,14 +40,24 @@ is_zsh() {
 
 set -u
 
-# Base URL the `cactup` binary is downloaded from; the binary is fetched from
-# <root>/cactup. Override with the CACTUP_UPDATE_ROOT environment variable.
-#
-# Only a single prebuilt binary is published at present, so there is no
-# per-platform path component. The host platform is still detected below for the
-# informational message and the post-download sanity check, which catches the
-# case of the binary not matching the running platform.
-CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT:-https://cct.lsu.edu/~mmorris/cactup}"
+# Base URL of the cactup site. The binary for a target is fetched from
+# <root>/<target>/cactup, next to <root>/<target>/cactup.sha256, which holds
+# "<sha256>  cactup-<build>": the checksum and the versioned file name to
+# install under. Override with the CACTUP_UPDATE_ROOT environment variable (a
+# mirror, or a local test server: plain http is accepted for 127.0.0.1 and
+# localhost only).
+CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT:-https://max-morris.github.io/Cactup}"
+CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT%/}"
+
+# The targets a release publishes. The binaries are fully static, so one build
+# per CPU runs on every Linux distribution, glibc- or musl-based.
+CACTUP_TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+
+# Temporary files, removed by cleanup() on any exit. Globals rather than locals
+# so the traps see them regardless of the shell's scoping rules.
+_CACTUP_TMP_BIN=""
+_CACTUP_TMP_SHA=""
+_CACTUP_TMP_LINK=""
 
 # Where cactup itself is installed. Mirrors rustup's ~/.cargo layout.
 CACTUP_HOME_DEFAULT="${HOME}/.cactup"
@@ -65,6 +81,9 @@ Options:
       --no-modify-path   Don't configure the PATH environment variable
   -h, --help             Print help
 
+Supported platforms: Linux on x86_64 or aarch64, any distribution (the binary
+is fully static).
+
 Environment:
   CACTUP_UPDATE_ROOT     Base URL to download the cactup binary from
                          (default: $CACTUP_UPDATE_ROOT)
@@ -81,19 +100,13 @@ main() {
     need_cmd mkdir
     need_cmd mv
     need_cmd rm
+    need_cmd ln
 
     get_architecture || return 1
     local _arch="$RETVAL"
     assert_nz "$_arch" "arch"
 
-    local _ext=""
-    case "$_arch" in
-        *windows*)
-            _ext=".exe"
-            ;;
-    esac
-
-    # ANSI escapes are only meaningful on a real terminal that we recognise.
+    # ANSI escapes are only meaningful on a real terminal that we recognize.
     _ansi_escapes_are_valid=false
     if [ -t 2 ]; then
         if [ "${TERM+set}" = 'set' ]; then
@@ -123,7 +136,7 @@ main() {
             *)
                 OPTIND=1
                 if [ "${arg%%--*}" = "" ]; then
-                    # An unrecognised long option; don't try to interpret it.
+                    # An unrecognized long option; don't try to interpret it.
                     err "unknown option: $arg"
                     err "run with --help for usage"
                     exit 1
@@ -152,12 +165,19 @@ main() {
         esac
     done
 
+    # Pick the published build for this host (after the argument scan, so
+    # --help works everywhere).
+    select_target "$_arch"
+    local _target="$RETVAL"
+
     # Resolve install locations.
     local _cactup_home="${CACTUP_HOME:-$CACTUP_HOME_DEFAULT}"
     local _bin_dir="${_cactup_home}/bin"
-    local _bin_path="${_bin_dir}/cactup${_ext}"
+    local _bin_path="${_bin_dir}/cactup"
 
-    local _url="${CACTUP_UPDATE_ROOT}/cactup${_ext}"
+    local _url="${CACTUP_UPDATE_ROOT}/${_target}/cactup"
+    local _sha_url="${_url}.sha256"
+    local _missing="no cactup build for ${_target} at ${CACTUP_UPDATE_ROOT}"
 
     say "detected host: $_arch"
     say "install directory: $_bin_dir"
@@ -172,41 +192,95 @@ main() {
         fi
     fi
 
-    say "downloading cactup"
+    say "downloading cactup for $_target"
     ensure mkdir -p "$_bin_dir"
 
-    # Stage the download *inside* the install directory, then rename it over the
-    # final path. Because both live on the same filesystem the rename is atomic:
+    # Remove every staging file if anything below aborts before its rename.
+    trap cleanup EXIT
+    trap 'cleanup; exit 130' INT
+    trap 'cleanup; exit 143' TERM
+
+    # Stage the downloads *inside* the install directory, then rename them into
+    # place. Because both live on the same filesystem the rename is atomic:
     # readers never see a half-written binary, and -- crucially for re-runs --
     # replacing a cactup that is currently executing succeeds. (Overwriting the
     # running file in place, as a cross-filesystem move from /tmp would do, fails
-    # with "text file busy".)
-    local _tmp_file
-    if ! _tmp_file="$(ensure mktemp "${_bin_dir}/.cactup-download.XXXXXX")"; then
-        # mktemp ran in a subshell, so propagate failure manually.
+    # with "text file busy".) mktemp runs in a subshell, so failure is
+    # propagated by hand.
+    if ! _CACTUP_TMP_SHA="$(ensure mktemp "${_bin_dir}/.cactup-sha256.XXXXXX")"; then
         exit 1
     fi
-    # Clean up the staging file if anything below aborts before the rename. The
-    # path is baked into the trap now so it does not depend on shell scoping.
-    trap "rm -f '$_tmp_file' 2>/dev/null" EXIT INT TERM
+    if ! _CACTUP_TMP_BIN="$(ensure mktemp "${_bin_dir}/.cactup-download.XXXXXX")"; then
+        exit 1
+    fi
 
-    ensure downloader "$_url" "$_tmp_file" "$_arch"
-    ensure chmod u+x "$_tmp_file"
-    if [ ! -x "$_tmp_file" ]; then
+    if ! downloader "$_sha_url" "$_CACTUP_TMP_SHA" "$_missing"; then
+        err "could not download $_sha_url"
+        exit 1
+    fi
+    # "<sha256>  cactup-<build>": the expected checksum and the versioned name.
+    local _sha_line=""
+    read -r _sha_line < "$_CACTUP_TMP_SHA" || true
+    local _want="${_sha_line%% *}"
+    local _name="${_sha_line##* }"
+    if ! is_sha256 "$_want" || ! is_versioned_name "$_name"; then
+        err "malformed checksum file at $_sha_url"
+        exit 1
+    fi
+
+    if ! downloader "$_url" "$_CACTUP_TMP_BIN" "$_missing"; then
+        err "could not download $_url"
+        exit 1
+    fi
+
+    # Verify before executing anything. `sha256sum -c` cannot be used: the
+    # checksum file names the published file, not our temporary one.
+    local _got=""
+    if check_cmd sha256sum; then
+        _got="$(sha256sum "$_CACTUP_TMP_BIN")"
+    elif check_cmd shasum; then
+        _got="$(shasum -a 256 "$_CACTUP_TMP_BIN")"
+    else
+        warn "neither sha256sum nor shasum is available; cannot verify the download"
+    fi
+    if [ -n "$_got" ]; then
+        _got="${_got%% *}"
+        if [ "$_got" != "$_want" ]; then
+            err "checksum mismatch for $_url"
+            err "a new build may be propagating; retry in a few minutes"
+            exit 1
+        fi
+    fi
+
+    ensure chmod 755 "$_CACTUP_TMP_BIN"
+    if [ ! -x "$_CACTUP_TMP_BIN" ]; then
         err "cannot execute the downloaded binary (is $_bin_dir on a noexec mount?)."
         exit 1
     fi
 
     # Sanity-check the binary actually runs on this host before we enshrine it.
-    if ! ignore "$_tmp_file" --version >/dev/null 2>&1; then
+    if ! ignore "$_CACTUP_TMP_BIN" --version >/dev/null 2>&1; then
         warn "the downloaded binary did not respond to --version; installing it anyway"
     fi
 
-    # Atomic replace. -f so a previous install is overwritten without prompting.
-    ensure mv -f "$_tmp_file" "$_bin_path"
+    # Install the build under its versioned name (atomic; -f so a re-run
+    # overwrites without prompting), then point bin/cactup at it by renaming a
+    # fresh symlink over it. The rename is atomic too, safe while an older
+    # cactup is running, and replaces a plain-file bin/cactup from an older
+    # install.
+    ensure mv -f "$_CACTUP_TMP_BIN" "${_bin_dir}/${_name}"
+    _CACTUP_TMP_BIN=""
+    ensure rm -f "$_CACTUP_TMP_SHA"
+    _CACTUP_TMP_SHA=""
+    _CACTUP_TMP_LINK="${_bin_dir}/.cactup-link.$$"
+    ensure rm -f "$_CACTUP_TMP_LINK"
+    ensure ln -s "$_name" "$_CACTUP_TMP_LINK"
+    ensure mv -f "$_CACTUP_TMP_LINK" "$_bin_path"
+    _CACTUP_TMP_LINK=""
     trap - EXIT INT TERM
 
-    say "installed cactup to $_bin_path"
+    say "installed ${_bin_dir}/${_name}"
+    say "linked $_bin_path -> $_name"
 
     if [ "$CACTUP_NO_MODIFY_PATH" = no ]; then
         update_path "$_bin_dir"
@@ -216,7 +290,64 @@ main() {
     printf '\n' >&2
     printf '%s\n' "cactup is installed. Restart your shell or run:" >&2
     printf '%s\n' "    export PATH=\"$_bin_dir:\$PATH\"" >&2
-    printf '%s\n' "then run 'cactup list' to see available Einstein Toolkit releases." >&2
+    printf '%s\n' "then run 'cactup releases' to see available Einstein Toolkit releases." >&2
+    printf '\n' >&2
+    printf '%s\n' "Documentation: ${CACTUP_UPDATE_ROOT}/" >&2
+    printf '%s\n' "cactup keeps itself up to date: ${CACTUP_UPDATE_ROOT}/users/updating.html" >&2
+}
+
+# Remove whatever staging files are still around. Called from the traps.
+cleanup() {
+    [ -n "$_CACTUP_TMP_BIN" ] && rm -f "$_CACTUP_TMP_BIN" 2>/dev/null
+    [ -n "$_CACTUP_TMP_SHA" ] && rm -f "$_CACTUP_TMP_SHA" 2>/dev/null
+    [ -n "$_CACTUP_TMP_LINK" ] && rm -f "$_CACTUP_TMP_LINK" 2>/dev/null
+    return 0
+}
+
+# Map the detected host triple to the published build that runs on it, in
+# RETVAL. The binaries are static, so a glibc host runs the musl build.
+select_target() {
+    local _arch=$1
+    local _target=""
+    case "$_arch" in
+        x86_64-unknown-linux-gnu | x86_64-unknown-linux-musl)
+            _target=x86_64-unknown-linux-musl
+            ;;
+        aarch64-unknown-linux-gnu | aarch64-unknown-linux-musl)
+            _target=aarch64-unknown-linux-musl
+            ;;
+    esac
+    case " $CACTUP_TARGETS " in
+        *" $_target "*)
+            if [ -n "$_target" ]; then
+                RETVAL="$_target"
+                return 0
+            fi
+            ;;
+    esac
+    err "no prebuilt cactup for $_arch; supported: x86_64 and aarch64 Linux (any distribution; the binary is fully static)"
+    exit 1
+}
+
+# Is $1 a sha256 digest (64 lowercase hex digits)?
+is_sha256() {
+    case "$1" in
+        '' | *[!0-9a-f]*) return 1 ;;
+    esac
+    [ "${#1}" -eq 64 ]
+}
+
+# Is $1 a versioned binary name, cactup-<hex build id>?
+is_versioned_name() {
+    case "$1" in
+        cactup-*) ;;
+        *) return 1 ;;
+    esac
+    local _id="${1#cactup-}"
+    case "$_id" in
+        '' | *[!0-9a-f]*) return 1 ;;
+    esac
+    [ "${#_id}" -ge 7 ] && [ "${#_id}" -le 40 ]
 }
 
 # Ask the user to confirm, returning 0 for yes and non-zero for no. $1 is
@@ -443,9 +574,11 @@ ignore() {
 }
 
 # Wraps curl or wget, preferring curl. Enforces HTTPS and TLS 1.2 where the
-# tool supports it. Usage:
-#   downloader --check          # verify a downloader exists
-#   downloader URL OUTFILE ARCH # download URL to OUTFILE
+# tool supports it, except for a local test server (plain http to 127.0.0.1 or
+# localhost). Usage:
+#   downloader --check               # verify a downloader exists
+#   downloader URL OUTFILE MISSING   # download URL to OUTFILE; on a 404,
+#                                    # print MISSING as the error and exit
 downloader() {
     # zsh does not word-split unquoted variables by default; needed below.
     is_zsh && setopt local_options shwordsplit
@@ -453,6 +586,12 @@ downloader() {
     local _dld
     local _err
     local _status
+    local _secure=yes
+    case "$1" in
+        http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]*)
+            _secure=no
+            ;;
+    esac
     if check_cmd curl; then
         _dld=curl
     elif check_cmd wget; then
@@ -467,19 +606,26 @@ downloader() {
     fi
 
     if [ "$_dld" = curl ]; then
-        _err=$(curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
-                    --location "$1" --output "$2" 2>&1)
+        if [ "$_secure" = yes ]; then
+            _err=$(curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
+                        --location "$1" --output "$2" 2>&1)
+        else
+            _err=$(curl --silent --show-error --fail --location "$1" --output "$2" 2>&1)
+        fi
         _status=$?
         if [ -n "$_err" ]; then
             warn "$_err"
             if echo "$_err" | grep -q 404$; then
-                err "cactup binary for platform '$3' not found; it may be unsupported."
+                err "$3"
                 exit 1
             fi
         fi
         return $_status
     elif [ "$_dld" = wget ]; then
-        if [ "$(wget -V 2>&1 | head -2 | tail -1 | cut -f1 -d' ')" = "BusyBox" ]; then
+        if [ "$_secure" = no ]; then
+            _err=$(wget "$1" -O "$2" 2>&1)
+            _status=$?
+        elif [ "$(wget -V 2>&1 | head -2 | tail -1 | cut -f1 -d' ')" = "BusyBox" ]; then
             warn "using the BusyBox version of wget; not enforcing TLS v1.2, this is potentially less secure"
             _err=$(wget "$1" -O "$2" 2>&1)
             _status=$?
@@ -488,9 +634,13 @@ downloader() {
             _status=$?
         fi
         if [ -n "$_err" ]; then
-            warn "$_err"
-            if echo "$_err" | grep -q ' 404 Not Found$'; then
-                err "cactup binary for platform '$3' not found; it may be unsupported."
+            # Non-BusyBox wget always reports progress on stderr; only surface
+            # it when the download failed.
+            if [ "$_status" -ne 0 ]; then
+                warn "$_err"
+            fi
+            if echo "$_err" | grep -Eq ' 404 Not Found$|ERROR 404:'; then
+                err "$3"
                 exit 1
             fi
         fi
