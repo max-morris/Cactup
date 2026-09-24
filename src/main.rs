@@ -54,7 +54,27 @@ pub static CACTUP_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
     home_dir.join(".cactup")
 });
 
+/// Is this the compute-node side of a job (D11)? Such a run must stay
+/// hermetic: no wisdom, no update check, no machine-database notice — it
+/// only reads what was frozen into its own metadata at submit time.
+fn compute_node_path(command: &Commands) -> bool {
+    match command {
+        Commands::Sim(SimCommand::Run(run)) => run.sim_dir.is_some(),
+        Commands::Test(TestCommand::Run(run)) => run.test_dir.is_some(),
+        // The build compute-node path, reachable either bare (`cactup build
+        // --config-dir …`) or through the explicit `build run` subcommand a
+        // generated submit script uses.
+        Commands::Build { start, command: None } => start.config_dir.is_some(),
+        Commands::Build { command: Some(BuildCommand::Run(run)), .. } => run.config_dir.is_some(),
+        _ => false,
+    }
+}
+
 fn main() -> Res<()> {
+    // First, while the process is still single-threaded: it removes an
+    // environment variable.
+    update::take_updated_marker();
+
     // Grace count 1: the FIRST Ctrl-C sets the interrupt flag — which every
     // long-running path polls, so cactup winds down within moments (locks
     // released, tempfiles cleaned) — and the SECOND aborts on the spot. Both
@@ -90,18 +110,32 @@ fn main() -> Res<()> {
         globals: args.globals,
         db: Db::open()?,
     };
+    let compute_node = compute_node_path(&args.command);
+    let updating = matches!(args.command, Commands::Update { .. });
+
+    // §17: before dispatch, never after — an update re-runs this same
+    // command in the new build, so checking after it would run it twice.
+    // Never on a compute node (D11), and `cactup update` does it itself.
+    if !compute_node && !updating {
+        update::maybe_auto_update(&ctx);
+        if gix::interrupt::is_triggered() {
+            anyhow::bail!("interrupted");
+        }
+    }
+    // §17: a binary pinned to an older MDB generation keeps working on the
+    // last revision of that generation; say so loudly until it is updated.
+    // `cactup update` reports it after its own sync instead.
+    if build_info::is_dist() && !compute_node && !updating && ctx.globals.mdb_path.is_none()
+        && let Some(notice) = update::mdb_generation_notice()
+    {
+        use colored::Colorize;
+        eprintln!("\n{}\n", notice.yellow().bold());
+    }
 
     // Skip the random post-command wisdom where it would be noise: the
     // compute-node path must stay hermetic (D11), and the log-follow views
     // end via Ctrl-C, where a trailing aphorism reads as clutter.
-    let suppress_wisdom = match &args.command {
-        Commands::Sim(SimCommand::Run(run)) if run.sim_dir.is_some() => true,
-        Commands::Test(TestCommand::Run(run)) if run.test_dir.is_some() => true,
-        // The build compute-node path (D11), same as the two arms above —
-        // reachable either bare (`cactup build --config-dir …`) or through
-        // the explicit `build run` subcommand a generated submit script uses.
-        Commands::Build { start, command: None } if start.config_dir.is_some() => true,
-        Commands::Build { command: Some(BuildCommand::Run(run)), .. } if run.config_dir.is_some() => true,
+    let suppress_wisdom = compute_node || match &args.command {
         Commands::Sim(SimCommand::Log { follow, follow_out, follow_err, .. })
         | Commands::Test(TestCommand::Log { follow, follow_out, follow_err, .. })
             if *follow || *follow_out || *follow_err =>
@@ -135,6 +169,7 @@ fn main() -> Res<()> {
         }
         Commands::Machine(cmd) => commands::machine::dispatch(&ctx, cmd),
         Commands::Wisdom => commands::wisdom::dispatch(&ctx),
+        Commands::Update { check, prune } => commands::update::dispatch(&ctx, check, prune),
     };
 
     // Wisdom after failure would be flippant — and gating on Ok also keeps

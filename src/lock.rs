@@ -59,7 +59,6 @@ pub fn fileserver_now(dir: &Path) -> Res<SystemTime> {
 /// ([`fileserver_now`] in its directory). `None` when it does not exist or
 /// either time cannot be read — callers treat that as "never stamped". A
 /// file from the future reads as age zero.
-#[cfg_attr(not(test), allow(dead_code))] // the MDB sync and update throttles
 pub fn mtime_age(path: &Path) -> Option<Duration> {
     let mtime = fs::symlink_metadata(path).and_then(|m| m.modified()).ok()?;
     let now = fileserver_now(lock_dir(path).ok()?).ok()?;
@@ -69,7 +68,6 @@ pub fn mtime_age(path: &Path) -> Option<Duration> {
 /// Write `bytes` to `path` atomically (a sibling temp file renamed over it),
 /// which also stamps its mtime with the fileserver's clock. Never
 /// `set_modified(now)`: that is the local clock (§2.3).
-#[cfg_attr(not(test), allow(dead_code))] // the MDB sync and update throttles
 pub fn write_stamp(path: &Path, bytes: &[u8]) -> Res<()> {
     let dir = lock_dir(path)?;
     let mut temp = tempfile::Builder::new()
@@ -151,9 +149,8 @@ impl LinkLock {
     /// (same host: probe `/proc/<pid>` — NOT libc `kill(pid, 0)`; this project
     /// must not depend on the libc crate. Different host: mtime older than
     /// [`LOCK_STALE_SECS`]). Returns `Ok(None)` when held by a live holder.
-    // Pinned foundation API (§2.3); production code uses the blocking
-    // `acquire`, tests exercise this form.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Pinned foundation API (§2.3); self-update uses it to step aside when
+    // another process is already installing.
     pub fn try_acquire(path: &Path) -> Res<Option<LinkLock>> {
         match Self::acquire_inner(path)? {
             Ok(lock) => Ok(Some(lock)),

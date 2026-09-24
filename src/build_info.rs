@@ -15,7 +15,6 @@ pub struct Stamp {
     /// (7-40 lowercase hex digits).
     pub id: &'static str,
     /// That commit's committer date, strict ISO 8601 (git's `%cI`).
-    #[cfg_attr(not(test), allow(dead_code))] // read by the self-update check
     pub date: &'static str,
 }
 
@@ -23,7 +22,6 @@ pub struct Stamp {
 // (the target triple), `GENERIC_HASH: &str` (content hash of the embedded
 // `mdb/generic`), `LONG_VERSION: &str` (the `--version` text) and
 // `USER_AGENT: &str`.
-#[allow(dead_code)] // TARGET is read by the self-update check
 mod generated {
     use super::Stamp;
     include!(concat!(env!("OUT_DIR"), "/build_info_gen.rs"));
