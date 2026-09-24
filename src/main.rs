@@ -112,11 +112,15 @@ fn main() -> Res<()> {
     };
     let compute_node = compute_node_path(&args.command);
     let updating = matches!(args.command, Commands::Update { .. });
+    // Any `cactup knob …`: the user is configuring cactup — possibly turning
+    // `autoupdate` off right now — so updating underneath them is wrong.
+    let configuring = matches!(args.command, Commands::Knob { .. });
 
     // §17: before dispatch, never after — an update re-runs this same
     // command in the new build, so checking after it would run it twice.
-    // Never on a compute node (D11), and `cactup update` does it itself.
-    if !compute_node && !updating {
+    // Never on a compute node (D11), never for `cactup knob` (above), and
+    // `cactup update` does it itself.
+    if !compute_node && !updating && !configuring {
         update::maybe_auto_update(&ctx);
         if gix::interrupt::is_triggered() {
             anyhow::bail!("interrupted");

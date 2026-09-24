@@ -40,12 +40,14 @@ is_zsh() {
 
 set -u
 
-# Base URL of the cactup site. The binary for a target is fetched from
-# <root>/<target>/cactup, next to <root>/<target>/cactup.sha256, which holds
-# "<sha256>  cactup-<build>": the checksum and the versioned file name to
-# install under. Override with the CACTUP_UPDATE_ROOT environment variable (a
-# mirror, or a local test server: plain http is accepted for 127.0.0.1 and
-# localhost only).
+# Base URL of the cactup site. For a target, <root>/<target>/cactup.sha256
+# holds "<sha256>  cactup-<build>": the checksum and the versioned file name.
+# The binary is then fetched by that immutable name,
+# <root>/<target>/cactup-<build>: the CDN caches every file on its own, so the
+# stable <target>/cactup alias can serve the previous release for minutes
+# after the checksum file has moved on. Override with the CACTUP_UPDATE_ROOT
+# environment variable (a mirror, or a local test server: plain http is
+# accepted for 127.0.0.1 and localhost only).
 CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT:-https://max-morris.github.io/Cactup}"
 CACTUP_UPDATE_ROOT="${CACTUP_UPDATE_ROOT%/}"
 
@@ -175,8 +177,7 @@ main() {
     local _bin_dir="${_cactup_home}/bin"
     local _bin_path="${_bin_dir}/cactup"
 
-    local _url="${CACTUP_UPDATE_ROOT}/${_target}/cactup"
-    local _sha_url="${_url}.sha256"
+    local _sha_url="${CACTUP_UPDATE_ROOT}/${_target}/cactup.sha256"
     local _missing="no cactup build for ${_target} at ${CACTUP_UPDATE_ROOT}"
 
     say "detected host: $_arch"
@@ -228,6 +229,9 @@ main() {
         exit 1
     fi
 
+    # The build the checksum file names, by its immutable name, so the two
+    # always come from the same release.
+    local _url="${CACTUP_UPDATE_ROOT}/${_target}/${_name}"
     if ! downloader "$_url" "$_CACTUP_TMP_BIN" "$_missing"; then
         err "could not download $_url"
         exit 1

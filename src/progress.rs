@@ -879,6 +879,20 @@ impl Line {
         }
     }
 
+    /// A second handle on this same line, reporting exactly as this one
+    /// does — for handing the line's work to another thread while keeping
+    /// this handle to write the outcome with. The line stays in the tree
+    /// until its last handle is gone.
+    pub fn another_handle(&self) -> Line {
+        Line {
+            shared: Arc::clone(&self.shared),
+            handle: Handle::Root,
+            depth: self.depth,
+            id: self.id,
+            scratch: Default::default(),
+        }
+    }
+
     /// Name the work about to start on this line, for the stretch before the
     /// phases the operation itself reports: `"cloning"`, `"downloading"`.
     pub fn phase(&self, name: impl Into<String>) {

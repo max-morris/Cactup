@@ -77,15 +77,46 @@ pub fn validate_autoupdate(value: &str) -> Res<String> {
     Ok(AutoUpdate::parse(value.trim())?.name().to_owned())
 }
 
-/// Knob validator (§5): `update-url` must be an http(s) URL; stored without
-/// a trailing `/`, since paths are appended to it.
+/// Knob validator (§5): `update-url` must be an https URL — what it serves
+/// is installed and run without asking, so a plain-http site would let
+/// anyone on the path hand out code. Plain http is accepted only for a
+/// loopback test server (`127.0.0.1`, `localhost`, `[::1]`), the rule
+/// `cactup-init.sh` applies to `CACTUP_UPDATE_ROOT`. Stored without a
+/// trailing `/`, since paths are appended to it.
 pub fn validate_update_url(value: &str) -> Res<String> {
     let url = value.trim().trim_end_matches('/');
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
-    match rest {
-        Some(host) if !host.is_empty() && !url.contains(char::is_whitespace) => Ok(url.to_owned()),
-        _ => bail!("invalid update-url \"{value}\": expected an http:// or https:// URL"),
+    if url.contains(char::is_whitespace) {
+        bail!("invalid update-url \"{value}\": expected an https:// URL");
     }
+    if url.strip_prefix("https://").is_some_and(|rest| !rest.is_empty()) {
+        return Ok(url.to_owned());
+    }
+    match url.strip_prefix("http://") {
+        Some(rest) if is_loopback(url_host(rest)) => Ok(url.to_owned()),
+        Some(_) => bail!(
+            "invalid update-url \"{value}\": https is required (plain http:// is accepted only for a \
+             loopback test server: 127.0.0.1, localhost or [::1])"
+        ),
+        None => bail!("invalid update-url \"{value}\": expected an https:// URL"),
+    }
+}
+
+/// The host of a URL with its scheme removed: the authority up to the path,
+/// without userinfo or port (an IPv6 literal keeps its brackets).
+fn url_host(rest: &str) -> &str {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host_port.starts_with('[') {
+        return host_port.find(']').map_or(host_port, |end| &host_port[..=end]);
+    }
+    host_port.split(':').next().unwrap_or("")
+}
+
+/// Is `host` (from [`url_host`]) the loopback interface?
+fn is_loopback(host: &str) -> bool {
+    ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|lo| host.eq_ignore_ascii_case(lo))
 }
 
 /// Knob validator (§5): `mdb-url` is anything git can fetch from (an
@@ -610,7 +641,7 @@ pub fn prune_binaries(bin_dir: &Path, exe: &Path) -> Res<Vec<PathBuf>> {
             continue;
         }
         let stamp = entry.path();
-        if !lock::mtime_age(&stamp).is_some_and(|age| age >= RETIRED_KEEP) {
+        if lock::mtime_age(&stamp).is_none_or(|age| age < RETIRED_KEEP) {
             continue;
         }
         match fs::remove_file(&path) {
@@ -773,9 +804,30 @@ mod tests {
             "https://example.org/cactup"
         );
         assert_eq!(validate_update_url("http://127.0.0.1:8080//").unwrap(), "http://127.0.0.1:8080");
-        for bad in ["", "example.org", "ftp://example.org", "https://", "https://a b"] {
+        // Plain http only for a loopback test server.
+        for ok in
+            ["http://localhost", "http://LOCALHOST:9/site", "http://[::1]:8000/x", "http://u@127.0.0.1"]
+        {
+            assert_eq!(validate_update_url(ok).unwrap(), ok);
+        }
+        for bad in [
+            "",
+            "example.org",
+            "ftp://example.org",
+            "https://",
+            "https://a b",
+            "http://",
+            "http://example.org",
+            "http://127.0.0.2:8080",
+            "http://localhost.example.org",
+            "http://127.0.0.1.example.org/x",
+            "http://127.0.0.1@example.org",
+            "http://[::2]",
+        ] {
             assert!(validate_update_url(bad).is_err(), "{bad:?} accepted");
         }
+        let err = validate_update_url("http://mirror.example.org/cactup").unwrap_err().to_string();
+        assert!(err.contains("https is required") && err.contains("loopback"), "{err}");
         assert_eq!(validate_update_url(DEFAULT_UPDATE_URL).unwrap(), DEFAULT_UPDATE_URL);
     }
 

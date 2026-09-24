@@ -473,10 +473,12 @@ cactup test delete     <name> [-f] [--purge]
 
 cactup knob [<name> [<value>]]                    (§5)
 
-cactup update [--check]                           (D14, §17.3: install the newest
+cactup update [--check] [--prune]                 (D14, §17.3: install the newest
                                                    build, then force an MDB sync;
                                                    --check compares and modifies
-                                                   nothing; dev builds refuse)
+                                                   nothing; --prune also removes
+                                                   builds retired > 30 days, §17.2;
+                                                   dev builds refuse)
 
 cactup machine show [<name>]                      (replaces print-mdb / list-machines)
 cactup machine whoami                             (which machine am I on)
@@ -1751,8 +1753,10 @@ ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
 
 Additionally three **maintenance** knobs for distribution (D14, §17):
 `autoupdate` (`auto`, the default, `|notify|off`; read leniently — garbage
-means `auto`), `update-url` (http(s) base of the site serving `latest.json`,
-trailing `/` stripped; default `https://max-morris.github.io/Cactup`) and
+means `auto`), `update-url` (https base of the site serving `latest.json` —
+plain `http://` only for a loopback host, `127.0.0.1`/`localhost`/`[::1]`,
+since what it serves is installed unasked; trailing `/` stripped; default
+`https://max-morris.github.io/Cactup`) and
 `mdb-url` (git URL whose `mdb` branch is synced; default
 `https://github.com/max-morris/Cactup.git`). Their `KnobSpec` has
 `snapshot = false`: they configure the cactup installation, not a job, so
@@ -4338,9 +4342,10 @@ only `master` publishes. The GitHub Pages root (`update-url`, default
 index.html, users/…, authors/…, …    # the docs site (cactupdocs) at the root
 cactup-init.sh                       # the installer
 latest.json                          # the version manifest below
-<target>/cactup                      # stable alias, for the installer
+<target>/cactup                      # stable alias, for manual downloads
 <target>/cactup-<build>              # immutable, what latest.json points at
-<target>/cactup.sha256               # "<sha256>  cactup-<build>"
+<target>/cactup.sha256               # "<sha256>  cactup-<build>"; the installer
+                                     # reads it first, then fetches that file
 ```
 
 for `<target>` ∈ {`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`}.
@@ -4393,7 +4398,8 @@ listing each one; a job whose build was pruned must be submitted again.
 ### 17.3 The update check and `cactup update`
 
 Before dispatch, an interactive (stderr is a tty) dist build not on a
-compute-node path (D11) and not already re-executed (`CACTUP_UPDATED`) fetches
+compute-node path (D11), not running `cactup knob` (the user is configuring
+it) or `cactup update`, and not already re-executed (`CACTUP_UPDATED`) fetches
 `latest.json` at most once per 24 h (`~/.cactup/update-check`, stamped on
 success and on failure; connect 5 s, total 10 s; failures silent). A build is
 newer iff its id differs **and** its date is strictly later. Then per
@@ -4414,7 +4420,9 @@ repo's `mdb/`; `--mdb-path` bypasses both). Layout under `~/.cactup/mdb/`:
 atomically), `.synced-<N>` (throttle stamp: `tip_generation`, `tip`,
 `commit`), `.lock` (`LinkLock`). A sync is skipped when `gen-<N>` exists and
 the stamp is younger than 6 h; otherwise, under the lock, after a 5 s TCP
-preflight, cactup fetches the branch (anonymous remote at `mdb-url`), reads
+preflight (skipped behind an `*_proxy` variable), cactup fetches the branch
+(anonymous remote at `mdb-url`) on a helper thread that an interrupt abandons
+(gix's http connect cannot be interrupted), reads
 `GENERATION` at the tip, and walks first-parent history back to the newest
 commit whose `GENERATION` equals its own N (a missing file = generation 0,
 stop). That commit is exported to `<sha>/` (verified to carry `GENERATION ==
@@ -4426,7 +4434,7 @@ networked host or `--mdb-path`. Trees no link references are pruned 24 h
 after they were retired. A tip generation newer than N produces the loud
 warning ("the machine database has moved to generation M; this cactup
 (generation N) keeps using the last generation-N revision. Run `cactup
-update` (if that reports up to date, a release is still propagating — retry
+update` (if that reports up to date, a release is still propagating; retry
 later)"). Compute-node paths (D11) never open the MDB, so never sync.
 
 ### 17.5 MDB generations

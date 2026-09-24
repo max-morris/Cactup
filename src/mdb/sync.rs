@@ -246,8 +246,7 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
     // is unreachable, the fetch fails — leaves the copy in place, if any.
     let fetched = open_repo(&root.join("repo")).and_then(|repo| {
         preflight(url)?;
-        let tip = fetch_mdb_branch(&repo, url, line)?;
-        Ok((repo, tip))
+        fetch_abandonable(repo, url, line)
     });
     let (repo, tip) = match fetched {
         Ok(fetched) => fetched,
@@ -431,6 +430,39 @@ fn connect(host: &str, port: u16) -> Res<()> {
         Some(e) => anyhow!("cannot connect to {host}:{port}: {e}"),
         None => anyhow!("no connection to {host}:{port} within {}s", PREFLIGHT_TIMEOUT.as_secs()),
     })
+}
+
+/// [`fetch_mdb_branch`] on a helper thread, polled from this one every
+/// 100 ms; returns the repository along with the tip. gix's http transport
+/// connects with a hard-coded 20 s timeout and checks the interrupt flag
+/// only between phases, and behind a proxy no preflight bounds that wait,
+/// so the calling thread is what keeps an interrupt prompt: it fails with
+/// "interrupted" at once and abandons the fetch. The thread is detached,
+/// never joined — it dies with the process the interrupt is ending — and
+/// reports through its own handle on `line`.
+fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix::Repository, ObjectId)> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let url = url.to_owned();
+    let mut handle = line.another_handle();
+    std::thread::spawn(move || {
+        let tip = fetch_mdb_branch(&repo, &url, &mut handle);
+        drop(handle);
+        let _ = tx.send(tip.map(|tip| (repo, tip)));
+    });
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {
+                if gix::interrupt::is_triggered() {
+                    bail!("interrupted");
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                bail!("the machine database fetch stopped unexpectedly")
+            }
+        }
+    }
 }
 
 /// Fetch the published `mdb` branch (full history, no tags) into

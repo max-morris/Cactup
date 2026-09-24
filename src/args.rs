@@ -297,7 +297,9 @@ pub(crate) enum Commands {
     ///               auto (the default: install it and carry on in it),
     ///               notify (only say so), or off (do not check).
     ///   update-url  Where builds are published (default
-    ///               https://max-morris.github.io/Cactup).
+    ///               https://max-morris.github.io/Cactup). Must be
+    ///               https; plain http only for a loopback test server
+    ///               (127.0.0.1, localhost, [::1]).
     ///   mdb-url     The git repository whose mdb branch carries the
     ///               machine database (default
     ///               https://github.com/max-morris/Cactup.git).

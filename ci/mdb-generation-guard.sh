@@ -16,10 +16,11 @@
 # files, optionlists) and every hostname.regexp must compile. A direction is
 # skipped when it would only re-run $base itself (nothing on its side changed).
 #
-# What this cannot catch, and needs human judgment (see CLAUDE.md, "MDB
-# generation"): template variables a binary substitutes differently, the .py
-# script protocol, optionlist [cactup] header keys an older binary silently
-# ignores, and any other change in meaning that still loads. The regexp test
+# What this cannot catch, and needs human judgment (see the docs page
+# cactupdocs/content/authors/mdb-generations.md, "What counts as breaking"):
+# template variables a binary substitutes differently, the .py script
+# protocol, optionlist [cactup] header keys an older binary silently ignores,
+# and any other change in meaning that still loads. The regexp test
 # also hard-codes which machines are undiscoverable, so adding a new
 # undiscoverable machine trips direction (a) even though older binaries cope.
 #
@@ -116,7 +117,7 @@ failed=no
 if [ "$run_a" = yes ]; then
     say "(a) generation-$generation base binary vs. the MDB of this commit"
     if ! check base "$base" "$head"; then
-        printf '::error::The MDB at this commit fails to load in the first generation-%s binary. Bump mdb/GENERATION and add a "## Generation %s" entry to mdb/GENERATIONS.md (see CLAUDE.md, "MDB generation").\n' \
+        printf '::error::The MDB at this commit fails to load in the first generation-%s binary. Bump mdb/GENERATION and add a "## Generation %s" entry to mdb/GENERATIONS.md (see https://max-morris.github.io/Cactup/authors/mdb-generations.html).\n' \
             "$generation" "$((generation + 1))"
         failed=yes
     fi
@@ -124,7 +125,7 @@ fi
 if [ "$run_b" = yes ]; then
     say "(b) this binary vs. the generation-$generation base MDB"
     if ! check head "$head" "$base"; then
-        printf '::error::This binary no longer loads the generation-%s MDB it must still accept (overlays written for it). Bump mdb/GENERATION and add a "## Generation %s" entry to mdb/GENERATIONS.md (see CLAUDE.md, "MDB generation").\n' \
+        printf '::error::This binary no longer loads the generation-%s MDB it must still accept (overlays written for it). Bump mdb/GENERATION and add a "## Generation %s" entry to mdb/GENERATIONS.md (see https://max-morris.github.io/Cactup/authors/mdb-generations.html).\n' \
             "$generation" "$((generation + 1))"
         failed=yes
     fi

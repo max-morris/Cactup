@@ -121,7 +121,7 @@ const AUTOSCROLL_MAX: u16 = 8;
 /// Longest the main loop ever blocks in one `event::poll`. File polling
 /// happens on the reader thread, so this only bounds two things: how long a
 /// keypress can sit unnoticed, and how long a Ctrl-C takes to wind the TUI
-/// down (the interrupt contract in `CLAUDE.md`).
+/// down (the interrupt contract, spec §2.4).
 const TICK: Duration = Duration::from_millis(50);
 /// Longest the *reader* thread sleeps in one go between checks of its stop
 /// flags. `PollBackoff` can ask for up to a second; chunking the wait keeps

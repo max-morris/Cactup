@@ -28,7 +28,16 @@ pub fn dispatch(ctx: &Ctx, check: bool, prune: bool) -> Res<()> {
     let binary = if update::just_updated() { Ok(()) } else { update_binary(&me, &base) };
 
     if ctx.globals.mdb_path.is_none() {
-        update::force_mdb_sync(ctx)?;
+        if let Err(sync_err) = update::force_mdb_sync(ctx) {
+            // Both failures, never just the last: the binary's reason (say,
+            // a cactup outside ~/.cactup/bin) is the one the user must act on.
+            return Err(match binary {
+                Err(binary_err) => {
+                    sync_err.context(format!("the binary update also failed: {binary_err:#}"))
+                }
+                Ok(()) => sync_err,
+            });
+        }
         if let Some(notice) = update::mdb_generation_notice() {
             eprintln!("\n{}\n", notice.yellow().bold());
         }

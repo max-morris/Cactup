@@ -26,6 +26,9 @@ fetches `latest.json` and compares it with its own build. The check:
 - **never happens in a batch job**: the commands a submit script runs on a
   compute node (`sim run --sim-dir …`, `test run --test-dir …`, `build run
   --config-dir …`) neither check for updates nor touch the network;
+- is not made before `cactup knob` (you are configuring cactup, so nothing
+  is installed underneath you), nor before `cactup update`, which does its
+  own;
 - gives up after a few seconds if the server does not answer, silently, and
   waits for the next 24-hour window before trying again.
 
@@ -154,7 +157,7 @@ loudly, on every command:
 ```
 the machine database has moved to generation 2; this cactup (generation 1)
 keeps using the last generation-1 revision. Run `cactup update` (if that
-reports up to date, a release is still propagating — retry later)
+reports up to date, a release is still propagating; retry later)
 ```
 
 Nothing breaks while you see this; your machines simply stop receiving
@@ -180,9 +183,10 @@ How to bring an overlay machine forward is described in
 - **Update checks** that cannot reach the server fail silently and are not
   retried for 24 hours. Set `autoupdate` to `off` to skip them entirely.
 - **Machine database refreshes** give up after about five seconds without a
-  connection. cactup then uses the copy it already has, with one line saying
-  it `could not reach` the server and how old that copy is, and does not
-  retry for 6 hours.
+  connection (longer when the connection goes through a proxy). cactup then
+  uses the copy it already has, with one line saying it `could not reach`
+  the server and how old that copy is, and does not retry for 6 hours.
+  Ctrl-C abandons a refresh promptly, however it is going.
 - With **no copy at all and no network**, commands that need machine
   information fail with an explanation. Either run `cactup update` once on a
   host that shares your home directory and does have network access (a login
@@ -202,7 +206,7 @@ Two more knobs say where updates come from:
 
 | Knob | Default | What it points at |
 |---|---|---|
-| `update-url` | `https://max-morris.github.io/Cactup` | The site serving `latest.json` and the builds (http or https) |
+| `update-url` | `https://max-morris.github.io/Cactup` | The site serving `latest.json` and the builds (https; plain http only for a test server on `127.0.0.1`, `localhost` or `[::1]`) |
 | `mdb-url` | `https://github.com/max-morris/Cactup.git` | The git repository whose `mdb` branch is the machine database |
 
 Point them at a mirror inside a firewall, or at your own fork (a fork that

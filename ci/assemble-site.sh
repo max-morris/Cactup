@@ -10,9 +10,9 @@
 # Resulting layout (under <site>):
 #   cactup-init.sh
 #   latest.json                     {build, date, mdb_generation, targets}
-#   <target>/cactup                 stable alias, what the installer fetches
-#   <target>/cactup-<build>         immutable copy, what latest.json names
-#   <target>/cactup.sha256          "<hash>  cactup-<build>"
+#   <target>/cactup                 stable alias (a convenience for manual downloads)
+#   <target>/cactup-<build>         immutable copy, what latest.json and the installer fetch
+#   <target>/cactup.sha256          "<hash>  cactup-<build>", naming that copy
 #
 # latest.json points at the immutable path because the Pages CDN caches every
 # file independently: a client that read a fresh latest.json must never be

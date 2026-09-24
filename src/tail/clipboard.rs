@@ -3,8 +3,8 @@
 //!
 //! OSC 52 (`ESC ] 52 ; c ; <base64> ESC \`) asks the terminal *emulator*
 //! itself to put the given text on the system clipboard. That's the only
-//! option available here: cactup is a MUSL static binary (`CLAUDE.md`'s
-//! static-linking contract) and every real clipboard crate (`arboard`,
+//! option available here: cactup is a MUSL static binary (the spec's
+//! static-linking contract, D13) and every real clipboard crate (`arboard`,
 //! `copypasta`, ...) ultimately links X11/Wayland/Win32 shared libraries,
 //! which the build cannot carry. OSC 52 needs nothing but bytes on stdout,
 //! so it costs zero dependencies — and, unlike every X11/Wayland API, it
