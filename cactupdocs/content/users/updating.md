@@ -109,11 +109,14 @@ even if cactup updates itself while the job waits in the queue. Installing an
 update swaps the link in one step and never modifies a file that a running
 cactup is using.
 
-A build is **deleted 30 days after an update retires it** (cactup tidies up
-old builds whenever it installs a new one; it never deletes the build that is
-running). That covers any realistic queue wait. A job that is still waiting,
-or a restart chain still running, after its build has been deleted cannot
-start; submit it again, and it will use the current build.
+Old builds are **never deleted automatically**: a restart chain can keep
+re-submitting itself under the build it started with for months, and every
+submit script it writes names that file. Each build costs about 11 MB. When
+you know nothing is still running under old builds, `cactup update --prune`
+removes every build that was retired more than 30 days ago (never the
+current one, never the one that is running) and prints what it removed. A
+job whose build has been pruned cannot start; submit it again, and it will
+use the current build.
 
 ## The machine database
 

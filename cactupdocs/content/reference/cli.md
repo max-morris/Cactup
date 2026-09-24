@@ -41,7 +41,8 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
 - `~/.cactup/bin/cactup` — a symbolic link to the current build,
   `~/.cactup/bin/cactup-<build>`. Every build keeps its own file so that jobs
   run the build they were submitted with; a build replaced by an update is
-  marked by `cactup-<build>.retired` and deleted 30 days later. See
+  marked by `cactup-<build>.retired`; only `cactup update --prune` deletes
+  builds retired more than 30 days ago. See
   [Updating cactup](../users/updating.html).
 - `~/.cactup/update-check` — when cactup last checked for a new build (at most
   once every 24 hours).

@@ -173,7 +173,7 @@ the global DB must not become a single point of failure for per-sim state.
 | System MDB (production = dist build) | `~/.cactup/mdb/gen-<N>` → `<sha>/`: a per-generation symlink to a tree exported from `~/.cactup/mdb/repo/` (a bare fetch-only clone of the `mdb` branch); **read-only** to cactup, swapped atomically on sync (D14, §17.4) |
 | System MDB (development = dev build) | `<project root>/mdb` (`CARGO_MANIFEST_DIR` at compile time) |
 | Built-in `generic` | `~/.cactup/mdb-builtin/<hash>/generic` (extracted from the binary, keyed by a content hash of `mdb/generic`; used only when the system MDB lacks `generic/`) |
-| cactup binaries | `~/.cactup/bin/cactup` → `cactup-<build>` (symlink to the current versioned build; retired builds pruned 30 days after replacement — §17.2) |
+| cactup binaries | `~/.cactup/bin/cactup` → `cactup-<build>` (symlink to the current versioned build; retired builds are removed only by `cactup update --prune` — §17.2) |
 | **User MDB (writable overlay)** | `~/.cactup/machines/` (user-created/customized machines; never touched by MDB updates) |
 | Database | `~/.cactup/database.json` |
 
@@ -4383,9 +4383,12 @@ into a temp file in `bin/`; check size and SHA-256 **before** executing
 anything; run `<tmp> --version` (≤ 10 s, must print the build id); persist as
 `cactup-<build>`; atomically replace `bin/cactup` with a symlink to it (safe
 while the old binary runs); stamp the previous target `cactup-<old>.retired`.
-Builds that are neither the link target nor the running executable are
-deleted once their `.retired` stamp is 30 days old (fileserver clock, §2.3).
-A job queued, or a restart chain running, past that window loses its build.
+Nothing is deleted automatically: a restart chain re-submits itself under
+the build it started with, and every submit script it writes names that
+file, so an automatic prune would break long chains. `cactup update --prune`
+removes builds that are neither the link target nor the running executable
+and whose `.retired` stamp is over 30 days old (fileserver clock, §2.3),
+listing each one; a job whose build was pruned must be submitted again.
 
 ### 17.3 The update check and `cactup update`
 
