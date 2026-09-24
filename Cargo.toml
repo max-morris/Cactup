@@ -34,6 +34,11 @@ regex = "1.13.0"
 gethostname = "1.1.0"
 tempfile = "3.27.0"
 chrono = { version = "0.4.45", features = ["serde"] }
+# SHA-256 for self-update checksums. Already in the tree as rustls' crypto
+# provider (via reqwest's "rustls" feature) with exactly these features, so
+# naming it adds no package and no C library beyond the one it already
+# builds statically: `cargo tree -e features -i aws-lc-rs` is unchanged.
+aws-lc-rs = { version = "1.17", default-features = false, features = ["aws-lc-sys"] }
 # Pinned to the same 0.29 line prodash already pulls in via crosstermion, and
 # ratatui's `crossterm_0_29` feature makes it target that same crossterm —
 # `cargo tree -i crossterm` must show a single 0.29.x entry, not two majors.

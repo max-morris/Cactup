@@ -98,11 +98,45 @@ pub fn download_component(
     let dest_path = dest_dir.join(&filename);
     let tmp_path = dest_dir.join(format!("{filename}.part"));
 
-    let mut response = CLIENT
-        .get(&fetch_url)
+    // Write to a same-directory temp file, then rename into place, so a
+    // reader never observes a partially-written destination file.
+    {
+        let mut tmp_file = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
+        download_to(client(), &fetch_url, &mut tmp_file, progress)?;
+    }
+    std::fs::rename(&tmp_path, &dest_path).with_context(|| {
+        format!("Failed to move {} into place at {}", tmp_path.display(), dest_path.display())
+    })?;
+
+    Ok(dest_path)
+}
+
+/// The shared download client ([`CLIENT`]): cactup's `User-Agent` and
+/// reqwest's default 30 s timeout on each connect, read and write.
+pub(crate) fn client() -> &'static reqwest::blocking::Client {
+    &CLIENT
+}
+
+/// GET `url` with `client` and stream the body into `dest`, returning the
+/// number of bytes written. Streamed in 64 KiB chunks rather than buffered
+/// whole, so progress (and memory use) tracks the download as it happens
+/// rather than jumping to 100% at the end: `progress` is initialized in
+/// bytes (with a percentage and throughput when the server sends
+/// `Content-Length`) and advanced per chunk. The interrupt flag is polled
+/// per chunk, failing with "interrupted". A non-success status is an error
+/// that carries the `reqwest::Error`, and so the status, in its chain.
+pub(crate) fn download_to(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &mut std::fs::File,
+    progress: &mut impl prodash::Progress,
+) -> crate::Res<u64> {
+    let mut response = client
+        .get(url)
         .send()
         .and_then(|r| r.error_for_status())
-        .with_context(|| format!("Failed to download {fetch_url}"))?;
+        .with_context(|| format!("Failed to download {url}"))?;
     progress.init(
         response.content_length().map(|l| l as usize),
         Some(prodash::unit::dynamic_and_mode(
@@ -111,33 +145,23 @@ pub fn download_component(
         )),
     );
 
-    // Write to a same-directory temp file, then rename into place, so a
-    // reader never observes a partially-written destination file. Streamed
-    // rather than buffered whole, so progress (and memory use) tracks the
-    // download as it happens rather than jumping to 100% at the end.
-    {
-        let mut tmp_file = std::fs::File::create(&tmp_path)
-            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            if gix::interrupt::is_triggered() {
-                bail!("interrupted");
-            }
-            let n = std::io::Read::read(&mut response, &mut buf)
-                .with_context(|| format!("Failed to read response body for {fetch_url}"))?;
-            if n == 0 {
-                break;
-            }
-            std::io::Write::write_all(&mut tmp_file, &buf[..n])
-                .with_context(|| format!("Failed to write {}", tmp_path.display()))?;
-            progress.inc_by(n);
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted");
         }
+        let n = std::io::Read::read(&mut response, &mut buf)
+            .with_context(|| format!("Failed to read the response body of {url}"))?;
+        if n == 0 {
+            break;
+        }
+        std::io::Write::write_all(dest, &buf[..n])
+            .with_context(|| format!("Failed to save the download of {url}"))?;
+        total += n as u64;
+        progress.inc_by(n);
     }
-    std::fs::rename(&tmp_path, &dest_path).with_context(|| {
-        format!("Failed to move {} into place at {}", tmp_path.display(), dest_path.display())
-    })?;
-
-    Ok(dest_path)
+    Ok(total)
 }
 
 /// `"$url/$checkout"` (GetComponents lines 2193, 2198, 2221, 2226): a plain
@@ -184,29 +208,9 @@ mod tests {
     /// Hand-rolled on `std::net`: proving one header is sent does not justify
     /// a dev-dependency on an HTTP server.
     fn serve_once(body: &'static [u8]) -> (String, std::thread::JoinHandle<String>) {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("local addr").port();
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut head = Vec::new();
-            let mut buf = [0u8; 512];
-            // Read to the end of the request head; a GET has no body to wait for.
-            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => head.extend_from_slice(&buf[..n]),
-                }
-            }
-            let status = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            stream.write_all(status.as_bytes()).expect("write status");
-            stream.write_all(body).expect("write body");
-            String::from_utf8_lossy(&head).into_owned()
-        });
-        (format!("http://127.0.0.1:{port}"), handle)
+        let (base, server) = test_server::serve(vec![("*", body.to_vec())], 1);
+        let handle = std::thread::spawn(move || server.join().expect("server thread").remove(0));
+        (base, handle)
     }
 
     #[test]
@@ -299,5 +303,59 @@ mod tests {
         c.url = None;
         let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
         assert!(format!("{err:#}").contains("!URL"));
+    }
+}
+
+/// A loopback HTTP server for tests of code that downloads. Hand-rolled on
+/// `std::net`: proving what goes out on the wire does not justify a
+/// dev-dependency on an HTTP server.
+#[cfg(test)]
+pub(crate) mod test_server {
+    use std::io::{Read, Write};
+
+    /// Serve exactly `requests` requests, one per connection, then stop.
+    /// Each `(path, body)` route answers a GET of that path (`"*"` answers
+    /// any path) with a 200 and the body; any other path gets a 404. The
+    /// join handle yields every request head received, in order, so a test
+    /// can assert what actually went out rather than what it meant to send.
+    /// Returns the base URL (`http://127.0.0.1:<port>`) and that handle.
+    pub(crate) fn serve(
+        routes: Vec<(&'static str, Vec<u8>)>,
+        requests: usize,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut head = Vec::new();
+                let mut buf = [0u8; 512];
+                // Read to the end of the request head; a GET has no body to
+                // wait for.
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or("");
+                let route = routes.iter().find(|(p, _)| *p == "*" || *p == path);
+                let (status, body): (&str, &[u8]) = match route {
+                    Some((_, body)) => ("200 OK", body),
+                    None => ("404 Not Found", b"not found"),
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).expect("write status");
+                stream.write_all(body).expect("write body");
+                heads.push(head);
+            }
+            heads
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
     }
 }

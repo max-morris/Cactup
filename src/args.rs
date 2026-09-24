@@ -278,6 +278,45 @@ pub(crate) enum Commands {
     ///   cactup knob wisdom-kind relevant
     #[clap(verbatim_doc_comment)]
     Wisdom,
+    // §17, §5
+    /// Update cactup and its machine database (--help for how to configure)
+    ///
+    /// Installs the newest published cactup build next to the others in
+    /// $CACTUP_HOME/bin (~/.cactup/bin by default) and points bin/cactup at
+    /// it, then refreshes the machine database. Each build keeps its own
+    /// file, cactup-<build>, so a queued or running job keeps the build it
+    /// was submitted with. The build an update replaces is kept until you
+    /// remove it with --prune. A cactup built from source never updates
+    /// itself: use git pull and cargo build.
+    ///
+    /// Before an interactive command, cactup also checks for a newer build
+    /// on its own, at most once a day. Three machine-global knobs control
+    /// updating:
+    ///
+    ///   autoupdate  What that check does when a newer build exists:
+    ///               auto (the default: install it and carry on in it),
+    ///               notify (only say so), or off (do not check).
+    ///   update-url  Where builds are published (default
+    ///               https://max-morris.github.io/Cactup).
+    ///   mdb-url     The git repository whose mdb branch carries the
+    ///               machine database (default
+    ///               https://github.com/max-morris/Cactup.git).
+    ///
+    /// Set them with `cactup knob`:
+    ///
+    ///   cactup knob autoupdate notify
+    #[clap(verbatim_doc_comment)]
+    Update {
+        /// Only report the installed and the published build; change nothing.
+        #[clap(long, conflicts_with = "prune")]
+        check: bool,
+        /// Also remove the builds an update retired more than 30 days ago
+        /// (never the current or the running one), printing each file
+        /// removed. A job still running an older build fails to start its
+        /// next restart once that build is gone.
+        #[clap(long)]
+        prune: bool,
+    },
 }
 
 // §5

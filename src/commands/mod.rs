@@ -16,6 +16,7 @@ pub mod show;
 pub mod sim;
 pub mod test;
 pub mod uninstall;
+pub mod update;
 pub mod use_cmd;
 pub mod wisdom;
 

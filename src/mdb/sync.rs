@@ -74,7 +74,6 @@ pub enum Mode {
     /// (and a copy exists). What every command does.
     Throttled,
     /// Always check the remote (`cactup update`).
-    #[cfg_attr(not(test), allow(dead_code))] // `cactup update` forces a sync
     Force,
 }
 
@@ -119,7 +118,6 @@ pub fn system_root(root: &Path, db: &Db, mode: Mode) -> Res<PathBuf> {
 
 /// The warning to print when the published MDB has moved past this binary's
 /// generation, from the throttle stamp alone (no network).
-#[cfg_attr(not(test), allow(dead_code))] // printed by main before dispatch
 pub fn newer_generation_notice(root: &Path) -> Option<String> {
     generation_notice(root, crate::build_info::MDB_GENERATION)
 }
