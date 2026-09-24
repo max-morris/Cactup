@@ -34,6 +34,7 @@ These were settled during design review and are treated as fixed below.
 | D11 | Global-DB locking | **Brief lock around DB access only.** The exclusive lock is held only while reading/mutating/persisting the database — never across a compile or a simulation run. Per-simulation coordination uses the simulation's own on-disk state, not the global lock (see §2.3). |
 | D12 | OptionList-variant ↔ queue compatibility | **The optionlist variant declares its compatible queues** (and therefore which run/submit variants it can pair with). `sim submit`/`sim run` enforce it (see §4.4, §7.4). |
 | D13 | Linking & system libraries | **Fully static MUSL binary.** cactup deploys to clusters as a single copyable binary: the release artifact targets `x86_64-unknown-linux-musl` and must stay fully statically linked (`ldd`: "statically linked"). No crate that binds a system shared library (no openssl/native-tls — reqwest uses rustls; no libgit2 — git is pure-Rust gix; no pkg-config'd C deps); C code a dependency compiles in statically at cargo-build time is fine. Our own code never uses the `libc` crate directly — OS facts come from `/proc` or std (e.g. §2.3's pid probing). |
+| D14 | Distribution, self-update & MDB generations | **CI builds, publishes and deploys; installed binaries keep themselves current.** Every passing `master` push builds static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (reused unchanged when no build input changed), publishes `mdb/` as the `mdb` git branch, and deploys docs + binaries + `cactup-init.sh` + `latest.json` to GitHub Pages. A binary is a **dist** build iff CI stamped it (`CACTUP_DIST=1`, build id, date); any local cargo build is a **dev** build (repo `mdb/`, no sync, no self-update). Dist builds clone the MDB into `~/.cactup/mdb`, sync the newest commit of their own **MDB generation** (warning loudly when a newer generation exists), and update themselves per the `autoupdate` knob (`auto`/`notify`/`off`). Each build lives at `~/.cactup/bin/cactup-<build>` behind a `bin/cactup` symlink and substitutes that path for `@CACTUP@`, so a job runs the exact build it was submitted with. The published MDB is the one on-disk artifact with a compatibility promise, and the generation is its only mechanism (§17). |
 
 Everything marked **ASSUMPTION** in this document is a smaller decision made to
 keep the spec complete; flag any you want changed.
@@ -167,17 +168,20 @@ the global DB must not become a single point of failure for per-sim state.
 
 | Constant | Value |
 |----------|-------|
-| `CACTUP_ROOT` | `~/.cactup` (existing) |
+| `CACTUP_ROOT` | `$CACTUP_HOME` when set (non-empty, absolute), else `~/.cactup` (D14; the installer honors the same variable) |
 | Installations root (default) | `<install-home>/<alias>/`, where `install-home` defaults to `~/.cactup/cacti` when the machine omits it (§4.2) |
-| System MDB (production) | `~/.cactup/mdb` (cloned from a dedicated git repo; **read-only** to cactup, overwritten on update) |
-| System MDB (development) | a hard-coded absolute path to `<project root>/mdb` |
+| System MDB (production = dist build) | `~/.cactup/mdb/gen-<N>` → `<sha>/`: a per-generation symlink to a tree exported from `~/.cactup/mdb/repo/` (a bare fetch-only clone of the `mdb` branch); **read-only** to cactup, swapped atomically on sync (D14, §17.4) |
+| System MDB (development = dev build) | `<project root>/mdb` (`CARGO_MANIFEST_DIR` at compile time) |
+| Built-in `generic` | `~/.cactup/mdb-builtin/<hash>/generic` (extracted from the binary, keyed by a content hash of `mdb/generic`; used only when the system MDB lacks `generic/`) |
+| cactup binaries | `~/.cactup/bin/cactup` → `cactup-<build>` (symlink to the current versioned build; retired builds pruned 30 days after replacement — §17.2) |
 | **User MDB (writable overlay)** | `~/.cactup/machines/` (user-created/customized machines; never touched by MDB updates) |
 | Database | `~/.cactup/database.json` |
 
-**ASSUMPTION:** MDB source resolution mirrors the manifest repo handling already
+~~**ASSUMPTION:**~~ **Resolved by D14 (§17).** MDB source resolution mirrors the manifest repo handling already
 in `src/manifest.rs`: in production cactup clones/updates the MDB git repo into
 `~/.cactup/mdb`; in development a compile-time-selected constant points at the
-in-repo `mdb/`. A `--mdb-path` global flag overrides for testing.
+in-repo `mdb/`. A `--mdb-path` global flag overrides for testing. "Production"
+vs "development" is the CI build stamp (dist vs dev), not the cargo profile.
 
 ### 2.3 Locking & long-running commands (D11)
 
@@ -469,6 +473,11 @@ cactup test delete     <name> [-f] [--purge]
 
 cactup knob [<name> [<value>]]                    (§5)
 
+cactup update [--check]                           (D14, §17.3: install the newest
+                                                   build, then force an MDB sync;
+                                                   --check compares and modifies
+                                                   nothing; dev builds refuse)
+
 cactup machine show [<name>]                      (replaces print-mdb / list-machines)
 cactup machine whoami                             (which machine am I on)
 cactup machine create [<name>] [--from-existing [B]] [--silent] [--no-discover]   (§4.7)
@@ -722,7 +731,9 @@ mdb/
 is the per-machine `<machine>/meta.toml` only. `cactup machine show` and
 discovery enumerate machines by listing the (few) per-machine directories and
 reading each `meta.toml` — a directory scan whose cost is negligible for the
-machine counts cactup deals with, and one fewer file to keep in sync.
+machine counts cactup deals with, and one fewer file to keep in sync. (The
+top-level `GENERATION` and `GENERATIONS.md` files are not an index; they
+version the published MDB — D14, §17.5 — and machine enumeration skips them.)
 
 **Two-layer MDB (read-only system + writable user overlay).** cactup resolves
 machines from two roots:
@@ -1738,6 +1749,15 @@ ordinal `0`–`4`, and is always rendered as the name (`cactup knob` shows
 `normal`, `database.json` holds `"2"`). `wisdom-kind` accepts and stores
 `relevant|all`.
 
+Additionally three **maintenance** knobs for distribution (D14, §17):
+`autoupdate` (`auto`, the default, `|notify|off`; read leniently — garbage
+means `auto`), `update-url` (http(s) base of the site serving `latest.json`,
+trailing `/` stripped; default `https://max-morris.github.io/Cactup`) and
+`mdb-url` (git URL whose `mdb` branch is synced; default
+`https://github.com/max-morris/Cactup.git`). Their `KnobSpec` has
+`snapshot = false`: they configure the cactup installation, not a job, so
+`knob_snapshot()` never freezes them into restart/build/test metadata.
+
 **Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
 as a single flat map — a `~/.cactup` lives on exactly one machine, so there is
 nothing to key them by. This is consistent with D4 (the global DB holds global
@@ -2053,6 +2073,11 @@ compute-node re-invocation as `--sim-dir`, §8.3.1), `SCRATCH_HOME`,
 `ALIAS` (installation alias — needed by the compute-node re-invocation, §8.3),
 `CACTUP` (absolute path to the cactup binary, used by the submit template to
 re-invoke `@CACTUP@ sim run …`; renamed from simfactory's `@SIMFACTORY@`).
+For a dist build this is the **frozen** versioned copy
+`~/.cactup/bin/cactup-<build>` (`freeze::frozen_cactup()`, created next to a
+plain-file `bin/cactup` if missing), never the `bin/cactup` symlink, so a
+queued job runs the exact build it was submitted with across a self-update
+(D14, §17.2); a dev build uses `current_exe()`.
 
 **Identity / machine:**
 `MACHINE`, `HOSTNAME`, `USER`, `EMAIL`, `EXECHOST`, `JOB_ID`, `CHAINED_JOB_ID`.
@@ -4175,7 +4200,9 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 Each is marked **ASSUMPTION** inline above; collected here:
 
 1. MDB source: git clone into `~/.cactup/mdb` (prod) vs hard-coded dev path; a
-   `--mdb-path` override (§2.2, §4).
+   `--mdb-path` override (§2.2, §4). **Resolved by D14 (§17):** dist builds
+   sync the `mdb` branch into `~/.cactup/mdb/{repo,<sha>,gen-<N>}`; dev builds
+   read the repo's `mdb/`.
 2. Python runtime: shell out to `python3` for `discover.py` (one process for
    all of them) and `.py` script variants rather than embedding CPython (§4.3).
 3. `interactive` command dropped for v1 (§3.1).
@@ -4295,3 +4322,133 @@ so it reads as decoration rather than output. Controls:
   wisdom` itself, and after any failed command. Decoration must never fail
   a command: any problem in the hook (unreadable DB, empty corpus) is a
   silent no-op.
+
+---
+
+## 17. Distribution, self-update & MDB generations (D14)
+
+### 17.1 What CI publishes
+
+One workflow (`.github/workflows/ci.yml`; jobs `stamp`, `test`, `mdb-compat`,
+`build`, `docs`, `site`, `publish-mdb`, `deploy`) runs on every push and PR;
+only `master` publishes. The GitHub Pages root (`update-url`, default
+`https://max-morris.github.io/Cactup`) holds:
+
+```
+index.html, users/…, authors/…, …    # the docs site (cactupdocs) at the root
+cactup-init.sh                       # the installer
+latest.json                          # the version manifest below
+<target>/cactup                      # stable alias, for the installer
+<target>/cactup-<build>              # immutable, what latest.json points at
+<target>/cactup.sha256               # "<sha256>  cactup-<build>"
+```
+
+for `<target>` ∈ {`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`}.
+
+```json
+{ "build": "a1b2c3d", "date": "2026-09-24T12:00:00-05:00", "mdb_generation": 1,
+  "targets": { "x86_64-unknown-linux-musl":
+               { "path": "x86_64-unknown-linux-musl/cactup-a1b2c3d",
+                 "sha256": "…", "size": 11534336 }, … } }
+```
+
+Readers are lenient (unknown fields ignored); `build` must match
+`^[0-9a-f]{7,40}$` and `path` must be relative without `..`.
+
+**Build id = the last commit that touched a build input** (`src build.rs
+Cargo.toml Cargo.lock resources mdb/GENERATION mdb/generic`), abbreviated to
+7 hex; `date` is that commit's committer date (`%cI`). A docs- or MDB-only
+push therefore has the same id, and CI republishes the live binaries (fetched
+from the current site and verified against `latest.json`) instead of
+rebuilding. `--version` prints `0.1.0 (a1b2c3d 2026-09-24, mdb generation 1)`,
+or `0.1.0 (dev build, mdb generation 1)` for an unstamped build.
+
+**Ordering and caching.** `publish-mdb` (push `git subtree split --prefix=mdb`
+to `refs/heads/mdb`) runs before `deploy`, so a binary of a new generation is
+never live before an MDB commit of that generation exists. The reverse window
+(an old binary sees the new generation before the new binary is live, up to
+the ~10 min Pages CDN TTL) yields only the generation warning, whose text
+says a release may still be propagating. The CDN caches each file
+independently, so `latest.json` names the immutable `cactup-<build>` path, and
+a 404 or checksum mismatch means "retry later", never an error. Runs are
+serialized per ref (no cancellation on `master`), so two pushes cannot deploy
+out of order.
+
+### 17.2 Versioned binaries and self-update
+
+Dist builds install as `~/.cactup/bin/cactup-<build>` with `bin/cactup` a
+symlink to the current one. `@CACTUP@` is the versioned path (§6.3), so a job
+keeps its exact build. An update: `LinkLock` on `bin/.update.lock`; download
+into a temp file in `bin/`; check size and SHA-256 **before** executing
+anything; run `<tmp> --version` (≤ 10 s, must print the build id); persist as
+`cactup-<build>`; atomically replace `bin/cactup` with a symlink to it (safe
+while the old binary runs); stamp the previous target `cactup-<old>.retired`.
+Builds that are neither the link target nor the running executable are
+deleted once their `.retired` stamp is 30 days old (fileserver clock, §2.3).
+A job queued, or a restart chain running, past that window loses its build.
+
+### 17.3 The update check and `cactup update`
+
+Before dispatch, an interactive (stderr is a tty) dist build not on a
+compute-node path (D11) and not already re-executed (`CACTUP_UPDATED`) fetches
+`latest.json` at most once per 24 h (`~/.cactup/update-check`, stamped on
+success and on failure; connect 5 s, total 10 s; failures silent). A build is
+newer iff its id differs **and** its date is strictly later. Then per
+`autoupdate`: `notify` prints one line (``cactup <b> is available (you have
+<a>); run `cactup update` ``); `auto` installs (§17.2) when the running binary
+is in `bin/` and named `cactup` or `cactup-<hex>`, then `exec`s the new
+binary with the same argv and `CACTUP_UPDATED=1`; `off` does nothing.
+`cactup update` does the same unconditionally (binary first, re-exec as the
+new binary, then a forced MDB sync unless `--mdb-path`); `--check` only
+reports. Dev builds refuse `cactup update`.
+
+### 17.4 MDB sync
+
+Dist builds resolve the system MDB through `mdb::sync` (dev builds read the
+repo's `mdb/`; `--mdb-path` bypasses both). Layout under `~/.cactup/mdb/`:
+`repo/` (bare, fetch-only clone of the `mdb` branch into `refs/mdb/head`),
+`<sha>/` (exported trees), `gen-<N>` (relative symlink → `<sha>`, swapped
+atomically), `.synced-<N>` (throttle stamp: `tip_generation`, `tip`,
+`commit`), `.lock` (`LinkLock`). A sync is skipped when `gen-<N>` exists and
+the stamp is younger than 6 h; otherwise, under the lock, after a 5 s TCP
+preflight, cactup fetches the branch (anonymous remote at `mdb-url`), reads
+`GENERATION` at the tip, and walks first-parent history back to the newest
+commit whose `GENERATION` equals its own N (a missing file = generation 0,
+stop). That commit is exported to `<sha>/` (verified to carry `GENERATION ==
+N`) and `gen-<N>` is swapped to it. The stamp is written on success **and** on
+network failure, so an offline host pays the timeout at most once per
+interval; a failure with an existing link keeps it (one yellow line), a
+failure with none is a hard error pointing at `cactup update` from a
+networked host or `--mdb-path`. Trees no link references are pruned 24 h
+after they were retired. A tip generation newer than N produces the loud
+warning ("the machine database has moved to generation M; this cactup
+(generation N) keeps using the last generation-N revision. Run `cactup
+update` (if that reports up to date, a release is still propagating — retry
+later)"). Compute-node paths (D11) never open the MDB, so never sync.
+
+### 17.5 MDB generations
+
+`mdb/GENERATION` (an integer, compiled into the binary as `MDB_GENERATION`)
+and `mdb/GENERATIONS.md` (one `## Generation N` entry per generation: what
+changed and how to migrate an overlay) version the published MDB. Unlike all
+other on-disk state, the published MDB has deployed readers, so it carries a
+compatibility promise, and the generation is its only mechanism.
+
+**Bump rule (two directions).** Bump when (a) `mdb/` at the new commit would
+fail to load or behave differently in the oldest binary of the current
+generation, or (b) an overlay written for the current generation would fail
+or behave differently in the new binary. Adding optional `meta.toml` keys
+counts (the schema is closed). The `mdb-compat` CI job loads every machine in
+both directions against the commit that last touched `mdb/GENERATION`; the
+rest (template variables, `.py` protocol, ignored optionlist header keys)
+needs review. A unit test requires a `GENERATIONS.md` entry for every
+generation up to N.
+
+**Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
+`[cactup] mdb-generation = N` (written by `machine create`). On load of a
+user-layer machine: missing → one warning per process ("assuming generation
+N"); older → `OverlayGenerationError` naming `GENERATIONS.md`; newer →
+"requires a newer cactup; run `cactup update`". `machine list` shows a
+refused overlay annotated instead of failing. A `--mdb-path` directory whose
+`GENERATION` differs from the binary's is a hard error (a missing file is
+accepted, for fixtures).

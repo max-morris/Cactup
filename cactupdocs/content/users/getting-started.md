@@ -7,6 +7,27 @@ description = "Your first steps with cactup: list releases, install one, and bui
 
 This guide walks you through your first cactup workflow: listing available releases, installing one, and building a Cactus config.
 
+## Step 0: Install cactup
+
+cactup is a single program that runs on any Linux distribution (x86_64 or
+aarch64). Install it with:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://max-morris.github.io/Cactup/cactup-init.sh | sh
+```
+
+(or `wget -qO- https://max-morris.github.io/Cactup/cactup-init.sh | sh`).
+The installer puts cactup in `~/.cactup/bin` and adds that directory to your
+`PATH` in your shell profile; open a new terminal, or run the `export` line
+it prints, before continuing. Check it with:
+
+```sh
+cactup --version
+```
+
+From then on cactup keeps itself and its machine database up to date; see
+[Updating cactup](updating.html) to change that or to use it offline.
+
 ## Step 1: List available releases
 
 See what Einstein Toolkit releases are available:

@@ -13,7 +13,9 @@ The MDB has two layers:
 
 ### System MDB
 
-The system MDB lives at `~/.cactup/mdb/` — a git clone that cactup manages and updates for you. It contains definitions for common HPC clusters plus the `generic` fallback. Don't hand-edit it; add your own machines in the user overlay described below.
+The system MDB lives at `~/.cactup/mdb/` — a git clone that cactup manages and updates for you (see [Updating cactup](../users/updating.html#the-machine-database)). It contains definitions for common HPC clusters plus the `generic` fallback. Don't hand-edit it; add your own machines in the user overlay described below.
+
+The published MDB is versioned by **generation**: each cactup build reads exactly one, and a change to `mdb/` that older builds could not read starts a new one. If you change the MDB itself, or keep machines in the user overlay, read [MDB Generations](mdb-generations.html).
 
 ### User MDB
 
@@ -34,10 +36,10 @@ See [Machine Discovery](machine-discovery.html) for details on writing `hostname
 
 ## Per-machine directory layout
 
-Each machine (in the system or user MDB) is a directory with:
+Each machine (in the system or user MDB) is a directory directly under the MDB root (`~/.cactup/machines/` for the user overlay) with:
 
 ```
-<mdb>/machines/<machine-name>/
+<mdb>/<machine-name>/
   meta.toml                    # Machine metadata and configuration
   optionlists/
     default.toml               # One TOML per optionlist variant
@@ -168,12 +170,16 @@ Machines in meta.toml have a `status` field indicating their maturity:
 
 ## Built-in machines
 
-cactup ships with:
+The system MDB ships definitions for a few dozen clusters, and the list grows
+as machines are ported; your copy picks up new ones automatically. To see what
+your cactup knows, with the user overlay merged in:
 
-- **generic** — single-node workstation, no batch system (fallback for any unknown machine)
-- **mike2.hpc.lsu.edu** (mike) — LSU HPC SuperMike cluster, SLURM scheduler
+```sh
+cactup machine list
+```
 
-Other machines can be added to the system MDB as they are ported.
+One of them is always present: **generic**, a single-node workstation with no
+batch system, the fallback for any machine nothing else claims.
 
 ## Understanding universe
 

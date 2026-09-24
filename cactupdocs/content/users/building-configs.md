@@ -41,7 +41,7 @@ cactup build myconfig
   compute node.
 
 Which one happens is decided by the machine's definition, not by anything
-you typed — see [meta.toml Reference](meta-toml.html#mdb-build) for exactly
+you typed — see [meta.toml Reference](../authors/meta-toml.html#mdb-build) for exactly
 how a machine opts into queued builds. If you want to force one or the other
 regardless of what the machine prefers:
 
@@ -565,7 +565,7 @@ cactup build native-build --no-universe
 
 **"Universe not found"**: If the machine defines optional universes, use `cactup machine show` to see available ones.
 
-**"cactup build submit is not possible on this machine"**: the machine needs both a `buildsubmitscript` variant and a scheduler `submit` command declared before it can queue a build — see [meta.toml Reference](meta-toml.html) or ask whoever ported the machine. `cactup build run` always works regardless.
+**"cactup build submit is not possible on this machine"**: the machine needs both a `buildsubmitscript` variant and a scheduler `submit` command declared before it can queue a build — see [meta.toml Reference](../authors/meta-toml.html) or ask whoever ported the machine. `cactup build run` always works regardless.
 
 **"--block waits for a queued build to finish, but this build runs in the foreground"**: `--block` only makes sense for a build that's going to the queue, and a bare `cactup build` resolved to the foreground instead — because you passed `--virtual-executable`, because the machine sets `[build].default-action = "run"`, or because it can't submit builds at all. The rest of the message names which one applies. Drop `--block`, or use `cactup build submit --block` on a machine that can queue the build. (`cactup build run --block` gets its own, blunter version of the same complaint: that command never queues anything.)
 

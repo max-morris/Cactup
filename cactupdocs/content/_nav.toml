@@ -1,6 +1,6 @@
 site_title = "cactup"
 tagline = "Install & manage the Einstein Toolkit"
-repo_url = "https://github.com/mmor115/cactup"
+repo_url = "https://github.com/max-morris/Cactup"
 
 [[sections]]
 title = "Introduction"
@@ -15,6 +15,10 @@ title = "User Guide"
   [[sections.pages]]
   title = "Getting Started"
   file = "users/getting-started.md"
+
+  [[sections.pages]]
+  title = "Updating cactup"
+  file = "users/updating.md"
 
   [[sections.pages]]
   title = "Installing Releases"
@@ -62,6 +66,10 @@ title = "Cluster Authors"
   [[sections.pages]]
   title = "Porting a Cluster"
   file = "authors/porting-a-cluster.md"
+
+  [[sections.pages]]
+  title = "MDB Generations"
+  file = "authors/mdb-generations.md"
 
 [[sections]]
 title = "Reference"

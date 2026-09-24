@@ -75,6 +75,59 @@ Keys: `title` (overrides the nav title for `<h1>`/`<title>`), `description`
 (meta description). If the file does not start with `+++`, there is no front
 matter. `markdown::parse_front_matter` returns `Page { front_matter, body }`.
 
+## Markdown dialect (markdown.rs)
+
+`markdown::to_html` and `markdown::to_plaintext` parse with the same options:
+CommonMark plus pipe **tables**, footnotes, `~~strikethrough~~` and task lists.
+Plain Markdown tables render as a bare `<table>` and are styled like
+`.ref-table` through `.content table`.
+
+Every heading gets a GitHub-style `id`: the heading text (code spans
+included) lowercased, spaces turned into `-`, everything but letters, digits,
+`-` and `_` dropped; a repeated slug gets `-1`, `-2`, …. So the heading
+``## The `autoupdate` knob`` is linked as `page.html#the-autoupdate-knob`.
+
+**Raw HTML** passes through unchanged. A block that starts with a tag (e.g.
+`<div class="…">`) ends at the first blank line, so leave a blank line after
+the opening tag and before the closing one to have Markdown (a fenced code
+block, say) rendered inside it. Markdown is *not* rendered on a line that is
+itself part of an HTML block: write `<code>` there, not backticks. Use raw
+HTML sparingly; it exists for layout the Markdown cannot express.
+
+### The home-page install box
+
+`content/index.md` wraps the install one-liner in raw HTML:
+
+````html
+<div class="install-box">
+
+To install cactup, run this in your terminal:
+
+```sh
+curl … | sh
+```
+
+<details>
+<summary>No <code>curl</code>? …</summary>
+
+```sh
+wget … | sh
+```
+
+</details>
+
+<p class="install-note">Linux x86_64 or aarch64, …</p>
+
+</div>
+````
+
+`style.css` styles `.install-box` (a highlighted panel, larger code) and makes
+its Copy button always visible (`.install-box pre .copy-btn`). The Copy button
+itself is the one `docs.js` adds to every `<pre>` that has a `<code>` child
+(class `copy-btn`); the install box needs no JavaScript of its own. The
+install URL is the Pages root that CI deploys to
+(`https://max-morris.github.io/Cactup/cactup-init.sh`).
+
 ## Generated-include tokens (in Markdown bodies)
 
 Authors embed generated reference sections with these tokens, each on its own
