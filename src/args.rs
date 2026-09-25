@@ -1102,6 +1102,9 @@ mod tests {
         assert!(Args::try_parse_from(["cactup", "-K", "wisdom-frequency=chatty", "wisdom"]).is_ok());
         let err = parse_err(&["cactup", "-K", "Bad_Name=1", "wisdom"]);
         assert!(err.contains("not a valid knob name"), "{err}");
+        // What the updater installs is only ever fetched over https.
+        let err = parse_err(&["cactup", "-K", "update-url=http://mirror.example.org", "update"]);
+        assert!(err.contains("https is required"), "{err}");
         let err = parse_err(&["cactup", "-K", "queue", "wisdom"]);
         assert!(err.contains("expected NAME=VALUE"), "{err}");
         // `knob -c` creates a custom knob.

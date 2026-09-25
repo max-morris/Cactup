@@ -39,12 +39,15 @@ use gix::objs::tree::EntryKind;
 use gix::protocol::fetch::Tags;
 use gix::remote::Direction;
 use gix::ObjectId;
-use prodash::{Count, NestedProgress, Progress};
+use prodash::messages::MessageLevel;
+use prodash::progress::{Id, Step, StepShared};
+use prodash::{Count, NestedProgress, Progress, Unit};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// How long a successful (or failed) sync is trusted before the next one.
@@ -55,9 +58,23 @@ const LOCK_WAIT: Duration = Duration::from_secs(120);
 /// The TCP preflight's budget. gix's http transport hard-codes a 20 s
 /// connect timeout and only checks the interrupt flag between phases.
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long an interrupted fetch gets to unwind (and so remove gix's lock
-/// and temp files) before it is abandoned.
-const FETCH_WIND_DOWN: Duration = Duration::from_secs(2);
+/// How long an interrupted fetch gets to unwind before it is abandoned. The
+/// wait exists at all because a responsive fetch that sees the flag drops
+/// gix's lock and pack temp files on its way out, which the exit the
+/// interrupt leads to would not; a fetch hung in a connect or a read never
+/// sees the flag and is abandoned when this runs out. Bounded well under a
+/// second, so an interrupt still feels instant.
+const FETCH_WIND_DOWN: Duration = Duration::from_millis(700);
+/// How long a fetch may go without reporting any progress before it is
+/// given up as a network failure. gix's http transport has a connect
+/// timeout but no read timeout, so a server (or proxy) that accepts the
+/// connection and never answers would otherwise hang every sync until
+/// Ctrl-C — and, since an interrupted sync stamps nothing, hang the next
+/// command again. See [`stall_timeout`].
+const FETCH_STALL: Duration = Duration::from_secs(30);
+/// The hard ceiling on a whole fetch, however steadily it trickles in; also
+/// a network failure once it runs out.
+const FETCH_MAX: Duration = Duration::from_secs(5 * 60);
 /// How long a retired tree outlives the link that pointed at it.
 const RETIRED_GRACE: Duration = Duration::from_secs(24 * 3600);
 /// How old a `*.tmp-*` leftover must be before it is taken for abandoned.
@@ -505,54 +522,208 @@ fn connect(host: &str, port: u16) -> Res<()> {
     })
 }
 
-/// [`fetch_mdb_branch`] on a helper thread, polled from this one every
-/// 100 ms; returns the repository along with the tip. gix's http transport
-/// connects with a hard-coded 20 s timeout and checks the interrupt flag
-/// only between phases, and behind a proxy no preflight bounds that wait,
-/// so the calling thread is what keeps an interrupt prompt. On an interrupt
-/// it gives the fetch up to [`FETCH_WIND_DOWN`] to see the flag and unwind —
-/// its drops remove gix's lock and temp files, which the exit the interrupt
-/// leads to would not — then fails with "interrupted" whether or not the
-/// fetch finished; one still stuck in a connect is abandoned, never joined,
-/// and dies with the process. The thread reports through its own handle on
-/// `line`.
+/// [`FETCH_STALL`], shortened under test so the stall test runs fast.
+fn stall_timeout() -> Duration {
+    if cfg!(test) { Duration::from_secs(2) } else { FETCH_STALL }
+}
+
+/// [`fetch_mdb_branch`] on a helper thread, watched from this one every
+/// 100 ms; returns the repository along with the tip. The calling thread is
+/// what bounds the wait: gix's http transport connects with a hard-coded
+/// 20 s timeout, has no read timeout at all, and checks the interrupt flag
+/// only between phases (and behind a proxy no preflight bounds even the
+/// connect).
+///
+/// - Nothing reported for [`stall_timeout`], or the whole fetch past
+///   [`FETCH_MAX`]: the fetch is abandoned and this fails like any other
+///   network failure, so the caller falls back on its copy and stamps the
+///   attempt, which the throttle then honors.
+/// - An interrupt: the fetch gets up to [`FETCH_WIND_DOWN`] to see the flag
+///   and unwind — its drops remove gix's lock and temp files, which the exit
+///   the interrupt leads to would not — then this fails with "interrupted"
+///   whether or not the fetch finished.
+///
+/// An abandoned fetch is never joined and dies with the process; its cancel
+/// flag stops it at gix's next check should the server wake up meanwhile.
+/// The thread reports through its own handle on `line`, watched for
+/// activity.
 fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix::Repository, ObjectId)> {
     use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
     let (tx, rx) = std::sync::mpsc::channel();
-    let url = url.to_owned();
-    let mut handle = line.another_handle();
+    let activity = Activity::default();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut handle = Watched { line: line.another_handle(), activity: activity.clone() };
+    let (worker_url, worker_cancel) = (url.to_owned(), Arc::clone(&cancel));
     std::thread::spawn(move || {
-        let tip = fetch_mdb_branch(&repo, &url, &mut handle);
+        let tip = fetch_mdb_branch(&repo, &worker_url, &mut handle, &worker_cancel);
         drop(handle);
         let _ = tx.send(tip.map(|tip| (repo, tip)));
     });
+    let started = Instant::now();
+    let (mut seen, mut moved) = (activity.reading(), started);
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(result) => return result,
-            Err(RecvTimeoutError::Timeout) => {
-                if gix::interrupt::is_triggered() {
-                    let deadline = std::time::Instant::now() + FETCH_WIND_DOWN;
-                    while std::time::Instant::now() < deadline
-                        && matches!(
-                            rx.recv_timeout(Duration::from_millis(100)),
-                            Err(RecvTimeoutError::Timeout)
-                        )
-                    {}
-                    bail!("interrupted");
-                }
-            }
             Err(RecvTimeoutError::Disconnected) => {
                 bail!("the machine database fetch stopped unexpectedly")
             }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if gix::interrupt::is_triggered() {
+            cancel.store(true, Ordering::Relaxed);
+            let _ = rx.recv_timeout(FETCH_WIND_DOWN);
+            bail!("interrupted");
+        }
+        let reading = activity.reading();
+        if reading != seen {
+            (seen, moved) = (reading, Instant::now());
+        }
+        let stall = stall_timeout();
+        if moved.elapsed() >= stall {
+            cancel.store(true, Ordering::Relaxed);
+            bail!("no response for {}s", stall.as_secs());
+        }
+        if started.elapsed() >= FETCH_MAX {
+            cancel.store(true, Ordering::Relaxed);
+            bail!("the fetch did not finish within {} minutes", FETCH_MAX.as_secs() / 60);
         }
     }
 }
 
+/// Everything a fetch reports, reduced to one number that changes whenever
+/// anything moves — how [`fetch_abandonable`] tells a slow fetch from a hung
+/// one.
+#[derive(Clone, Default)]
+struct Activity(Arc<ActivityState>);
+
+#[derive(Default)]
+struct ActivityState {
+    /// Bumped by every report made through a [`Watched`] handle.
+    reports: AtomicU64,
+    /// Counters handed out to be incremented directly, never through a
+    /// handle (gix's threaded delta resolution counts that way).
+    counters: Mutex<Vec<StepShared>>,
+}
+
+impl Activity {
+    fn bump(&self) {
+        self.0.reports.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn watch(&self, counter: &StepShared) {
+        let mut counters = self.0.counters.lock().unwrap_or_else(PoisonError::into_inner);
+        if !counters.iter().any(|known| Arc::ptr_eq(known, counter)) {
+            counters.push(Arc::clone(counter));
+        }
+    }
+
+    fn reading(&self) -> u64 {
+        let counters = self.0.counters.lock().unwrap_or_else(PoisonError::into_inner);
+        counters.iter().fold(self.0.reports.load(Ordering::Relaxed), |sum, counter| {
+            sum.wrapping_add(counter.load(Ordering::Relaxed) as u64)
+        })
+    }
+}
+
+/// A [`Line`] handle, and every child it hands out, that records each
+/// report in an [`Activity`] before passing it on.
+struct Watched {
+    line: Line,
+    activity: Activity,
+}
+
+impl Watched {
+    fn child(&self, line: Line) -> Watched {
+        self.activity.bump();
+        Watched { line, activity: self.activity.clone() }
+    }
+}
+
+impl Count for Watched {
+    fn set(&self, step: Step) {
+        self.activity.bump();
+        self.line.set(step);
+    }
+
+    fn step(&self) -> Step {
+        self.line.step()
+    }
+
+    fn inc_by(&self, step: Step) {
+        self.activity.bump();
+        self.line.inc_by(step);
+    }
+
+    fn counter(&self) -> StepShared {
+        let counter = self.line.counter();
+        self.activity.watch(&counter);
+        counter
+    }
+}
+
+impl Progress for Watched {
+    fn init(&mut self, max: Option<Step>, unit: Option<Unit>) {
+        self.activity.bump();
+        self.line.init(max, unit);
+    }
+
+    fn unit(&self) -> Option<Unit> {
+        self.line.unit()
+    }
+
+    fn max(&self) -> Option<Step> {
+        self.line.max()
+    }
+
+    fn set_max(&mut self, max: Option<Step>) -> Option<Step> {
+        self.activity.bump();
+        self.line.set_max(max)
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.activity.bump();
+        self.line.set_name(name);
+    }
+
+    fn name(&self) -> Option<String> {
+        self.line.name()
+    }
+
+    fn id(&self) -> Id {
+        self.line.id()
+    }
+
+    fn message(&self, level: MessageLevel, message: String) {
+        self.activity.bump();
+        self.line.message(level, message);
+    }
+}
+
+impl NestedProgress for Watched {
+    type SubProgress = Watched;
+
+    fn add_child(&mut self, name: impl Into<String>) -> Watched {
+        let line = self.line.add_child(name);
+        self.child(line)
+    }
+
+    fn add_child_with_id(&mut self, name: impl Into<String>, id: Id) -> Watched {
+        let line = self.line.add_child_with_id(name, id);
+        self.child(line)
+    }
+}
+
 /// Fetch the published `mdb` branch (full history, no tags) into
-/// `refs/mdb/head` and return its tip. The remote is anonymous, so a changed
-/// `mdb-url` knob needs no config rewrite; the fetch is incremental after
-/// the first.
-fn fetch_mdb_branch(repo: &gix::Repository, url: &str, line: &mut Line) -> Res<ObjectId> {
+/// `refs/mdb/head` and return its tip; `cancel` stops the pack transfer at
+/// gix's next check. The remote is anonymous, so a changed `mdb-url` knob
+/// needs no config rewrite; the fetch is incremental after the first.
+fn fetch_mdb_branch(
+    repo: &gix::Repository,
+    url: &str,
+    progress: &mut Watched,
+    cancel: &AtomicBool,
+) -> Res<ObjectId> {
     let remote = repo
         .remote_at(url)
         .with_context(|| format!("invalid mdb-url {url}"))?
@@ -562,11 +733,11 @@ fn fetch_mdb_branch(repo: &gix::Repository, url: &str, line: &mut Line) -> Res<O
     remote
         .connect(Direction::Fetch)
         .with_context(|| format!("failed to connect to {url}"))?
-        .prepare_fetch(&mut *line, Default::default())
+        .prepare_fetch(&mut *progress, Default::default())
         .with_context(|| format!("failed to list the branches of {url}"))?
-        .receive(&mut *line, &gix::interrupt::IS_INTERRUPTED)
+        .receive(&mut *progress, cancel)
         .with_context(|| format!("failed to fetch the mdb branch of {url}"))?;
-    if gix::interrupt::is_triggered() {
+    if cancel.load(Ordering::Relaxed) || gix::interrupt::is_triggered() {
         bail!("interrupted");
     }
     let tip = repo
@@ -1042,16 +1213,18 @@ mod tests {
         }
     }
 
+    fn env_proxy() -> bool {
+        ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]
+            .iter()
+            .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+    }
+
     #[test]
     fn a_git_config_proxy_skips_the_preflight() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("repo");
         let repo = open_repo(&path).unwrap();
-        let env_proxy =
-            ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]
-                .iter()
-                .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()));
-        if env_proxy || git_config_proxy(&repo) {
+        if env_proxy() || git_config_proxy(&repo) {
             eprintln!("note: a proxy is configured here already; skipping the preflight proxy test");
             return;
         }
@@ -1173,6 +1346,48 @@ mod tests {
         assert_eq!(sync_at(&root, &remote.url(), 1, Mode::Force).unwrap(), root.join(tip.to_string()));
         assert!(!repo.join("refs/mdb/head.lock").exists());
         assert!(!repo.join("marker").exists());
+    }
+
+    #[test]
+    fn a_server_that_never_answers_is_a_network_failure() {
+        if !have_upload_pack() {
+            return;
+        }
+        let remote = history(&[1]);
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join("mdb");
+        let synced = sync_at(&root, &remote.url(), 1, Mode::Throttled).unwrap();
+        if env_proxy() || git_config_proxy(&gix::open(root.join("repo")).unwrap()) {
+            eprintln!("note: a proxy is configured here; skipping the black-hole fetch test");
+            return;
+        }
+
+        // Accepts every connection, so the preflight passes, and never says
+        // a word.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/published.git", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+
+        // With a copy: given up after the stall deadline, the copy kept, and
+        // the attempt stamped so the throttle applies.
+        fs::remove_file(stamp_path(&root, 1)).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(sync_at(&root, &url, 1, Mode::Force).unwrap(), synced);
+        let took = started.elapsed();
+        assert!(took >= stall_timeout() && took < stall_timeout() * 4, "{took:?}");
+        assert_eq!(read_stamp(&root, 1).unwrap().commit, remote.commits[0].to_string());
+        assert_eq!(sync_at(&root, &url, 1, Mode::Throttled).unwrap(), synced);
+
+        // Without one: a hard error naming the stall.
+        let bare = tempfile::tempdir().unwrap();
+        let err =
+            format!("{:#}", sync_at(&bare.path().join("mdb"), &url, 1, Mode::Throttled).unwrap_err());
+        assert!(err.contains("no response for"), "{err}");
     }
 
     #[test]

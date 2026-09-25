@@ -4401,8 +4401,13 @@ Before dispatch, an interactive (stderr is a tty) dist build not on a
 compute-node path (D11), not running `cactup knob` (the user is configuring
 it) or `cactup update`, and not already re-executed (`CACTUP_UPDATED`) fetches
 `latest.json` at most once per 24 h (`~/.cactup/update-check`, stamped on
-success and on failure; connect 5 s, total 10 s; failures silent). A build is
-newer iff its id differs **and** its date is strictly later. Then per
+success and on failure, but not when an automatic install finds the release
+still propagating — missing, or not matching `latest.json` — so the next
+command retries; connect 5 s, total 10 s; failures silent). Builds are
+ordered by date (RFC 3339, compared as instants): a strictly later published
+date is newer; an equal or unparseable date with the same build (one id a
+prefix of the other) is up to date; anything else is the server being older,
+never installed. Then per
 `autoupdate`: `notify` prints one line (``cactup <b> is available (you have
 <a>); run `cactup update` ``); `auto` installs (§17.2) when the running binary
 is in `bin/` and named `cactup` or `cactup-<hex>`, then `exec`s the new
@@ -4420,9 +4425,15 @@ repo's `mdb/`; `--mdb-path` bypasses both). Layout under `~/.cactup/mdb/`:
 atomically), `.synced-<N>` (throttle stamp: `tip_generation`, `tip`,
 `commit`), `.lock` (`LinkLock`). A sync is skipped when `gen-<N>` exists and
 the stamp is younger than 6 h; otherwise, under the lock, after a 5 s TCP
-preflight (skipped behind an `*_proxy` variable), cactup fetches the branch
-(anonymous remote at `mdb-url`) on a helper thread that an interrupt abandons
-(gix's http connect cannot be interrupted), reads
+preflight (skipped behind a proxy: an `*_proxy` variable, or git config's
+`http.proxy`, `https.proxy` or `http.<url>.proxy`), cactup fetches the branch
+(anonymous remote at `mdb-url`) on a watched helper thread (gix's http
+transport has a 20 s connect timeout, no read timeout, and checks the
+interrupt flag only between phases). The watcher abandons the fetch as a
+network failure once no progress has been reported for 30 s, or 5 min have
+passed in all, so a server that accepts the connection and never answers
+cannot hang every sync; on an interrupt it gives the fetch 700 ms to unwind
+(dropping gix's lock and pack temp files), then fails "interrupted". It reads
 `GENERATION` at the tip, and walks first-parent history back to the newest
 commit whose `GENERATION` equals its own N (a missing file = generation 0,
 stop). That commit is exported to `<sha>/` (verified to carry `GENERATION ==

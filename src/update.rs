@@ -82,7 +82,8 @@ pub fn validate_autoupdate(value: &str) -> Res<String> {
 /// anyone on the path hand out code. Plain http is accepted only for a
 /// loopback test server (`127.0.0.1`, `localhost`, `[::1]`), the rule
 /// `cactup-init.sh` applies to `CACTUP_UPDATE_ROOT`. Stored without a
-/// trailing `/`, since paths are appended to it.
+/// trailing `/`, since paths are appended to it — which is also why it may
+/// not carry a query or fragment: an appended path would land inside it.
 pub fn validate_update_url(value: &str) -> Res<String> {
     let url = value.trim().trim_end_matches('/');
     // Parsed the way reqwest will parse it when fetching, so the host judged
@@ -90,6 +91,12 @@ pub fn validate_update_url(value: &str) -> Res<String> {
     let parsed = (!url.contains(char::is_whitespace))
         .then(|| reqwest::Url::parse(url).ok())
         .flatten();
+    if parsed
+        .as_ref()
+        .is_some_and(|parsed| parsed.query().is_some() || parsed.fragment().is_some())
+    {
+        bail!("invalid update-url \"{value}\": update-url must not carry a query or fragment");
+    }
     match parsed {
         Some(parsed) if is_trusted_url(&parsed) => Ok(url.to_owned()),
         Some(parsed) if parsed.scheme() == "http" => bail!(
@@ -301,9 +308,11 @@ pub fn decide(latest: &Latest, me: &Stamp, target: &str) -> Res<Decision> {
 
 /// Fetch `<base>/latest.json`: its own client, 5 s to connect and 10 s in
 /// all, so an unreachable site cannot hold up a command for long, following
-/// only the redirects [`redirect_policy`] allows.
+/// only the redirects [`redirect_policy`] allows. `base` must pass the
+/// `update-url` knob's validation, checked here again because a
+/// hand-edited database never went through it.
 pub fn fetch_latest(base: &str) -> Res<Latest> {
-    let url = format!("{}/latest.json", base.trim_end_matches('/'));
+    let url = format!("{}/latest.json", validate_update_url(base)?);
     let client = reqwest::blocking::Client::builder()
         .user_agent(build_info::USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
@@ -467,6 +476,9 @@ fn apply_with(
     me: &Stamp,
     line: &mut crate::progress::Line,
 ) -> Res<Applied> {
+    // As in `fetch_latest`: nothing is fetched from a site the `update-url`
+    // knob's validation would refuse.
+    let base = validate_update_url(base)?;
     // §2.3: link()-based, never flock; the heartbeat keeps a slow download
     // from reading as a stale lock on another host.
     let _lock = match LinkLock::try_acquire(&bin_dir.join(UPDATE_LOCK)) {
@@ -494,7 +506,7 @@ fn apply_with(
         }
     };
     line.phase(format!("downloading {}", latest.build));
-    let url = format!("{}/{}", base.trim_end_matches('/'), entry.path);
+    let url = format!("{base}/{}", entry.path);
     let size = match crate::fetch::download::download_to(
         download_client(),
         &url,
@@ -724,10 +736,11 @@ pub fn short_date(date: &str) -> &str {
 /// silent unless there is something to say. Nothing happens for a dev build,
 /// when stderr is not a terminal (scripts, jobs, pipes), in a process an
 /// update just started, within a day of the last check, or with
-/// `autoupdate = off`. Otherwise it asks the update site (the day's check is
-/// spent whether or not that works; a failure is silent) and, when a newer
-/// build exists, either says so (`notify`) or installs it and re-runs this
-/// same command in it (`auto`).
+/// `autoupdate = off`. Otherwise it asks the update site (a failure is
+/// silent) and, when a newer build exists, either says so (`notify`) or
+/// installs it and re-runs this same command in it (`auto`). The day's check
+/// is spent whatever the outcome but one: a release still propagating
+/// through the CDN, which the next command retries (see [`spends_check`]).
 pub fn maybe_auto_update(ctx: &Ctx) {
     let Some(me) = build_info::DIST.filter(|_| build_info::is_dist()) else { return };
     if !std::io::stderr().is_terminal() || just_updated() {
@@ -749,20 +762,30 @@ pub fn maybe_auto_update(ctx: &Ctx) {
     if gix::interrupt::is_triggered() {
         return;
     }
-    let _ = fs::create_dir_all(&*crate::CACTUP_ROOT);
     let seen = latest.as_ref().map(|l| format!("{}\n", l.build)).unwrap_or_default();
-    let _ = lock::write_stamp(&stamp, seen.as_bytes());
+    let spend_check = || {
+        let _ = fs::create_dir_all(&*crate::CACTUP_ROOT);
+        let _ = lock::write_stamp(&stamp, seen.as_bytes());
+    };
 
-    let Ok(latest) = latest else { return };
-    let Ok(Decision::Newer(entry)) = decide(&latest, &me, build_info::TARGET) else { return };
+    let newer = latest
+        .as_ref()
+        .ok()
+        .and_then(|latest| match decide(latest, &me, build_info::TARGET) {
+            Ok(Decision::Newer(entry)) => Some(entry),
+            _ => None,
+        });
+    let (Ok(latest), Some(entry)) = (latest, newer) else { return spend_check() };
     let available = format!("cactup {} is available (you have {})", latest.build, me.id);
     if mode == AutoUpdate::Notify {
+        spend_check();
         eprintln!("{}", format!("{available}; run `cactup update`").yellow());
         return;
     }
 
     let bin_dir = crate::CACTUP_ROOT.join("bin");
     let not_updatable = |reason: &str| {
+        spend_check();
         eprintln!(
             "{}",
             format!("{available}, but cannot be installed automatically: {reason}").yellow()
@@ -775,12 +798,17 @@ pub fn maybe_auto_update(ctx: &Ctx) {
     if let Installability::NotUpdatable(reason) = installability(&exe, &bin_dir) {
         return not_updatable(&reason);
     }
-    let path = match apply(&base, &latest, &entry, &bin_dir, &me) {
+    let applied = apply(&base, &latest, &entry, &bin_dir, &me);
+    if spends_check(&applied) {
+        spend_check();
+    }
+    let path = match applied {
         Ok(Applied::Installed(path)) => path,
         // Someone else just installed it: carry on in it all the same.
         Ok(Applied::AlreadyInstalled) => bin_dir.join(binary_name(&latest.build)),
-        // Someone else is installing it, or it is still propagating: the
-        // next check, or `cactup update`, gets it.
+        // Someone else is installing it (the next check, or `cactup
+        // update`, gets it if they fail), or it is still propagating (the
+        // next command tries again).
         Ok(Applied::Busy | Applied::NotYet) => return,
         Ok(Applied::NotUpdatable(reason)) => return not_updatable(&reason),
         Err(e) => {
@@ -802,6 +830,14 @@ pub fn maybe_auto_update(ctx: &Ctx) {
         )
         .yellow()
     );
+}
+
+/// Whether an automatic install that ended in `applied` spends the day's
+/// check. Every outcome does except [`Applied::NotYet`]: the CDN takes
+/// minutes to propagate a release, and waiting a whole day for the next
+/// check would leave the install that long behind.
+fn spends_check(applied: &Res<Applied>) -> bool {
+    !matches!(applied, Ok(Applied::NotYet))
 }
 
 /// Bring the machine database up to date now, ignoring the sync throttle.
@@ -876,6 +912,17 @@ mod tests {
         }
         let err = validate_update_url("http://mirror.example.org/cactup").unwrap_err().to_string();
         assert!(err.contains("https is required") && err.contains("loopback"), "{err}");
+        // Paths are appended to it, so nothing may follow the path.
+        for bad in [
+            "http://127.0.0.1#x",
+            "http://127.0.0.1/site#",
+            "https://example.org/cactup?mirror=1",
+            "https://example.org/cactup?",
+            "https://example.org/?x#y",
+        ] {
+            let err = validate_update_url(bad).unwrap_err().to_string();
+            assert!(err.contains("must not carry a query or fragment"), "{bad:?}: {err}");
+        }
         assert_eq!(validate_update_url(DEFAULT_UPDATE_URL).unwrap(), DEFAULT_UPDATE_URL);
     }
 
@@ -1053,6 +1100,37 @@ mod tests {
         assert_eq!(fetch_latest(&base).unwrap().build, "bbbbbbb");
         server.join().unwrap();
         target_server.join().unwrap();
+    }
+
+    #[test]
+    fn an_untrusted_site_is_refused_before_any_request() {
+        // A hand-edited database skips the knob's validation; the updater
+        // checks again.
+        let err = format!("{:#}", fetch_latest("http://mirror.example.org").unwrap_err());
+        assert!(err.contains("https is required"), "{err}");
+        let bin = tempfile::tempdir().unwrap();
+        fs::write(bin.path().join("cactup"), b"old").unwrap();
+        let entry = entry_for("t/cactup-bbbbbbb", b"x");
+        let release = latest("bbbbbbb", "2026-09-24T00:00:00+00:00", Some(entry.clone()));
+        let err =
+            apply_with("http://mirror.example.org", &release, &entry, bin.path(), &ME, &mut test_line())
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("https is required"), "{err:#}");
+        assert_eq!(names(bin.path()), ["cactup"]);
+    }
+
+    #[test]
+    fn only_a_release_still_propagating_leaves_the_check_unspent() {
+        assert!(!spends_check(&Ok(Applied::NotYet)));
+        for applied in [
+            Applied::Installed(PathBuf::from("cactup-bbbbbbb")),
+            Applied::AlreadyInstalled,
+            Applied::Busy,
+            Applied::NotUpdatable("read-only".to_owned()),
+        ] {
+            assert!(spends_check(&Ok(applied.clone())), "{applied:?}");
+        }
+        assert!(spends_check(&Err(anyhow!("download failed"))));
     }
 
     #[test]

@@ -84,17 +84,14 @@ fn build_info(out: &Path) {
                 hex && (7..=40).contains(&id.len()),
                 "CACTUP_DIST=1 needs CACTUP_BUILD_ID set to a 7-40 digit lowercase hex commit id, got {id:?}"
             );
-            // `git log --format=%cI`: strict ISO 8601, so the day is its first
+            // `git log --format=%cI`, in full: the updater orders builds by
+            // this date (RFC 3339), and one it cannot parse would never be
+            // seen as older than a published build. Its day is the first
             // ten characters.
-            let day = date.get(..10).unwrap_or("");
-            let day_ok = day.len() == 10
-                && day
-                    .bytes()
-                    .enumerate()
-                    .all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() });
             assert!(
-                day_ok,
-                "CACTUP_DIST=1 needs CACTUP_BUILD_DATE set to an ISO 8601 committer date (git's %cI), got {date:?}"
+                is_rfc3339(&date),
+                "CACTUP_DIST=1 needs CACTUP_BUILD_DATE set to a full RFC 3339 committer date \
+                 (git's %cI: YYYY-MM-DDTHH:MM:SS followed by Z or +HH:MM/-HH:MM), got {date:?}"
             );
             Some((id, date))
         }
@@ -129,6 +126,38 @@ fn build_info(out: &Path) {
          pub const USER_AGENT: &str = {user_agent:?};\n"
     );
     std::fs::write(out.join("build_info_gen.rs"), generated).expect("failed to write build_info_gen.rs");
+}
+
+/// Is `date` a full RFC 3339 date-time without fractional seconds, as git's
+/// `%cI` writes it: `YYYY-MM-DDTHH:MM:SS` followed by `Z` or `+HH:MM`/`-HH:MM`?
+fn is_rfc3339(date: &str) -> bool {
+    let b = date.as_bytes();
+    let num = |at: usize, len: usize, range: std::ops::RangeInclusive<u32>| {
+        b.get(at..at + len)
+            .filter(|digits| digits.iter().all(u8::is_ascii_digit))
+            .and_then(|digits| std::str::from_utf8(digits).ok()?.parse::<u32>().ok())
+            .is_some_and(|n| range.contains(&n))
+    };
+    let sep = |at: usize, c: u8| b.get(at) == Some(&c);
+    let stamp = num(0, 4, 0..=9999)
+        && sep(4, b'-')
+        && num(5, 2, 1..=12)
+        && sep(7, b'-')
+        && num(8, 2, 1..=31)
+        && sep(10, b'T')
+        && num(11, 2, 0..=23)
+        && sep(13, b':')
+        && num(14, 2, 0..=59)
+        && sep(16, b':')
+        && num(17, 2, 0..=60);
+    let zone = match b.get(19..) {
+        Some(b"Z") => true,
+        Some([b'+' | b'-', ..]) => {
+            b.len() == 25 && num(20, 2, 0..=23) && sep(22, b':') && num(23, 2, 0..=59)
+        }
+        _ => false,
+    };
+    stamp && zone
 }
 
 /// FNV-1a 64 over the sorted relative paths and bytes of every file under

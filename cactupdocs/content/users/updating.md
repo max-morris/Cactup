@@ -60,7 +60,8 @@ build you have.
 A download is checked against the published size and SHA-256 **before**
 anything runs it. If the file is not there yet or the checksum does not match,
 a new release is usually still spreading through the web server's cache
-(about ten minutes); cactup quietly tries again at the next check.
+(about ten minutes); cactup quietly retries on the next command until the
+release has propagated.
 
 ## `cactup update`
 
@@ -183,10 +184,12 @@ How to bring an overlay machine forward is described in
 - **Update checks** that cannot reach the server fail silently and are not
   retried for 24 hours. Set `autoupdate` to `off` to skip them entirely.
 - **Machine database refreshes** give up after about five seconds without a
-  connection (longer when the connection goes through a proxy). cactup then
-  uses the copy it already has, with one line saying it `could not reach`
-  the server and how old that copy is, and does not retry for 6 hours.
-  Ctrl-C abandons a refresh promptly, however it is going.
+  connection (longer when the connection goes through a proxy, whether set in
+  the environment or in git config), and after 30 seconds in which the server
+  sends nothing (five minutes at most in all). cactup then uses the copy it
+  already has, with one line saying it `could not reach` the server and how
+  old that copy is, and does not retry for 6 hours. Ctrl-C abandons a refresh
+  within a second, however it is going.
 - With **no copy at all and no network**, commands that need machine
   information fail with an explanation. Either run `cactup update` once on a
   host that shares your home directory and does have network access (a login
