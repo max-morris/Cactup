@@ -49,6 +49,7 @@ for `cactup installation refetch`.
 cactup handles:
 
 - **Installing releases** — download and install Einstein Toolkit versions with a single command
+- **Managing multiple installations** — keep several Einstein Toolkit releases installed side by side, each with its own configs and simulations; `cactup list` shows them, and `cactup use` picks the active one
 - **Refreshing installations** — refetch an existing installation to pick up thornlist edits or move to a new release
 - **Managing configurations** — build Cactus configs with custom thornlists and compiler options
 - **Running simulations** — create, submit, and monitor simulations on batch systems or interactively

@@ -21,8 +21,7 @@ Global options (available on every subcommand) are listed first, followed by eve
 
 ## Environment variables
 
-- `HOME` — Locates cactup's root directory (`~/.cactup`).
-- `CACTUP_HOME` — An absolute path that replaces `~/.cactup` as cactup's root directory (the installer honors it too). Every `~/.cactup` below means this directory when it is set. See [Updating cactup](../users/updating.html#moving-cactups-home-cactup_home).
+- `CACTUP_HOME` — An absolute path that is cactup's root directory (the installer honors it too). Every `~/.cactup` below means this directory when it is set. When it is unset, the root defaults to `.cactup` under your home directory. See [Updating cactup](../users/updating.html#moving-cactups-home-cactup_home).
 - Scheduler variables (e.g. `SLURM_JOB_ID`, `PBS_JOBID`) — how cactup detects whether it is running inside a job allocation. Which variables matter is declared per machine via `[scheduler].allocation-env`.
 - `@ENV(NAME)@` tokens in MDB templates, parfiles and paths read arbitrary environment variables at use time; `@ENV-OPTIONAL(NAME)@` and `@ENV-OPTIONAL(NAME, default)@` tolerate an unset one — see [Scripts & Variables](../authors/scripts-and-variables.html#substitution-rules).
 
