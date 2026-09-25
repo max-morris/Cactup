@@ -46,7 +46,7 @@ What happens when a newer build exists depends on the `autoupdate` knob.
 | `off` | Nothing; cactup never checks on its own (`cactup update` still works) |
 
 ```sh
-cactup knob autoupdate notify         # ask before updating
+cactup knob autoupdate notify         # only say when a newer build exists
 cactup knob autoupdate off            # never check on your own
 cactup knob delete autoupdate         # back to the default, auto
 cactup -K autoupdate=off install      # skip the check for this one command

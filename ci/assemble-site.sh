@@ -47,9 +47,14 @@ esac
 if [ ${#build} -lt 7 ] || [ ${#build} -gt 40 ]; then
     die "CACTUP_BUILD_ID must be 7 to 40 hex digits: $build"
 fi
+# The same shape build.rs accepts (RFC 3339 with an explicit offset, which is
+# what `git log --format=%cI` prints): a looser date here would publish a
+# manifest whose date no binary can order, and every client would then see
+# the release as older than itself.
 case $date in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*) ;;
-    *) die "CACTUP_BUILD_DATE is not an ISO 8601 committer date: $date" ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][+-][0-9][0-9]:[0-9][0-9]) ;;
+    *) die "CACTUP_BUILD_DATE must be RFC 3339 (YYYY-MM-DDTHH:MM:SS followed by Z or +HH:MM): $date" ;;
 esac
 
 [ -f "$site/index.html" ] || die "$site/index.html is missing (build the docs first)"

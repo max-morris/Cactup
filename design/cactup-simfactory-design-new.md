@@ -4428,11 +4428,13 @@ the stamp is younger than 6 h; otherwise, under the lock, after a 5 s TCP
 preflight (skipped behind a proxy: an `*_proxy` variable, or git config's
 `http.proxy`, `https.proxy` or `http.<url>.proxy`), cactup fetches the branch
 (anonymous remote at `mdb-url`) on a watched helper thread (gix's http
-transport has a 20 s connect timeout, no read timeout, and checks the
-interrupt flag only between phases). The watcher abandons the fetch as a
-network failure once no progress has been reported for 30 s, or 5 min have
-passed in all, so a server that accepts the connection and never answers
-cannot hang every sync; on an interrupt it gives the fetch 700 ms to unwind
+transport has a 20 s connect timeout and reqwest's default 30 s idle timeout
+on the headers and each body read; git://, ssh and file transports have no
+timeout of their own; and gix checks the interrupt flag only between
+phases). The watcher abandons the fetch as a network failure once no
+progress has been reported for 30 s (the bound that matters for the
+non-http transports), or 5 min have passed in all, so a server that accepts
+the connection and never answers cannot hang every sync; on an interrupt it gives the fetch 700 ms to unwind
 (dropping gix's lock and pack temp files), then fails "interrupted". It reads
 `GENERATION` at the tip, and walks first-parent history back to the newest
 commit whose `GENERATION` equals its own N (a missing file = generation 0,

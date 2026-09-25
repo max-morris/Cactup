@@ -66,11 +66,15 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 /// second, so an interrupt still feels instant.
 const FETCH_WIND_DOWN: Duration = Duration::from_millis(700);
 /// How long a fetch may go without reporting any progress before it is
-/// given up as a network failure. gix's http transport has a connect
-/// timeout but no read timeout, so a server (or proxy) that accepts the
-/// connection and never answers would otherwise hang every sync until
-/// Ctrl-C — and, since an interrupted sync stamps nothing, hang the next
-/// command again. See [`stall_timeout`].
+/// given up as a network failure. Over http(s) gix's reqwest transport
+/// already bounds this: a 20 s connect timeout plus reqwest's default 30 s
+/// timeout on the headers and on each body read (an idle timeout, not a
+/// whole-request one), so raising this constant changes nothing there.
+/// It is what bounds git://, ssh and file remotes, which have no timeout of
+/// their own: a server (or proxy) that accepts the connection and never
+/// answers would otherwise hang every sync until Ctrl-C — and, since an
+/// interrupted sync stamps nothing, hang the next command again. See
+/// [`stall_timeout`].
 const FETCH_STALL: Duration = Duration::from_secs(30);
 /// The hard ceiling on a whole fetch, however steadily it trickles in; also
 /// a network failure once it runs out.
@@ -530,9 +534,9 @@ fn stall_timeout() -> Duration {
 /// [`fetch_mdb_branch`] on a helper thread, watched from this one every
 /// 100 ms; returns the repository along with the tip. The calling thread is
 /// what bounds the wait: gix's http transport connects with a hard-coded
-/// 20 s timeout, has no read timeout at all, and checks the interrupt flag
-/// only between phases (and behind a proxy no preflight bounds even the
-/// connect).
+/// 20 s timeout and idles out after 30 s per read, other transports never
+/// time out at all, and gix checks the interrupt flag only between phases
+/// (and behind a proxy no preflight bounds even the connect).
 ///
 /// - Nothing reported for [`stall_timeout`], or the whole fetch past
 ///   [`FETCH_MAX`]: the fetch is abandoned and this fails like any other
