@@ -85,38 +85,65 @@ pub fn validate_autoupdate(value: &str) -> Res<String> {
 /// trailing `/`, since paths are appended to it.
 pub fn validate_update_url(value: &str) -> Res<String> {
     let url = value.trim().trim_end_matches('/');
-    if url.contains(char::is_whitespace) {
-        bail!("invalid update-url \"{value}\": expected an https:// URL");
-    }
-    if url.strip_prefix("https://").is_some_and(|rest| !rest.is_empty()) {
-        return Ok(url.to_owned());
-    }
-    match url.strip_prefix("http://") {
-        Some(rest) if is_loopback(url_host(rest)) => Ok(url.to_owned()),
-        Some(_) => bail!(
+    // Parsed the way reqwest will parse it when fetching, so the host judged
+    // here is the host contacted there.
+    let parsed = (!url.contains(char::is_whitespace))
+        .then(|| reqwest::Url::parse(url).ok())
+        .flatten();
+    match parsed {
+        Some(parsed) if is_trusted_url(&parsed) => Ok(url.to_owned()),
+        Some(parsed) if parsed.scheme() == "http" => bail!(
             "invalid update-url \"{value}\": https is required (plain http:// is accepted only for a \
              loopback test server: 127.0.0.1, localhost or [::1])"
         ),
-        None => bail!("invalid update-url \"{value}\": expected an https:// URL"),
+        _ => bail!("invalid update-url \"{value}\": expected an https:// URL"),
     }
 }
 
-/// The host of a URL with its scheme removed: the authority up to the path,
-/// without userinfo or port (an IPv6 literal keeps its brackets).
-fn url_host(rest: &str) -> &str {
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    if host_port.starts_with('[') {
-        return host_port.find(']').map_or(host_port, |end| &host_port[..=end]);
+/// May the updater fetch from `url`? https to any host, or plain http to the
+/// loopback interface only. Both the `update-url` knob and every redirect
+/// the updater follows must pass.
+fn is_trusted_url(url: &reqwest::Url) -> bool {
+    match url.scheme() {
+        "https" => url.host().is_some(),
+        // The parser serializes hosts canonically (lowercase names, dotted
+        // IPv4, compressed IPv6), so these spellings are the only ones.
+        "http" => matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")),
+        _ => false,
     }
-    host_port.split(':').next().unwrap_or("")
 }
 
-/// Is `host` (from [`url_host`]) the loopback interface?
-fn is_loopback(host: &str) -> bool {
-    ["127.0.0.1", "localhost", "[::1]"]
-        .iter()
-        .any(|lo| host.eq_ignore_ascii_case(lo))
+/// The redirect policy of every client the updater fetches with: follow a
+/// redirect only to a URL [`is_trusted_url`] accepts, so https can never be
+/// traded for plain http on the way, and at most ten of them (reqwest's
+/// default limit).
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() > 10 {
+            attempt.error("too many redirects")
+        } else if is_trusted_url(attempt.url()) {
+            attempt.follow()
+        } else {
+            let to = attempt.url().to_string();
+            attempt.error(format!("refusing to follow a redirect to {to}: https is required"))
+        }
+    })
+}
+
+/// The client that downloads a release binary: cactup's `User-Agent`,
+/// reqwest's default timeouts and [`redirect_policy`]. Its own client, not
+/// the component downloads' one, which follows redirects as reqwest does by
+/// default (thornlists may name plain-http mirrors). A failure to build it
+/// means the process cannot speak HTTPS at all, as for that one.
+fn download_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(build_info::USER_AGENT)
+            .redirect(redirect_policy())
+            .build()
+            .expect("failed to build the HTTP client")
+    });
+    &CLIENT
 }
 
 /// Knob validator (§5): `mdb-url` is anything git can fetch from (an
@@ -224,8 +251,10 @@ fn build_of(name: &str) -> Option<&str> {
     name.strip_prefix("cactup-").filter(|id| is_build_id(id))
 }
 
-/// Do two build ids name the same commit? git abbreviates to at least seven
-/// digits but may use more, so one may be a prefix of the other.
+/// Could two build ids name the same commit? git abbreviates to at least
+/// seven digits but may use more, so one may be a prefix of the other — but
+/// a later commit's id may also extend this one's, so [`decide`] trusts this
+/// only together with equal dates.
 fn same_build(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
@@ -235,24 +264,27 @@ fn parse_date(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
 }
 
 /// Decide what the published release `latest` means for the running build
-/// `me` on `target`. A different build is newer only when its committer
-/// date is strictly later — builds are ordered by date, never by id, and a
-/// date that does not parse never counts as newer. A malformed manifest
+/// `me` on `target`. The published build is newer exactly when its
+/// committer date is strictly later — builds are ordered by date, whatever
+/// their ids, and a date that does not parse never counts as newer. It is
+/// this build when the ids agree (one may be a longer abbreviation) and the
+/// dates are equal or cannot be compared. A malformed manifest
 /// (a build id that is not hex, a path that leaves the site, a checksum that
 /// is not one) is an error.
 pub fn decide(latest: &Latest, me: &Stamp, target: &str) -> Res<Decision> {
     if !is_build_id(&latest.build) {
         bail!("the update site publishes an invalid build id \"{}\"", latest.build);
     }
-    if same_build(&latest.build, me.id) {
-        return Ok(Decision::UpToDate);
-    }
-    let newer = match (parse_date(&latest.date), parse_date(me.date)) {
-        (Some(published), Some(mine)) => published > mine,
-        _ => false,
+    let order = match (parse_date(&latest.date), parse_date(me.date)) {
+        (Some(published), Some(mine)) => Some(published.cmp(&mine)),
+        _ => None,
     };
-    if !newer {
-        return Ok(Decision::ServerOlder);
+    match order {
+        Some(std::cmp::Ordering::Greater) => {}
+        Some(std::cmp::Ordering::Equal) | None if same_build(&latest.build, me.id) => {
+            return Ok(Decision::UpToDate);
+        }
+        _ => return Ok(Decision::ServerOlder),
     }
     let Some(entry) = latest.targets.get(target) else {
         return Ok(Decision::NoTarget);
@@ -268,13 +300,15 @@ pub fn decide(latest: &Latest, me: &Stamp, target: &str) -> Res<Decision> {
 }
 
 /// Fetch `<base>/latest.json`: its own client, 5 s to connect and 10 s in
-/// all, so an unreachable site cannot hold up a command for long.
+/// all, so an unreachable site cannot hold up a command for long, following
+/// only the redirects [`redirect_policy`] allows.
 pub fn fetch_latest(base: &str) -> Res<Latest> {
     let url = format!("{}/latest.json", base.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
         .user_agent(build_info::USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(LATEST_TIMEOUT)
+        .redirect(redirect_policy())
         .build()
         .context("Failed to build the HTTP client")?;
     let response = client
@@ -462,7 +496,7 @@ fn apply_with(
     line.phase(format!("downloading {}", latest.build));
     let url = format!("{}/{}", base.trim_end_matches('/'), entry.path);
     let size = match crate::fetch::download::download_to(
-        crate::fetch::download::client(),
+        download_client(),
         &url,
         download.as_file_mut(),
         line,
@@ -805,9 +839,15 @@ mod tests {
         );
         assert_eq!(validate_update_url("http://127.0.0.1:8080//").unwrap(), "http://127.0.0.1:8080");
         // Plain http only for a loopback test server.
-        for ok in
-            ["http://localhost", "http://LOCALHOST:9/site", "http://[::1]:8000/x", "http://u@127.0.0.1"]
-        {
+        for ok in [
+            "http://localhost",
+            "http://LOCALHOST:9/site",
+            "HTTP://LocalHost/site",
+            "http://[::1]:8000/x",
+            "http://[0:0::1]",
+            "http://u@127.0.0.1",
+            "HTTPS://Example.ORG/cactup",
+        ] {
             assert_eq!(validate_update_url(ok).unwrap(), ok);
         }
         for bad in [
@@ -823,6 +863,14 @@ mod tests {
             "http://127.0.0.1.example.org/x",
             "http://127.0.0.1@example.org",
             "http://[::2]",
+            // The WHATWG parser reqwest uses ends the authority at `\` too:
+            // the host is `evil`, not the loopback address after it.
+            "http://evil\\@127.0.0.1",
+            "HTTP://EVIL\\@127.0.0.1",
+            "http://[::1]@evil",
+            "http://localhost.evil.com",
+            "HTTP://LOCALHOST.EVIL.COM",
+            "http://127.0.0.1.evil",
         ] {
             assert!(validate_update_url(bad).is_err(), "{bad:?} accepted");
         }
@@ -936,11 +984,21 @@ mod tests {
         let newer = latest("bbbbbbb", "2026-09-24T00:00:00+00:00", Some(entry.clone()));
         assert_eq!(decide(&newer, &ME, TARGET).unwrap(), Decision::Newer(entry.clone()));
 
-        // The same build, also when one id is a longer abbreviation.
-        let same = latest("aaaaaaa", "2026-09-24T00:00:00+00:00", Some(entry.clone()));
+        // The same build, also when one id is a longer abbreviation, or when
+        // either date does not parse.
+        let same = latest("aaaaaaa", ME.date, Some(entry.clone()));
         assert_eq!(decide(&same, &ME, TARGET).unwrap(), Decision::UpToDate);
-        let longer = latest("aaaaaaa1", "2026-09-24T00:00:00+00:00", Some(entry.clone()));
+        let longer = latest("aaaaaaa1", "2026-09-20T17:00:00+00:00", Some(entry.clone()));
         assert_eq!(decide(&longer, &ME, TARGET).unwrap(), Decision::UpToDate);
+        let undated = latest("aaaaaaa", "yesterday", Some(entry.clone()));
+        assert_eq!(decide(&undated, &ME, TARGET).unwrap(), Decision::UpToDate);
+
+        // A later commit whose id merely extends this one's is newer, and an
+        // earlier one is older, whatever the ids say.
+        let extends = latest("aaaaaaa1", "2026-09-24T00:00:00+00:00", Some(entry.clone()));
+        assert_eq!(decide(&extends, &ME, TARGET).unwrap(), Decision::Newer(entry.clone()));
+        let before = latest("aaaaaaa", "2026-09-19T00:00:00+00:00", Some(entry.clone()));
+        assert_eq!(decide(&before, &ME, TARGET).unwrap(), Decision::ServerOlder);
 
         // Older, the very same instant in another zone, and unparseable:
         // never newer.
@@ -988,6 +1046,41 @@ mod tests {
         let (base, server) = test_server::serve(vec![], 1);
         assert!(fetch_latest(&base).is_err(), "a 404 is an error");
         server.join().unwrap();
+
+        // A redirect to another loopback server is followed.
+        let (target, target_server) = test_server::serve(vec![("/latest.json", json.to_vec())], 1);
+        let (base, server) = test_server::redirect(format!("{target}/latest.json"), 1);
+        assert_eq!(fetch_latest(&base).unwrap().build, "bbbbbbb");
+        server.join().unwrap();
+        target_server.join().unwrap();
+    }
+
+    #[test]
+    fn redirects_off_https_are_refused() {
+        // From loopback to plain http elsewhere: refused before any request
+        // leaves for that host.
+        let (base, server) = test_server::redirect("http://example.invalid/latest.json".to_owned(), 1);
+        let err = format!("{:#}", fetch_latest(&base).unwrap_err());
+        server.join().unwrap();
+        assert!(err.contains("refusing to follow a redirect to http://example.invalid/"), "{err}");
+
+        // The release download refuses it the same way, as an error rather
+        // than a release still propagating.
+        let bin = tempfile::tempdir().unwrap();
+        fs::write(bin.path().join("cactup"), b"old").unwrap();
+        let entry = entry_for("t/cactup-bbbbbbb", b"x");
+        let release = latest("bbbbbbb", "2026-09-24T00:00:00+00:00", Some(entry.clone()));
+        let (base, server) = test_server::redirect("http://example.invalid/cactup".to_owned(), 1);
+        let err = apply_with(&base, &release, &entry, bin.path(), &ME, &mut test_line()).unwrap_err();
+        server.join().unwrap();
+        assert!(format!("{err:#}").contains("refusing to follow a redirect"), "{err:#}");
+        assert_eq!(names(bin.path()), ["cactup"]);
+
+        // The rule itself, as every hop is judged.
+        let trusted = |url: &str| is_trusted_url(&reqwest::Url::parse(url).unwrap());
+        assert!(trusted("https://mirror.example.org/x"));
+        assert!(trusted("http://127.0.0.1:9/x") && trusted("http://[::1]/x"));
+        assert!(!trusted("http://example.org/x") && !trusted("ftp://127.0.0.1/x"));
     }
 
     #[test]

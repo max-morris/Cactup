@@ -323,6 +323,27 @@ pub(crate) mod test_server {
         routes: Vec<(&'static str, Vec<u8>)>,
         requests: usize,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        serve_with(requests, move |path| match routes.iter().find(|(p, _)| *p == "*" || *p == path) {
+            Some((_, body)) => ("200 OK", String::new(), body.clone()),
+            None => ("404 Not Found", String::new(), b"not found".to_vec()),
+        })
+    }
+
+    /// Like [`serve`], but every request is answered with a 302 to `location`.
+    pub(crate) fn redirect(
+        location: String,
+        requests: usize,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        serve_with(requests, move |_| ("302 Found", format!("Location: {location}\r\n"), Vec::new()))
+    }
+
+    /// Serve `requests` requests, answering each with what `reply` returns
+    /// for its path: a status, extra header lines (each ending in CRLF) and
+    /// a body.
+    fn serve_with(
+        requests: usize,
+        reply: impl Fn(&str) -> (&'static str, String, Vec<u8>) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("local addr").port();
         let handle = std::thread::spawn(move || {
@@ -341,17 +362,13 @@ pub(crate) mod test_server {
                 }
                 let head = String::from_utf8_lossy(&head).into_owned();
                 let path = head.split_whitespace().nth(1).unwrap_or("");
-                let route = routes.iter().find(|(p, _)| *p == "*" || *p == path);
-                let (status, body): (&str, &[u8]) = match route {
-                    Some((_, body)) => ("200 OK", body),
-                    None => ("404 Not Found", b"not found"),
-                };
+                let (status, headers, body) = reply(path);
                 let reply = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 stream.write_all(reply.as_bytes()).expect("write status");
-                stream.write_all(body).expect("write body");
+                stream.write_all(&body).expect("write body");
                 heads.push(head);
             }
             heads

@@ -55,6 +55,9 @@ const LOCK_WAIT: Duration = Duration::from_secs(120);
 /// The TCP preflight's budget. gix's http transport hard-codes a 20 s
 /// connect timeout and only checks the interrupt flag between phases.
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an interrupted fetch gets to unwind (and so remove gix's lock
+/// and temp files) before it is abandoned.
+const FETCH_WIND_DOWN: Duration = Duration::from_secs(2);
 /// How long a retired tree outlives the link that pointed at it.
 const RETIRED_GRACE: Duration = Duration::from_secs(24 * 3600);
 /// How old a `*.tmp-*` leftover must be before it is taken for abandoned.
@@ -198,10 +201,16 @@ pub fn sync_at(root: &Path, url: &str, generation: u32, mode: Mode) -> Res<PathB
     fs::create_dir_all(root).with_context(|| format!("Failed to create {}", root.display()))?;
 
     // Phase-scoped renderer, one line, gix's phases collapsed onto it (the
-    // same shape as the release manifest's fetch).
-    let (progress, renderer) =
-        crate::manifest::setup_prodash_with(Some(crate::manifest::progress_level_filter(1)), true);
-    let _renderer = Renderer(Some(renderer));
+    // same shape as the release manifest's fetch). Tests get the tree alone,
+    // so no progress lines land in their output.
+    let (progress, renderer) = if cfg!(test) {
+        (prodash::tree::Root::new(), None)
+    } else {
+        let (progress, renderer) =
+            crate::manifest::setup_prodash_with(Some(crate::manifest::progress_level_filter(1)), true);
+        (progress, Some(renderer))
+    };
+    let _renderer = Renderer(renderer);
     let layout = Layout::for_names([HEADLINE]);
     let mut line = Line::over(progress.add_child(HEADLINE), HEADLINE, layout);
 
@@ -242,12 +251,30 @@ pub fn sync_at(root: &Path, url: &str, generation: u32, mode: Mode) -> Res<PathB
 fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<PathBuf> {
     let current = resolve_link(root, generation);
     line.phase("checking for updates");
+    let repo_dir = root.join("repo");
+    // We hold `.lock`, which owns `repo/`: any gix lock file in there is a
+    // leftover of a fetch that died holding it (kill -9, OOM, a node crash,
+    // an interrupt that abandoned it), and gix would refuse every later
+    // fetch over it.
+    remove_stale_locks(&repo_dir);
     // Anything short of a fetched tip — the cache cannot be opened, the host
     // is unreachable, the fetch fails — leaves the copy in place, if any.
-    let fetched = open_repo(&root.join("repo")).and_then(|repo| {
-        preflight(url)?;
-        fetch_abandonable(repo, url, line)
-    });
+    let fetch = |line: &Line| {
+        open_repo(&repo_dir).and_then(|repo| {
+            preflight(&repo, url)?;
+            fetch_abandonable(repo, url, line)
+        })
+    };
+    let mut fetched = fetch(line);
+    if let Err(e) = &fetched
+        && !gix::interrupt::is_triggered()
+        && is_lock_error(e)
+    {
+        // A lock the sweep could not remove: the cache holds nothing a fetch
+        // cannot restore, so start it over and fetch once more.
+        let _ = fs::remove_dir_all(&repo_dir);
+        fetched = fetch(line);
+    }
     let (repo, tip) = match fetched {
         Ok(fetched) => fetched,
         Err(e) if gix::interrupt::is_triggered() => return Err(e),
@@ -346,6 +373,38 @@ fn copy_date(root: &Path, dir: &Path) -> String {
     date.unwrap_or_else(|| name.chars().take(7).collect())
 }
 
+/// Delete every gix lock file (`*.lock`) in the fetch cache `repo`: at its
+/// top (`HEAD.lock`, `config.lock`, `packed-refs.lock`), anywhere under
+/// `refs/`, and in `objects/pack/`. Called only under `.lock`, which owns
+/// `repo/`, so every one of them is stale. Best-effort and silent: one that
+/// cannot be removed fails the fetch with a lock error, and the cache is
+/// rebuilt.
+fn remove_stale_locks(repo: &Path) {
+    fn sweep(dir: &Path, recurse: bool) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                if recurse {
+                    sweep(&path, true);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "lock") {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    sweep(repo, false);
+    sweep(&repo.join("refs"), true);
+    sweep(&repo.join("objects").join("pack"), false);
+}
+
+/// Did `e` come from a gix lock file that is in the way?
+fn is_lock_error(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|cause| cause.downcast_ref::<gix::lock::acquire::Error>().is_some())
+}
+
 /// Open the bare fetch cache, (re-)creating it when it is missing or broken:
 /// it holds nothing a fetch cannot restore.
 fn open_repo(dir: &Path) -> Res<gix::Repository> {
@@ -368,8 +427,9 @@ fn open_repo(dir: &Path) -> Res<gix::Repository> {
 /// Before an http(s) fetch, check within [`PREFLIGHT_TIMEOUT`] that the host
 /// accepts a TCP connection at all, so an offline host fails fast (and the
 /// wait stays interruptible). Other transports, and hosts behind a proxy
-/// (where a direct connection proves nothing), go straight to the fetch.
-fn preflight(url: &str) -> Res<()> {
+/// (where a direct connection proves nothing), go straight to the fetch —
+/// a proxy from the environment or from git config.
+fn preflight(repo: &gix::Repository, url: &str) -> Res<()> {
     use gix::url::Scheme;
     let Ok(parsed) = gix::url::parse(url.as_bytes().as_bstr()) else { return Ok(()) };
     if !matches!(parsed.scheme, Scheme::Http | Scheme::Https) {
@@ -378,7 +438,7 @@ fn preflight(url: &str) -> Res<()> {
     let proxied = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]
         .iter()
         .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()));
-    if proxied {
+    if proxied || git_config_proxy(repo) {
         return Ok(());
     }
     let Some(host) = parsed.host().map(str::to_owned) else { return Ok(()) };
@@ -405,6 +465,19 @@ fn preflight(url: &str) -> Res<()> {
             bail!("no connection to {host}:{port} within {}s", PREFLIGHT_TIMEOUT.as_secs());
         }
     }
+}
+
+/// Does git config name an http proxy (`http.proxy`, `http.<url>.proxy` or
+/// `https.proxy`)? The cache's config snapshot includes the user's
+/// `~/.gitconfig` and the system config, as `gix::open` reads them all.
+fn git_config_proxy(repo: &gix::Repository) -> bool {
+    let snapshot = repo.config_snapshot();
+    let config = snapshot.plumbing();
+    ["http", "https"].into_iter().any(|name| {
+        config.sections_by_name(name).is_some_and(|mut sections| {
+            sections.any(|section| section.value("proxy").is_some_and(|v| !v.trim().is_empty()))
+        })
+    })
 }
 
 /// Resolve `host` and try its addresses until one accepts, all within
@@ -436,10 +509,13 @@ fn connect(host: &str, port: u16) -> Res<()> {
 /// 100 ms; returns the repository along with the tip. gix's http transport
 /// connects with a hard-coded 20 s timeout and checks the interrupt flag
 /// only between phases, and behind a proxy no preflight bounds that wait,
-/// so the calling thread is what keeps an interrupt prompt: it fails with
-/// "interrupted" at once and abandons the fetch. The thread is detached,
-/// never joined — it dies with the process the interrupt is ending — and
-/// reports through its own handle on `line`.
+/// so the calling thread is what keeps an interrupt prompt. On an interrupt
+/// it gives the fetch up to [`FETCH_WIND_DOWN`] to see the flag and unwind —
+/// its drops remove gix's lock and temp files, which the exit the interrupt
+/// leads to would not — then fails with "interrupted" whether or not the
+/// fetch finished; one still stuck in a connect is abandoned, never joined,
+/// and dies with the process. The thread reports through its own handle on
+/// `line`.
 fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix::Repository, ObjectId)> {
     use std::sync::mpsc::RecvTimeoutError;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -455,6 +531,13 @@ fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix:
             Ok(result) => return result,
             Err(RecvTimeoutError::Timeout) => {
                 if gix::interrupt::is_triggered() {
+                    let deadline = std::time::Instant::now() + FETCH_WIND_DOWN;
+                    while std::time::Instant::now() < deadline
+                        && matches!(
+                            rx.recv_timeout(Duration::from_millis(100)),
+                            Err(RecvTimeoutError::Timeout)
+                        )
+                    {}
                     bail!("interrupted");
                 }
             }
@@ -932,6 +1015,57 @@ mod tests {
         assert!(notice.contains("cactup update"), "{notice}");
     }
 
+    #[test]
+    fn the_lock_sweep_removes_lock_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        gix::init_bare(&repo).unwrap();
+        fs::create_dir_all(repo.join("refs/mdb")).unwrap();
+        fs::create_dir_all(repo.join("objects/pack")).unwrap();
+        let stale = [
+            "HEAD.lock",
+            "config.lock",
+            "packed-refs.lock",
+            "refs/mdb/head.lock",
+            "objects/pack/pack-1.keep.lock",
+        ];
+        let kept = ["HEAD", "config", "refs/mdb/head", "objects/pack/pack-1.pack", "objects/ab.lock"];
+        for name in stale.iter().chain(&kept) {
+            fs::write(repo.join(name), "").unwrap();
+        }
+        remove_stale_locks(&repo);
+        for name in stale {
+            assert!(!repo.join(name).exists(), "{name} survived");
+        }
+        for name in kept {
+            assert!(repo.join(name).exists(), "{name} was removed");
+        }
+    }
+
+    #[test]
+    fn a_git_config_proxy_skips_the_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo");
+        let repo = open_repo(&path).unwrap();
+        let env_proxy =
+            ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]
+                .iter()
+                .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()));
+        if env_proxy || git_config_proxy(&repo) {
+            eprintln!("note: a proxy is configured here already; skipping the preflight proxy test");
+            return;
+        }
+        // Nothing listens on port 1: the direct probe fails at once.
+        let url = "https://127.0.0.1:1/cactup.git";
+        assert!(preflight(&repo, url).is_err());
+        let config = fs::read_to_string(path.join("config")).unwrap();
+        fs::write(path.join("config"), format!("{config}[http]\n\tproxy = http://proxy.invalid:3128\n"))
+            .unwrap();
+        let repo = gix::open(&path).unwrap();
+        assert!(git_config_proxy(&repo));
+        preflight(&repo, url).unwrap();
+    }
+
     /// Local-path fetches run `git-upload-pack`; without it on PATH the
     /// transport tests have nothing to talk to.
     fn have_upload_pack() -> bool {
@@ -1001,6 +1135,44 @@ mod tests {
         let before = read_stamp(&root, 1).unwrap();
         assert_eq!(sync_at(&root, BOGUS, 1, Mode::Force).unwrap(), synced);
         assert_eq!(read_stamp(&root, 1).unwrap(), before);
+    }
+
+    #[test]
+    fn a_stale_gix_lock_does_not_wedge_the_cache() {
+        if !have_upload_pack() {
+            return;
+        }
+        let mut remote = history(&[1]);
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().join("mdb");
+        sync_at(&root, &remote.url(), 1, Mode::Throttled).unwrap();
+        let repo = root.join("repo");
+
+        // Survives exactly as long as the cache is not rebuilt.
+        fs::write(repo.join("marker"), "").unwrap();
+
+        // Left behind by a fetch that died holding them: swept away, and the
+        // next sync moves the ref they guarded, in the same cache.
+        let stale = ["refs/mdb/head.lock", "packed-refs.lock", "HEAD.lock", "objects/pack/x.lock"];
+        fs::create_dir_all(repo.join("objects/pack")).unwrap();
+        for name in stale {
+            fs::write(repo.join(name), "").unwrap();
+        }
+        let tip = remote.commit(Some(1), "commit 1");
+        assert_eq!(sync_at(&root, &remote.url(), 1, Mode::Force).unwrap(), root.join(tip.to_string()));
+        for name in stale {
+            assert!(!repo.join(name).exists(), "{name} survived");
+        }
+        assert!(repo.join("marker").exists(), "the sweep alone should have sufficed");
+
+        // One the sweep cannot remove (a directory here) fails the fetch with
+        // a lock error: the cache is rebuilt and the fetch retried.
+        fs::create_dir(repo.join("refs/mdb/head.lock")).unwrap();
+        fs::write(repo.join("refs/mdb/head.lock/x"), "").unwrap();
+        let tip = remote.commit(Some(1), "commit 2");
+        assert_eq!(sync_at(&root, &remote.url(), 1, Mode::Force).unwrap(), root.join(tip.to_string()));
+        assert!(!repo.join("refs/mdb/head.lock").exists());
+        assert!(!repo.join("marker").exists());
     }
 
     #[test]

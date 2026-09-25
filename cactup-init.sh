@@ -427,7 +427,11 @@ ${_line}"
 }
 
 get_architecture() {
-    local _ostype _cputype _bitness _arch _clibtype
+    local _ostype
+    local _cputype
+    local _bitness
+    local _arch
+    local _clibtype
     _ostype="$(uname -s)"
     _cputype="$(uname -m)"
     _clibtype="gnu"

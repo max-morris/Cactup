@@ -65,13 +65,11 @@ fn freeze(exe: &Path, stamp: Option<Stamp>, open: impl FnOnce(&Path) -> Res<File
 /// `current_exe()` and this open, a concurrent update can rename a symlink
 /// over `bin/cactup`, and `cactup-<id>` would then receive another build's
 /// bytes under this build's name. `/proc/self/exe` always opens the file
-/// this process was started from; `exe` is only the fallback for when
-/// /proc is unavailable.
-fn open_running(exe: &Path) -> Res<File> {
-    match File::open("/proc/self/exe") {
-        Ok(file) => Ok(file),
-        Err(_) => File::open(exe).with_context(|| format!("Failed to open {}", exe.display())),
-    }
+/// this process was started from. There is deliberately no fallback to
+/// opening `exe`: without /proc no copy is made (and [`freeze`] warns),
+/// rather than a copy that might be of another build.
+fn open_running(_exe: &Path) -> Res<File> {
+    File::open("/proc/self/exe").context("Failed to open /proc/self/exe, the running cactup")
 }
 
 /// `exe` itself when it is already `cactup-<id>`; else `cactup-<id>` in the
@@ -129,7 +127,8 @@ mod tests {
     #[test]
     fn the_copy_source_is_the_running_inode_not_the_path() {
         use std::os::unix::fs::MetadataExt;
-        // Whatever the path names now, the source is this process's own file.
+        // Whatever the path names now (it is never opened), the source is
+        // this process's own file.
         let bin = tempfile::tempdir().unwrap();
         let impostor = bin.path().join("cactup");
         fs::write(&impostor, b"another build").unwrap();
