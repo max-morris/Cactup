@@ -7,23 +7,6 @@ description = "Install and manage Einstein Toolkit releases on HPC clusters and 
 
 **cactup** is the easiest way to install and manage [Einstein Toolkit](http://einsteintoolkit.org/) (Cactus) releases on HPC clusters and workstations. It replaces the older simfactory system with a modern, user-friendly CLI.
 
-## What is cactup?
-
-cactup handles:
-
-- **Installing releases** — download and install Einstein Toolkit versions with a single command
-- **Refreshing installations** — refetch an existing installation to pick up thornlist edits or move to a new release
-- **Managing configurations** — build Cactus configs with custom thornlists and compiler options
-- **Running simulations** — create, submit, and monitor simulations on batch systems or interactively
-- **Running test suites** — validate built configs against the thorn test suite
-- **Cluster support** — manage multiple machines, from single-node workstations to large HPC clusters
-
-## Two audiences
-
-**Users**: Install releases, build configs, and run simulations on your machine. Start with [Getting Started](users/getting-started.html).
-
-**Cluster authors**: Add your HPC cluster to cactup by writing a machine database (MDB) entry. Start with [MDB Overview](authors/mdb-overview.html).
-
 ## Quick start
 
 <div class="install-box">
@@ -60,6 +43,23 @@ Once installed, explore the user guide to build configs and run simulations.
 To refresh an existing installation — pick up a thornlist edit or move it to
 a newer release — see [Installing Releases](users/installing-releases.html)
 for `cactup installation refetch`.
+
+## What is cactup?
+
+cactup handles:
+
+- **Installing releases** — download and install Einstein Toolkit versions with a single command
+- **Refreshing installations** — refetch an existing installation to pick up thornlist edits or move to a new release
+- **Managing configurations** — build Cactus configs with custom thornlists and compiler options
+- **Running simulations** — create, submit, and monitor simulations on batch systems or interactively
+- **Running test suites** — validate built configs against the thorn test suite
+- **Cluster support** — manage multiple machines, from single-node workstations to large HPC clusters
+
+## Two audiences
+
+**Users**: Install releases, build configs, and run simulations on your machine. Start with [Getting Started](users/getting-started.html).
+
+**Cluster authors**: Add your HPC cluster to cactup by writing a machine database (MDB) entry. Start with [MDB Overview](authors/mdb-overview.html).
 
 ## For cluster authors
 
