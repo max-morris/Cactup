@@ -135,6 +135,10 @@ if [ "${OMPI_COMM_WORLD_RANK:-0}" = 0 ]; then
   # of the name and the regex can select them. --launch-skip/--launch-count
   # then count only launches that match the regex. No regex = every launch.
   # CACTUP_NCU_METRICS (comma-separated) replaces the two sections when set.
+  # CACTUP_NCU_NVTX (regex) restricts profiling to launches inside a matching
+  # NVTX range, e.g. ODESolvers::Solve: without it --launch-skip has to count
+  # past the initial-data prolongations (18k on a 2lev run) to reach the
+  # evolution, and a fixed skip lands wherever it lands (2026-09-29, athena).
   if [ -n "${CACTUP_NCU_METRICS:-}" ]; then
     NCU_WHAT="--metrics ${CACTUP_NCU_METRICS}"
   else
@@ -143,6 +147,7 @@ if [ "${OMPI_COMM_WORLD_RANK:-0}" = 0 ]; then
   exec ncu --target-processes all --kernel-name-base demangled \
     --launch-skip "${CACTUP_NCU_SKIP:-300}" --launch-count "${CACTUP_NCU_COUNT:-60}" \
     ${CACTUP_NCU_KERNELS:+--kernel-name "regex:${CACTUP_NCU_KERNELS}"} \
+    ${CACTUP_NCU_NVTX:+--nvtx --nvtx-include "regex:${CACTUP_NCU_NVTX}"} \
     ${NCU_WHAT} \
     --force-overwrite -o profile.ncu "$@@"
 else

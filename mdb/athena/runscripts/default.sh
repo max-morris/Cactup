@@ -132,6 +132,7 @@ if [ "${OMPI_COMM_WORLD_RANK:-0}" = 0 ]; then
   exec ncu --target-processes all --kernel-name-base demangled \
     --launch-skip "${CACTUP_NCU_SKIP:-300}" --launch-count "${CACTUP_NCU_COUNT:-60}" \
     ${CACTUP_NCU_KERNELS:+--kernel-name "regex:${CACTUP_NCU_KERNELS}"} \
+    ${CACTUP_NCU_NVTX:+--nvtx --nvtx-include "regex:${CACTUP_NCU_NVTX}"} \
     ${NCU_WHAT} \
     --force-overwrite -o profile.ncu "$@@"
 else
