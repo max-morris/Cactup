@@ -91,6 +91,10 @@ FFTW3_DIR = "BUILD"
 GSL_DIR   = "BUILD"
 BOOST_DIR = "BUILD"
 HWLOC_DIR = "BUILD"
+# hwloc's configure finds athena's libudev headers (systemd-devel) and links
+# against them, but the thorn adds only -lhwloc, so the final link failed on
+# 2026-09-29 with undefined udev_* references. Same fix as crux and smic.
+HWLOC_EXTRA_LIBS = "udev"
 LIBJPEG_DIR = "BUILD"
 BLAS_DIR   = "BUILD"
 LAPACK_DIR = "BUILD"
