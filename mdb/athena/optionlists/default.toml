@@ -1,0 +1,160 @@
+# athena optionlist (variant "default"): native CUDA build for CarpetX/AMReX
+# on the node's four A100s. Written 2026-09-29, modeled on
+# mdb/qbd/optionlists/default.toml (QB4 is also A100, so the device flags
+# carry over unchanged). Measured facts it depends on:
+#   - GPU: NVIDIA A100-SXM4-40GB -> sm_80 / CMake CUDA architecture 80.
+#   - CUDA 13.3.1 (nvcc 13.3.73), /packages/cuda/13.3.1 (env-setup in
+#     meta.toml puts it first on PATH).
+#   - gcc-toolset-13, gcc/g++/gfortran 13.3.1, absolute paths below.
+#   - CPU: AMD EPYC 7662 (Zen 2): AVX2 + FMA + F16C, no AVX-512.
+#   - MPI: HPC-X 2.24 Open MPI (CUDA-aware), see meta.toml.
+#
+# Differences from qbd, and why:
+#   - One compiler for everything. qbd splits gcc 11 (nvcc host, gfortran)
+#     from gcc 13 (flesh C, the _Float16 probe) because its nvcc 12.2 caps
+#     the host at gcc 12. nvcc 13.3 supports host gcc up to 15, so gcc 13.3.1
+#     is nvcc's host compiler too and no -allow-unsupported-compiler is
+#     needed (verified on athena: nvcc -ccbin g++ compiled and linked a
+#     CUDA + MPI test including <cmath>/<complex>/<random>/cuda_fp16.h, and
+#     the kernel ran).
+#   - No gcc runtime rpath / --enable-new-dtags: gcc-toolset-13 links newer
+#     libgcc/libstdc++ symbols statically, so there is no second libgcc_s to
+#     shadow (a _Float16 <-> double test binary had no dynamic half-precision
+#     helpers).
+#   - x86 flags: -mavx2 -mfma -mf16c instead of qbd's AVX-512 set.
+#     -mf16c keeps its qbd role (hardware binary16 <-> binary32 for gcc's
+#     _Float16 in the flesh's C code) and stays out of CUCCFLAGS for the same
+#     reason as on qbd.
+#   - LD adds --gpu-architecture sm_80: CUDA 13's default target is sm_75,
+#     so a relocatable-device-code link without it warns "SM Arch ('sm_75')
+#     not found" and device-links for the wrong architecture.
+#   - Externals: athena has no prebuilt set like qbd's externals-qbd, and no
+#     system development packages for HDF5, FFTW3, GSL, Boost, yaml-cpp,
+#     hwloc, libjpeg, BLAS/LAPACK, ADIOS2, openPMD or Silo (runtime .so files
+#     only, for hwloc/libjpeg/OpenBLAS). Those are BUILD, from the Cactus
+#     ExternalLibraries thorns. zlib and OpenSSL have headers in /usr.
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8); every value is kept
+# as a TOML string so the render is faithful.
+
+[cactup]
+gpu               = true
+default           = true      # `cpu` is the other variant; this one stays the implicit choice
+compatible-queues = ["local"]
+
+[options]
+VERSION = "athena-2026-09-29"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "/opt/rh/gcc-toolset-13/root/usr/bin/gcc"
+CXX = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
+F90 = "/opt/rh/gcc-toolset-13/root/usr/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx2 -mfma -mf16c"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx2 -mfma -mf16c"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx2 -mfma -mf16c"
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
+
+LIBS    = "stdc++fs gfortran cudart_static curand_static culibos dl rt pthread"
+LIBDIRS = "/packages/cuda/13.3.1/lib64"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+# nvcc: every C++ file goes through it (AMReX's detect.sh sets CXX = CUCC),
+# and under nvcc the flesh maps CCTK_REAL2 to __half. `--compiler-bindir g++`
+# resolves to gcc-toolset-13 via env-setup's PATH (the GPU test kit's
+# preflight also reads the host compiler from this flag).
+CUCC  = "nvcc"
+CUCCFLAGS = "--compiler-bindir g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
+LD = "nvcc --compiler-bindir g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80"
+CUCC_DEBUG_FLAGS    = "-g3"
+CUCC_OPTIMISE_FLAGS = "-O3"
+CUCC_WARN_FLAGS     = "-Xcompiler -Wall"
+CUCC_OPENMP_FLAGS   = "-Xcompiler -fopenmp"
+
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+AMREX_ENABLE_CUDA = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+# CMake 3.31.1 (also first on env-setup's PATH); the AMReX build needs a
+# newer one than the site default 3.19.6.
+CMAKE_DIR = "/packages/cmake/3.31.1"
+
+# HPC-X 2.24 Open MPI (CUDA-aware). Given explicitly rather than through the
+# mpicc wrapper: HPC-X's wrappers name nvc (the HPC SDK compiler) as the
+# underlying compiler, which this build does not use.
+MPI_DIR      = "/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24/ompi"
+MPI_INC_DIRS = "/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24/ompi/include"
+MPI_LIB_DIRS = "/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24/ompi/lib"
+MPI_LIBS     = "mpi"
+
+# Built by Cactus (no usable system copy; see the header).
+HDF5_DIR  = "BUILD"
+FFTW3_DIR = "BUILD"
+GSL_DIR   = "BUILD"
+BOOST_DIR = "BUILD"
+HWLOC_DIR = "BUILD"
+LIBJPEG_DIR = "BUILD"
+BLAS_DIR   = "BUILD"
+LAPACK_DIR = "BUILD"
+YAML_CPP_DIR = "BUILD"
+YAML_CPP_ENABLE_FORTRAN = "OFF"
+ADIOS2_DIR  = "BUILD"
+OPENPMD_DIR = "BUILD"
+SILO_DIR    = "BUILD"
+
+# NSIMD is built too; Zen 2 tops out at AVX2.
+NSIMD_DIR  = "BUILD"
+NSIMD_SIMD = "AVX2"
+
+ZLIB_DIR  = "/usr"
+ZLIB_LIBS = "z"
+OPENSSL_DIR = "/usr"
+
+AMREX_DIR                      = "BUILD"
+AMREX_ENABLE_FORTRAN           = "OFF"
+AMREX_ENABLE_HIP               = "no"
+AMREX_CMAKE_CUDA_ARCHITECTURES = "80"

@@ -1,0 +1,151 @@
+# saturn — one GPU node of "Frank", the University of Oregon closet cluster
+# (a handful of GPU nodes behind the login host orthus, one shared NFS home and
+# package tree, NO batch scheduler). Written 2026-09-29 from measurements taken
+# on the node itself that day:
+#
+#   Ubuntu 22.04.5 LTS, kernel 5.15.0-186-generic, `hostname` = "saturn"
+#     (FQDN saturn.nic.uoregon.edu; storage-network alias saturn.stor).
+#   4 x Intel Xeon Platinum 8367HC (Cooper Lake, AVX-512 + AVX512_BF16),
+#     26 cores per socket = 104 cores, SMT 2 (208 hardware threads), 4 NUMA
+#     nodes; 376 GiB RAM (MemTotal 394745224 kB).
+#   3 x NVIDIA A100 PCIe (sm_80) of TWO sizes: GPU0 80 GB (NUMA 0), GPU1 and
+#     GPU2 40 GB (NUMA 1 and 3). No NVLink: every GPU pair is "SYS".
+#   Driver 610.43.02, CUDA driver API 13.3; profiling counters open to users
+#     (/proc/driver/nvidia/params: RmProfilingAdminOnly: 0; an ncu metrics
+#     run on a test kernel returned real counter values).
+#   Toolchain (environment-modules under /packages, the shared NFS package
+#     tree): gcc 13.2.0, CUDA 13.2.1 (nvcc 13.2; accepts gcc <= 15), OpenMPI
+#     4.1.8 built with that gcc (NOT CUDA-aware; ob1/vader, no UCX pml).
+#
+# Frank facts that shape this entry:
+#   - No scheduler: submit backgrounds the script with nohup, the PID is the
+#     job id, ps/pkill give status/stop (the et-juphub/omnia shape).
+#   - Other people use this node interactively (7 sessions, load average ~20
+#     when measured; GPU0 was at 100% for another user's job), so defaults are
+#     deliberately modest: 8 cores and ONE GPU per run unless asked, and the
+#     runscript picks GPUs that have no compute process on them.
+#   - $HOME is /home/users/<user> -> /storage/users/<user> (NFS, shared by all
+#     Frank nodes, 59 TB free); /packages is the NFS package tree (built for
+#     Ubuntu 20.04, so some of it no longer runs here: the cmake modules want
+#     libssl.so.1.1). /mnt/beegfs is a shared BeeGFS scratch (107 TB free) with
+#     no per-user directories. /tmp is on the node's local NVMe.
+#   - Single-node only: exec-host is "localhost" and runs launch with a local
+#     mpirun. The InfiniBand ports (mlx5_2/3) are DOWN; the 100 GbE mlx5 NICs
+#     are up. Multi-node runs would need an mpirun hostfile and are not wired.
+
+[machine]
+name        = "saturn"
+nickname    = "saturn"
+location    = "University of Oregon"
+description = "GPU node of Frank, the University of Oregon closet cluster (no batch scheduler, shared NFS home): 104-core Xeon 8367HC, 3 x A100 PCIe (one 80 GB, two 40 GB), CUDA 13.2."
+status      = "experimental"
+hostname    = "saturn.nic.uoregon.edu"
+
+[paths]
+# The shared NFS home, spelled by its real mount point (/home/users is a
+# symlink to /storage/users) so recorded paths are the same on every node.
+# install-home matches where the existing installation already lives
+# (/storage/users/<user>/.cactup/cacti).
+install-home    = "/storage/users/@USER@/.cactup/cacti"
+simulation-home = "/storage/users/@USER@/simulations"
+test-home       = "/storage/users/@USER@/tests"
+
+[hardware]
+# A CPU is a core, never a hardware thread: 4 sockets x 26 cores = 104, with
+# SMT 2 declared separately (104 x 2 = the 208 CPUs lscpu counts).
+max-cpus-per-node     = 104
+threads-per-cpu       = 2
+# Polite default for a shared node (the omnia reasoning): a GPU rank's host
+# side needs a few cores, not a quarter of the machine. Ask for more with -c.
+default-cpus-per-task = 8
+# Three A100s. A ceiling, not a target: GPUS_PER_TASK stays 1. Note the sizes
+# differ (80/40/40 GB), so a multi-GPU run must fit its per-rank share into
+# 40 GB.
+max-gpus-per-node     = 3
+# MB per node (free -m: 385493).
+memory                = 385493
+
+[build]
+make      = "make -j@MAKEJOBS@"
+# 32 of 104 cores: a CarpetX build in reasonable time while staying a good
+# neighbor on a node other people are using interactively.
+make-jobs = 32
+
+[environment]
+# Plain exports instead of `module load`: the build and submit phases source
+# this in `/bin/sh -c`, which is dash here, and `module` is only defined in
+# bash login shells (/etc/profile.d/modules.sh). The paths are exactly what
+# the modules gcc/13.2.0, cuda/13.2 and openmpi/4.1.8_gcc13.2.0 set up
+# (checked against the modulefiles on 2026-09-29).
+#   - gcc 13.2.0 for everything: C, C++, Fortran and nvcc's host compiler.
+#     Unlike qbd (nvcc 12.2, gcc <= 12) no compiler split is needed: CUDA
+#     13.2's host_config.h accepts gcc up to 15, and nvcc 13.2 compiled a
+#     C++17 --extended-lambda test with <cmath>/<complex>/<random>/mpi.h and
+#     cuda_fp16's __half cleanly with this gcc, so no floatn.h trouble either.
+#   - CUDA 13.2.1: the newest toolkit with a module (13.3.1 is installed under
+#     /packages/cuda but has no module). The bundled AMReX 25.11 supports
+#     CUDA 13 ("Fix for CUDA 13 (#4648)" in its CHANGES). cuda/12.8 is the
+#     fallback if CUDA 13 bites; it also accepts gcc 13.
+#   - ncu 2026.1.1 and nsys 2025.6.3 come from that toolkit (the runscript's
+#     CACTUP_PROFILE block needs them on PATH).
+#   - gcc 13's lib64 first on LD_LIBRARY_PATH: the system libstdc++ is gcc
+#     11's; the optionlist also bakes in an rpath as a fallback.
+env-setup = """
+SATURN_GCC=/packages/gcc/13.2.0
+SATURN_CUDA=/packages/cuda/13.2.1
+SATURN_MPI=/packages/openmpi/4.1.8/gcc_13.2.0
+export CUDA_HOME="$SATURN_CUDA"
+export PATH="$SATURN_MPI/bin:$SATURN_CUDA/bin:$SATURN_CUDA/nsight-compute-2026.1.1/target/linux-desktop-glibc_2_11_3-x64:$SATURN_CUDA/nsight-systems-2025.6.3/bin:$SATURN_GCC/bin:$PATH"
+export LD_LIBRARY_PATH="$SATURN_MPI/lib:$SATURN_CUDA/lib64:$SATURN_CUDA/extras/CUPTI/lib64:$SATURN_GCC/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"""
+
+[scheduler]
+# No scheduler: copied from et-juphub/omnia. Background the script, echo its
+# PID as the job id; ps/pkill for status/stop.
+submit            = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit   = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+get-status        = "ps @JOB_ID@"
+# Kill the whole process group descending from @JOB_ID@, not just the top
+# process (mpirun and every rank with it).
+stop              = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern    = "(.*)"
+status-pattern    = "^ *@JOB_ID@ "
+queued-pattern    = "$^"          # never "queued"
+running-pattern   = "^"           # in ps => running
+holding-pattern   = "$^"          # never "held"
+exec-host         = "echo localhost"
+exec-host-pattern = "(.*)"
+# No max-walltime: nothing enforces one here, so the one-year fallback applies.
+# No allocation-env: nothing allocates, so `test run` needs no gate.
+
+# The GPU "queue": every default build is the CUDA/CarpetX build, and D12
+# refuses a GPU binary on a non-GPU queue.
+[queues.local]
+gpu     = true
+default = true
+
+# The CPU-only optionlist variant (optionlists/cpu.toml) runs through its own
+# runscript, and cactup picks script variants by queue, so it gets a queue of
+# its own (the qbd pattern): `cactup sim submit ... -q cpu`. Same node, no GPU
+# binding; 8 threads per rank gives 13 ranks when the whole node is asked for.
+[queues.cpu]
+gpu = false
+default-cpus-per-task = 8
+
+# tasks = 1 on the default variants: a no-flag run takes one GPU (the fill-
+# the-node rule would otherwise derive 3 ranks and grab all three A100s on a
+# shared node). Ask for more with -n 2 / -n 3. The test variants keep the
+# testsuite default of 2 ranks (two GPUs).
+[variants.submitscript]
+"default" = { queues = ["local"], default = true, tasks = 1 }
+"cpu"     = { queues = ["cpu"] }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["local"], default = true, tasks = 1 }
+"cpu"     = { queues = ["cpu"] }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default", "cpu"]
