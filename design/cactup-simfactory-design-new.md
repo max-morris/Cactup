@@ -2346,13 +2346,51 @@ landed:
   directory; the symlink target it resolves to and the backing repo's
   normalized `origin` URL (so re-pointing a repo at a fork invalidates that
   repo's thorns, while a mere URL-spelling change does not); the sorted list
-  of file paths in the thorn (top-level plus everything under `src/`); and
-  the contents of its `*.ccl` files and `make.code.defn` /
-  `make.configuration.defn` / `make.code.deps`. It deliberately excludes the
-  contents of ordinary source files: `make`'s own `.d` dependency tracking
-  already gets body-code edits right, and hashing bodies would discard a
-  thorn's whole build directory on every such edit — the opposite of what
-  this tracking is for.
+  of file paths in the thorn (top-level plus everything under `src/`), less
+  those a `.cactupignore` exempts (below); and the contents of its `*.ccl`
+  files and `make.code.defn` / `make.configuration.defn` / `make.code.deps`.
+  It deliberately excludes the contents of ordinary source files: `make`'s
+  own `.d` dependency tracking already gets body-code edits right, and
+  hashing bodies would discard a thorn's whole build directory on every such
+  edit — the opposite of what this tracking is for.
+
+**`.cactupignore`.** Editor droppings under `src/` (JupyterLab's
+`.ipynb_checkpoints/`, vim's `.*.swp`) would otherwise each read as a file
+added to the thorn and cost it a from-scratch recompile; blanket-ignoring
+dotfiles was rejected as too blunt. A `.cactupignore` has exactly `.gitignore`
+syntax and semantics (`!` negation, trailing `/` for directories, anchoring by
+a leading or middle `/`, `**`, comments, escaping; a bad pattern is skipped as
+git skips it) and exempts what it matches from the `thorn-shapes` file list
+only — never from the `sources` map above (HEAD plus tracked-file edits) or
+anything else. Locations mirror git:
+
+- per directory, from the thorn's repo root (`repos/<repo>`, what the URL
+  frame above resolves) down through the thorn dir and `src/`, each applying
+  at and below its own directory, deeper files taking precedence; paths are
+  matched relative to the repo root. A thorn not under `repos/` sees only the
+  files from the thorn dir down, matched relative to the thorn dir;
+- `$CACTUP_HOME/cactupignore` (`~/.cactup/cactupignore`), lowest precedence,
+  like `core.excludesFile`.
+
+As in git, an ignored directory is not descended into and nothing under it
+can be re-included; an ignored repo-level ancestor (or the thorn dir itself)
+leaves the thorn an empty file list. The ignore files themselves are never in
+the list, so a tree with none hashes byte-for-byte as before `.cactupignore`
+existed (pinned by a unit test), and editing one changes a shape only when it
+changes which files match. Each file is parsed once per directory per shape
+pass (repo-level ancestors are shared across a repo's thorns). A missing
+ignore file is no patterns; any other I/O error reading one is treated like
+any other unreadable file in the thorn — the thorn is omitted from the map.
+An entry that cannot be stat'ed (a dangling symlink) still fails the thorn
+unless it is ignored, so a `.#*` pattern covers Emacs lock files.
+
+The global file is read once, by `prepare`, and its text (or its absence) is
+frozen into the attempt's `build.toml` as `global-shape-ignore`; `execute`'s
+re-probe (§7.9) matches with that copy and never reads `$CACTUP_HOME` (D11) —
+a queued job may run under another `CACTUP_HOME`, or none, and would otherwise
+flip shapes between builds. An unreadable global file warns at read time and
+reads as absent: failing it like an in-thorn file would drop every thorn's
+build state, while treating it as absent can only put files back into shapes.
 
 A thorn whose recorded provider or shape has moved since the last build has
 its `build/<Thorn>/` and `libthorn_<Thorn>.a` deleted before the reconfigure
@@ -2626,9 +2664,10 @@ A thorn whose provider or shape differs also triggers a reconfigure + `make`
 without the realclean, but scoped to that thorn alone: `build/<Thorn>/` and
 `libthorn_<Thorn>.a` are deleted before make runs, not the whole config. A
 provider change means the name now resolves to a different arrangement
-entirely; a shape change means a file was added or removed, or one of the
-thorn's `.ccl`/`make.code.defn`/`make.configuration.defn`/`make.code.deps`
-was edited — either way, make's own dependency tracking cannot be trusted to
+entirely; a shape change means a file was added or removed (one no
+`.cactupignore` exempts, §7.4), or one of the thorn's
+`.ccl`/`make.code.defn`/`make.configuration.defn`/`make.code.deps` was
+edited — either way, make's own dependency tracking cannot be trusted to
 notice on its own (a stale `.d` can still name a bindings header Cactus's
 configure step has since deleted, and `ar` updates `libthorn_*.a` in place,
 so a removed source's orphaned `.o` keeps linking in). Ordinary edits to a
@@ -2800,7 +2839,9 @@ become a **lie**: the next plain `cactup build` would diff stored-against-live,
 find them equal (because the frozen record already matches whatever the queued
 build compiled *against*, not what it actually compiled), and print "up to
 date" forever — a silently wrong binary, permanently. So `execute` re-probes
-sources, providers, and shapes itself, right before compiling, and:
+sources, providers, and shapes itself, right before compiling — the shapes
+with the global `.cactupignore` `prepare` froze into `build.toml` (§7.4), so
+the re-probe reads nothing under `$CACTUP_HOME` — and:
 
 1. Records what it actually finds — not what `prepare` found — as this
    attempt's baseline.

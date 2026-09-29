@@ -449,10 +449,17 @@ fn open_repo(dir: &Path) -> Res<gix::Repository> {
 /// accepts a TCP connection at all, so an offline host fails fast (and the
 /// wait stays interruptible). Other transports, and hosts behind a proxy
 /// (where a direct connection proves nothing), go straight to the fetch —
-/// a proxy from the environment or from git config.
+/// a proxy from the environment or from git config. The URL checked is the
+/// one the fetch will really use, after `url.<base>.insteadOf` rewriting: a
+/// site that mirrors GitHub locally must not need GitHub to be reachable.
 fn preflight(repo: &gix::Repository, url: &str) -> Res<()> {
     use gix::url::Scheme;
-    let Ok(parsed) = gix::url::parse(url.as_bytes().as_bstr()) else { return Ok(()) };
+    let effective = repo
+        .remote_at(url)
+        .ok()
+        .and_then(|remote| remote.url(gix::remote::Direction::Fetch).map(|u| u.to_bstring().to_string()))
+        .unwrap_or_else(|| url.to_owned());
+    let Ok(parsed) = gix::url::parse(effective.as_bytes().as_bstr()) else { return Ok(()) };
     if !matches!(parsed.scheme, Scheme::Http | Scheme::Https) {
         return Ok(());
     }
@@ -1240,6 +1247,30 @@ mod tests {
             .unwrap();
         let repo = gix::open(&path).unwrap();
         assert!(git_config_proxy(&repo));
+        preflight(&repo, url).unwrap();
+    }
+
+    /// An `insteadOf` rule that sends the fetch to a local mirror means the
+    /// upstream host is never contacted, so it need not be reachable.
+    #[test]
+    fn an_insteadof_mirror_skips_the_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo");
+        let repo = open_repo(&path).unwrap();
+        if env_proxy() || git_config_proxy(&repo) {
+            eprintln!("note: a proxy is configured here already; skipping the preflight mirror test");
+            return;
+        }
+        // Nothing listens on port 1: the direct probe fails at once.
+        let url = "https://127.0.0.1:1/cactup.git";
+        assert!(preflight(&repo, url).is_err());
+        let config = fs::read_to_string(path.join("config")).unwrap();
+        fs::write(
+            path.join("config"),
+            format!("{config}[url \"file:///srv/mirrors/\"]\n\tinsteadOf = https://127.0.0.1:1/\n"),
+        )
+        .unwrap();
+        let repo = gix::open(&path).unwrap();
         preflight(&repo, url).unwrap();
     }
 

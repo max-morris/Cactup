@@ -1281,9 +1281,11 @@ fn report_configs(
     // nothing next to the fetch that just ran. `.ok()` also swallows an
     // interrupt here deliberately — this is a post-fetch report, not the
     // fetch itself, and a report must never fail the refetch.
-    let fresh_shapes = live_list
-        .as_ref()
-        .and_then(|list| crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list).ok());
+    let global_ignore = crate::build::read_global_shape_ignore();
+    let fresh_shapes = live_list.as_ref().and_then(|list| {
+        let global_ignore = global_ignore.as_deref();
+        crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list, global_ignore).ok()
+    });
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {

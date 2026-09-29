@@ -2,7 +2,7 @@
 //! one run of `make` for one config, recorded under
 //! `configs/<name>/.cactup-builds/%04d/` so a queued build can be monitored
 //! and a compute node can execute it without touching the global DB, the
-//! installation registry, the MDB, or knobs (D11). Modelled closely on
+//! installation registry, the MDB, or knobs (D11). Modeled closely on
 //! `testsuite::{TestMeta, TestRun}` and `sim::restart::{RestartMeta, Restart}`.
 //!
 //! Unlike a simulation restart's `output-%04d`, there is no nested `.cactup/`
@@ -148,6 +148,13 @@ pub struct BuildMeta {
     /// re-wrap the build command without reading the MDB (D11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub universe: Option<UniverseSpec>,
+    /// The global `.cactupignore`'s text as `prepare` read it (`None`: there
+    /// was none), so `execute`'s re-probe of thorn shapes matches with the
+    /// same patterns without reading `$CACTUP_HOME` on the compute node
+    /// (D11) — where a different `CACTUP_HOME`, or none, would otherwise
+    /// flip shapes between builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_shape_ignore: Option<String>,
     /// The fully-formed config metadata to store on success — `built` is
     /// unset until then (execute stamps it).
     pub config_meta: ConfigMeta,
@@ -389,6 +396,7 @@ mod tests {
                 wrapper_argv: Some(vec!["singularity".to_owned(), "exec".to_owned()]),
                 wrapper: None,
             }),
+            global_shape_ignore: None,
             config_meta: sample_config_meta(),
             vars: freeze_vars(&vars),
             knobs: freeze_knobs(&vars),

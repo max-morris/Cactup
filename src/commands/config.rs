@@ -153,7 +153,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
-    // Labelled for what it actually is: "variant" would misdescribe a config
+    // Labeled for what it actually is: "variant" would misdescribe a config
     // built from a --optionlist file, and — now that the choice is sticky —
     // that path is what the next bare rebuild will use, so it is worth naming.
     match &meta.optionlist_source {
@@ -480,6 +480,7 @@ mod tests {
             build_env: String::new(),
             virtual_executable: None,
             universe: None,
+            global_shape_ignore: None,
             config_meta: toml::from_str(&format!(
                 r#"
                 schema = 1

@@ -117,9 +117,13 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
     }
 
     // Remote URL check before worktree state: a repo pointing somewhere else
-    // entirely is a different upstream no matter how clean it is.
+    // entirely is a different upstream no matter how clean it is. Compare
+    // the URL as configured, not after `url.<base>.insteadOf` rewriting: a
+    // site that mirrors GitHub through insteadOf still has origin set to the
+    // thornlist's URL, and the rewritten one would never match it.
     let remote = repo
-        .find_remote("origin")
+        .try_find_remote_without_url_rewrite("origin")
+        .ok_or_else(|| anyhow!("no origin remote"))?
         .map_err(|e| anyhow!("no origin remote: {e}"))?;
     let on_disk_url = remote
         .url(Direction::Fetch)
@@ -799,6 +803,38 @@ mod tests {
             }
             other => panic!("expected RemoteUrlChanged with a modification, got {other:?}"),
         }
+    }
+
+    /// A site mirror configured through `url.<base>.insteadOf` rewrites
+    /// origin only at connect time; origin itself still names the
+    /// thornlist's URL, so the probe must not call the repo retargeted.
+    #[test]
+    fn insteadof_mirror_is_not_a_remote_url_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        testrepo::init(&dir);
+        testrepo::commit_file(&dir, "thorn.cc", "int a;\n");
+        set_origin_url(&dir, "https://github.com/owner/repo.git").unwrap();
+        let config = dir.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[url \"file:///srv/mirrors/github.com/\"]\n\tinsteadOf = https://github.com/\n");
+        std::fs::write(&config, text).unwrap();
+
+        // A clean clone has a remote-tracking ref for its branch; plant one so
+        // the probe runs to completion and has to call the repo clean.
+        let repo = gix::open(&dir).unwrap();
+        let branch = repo.head_name().unwrap().unwrap().shorten().to_string();
+        let head = repo.head_id().unwrap().detach();
+        let tracking = dir.join(".git/refs/remotes/origin").join(&branch);
+        std::fs::create_dir_all(tracking.parent().unwrap()).unwrap();
+        std::fs::write(&tracking, format!("{head}\n")).unwrap();
+
+        let probe = probe(&dir, "https://github.com/owner/repo.git", &branch);
+        assert!(
+            matches!(probe.state, RepoState::Clean { .. }),
+            "a repo behind an insteadOf mirror should probe clean, got {:?}",
+            probe.state
+        );
     }
 
     /// The heal path: rewriting `origin` persists, is visible to a fresh

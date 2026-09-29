@@ -3,6 +3,9 @@
 //! (§7.5, D8), env-setup'd `make` driving (§7.2, §6.1), build universes
 //! (§4.8), the rebuild-decision snapshot diff (§7.8), the per-config build
 //! lock (§2.3 item 4), and `cactup-config.toml` metadata (§7.4).
+//!
+//! (spelling-check: skip — the flesh's optionlist variable really is spelled
+//! `OPTIMISE`, and this file has to name it.)
 
 pub mod attempt;
 
@@ -158,7 +161,7 @@ impl Default for BuildFlags {
 /// other, and re-supplying either flag is what moves it between them.
 ///
 /// Serialized flattened into `cactup-config.toml`, where it is the single key
-/// `variant = "cuda"` or `optionlist = "/abs/path/my.cfg"`. Modelling it as a
+/// `variant = "cuda"` or `optionlist = "/abs/path/my.cfg"`. Modeling it as a
 /// sum rather than two optional keys is what keeps "exactly one" true by
 /// construction: neither the metadata nor the resolver below can express a
 /// config that is both, or neither.
@@ -775,54 +778,307 @@ fn is_shape_qualifying(basename: &str) -> bool {
 /// 32 is far deeper than any real thorn's source tree.
 const SHAPE_WALK_MAX_DEPTH: u32 = 32;
 
+/// The per-directory ignore file: `.gitignore` syntax and semantics, but it
+/// exempts files and directories from the thorn shape only (item 4 of
+/// `thorn_shapes`), never from `sources` or anything else. Its whole reason to
+/// exist is editor droppings under `src/` — JupyterLab's
+/// `.ipynb_checkpoints/`, vim's `.*.swp` — each of which would otherwise read
+/// as a file added to the thorn and cost a from-scratch recompile of it.
+const SHAPE_IGNORE_FILE: &str = ".cactupignore";
+
+/// The user-global counterpart of `SHAPE_IGNORE_FILE`, like git's
+/// `core.excludesFile`: `$CACTUP_HOME/cactupignore` (`~/.cactup/cactupignore`
+/// by default), with lower precedence than every `.cactupignore`. Only read
+/// through [`read_global_shape_ignore`]. Unit tests never read the real one —
+/// a developer's own patterns would leak into every build test — and get
+/// whatever `tests::GLOBAL_SHAPE_IGNORE` names instead.
+fn global_shape_ignore_file() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        tests::GLOBAL_SHAPE_IGNORE.with_borrow(|path| path.clone())
+    }
+    #[cfg(not(test))]
+    {
+        Some(crate::CACTUP_ROOT.join("cactupignore"))
+    }
+}
+
+/// The global ignore file's text as of now, for [`thorn_shapes`]: `None` when
+/// there is none. Read by the caller rather than inside `thorn_shapes` so it
+/// can be frozen: `prepare` records it in the build attempt, and `execute`
+/// re-probes shapes with that copy, never with `$CACTUP_HOME` — a queued
+/// build's compute node may see another `CACTUP_HOME`, or none (D11). Bytes
+/// that are not UTF-8 are replaced (lossily) here, before any use, so the
+/// frozen copy and a live reading always agree.
+///
+/// An I/O error other than the file's absence warns and reads as no global
+/// file. It feeds every thorn, so failing the way an unreadable in-thorn file
+/// does would drop every thorn's build state over one bad permission bit,
+/// while treating it as absent can only put files back into shapes (a rebuild
+/// of the thorns it covered, never a missed change). Called before any
+/// progress renderer starts, so the warning never lands inside a bar.
+pub fn read_global_shape_ignore() -> Option<String> {
+    let path = global_shape_ignore_file()?;
+    match read_shape_ignore_file(&path) {
+        Ok(bytes) => bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) => {
+            eprintln!(
+                "{} could not read {} ({e}); treating it as absent",
+                "warning:".yellow().bold(),
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+type ShapeIgnoreList = gix::glob::search::pattern::List<gix::ignore::search::Ignore>;
+
+/// Read one ignore file. A missing one (or a directory by that name) has no
+/// patterns; any other I/O error is returned, which makes the thorn's shape
+/// unreadable exactly as an unreadable `.ccl` would (see `shape_one_thorn`).
+fn read_shape_ignore_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory => Ok(None),
+            _ => Err(e),
+        },
+    }
+}
+
+/// Parse an ignore file's bytes the way git parses a `.gitignore` (a pattern
+/// it cannot parse is skipped, never an error; no `$` "precious" prefix,
+/// which stock git does not have either). `dir` is the directory holding the
+/// file, relative to the matching root and without a trailing slash; the
+/// patterns then only apply at and below it. The global file passes `""`.
+fn parse_shape_ignores(bytes: &[u8], dir: &str) -> ShapeIgnoreList {
+    let source = Path::new(dir).join(SHAPE_IGNORE_FILE);
+    let parse = gix::ignore::search::Ignore { support_precious: false };
+    gix::glob::search::pattern::List::from_bytes(bytes, source, Some(Path::new("")), parse)
+}
+
+/// The `.cactupignore` state one `thorn_shapes` pass shares across its
+/// thorns: the global file, read once per pass (so the next cactup run sees
+/// an edit to it), and the parsed ignore file of each directory between a repo
+/// root and its thorns — ~30 thorns can share one repo, and re-reading its
+/// root's file for each would be wasteful on a network filesystem. A cached
+/// `None` is a directory with no ignore file; a read error is not cached.
+#[derive(Default)]
+struct ShapeIgnoreCache {
+    global: Option<ShapeIgnoreList>,
+    dirs: Mutex<HashMap<PathBuf, Option<ShapeIgnoreList>>>,
+}
+
+impl ShapeIgnoreCache {
+    /// A pass whose global ignore file holds `global` (see
+    /// [`read_global_shape_ignore`]).
+    fn new(global: Option<&str>) -> Self {
+        let global = global.map(|text| parse_shape_ignores(text.as_bytes(), ""));
+        ShapeIgnoreCache { global, dirs: Mutex::default() }
+    }
+
+    /// `dir`'s `.cactupignore` patterns, `rel_dir` being `dir` relative to the
+    /// matching root; read once per pass.
+    fn dir(&self, dir: &Path, rel_dir: &str) -> std::io::Result<Option<ShapeIgnoreList>> {
+        if let Some(cached) = self.dirs.lock().expect("shape ignore cache poisoned").get(dir) {
+            return Ok(cached.clone());
+        }
+        let list = read_shape_ignore_file(&dir.join(SHAPE_IGNORE_FILE))?
+            .map(|bytes| parse_shape_ignores(&bytes, rel_dir));
+        self.dirs.lock().expect("shape ignore cache poisoned").insert(dir.to_owned(), list.clone());
+        Ok(list)
+    }
+}
+
+/// The ignore patterns in force at one point of a shape walk. Matching paths
+/// are relative to the "matching root", which is the backing repo when the
+/// thorn resolves into `repos/` (so a `.cactupignore` anywhere from the repo
+/// root down applies, as a `.gitignore` would) and the thorn dir otherwise.
+struct ShapeIgnores {
+    /// The global list first, then one list per directory from the root down
+    /// to the one being walked. gix searches the lists last to first, which
+    /// is git's precedence: deeper beats shallower beats global.
+    search: gix::ignore::Search,
+    /// The thorn dir relative to the matching root, with a trailing `/`, or
+    /// empty when the thorn dir is the root itself.
+    thorn_prefix: String,
+}
+
+impl ShapeIgnores {
+    /// Is `rel` ignored? The last pattern that matches decides, so a `!`
+    /// re-include wins over an earlier exclude. `rel` is relative to the
+    /// matching root.
+    fn ignores(&self, rel: &str, is_dir: bool) -> bool {
+        let case = gix::glob::pattern::Case::Sensitive;
+        self.search
+            .pattern_matching_relative_path(rel.into(), Some(is_dir), case)
+            .is_some_and(|m| !m.pattern.is_negative())
+    }
+
+    /// Push the patterns of `dir`'s `.cactupignore`, if it has one. `rel_dir`
+    /// is `dir` relative to the matching root (`""` for the root).
+    fn enter(&mut self, dir: &Path, rel_dir: &str) -> std::io::Result<()> {
+        if let Some(bytes) = read_shape_ignore_file(&dir.join(SHAPE_IGNORE_FILE))? {
+            self.search.patterns.push(parse_shape_ignores(&bytes, rel_dir));
+        }
+        Ok(())
+    }
+
+    /// Load every `.cactupignore` from the repo root `repo_dir` down to (not
+    /// including) the thorn dir `real`, which must lie under it, through
+    /// `cache`. Returns whether one of those directories, or the thorn dir
+    /// itself, is ignored: as in git, nothing under an ignored directory can
+    /// be re-included.
+    fn enter_repo(
+        &mut self,
+        repo_dir: &Path,
+        real: &Path,
+        cache: &ShapeIgnoreCache,
+    ) -> std::io::Result<bool> {
+        let rel = real.strip_prefix(repo_dir).map_err(std::io::Error::other)?;
+        let mut dir = repo_dir.to_path_buf();
+        let mut rel_dir = String::new();
+        for component in rel.components() {
+            self.search.patterns.extend(cache.dir(&dir, &rel_dir)?);
+            let name = component.as_os_str().to_string_lossy();
+            rel_dir = if rel_dir.is_empty() { name.into_owned() } else { format!("{rel_dir}/{name}") };
+            if self.ignores(&rel_dir, true) {
+                return Ok(true);
+            }
+            dir.push(component);
+        }
+        if !rel_dir.is_empty() {
+            self.thorn_prefix = format!("{rel_dir}/");
+        }
+        Ok(false)
+    }
+
+    /// One shape-walk directory: `dir` is `rel_dir` relative to the thorn dir
+    /// (`""` for the thorn dir itself). Pushes `dir`'s own `.cactupignore`
+    /// (the caller truncates `search.patterns` back once done with `dir`),
+    /// then returns every entry that is neither named `.cactupignore` nor ignored,
+    /// with its path relative to the thorn dir and its symlink-following
+    /// metadata. An ignore file is never part of the shape itself: what it
+    /// contributes is the set of files it lets through.
+    ///
+    /// Stat'ing an entry fails the walk as it always has (a dangling symlink,
+    /// say), unless that entry is ignored as a file — which is what lets a
+    /// `.#*` pattern cover Emacs's lock files, which are dangling symlinks.
+    fn entries(
+        &mut self,
+        dir: &Path,
+        rel_dir: &str,
+    ) -> std::io::Result<Vec<(PathBuf, String, fs::Metadata)>> {
+        let listed = fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        let root_rel_dir = format!("{}{rel_dir}", self.thorn_prefix);
+        if listed.iter().any(|e| e.file_name() == SHAPE_IGNORE_FILE) {
+            self.enter(dir, root_rel_dir.trim_end_matches('/'))?;
+        }
+        let mut kept = Vec::new();
+        for entry in listed {
+            let name = entry.file_name();
+            if name == SHAPE_IGNORE_FILE {
+                continue;
+            }
+            let name = name.to_string_lossy();
+            let rel = if rel_dir.is_empty() { name.into_owned() } else { format!("{rel_dir}/{name}") };
+            let root_rel = format!("{}{rel}", self.thorn_prefix);
+            let meta = match fs::metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(_) if self.ignores(&root_rel, false) => continue,
+                Err(e) => return Err(e),
+            };
+            if !self.ignores(&root_rel, meta.is_dir()) {
+                kept.push((entry.path(), rel, meta));
+            }
+        }
+        Ok(kept)
+    }
+}
+
 /// Recursively collect file paths under `dir` (a thorn's `src/`, or a
-/// directory beneath it), relative to the thorn dir, into `out`. Symlinks are
-/// followed (`fs::metadata`, not `symlink_metadata`) since the thorn dir
-/// itself is normally one; `depth` guards against a symlink loop hanging the
-/// build by simply declining to recurse past `SHAPE_WALK_MAX_DEPTH` rather
-/// than erroring — silent truncation is fine here, since it can only make a
-/// fingerprint miss part of an already-pathological tree, not corrupt one.
-fn walk_shape_dir(dir: &Path, prefix: &str, depth: u32, out: &mut Vec<String>) -> std::io::Result<()> {
+/// directory beneath it), relative to the thorn dir, into `out`, skipping
+/// whatever `ignores` exempts (an ignored directory is not descended into).
+/// Symlinks are followed (`fs::metadata`, not `symlink_metadata`) since the
+/// thorn dir itself is normally one; `depth` guards against a symlink loop
+/// hanging the build by simply declining to recurse past
+/// `SHAPE_WALK_MAX_DEPTH` rather than erroring — silent truncation is fine
+/// here, since it can only make a fingerprint miss part of an
+/// already-pathological tree, not corrupt one.
+fn walk_shape_dir(
+    dir: &Path,
+    prefix: &str,
+    depth: u32,
+    ignores: &mut ShapeIgnores,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
     if depth > SHAPE_WALK_MAX_DEPTH {
         return Ok(());
     }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let rel = format!("{prefix}/{name}");
-        let meta = fs::metadata(entry.path())?;
+    let mark = ignores.search.patterns.len();
+    for (path, rel, meta) in ignores.entries(dir, prefix)? {
         if meta.is_dir() {
-            walk_shape_dir(&entry.path(), &rel, depth + 1, out)?;
+            walk_shape_dir(&path, &rel, depth + 1, ignores, out)?;
         } else if meta.is_file() {
             out.push(rel);
         }
     }
+    ignores.search.patterns.truncate(mark);
     Ok(())
 }
 
 /// Item 4 of `thorn_shapes`: the compilation-relevant file paths under a
 /// thorn dir, relative to it — direct children, plus everything recursively
-/// under `src/`. `doc/`, `test/`, `par/`, `.git`, and any other subdirectory
-/// are deliberately not descended into: none of them feed the compile or the
-/// bindings generation this fingerprint exists to track.
-fn shape_files(thorn_dir: &Path) -> std::io::Result<Vec<String>> {
+/// under `src/`, less whatever `.cactupignore` patterns exempt (see
+/// `SHAPE_IGNORE_FILE`): the global file, the ones from `repo`'s root down to
+/// the thorn when it resolves into one, and the thorn's own. `doc/`, `test/`,
+/// `par/`, `.git`, and any other subdirectory are deliberately not descended
+/// into: none of them feed the compile or the bindings generation this
+/// fingerprint exists to track.
+fn shape_files(
+    thorn_dir: &Path,
+    repo: Option<&ShapeRepo>,
+    cache: &ShapeIgnoreCache,
+) -> std::io::Result<Vec<String>> {
+    // Lowest precedence first (see `ShapeIgnores::search`).
+    let mut ignores = ShapeIgnores {
+        search: gix::ignore::Search { patterns: cache.global.iter().cloned().collect() },
+        thorn_prefix: String::new(),
+    };
+    if let Some(repo) = repo
+        && ignores.enter_repo(&repo.dir, &repo.real, cache)?
+    {
+        return Ok(Vec::new());
+    }
     let mut files = Vec::new();
-    for entry in fs::read_dir(thorn_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy().into_owned();
-        let meta = fs::metadata(entry.path())?;
+    for (path, rel, meta) in ignores.entries(thorn_dir, "")? {
         if meta.is_dir() {
-            if name_str == "src" {
-                walk_shape_dir(&entry.path(), "src", 0, &mut files)?;
+            if rel == "src" {
+                walk_shape_dir(&path, "src", 0, &mut ignores, &mut files)?;
             }
         } else if meta.is_file() {
-            files.push(name_str);
+            files.push(rel);
         }
     }
     files.sort();
     Ok(files)
+}
+
+/// The repo a thorn dir resolves into (see `shape_repo`).
+struct ShapeRepo {
+    /// The repo's directory, `repos_root` plus one component.
+    dir: PathBuf,
+    /// The canonicalized thorn dir, somewhere under `dir`.
+    real: PathBuf,
+}
+
+/// Where `thorn_dir` lands under `repos_root`, if it does: `shape_repo_dir`
+/// on its canonical path. `None` for a thorn outside `repos/`, or one that
+/// cannot be resolved at all (which `shape_files` then reports).
+fn shape_repo(thorn_dir: &Path, repos_root: &Path) -> Option<ShapeRepo> {
+    let real = fs::canonicalize(thorn_dir).ok()?;
+    Some(ShapeRepo { dir: shape_repo_dir(&real, repos_root)?, real })
 }
 
 /// If `real` (a canonicalized thorn dir) lands under `repos_root`
@@ -849,7 +1105,9 @@ fn shape_repo_url(repo_dir: &Path, cache: &Mutex<HashMap<PathBuf, Option<String>
     }
     let url = (|| {
         let repo = gix::open(repo_dir).ok()?;
-        let remote = repo.find_remote("origin").ok()?;
+        // The configured URL, not the one `url.<base>.insteadOf` rewrites it
+        // to: a site mirror is not a repoint, so it must not change a shape.
+        let remote = repo.try_find_remote_without_url_rewrite("origin")?.ok()?;
         let raw = remote.url(gix::remote::Direction::Fetch)?.to_bstring().to_string();
         Some(crate::fetch::git::normalize_url(&raw))
     })();
@@ -903,7 +1161,9 @@ fn feed(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 ///      the thorn does not resolve into `repos/`, e.g. a hand-placed
 ///      arrangement or a test fixture;
 ///   4. the sorted list of file paths under the thorn (`shape_files`,
-///      relative to the thorn dir), one frame per path;
+///      relative to the thorn dir), one frame per path — less whatever a
+///      `.cactupignore` exempts (`SHAPE_IGNORE_FILE`), and never the ignore
+///      files themselves, so a tree without any hashes as it always has;
 ///   5. for each of those files whose basename is `*.ccl` or one of the fixed
 ///      `make.*.defn`/`make.code.deps` names (`is_shape_qualifying`), in the
 ///      same sorted order: a frame for its path, then a frame for its bytes.
@@ -917,8 +1177,10 @@ fn feed(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 ///
 /// Error semantics are load-bearing: if a thorn's directory cannot be read at
 /// all — missing, or an I/O error anywhere inside it (listing it, reading a
-/// qualifying file, hashing) — that thorn is simply omitted from the
-/// returned map, never an error. This is fail-safe in both directions:
+/// qualifying file or a `.cactupignore` from its repo root down, hashing) —
+/// that thorn is simply omitted from the returned map, never an error. (An
+/// unreadable global ignore file is the exception: see
+/// `read_global_shape_ignore`.) This is fail-safe in both directions:
 /// `shape_delta` treats stored-has-it/fresh-lacks-it as a change (a vanished
 /// thorn's stale build state is invalidated), while a thorn absent on *both*
 /// sides — the normal case in unit tests, and in a config whose fetch never
@@ -930,11 +1192,13 @@ fn shape_one_thorn(
     cactus_root: &Path,
     repos_root: Option<&Path>,
     url_cache: &Mutex<HashMap<PathBuf, Option<String>>>,
+    ignore_cache: &ShapeIgnoreCache,
     provider: &str,
 ) -> Option<String> {
     let thorn_dir = cactus_root.join(provider);
+    let repo = repos_root.and_then(|repos_root| shape_repo(&thorn_dir, repos_root));
 
-    let files = shape_files(&thorn_dir).ok()?;
+    let files = shape_files(&thorn_dir, repo.as_ref(), ignore_cache).ok()?;
     let link_meta = fs::symlink_metadata(&thorn_dir).ok()?;
     let shape_marker: Vec<u8> = if link_meta.file_type().is_symlink() {
         fs::read_link(&thorn_dir).ok()?.to_string_lossy().into_owned().into_bytes()
@@ -946,10 +1210,8 @@ fn shape_one_thorn(
     feed(&mut hasher, provider.as_bytes());
     feed(&mut hasher, &shape_marker);
 
-    if let Some(repos_root) = repos_root
-        && let Ok(real) = fs::canonicalize(&thorn_dir)
-        && let Some(repo_dir) = shape_repo_dir(&real, repos_root)
-        && let Some(url) = shape_repo_url(&repo_dir, url_cache)
+    if let Some(ShapeRepo { dir: repo_dir, .. }) = &repo
+        && let Some(url) = shape_repo_url(repo_dir, url_cache)
     {
         feed(&mut hasher, url.as_bytes());
     }
@@ -980,16 +1242,21 @@ fn shape_one_thorn(
 /// in-flight thorn, `inc()` per completion (§2.4's progress contract — this
 /// phase never calls `info`/`fail` on an item, only `init`/`add_child`/`inc`).
 ///
+/// `global_ignore` is the global ignore file's text, from
+/// [`read_global_shape_ignore`] or a frozen copy of it.
+///
 /// Returns `Err` only when interrupted (`par::parallel_map`'s "interrupted"
 /// failure, §2.4's interrupt contract) — see `shape_one_thorn`'s doc comment
 /// for why an individual unreadable thorn never causes one.
 pub fn thorn_shapes(
     cactus_root: &Path,
     list: &Thornlist,
+    global_ignore: Option<&str>,
     progress: &mut prodash::tree::Item,
 ) -> Res<BTreeMap<String, String>> {
     let repos_root = fs::canonicalize(cactus_root.join("repos")).ok();
     let url_cache: Mutex<HashMap<PathBuf, Option<String>>> = Mutex::new(HashMap::new());
+    let ignore_cache = ShapeIgnoreCache::new(global_ignore);
     let providers: Vec<(String, String)> = list.thorn_providers().into_iter().collect();
 
     progress.init(Some(providers.len()), Some(prodash::unit::label("thorns")));
@@ -997,7 +1264,8 @@ pub fn thorn_shapes(
 
     let results = crate::par::parallel_map(&providers, |(name, provider)| {
         let current = progress.lock().expect("thorn_shapes progress poisoned").add_child(name.clone());
-        let shape = shape_one_thorn(cactus_root, repos_root.as_deref(), &url_cache, provider);
+        let shape =
+            shape_one_thorn(cactus_root, repos_root.as_deref(), &url_cache, &ignore_cache, provider);
         drop(current);
         progress.lock().expect("thorn_shapes progress poisoned").inc();
         shape.map(|hash| (name.clone(), hash))
@@ -1013,10 +1281,14 @@ pub fn thorn_shapes(
 /// `manifest::setup_prodash_if_tty`'s doc comment on why that precondition
 /// matters — a phase that DID call them would lose those messages on a
 /// non-tty stderr).
-pub fn thorn_shapes_with_progress(cactus_root: &Path, list: &Thornlist) -> Res<BTreeMap<String, String>> {
+pub fn thorn_shapes_with_progress(
+    cactus_root: &Path,
+    list: &Thornlist,
+    global_ignore: Option<&str>,
+) -> Res<BTreeMap<String, String>> {
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let mut probing = progress.add_child("probe thorn shapes");
-    let result = thorn_shapes(cactus_root, list, &mut probing);
+    let result = thorn_shapes(cactus_root, list, global_ignore, &mut probing);
     drop(probing);
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
@@ -1590,7 +1862,7 @@ pub fn prepare(
     let parsed_list = crate::thornlist::parse(&thornlist_processed).ok();
     // When this whole reading was taken, for the [`SourceProbe`] handed back
     // below. Stamped BEFORE the walks, not after: the reading describes the
-    // tree as it was when the first walk started, so ageing it from then is
+    // tree as it was when the first walk started, so aging it from then is
     // the conservative end.
     let probed_at = std::time::Instant::now();
     // How the source trees now differ from what this config was built with
@@ -1606,9 +1878,14 @@ pub fn prepare(
     // could never acquire one to diff a later plain rebuild against.
     // `?` propagates only an interrupt (§2.4) — an individual unreadable
     // thorn never fails `thorn_shapes` (see its doc comment).
+    //
+    // The global `.cactupignore` is read once, here, and frozen into the
+    // attempt below: `execute`'s re-probe must match with these same patterns
+    // (D11), whatever `$CACTUP_HOME` it runs under.
+    let global_shape_ignore = read_global_shape_ignore();
     let fresh_shapes = parsed_list
         .as_ref()
-        .map(|l| thorn_shapes_with_progress(&cactus_root, l))
+        .map(|l| thorn_shapes_with_progress(&cactus_root, l, global_shape_ignore.as_deref()))
         .transpose()?;
     let (sources, source_change) =
         source_delta(stored_meta.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
@@ -1865,6 +2142,7 @@ pub fn prepare(
         build_env: build_env.clone(),
         virtual_executable,
         universe: universe_spec,
+        global_shape_ignore,
         config_meta,
         vars: freeze_vars(&vars),
         knobs: freeze_knobs(&vars),
@@ -2044,9 +2322,10 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             None => {
                 // The processed thornlist is re-parsed from the copy
                 // `prepare` staged into the attempt dir — that,
-                // `install_root`, and `cactus_root` are all already frozen in
-                // `attempt.meta`, so this reads no MDB, global DB,
-                // installation registry, or knob (D11-clean).
+                // `install_root`, `cactus_root`, and the global
+                // `.cactupignore` are all already frozen in `attempt.meta`,
+                // so this reads no MDB, global DB, installation registry,
+                // knob, or anything under `$CACTUP_HOME` (D11-clean).
                 let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
                     .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
                 let fresh_list = crate::thornlist::parse(&processed_thornlist).ok();
@@ -2063,7 +2342,10 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                 // hit Ctrl-C, and that must abort this build rather than
                 // silently compiling against an incomplete shape probe.
                 let shapes = match &fresh_list {
-                    Some(l) => Some(thorn_shapes_with_progress(&cactus_root, l)?),
+                    Some(l) => {
+                        let global_ignore = attempt.meta.global_shape_ignore.as_deref();
+                        Some(thorn_shapes_with_progress(&cactus_root, l, global_ignore)?)
+                    }
                     None => None,
                 };
                 (sources, providers, shapes)
@@ -2171,8 +2453,21 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         // in-process file copy, exactly as before this split.
         let exe_dir = cactus_root.join("exe");
         fs::create_dir_all(&exe_dir).with_context(|| format!("Failed to create {}", exe_dir.display()))?;
-        fs::copy(prebuilt, exe_dir.join(format!("cactus_{name}")))
+        // Copy to a temp file and rename it over the old executable, never
+        // write through it: simulations hard-link that inode into their
+        // executable cache (§8.1), and overwriting it in place would swap
+        // the binary under every one of them. `fs::copy` carries the
+        // prebuilt's permission bits over; dropping `temp` on an error
+        // removes it.
+        let exe = executable_path(&cactus_root, &name);
+        let temp = tempfile::Builder::new()
+            .prefix(".cactup-exe.")
+            .tempfile_in(&exe_dir)
+            .with_context(|| format!("Failed to create a temp file in {}", exe_dir.display()))?;
+        fs::copy(prebuilt, temp.path())
             .with_context(|| format!("Failed to copy {}", prebuilt.display()))?;
+        temp.persist(&exe)
+            .with_context(|| format!("Failed to move the copy into place at {}", exe.display()))?;
         None
     } else {
         let vset = thaw_vars(&attempt.meta.vars, &attempt.meta.knobs)?;
@@ -2254,14 +2549,27 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         );
     }
 
-    if !is_complete(&cactus_root, &name) {
+    // A virtual build never configures, so there is no configure marker to
+    // look for: the executable in place is all it produces. (`is_complete`
+    // itself still demands the marker, so `config list`/`show` call a
+    // virtual-only config incomplete and `prepare` never reads it as up to
+    // date.)
+    let virtual_build = attempt.meta.virtual_executable.is_some();
+    let complete = if virtual_build {
+        executable_path(&cactus_root, &name).is_file()
+    } else {
+        is_complete(&cactus_root, &name)
+    };
+    if !complete {
         // Report the component that is actually absent (§7.2). The two states
         // point the operator at opposite ends of the output:
         //   - configure never completed  → the marker is missing; look near
         //     the TOP of build.out/build.err (a CST/configure error).
         //   - configure done, no exe     → the compile/link failed; look near
         //     the END of build.out/build.err.
-        let (missing, hint) = if !is_configured(&cactus_root, &name) {
+        let (missing, hint) = if virtual_build {
+            (executable_path(&cactus_root, &name), "the prebuilt executable was not copied into place")
+        } else if !is_configured(&cactus_root, &name) {
             (
                 completeness_marker(&cactus_root, &name),
                 "the configure step did not complete — look near the top of build.out/build.err",
@@ -2334,7 +2642,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
 /// before this split — `cactup build` still runs both back to back today;
 /// only a later submit-path chunk lets time pass between them. Returns the
 /// stored metadata. The global DB is never touched by `execute` (§2.3); the
-/// caller updates the active-config pointer afterwards.
+/// caller updates the active-config pointer afterward.
 pub fn build(
     installation: &Installation,
     machine: &Machine,
@@ -2396,6 +2704,13 @@ fn sh_quote(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::mdb::Mdb;
+
+    thread_local! {
+        /// What `global_shape_ignore_file` returns on this test thread: no
+        /// global ignore file unless a test sets one.
+        pub(super) static GLOBAL_SHAPE_IGNORE: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     /// A comment that merely mentions a thorn name must never be toggled —
     /// a custom thornlist's prose header documents thorns by name, and the
@@ -2881,6 +3196,351 @@ mod tests {
             ("ML_BSSN", "arrangements/McLachlan/ML_BSSN"),
         ]);
         assert!(provider_delta(Some(&stored), Some(&added)).is_empty());
+    }
+
+    /// A site mirror configured through `url.<base>.insteadOf` must not change
+    /// the upstream identity a thorn's shape hashes, or adding a mirror would
+    /// look like every thorn changing shape (and force a rebuild of each).
+    #[test]
+    fn shape_repo_url_ignores_insteadof_mirrors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        crate::fetch::git::testrepo::init(&dir);
+        crate::fetch::git::testrepo::commit_file(&dir, "thorn.cc", "int a;\n");
+        crate::fetch::git::set_origin_url(&dir, "https://github.com/owner/repo.git").unwrap();
+        let before = shape_repo_url(&dir, &Mutex::new(HashMap::new()));
+
+        let config = dir.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[url \"file:///srv/mirrors/github.com/\"]\n\tinsteadOf = https://github.com/\n");
+        std::fs::write(&config, text).unwrap();
+        let after = shape_repo_url(&dir, &Mutex::new(HashMap::new()));
+
+        assert!(before.is_some());
+        assert_eq!(before, after);
+    }
+
+    /// Write `content` to `path`, creating its parent directories.
+    fn put(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    /// A Cactus tree with two thorns that between them reach every frame
+    /// `shape_one_thorn` hashes: `Arr/Plain` is a real directory (the `<dir>`
+    /// marker, no URL frame) and `Arr/Linked` is a symlink into a git repo
+    /// under `repos/` (link target and `origin` URL frames). Both carry the
+    /// editor droppings `.cactupignore` exists for, so the same tree serves
+    /// the ignore tests. Returns the Cactus root.
+    fn shape_fixture(root: &Path) -> PathBuf {
+        let cactus = root.join("Cactus");
+        let plain = cactus.join("arrangements/Arr/Plain");
+        put(&plain.join("configuration.ccl"), "REQUIRES GenericFD\n");
+        put(&plain.join("interface.ccl"), "implements: plain\n");
+        put(&plain.join("README"), "a thorn\n");
+        put(&plain.join("src/make.code.defn"), "SRCS = a.cc sub/b.F90\n");
+        put(&plain.join("src/a.cc"), "int a;\n");
+        put(&plain.join("src/.a.cc.swp"), "vim\n");
+        put(&plain.join("src/sub/b.F90"), "end\n");
+        put(&plain.join("src/sub/deeper/c.h"), "#pragma once\n");
+        put(&plain.join("src/.ipynb_checkpoints/a-checkpoint.cc"), "int a;\n");
+        put(&plain.join("src/sub/.ipynb_checkpoints/b-checkpoint.F90"), "end\n");
+        put(&plain.join("doc/documentation.tex"), "\\begin{document}\n");
+
+        let repo = cactus.join("repos/Repo");
+        crate::fetch::git::testrepo::init(&repo);
+        crate::fetch::git::set_origin_url(&repo, "https://github.com/owner/repo.git").unwrap();
+        let linked = repo.join("Arr/Linked");
+        put(&linked.join("configuration.ccl"), "PROVIDES Linked\n");
+        put(&linked.join("src/make.code.defn"), "SRCS = x.cc\n");
+        put(&linked.join("src/x.cc"), "int x;\n");
+        put(&linked.join("src/.ipynb_checkpoints/x-checkpoint.cc"), "int x;\n");
+        let link = cactus.join("arrangements/Arr/Linked");
+        std::os::unix::fs::symlink("../../repos/Repo/Arr/Linked", link).unwrap();
+        cactus
+    }
+
+    const PLAIN: &str = "arrangements/Arr/Plain";
+    const LINKED: &str = "arrangements/Arr/Linked";
+
+    /// `shape_one_thorn` for one provider of [`shape_fixture`]'s tree, with
+    /// no global ignore file.
+    fn fixture_shape(cactus: &Path, provider: &str) -> Option<String> {
+        fixture_shape_with(cactus, provider, &ShapeIgnoreCache::default())
+    }
+
+    fn fixture_shape_with(cactus: &Path, provider: &str, cache: &ShapeIgnoreCache) -> Option<String> {
+        let repos_root = fs::canonicalize(cactus.join("repos")).ok();
+        shape_one_thorn(cactus, repos_root.as_deref(), &Mutex::new(HashMap::new()), cache, provider)
+    }
+
+    /// The file list (item 4) `shape_one_thorn` would hash for `provider`.
+    fn fixture_files(cactus: &Path, provider: &str, cache: &ShapeIgnoreCache) -> Vec<String> {
+        let thorn_dir = cactus.join(provider);
+        let repo = shape_repo(&thorn_dir, &fs::canonicalize(cactus.join("repos")).unwrap());
+        shape_files(&thorn_dir, repo.as_ref(), cache).unwrap()
+    }
+
+    /// A pass whose global ignore file holds `patterns`.
+    fn global_ignores(patterns: &str) -> ShapeIgnoreCache {
+        ShapeIgnoreCache::new(Some(patterns))
+    }
+
+    /// Upgrading cactup must not rebuild anything: with no `.cactupignore`
+    /// anywhere and no global file, a shape is byte-for-byte what it was
+    /// before `.cactupignore` existed. These hashes were computed by the
+    /// pre-`.cactupignore` code; if one moves, every thorn of every config
+    /// would read as reshaped and lose its build state on the next build.
+    #[test]
+    fn shapes_without_ignore_files_are_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        assert_eq!(fixture_shape(&cactus, PLAIN).as_deref(), Some("02c38d54cff81d37"));
+        assert_eq!(fixture_shape(&cactus, LINKED).as_deref(), Some("fd078676f1c34f8b"));
+        // A global file that matches nothing is no global file at all.
+        let no_match = global_ignores("# nothing here\n*.o\n");
+        assert_eq!(fixture_shape_with(&cactus, PLAIN, &no_match).as_deref(), Some("02c38d54cff81d37"));
+        assert_eq!(fixture_shape_with(&cactus, LINKED, &no_match).as_deref(), Some("fd078676f1c34f8b"));
+    }
+
+    /// The reason `.cactupignore` exists: JupyterLab and vim droppings under
+    /// `src/`, however deep, must not read as files added to the thorn.
+    /// Exempting a file fingerprints exactly as if it were not there, and the
+    /// ignore file itself is not part of the shape.
+    #[test]
+    fn cactupignore_exempts_editor_droppings_and_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let plain = cactus.join(PLAIN);
+        let none = ShapeIgnoreCache::default();
+        put(&plain.join(".cactupignore"), "# editor droppings\n.ipynb_checkpoints/\n.*.sw?\n");
+        assert_eq!(
+            fixture_files(&cactus, PLAIN, &none),
+            [
+                "README",
+                "configuration.ccl",
+                "interface.ccl",
+                "src/a.cc",
+                "src/make.code.defn",
+                "src/sub/b.F90",
+                "src/sub/deeper/c.h",
+            ]
+        );
+        let ignored = fixture_shape(&cactus, PLAIN).unwrap();
+
+        fs::remove_file(plain.join(".cactupignore")).unwrap();
+        fs::remove_file(plain.join("src/.a.cc.swp")).unwrap();
+        fs::remove_dir_all(plain.join("src/.ipynb_checkpoints")).unwrap();
+        fs::remove_dir_all(plain.join("src/sub/.ipynb_checkpoints")).unwrap();
+        assert_eq!(fixture_shape(&cactus, PLAIN).unwrap(), ignored);
+    }
+
+    /// Emacs lock files (`.#a.cc`) are dangling symlinks, which make a
+    /// thorn's shape unreadable; ignoring them makes it readable again.
+    #[test]
+    fn an_ignored_dangling_symlink_does_not_hide_the_thorn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let plain = cactus.join(PLAIN);
+        std::os::unix::fs::symlink("max@host.1234:1700000000", plain.join("src/.#a.cc")).unwrap();
+        assert_eq!(fixture_shape(&cactus, PLAIN), None);
+        put(&plain.join("src/.cactupignore"), ".#*\n");
+        assert!(fixture_shape(&cactus, PLAIN).is_some());
+    }
+
+    /// Nested files, as in git: a deeper `.cactupignore` beats a shallower
+    /// one (so its `!pattern` re-includes), a pattern with a leading or
+    /// middle slash is anchored to its own file's directory, and nothing
+    /// under an ignored directory can be re-included.
+    #[test]
+    fn nested_cactupignore_files_take_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let plain = cactus.join(PLAIN);
+        let none = ShapeIgnoreCache::default();
+        put(&plain.join(".cactupignore"), "*.h\n*.F90\n/a.cc\n");
+        put(&plain.join("src/sub/.cactupignore"), "!*.h\n");
+        let has = |path: &str| fixture_files(&cactus, PLAIN, &none).iter().any(|f| f == path);
+        assert!(has("src/sub/deeper/c.h"), "re-included deeper down");
+        assert!(!has("src/sub/b.F90"));
+        assert!(!has("src/sub/.ipynb_checkpoints/b-checkpoint.F90"));
+        assert!(has("src/a.cc"), "`/a.cc` is anchored to the thorn dir");
+
+        // Anchored to `src/` by its middle slash; `src/sub`'s `!*.h` is deeper
+        // still, but cannot reach into a directory that is ignored.
+        put(&plain.join("src/.cactupignore"), "sub/deeper/\n");
+        assert!(!has("src/sub/deeper/c.h"), "inside an ignored directory");
+
+        put(&plain.join("src/.cactupignore"), "deeper/\n");
+        assert!(!has("src/sub/deeper/c.h"), "an unanchored directory pattern matches at depth");
+        put(&plain.join("src/.cactupignore"), "/deeper/\n");
+        assert!(has("src/sub/deeper/c.h"), "an anchored one only at its own level");
+    }
+
+    /// An ignore file's patterns decide which files are fingerprinted, so an
+    /// edit that changes what they match changes the shape — and one that
+    /// does not (a comment) leaves it alone.
+    #[test]
+    fn editing_a_cactupignore_changes_the_shape_only_when_its_matches_do() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let ignore = cactus.join(PLAIN).join(".cactupignore");
+        put(&ignore, ".ipynb_checkpoints/\n");
+        let ignoring = fixture_shape(&cactus, PLAIN).unwrap();
+        put(&ignore, "# JupyterLab\n.ipynb_checkpoints/\n");
+        assert_eq!(fixture_shape(&cactus, PLAIN).unwrap(), ignoring);
+        put(&ignore, "# nothing ignored any more\n");
+        let not_ignoring = fixture_shape(&cactus, PLAIN).unwrap();
+        assert_ne!(not_ignoring, ignoring);
+        assert_eq!(not_ignoring, "02c38d54cff81d37", "matching nothing is having no ignore file");
+    }
+
+    /// The global file applies to every thorn, below every `.cactupignore`.
+    #[test]
+    fn global_cactupignore_has_the_lowest_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let global = global_ignores("*.cc\n.ipynb_checkpoints/\n");
+        put(&cactus.join(PLAIN).join("src/.cactupignore"), "!a.cc\n");
+        let files = fixture_files(&cactus, PLAIN, &global);
+        assert!(files.contains(&"src/a.cc".to_owned()), "a `.cactupignore` overrides the global file");
+        assert!(!files.iter().any(|f| f.contains(".ipynb_checkpoints")), "{files:?}");
+        assert_eq!(fixture_files(&cactus, LINKED, &global), ["configuration.ccl", "src/make.code.defn"]);
+    }
+
+    /// `read_global_shape_ignore` reads the global file afresh every time,
+    /// and an unreadable one (after a warning) reads as no global file at all.
+    #[test]
+    fn thorn_shapes_reads_the_global_cactupignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let list = crate::thornlist::parse(
+            "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\n\
+             !TARGET = $ROOT/arrangements\n!TYPE = git\n\
+             !URL = https://e.invalid/arr.git\n!CHECKOUT = Arr/Plain Arr/Linked\n",
+        )
+        .unwrap();
+        let global = tmp.path().join("cactupignore");
+        GLOBAL_SHAPE_IGNORE.set(Some(global.clone()));
+        let shapes =
+            || thorn_shapes_with_progress(&cactus, &list, read_global_shape_ignore().as_deref());
+
+        let absent = shapes().unwrap();
+        assert_eq!(absent["Plain"], "02c38d54cff81d37");
+        assert_eq!(absent["Linked"], "fd078676f1c34f8b");
+
+        put(&global, ".ipynb_checkpoints/\n");
+        let present = shapes().unwrap();
+        assert_ne!(present["Plain"], absent["Plain"]);
+        assert_ne!(present["Linked"], absent["Linked"]);
+
+        // Not a directory: an I/O error other than "not found".
+        GLOBAL_SHAPE_IGNORE.set(Some(global.join("cactupignore")));
+        assert_eq!(read_global_shape_ignore(), None);
+        assert_eq!(shapes().unwrap(), absent);
+        GLOBAL_SHAPE_IGNORE.set(None);
+    }
+
+    /// D11: a queued build's `execute` re-probes shapes on the compute node,
+    /// where `$CACTUP_HOME` may differ or be unset. It must match with the
+    /// global `.cactupignore` `prepare` froze into the attempt, not whatever
+    /// that node would read — here the file is gone by the time it runs.
+    #[test]
+    fn execute_reprobes_shapes_with_the_frozen_global_cactupignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, _opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;",
+                c = cactus.display()
+            ),
+        );
+        let (list, thorn_dir) = write_shape_fixture(&cactus);
+        put(&thorn_dir.join("src/.ipynb_checkpoints/thorn-checkpoint.cc"), "int a;\n");
+        let global = root.join("cactupignore");
+        put(&global, ".ipynb_checkpoints/\n");
+        GLOBAL_SHAPE_IGNORE.set(Some(global.clone()));
+        let mut opts = BuildOpts::default_for_tests();
+        opts.thornlist = Some(list);
+
+        let attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a, _) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        assert_eq!(attempt.meta.global_shape_ignore.as_deref(), Some(".ipynb_checkpoints/\n"));
+        let prepared = attempt.meta.config_meta.thorn_shapes.clone().expect("prepare records shapes");
+
+        // What the compute node would see: no global file at all.
+        fs::remove_file(&global).unwrap();
+        let processed = fs::read_to_string(attempt.thornlist_path()).unwrap();
+        let unfrozen = thorn_shapes_with_progress(
+            &cactus,
+            &crate::thornlist::parse(&processed).unwrap(),
+            read_global_shape_ignore().as_deref(),
+        )
+        .unwrap();
+        assert_ne!(unfrozen["TestThorn"], prepared["TestThorn"], "the checkpoint must matter");
+
+        // Re-opened from disk with no probe, exactly as `build run` does.
+        let config_dir = cactus.join("configs/sim");
+        let mut reopened = BuildAttempt::open(&config_dir, attempt.meta.attempt_id).unwrap();
+        let built = execute(&mut reopened, true, None).unwrap();
+        assert_eq!(built.thorn_shapes.as_ref(), Some(&prepared));
+        GLOBAL_SHAPE_IGNORE.set(None);
+    }
+
+    /// For a thorn inside a repo under `repos/`, every `.cactupignore` from
+    /// the repo root down applies, with paths relative to the repo root; for
+    /// one outside `repos/`, nothing above the thorn dir does.
+    #[test]
+    fn repo_cactupignore_files_apply_to_thorns_inside_the_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = shape_fixture(tmp.path());
+        let repo = cactus.join("repos/Repo");
+        // A fresh cache for every reading: one pass caches each repo
+        // directory's ignore file, and this test edits them between readings.
+        let files = |provider| fixture_files(&cactus, provider, &ShapeIgnoreCache::default());
+
+        put(&repo.join(".cactupignore"), ".ipynb_checkpoints/\n/Arr/Linked/src/x.cc\n");
+        assert_eq!(files(LINKED), ["configuration.ccl", "src/make.code.defn"]);
+
+        put(&repo.join("Arr/.cactupignore"), "!.ipynb_checkpoints/\n");
+        assert_eq!(
+            files(LINKED),
+            ["configuration.ccl", "src/.ipynb_checkpoints/x-checkpoint.cc", "src/make.code.defn"],
+            "a deeper file re-includes"
+        );
+
+        // Ignoring the thorn dir itself leaves it no files, not no shape.
+        put(&repo.join(".cactupignore"), "/Arr/Linked/\n");
+        assert!(files(LINKED).is_empty());
+        assert!(fixture_shape(&cactus, LINKED).is_some());
+
+        put(&cactus.join(".cactupignore"), "*.cc\n");
+        put(&cactus.join("arrangements/Arr/.cactupignore"), "*.cc\n");
+        assert_eq!(fixture_shape(&cactus, PLAIN).as_deref(), Some("02c38d54cff81d37"));
+    }
+
+    /// `.cactupignore` is for the thorn shape only: it must not hide a
+    /// tracked file's modification from the source-state check, and the
+    /// untracked ignore file is not a modification either.
+    #[test]
+    fn cactupignore_does_not_affect_source_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        crate::fetch::git::testrepo::init(&dir);
+        crate::fetch::git::testrepo::commit_file(&dir, "thorn.cc", "int a;\n");
+        let clean = crate::fetch::git::source_state(&dir).unwrap();
+
+        fs::write(dir.join(".cactupignore"), "thorn.cc\n*.cc\n").unwrap();
+        assert_eq!(crate::fetch::git::source_state(&dir).unwrap(), clean);
+        fs::write(dir.join("thorn.cc"), "int a; int b;\n").unwrap();
+        let edited = crate::fetch::git::source_state(&dir).unwrap();
+        assert!(edited.starts_with(&clean) && edited.contains("1mod@"), "{edited}");
+        assert_eq!(crate::fetch::git::source_diff(&dir).unwrap().modified, ["thorn.cc"]);
     }
 
     #[test]
@@ -3730,6 +4390,73 @@ mod tests {
             recorded["cactusbase"], staged["cactusbase"],
             "a stale probe must not be trusted: {recorded:?} vs {staged:?}"
         );
+    }
+
+    /// Write an executable stand-in for a prebuilt `cactus_<config>`.
+    fn fake_prebuilt(path: &Path, content: &str) {
+        fs::write(path, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// §7.7: `--virtual-executable` on a config that was never configured
+    /// copies the binary into place and succeeds. It never runs configure, so
+    /// it must not be judged by the configure marker a real build leaves.
+    #[test]
+    fn virtual_build_of_a_fresh_config_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        // Any make invocation would fail the build: a virtual one runs none.
+        let (_mdb, machine, inst, mut opts) = fake_tree(root, "*) exit 1 ;;");
+        let prebuilt = root.join("prebuilt");
+        fake_prebuilt(&prebuilt, "prebuilt v1\n");
+        opts.virtual_executable = Some(prebuilt);
+
+        let outcome = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(outcome.rebuilt);
+        let exe = executable_path(&cactus, "sim");
+        assert_eq!(fs::read_to_string(&exe).unwrap(), "prebuilt v1\n");
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(fs::metadata(&exe).unwrap().permissions().mode() & 0o111, 0, "must stay executable");
+        let stored = ConfigMeta::load(&cactus, "sim").unwrap().expect("ConfigMeta must be stored");
+        assert_eq!(stored.build_id, outcome.meta.build_id);
+    }
+
+    /// Simulations hard-link the executable into their cache (§8.1), so a
+    /// virtual rebuild must replace `exe/cactus_<config>` with a new inode,
+    /// never write through the old one — that would silently swap the
+    /// binary under every earlier simulation.
+    #[test]
+    fn virtual_rebuild_does_not_write_through_a_hard_linked_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, mut opts) = fake_tree(root, "*) exit 1 ;;");
+        let prebuilt = root.join("prebuilt");
+        fake_prebuilt(&prebuilt, "prebuilt v1\n");
+        opts.virtual_executable = Some(prebuilt.clone());
+        build(&inst, &machine, "sim", &opts).unwrap();
+
+        // What a simulation's executable cache entry does to it.
+        let exe = executable_path(&cactus, "sim");
+        let cached = root.join("cache-entry");
+        fs::hard_link(&exe, &cached).unwrap();
+
+        fake_prebuilt(&prebuilt, "prebuilt v2\n");
+        build(&inst, &machine, "sim", &opts).unwrap();
+        assert_eq!(fs::read_to_string(&exe).unwrap(), "prebuilt v2\n");
+        assert_eq!(
+            fs::read_to_string(&cached).unwrap(),
+            "prebuilt v1\n",
+            "the hard-linked copy must keep the old binary"
+        );
+        let leftovers: Vec<_> = fs::read_dir(cactus.join("exe"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "cactus_sim")
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files may be left behind: {leftovers:?}");
     }
 
     /// D11/queued-build safety (item 4): if someone runs `cactup config

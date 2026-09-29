@@ -1507,7 +1507,7 @@ mod tests {
     }
 
     /// Without the key, `--block` is not a different submission — it is the
-    /// ordinary one plus a wait the caller performs afterwards, so what
+    /// ordinary one plus a wait the caller performs afterward, so what
     /// reaches the scheduler here is unchanged.
     #[test]
     fn block_without_a_blocking_submit_key_submits_normally() {
@@ -1950,6 +1950,7 @@ mod tests {
             build_env: String::new(),
             virtual_executable: None,
             universe: None,
+            global_shape_ignore: None,
             config_meta: sample_config_meta_named(config),
             vars: Default::default(),
             knobs: Default::default(),

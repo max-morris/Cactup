@@ -249,7 +249,7 @@ What each costs:
 |---|---|
 | Nothing under this config | short-circuits: "up to date" |
 | A thorn's body code edited in place (a `.cc`, `.F90`, header, …) | reconfigure + rebuild what the edit affects; that thorn's `build/<Thorn>/` is left alone |
-| A thorn's *shape* changed — a file added or removed, or a `.ccl` / `make.code.defn` / `make.configuration.defn` / `make.code.deps` edited | that thorn's `build/<Thorn>/` and `libthorn_<Thorn>.a` are deleted, then rebuilt from scratch |
+| A thorn's *shape* changed — a file added or removed (other than one a `.cactupignore` exempts, see below), or a `.ccl` / `make.code.defn` / `make.configuration.defn` / `make.code.deps` edited | that thorn's `build/<Thorn>/` and `libthorn_<Thorn>.a` are deleted, then rebuilt from scratch |
 | A thorn repo on a different commit | reconfigure + rebuild what that affects |
 | The **Cactus flesh** on a different commit | a from-scratch rebuild — the make system and everything `config-data` is generated from have changed |
 
@@ -274,8 +274,77 @@ than a body edit. As with source tracking, a config built before this landed
 has no recorded shape baseline; its first build afterward records one and
 invalidates nothing, and every build after that is detected.
 
-Untracked files are ignored throughout — the test harness leaves output inside
-the source tree, and that must never read as a source change.
+Untracked files never count as source edits — the test harness leaves output
+inside the source tree, and that must never read as a source change. A file
+added under a thorn's `src/` does change that thorn's shape, though (see
+below).
+
+#### Keeping editor files out of a thorn's shape
+
+A thorn's shape counts every file directly in the thorn directory and
+everything under its `src/`, untracked or not, so the files editors leave behind count too:
+opening `src/foo.cc` in JupyterLab creates `src/.ipynb_checkpoints/foo-checkpoint.cc`,
+and vim creates `src/.foo.cc.swp`. Each reads as a file added to the thorn,
+and costs that thorn a from-scratch recompile. A `.cactupignore` file tells
+cactup which files to leave out:
+
+```gitignore
+# JupyterLab checkpoints, at any depth
+.ipynb_checkpoints/
+# vim swap files (.foo.cc.swp, .foo.cc.swo, ...)
+.*.sw?
+# Emacs backups, autosaves and lock files; a leading # starts a comment,
+# so the autosave pattern escapes it with a backslash
+*~
+\#*#
+.#*
+```
+
+It uses the syntax and matching rules of a `.gitignore` — `!` to re-include,
+a trailing `/` to match only directories, a leading or middle `/` to anchor a
+pattern to the directory the `.cactupignore` is in, `**`, `#` comments, `\` escapes — with
+two differences: a symlinked directory under `src/` is followed (and matched
+as a directory), where git would treat it as a single file, and a
+`.cactupignore` that is itself a symlink is honored. Ignore files are found
+the way git finds them:
+
+- A `.cactupignore` in any directory from the thorn's repository root down
+  through the thorn and its `src/` applies to that directory and everything
+  below it, and a deeper file overrides a shallower one. One at the root of a
+  repo under `Cactus/repos/` therefore covers every thorn in that repo. For a
+  thorn that does not live in a repo under `Cactus/repos/`, only the files
+  from the thorn directory down apply.
+- A `.cactupignore` in `Cactus/` or `Cactus/arrangements/` does nothing for
+  thorns that live in repos under `Cactus/repos/`: the arrangement entries are
+  only symlinks into those repos, and the search starts at the repo's root.
+- `~/.cactup/cactupignore` (under `$CACTUP_HOME` if you set it) applies to
+  every thorn, below every `.cactupignore`, like git's `core.excludesFile`.
+  It is the natural home for your own editor's droppings. Its anchored
+  patterns are matched relative to each thorn's repository root, or to the
+  thorn directory for a thorn outside `Cactus/repos/`, so unanchored patterns
+  like the ones above are usually what you want there. A queued build uses
+  the global file as it was when the build was queued.
+
+> [!CAUTION]
+> Ignore only files the build never reads. Ignoring a `.ccl` file, a
+> `make.code.defn`/`make.configuration.defn`/`make.code.deps`, or a source
+> file also stops cactup noticing that file being added or removed — and, for
+> the `.ccl` and `make.*` files, being edited — which is exactly what the
+> shape exists to catch.
+
+A `.cactupignore` only decides a thorn's shape. It hides nothing from source
+tracking (an edit to a tracked file is still an edit), from Cactus's own
+build, or from git. The ignore files are never part of a shape themselves,
+but editing one so it matches different files changes the shape, exactly as
+adding or removing those files would; a change that matches the same files
+(a new comment, say) changes nothing. A tree with no ignore files
+fingerprints exactly as it did before `.cactupignore` existed.
+
+Shapes are not something `cactup config delta` (below) reports: it shows
+commits and edits to tracked files only. A shape change shows up when you
+build, as the reason "thorn contents changed", followed by a line naming
+the thorns: `changed contents (removing their stale per-thorn build state):
+...`. That line is where to start looking for the file that changed.
 
 #### Seeing what diverged
 

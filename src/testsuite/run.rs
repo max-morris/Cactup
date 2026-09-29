@@ -821,6 +821,7 @@ mod tests {
             build_env: String::new(),
             virtual_executable: None,
             universe: None,
+            global_shape_ignore: None,
             config_meta: toml::from_str(
                 r#"
                 schema = 1
