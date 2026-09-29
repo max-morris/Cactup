@@ -1,0 +1,15 @@
+{
+  "@jupyterlab/apputils-extension:notification": {
+    "checkForUpdates": false,
+    "fetchNews": "false"
+  },
+  "@jupyterlab/notebook-extension:tracker": {
+    "codeCellConfig": {
+      "lineNumbers": true
+    },
+    "kernelShutdown": false
+  },
+  "@jupyterlab/apputils-extension:themes": {
+    "adaptive-theme": true
+  }
+}

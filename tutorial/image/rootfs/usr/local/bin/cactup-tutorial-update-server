@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Serve a cactup update root on http://127.0.0.1:8765.
+
+cactup accepts plain http for loopback only, which is what lets the tutorial
+VM act as its own update site: the installer ran against one root when the
+image was built, and the binary's `update-url` knob points here.
+
+Usage: cactup-tutorial-update-server [ROOT]   (default /opt/cactup-tutorial/update-root)
+"""
+
+import functools
+import http.server
+import sys
+
+ROOT = sys.argv[1] if len(sys.argv) > 1 else "/opt/cactup-tutorial/update-root"
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):  # quiet: nobody reads these
+        pass
+
+
+def main() -> None:
+    handler = functools.partial(Handler, directory=ROOT)
+    http.server.ThreadingHTTPServer.allow_reuse_address = True
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 8765), handler) as server:
+        server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

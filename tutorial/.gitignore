@@ -1,0 +1,9 @@
+# Build outputs of the JupyterLab extension (built in Docker, see jupyter/Dockerfile.labext).
+jupyter/cactup_tutorial/labextension/
+jupyter/labext/node_modules/
+jupyter/labext/lib/
+jupyter/labext/build-test/
+jupyter/labext/tsconfig.tsbuildinfo
+jupyter/labext/package-lock.json
+*.egg-info/
+.pytest_cache/

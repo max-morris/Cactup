@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cactup-tutorial"
+version = "0.1.0"
+description = "Cell magics, lexers and a JupyterLab extension for the Cactup tutorial notebooks"
+requires-python = ">=3.11"
+dependencies = [
+    "ipython>=8",
+    "pyte>=0.8.1",
+    "pygments>=2.15",
+]
+
+[project.optional-dependencies]
+# The out-of-tree checkpoints class runs inside the notebook server.
+lab = ["jupyter_server>=2", "jupyter_core>=5", "traitlets>=5", "tornado>=6"]
+test = ["pytest>=8", "ipykernel>=6", "nbclient>=0.10", "nbformat>=5", "cactup-tutorial[lab]"]
+
+[project.entry-points."pygments.lexers"]
+cactus-par = "cactup_tutorial.lexers:CactusParLexer"
+thornlist = "cactup_tutorial.lexers:ThornlistLexer"
+ccl = "cactup_tutorial.lexers:CCLLexer"
+optionlist = "cactup_tutorial.lexers:OptionlistLexer"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cactup_tutorial"]
+
+# The labextension is prebuilt (see Dockerfile.labext) into
+# cactup_tutorial/labextension and installed where JupyterLab looks for it.
+[tool.hatch.build.targets.wheel.shared-data]
+"cactup_tutorial/labextension" = "share/jupyter/labextensions/cactup-tutorial"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["labext/node_modules", "labext/lib", "labext/build-test"]

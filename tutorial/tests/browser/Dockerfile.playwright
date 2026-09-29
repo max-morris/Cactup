@@ -1,0 +1,2 @@
+FROM python:3.12-bookworm
+RUN pip install --no-cache-dir playwright==1.* && playwright install --with-deps chromium

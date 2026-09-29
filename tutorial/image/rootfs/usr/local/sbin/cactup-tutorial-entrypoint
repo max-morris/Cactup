@@ -1,0 +1,50 @@
+#!/bin/bash
+# Container entrypoint: start the machine's services as root, then run the
+# notebook server as the tutorial user.
+#
+# Inside JupyterHub (JUPYTERHUB_API_TOKEN is set by the spawner) it runs
+# jupyterhub-singleuser; started directly (`docker run -p 8888:8888 ...`) it
+# runs JupyterLab with the token from $CACTUP_TUTORIAL_TOKEN, or a random one
+# it prints.
+set -euo pipefail
+
+TUTORIAL_USER=cactus
+TUTORIAL_HOME=/home/cactus
+SKEL=/opt/cactup-tutorial/skel
+
+log() { printf 'cactup-tutorial: %s\n' "$*" >&2; }
+
+if [ "$(id -u)" -ne 0 ]; then
+    log "the entrypoint must start as root (it starts system services)"
+    exit 1
+fi
+
+# First start with an empty home (a fresh volume): seed it from the skeleton.
+if [ ! -e "$TUTORIAL_HOME/.cactup" ]; then
+    log "setting up $TUTORIAL_HOME"
+    cp -a "$SKEL/." "$TUTORIAL_HOME/"
+    chown -R "$TUTORIAL_USER:$TUTORIAL_USER" "$TUTORIAL_HOME"
+fi
+
+# The local update site. It must answer before anything runs cactup.
+setpriv --reuid=nobody --regid=nogroup --clear-groups \
+    /usr/local/bin/cactup-tutorial-update-server &
+/usr/local/bin/cactup-tutorial-wait-update-server
+
+run_as_user() {
+    exec setpriv --reuid="$TUTORIAL_USER" --regid="$TUTORIAL_USER" --init-groups \
+        env HOME="$TUTORIAL_HOME" USER="$TUTORIAL_USER" LOGNAME="$TUTORIAL_USER" SHELL=/bin/bash \
+        "$@"
+}
+
+cd "$TUTORIAL_HOME"
+if [ -n "${JUPYTERHUB_API_TOKEN:-}" ]; then
+    run_as_user jupyterhub-singleuser "$@"
+fi
+
+token=${CACTUP_TUTORIAL_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_hex(16))')}
+log "open http://127.0.0.1:8888/lab?token=$token"
+# In the environment rather than on the command line, where every process
+# could read it.
+export JUPYTER_TOKEN="$token"
+run_as_user jupyter lab --ip=0.0.0.0 --port=8888 --no-browser "$@"

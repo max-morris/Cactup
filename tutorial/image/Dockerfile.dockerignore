@@ -1,0 +1,20 @@
+# The build context is the repository root; send only what the stages COPY.
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!cactupdocs/Cargo.toml
+!cactupdocs/src/
+!src/
+!resources/
+!mdb/
+!cactup-init.sh
+!tutorial/
+tutorial/**/node_modules/
+tutorial/**/lib/
+tutorial/**/build-test/
+tutorial/**/labextension/
+tutorial/**/__pycache__/
+tutorial/**/*.egg-info/
+tutorial/bakes/
+tutorial/mirrors/cache/

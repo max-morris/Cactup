@@ -1,0 +1,15 @@
+#!/bin/sh
+# Wait (up to 15 s) until the local update server answers with a manifest.
+# A cactup that checks for updates while the server is still starting records
+# a failed check and doesn't look again for a day, so nothing may run cactup
+# before this succeeds.
+i=0
+while [ "$i" -lt 150 ]; do
+    if curl -fsS -o /dev/null http://127.0.0.1:8765/latest.json 2>/dev/null; then
+        exit 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+done
+echo "cactup-tutorial: the local update server did not start" >&2
+exit 1

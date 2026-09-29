@@ -1,0 +1,20 @@
+/* The magic line (`%%shell`, `%%file path`) reads as a header, not as code. */
+.cm-cactup-magic-line {
+  background: var(--jp-layout-color2);
+  font-style: italic;
+}
+
+.cm-cactup-magic-line,
+.cm-cactup-magic-line * {
+  color: var(--jp-mirror-editor-meta-color) !important;
+  font-weight: normal !important;
+}
+
+/* cactup template tokens: @VAR@, @ENV(NAME)@, @KNOB(name)@. */
+.cm-cactup-template,
+.cm-cactup-template * {
+  color: var(--jp-mirror-editor-variable-3-color) !important;
+  font-weight: bold;
+  background: var(--jp-layout-color2);
+  border-radius: 2px;
+}

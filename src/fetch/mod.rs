@@ -382,11 +382,9 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 })
                             }
                             Err(e) => {
-                                line.failed(format!("{e:#}"));
-                                report.failures.push(Failure {
-                                    what: item.repo.clone(),
-                                    error: format!("{e:#}"),
-                                });
+                                let error = describe_git_failure(&e);
+                                line.failed(error.clone());
+                                report.failures.push(Failure { what: item.repo.clone(), error });
                             }
                         }
                         drop(report);
@@ -895,8 +893,40 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
     Ok(plan)
 }
 
+/// A git failure as one line for the fetch report. gix's credential error
+/// spans lines and, for an https URL, reads like a login problem, although
+/// the usual cause is a repository that doesn't exist (hosts answer a missing
+/// repository as they would a private one): say so.
+fn describe_git_failure(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}")
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if text.contains("obtain credentials") {
+        format!(
+            "{text} (the repository may not exist or may be private: check its URL in the thornlist)"
+        )
+    } else {
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_credential_failure_reads_as_a_possibly_missing_repository() {
+        let e = anyhow::anyhow!(
+            "Failed to obtain credentials: Could not obtain identity for context: \
+             protocol=https\nhost=github.com"
+        );
+        let text = describe_git_failure(&e);
+        assert!(!text.contains('\n'), "{text}");
+        assert!(text.contains("may not exist"), "{text}");
+        assert_eq!(describe_git_failure(&anyhow::anyhow!("timed out")), "timed out");
+    }
+
     use super::*;
 
     /// A miniature list in the shape the real Einstein Toolkit one uses: the

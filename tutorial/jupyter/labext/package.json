@@ -1,0 +1,42 @@
+{
+  "name": "cactup-tutorial",
+  "version": "0.1.0",
+  "description": "Cactus file formats and per-cell magic languages for the Cactup tutorial",
+  "private": true,
+  "license": "BSD-3-Clause",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "style": "style/index.css",
+  "styleModule": "style/index.js",
+  "sideEffects": [
+    "style/*.css",
+    "style/index.js"
+  ],
+  "files": [
+    "lib/**/*.{d.ts,js}",
+    "style/**/*.{css,js}"
+  ],
+  "scripts": {
+    "build": "tsc && jupyter labextension build .",
+    "build:lib": "tsc",
+    "test": "tsc -p tsconfig.test.json && node --test build-test/test/"
+  },
+  "dependencies": {
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/view": "^6.26.0",
+    "@jupyterlab/application": "^4.4.0",
+    "@jupyterlab/cells": "^4.4.0",
+    "@jupyterlab/codemirror": "^4.4.0",
+    "@jupyterlab/notebook": "^4.4.0"
+  },
+  "devDependencies": {
+    "@jupyterlab/builder": "^4.4.0",
+    "@types/node": "^20.0.0",
+    "typescript": "~5.5.0"
+  },
+  "jupyterlab": {
+    "extension": true,
+    "outputDir": "../cactup_tutorial/labextension"
+  }
+}
