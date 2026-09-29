@@ -1,0 +1,176 @@
+# athena — GPU node of "Frank", the University of Oregon closet cluster
+# (athena.nic.uoregon.edu). Written 2026-09-29 from measurements taken on the
+# node that day; the facts this entry depends on:
+#
+#   - RHEL 8.10, kernel 4.18.0-553; `hostname` = athena, `hostname -f` =
+#     athena.nic.uoregon.edu (hostname.regexp claims both).
+#   - 2 x AMD EPYC 7662 (Zen 2, AVX2, no AVX-512), 2 x 64 cores, SMT off
+#     (lscpu: 1 thread per core, 128 CPUs), 8 NUMA nodes of 16 cores;
+#     MemTotal 263385732 kB.
+#   - 4 x NVIDIA A100-SXM4-40GB (sm_80), all-to-all NVLink (NV4); driver
+#     610.43.02, CUDA UMD 13.3; persistence on, compute mode Default, MIG off.
+#     GPUs 0/1 sit on NUMA node 2 (cores 32-47), GPUs 2/3 on NUMA node 6
+#     (cores 96-111).
+#   - GPU performance counters are open to ordinary users
+#     (/etc/modprobe.d: NVreg_RestrictProfilingToAdminUsers=0; ncu measured
+#     gpu__time_duration.sum on a test kernel as mmorris). ncu 2026.2.1 and
+#     nsys 2026.1.3 ship in the CUDA 13.3.1 tree below.
+#   - CUDA 13.3.1 at /packages/cuda/13.3.1 (nvcc 13.3.73; /usr/local/cuda is
+#     a symlink to it today, but the admins move that link, so the entry pins
+#     the versioned path). nvcc 13.3 accepts host gcc up to 15.
+#   - gcc-toolset-13 (gcc/g++/gfortran 13.3.1) under /opt/rh; the system gcc
+#     is 8.5 (no _Float16). /etc/bashrc enables the toolset for login shells,
+#     but env-setup below does not rely on that.
+#   - MPI: HPC-X 2.24 (Open MPI 4.1.9a1, CUDA-aware, UCX 1.19 with CUDA
+#     transports) from the NVIDIA HPC SDK 25.9. See the env-setup comment.
+#
+# Scheduling. Frank has no batch system in practice: users start work with
+# nohup on the node they are logged into, and other users' jobs share the
+# GPUs (2026-09-29: another user's processes held ~2 GB on every A100 at 0%
+# utilization). So this is the scheduler-less shape of mdb/et-juphub and
+# mdb/omnia: "submit" backgrounds the script and prints its PID; ps/pkill do
+# status/stop. NOTE: Slurm does run on the cluster, and `sinfo -N` lists a
+# partition `athena` (Nodes=athena, State=UP, idle, no GPU GRES configured,
+# /etc/profile exports SLURM_PARTITION=athena). Nobody queues there (squeue
+# was empty while the GPUs were in use), and this entry deliberately does not
+# use it.
+#
+# Filesystems (all shared by the RHEL 8 Frank nodes over NFS 4.2 from
+# 172.17.202.253): /storage/users (homes; /home/users is a symlink to it;
+# 199T, 59T free), /storage/packages (= /packages, the x86_64.rh8 package
+# tree; the Ubuntu nodes mount a different tree there). /mnt/beegfs (BeeGFS,
+# 172T, 107T free) has a users/ directory but none for mmorris yet. /tmp is
+# on the node-local root disk (3.5T, 2.1T free).
+#
+# Multi-node runs are not set up: there is no hostfile convention, and
+# athena's ~/.ssh holds no private key, so mpirun cannot reach another node
+# without further setup. The runscripts launch on this node only.
+
+[machine]
+name        = "athena"
+nickname    = "athena"
+location    = "University of Oregon"
+description = "GPU node of the Frank closet cluster: 2 x AMD EPYC 7662 (128 cores), 4 x NVIDIA A100-SXM4-40GB, no batch system (nohup), shared NFS home."
+status      = "experimental"
+hostname    = "athena.nic.uoregon.edu"
+
+[paths]
+# The shared NFS home, spelled by its real mount point (/home/users is a
+# symlink to /storage/users). install-home is where cactup's own fallback
+# (~/.cactup/cacti) already puts installations here — the existing
+# mixed-precision tree lives there — so it is written out, not changed.
+install-home    = "/storage/users/@USER@/.cactup/cacti"
+simulation-home = "/storage/users/@USER@/simulations"
+# NEW (design §11.5): testsuite-output root, sibling of simulation-home.
+test-home       = "/storage/users/@USER@/tests"
+
+[hardware]
+# A CPU is a core: 2 sockets x 64, SMT off.
+max-cpus-per-node     = 128
+# Request default when -c is omitted (§8.5). One rank per GPU is the shape
+# (cactup's default of one GPU per rank; max-gpus-per-node bounds a derived
+# TASKS_PER_NODE at 4), and 16 cores per rank is one NUMA node each. A no-flag
+# run is therefore 4 ranks x 16 cores = half the node's cores on all four
+# GPUs — restrained on purpose, since the node is shared. `-c 32` fills it.
+default-cpus-per-task = 16
+threads-per-cpu       = 1
+max-gpus-per-node     = 4
+memory                = 257212    # MB per node (MemTotal 263385732 kB)
+
+[build]
+make      = "make -j@MAKEJOBS@"
+# 32 of 128 cores: a shared node (load average ~20 from other users when
+# measured), so the omnia choice of a restrained -j carries over.
+make-jobs = 32
+
+[environment]
+# Self-contained on purpose: the build/submit phases source this in a plain
+# `/bin/sh -c`, which never reads /etc/bashrc (gcc-toolset-13 via scl) or the
+# Cray PE modules a login shell loads (PrgEnv-cray, cray-mpich). Only
+# absolute paths, no `module` calls. Prepending is enough to shadow the Cray
+# PE entries a login shell leaves on PATH/LD_LIBRARY_PATH.
+#
+#   - gcc-toolset-13 (gcc 13.3.1): C/C++/Fortran and nvcc's host compiler.
+#     CUDA 13.3 supports it, so no -allow-unsupported-compiler (see the
+#     optionlist). Its libstdc++/libgcc are the RHEL "nonshared" kind: newer
+#     symbols are linked statically, the shared ones are the system's, so
+#     there is no gcc runtime to put on LD_LIBRARY_PATH at run time (verified:
+#     a _Float16 <-> double test binary had no dynamic half-precision
+#     helpers).
+#   - CUDA 13.3.1: nvcc, ncu, nsys.
+#   - MPI: HPC-X 2.24. Chosen over the site's Open MPI 4.1.8 (gcc 13.2.0
+#     build) because on athena that one is left with TCP only: its pml ucx
+#     needs UCX >= 1.18 but the system has 1.15, and its btl vader needs
+#     libxpmem.so.0, which is not installed; a 4-rank job hung over TCP.
+#     HPC-X brings its own UCX 1.19, has working vader/smcuda BTLs, and is
+#     CUDA-aware (MPIX_Query_cuda_support() = 1; a device-buffer
+#     MPI_Allreduce over 4 ranks was correct). The directories are what
+#     HPC-X's own hpcx-init.sh `hpcx_load` sets; OPAL_PREFIX is required
+#     because HPC-X is installed relocated.
+#   - hcoll is disabled: athena has no InfiniBand HCA, and hcoll prints an
+#     init error per rank otherwise (the job still ran).
+#   - CMake 3.31.1 for the Cactus-built AMReX (the /etc/bashrc default is
+#     3.19.6).
+env-setup = """
+export CUDA_HOME=/packages/cuda/13.3.1
+export HPCX_HOME=/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24
+export MPI_HOME=${HPCX_HOME}/ompi
+export OPAL_PREFIX=${MPI_HOME}
+export PATH="/opt/rh/gcc-toolset-13/root/usr/bin:/packages/cmake/3.31.1/bin:${CUDA_HOME}/bin:${MPI_HOME}/bin:${HPCX_HOME}/ucx/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64:${CUDA_HOME}/lib64:${MPI_HOME}/lib:${HPCX_HOME}/ucx/lib:${HPCX_HOME}/ucx/lib/ucx:${HPCX_HOME}/ucc/lib:${HPCX_HOME}/ucc/lib/ucc:${HPCX_HOME}/hcoll/lib:${HPCX_HOME}/sharp/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export OMPI_MCA_coll_hcoll_enable=0
+"""
+
+[scheduler]
+# No batch system (see the header): background the script, echo its PID as
+# the job id; ps/pkill for status/stop. Copied from mdb/et-juphub.
+# @STDOUT_FILE@/@STDERR_FILE@ default to @RUNDIR@/@SIMULATION_NAME@.{out,err}
+# unless -o/-e are given (design §8.3.1).
+submit            = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit   = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+get-status        = "ps @JOB_ID@"
+# Kill the whole process group descending from @JOB_ID@ (mpirun and every
+# rank), not just the top process.
+stop              = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern    = "(.*)"
+status-pattern    = "^ *@JOB_ID@ "
+queued-pattern    = "$^"          # never "queued"
+running-pattern   = "^"           # in ps => running
+holding-pattern   = "$^"          # never "held"
+exec-host         = "echo localhost"
+exec-host-pattern = "(.*)"
+# No max-walltime: the built-in one-year fallback applies (§4.2).
+# No allocation-env: nothing allocates here, so `test run` needs no gate.
+
+# Two cactup queues on the one node; no scheduler sees either name.
+# `local` (default) is GPU-flagged because the default optionlist is the CUDA
+# build (D12, §4.4, refuses a GPU binary on a non-GPU queue). `cpu` serves the
+# CPU-only optionlist variant, mirroring qbd's CPU partitions: without it a
+# CPU run on `local` would have its derived rank count capped at the four
+# GPUs. Run a CPU config with `-q cpu`.
+[queues.local]
+gpu     = true
+default = true
+
+# 8 threads per rank, as on qbd's CPU queues (two ranks per 16-core NUMA
+# node). The runscript variant below defaults to 8 ranks: half the node, the
+# same share a no-flag GPU run takes.
+[queues.cpu]
+gpu = false
+default-cpus-per-task = 8
+
+# The normal variant of each script, the CPU-only variant (mirrors qbd's
+# `cpu`), and the testsuite variant (design §11.2). One submitscript serves
+# both queues: with no scheduler it only re-invokes cactup.
+[variants.submitscript]
+"default" = { queues = ["local", "cpu"], default = true }
+"test"    = { queues = ["local", "cpu"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["local"], default = true }
+"cpu"     = { queues = ["cpu"], tasks = 8 }
+"test"    = { queues = ["local", "cpu"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default", "cpu"]

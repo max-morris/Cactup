@@ -1,0 +1,24 @@
+#! /bin/bash
+# athena submitscript (variant "default"), written 2026-09-29 as a copy of
+# mdb/et-juphub/submitscripts/default.sh (itself ported from simfactory2
+# generic.sub): athena has no batch system either (see meta.toml). It does not
+# depend on the GPU, CUDA or compiler facts; it serves both queues.
+# Changes vs simfactory (design §6.3, §8.3.1): SIMFACTORY run → @CACTUP@ sim run,
+# added --installation=@ALIAS@ for the compute-node re-invocation locator.
+#
+# No batch scheduler: chaining is emulated by waiting for the previous job's PID
+# to exit. Plain bash conditional (the NAME engine does literal substitution
+# only — §6/§D7), so a .sh variant suffices.
+
+cd @SOURCEDIR@ || exit 1
+
+CHAINED_JOB_ID='@CHAINED_JOB_ID@'
+if [ "${CHAINED_JOB_ID}" != '' ]; then
+    while ps "${CHAINED_JOB_ID}" >/dev/null; do
+        sleep 60
+    done
+fi
+
+exec @CACTUP@ sim run @SIMULATION_NAME@ \
+    --installation=@ALIAS@ --sim-dir=@SIMULATION_DIR@ --machine=@MACHINE@ \
+    --restart-id=@RESTART_ID@

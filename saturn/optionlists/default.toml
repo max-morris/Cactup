@@ -1,0 +1,160 @@
+# saturn optionlist (variant "default"): native CUDA build for CarpetX/AMReX
+# on Frank's saturn node. Written 2026-09-29, modeled on mdb/qbd's default
+# variant and adapted to what was measured on saturn that day:
+#   GPU      3 x NVIDIA A100 PCIe -> sm_80 / AMReX CUDA architecture 80
+#   CUDA     13.2.1 (/packages/cuda/13.2.1, nvcc 13.2; driver API 13.3)
+#   gcc      13.2.0 (/packages/gcc/13.2.0) for C, C++, Fortran AND as nvcc's
+#            host compiler
+#   MPI      OpenMPI 4.1.8 built with that gcc (not CUDA-aware)
+#   CPU      Xeon Platinum 8367HC (Cooper Lake): AVX-512 F/CD/BW/DQ/VL, FMA, F16C
+#
+# Differences from qbd, and why:
+#   - One compiler, not a split. qbd pairs gcc 13 (C, _Float16 probe) with a
+#     gcc 11 host compiler because nvcc 12.2 rejects gcc 13. nvcc 13.2 accepts
+#     gcc up to 15, so gcc 13 does everything here and
+#     -allow-unsupported-compiler is NOT needed (a C++17/--extended-lambda/
+#     cuda_fp16 test file compiled cleanly with this exact pairing).
+#   - Libraries the node lacks are BUILD (Cactus's ExternalLibraries build
+#     them): HDF5, FFTW3, GSL, BLAS/LAPACK, hwloc, Boost, libjpeg, yaml-cpp,
+#     Silo, ADIOS2, openPMD, NSIMD, AMReX. The system has only zlib and
+#     OpenSSL with headers. (/packages has OpenBLAS 0.3.21, but it is a
+#     Zen-targeted build, and hwloc 2.11.2 built for the Ubuntu 20.04 tree;
+#     neither is worth the risk for a GPU build.)
+#   - CMAKE_DIR is the system cmake 3.22.1: the /packages cmake modules
+#     (3.26.0, 3.31.1) fail to start on Ubuntu 22.04 (libssl.so.1.1 missing).
+#     AMReX 25.11 needs cmake >= 3.18 and its build forces the CUDA compiler,
+#     so 3.22 is enough.
+#
+# The [options] table is rendered back to the native Cactus "NAME = value"
+# optionlist before `make <config>-config` (design §7.8); every value is kept
+# as a TOML string so the render is faithful.
+#
+# spelling-check: skip -- the bare OPTIMISE and VECTORISE keys below are the
+# Cactus flesh's own option names and must be spelled exactly that way.
+
+[cactup]
+gpu               = true
+default           = true      # `cpu` is the other variant; this one stays the implicit choice
+compatible-queues = ["local"]
+
+[options]
+# -mf16c (CFLAGS/CXXFLAGS/F90FLAGS only): hardware binary16<->binary32
+# conversion for gcc's _Float16 in the flesh's C code (gcc 13 has _Float16;
+# checked on saturn). Deliberately NOT in CUCCFLAGS: under nvcc CCTK_REAL2 is
+# __half and cuda_fp16.hpp converts on the host in software regardless.
+VERSION = "saturn-2026-09-29"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "/packages/gcc/13.2.0/bin/gcc"
+CXX = "/packages/gcc/13.2.0/bin/g++"
+F90 = "/packages/gcc/13.2.0/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+# The system libstdc++/libgcc_s are gcc 11's; the executable needs gcc 13's
+# (libstdc++ 13, and libgcc's half<->double helpers such as __extendhfdf2).
+# env-setup puts gcc 13's lib64 first on LD_LIBRARY_PATH; the rpaths are the
+# fallback for a shell without env-setup (DT_RUNPATH via --enable-new-dtags,
+# as on qbd, so LD_LIBRARY_PATH can still override). OpenMPI's lib gets one
+# too because the link goes through nvcc, not mpicxx (which would add it).
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition -Wl,--enable-new-dtags -Wl,-rpath,/packages/gcc/13.2.0/lib64 -Wl,-rpath,/packages/openmpi/4.1.8/gcc_13.2.0/lib"
+
+LIBS    = "stdc++fs gfortran cudart_static curand_static culibos dl rt pthread"
+LIBDIRS = "/packages/cuda/13.2.1/lib64 /packages/gcc/13.2.0/lib64 /packages/gcc/13.2.0/lib/gcc/x86_64-pc-linux-gnu/13.2.0"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+# Same nvcc flags as qbd; the host compiler is named by absolute path so the
+# build does not depend on which g++ happens to be first on PATH.
+CUCC  = "nvcc"
+CUCCFLAGS = "--compiler-bindir /packages/gcc/13.2.0/bin/g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
+LD = "nvcc --compiler-bindir /packages/gcc/13.2.0/bin/g++ -g -fno-lto --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir"
+CUCC_DEBUG_FLAGS    = "-g3"
+CUCC_OPTIMISE_FLAGS = "-O3"
+CUCC_WARN_FLAGS     = "-Xcompiler -Wall"
+CUCC_OPENMP_FLAGS   = "-Xcompiler -fopenmp"
+
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+AMREX_ENABLE_CUDA = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+CMAKE_DIR = "/usr"
+
+# OpenMPI 4.1.8 has no C++ bindings library (mpicxx --showme links -lmpi
+# only), hence MPI_LIBS = mpi.
+MPI_DIR      = "/packages/openmpi/4.1.8/gcc_13.2.0"
+MPI_INC_DIRS = "/packages/openmpi/4.1.8/gcc_13.2.0/include"
+MPI_LIB_DIRS = "/packages/openmpi/4.1.8/gcc_13.2.0/lib"
+MPI_LIBS     = "mpi"
+
+HDF5_DIR   = "BUILD"
+FFTW3_DIR  = "BUILD"
+GSL_DIR    = "BUILD"
+BLAS_DIR   = "BUILD"
+LAPACK_DIR = "BUILD"
+HWLOC_DIR  = "BUILD"
+BOOST_DIR  = "BUILD"
+LIBJPEG_DIR = "BUILD"
+
+ZLIB_DIR  = "/usr"
+ZLIB_LIBS = "z"
+
+# OpenSSL 3.0.2 (libssl-dev): found in system paths.
+
+SILO_DIR    = "BUILD"
+ADIOS2_DIR  = "BUILD"
+OPENPMD_DIR = "BUILD"
+
+NSIMD_DIR  = "BUILD"
+NSIMD_SIMD = "AVX512_SKYLAKE"
+
+AMREX_DIR                      = "BUILD"
+AMREX_ENABLE_FORTRAN           = "OFF"
+AMREX_ENABLE_HIP               = "no"
+AMREX_CMAKE_CUDA_ARCHITECTURES = "80"
+
+YAML_CPP_DIR            = "BUILD"
+YAML_CPP_ENABLE_FORTRAN = "OFF"

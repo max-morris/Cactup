@@ -1,0 +1,108 @@
+# athena optionlist (variant "cpu"): a CPU-only build for the Carpet-based
+# Einstein Toolkit stack (McLachlan, IllinoisGRMHD, AHFinderDirect, Fuka/Kadath
+# initial data, ...), run on the `cpu` queue (`-q cpu`). Written 2026-09-29,
+# mirroring mdb/qbd/optionlists/cpu.toml the way that file mirrors qbd's
+# default: this variant's "default" twin minus everything that exists only
+# for nvcc/AMReX (CUCC*, the nvcc LD, cudart libs, AMREX_*).
+#
+# Measured facts it depends on: gcc-toolset-13 (gcc/g++/gfortran 13.3.1);
+# AMD EPYC 7662 (Zen 2: AVX2 + FMA, no AVX-512); HPC-X 2.24 Open MPI (see
+# meta.toml). The same env-setup applies; the CUDA paths in it are harmless
+# here.
+#
+# Not yet exercised on athena. Kadath (KadathThorn) needs FFTW3, GSL, LAPACK
+# and Boost: all four are built from source below.
+
+[cactup]
+gpu               = false
+description       = "CPU-only build (Carpet/McLachlan/IllinoisGRMHD, Fuka) for the cpu queue"
+compatible-queues = ["cpu"]
+
+[options]
+VERSION = "athena-cpu-2026-09-29"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "/opt/rh/gcc-toolset-13/root/usr/bin/gcc"
+CXX = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
+F90 = "/opt/rh/gcc-toolset-13/root/usr/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx2 -mfma"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx2 -mfma"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx2 -mfma"
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition"
+
+LIBS    = "stdc++fs gfortran dl rt pthread"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+CMAKE_DIR = "/packages/cmake/3.31.1"
+
+MPI_DIR      = "/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24/ompi"
+MPI_INC_DIRS = "/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24/ompi/include"
+MPI_LIB_DIRS = "/packages/nvhpc/nvhpc25.9_cuda13.0/Linux_x86_64/25.9/comm_libs/13.0/hpcx/hpcx-2.24/ompi/lib"
+MPI_LIBS     = "mpi"
+
+HDF5_DIR  = "BUILD"
+FFTW3_DIR = "BUILD"
+GSL_DIR   = "BUILD"
+BOOST_DIR = "BUILD"
+HWLOC_DIR = "BUILD"
+LIBJPEG_DIR = "BUILD"
+BLAS_DIR   = "BUILD"
+LAPACK_DIR = "BUILD"
+YAML_CPP_DIR = "BUILD"
+YAML_CPP_ENABLE_FORTRAN = "OFF"
+ADIOS2_DIR  = "BUILD"
+OPENPMD_DIR = "BUILD"
+SILO_DIR    = "BUILD"
+
+NSIMD_DIR  = "BUILD"
+NSIMD_SIMD = "AVX2"
+
+ZLIB_DIR  = "/usr"
+ZLIB_LIBS = "z"
+OPENSSL_DIR = "/usr"

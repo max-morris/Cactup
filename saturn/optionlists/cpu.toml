@@ -1,0 +1,129 @@
+# saturn optionlist (variant "cpu"): CPU-only build (Carpet/McLachlan/
+# IllinoisGRMHD-style thornlists, or a CarpetX build without AMReX's CUDA
+# backend) for Frank's saturn node, run through the `cpu` queue
+# (`cactup sim submit ... -q cpu`). Written 2026-09-29, derived from this
+# machine's "default" (CUDA) variant the way mdb/qbd/optionlists/cpu.toml is
+# derived from qbd's: same compilers, flags and libraries, minus everything
+# that exists only for nvcc/AMReX-CUDA (CUCC*, the nvcc LD, cudart libs,
+# AMREX_ENABLE_CUDA, the CUDA architecture).
+#
+# Measured facts it depends on: gcc 13.2.0 (/packages/gcc/13.2.0; has
+# _Float16, so -mf16c stays, unlike qbd's cpu variant on gcc 8.5), OpenMPI
+# 4.1.8 built with that gcc, Xeon Platinum 8367HC (Cooper Lake, AVX-512).
+# Libraries the node lacks are BUILD, as in the default variant.
+#
+# spelling-check: skip -- the bare OPTIMISE and VECTORISE keys below are the
+# Cactus flesh's own option names and must be spelled exactly that way.
+
+[cactup]
+gpu               = false
+description       = "CPU-only build (no nvcc, no AMReX CUDA) for the `cpu` queue"
+compatible-queues = ["cpu"]
+
+[options]
+# -mf16c: hardware binary16<->binary32 conversion for gcc's _Float16
+# (CCTK_REAL2 on the CPU side; gcc 13 has _Float16, checked on saturn).
+VERSION = "saturn-cpu-2026-09-29"
+
+CPP = "cpp"
+FPP = "cpp"
+CC  = "/packages/gcc/13.2.0/bin/gcc"
+CXX = "/packages/gcc/13.2.0/bin/g++"
+F90 = "/packages/gcc/13.2.0/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+CFLAGS   = "-g -O2 -std=gnu99 -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+CXXFLAGS = "-g -O2 -std=c++17 -D_GNU_SOURCE -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none -mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c"
+# The system libstdc++/libgcc_s are gcc 11's; the executable needs gcc 13's
+# (libstdc++ 13, and libgcc's half<->double helpers such as __extendhfdf2).
+# env-setup puts gcc 13's lib64 first on LD_LIBRARY_PATH; the rpaths are the
+# fallback for a shell without env-setup (DT_RUNPATH via --enable-new-dtags,
+# as on qbd, so LD_LIBRARY_PATH can still override). OpenMPI's lib gets one
+# too because the link uses the plain compiler, not mpicxx (which would add it).
+LDFLAGS  = "-rdynamic -Wl,--allow-multiple-definition -Wl,--enable-new-dtags -Wl,-rpath,/packages/gcc/13.2.0/lib64 -Wl,-rpath,/packages/openmpi/4.1.8/gcc_13.2.0/lib"
+
+LIBS    = "stdc++fs gfortran dl rt pthread"
+LIBDIRS = "/packages/gcc/13.2.0/lib64 /packages/gcc/13.2.0/lib/gcc/x86_64-pc-linux-gnu/13.2.0"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+OPTIMISE           = "yes"
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+VECTORISE                = "yes"
+VECTORISE_ALIGNED_ARRAYS = "no"
+VECTORISE_INLINE         = "yes"
+
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+CMAKE_DIR = "/usr"
+
+# OpenMPI 4.1.8 has no C++ bindings library (mpicxx --showme links -lmpi
+# only), hence MPI_LIBS = mpi.
+MPI_DIR      = "/packages/openmpi/4.1.8/gcc_13.2.0"
+MPI_INC_DIRS = "/packages/openmpi/4.1.8/gcc_13.2.0/include"
+MPI_LIB_DIRS = "/packages/openmpi/4.1.8/gcc_13.2.0/lib"
+MPI_LIBS     = "mpi"
+
+HDF5_DIR   = "BUILD"
+FFTW3_DIR  = "BUILD"
+GSL_DIR    = "BUILD"
+BLAS_DIR   = "BUILD"
+LAPACK_DIR = "BUILD"
+HWLOC_DIR  = "BUILD"
+BOOST_DIR  = "BUILD"
+LIBJPEG_DIR = "BUILD"
+
+ZLIB_DIR  = "/usr"
+ZLIB_LIBS = "z"
+
+# OpenSSL 3.0.2 (libssl-dev): found in system paths.
+
+SILO_DIR    = "BUILD"
+ADIOS2_DIR  = "BUILD"
+OPENPMD_DIR = "BUILD"
+
+NSIMD_DIR  = "BUILD"
+NSIMD_SIMD = "AVX512_SKYLAKE"
+
+# CPU-only AMReX, for a CarpetX thornlist built with this variant.
+AMREX_DIR            = "BUILD"
+AMREX_ENABLE_FORTRAN = "OFF"
+AMREX_ENABLE_HIP     = "no"
+
+YAML_CPP_DIR            = "BUILD"
+YAML_CPP_ENABLE_FORTRAN = "OFF"
