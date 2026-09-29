@@ -42,6 +42,8 @@ body[data-jp-theme-light='true'] .cactup-term .ansi-cyan-fg,
 body[data-jp-theme-light='true'] .cactup-term .ansi-cyan-intense-fg { color: #00797f; }
 body[data-jp-theme-light='true'] .cactup-term .ansi-yellow-fg,
 body[data-jp-theme-light='true'] .cactup-term .ansi-yellow-intense-fg { color: #8a6100; }
+body[data-jp-theme-light='false'] .cactup-term .ansi-red-intense-fg { color: #ff6b6b; }
+body[data-jp-theme-light='false'] .cactup-term .ansi-green-intense-fg { color: #5fd068; }
 body[data-jp-theme-light='false'] .cactup-term .ansi-black-fg,
 body[data-jp-theme-light='false'] .cactup-term .ansi-black-intense-fg { color: #9e9e9e; }
 .cactup-status { margin-top: 0.3em; font-family: var(--jp-ui-font-family);

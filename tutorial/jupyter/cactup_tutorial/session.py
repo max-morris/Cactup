@@ -308,16 +308,26 @@ class Session:
                 self._setting_up = False
 
             deadline = time.monotonic() + timeout if timeout else None
-            for item in self._read_until_done(seq, interruptible=True, deadline=deadline, tick=tick):
-                if isinstance(item, Result):
+            finished = False
+            try:
+                for item in self._read_until_done(seq, interruptible=True, deadline=deadline, tick=tick):
+                    if isinstance(item, Result):
+                        with self._hold_lock:
+                            item.interrupted = self._interrupts > 0 or self._held > 0
+                            self._held = 0
+                            self._held_at = None
+                        self.cwd = item.cwd or self.cwd
+                        finished = True
+                        yield item
+                        return
+                    yield item
+            finally:
+                if not finished:
+                    # Closed before its result (the caller gave up on it): an
+                    # interrupt held for this cell must not cancel the next.
                     with self._hold_lock:
-                        item.interrupted = self._interrupts > 0 or self._held > 0
                         self._held = 0
                         self._held_at = None
-                    self.cwd = item.cwd or self.cwd
-                    yield item
-                    return
-                yield item
 
     def _cell_path(self, seq: int, part: str = "cell") -> str:
         return os.path.join(self._tmpdir, f"{part}-{seq}.sh")

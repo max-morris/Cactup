@@ -15,12 +15,16 @@ the HTML wraps its `<pre>` in a `jp-RenderedText` element.
 from __future__ import annotations
 
 import html
+import re
 
 import pyte
 
 from .session import COLUMNS, ROWS
 
 MAX_LINES = 5000
+
+# A control sequence (CSI): ESC [, parameter bytes, intermediate bytes, a final byte.
+_CSI = re.compile(rb"(\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e])")
 
 _NAMES = {
     "black": "black",
@@ -84,12 +88,15 @@ class Terminal:
 
     def feed(self, data: bytes) -> None:
         # pyte raises on many malformed escape sequences (`cat` of a binary
-        # file prints plenty); it resets its parser first, so the rest of the
-        # output still renders, less the rest of this chunk.
-        try:
-            self.stream.feed(data)
-        except Exception:
-            pass
+        # file prints plenty) and then drops the rest of what it was given.
+        # Fed a control sequence at a time, a bad one loses only itself;
+        # pyte keeps its parser state between calls, and resets it on error.
+        for part in _CSI.split(data):
+            if part:
+                try:
+                    self.stream.feed(part)
+                except Exception:
+                    pass
 
     def mid_line(self) -> bool:
         """The output so far ends in an unfinished line (a prompt, perhaps)."""

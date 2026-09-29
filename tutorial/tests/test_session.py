@@ -298,3 +298,14 @@ def test_the_notebook_token_does_not_reach_cells(monkeypatch, tmp_path):
     finally:
         s.close()
     assert out.strip() == "[unset]"
+
+
+def test_closing_a_cell_early_forgets_its_held_interrupt(session):
+    os.kill(session.pid, signal.SIGSTOP)
+    items = session.run("echo one", tick=True)
+    next(items)  # the line is sent; the stopped shell never starts the cell
+    session.interrupt()  # held
+    items.close()
+    os.kill(session.pid, signal.SIGCONT)
+    out, res = run(session, "echo two")
+    assert "two" in out and not res.exited

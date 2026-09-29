@@ -296,8 +296,8 @@ otherwise it is a no-op.
 ### 2.4 Interrupts & progress (required for every long-running path)
 
 **Interrupt contract.** `main.rs` installs the process signal handler with a
-grace count of 1: the **first** Ctrl-C prints a notice ("stopping…, Ctrl-C
-again aborts instantly") and sets the global interrupt flag
+grace count of 1: the **first** Ctrl-C prints a notice ("stopping…, interrupt
+again to abort instantly", worded so it also reads right in a notebook) and sets the global interrupt flag
 (`gix::interrupt::is_triggered()`); the **second** aborts on the spot. The
 notice is a promise, so every long-running path — any loop over
 repos/thorns/files, child-process wait, network operation, or polling loop —

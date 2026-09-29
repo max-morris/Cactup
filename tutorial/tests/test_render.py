@@ -83,3 +83,10 @@ def test_malformed_escape_sequences_never_break_the_terminal():
     term.feed(b"\r\nstill here\r\n")
     assert "still here" in term.text()
     assert term.html()
+
+
+def test_a_bad_escape_sequence_loses_only_itself():
+    term = Terminal()
+    term.feed(b"A\x1b[?1;2cB\r\nC\r\n\x1b[1;2;3Cafter\r\n")
+    text = term.text()
+    assert "B" in text and "C" in text and "after" in text

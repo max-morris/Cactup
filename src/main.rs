@@ -90,7 +90,7 @@ fn main() -> Res<()> {
         use std::os::fd::FromRawFd;
         let mut stderr = unsafe { std::fs::File::from_raw_fd(2) };
         let _ =
-            stderr.write_all(b"\ncactup: interrupted, stopping (Ctrl-C again aborts instantly)\n");
+            stderr.write_all(b"\ncactup: interrupted, stopping (interrupt again to abort instantly)\n");
         std::mem::forget(stderr);
     };
     unsafe {
