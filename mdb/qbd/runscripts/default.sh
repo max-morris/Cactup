@@ -37,9 +37,15 @@ env | sort > .cactup/ENVIRONMENT
 # Optional profiler wrapper (mixed-precision performance work). Set the
 # variable in the shell that runs `cactup sim submit`; sbatch propagates the
 # environment to the job. Unset: this block is inert.
-#   CACTUP_PROFILE=nsys   one nsys report per task (CUDA + NVTX + MPI, plus
-#                         unified-memory page faults on both sides, since
-#                         CarpetX's host-side reductions read managed memory)
+#   CACTUP_PROFILE=nsys   one nsys report per task (CUDA + NVTX + MPI).
+#                         CACTUP_NSYS_UM=1 adds unified-memory page-fault
+#                         tracing on both sides (CarpetX's host-side
+#                         reductions read managed memory). Off by default:
+#                         on 2026-09-28 all four traces taken with it on
+#                         ended in "Errors occurred while processing the
+#                         raw events" (an event-order check in nsys), and
+#                         three of the four kept only the first two
+#                         iterations.
 #   CACTUP_PROFILE=ncu    ncu on task 0 only: CACTUP_NCU_COUNT launches
 #                         (default 60) after skipping CACTUP_NCU_SKIP
 #                         (default 300), counted among launches whose
@@ -53,7 +59,7 @@ env | sort > .cactup/ENVIRONMENT
 PROF_WRAPPER=
 case "${CACTUP_PROFILE:-}" in
   nsys)
-    PROF_WRAPPER="nsys profile --trace=cuda,nvtx,mpi --sample=none --cpuctxsw=none --cuda-memory-usage=true --cuda-um-cpu-page-faults=true --cuda-um-gpu-page-faults=true --force-overwrite=true -o profile.task%q{SLURM_PROCID}" ;;
+    PROF_WRAPPER="nsys profile --trace=cuda,nvtx,mpi --sample=none --cpuctxsw=none --cuda-memory-usage=true ${CACTUP_NSYS_UM:+--cuda-um-cpu-page-faults=true --cuda-um-gpu-page-faults=true} --force-overwrite=true -o profile.task%q{SLURM_PROCID}" ;;
   ncu)
     cat > ./prof-ncu.sh <<'EOS'
 #!/bin/bash
