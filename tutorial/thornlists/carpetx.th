@@ -1,0 +1,101 @@
+# carpetx.th -- the CarpetX driver and its thorns on their own, from the
+# Einstein Toolkit ET_2026_05 release.
+#
+# The flesh; the CarpetX thorns the release enables, plus Algo; IOUtil for
+# CarpetX's I/O parameters; and every external library those thorns require
+# or can use: AMReX, MPI, yaml-cpp and zlib (required), Boost (for Algo), and
+# ADIOS2, openPMD, Silo with HDF5, NSIMD, hwloc and CMake (optional, for a
+# fully featured build).
+#
+# Every repository and branch is the ET_2026_05 release's.
+
+!CRL_VERSION = 1.0
+
+!DEFINE ROOT = Cactus
+!DEFINE ARR  = $ROOT/arrangements
+!DEFINE COMPONENTLIST_TARGET = $ROOT/thornlists/
+
+!DEFINE ET_RELEASE = ET_2026_05
+
+
+# Cactus Flesh
+!TARGET   = $ROOT
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactus.git
+!REPO_BRANCH = $ET_RELEASE
+!NAME     = flesh
+!CHECKOUT = .clang-format CONTRIBUTORS COPYRIGHT doc lib Makefile README.md src
+
+
+# CactusBase thorns
+# IOUtil implements "IO", which CarpetX's param.ccl SHARES.
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactusbase.git
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+CactusBase/IOUtil
+
+
+# CarpetX thorns
+# PDESolvers and PoissonX are checked out but disabled, as in the release:
+# they need PETSc, which this list does not carry.
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/CarpetX
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT = CarpetX/PDESolvers CarpetX/PoissonX
+CarpetX/ADMBaseX
+CarpetX/Algo
+CarpetX/Arith
+CarpetX/BoxInBox
+CarpetX/CarpetX
+CarpetX/CarpetXRegrid
+CarpetX/CoordinatesX
+CarpetX/Derivs
+CarpetX/ErrorEstimator
+CarpetX/FluxWaveToyX
+CarpetX/HydroBaseX
+CarpetX/Loop
+CarpetX/ODESolvers
+#DISABLED CarpetX/PDESolvers
+#DISABLED CarpetX/PoissonX
+CarpetX/SIMDWaveToyX
+CarpetX/SpacetimeWaveToyX
+CarpetX/StaggeredWaveToyX
+CarpetX/TestArrayGroup
+CarpetX/TestBoundaries
+CarpetX/TestBoxInBox
+CarpetX/TestDerivs
+CarpetX/TestInterpolate
+CarpetX/TestNorms
+CarpetX/TestODESolvers
+CarpetX/TestODESolvers2
+CarpetX/TestOutput
+CarpetX/TestProlongate
+CarpetX/TestSymmetries
+CarpetX/TmunuBaseX
+CarpetX/WaveToyX
+
+
+# External libraries
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/$1-$2
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH = ../$1-$2
+!CHECKOUT =
+ExternalLibraries/ADIOS2
+ExternalLibraries/AMReX
+ExternalLibraries/Boost
+ExternalLibraries/CMake
+ExternalLibraries/HDF5
+ExternalLibraries/hwloc
+ExternalLibraries/MPI
+ExternalLibraries/NSIMD
+ExternalLibraries/openPMD
+ExternalLibraries/Silo
+ExternalLibraries/yaml_cpp
+ExternalLibraries/zlib

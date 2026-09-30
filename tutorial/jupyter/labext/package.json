@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc && jupyter labextension build .",
     "build:lib": "tsc",
-    "test": "tsc -p tsconfig.test.json && node --test build-test/test/"
+    "test": "tsc -p tsconfig.test.json && node --test build-test/test/*.test.js"
   },
   "dependencies": {
     "@codemirror/language": "^6.10.0",

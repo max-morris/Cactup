@@ -1,11 +1,11 @@
 #!/bin/bash
-# Container entrypoint: start the machine's services as root, then run the
-# notebook server as the tutorial user.
+# Container entrypoint: start the machine's services as root (the local update
+# site, munge, SLURM), then run the notebook server as the tutorial user.
 #
 # Inside JupyterHub (JUPYTERHUB_API_TOKEN is set by the spawner) it runs
-# jupyterhub-singleuser; started directly (`docker run -p 8888:8888 ...`) it
-# runs JupyterLab with the token from $CACTUP_TUTORIAL_TOKEN, or a random one
-# it prints.
+# jupyterhub-singleuser; started directly
+# (`docker run --hostname cactup-tutorial -p 8888:8888 ...`) it runs JupyterLab
+# with the token from $CACTUP_TUTORIAL_TOKEN, or a random one it prints.
 set -euo pipefail
 
 TUTORIAL_USER=cactus
@@ -19,22 +19,187 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# First start with an empty home (a fresh volume): seed it from the skeleton.
-if [ ! -e "$TUTORIAL_HOME/.cactup" ]; then
-    log "setting up $TUTORIAL_HOME"
-    cp -a "$SKEL/." "$TUTORIAL_HOME/"
-    chown -R "$TUTORIAL_USER:$TUTORIAL_USER" "$TUTORIAL_HOME"
+# The MDB entry is discovered on this hostname, and SLURM's node is named after
+# it. Under any other name cactup would quietly create a machine for the host
+# and slurmd would not find its node, so refuse instead.
+if [ "$(hostname)" != cactup-tutorial ]; then
+    log "the container's hostname must be cactup-tutorial (docker run --hostname cactup-tutorial ...)"
+    exit 1
 fi
 
-# The local update site. It must answer before anything runs cactup.
-setpriv --reuid=nobody --regid=nogroup --clear-groups \
-    /usr/local/bin/cactup-tutorial-update-server &
+# First start with an empty home (a fresh volume): seed it from the skeleton.
+# The marker is written last, so a start interrupted halfway seeds again, and
+# seeding never overwrites a file that is already there: a home that lacks
+# the marker for any other reason keeps everything the attendee made.
+# Seeding is best effort for a home that already has files: anything it
+# can't copy is reported, never a reason to keep the attendee out.
+seeded=$TUTORIAL_HOME/.cactup-tutorial-seeded
+if [ ! -e "$seeded" ]; then
+    log "setting up $TUTORIAL_HOME"
+    for entry in "$SKEL"/* "$SKEL"/.[!.]* "$SKEL"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        [ "${entry##*/}" = .cactup-tutorial-seeded ] && continue
+        cp -a --update=none "$entry" "$TUTORIAL_HOME/" \
+            || log "could not copy ${entry##*/} into $TUTORIAL_HOME; continuing"
+    done
+    chown "$TUTORIAL_USER:$TUTORIAL_USER" "$TUTORIAL_HOME"
+    find "$TUTORIAL_HOME" -xdev -user root -exec chown -h "$TUTORIAL_USER:$TUTORIAL_USER" {} + || true
+    touch "$seeded"
+    chown "$TUTORIAL_USER:$TUTORIAL_USER" "$seeded"
+fi
+
+# The CPUs this container may use (its cpuset), for the `pinned` universe's
+# taskset: CPU numbers differ from container to container.
+CACTUP_TUTORIAL_CPUS=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status)
+export CACTUP_TUTORIAL_CPUS
+
+# The local update site, restarted if it ever dies. It must answer before
+# anything runs cactup: a failed update check isn't retried for a day.
+(
+    while :; do
+        setpriv --reuid=nobody --regid=nogroup --clear-groups \
+            /usr/local/bin/cactup-tutorial-update-server || true
+        sleep 1
+    done
+) &
 /usr/local/bin/cactup-tutorial-wait-update-server
 
+# SLURM's daemons need a network (any, even an --internal one with no route
+# out); without one they can't open their ports. The routing table is empty
+# only when there is none (tunnel devices may still appear in /proc/net/dev).
+if ! awk 'NR > 1 { found = 1 } END { exit !found }' /proc/net/route; then
+    log "the container needs a network (any; --internal is fine), not --network none"
+    exit 1
+fi
+
+# No core files: a crashing run or tool would leave hundreds of megabytes
+# in the attendee's home (and gdb, for --debug runs, doesn't need them).
+ulimit -c 0
+
+# munge, then SLURM. A new munge key on every start: nothing outside this
+# container may ever hold it.
+mkdir -p /run/munge /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
+chown munge:munge /run/munge
+chown slurm:slurm /var/spool/slurmctld /var/log/slurm
+dd if=/dev/urandom bs=1 count=1024 of=/etc/munge/munge.key 2>/dev/null
+chown munge:munge /etc/munge/munge.key
+chmod 0400 /etc/munge/munge.key
+setpriv --reuid=munge --regid=munge --clear-groups munged
+
+# The node: 4 CPUs (config_overrides makes slurmd accept them whatever the
+# host has), and 90% of the memory the container may use, in MB.
+limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+total_kb=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo)
+if [ "$limit" = max ] || [ "$((limit / 1024))" -gt "$total_kb" ]; then
+    memory_mb=$((total_kb / 1024))
+else
+    memory_mb=$((limit / 1024 / 1024))
+fi
+memory_mb=$((memory_mb * 9 / 10))
+# GPUs passed through to the container (the gpu partition works only then).
+gres=
+: > /etc/slurm/gres.conf
+shopt -s nullglob
+gpus=(/dev/nvidia[0-9]*)
+shopt -u nullglob
+if [ "${#gpus[@]}" -gt 0 ]; then
+    gres=" Gres=gpu:${#gpus[@]}"
+    for dev in "${gpus[@]}"; do
+        printf 'Name=gpu File=%s\n' "$dev" >> /etc/slurm/gres.conf
+    done
+fi
+printf 'NodeName=cactup-tutorial CPUs=4 Sockets=1 CoresPerSocket=4 ThreadsPerCore=1 RealMemory=%s%s State=UNKNOWN\n' \
+    "$memory_mb" "$gres" > /etc/slurm/node.conf
+slurmctld
+slurmd
+deadline=$((SECONDS + 30))
+# (A node slurmd drained, say because its spool disk filled up, stays drained
+# across restarts; it counts as up here, and the reset below clears it.)
+until timeout 2 sinfo -h -o %T 2>/dev/null | grep -qE '^(idle|mixed|allocated|drained|draining)'; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        log "SLURM did not come up; see /var/log/slurm/"
+        exit 1
+    fi
+    sleep 0.2
+done
+# Nothing can be running in a container that just started, but SLURM restores
+# the jobs that were running when it stopped and, since the node's boot time
+# is the host's, never notices they are gone: they would hold the node until
+# their walltime ran out. Taking the node down and up again requeues them, as
+# a real cluster does after a node reboots.
+#
+# A requeued job must not lose its turn either: SLURM holds it for two
+# minutes, resets its submit time, and (every job having the same priority)
+# would start any job that was waiting behind it first. So, with every
+# partition down (nothing may be scheduled meanwhile; slurmd re-registering
+# brings the node back by itself within seconds), each requeued job gets its
+# hold lifted and a priority that keeps the original order, and only then do
+# the node and the partitions come back. Only the jobs that were running: a
+# job an attendee delayed on purpose (--begin) keeps its start time. The
+# partitions' state comes from slurm.conf again on every start, so a start
+# interrupted halfway can't leave them down.
+running=$(squeue -h -t R,CG,CF -o %i | sort -n || true)
+partitions=$(sinfo -h -o %R | sort -u || true)
+for partition in $partitions; do
+    scontrol update PartitionName="$partition" State=DOWN || true
+done
+scontrol update NodeName=cactup-tutorial State=DOWN Reason="container restarted" || true
+priority=100000
+for job in $running; do
+    for _ in $(seq 50); do
+        squeue -h -j "$job" -t PD -o %i 2> /dev/null | grep -q . && break
+        sleep 0.1
+    done
+    scontrol update JobId="$job" StartTime=now Priority="$priority" > /dev/null 2>&1 || true
+    priority=$((priority - 1))
+done
+# (slurmd may already have brought the node back, which makes RESUME fail;
+# the node is up either way.)
+scontrol update NodeName=cactup-tutorial State=RESUME 2> /dev/null || true
+# Without a GPU the gpu partition can't run anything: say so where sinfo
+# shows it, rather than accept jobs it can never start.
+for partition in $partitions; do
+    if [ "$partition" = gpu ] && [ "${#gpus[@]}" -eq 0 ]; then
+        scontrol update PartitionName=gpu State=INACTIVE || true
+    else
+        scontrol update PartitionName="$partition" State=UP || true
+    fi
+done
+
+# The notebook server runs as a child, not in this process's place, so that a
+# stop (docker stop sends TERM here) first reaches slurmctld: it writes its
+# state on shutdown, and job ids then never repeat after a restart.
+server=
+stopping=
+# `scontrol shutdown` returns before slurmctld has saved its state; wait for
+# it to be gone (up to 5 s), whether or not scontrol itself succeeded.
+shutdown_slurm() {
+    scontrol shutdown > /dev/null 2>&1 || true
+    for _ in $(seq 50); do
+        pgrep -x slurmctld > /dev/null || return 0
+        sleep 0.1
+    done
+}
+stop() {
+    stopping=yes
+    [ -n "$server" ] && kill -TERM "$server" 2>/dev/null
+    shutdown_slurm
+}
+trap stop TERM INT
+
 run_as_user() {
-    exec setpriv --reuid="$TUTORIAL_USER" --regid="$TUTORIAL_USER" --init-groups \
+    [ -z "$stopping" ] || exit 0
+    setpriv --reuid="$TUTORIAL_USER" --regid="$TUTORIAL_USER" --init-groups \
         env HOME="$TUTORIAL_HOME" USER="$TUTORIAL_USER" LOGNAME="$TUTORIAL_USER" SHELL=/bin/bash \
-        "$@"
+        "$@" &
+    server=$!
+    status=0
+    while kill -0 "$server" 2>/dev/null; do
+        status=0
+        wait "$server" || status=$?
+    done
+    shutdown_slurm
+    exit "$status"
 }
 
 cd "$TUTORIAL_HOME"
@@ -45,6 +210,6 @@ fi
 token=${CACTUP_TUTORIAL_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_hex(16))')}
 log "open http://127.0.0.1:8888/lab?token=$token"
 # In the environment rather than on the command line, where every process
-# could read it.
+# could read it; the server takes it out of its own environment on start.
 export JUPYTER_TOKEN="$token"
 run_as_user jupyter lab --ip=0.0.0.0 --port=8888 --no-browser "$@"

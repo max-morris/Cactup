@@ -1,0 +1,113 @@
+# tutorial.th -- a CarpetX and Cottonmouth subset of the Einstein Toolkit
+# ET_2026_05 release.
+#
+# It builds the CarpetX driver with its infrastructure, example and test
+# thorns, and Cottonmouth's Z4c evolution (CottonmouthZ4c4m) with its
+# linear-wave initial data (CottonmouthLinearWaveID), plus exactly what those
+# require: IOUtil for CarpetX's I/O parameters, the radiative boundary
+# condition NewRadX, and the external libraries AMReX, MPI, yaml-cpp and zlib.
+#
+# Left out: the rest of the release, the libraries CarpetX can use but does
+# not need (ADIOS2, openPMD, Silo, NSIMD, hwloc), and the CarpetX thorns the
+# release only checks out (Algo, PDESolvers, PoissonX).
+#
+# Every repository and branch is the ET_2026_05 release's.
+
+!CRL_VERSION = 1.0
+
+!DEFINE ROOT = Cactus
+!DEFINE ARR  = $ROOT/arrangements
+!DEFINE COMPONENTLIST_TARGET = $ROOT/thornlists/
+
+!DEFINE ET_RELEASE = ET_2026_05
+
+
+# Cactus Flesh
+!TARGET   = $ROOT
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactus.git
+!REPO_BRANCH = $ET_RELEASE
+!NAME     = flesh
+!CHECKOUT = .clang-format CONTRIBUTORS COPYRIGHT doc lib Makefile README.md src
+
+
+# CactusBase thorns
+# IOUtil implements "IO", which CarpetX's param.ccl SHARES.
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactusbase.git
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+CactusBase/IOUtil
+
+
+# CarpetX thorns: exactly the ones the release enables
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/CarpetX
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+CarpetX/ADMBaseX
+CarpetX/Arith
+CarpetX/BoxInBox
+CarpetX/CarpetX
+CarpetX/CarpetXRegrid
+CarpetX/CoordinatesX
+CarpetX/Derivs
+CarpetX/ErrorEstimator
+CarpetX/FluxWaveToyX
+CarpetX/HydroBaseX
+CarpetX/Loop
+CarpetX/ODESolvers
+CarpetX/SIMDWaveToyX
+CarpetX/SpacetimeWaveToyX
+CarpetX/StaggeredWaveToyX
+CarpetX/TestArrayGroup
+CarpetX/TestBoundaries
+CarpetX/TestBoxInBox
+CarpetX/TestDerivs
+CarpetX/TestInterpolate
+CarpetX/TestNorms
+CarpetX/TestODESolvers
+CarpetX/TestODESolvers2
+CarpetX/TestOutput
+CarpetX/TestProlongate
+CarpetX/TestSymmetries
+CarpetX/TmunuBaseX
+CarpetX/WaveToyX
+
+
+# External libraries: exactly the ones the thorns above REQUIRE
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/$1-$2
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH = ../$1-$2
+!CHECKOUT =
+ExternalLibraries/AMReX
+ExternalLibraries/MPI
+ExternalLibraries/yaml_cpp
+ExternalLibraries/zlib
+
+
+# Cottonmouth: Z4c and linear-wave initial data
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/Cottonmouth
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+Cottonmouth/CottonmouthLinearWaveID
+Cottonmouth/CottonmouthZ4c4m
+
+
+# SpacetimeX: the radiative boundary condition Cottonmouth requires
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/SpacetimeX
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+SpacetimeX/NewRadX

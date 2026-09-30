@@ -130,7 +130,7 @@ pub fn resolve_topology(
     if !fit.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
         eprintln!(
             "{} config \"{}\" was built without GPU support but queue \"{queue}\" is GPU-flagged; \
-             this machine also has non-GPU queue(s) (D12)",
+             this machine also has non-GPU queue(s), which suit it better",
             "note:".yellow(),
             fit.label,
         );
@@ -836,7 +836,7 @@ mod tests {
         f.tpn = Some(4);
         assert!(err(&f).contains("8 GPUs per node"), "{}", err(&f));
 
-        // Shrinking the layout afterwards leaves GPUS_PER_TASK alone — it is
+        // Shrinking the layout afterward leaves GPUS_PER_TASK alone — it is
         // per-task, so fewer ranks simply need fewer GPUs.
         let mut f = flags();
         f.queue = Some("gpudef".to_owned());

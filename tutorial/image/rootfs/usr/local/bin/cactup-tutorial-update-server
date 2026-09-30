@@ -2,8 +2,9 @@
 """Serve a cactup update root on http://127.0.0.1:8765.
 
 cactup accepts plain http for loopback only, which is what lets the tutorial
-VM act as its own update site: the installer ran against one root when the
-image was built, and the binary's `update-url` knob points here.
+container act as its own update site: attendees install cactup from it with
+the documented installer, and the `update-url` knob points cactup's update
+check here.
 
 Usage: cactup-tutorial-update-server [ROOT]   (default /opt/cactup-tutorial/update-root)
 """

@@ -50,9 +50,11 @@ pages.
 
 Notebook 1 installs the full `ET_2026_05_v0` release, but the config the
 tutorial builds and hacks on, `tutorial`, uses a curated **CarpetX /
-SpacetimeX subset** of it (`/opt/cactup-tutorial/thornlists/tutorial.th`,
-passed with `--thornlist`): CarpetX and its test thorns, SpacetimeX's Z4c and
-the ExternalLibraries they need. That is what CarpetX users really build, it
+Cottonmouth subset** of it (`/opt/cactup-tutorial/thornlists/tutorial.th`,
+passed with `--thornlist`): CarpetX and its test thorns, Cottonmouth's Z4c
+evolution (`CottonmouthZ4c4m`) with its linear-wave initial data, and the
+thorns and ExternalLibraries they need. The release links all of them (it
+does not link SpacetimeX's own Z4c). That is what CarpetX users really build, it
 teaches `--thornlist`, and it keeps the object tree, the restore and real
 incremental rebuilds small enough for a room of attendees on one VM. The file
 is read-only: a config records its thornlist's path and keeps using it, so an
@@ -94,7 +96,12 @@ Constraints the notebooks must respect (each found by reading the code):
   printing documentation links on `127.0.0.1:8765`, which is the container,
   not the attendee's laptop; the notebook says so and links the public
   documentation instead. See Auto-update for why this installs the older
-  build.
+  build. The notebook also says openly that the VM serves the Einstein
+  Toolkit's repositories from local mirrors (a whole release installs in
+  seconds, and plain git shows it: `git remote -v` and `git fetch -v` print
+  `file:///opt/cactup-mirrors/...`), while cactup, `origin` and the
+  thornlists all name the upstream repositories, as they would on a cluster
+  whose site mirrors GitHub.
 - **3:** after installing, the notebook runs `cactup use et-mp` (installing
   makes a new install active only when none is), previewing what 4a teaches.
   Its last cell is an optional "start over" (`cactup uninstall et-mp
@@ -110,16 +117,30 @@ Constraints the notebooks must respect (each found by reading the code):
   origin differs from the thornlist ("remote URL changed") unless forced, so
   after the dry run the cell passes `--overwrite` for the flesh and CarpetX
   repositories, and the output shows cactup's "origin re-pointed" block.
-  B2a and B2b are baked exactly this way.
+  B2a and B2b are baked exactly this way. (Pending bake B2b: stock NewRadX
+  may not compile against the fork's CarpetX, in which case SpacetimeX joins
+  them; see `thornlists/NOTES.md`.)
 - **4b:** flags are sticky but `cactup build EXISTING --debug` on an
   up-to-date config does nothing (the up-to-date check returns before flags
   are recorded), so the debug build is a new config, `tutorial-debug`.
-  `--force-queue` is explained, never run.
+  `--force-queue` is explained, never run. The container has no CUDA toolkit
+  (only the bake container for B3 does), so the notebook says openly, as
+  notebook 1 does for the mirrors, that the GPU build was prepared ahead of
+  time for a GPU node, and the `gpu` optionlist it reads describes the
+  toolkit that build used. Its GPU config goes to the `gpu` queue with `-q
+  gpu` (not `--force-queue`, whatever cactup's refusal suggests), which
+  `sinfo` shows inactive without a GPU: the submit is then refused by SLURM
+  ("Required partition not available (inactive or drain)"), and the refused
+  simulation stays listed as ACTIVE with no job, so the cell uses a
+  throwaway simulation name and deletes it afterward. The same goes for the
+  cell showing cactup's own refusal to put the GPU config on a CPU queue:
+  cactup creates the simulation before it refuses, and running the cell again
+  would otherwise fail with "already exists".
 - **5:** its variant build is a separate config in a build universe,
   `build tutorial-pinned --universe pinned --thornlist tutorial.th` (bake
   B5), whose wrapper is `taskset -c @ENV(CACTUP_TUTORIAL_CPUS)@`: each
-  container's cpuset has different CPU numbers, which the entrypoint exports
-  from `cpuset.cpus.effective`. It comes before the hacking section, while
+  container's cpuset has different CPU numbers, which the entrypoint
+  exports. It comes before the hacking section, while
   the stock install's repositories are still clean (its fingerprint includes
   their state, like every bake's). The prose explains that changing an
   existing config's universe forces a full rebuild, and that the universe is
@@ -140,7 +161,14 @@ Constraints the notebooks must respect (each found by reading the code):
   cactup-tutorial --no-discover --silent` (without `--silent` it prompts for
   homes and knobs), `--machine mylab` on the commands that use it, fixing
   `[hardware]` as the first exercise, and `machine delete mylab` plus
-  `machine forget` at the end. A config built for `cactup-tutorial` is
+  `machine forget` at the end. `--from-existing` copies the optionlists and
+  scripts verbatim but writes `mylab/meta.toml` afresh, without the
+  original's comments, with `[paths]` spelled out and `[hardware]`
+  autodetected; 6a shows the commented original (the file `machine show
+  cactup-tutorial` names) next to the attendee's copy, since its comments
+  explain what the first exercise fixes. The copy also keeps
+  `nickname = "cactup-tutorial"`, which the first exercise fixes along with
+  `[hardware]`. A config built for `cactup-tutorial` is
   refused on `mylab` (`check_machine`), so submits there use
   `--ignore-machine` on the stock `tutorial`. 6b builds nothing. `mylab`
   lives from the start of 6a to the end of 6b: `machine create` refuses an
@@ -156,13 +184,33 @@ Constraints the notebooks must respect (each found by reading the code):
   the middle of 6b keeps 6b's additions.
 - **7:** walltime chaining runs on the `short` partition (3 minutes), in two
   segments; the parfile's checkpoint and recovery path is validated before the
-  notebook is written.
+  notebook is written. Every `short` submit passes `--checkpt-buffer
+  00:01:00`: cactup's default buffer (at least ten minutes) is longer than a
+  whole segment, and cactup doesn't warn about it. The notebook also presents
+  what happens to a run when the container stops (the idle culler over lunch):
+  its job is requeued and runs its segment again from the start (a
+  checkpointing run loses at most that segment), `sim show` shows it queued
+  on the same restart, and its log keeps the interrupted attempt; the
+  simulation's `log.txt` records the second "compute-node run". Its prose
+  keeps the two meanings of "restart" apart: cactup's restarts are
+  `output-NNNN` (what `sim list` counts), a requeue reruns the same one (the
+  log's "Times SLURM requeued this job").
+- **No random tips:** the skeleton turns cactup's after-command tips off
+  (`wisdom-frequency off`): every cell is a terminal, so they would appear
+  in one cell in eight, some wrong for this machine, and the notebooks'
+  output would differ run to run. The bake home does the same. A notebook
+  may still show `cactup wisdom` on purpose.
+- **No pipes into `head`:** cactup panics on a closed pipe ("failed
+  printing to stdout: Broken pipe"), so cells never pipe it into `head` or
+  the like.
+- **Follow modes** (`sim log -f/-o/-e`, `build log -e`) run until
+  interrupted, so any cell using one passes `%%shell --timeout`.
 - **8:** sweep points run 1 task × 1 thread so all three share the node at
   once.
 - **9:** tests run with `test submit`: a foreground `test run` is refused
   outside an allocation because the machine sets `allocation-env`. The run
   is a small subset (a few CarpetX tests on 1 process), with a target of
-  5 minutes, not the full CarpetX and Z4c suites. If the attendee skipped the
+  5 minutes, not the full CarpetX and Cottonmouth suites. If the attendee skipped the
   fix cell, the closing revert is "up to date" with no make (the failed build
   recorded nothing), so the notebook's text doesn't promise a recompile.
   `build log -e` follows the log until interrupted, so its cell uses
@@ -321,9 +369,10 @@ thornlist), plus the ET manifest and Cactup's `mdb` branch, and runs
 - repacks each mirror (`git repack -ad`); cactup clones shallowly, which
   reachability bitmaps don't speed up, so the concurrent-install target under
   Sizing rests on measurement;
-- records every mirrored ref in `mirrors.lock`, so rebuilding the image
+- records every mirrored ref in `tutorial/mirrors/mirrors.lock`, which is
+  committed: an image build brings the mirrors to the lock, so rebuilding it
   reproduces the same commits (and the same bakes) until the lock is updated
-  on purpose;
+  on purpose (`build.sh --update-mirrors`);
 - writes **one `insteadOf` rule per mirrored repository** to the system
   gitconfig, for every spelling of its URL the thornlists use (with and
   without `.git`, case variants):
@@ -556,7 +605,7 @@ out neither.
 ### Bakes
 
 `image/build.sh` runs the bakes in a **bake container** started from the
-platform image with `docker run --hostname cactup-tutorial`, as user `cactus`
+tutorial image with `docker run --hostname cactup-tutorial`, as user `cactus`
 with `HOME=/home/cactus` and a bake-only home (never the skeleton, so the
 skeleton's `database.json` has no ghost installations and no cached machine;
 it does get the skeleton's `~/.cactup/cactupignore`).
@@ -606,14 +655,16 @@ driver, never from a bake.
 The toolchain is trixie's: gcc 14 and OpenMPI 5.0. The optionlist uses
 Debian's packaged libraries wherever they exist (OpenMPI, HDF5 1.14 with
 OpenMPI, FFTW, GSL, hwloc, yaml-cpp, zlib, ADIOS2 2.10, Silo, BLAS/LAPACK), so
-`scratch/external` holds only what Debian lacks: AMReX, openPMD-api (built
-against Debian's ADIOS2), NSIMD. That keeps the trees, the image and the
+`scratch/external` holds only what Debian lacks. For `tutorial.th` that is
+AMReX alone (the optionlist would also build openPMD-api and NSIMD, for
+thornlists that use them). That keeps the trees, the image and the
 per-attendee disk small; see sizing below.
 
-B3 needs CUDA, which exists only in the bake container used for it. Which
-CUDA is settled with B3: Debian's `nvidia-cuda-toolkit` (12.4, non-free) needs
-g++-13 as nvcc's host compiler, so it would mix host compilers; NVIDIA's own
-repository (12.8 and later) supports gcc 14. The GPU executable links the CUDA
+B3 needs CUDA, which exists only in the bake container used for it: CUDA
+13.x from NVIDIA's debian13 repository, which supports gcc 14 as nvcc's host
+compiler. (Debian's own `nvidia-cuda-toolkit` 12.4 wants g++-13, mixing host
+compilers, and NVIDIA's 12.x packages exist only in its debian12 repository,
+whose signing key trixie's apt refuses.) The GPU executable links the CUDA
 runtime statically (and whatever else AMReX pulls in, such as cuRAND, is
 checked the same way), so it runs on a VM that passes an NVIDIA GPU through,
 and is never run otherwise (notebook 4b shows how cactup refuses to put it on
@@ -663,8 +714,8 @@ removes the stamp).
   explicit (no autodetect), slurmd's node is declared `Sockets=1
   CoresPerSocket=4 ThreadsPerCore=1` with `RealMemory` from the memory limit
   (`SlurmdParameters=config_overrides`), and the runscripts bind no threads.
-  The entrypoint exports the container's own CPU list from
-  `cpuset.cpus.effective` as `CACTUP_TUTORIAL_CPUS`, since absolute CPU
+  The entrypoint exports the container's own CPU list (its allowed CPUs,
+  from `/proc/self/status`) as `CACTUP_TUTORIAL_CPUS`, since absolute CPU
   numbers differ from container to container.
 - **SLURM.** The entrypoint starts `munged`, `slurmctld` and `slurmd` as root
   (`proctrack/linuxproc`, `task/none`, no cgroups, `select/cons_tres` so jobs
@@ -675,12 +726,28 @@ removes the stamp).
   - `debug` (default, 30 min)
   - `short` (3 min, for walltime chaining in notebook 7)
   - `batch` (4 h)
-  - `gpu` (usable only when the VM passes a GPU through)
+  - `gpu` (usable only when the VM passes a GPU through: the entrypoint
+    then declares the devices as SLURM GPUs; without one, a job asking for a
+    GPU is refused)
 
   Jobs launch with OpenMPI's `mpirun --bind-to none` inside the allocation
   (OpenMPI binds by default; the container's cpuset already confines it),
   with `pml ob1`, the shared-memory BTL (named `sm` in OpenMPI 5), and a
   shared-memory size set on the container.
+
+  When the container starts again after a stop (the idle culler, a
+  re-created container on the same state volume), SLURM restores its queue;
+  the entrypoint then takes the node down and up once, so jobs that were
+  running when it stopped are requeued, as a cluster does after a node
+  reboots, instead of appearing to run and holding the node; it also lifts
+  the two-minute hold SLURM puts on requeued jobs, so they don't lose their
+  turn to later ones. The simulation submit script appends to a job's output
+  (the test one doesn't: every run of a test shares its output files), and
+  the runscript prints SLURM's requeue count, so a simulation's log keeps
+  the interrupted attempt. A notebook that shows `squeue` explains SLURM's
+  alarming pending reason "Nodes required for job are DOWN, DRAINED or
+  reserved for jobs in higher priority partitions": here it only means a job
+  ahead of it, in another partition, has the node reserved.
 - **Hostname** `cactup-tutorial`, set by DockerSpawner or `docker run
   --hostname`, so the MDB entry is discovered like any cluster's. The
   entrypoint refuses to start under any other hostname rather than letting
@@ -725,9 +792,65 @@ Acceptance targets, checked in the bake stage and again on the deployment VM:
 
 ## Building
 
-(Filled in as the image stages land.)
+```sh
+tutorial/image/build.sh                  # the image, tagged cactup-tutorial:lab
+tutorial/image/build.sh --update-mirrors # the same, moving the mirrors to upstream's tips
+```
+
+The git mirrors live outside Docker, in `$CACTUP_TUTORIAL_MIRRORS` (default
+`~/.cache/cactup-tutorial/mirrors`; about 3 GB, a quarter of an hour to fetch
+the first time), and the image is built with that directory as its `mirrors`
+build context. `build.sh` first brings them to the committed lock,
+`tutorial/mirrors/mirrors.lock` (`mirror.py pin`: seconds when they already
+are, a fetch only for commits they lack), so every build serves the same
+commits. `--update-mirrors` instead moves them to upstream's current tips
+(`mirror.py sync`) and rewrites the lock in the checkout; commit it, knowing
+the bakes will be redone. The `mdb` branch in the image's mirror of Cactup is
+always built from this checkout's `mdb/`, uncommitted edits included.
+
+The base image is pinned by digest and the Debian archive by a
+snapshot.debian.org date, both in the Dockerfile's base stage; move them
+together, on purpose (it changes the toolchain, and so every bake).
+
+The two cactup builds get their stamps from git: "current" is the last commit
+that touched cactup's inputs, "previous" the one before, so a build needs two
+such commits.
+
+Checks:
+
+```sh
+PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, session, mirrors
+tutorial/tests/browser/run.sh cactup-tutorial:lab             # the frontend, in headless Chromium
+tutorial/tests/platform/smoke.sh cactup-tutorial:lab          # install, update, SLURM, a simulation
+```
+
+To try the image locally as one attendee:
+
+```sh
+docker run --rm -p 8888:8888 --hostname cactup-tutorial \
+    --cpuset-cpus 0-3 --memory 8g --shm-size 1g cactup-tutorial:lab
+```
+
+(Rootless Docker ignores `--cpuset-cpus` unless the cpuset cgroup controller
+is delegated to the user's systemd slice; without it the container sees every
+host CPU.)
 
 ## Deploying to a VM
 
 (Filled in with the deployment stage: compose, choose-your-own-login, session
-token, sizing.)
+token, sizing.) Two things the deployment must provide, found while building
+the platform: a named volume for `/var/spool/slurmctld` per attendee (SLURM's
+state; without it a re-created container restarts job ids at 1, and cactup
+could mistake a new job for an old simulation's), and a cpuset per container
+that Docker actually applies (see the rootless note above). The idle culler
+judges idleness by Jupyter activity only, so its timeout should be at least
+the `batch` partition's limit (4 hours), or jobs still running are stopped
+and requeued. Only a clean stop (`docker stop`, the hub's stop, the culler)
+saves SLURM's state fully: a `docker kill`, `docker rm -f` or host crash can
+lose submits from its last couple of seconds (and reuse their job ids), and a
+kill in the first seconds of a start leaves a job it had requeued on SLURM's
+two-minute hold. A job whose launch failed on a drained node ends up
+"launch failed requeued held"; `scontrol release <job>` lets it run again.
+After a restart, `scontrol show job` shows the jobs the entrypoint requeued
+with a high priority (100000 and down) that keeps their turn; every other
+job has priority 1.

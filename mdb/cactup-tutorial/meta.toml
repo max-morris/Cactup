@@ -1,0 +1,117 @@
+# cactup-tutorial — the Cactup tutorial machine: one Docker container per
+# user, which is at once the login node and the only compute node.
+#
+# The container runs a real single-node SLURM: slurmctld and slurmd on the
+# same host, select/cons_tres so several jobs can share the node's cores,
+# proctrack/linuxproc and task/none (an unprivileged container has no cgroups
+# to hand out, and its own cpuset and memory limit already confine every job).
+# Its hostname is `cactup-tutorial`, which hostname.regexp matches.
+#
+# The toolchain is Debian trixie's: gcc/g++/gfortran 14, OpenMPI 5.0 and
+# Debian's packaged libraries (see optionlists/default.toml).
+
+[machine]
+name        = "Cactup tutorial"
+nickname    = "cactup-tutorial"
+location    = "a Docker container"
+description = "Single-node SLURM in a container, for the Cactup tutorial"
+status      = "personal"
+hostname    = "cactup-tutorial"
+
+# No [paths]: installs, simulations and test results go to cactup's built-in
+# homes under ~/.cactup (cacti, simulations, tests). A machine only needs
+# [paths] when its site wants them elsewhere, e.g. on a scratch file system.
+
+[hardware]
+# Stated, not autodetected: inside a container /proc reports the host's cores
+# and memory, not the container's. The container gets a cpuset of 4 cores,
+# and slurmd declares the same node (Sockets=1 CoresPerSocket=4
+# ThreadsPerCore=1), so cactup and SLURM agree on what a full node is.
+max-cpus-per-node     = 4
+# One thread per rank: a run without -c fills the node with 4 MPI ranks.
+default-cpus-per-task = 1
+threads-per-cpu       = 1
+# MB per node, as SLURM's RealMemory declares it: 90% of the container's
+# 8 GB memory limit, leaving the rest for the processes outside jobs.
+memory                = 7372
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 4
+# There is no separate compute node to build on, so `cactup build` always
+# runs in the foreground; this machine declares no build submit script.
+default-action = "run"
+
+# No [environment]: the compilers, OpenMPI and the libraries are Debian
+# packages in the standard locations, so nothing needs loading first.
+
+[scheduler]
+# Grab stderr so we can see submit problems in the log.
+submit          = "sbatch @SCRIPTFILE@ 2>&1"
+# Set inside a SLURM allocation. `cactup test run` refuses to start without
+# it (each test is launched with mpirun, which belongs inside a job), so tests
+# go through `cactup test submit`.
+allocation-env  = "SLURM_JOB_ID"
+get-status      = "squeue -j @JOB_ID@"
+# One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
+# is what keeps the patterns below matching.
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job (\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname -s"
+exec-host-pattern = '(\S+)'
+
+# The SLURM partitions, each with its partition's MaxTime.
+[queues.debug]
+gpu          = false
+default      = true
+max-walltime = "00:30:00"
+
+# A three-minute limit: a simulation submitted with a longer -w is split into
+# chained three-minute jobs; a parameter file that checkpoints and recovers
+# carries the run from one job to the next. Give such runs a checkpoint
+# buffer of about a minute (--checkpt-buffer 00:01:00): the default, at
+# least ten minutes, is longer than a whole job here.
+[queues.short]
+gpu          = false
+max-walltime = "00:03:00"
+
+[queues.batch]
+gpu          = false
+max-walltime = "04:00:00"
+
+# Usable only when the host passes an NVIDIA GPU through to the container.
+# GPU runs ask for it with --gpus-per-task, so slurmd must know it as a gres
+# (GresTypes=gpu, Gres=gpu:1 on the node); otherwise sbatch refuses the job.
+# One GPU, so by default one rank that drives it with all four cores.
+[queues.gpu]
+gpu                   = true
+max-walltime          = "04:00:00"
+max-gpus-per-node     = 1
+default-cpus-per-task = 4
+
+[variants.submitscript]
+"default" = { queues = ["debug", "short", "batch", "gpu"], default = true }
+"test"    = { queues = ["debug", "short", "batch", "gpu"], test = true }   # used by `cactup test submit`
+
+[variants.runscript]
+"default" = { queues = ["debug", "short", "batch", "gpu"], default = true }
+"test"    = { queues = ["debug", "short", "batch", "gpu"], test = true }   # used by `cactup test run`
+
+[variants.optionlist]
+variants = ["default", "gpu"]
+
+# A universe wraps the commands cactup runs for a config: its build and, by
+# default, its simulations (an optionlist can opt out with
+# coerce-run-universe = false). `cactup build NAME --universe
+# pinned` builds and runs under taskset, restricted to this container's CPUs.
+# The CPU numbers differ from container to container, so they come from the
+# environment: the container's startup exports its CPU list as
+# CACTUP_TUTORIAL_CPUS, and sbatch passes the submitting shell's environment
+# on to the job, where the run is wrapped.
+[universes.pinned]
+wrapper-argv = ["taskset", "-c", "@ENV(CACTUP_TUTORIAL_CPUS)@"]

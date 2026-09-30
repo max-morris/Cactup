@@ -1,0 +1,146 @@
+# cactup-tutorial optionlist (variant "default"): a CPU build with Debian
+# trixie's toolchain, gcc/g++/gfortran 14 and OpenMPI 5.0.
+#
+# It uses Debian's packaged libraries wherever they exist: OpenMPI, HDF5 1.14
+# (the OpenMPI flavor), FFTW, GSL, hwloc, yaml-cpp, zlib, ADIOS2 2.10 (MPI),
+# Silo, BLAS/LAPACK, Boost (headers) and CMake, from the packages
+# libopenmpi-dev, libhdf5-openmpi-dev, libfftw3-dev, libgsl-dev, libhwloc-dev,
+# libyaml-cpp-dev, zlib1g-dev, libadios2-mpi-{c,c++11}-dev, libsilo-dev,
+# libblas-dev, liblapack-dev, libboost-dev and cmake. The paths below are the
+# ones those packages install (`dpkg -L <package>` lists them). What Debian
+# lacks, the ExternalLibraries thorns build from source into the config's
+# scratch/external: AMReX, and, for thornlists that use them, openPMD-api
+# (against Debian's ADIOS2 and HDF5) and NSIMD.
+#
+# The containers may run on any x86-64 host, and a config built in one may
+# run in another, so the code targets the x86-64 baseline: no -march, and
+# NSIMD at SSE2.
+
+# The [cactup] header is for cactup only and never reaches Cactus: this
+# variant is the implicit choice (default), and its executables are CPU-only
+# (gpu = false), so cactup submits them only to the CPU partitions.
+[cactup]
+gpu               = false
+default           = true
+description       = "CPU build with Debian's gcc 14, OpenMPI 5 and packaged libraries"
+compatible-queues = ["debug", "short", "batch"]
+
+[options]
+# Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.
+VERSION = "cactup-tutorial-2026-09-29"
+
+CPP = "/usr/bin/cpp"
+FPP = "/usr/bin/cpp"
+CC  = "/usr/bin/gcc"
+CXX = "/usr/bin/g++"
+F90 = "/usr/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+# cactup builds optimized by default, which adds the *_OPTIMISE_FLAGS below.
+# The base flags carry -O2 as well, so a config built with optimization
+# turned off still compiles at -O2.
+CFLAGS   = "-g -O2 -std=gnu11"
+CXXFLAGS = "-g -O2 -std=c++17"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none"
+LDFLAGS  = "-rdynamic"
+LIBS     = "gfortran"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+# No 16-byte integer or real types (CCTK_INT16, CCTK_REAL16): the gpu variant
+# cannot have them under nvcc, and the two variants should offer the same
+# types. The 2- and 4-byte reals that CarpetX's TestReal2/TestReal4 use stay.
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+# Debian's cmake, for the libraries built from source.
+CMAKE_DIR = "/usr"
+BOOST_DIR = "/usr"
+
+# OpenMPI 5 keeps its headers and its unversioned libmpi.so under
+# /usr/lib/x86_64-linux-gnu/openmpi (what `mpicxx --showme` reports). There
+# are no C++ bindings (mpi_cxx) in OpenMPI 5.
+MPI_DIR      = "/usr/lib/x86_64-linux-gnu/openmpi"
+MPI_INC_DIRS = "/usr/lib/x86_64-linux-gnu/openmpi/include /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi"
+MPI_LIB_DIRS = "/usr/lib/x86_64-linux-gnu/openmpi/lib"
+MPI_LIBS     = "mpi"
+
+# libhdf5-openmpi-dev: headers (and Fortran modules) in
+# /usr/include/hdf5/openmpi, the libraries under their plain names in
+# /usr/lib/x86_64-linux-gnu/hdf5/openmpi. That directory also carries
+# `include` and `lib` links, so it serves as HDF5_DIR for openPMD's build,
+# which looks for $HDF5_DIR/include/H5pubconf.h to see that HDF5 is parallel.
+# The HDF5 thorn adds sz, z and the MPI libraries itself (from H5pubconf.h).
+HDF5_DIR            = "/usr/lib/x86_64-linux-gnu/hdf5/openmpi"
+HDF5_ENABLE_CXX     = "no"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_INC_DIRS       = "/usr/include/hdf5/openmpi"
+HDF5_LIB_DIRS       = "/usr/lib/x86_64-linux-gnu/hdf5/openmpi"
+HDF5_LIBS           = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+
+# libadios2-mpi-*-dev: Debian names the MPI flavor's libraries adios2_mpi_*,
+# which the ADIOS2 thorn's search does not know, hence the explicit list.
+# The MPI flavor's ADIOSConfig.h is under /usr/include/adios2/build/mpi.
+# openPMD's build finds the same ADIOS2 through ADIOS2_DIR, via
+# /usr/lib/x86_64-linux-gnu/cmake/adios2 (which picks the MPI flavor).
+ADIOS2_DIR      = "/usr"
+ADIOS2_INC_DIRS = "/usr/include/adios2/build/mpi"
+ADIOS2_LIB_DIRS = "/usr/lib/x86_64-linux-gnu"
+ADIOS2_LIBS     = "adios2_mpi_cxx11_mpi adios2_mpi_cxx11 adios2_mpi_c_mpi adios2_mpi_c adios2_mpi_core_mpi adios2_mpi_core"
+
+# Standard locations (/usr/include, /usr/lib/x86_64-linux-gnu).
+FFTW3_DIR    = "/usr"
+GSL_DIR      = "/usr"
+HWLOC_DIR    = "/usr"
+YAML_CPP_DIR = "/usr"
+ZLIB_DIR     = "/usr"
+# Debian's libsiloh5 is built against the same OpenMPI HDF5 as above.
+SILO_DIR     = "/usr"
+
+# The reference BLAS/LAPACK, through Debian's alternatives links
+# (/usr/lib/x86_64-linux-gnu/lib{blas,lapack}.so).
+BLAS_DIR        = "/usr/lib/x86_64-linux-gnu"
+BLAS_LIBS       = "blas"
+LAPACK_DIR      = "/usr/lib/x86_64-linux-gnu"
+LAPACK_LIB_DIRS = "/usr/lib/x86_64-linux-gnu"
+LAPACK_LIBS     = "lapack"
+
+# Not packaged by Debian: built from source into scratch/external.
+AMREX_DIR   = "BUILD"
+OPENPMD_DIR = "BUILD"
+NSIMD_DIR   = "BUILD"
+NSIMD_SIMD  = "SSE2"

@@ -1,0 +1,143 @@
+# cactup-tutorial optionlist (variant "gpu"): a CUDA build with the same
+# toolchain and Debian libraries as the "default" variant (see
+# optionlists/default.toml for where each library comes from); only the
+# compilers, the link and the AMReX GPU settings differ.
+#
+# CUDA 13.x, from NVIDIA's apt repository for Debian 13, installed under
+# /usr/local/cuda-13.x with /usr/local/cuda pointing at it. Why not another:
+# Debian's own nvidia-cuda-toolkit is CUDA 12.4, whose nvcc needs g++ 13 as
+# its host compiler; NVIDIA publishes 12.8 and 12.9 only for Debian 12, and
+# trixie's apt rejects that repository's signing key. CUDA 13 accepts gcc 14.
+#
+# Building needs the CUDA toolkit; running needs only a GPU and its driver:
+# the CUDA runtime and cuRAND (which AMReX uses) are linked statically, and
+# /usr/local/cuda/lib64 (a link to targets/x86_64-linux/lib) holds their
+# static libraries.
+#
+# One GPU architecture, sm_80 (Ampere): `--gpu-architecture=sm_80` embeds
+# sm_80 code plus compute_80 PTX, which the driver compiles for newer GPUs
+# (Ada, Hopper, ...) when the program starts. For an older GPU (a T4 is
+# sm_75), put 75 in CUCCFLAGS, LD and AMREX_CMAKE_CUDA_ARCHITECTURES alike.
+# Each extra architecture multiplies device compile time and object size.
+
+# gpu = true: these executables need a GPU, so cactup submits them only to
+# GPU queues, and compatible-queues narrows that to the gpu partition.
+[cactup]
+gpu               = true
+description       = "CUDA build (nvcc with gcc 14 as host compiler) for the gpu queue"
+compatible-queues = ["gpu"]
+
+[options]
+# Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.
+VERSION = "cactup-tutorial-gpu-2026-09-29"
+
+CPP = "/usr/bin/cpp"
+FPP = "/usr/bin/cpp"
+CC  = "/usr/bin/gcc"
+CXX = "/usr/bin/g++"
+F90 = "/usr/bin/gfortran"
+
+FPPFLAGS = "-traditional"
+# -O2 in the base flags, as in the default variant (see there).
+CFLAGS   = "-g -O2 -std=gnu11"
+CXXFLAGS = "-g -O2 -std=c++17"
+F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none"
+
+# ExternalLibraries/AMReX compiles every C++ file with nvcc (CUCC) once CUDA
+# is on; g++ is its host compiler. -DSIMD_DISABLE: no NSIMD vectors in device
+# code.
+CUCC      = "/usr/local/cuda/bin/nvcc"
+CUCCFLAGS = "--compiler-bindir /usr/bin/g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture=sm_80 --diag-suppress=20012 -DSIMD_DISABLE"
+CUCC_DEBUG_FLAGS    = "-g3"
+CUCC_OPTIMISE_FLAGS = "-O3"
+CUCC_WARN_FLAGS     = "-Xcompiler -Wall"
+CUCC_OPENMP_FLAGS   = "-Xcompiler -fopenmp"
+
+# nvcc links, so relocatable device code gets its device link step, for the
+# same architecture.
+LD      = "/usr/local/cuda/bin/nvcc --compiler-bindir /usr/bin/g++ -g --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture=sm_80"
+LDFLAGS = "-rdynamic"
+LIBS    = "gfortran cudart_static curand_static culibos rt dl pthread"
+LIBDIRS = "/usr/local/cuda/lib64"
+
+C_LINE_DIRECTIVES = "yes"
+F_LINE_DIRECTIVES = "yes"
+
+DEBUG           = "no"
+CPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+FPP_DEBUG_FLAGS = "-DCARPET_DEBUG"
+C_DEBUG_FLAGS   = "-g3"
+CXX_DEBUG_FLAGS = "-g3"
+F90_DEBUG_FLAGS = "-g3"
+
+CPP_OPTIMISE_FLAGS = ""
+C_OPTIMISE_FLAGS   = "-O2"
+CXX_OPTIMISE_FLAGS = "-O2"
+F90_OPTIMISE_FLAGS = "-O2"
+
+PROFILE           = "no"
+C_PROFILE_FLAGS   = "-pg"
+CXX_PROFILE_FLAGS = "-pg"
+F90_PROFILE_FLAGS = "-pg"
+
+WARN           = "yes"
+CPP_WARN_FLAGS = "-Wall"
+C_WARN_FLAGS   = "-Wall"
+CXX_WARN_FLAGS = "-Wall"
+F90_WARN_FLAGS = "-Wall"
+
+OPENMP           = "yes"
+CPP_OPENMP_FLAGS = "-fopenmp"
+FPP_OPENMP_FLAGS = "-D_OPENMP"
+C_OPENMP_FLAGS   = "-fopenmp"
+CXX_OPENMP_FLAGS = "-fopenmp"
+F90_OPENMP_FLAGS = "-fopenmp"
+LD_OPENMP_FLAGS  = "-fopenmp"
+
+# nvcc has no 16-byte integer or real types.
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+PTHREADS_DIR = "NO_BUILD"
+
+CMAKE_DIR = "/usr"
+BOOST_DIR = "/usr"
+
+# The libraries, exactly as in the default variant.
+MPI_DIR      = "/usr/lib/x86_64-linux-gnu/openmpi"
+MPI_INC_DIRS = "/usr/lib/x86_64-linux-gnu/openmpi/include /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi"
+MPI_LIB_DIRS = "/usr/lib/x86_64-linux-gnu/openmpi/lib"
+MPI_LIBS     = "mpi"
+
+HDF5_DIR            = "/usr/lib/x86_64-linux-gnu/hdf5/openmpi"
+HDF5_ENABLE_CXX     = "no"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_INC_DIRS       = "/usr/include/hdf5/openmpi"
+HDF5_LIB_DIRS       = "/usr/lib/x86_64-linux-gnu/hdf5/openmpi"
+HDF5_LIBS           = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+
+ADIOS2_DIR      = "/usr"
+ADIOS2_INC_DIRS = "/usr/include/adios2/build/mpi"
+ADIOS2_LIB_DIRS = "/usr/lib/x86_64-linux-gnu"
+ADIOS2_LIBS     = "adios2_mpi_cxx11_mpi adios2_mpi_cxx11 adios2_mpi_c_mpi adios2_mpi_c adios2_mpi_core_mpi adios2_mpi_core"
+
+FFTW3_DIR    = "/usr"
+GSL_DIR      = "/usr"
+HWLOC_DIR    = "/usr"
+YAML_CPP_DIR = "/usr"
+ZLIB_DIR     = "/usr"
+SILO_DIR     = "/usr"
+
+BLAS_DIR        = "/usr/lib/x86_64-linux-gnu"
+BLAS_LIBS       = "blas"
+LAPACK_DIR      = "/usr/lib/x86_64-linux-gnu"
+LAPACK_LIB_DIRS = "/usr/lib/x86_64-linux-gnu"
+LAPACK_LIBS     = "lapack"
+
+# Built from source into scratch/external; AMReX with its CUDA backend.
+AMREX_DIR                      = "BUILD"
+AMREX_ENABLE_CUDA              = "yes"
+AMREX_CMAKE_CUDA_ARCHITECTURES = "80"
+OPENPMD_DIR                    = "BUILD"
+NSIMD_DIR                      = "BUILD"
+NSIMD_SIMD                     = "SSE2"
