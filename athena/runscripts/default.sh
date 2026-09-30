@@ -172,7 +172,7 @@ nvidia-smi -q -d CLOCK,TEMPERATURE > nvidia-smi.after.txt 2>&1 || true
 case "${CACTUP_PROFILE:-}" in
   nsys) for rep in profile.task*.nsys-rep; do
           [ -f "$rep" ] || continue
-          nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum,cuda_gpu_mem_size_sum,nvtx_sum \
+          nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum,cuda_gpu_mem_size_sum,nvtx_sum,nvtx_kern_sum \
                --format csv --force-export=true -o "${rep%.nsys-rep}" "$rep" >/dev/null 2>&1 || echo "nsys stats failed for $rep"
         done ;;
   ncu)  [ -f profile.ncu.ncu-rep ] && { ncu --import profile.ncu.ncu-rep --page details > prof-ncu-details.txt 2>&1
