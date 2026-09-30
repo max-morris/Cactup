@@ -1,0 +1,184 @@
+#!/usr/bin/python3 -I
+"""Start over, in whole or in part.
+
+    cactup-tutorial-reset                 cancel your jobs and return your home
+                                          to its state at the start (asks first)
+    cactup-tutorial-reset --notebook N    restore notebook N as it was shipped
+    cactup-tutorial-reset --update-demo   let notebook 1's auto-update happen again
+
+Whatever it replaces of yours it first saves under ~/tutorial-saved/.
+See "Catch-up and reset" in tutorial/README.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+SKEL = Path("/opt/cactup-tutorial/skel")
+NOTEBOOKS = Path("/opt/cactup-tutorial/notebooks")
+UPDATE_ROOT = Path("/opt/cactup-tutorial/update-root")
+SAVED = HOME / "tutorial-saved"
+
+
+def saved_dir() -> Path:
+    """A new directory under ~/tutorial-saved, never one already used."""
+    stamp = time.strftime("%Y-%m-%d-%H%M%S")
+    for n in range(1000):
+        d = SAVED / (stamp if n == 0 else f"{stamp}-{n}")
+        try:
+            d.mkdir(parents=True)
+            return d
+        except FileExistsError:
+            continue
+    raise SystemExit("could not make a directory under ~/tutorial-saved")
+
+
+def notebook_numbers() -> dict[str, Path]:
+    """Notebook number ("1", "4a") -> its pristine copy."""
+    out = {}
+    for p in sorted(NOTEBOOKS.glob("*.ipynb")):
+        m = re.match(r"(\d+)([a-z]?)-", p.name)
+        if m:
+            out[f"{int(m[1])}{m[2]}"] = p
+    return out
+
+
+def notebook(number: str) -> int:
+    known = notebook_numbers()
+    m = re.fullmatch(r"0*(\d+)([a-z]?)", number.strip().lower())
+    src = known.get(f"{int(m[1])}{m[2]}") if m else None
+    if src is None:
+        print(f"no notebook {number!r}; they are: " + ", ".join(known), file=sys.stderr)
+        return 2
+    dst = HOME / "notebooks" / src.name
+    dst.parent.mkdir(exist_ok=True)
+    if dst.exists():
+        keep = saved_dir() / src.name
+        shutil.copy2(dst, keep)
+        print(f"saved your copy to {keep}")
+    shutil.copyfile(src, dst)
+    print(f"restored {dst}; if it is open, reload it (File > Reload ... from Disk)")
+    return 0
+
+
+def update_demo() -> int:
+    """Point ~/.cactup/bin/cactup back at the "previous" build and forget the
+    last update check, so the next cactup command on a terminal updates again."""
+    sha = next(UPDATE_ROOT.glob("*/cactup.sha256")).read_text()
+    previous = re.search(r"cactup-(\w+)", sha).group(1)
+    bin_dir = HOME / ".cactup" / "bin"
+    build = bin_dir / f"cactup-{previous}"
+    if not build.exists():
+        target = next(UPDATE_ROOT.glob(f"*/cactup-{previous}"))
+        shutil.copyfile(target, build)
+        build.chmod(0o755)
+    link = bin_dir / "cactup"
+    tmp = bin_dir / ".cactup.reset"
+    tmp.unlink(missing_ok=True)
+    tmp.symlink_to(build.name)
+    os.replace(tmp, link)
+    (HOME / ".cactup" / "update-check").unlink(missing_ok=True)
+    print(f"cactup is build {previous} again; the next cactup command in a terminal cell updates it")
+    return 0
+
+
+def everything(yes: bool) -> int:
+    if HOME != Path("/home/cactus"):
+        print(f"refusing to reset {HOME}: this resets the tutorial user's home, /home/cactus", file=sys.stderr)
+        return 2
+    if not yes:
+        print("This cancels your SLURM jobs and returns your home directory to its state at the")
+        print("start of the tutorial: installs, builds, simulations and your own files are removed.")
+        answer = input("Type yes to go ahead: ")
+        print()
+        if answer.strip() != "yes":
+            print("nothing done")
+            return 1
+    user = os.environ.get("USER", "cactus")
+    subprocess.run(["scancel", "-u", user], check=False)
+    # scancel only asks; wait for the jobs to be gone before removing the
+    # files they write to.
+    for _ in range(60):
+        out = subprocess.run(["squeue", "-h", "-u", user], capture_output=True, text=True).stdout
+        if not out.strip():
+            break
+        time.sleep(0.5)
+    else:
+        print("some of your jobs are still in the queue; wait for them (squeue) and run this again",
+              file=sys.stderr)
+        return 1
+    failed: list[str] = []
+    empty(HOME, KEEP, failed)
+    subprocess.run(["cp", "-a", f"{SKEL}/.", str(HOME)], check=True)
+    if failed:
+        print("could not remove: " + ", ".join(failed[:10]) + (" ..." if len(failed) > 10 else ""),
+              file=sys.stderr)
+        print("Everything else is as it was at the start. Now:")
+    else:
+        kept = " (~/tutorial-saved is kept)" if SAVED.exists() else ""
+        print(f"Your home is as it was at the start{kept}. Now:")
+    print("- in each open notebook: File > Reload ... from Disk, then Kernel > Restart Kernel;")
+    print("  if JupyterLab says a file changed on disk, choose Revert, not Overwrite;")
+    print("- in each open Terminal: cd ~")
+    return 1 if failed else 0
+
+
+# What a full reset leaves in place: the saved copies, the notebook server's
+# own runtime files (without them it can start no kernel), and directories a
+# running shell or kernel may be sitting in (emptied, not removed, so they
+# stay where they are). Paths relative to the home.
+KEEP = {
+    "tutorial-saved": "keep",
+    ".local/share/jupyter/runtime": "keep",
+    # Running kernels keep their history database open in here.
+    ".ipython": "keep",
+    "notebooks": "empty",
+}
+
+
+def empty(directory: Path, keep: dict[str, str], failed: list[str], rel: str = "") -> None:
+    """Remove everything in `directory` but what `keep` protects."""
+    for entry in directory.iterdir():
+        path = f"{rel}{entry.name}"
+        rule = keep.get(path)
+        real_dir = entry.is_dir() and not entry.is_symlink()
+        if rule == "keep" and real_dir:
+            continue
+        inside = [k for k in keep if k.startswith(path + "/")]
+        # Only a real directory is kept or emptied: a link or a file in its
+        # place goes, and the skeleton's directory comes back.
+        if real_dir and (rule == "empty" or inside):
+            empty(entry, keep, failed, path + "/")
+        elif real_dir:
+            shutil.rmtree(entry, onexc=lambda _f, p, _e: failed.append(str(p)))
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                failed.append(str(entry))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--notebook", metavar="N", help="restore notebook N as it was shipped")
+    group.add_argument("--update-demo", action="store_true", help="let notebook 1's auto-update happen again")
+    parser.add_argument("-y", "--yes", action="store_true", help="don't ask before a full reset")
+    args = parser.parse_args()
+    if args.notebook is not None:
+        return notebook(args.notebook)
+    if args.update_demo:
+        return update_demo()
+    return everything(args.yes)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -35,6 +35,14 @@ _STYLE = """
 .jp-RenderedText pre.cactup-term { margin: 0; padding: 0; line-height: 1.3;
   font-family: var(--jp-code-font-family); font-size: var(--jp-code-font-size);
   background: transparent; white-space: pre; overflow-x: auto; }
+/* Long output: a box of its own height, starting scrolled to its end (a
+   column-reverse flex box keeps its scroll position at the bottom). */
+.jp-RenderedText.cactup-box { max-height: 36em; overflow-y: auto; display: flex;
+  flex-direction: column-reverse; border: 1px solid var(--jp-border-color2);
+  padding: 0.2em 0.4em; }
+/* The terminal keeps its full height inside the box, so the box (not the
+   terminal) is what scrolls. */
+.jp-RenderedText.cactup-box > pre.cactup-term { flex: none; }
 /* Colors a theme can't show: white on white, bright black on black. */
 body[data-jp-theme-light='true'] .cactup-term .ansi-white-fg,
 body[data-jp-theme-light='true'] .cactup-term .ansi-white-intense-fg { color: var(--jp-content-font-color0); }

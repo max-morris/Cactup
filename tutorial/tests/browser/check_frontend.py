@@ -156,6 +156,27 @@ with sync_playwright() as p:
     interrupt()
     check(last_has("interrupted", 10000), "a second interrupt stops it")
 
+    # Long output: a box that scrolls itself and starts at its end.
+    rerun_last("%%shell\nseq 1 300\n")
+    last_has("300", 15000)
+    box = cells.nth(last).locator(".cactup-box")
+    check(box.count() == 1, "long output goes in a box")
+    if box.count() == 1:
+        sizes = box.evaluate("e => [e.scrollHeight, e.clientHeight, e.scrollTop,"
+                             " e.querySelector('pre').scrollHeight, e.querySelector('pre').clientHeight]")
+        scroll_height, client_height, _, pre_scroll, pre_client = sizes
+        check(scroll_height > client_height and pre_scroll == pre_client,
+              f"the box scrolls, not the terminal inside it (box {scroll_height}/{client_height}, "
+              f"terminal {pre_scroll}/{pre_client})")
+        # Where the output's last character is drawn, against the box's bottom.
+        box_rect, end = box.evaluate(
+            "e => { const w = document.createTreeWalker(e.querySelector('pre'), NodeFilter.SHOW_TEXT);"
+            " let last = null; while (w.nextNode()) if (w.currentNode.data.trim()) last = w.currentNode;"
+            " const r = document.createRange(); r.setStart(last, last.data.trimEnd().length - 1);"
+            " r.setEnd(last, last.data.trimEnd().length);"
+            " return [e.getBoundingClientRect().bottom, r.getBoundingClientRect().bottom]; }")
+        check(abs(box_rect - end) < 40, f"the box starts at its end (last line {end:.0f}, box bottom {box_rect:.0f})")
+
     page.screenshot(path=f"{OUT}/notebook-light.png", full_page=True)
     # Save, so the outputs survive the reload into the dark theme.
     page.keyboard.press("Control+s")

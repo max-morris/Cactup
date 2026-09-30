@@ -90,3 +90,13 @@ def test_a_bad_escape_sequence_loses_only_itself():
     term.feed(b"A\x1b[?1;2cB\r\nC\r\n\x1b[1;2;3Cafter\r\n")
     text = term.text()
     assert "B" in text and "C" in text and "after" in text
+
+
+def test_long_output_goes_in_a_box_short_output_does_not():
+    from cactup_tutorial.render import BOX_LINES
+
+    short, long_ = Terminal(), Terminal()
+    short.feed(b"one\r\ntwo\r\n")
+    long_.feed(b"".join(b"%d\r\n" % i for i in range(BOX_LINES + 5)))
+    assert "cactup-box" not in short.html()
+    assert 'class="jp-RenderedText cactup-box"' in long_.html()

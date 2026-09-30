@@ -1,0 +1,206 @@
+#!/usr/bin/python3 -I
+"""Bring this container to the state a tutorial notebook assumes.
+
+    cactup-tutorial-catch-up N
+
+Every notebook's first cell runs it with its own number. It is idempotent:
+it prints one line for each thing it had to do, and nothing when there was
+nothing to do. See "Catch-up and reset" in tutorial/README.md.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CACTUP_HOME = HOME / ".cactup"
+CACTUP = CACTUP_HOME / "bin" / "cactup"
+UPDATE_ROOT = Path("/opt/cactup-tutorial/update-root")
+UPDATE_URL = "http://127.0.0.1:8765"
+MACHINE = "cactup-tutorial"
+RELEASE = "ET_2026_05_v0"
+SAVED = HOME / "tutorial-saved"
+
+# What each notebook needs before its first cell, beyond cactup itself.
+NOTEBOOKS = {
+    "1": {"cactup": False},
+    "2": {"cactup": True, "install": True},
+}
+
+
+def say(line: str) -> None:
+    print(f"catch-up: {line}", flush=True)
+
+
+def plain_env() -> dict:
+    """The environment without the notebook kernel's color forcing
+    (CLICOLOR_FORCE and friends), which would put color codes into output
+    read through a pipe."""
+    env = {k: v for k, v in os.environ.items() if k not in ("CLICOLOR_FORCE", "FORCE_COLOR", "CLICOLOR")}
+    env["NO_COLOR"] = "1"
+    return env
+
+
+def cactup(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Run cactup never on a terminal (so it never checks for updates or
+    shows progress bars), with its output captured, uncolored."""
+    proc = subprocess.run([str(CACTUP), *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          env=plain_env())
+    if check and proc.returncode != 0:
+        sys.stderr.write(proc.stdout + proc.stderr)
+        raise SystemExit(f"catch-up: `cactup {' '.join(args)}` failed")
+    return proc
+
+
+def saved_dir() -> Path:
+    """A new directory under ~/tutorial-saved, never one already used."""
+    stamp = time.strftime("%Y-%m-%d-%H%M%S")
+    for n in range(1000):
+        d = SAVED / (stamp if n == 0 else f"{stamp}-{n}")
+        try:
+            d.mkdir(parents=True)
+            return d
+        except FileExistsError:
+            continue
+    raise SystemExit("catch-up: could not make a directory under ~/tutorial-saved")
+
+
+# -- the machine ----------------------------------------------------------------
+
+
+def claims_this_host(entry: Path) -> bool:
+    if (entry / "discover.py").exists():
+        return True
+    try:
+        pattern = (entry / "hostname.regexp").read_text().strip()
+    except OSError:
+        return False
+    try:
+        # Unanchored, as cactup matches it.
+        return bool(pattern) and re.search(pattern, MACHINE) is not None
+    except re.error:
+        return False
+
+
+def machine(forget: bool = True) -> None:
+    """Undo what would make cactup pick another machine than the tutorial's,
+    or ask which one in a cell."""
+    hostname_file = HOME / ".hostname"
+    if hostname_file.exists():
+        hostname_file.unlink()
+        say("removed ~/.hostname (cactup would take this host's name from it)")
+    user = CACTUP_HOME / "machines"
+    if user.is_dir():
+        for entry in sorted(user.iterdir()):
+            if entry.is_dir() and (entry.name == MACHINE or claims_this_host(entry)):
+                dest = saved_dir() / entry.name
+                shutil.move(str(entry), dest)
+                say(f"moved your machine entry {entry.name} to {dest} (it claims this host)")
+    try:
+        detected = json.loads((CACTUP_HOME / "database.json").read_text()).get("detected") or {}
+    except (OSError, ValueError):
+        detected = {}
+    if forget and detected.get("name") not in (None, MACHINE) and CACTUP.exists():
+        cactup("machine", "forget")
+        say(f"forgot the cached machine {detected['name']}")
+
+
+# -- cactup ---------------------------------------------------------------------
+
+
+def builds() -> tuple[str, str]:
+    """The update site's "previous" (what the installer installs) and
+    "current" (what the update check offers) builds."""
+    current = json.loads((UPDATE_ROOT / "latest.json").read_text())["build"]
+    sha = next(UPDATE_ROOT.glob("*/cactup.sha256")).read_text()
+    previous = re.search(r"cactup-(\w+)", sha).group(1)
+    return previous, current
+
+
+def installed_build() -> str | None:
+    if not CACTUP.exists():
+        return None
+    out = cactup("--version", check=False).stdout
+    m = re.search(r"\((\w+) ", out)
+    return m.group(1) if m else ""
+
+
+def install_cactup() -> None:
+    proc = subprocess.run(
+        ["sh", "-c", f"curl -sSf {UPDATE_URL}/cactup-init.sh | CACTUP_UPDATE_ROOT={UPDATE_URL} sh -s -- -y"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, env=plain_env(),
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout + proc.stderr)
+        raise SystemExit("catch-up: the cactup installer failed")
+
+
+def ensure_cactup() -> None:
+    previous, current = builds()
+    have = installed_build()
+    if have is None:
+        install_cactup()
+        say("installed cactup with the documented installer (notebook 1 does this)")
+    elif have not in (previous, current):
+        # Not a build this VM serves (say, the public installer's): its output
+        # differs from the notebooks', and it would miss every precomputed build.
+        install_cactup()
+        say(f"reinstalled cactup from this VM's update site (you had build {have})")
+    if installed_build() != current:
+        cactup("update")
+        say(f"updated cactup to {current} (the first command on a terminal would have)")
+
+
+# -- the install ----------------------------------------------------------------
+
+
+def ensure_install() -> None:
+    listing = cactup("list").stdout
+    if not re.search(rf"^- {RELEASE}\b", listing, re.M):
+        say(f"installing {RELEASE} from the mirrors (notebook 1 does this; under a minute)")
+        cactup("install", RELEASE, "--silent")
+        listing = cactup("list").stdout
+    if not re.search(rf"^- {RELEASE}\b.*\(active\)", listing, re.M):
+        cactup("use", RELEASE)
+        say(f"made {RELEASE} the active installation")
+    link = HOME / "Cactus"
+    target = CACTUP_HOME / "cacti" / RELEASE / "Cactus"
+    if not (link.is_symlink() and Path(os.readlink(link)) == target):
+        if link.is_symlink() or not link.exists():
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(target)
+            say(f"pointed ~/Cactus at {RELEASE}'s source tree")
+        else:
+            say("~/Cactus is not a link to the stock install; notebooks that use it will not find it")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 1 or argv[0] not in NOTEBOOKS:
+        print(f"usage: cactup-tutorial-catch-up {{{','.join(NOTEBOOKS)}}}", file=sys.stderr)
+        return 2
+    needs = NOTEBOOKS[argv[0]]
+    if not needs.get("cactup"):
+        # Notebook 1 installs cactup and watches it update. Run again, its
+        # installer puts back the older build, and a check made earlier
+        # today would keep the update from happening: forget it. Otherwise
+        # only what needs no cactup.
+        (CACTUP_HOME / "update-check").unlink(missing_ok=True)
+        machine(forget=False)
+        return 0
+    ensure_cactup()
+    machine()
+    if needs.get("install"):
+        ensure_install()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

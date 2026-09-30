@@ -21,7 +21,12 @@ import pyte
 
 from .session import COLUMNS, ROWS
 
-MAX_LINES = 5000
+# Kept lines (terminal rows, after wrapping): enough for a whole Cactus build.
+MAX_LINES = 12000
+# Longer output goes in a box of its own height that starts scrolled to the
+# end, so a build's output doesn't push the rest of the notebook ninety
+# screens down.
+BOX_LINES = 40
 
 # A control sequence (CSI): ESC [, parameter bytes, intermediate bytes, a final byte.
 _CSI = re.compile(rb"(\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e])")
@@ -127,11 +132,13 @@ class Terminal:
             parts.append(
                 f'<span class="ansi-bold">... {self.screen.dropped} earlier lines not shown</span>\n'
             )
-        for row in self._rows():
+        rows = self._rows()
+        for row in rows:
             parts.append(_line_html(row, self.screen.columns))
             parts.append("\n")
         body = "".join(parts).rstrip("\n")
-        return f'<div class="jp-RenderedText"><pre class="cactup-term">{body}</pre></div>'
+        box = " cactup-box" if len(rows) > BOX_LINES else ""
+        return f'<div class="jp-RenderedText{box}"><pre class="cactup-term">{body}</pre></div>'
 
 
 def _line_text(row: dict, columns: int) -> str:

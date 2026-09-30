@@ -35,7 +35,9 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-COLUMNS = 110
+# 100 columns fit a notebook's output area beside JupyterLab's file browser
+# in a 1280-pixel-wide window.
+COLUMNS = 100
 ROWS = 40
 
 # The shell reports the end of every cell with this private OSC sequence,

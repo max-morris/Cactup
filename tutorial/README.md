@@ -98,7 +98,7 @@ Constraints the notebooks must respect (each found by reading the code):
   documentation instead. See Auto-update for why this installs the older
   build. The notebook also says openly that the VM serves the Einstein
   Toolkit's repositories from local mirrors (a whole release installs in
-  seconds, and plain git shows it: `git remote -v` and `git fetch -v` print
+  seconds, and plain git shows it: `git remote -v` prints
   `file:///opt/cactup-mirrors/...`), while cactup, `origin` and the
   thornlists all name the upstream repositories, as they would on a cluster
   whose site mirrors GitHub.
@@ -273,7 +273,9 @@ Attendees skip notebooks, restart kernels and arrive late, and the notebooks
 depend on state earlier ones created (installs, the active installation,
 configs, simulations). So:
 
-- Every notebook's first code cell runs `cactup-tutorial-catch-up N`, which
+- Every notebook's first code cell runs `cactup-tutorial-catch-up N`
+  (`image/rootfs/usr/local/bin/`; each notebook's stage adds that
+  notebook's steps, so far those of notebooks 1 and 2), which
   brings the container to the state notebook N assumes (installing from the
   mirrors and building from the bakes if needed, selecting the right
   installation and config). It is idempotent and prints one line per thing it
@@ -294,7 +296,10 @@ configs, simulations). So:
   build (an attendee ran the public one-liner, and containers can reach the
   internet), it reinstalls from the local update site: a foreign build's
   output differs from the notebooks', and a build-record change would miss
-  every bake. `cactup-tutorial-catch-up 1` runs no cactup at all.
+  every bake. `cactup-tutorial-catch-up 1` runs no cactup at all; it only
+  does the machine cleanups that need none, and, silently, forgets the last
+  update check, so that running notebook 1 again (whose installer puts the
+  older build back) shows the update again.
 - Catch-up only ever needs the stock `ET_2026_05_v0` install and the stock
   `tutorial` build (B1): notebooks 2, 4a, 4b and 10 need the install,
   notebooks 5 to 9 also need `tutorial`, and every other install or config
@@ -334,8 +339,13 @@ configs, simulations). So:
   finish (an open tab would offer to overwrite the restored file on its next
   save). Notebook 9 also ends by reverting its file and rebuilding, so it
   leaves the tree clean itself.
-- `cactup-tutorial-reset` cancels the attendee's SLURM jobs and wipes
-  `/home/cactus` back to the skeleton (asking first), and
+- `cactup-tutorial-reset` cancels the attendee's SLURM jobs, waits for them
+  to leave the queue, and wipes `/home/cactus` back to the skeleton (asking
+  first). It keeps `~/tutorial-saved`, the notebook server's runtime
+  directory (`~/.local/share/jupyter/runtime`; without it the server can
+  start no kernel), `~/.ipython` (running kernels keep their history
+  database open there) and the `~/notebooks` directory itself, which it
+  empties and refills (a kernel's shell may be sitting in it). And
   `cactup-tutorial-reset --notebook N` restores one notebook's pristine copy
   from `/opt/cactup-tutorial/notebooks` — which is also how a fix made
   mid-workshop reaches attendees who already started.
@@ -915,6 +925,7 @@ PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, 
 tutorial/tests/browser/run.sh cactup-tutorial:lab             # the frontend, in headless Chromium
 tutorial/tests/platform/smoke.sh cactup-tutorial:lab          # install, update, SLURM, a simulation
 tutorial/tests/platform/replay.sh cactup-tutorial:tutorial    # a replayed build, its executable, real rebuilds
+tutorial/tests/run_all.py                                     # every notebook, headless, in order and alone
 ```
 
 To try the image locally as one attendee:

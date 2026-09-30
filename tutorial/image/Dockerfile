@@ -202,3 +202,19 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/sbin/cactup-tutorial-entrypoint"]
 # lab image and passes the ones this image needs as the `bakes` context.
 FROM lab AS tutorial
 COPY --from=bakes / /opt/cactup-bakes/
+
+# The notebooks, last, so editing one rebuilds only this layer. Their sources
+# are jupytext MyST files; attendees get .ipynb files in ~/notebooks, and
+# cactup-tutorial-reset --notebook restores one from the pristine copies.
+COPY tutorial/notebooks/*.md /tmp/notebooks/
+RUN set -eu; \
+    pristine=/opt/cactup-tutorial/notebooks; \
+    mkdir -p "$pristine"; \
+    for src in /tmp/notebooks/*.md; do \
+      jupytext --quiet --to ipynb -o "$pristine/$(basename "$src" .md).ipynb" "$src"; \
+    done; \
+    chmod 0755 "$pristine"; chmod 0644 "$pristine"/*.ipynb; rm -rf /tmp/notebooks; \
+    for home in /home/cactus /opt/cactup-tutorial/skel; do \
+      install -d -o cactus -g cactus "$home/notebooks"; \
+      install -o cactus -g cactus -m 0644 "$pristine"/*.ipynb "$home/notebooks/"; \
+    done
