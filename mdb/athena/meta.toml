@@ -126,9 +126,13 @@ export OMPI_MCA_coll_hcoll_enable=0
 # the job id; ps/pkill for status/stop. Copied from mdb/et-juphub.
 # @STDOUT_FILE@/@STDERR_FILE@ default to @RUNDIR@/@SIMULATION_NAME@.{out,err}
 # unless -o/-e are given (design §8.3.1).
-submit            = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+# setsid: every job gets its own session and process group. Without it the
+# jobs submitted from one shell share a process group, and `stop`'s
+# pkill -g on one of them killed the other two (athena, 2026-09-30: three
+# qc0 controls lost two hours each).
+submit            = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
 # The pid is printed before the wait, so the job id parses immediately.
-blocking-submit   = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+blocking-submit   = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 get-status        = "ps @JOB_ID@"
 # Kill the whole process group descending from @JOB_ID@ (mpirun and every
 # rank), not just the top process.
