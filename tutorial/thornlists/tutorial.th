@@ -5,11 +5,13 @@
 # thorns, and Cottonmouth's Z4c evolution (CottonmouthZ4c4m) with its
 # linear-wave initial data (CottonmouthLinearWaveID), plus exactly what those
 # require: IOUtil for CarpetX's I/O parameters, the radiative boundary
-# condition NewRadX, and the external libraries AMReX, MPI, yaml-cpp and zlib.
+# condition NewRadX, and the external libraries AMReX, MPI, NSIMD, yaml-cpp
+# and zlib. (Arith lists NSIMD as optional, but its SIMD code does not
+# compile without it.)
 #
 # Left out: the rest of the release, the libraries CarpetX can use but does
-# not need (ADIOS2, openPMD, Silo, NSIMD, hwloc), and the CarpetX thorns the
-# release only checks out (Algo, PDESolvers, PoissonX).
+# not need (ADIOS2, openPMD, Silo) and hwloc, which MPI can use, and the
+# CarpetX thorns the release only checks out (Algo, PDESolvers, PoissonX).
 #
 # Every repository and branch is the ET_2026_05 release's.
 
@@ -79,7 +81,7 @@ CarpetX/TmunuBaseX
 CarpetX/WaveToyX
 
 
-# External libraries: exactly the ones the thorns above REQUIRE
+# External libraries: exactly the ones the thorns above need
 !TARGET   = $ARR
 !TYPE     = git
 !URL      = https://github.com/EinsteinToolkit/$1-$2
@@ -88,6 +90,7 @@ CarpetX/WaveToyX
 !CHECKOUT =
 ExternalLibraries/AMReX
 ExternalLibraries/MPI
+ExternalLibraries/NSIMD
 ExternalLibraries/yaml_cpp
 ExternalLibraries/zlib
 

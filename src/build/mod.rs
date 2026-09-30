@@ -648,8 +648,13 @@ pub enum SourceDelta {
 pub struct SourceChange {
     /// Repos now on a different commit than the build used.
     pub moved: Vec<String>,
-    /// Repos whose worktree differs from what the build used.
+    /// Repos whose worktree differs from what the build used, and still has
+    /// local edits.
     pub edited: Vec<String>,
+    /// Repos the build used with local edits whose worktree is clean again at
+    /// the same commit: the edits were reverted. Still a change (the reverted
+    /// files must recompile), but not one to call an edit.
+    pub reverted: Vec<String>,
     /// Repos the build recorded a state for that can no longer be read: the
     /// directory is gone, or it is no longer a git repo (a hand-built variant
     /// dropped in place of the checkout). No state string exists to compare,
@@ -659,7 +664,7 @@ pub struct SourceChange {
 
 impl SourceChange {
     fn is_empty(&self) -> bool {
-        self.moved.is_empty() && self.edited.is_empty() && self.vanished.is_empty()
+        self.moved.is_empty() && self.edited.is_empty() && self.reverted.is_empty() && self.vanished.is_empty()
     }
 }
 
@@ -695,7 +700,11 @@ pub fn source_delta(
         // Split by *why* it differs: the commit moved (a refetch or a manual
         // checkout) or only the worktree did (a hand edit).
         if crate::fetch::committed(was) == crate::fetch::committed(state) {
-            change.edited.push(repo.clone());
+            if crate::fetch::committed(state) == state {
+                change.reverted.push(repo.clone());
+            } else {
+                change.edited.push(repo.clone());
+            }
         } else {
             change.moved.push(repo.clone());
         }
@@ -1372,7 +1381,7 @@ pub fn rebuild_decision(
             RebuildDecision::Incremental("thorn sources are not the commits this was built from")
         }
         Some(_) if sources == SourceDelta::Edited => {
-            RebuildDecision::Incremental("the source tree has local edits")
+            RebuildDecision::Incremental("local edits changed since the last build")
         }
         Some(_) => RebuildDecision::UpToDate,
     }
@@ -1981,6 +1990,9 @@ pub fn prepare(
         }
         if !source_change.edited.is_empty() {
             println!("  locally edited: {}", summarize(&source_change.edited));
+        }
+        if !source_change.reverted.is_empty() {
+            println!("  local edits reverted: {}", summarize(&source_change.reverted));
         }
         if !source_change.vanished.is_empty() {
             println!(
@@ -3089,7 +3101,10 @@ mod tests {
         assert_eq!(source_delta(Some(&one_edit), Some(&two_edits)).0, SourceDelta::Edited);
         // …and reverting back to clean is also a change.
         let reverted = heads(&[("cactusbase", "aaa")], None);
-        assert_eq!(source_delta(Some(&one_edit), Some(&reverted)).0, SourceDelta::Edited);
+        let (delta, change) = source_delta(Some(&one_edit), Some(&reverted));
+        assert_eq!(delta, SourceDelta::Edited);
+        assert_eq!(change.reverted, vec!["cactusbase".to_string()], "a revert is reported as one");
+        assert!(change.edited.is_empty(), "a clean worktree is not called edited");
 
         // Editing the FLESH in place stays incremental: make recompiles what
         // the edit affects, and a realclean would punish iterating on it.

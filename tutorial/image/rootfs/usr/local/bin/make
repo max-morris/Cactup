@@ -1,0 +1,18 @@
+#!/bin/bash -p
+# The tutorial's make: a shim ahead of /usr/bin/make on PATH that lets a
+# cactup build restore a precomputed build instead of compiling for ten
+# minutes (see "Build replay" in tutorial/README.md).
+#
+# A recursive make (MAKELEVEL is set) goes straight to /usr/bin/make. Only a
+# top-level make reaches the Python part, which passes it through too unless
+# it is one of the steps of a cactup build script. Either way make runs as
+# "make" (argv[0]), as typed, so the $(MAKE) Cactus's makefiles print and
+# run reads "make". (A make that remakes one of its own included makefiles
+# re-executes itself as "make", top-level again, and so comes back through
+# here; Cactus's top-level Makefile includes none.)
+#
+# -p: no $BASH_ENV to read on each of the hundreds of recursive makes.
+if [ -z "${MAKELEVEL:-}" ]; then
+    exec /usr/bin/python3 -I /usr/local/lib/cactup-tutorial/make_shim.py "$@"
+fi
+exec -a make /usr/bin/make "$@"

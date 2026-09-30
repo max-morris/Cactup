@@ -156,7 +156,12 @@ fn missing_to_submit_builds(machine: &Machine) -> Option<&'static str> {
 fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force: bool) -> Res<()> {
     let Some(id) = BuildAttempt::latest_id(config_dir)? else { return Ok(()) };
     let attempt = BuildAttempt::open(config_dir, id)?;
-    if attempt.meta.job_id != NO_JOB_ID
+    // Only a submitted attempt's job_id is a scheduler id — a foreground
+    // build's is its pid, which the scheduler may well know as some other
+    // job — and an attempt that recorded an outcome is over.
+    if attempt.meta.submitted
+        && attempt.meta.outcome.is_none()
+        && attempt.meta.job_id != NO_JOB_ID
         && !LinkLock::is_held_live(&attempt.running_lock_path())?
         && matches!(
             sched.get_status(&attempt.meta.job_id)?,
@@ -1137,7 +1142,8 @@ fn attempt_is_live(attempt: &BuildAttempt, sched: &Scheduler) -> Res<bool> {
     if attempt.meta.outcome.is_some() {
         return Ok(false);
     }
-    let status = if attempt.meta.job_id != NO_JOB_ID {
+    // A foreground build's job_id is its pid, not a scheduler id.
+    let status = if attempt.meta.submitted && attempt.meta.job_id != NO_JOB_ID {
         sched.get_status(&attempt.meta.job_id).ok()
     } else {
         None
@@ -2248,6 +2254,34 @@ mod tests {
         let phrase = in_flight_build(&config_dir, "sim", None).expect("lock held live");
         assert!(phrase.contains("foreground"), "{phrase}");
         assert!(phrase.contains("12345"), "{phrase}");
+    }
+
+    /// A foreground build's job_id is its pid, which the scheduler may know as
+    /// another job: neither the pre-build guard nor `attempt_is_live` may ask
+    /// it about one. Here the scheduler calls every job id queued, so any
+    /// question would read as a live build.
+    #[test]
+    fn a_foreground_attempts_pid_is_never_asked_of_the_scheduler() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let machine = fake_submit_machine(&tmp.path().join("mdb/fake"), "", "", true);
+        let sched = Scheduler::new(&machine.meta);
+        let config_dir = cactus.join("configs/sim");
+        let done = BuildOutcomeRecord { exit_status: Some(0), complete: true };
+        let finished = make_attempt(&config_dir, &cactus, "sim", 0, "12345", false, Some(done));
+        guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
+        assert!(!attempt_is_live(&finished, &sched).unwrap());
+
+        // One that died without an outcome (no lock held) is not live either.
+        let died = make_attempt(&config_dir, &cactus, "sim", 1, "12346", false, None);
+        guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
+        assert!(!attempt_is_live(&died, &sched).unwrap());
+
+        // A submitted one still asks the scheduler.
+        let queued = make_attempt(&config_dir, &cactus, "sim", 2, "JOB-B2", true, None);
+        let err = guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap_err();
+        assert!(format!("{err:#}").contains("already has a live build attempt"), "{err:#}");
+        assert!(attempt_is_live(&queued, &sched).unwrap());
     }
 
     /// A foreground attempt with no held lock and no outcome died without

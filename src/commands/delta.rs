@@ -342,6 +342,9 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
             print_modified(diff, verbose);
         }
     }
+    for repo in &change.reverted {
+        println!("  {} — {}", repo.bold(), "built with local edits, now reverted".yellow());
+    }
     // No `details` entry is possible for these — that they cannot be inspected
     // as git repos is the whole finding.
     for repo in &change.vanished {
@@ -404,6 +407,9 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
     }
     if !change.edited.is_empty() {
         what.push(format!("{} locally edited", change.edited.len()));
+    }
+    if !change.reverted.is_empty() {
+        what.push(format!("{} with local edits reverted", change.reverted.len()));
     }
     if !change.vanished.is_empty() {
         what.push(format!("{} no longer inspectable", change.vanished.len()));

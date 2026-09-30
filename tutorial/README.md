@@ -223,6 +223,11 @@ Constraints the notebooks must respect (each found by reading the code):
 - **Every build runs in the foreground:** `mdb/cactup-tutorial` sets `[build]
   default-action = "run"` (with a build-submit script variant and a
   `[scheduler].submit`, `cactup build` would otherwise go to the queue).
+- **Simulations and tests go through SLURM, never in the foreground.** A
+  foreground `sim` run records its own pid as its job id, and cactup asks
+  the scheduler about it (for the generic machine's `ps`-style status
+  command); on this machine `squeue -j <pid>` could match an unrelated job.
+  (`cactup build` had the same problem and no longer does.)
 
 ### Editor files
 
@@ -419,17 +424,20 @@ make -jN NAME-utils
 ```
 
 `image/rootfs/usr/local/bin/make` sits ahead of `/usr/bin/make` on `PATH`. It
-starts as a few lines of `sh`. A top-level invocation (`MAKELEVEL` unset)
-whose parent process is the `/bin/sh` running an attempt's `build-script`
-(exactly that name) goes on to the Python part. Every other invocation
-`exec`s `/usr/bin/make` at once, with `argv[0]` set to `/usr/bin/make` so
-every recursive `$(MAKE)` inside Cactus's makefiles bypasses the shim
-entirely, after one piece of bookkeeping when it is top-level: a
-`NAME-realclean` or `NAME-clean` target (the separate `build-script-realclean`
+is a few lines of `bash`: a recursive make (`MAKELEVEL` set) `exec`s
+`/usr/bin/make` at once. Every make runs with `argv[0]` `make`, as typed, so
+the `$(MAKE)` Cactus's makefiles print ("Use make NAME to build the
+configuration") and run reads `make`; a recursive `$(MAKE)` passes through
+those few lines on its way. A top-level make goes on to the Python part
+(`/usr/local/lib/cactup-tutorial/make_shim.py`), which ends quietly on a
+Ctrl-C until it has decided what to do.
+Unless its parent process is the `/bin/sh` running an attempt's
+`build-script` (exactly that name) and its goal is one of that build's steps,
+it too becomes `/usr/bin/make`, after one piece of bookkeeping: a
+`NAME-realclean` or `NAME-clean` goal (the separate `build-script-realclean`
 cactup may run, or one typed by hand) removes that config's restore marker,
-and a `NAME-config` or plain `NAME` target for an existing config marks it
-*built on* (below).
-Only the few top-level steps of a build reach Python.
+and a `NAME-config` or plain `NAME` goal for a config whose tree is
+*pristine* marks it *built on* (below).
 
 **The fingerprint** is read, not recomputed. The `options=` argument names
 the attempt directory, and its `build.toml` already records what decides the
@@ -451,9 +459,11 @@ build's product, in cactup's own terms (the key names are `build.toml`'s):
 
 plus the contents of the option file and a normalized parse of the thornlist
 (repository URL, branch and thorn entries; comments and whitespace don't
-matter), both with the attempt directory normalized out. A test pins the
-`build.toml` fields the shim reads, so a cactup schema change fails loudly
-instead of silently missing every bake. The frozen copy of the global
+matter), both with the attempt directory normalized out. A cactup schema
+change that moved these fields would make every build miss; the replay check
+(`tests/platform/replay.sh`), which builds with the image's real cactup,
+fails then, loudly (the build takes ten minutes and prints the "not
+precomputed" note). The frozen copy of the global
 `.cactupignore` (`global-shape-ignore`) is left out on purpose: the shapes
 already reflect what it exempts, and fingerprinting its text would make a
 harmless edit to it (a comment) miss every bake.
@@ -464,7 +474,9 @@ for the config's lock reads them again without writing them back, so the shim
 could fingerprint the older reading. Nothing in the tutorial holds a config's lock
 that long, so this is accepted.
 
-**The restore marker** (`configs/NAME/.cactup-tutorial-restored`) has four
+**The restore marker** (`configs/NAME/.make-state`; the shim's files in the
+config directory, this one, `.make-session`, `.make-staging-<id>` and
+`.make-trash-<id>`, are named for make, not for the tutorial) has four
 states:
 
 - *absent*: the tree is whatever real makes left in it, possibly nothing (a
@@ -485,23 +497,32 @@ path is in the parent's argv) has a `NAME-clean` step still to come, or when
 there are no objects under `build/`. Then:
 
 - a hit with the marker *restoring* (any bake): restore, then replay;
-- a hit with the marker *pristine* for this bake: replay only if the attempt
-  compiles from scratch (re-placing the executable if it is missing);
-  otherwise pass through, since the tree is already current and the real make
-  reruns CST and configure and finds nothing to compile;
+- a hit with the marker *pristine* for this bake: when the script cleans
+  (`--clean`), replay (the tree is already what the clean and build would
+  leave; restore first only if its objects are gone); when cactup decided on
+  a full rebuild without a realclean (it found the config incomplete, say
+  its executable deleted), pass through, since a real make only relinks
+  (restore instead if the objects are gone); otherwise pass through, since
+  the tree is already current and the real make reruns CST and configure
+  and finds nothing to compile;
 - any other hit that compiles from scratch: restore, then replay;
 - any other hit: pass through. This is the "edit, rebuild, revert, rebuild"
   case of notebooks 5 and 9: the reverted files carry new mtimes, so only they
   recompile (the whole thorn after a `.ccl` revert, whose shape changes back,
   so cactup drops that thorn's build state again). Correct, and honest: a
-  revert shows a small recompile, not a thirty-second "full" build;
+  revert shows a small recompile, not a 45-second "full" build;
 - a miss: pass through. If the attempt compiles from scratch, the shim first
   prints a short note saying the build was not precomputed and will take a
-  long time on this VM, and what differs from the nearest bake: the
+  long time on this VM, and what differs from the nearest bake of the same
+  config. When the build as a whole is another one (a different thornlist,
+  say a new config built without `--thornlist`, which takes the
+  installation's full thornlist; or another optionlist, other flags or
+  another build environment) it says just that. Otherwise it names the
   repositories with edits (`cactup config delta` lists them) and the thorns
   whose shape differs, by name, since `config delta` can't show those (an
-  untracked `.orig` or backup file under a thorn's `src/` is enough).
-  Reverting brings the fast build back.
+  untracked `.orig` or backup file under a thorn's `src/` is enough), and
+  says reverting brings the fast build back. With no bake of that config it
+  names the configs that have one.
 
 After `-f` or `--reconfig`, the real `NAME-realclean` empties the tree and
 removes the marker, and the attempt is full, so the config step's hit
@@ -515,11 +536,15 @@ can't inherit it), so the `NAME-clean`, `NAME` and `NAME-utils` steps of the
 same attempt replay too (a replayed `--clean` does not wipe the restored
 objects), and nothing leaks into a later attempt.
 
-- The recorded output of each step is replayed with its original relative
-  timing, compressed so the whole build takes about
-  `CACTUP_TUTORIAL_BUILD_SECONDS` (default 30). The bake's attempt directory is
-  rewritten to this attempt's in the replayed text, since Cactus echoes the
-  `options=`/`THORNLIST=` paths.
+- The recorded output of each step is replayed in its original order and
+  rhythm, compressed so the whole build takes about
+  `CACTUP_TUTORIAL_BUILD_SECONDS` (default 45, noticeably longer than a real
+  one-file rebuild's 13). Each silence is scaled by a power of its length
+  (0.6), not in proportion, so a long compile shrinks far more than the gaps
+  between configure's quick checks, and none lasts more than 1.5 s. The
+  bake's attempt directory is rewritten to this attempt's in the replayed
+  text, since Cactus echoes the `options=`/`THORNLIST=` paths, and so is the
+  number in make's jobserver fifo name (the top-level make's pid).
 - The config step starts the copy into a staging directory and leaves it
   running. Its standard streams go to a log in the staging directory, never
   to the build's output (cactup notices a process still holding its output
@@ -532,8 +557,22 @@ objects), and nothing leaks into a later attempt.
   exits non-zero with a message naming the cause, and the staging directory is
   removed. Nothing was swapped, so the marker and the tree are as they were;
   cactup reports a failed build and the next attempt starts over.
+- Every make the shim passes through or records gets the signal
+  dispositions it would have had without Python in between (Python ignores
+  SIGPIPE and SIGXFSZ, and an exec keeps them ignored), and a Ctrl-C its
+  caller ignores stays ignored.
 - A Ctrl-C during a replay stops it at once and exits 130 with make's own
-  interrupt message.
+  interrupt message: the bake records it for each step by interrupting a
+  real make on the baked tree a moment in (sooner, until it lands, for
+  the quick steps), and
+  the replay prints the
+  top-level make's line of it (the sub-makes' lines name whatever was
+  compiling in the bake, not what is on the screen).
+- Each replay stages in a directory of its own (`.make-staging-<id>`), and
+  the next config step first stops an earlier replay's copier if it is
+  still running (a Ctrl-C followed at once by a new build) and removes what
+  it left. The replay treats a copier that has exited, or made no progress
+  for two minutes, as a failed copy.
 
 **The restore** never corrupts cactup's state:
 
@@ -544,7 +583,9 @@ objects), and nothing leaks into a later attempt.
   and its siblings, `cactup-config.toml`, and the `cactup-optionlist.*` and
   `cactup-thornlist*.th` snapshots. `cactup build list` shows only real
   attempts.
-- A partial bake (B2–B5) also empties `build/` and `lib/`, so no objects from
+- A partial bake (B2–B5) keeps no objects: its `build/` and `lib/` are empty
+  and its `scratch/` holds only `scratch/external`. Restoring it also empties
+  the config's `build/` and `lib/`, so no objects from
   a real build survive beside the restored `config-data`. Otherwise a
   restore after a real build on that config (then `--clean`, or a deleted
   executable, which cactup rebuilds as full without a realclean) would leave
@@ -555,17 +596,35 @@ objects), and nothing leaks into a later attempt.
   `config-data/`). An interrupt mid-swap leaves the marker *restoring*, so
   the next hit restores the whole tree again, and a staging directory the
   next run removes.
-- `exe/cactus_NAME` is written to a temporary file and renamed over the old
-  one, at the end of the `NAME` step's replay. It is never copied over in
+- `exe/cactus_NAME` (and any utilities under `exe/NAME/`) is staged by the
+  copier beside the tree and renamed over the old one, with the tree
+  swapped in, just before the replay prints Cactus's "Done creating" line
+  (so a Ctrl-C after it finds the build in place, as it would). It is never
+  copied over in
   place: simulations hard-link the executable into their cache, and
   overwriting the shared inode would corrupt every earlier simulation's frozen
   executable.
-- Restored mtimes keep their relative order: they are mapped monotonically
-  into the interval from the attempt's start (or the newest source file, if
-  later) to now, so they also look like the thirty-second build they
-  replay. Every object ends
-  up newer than the freshly fetched sources, without reordering objects and
-  headers, so the first real incremental build compiles only what changed.
+- Restored mtimes keep their relative order: the copier maps those from
+  the bake's build (from its start, as cactup recorded it, to its newest
+  file) monotonically into the interval from the config step to the planned
+  end of the build step's replay, so they also look like the build they
+  replay. Every object ends up newer than the freshly fetched sources (and
+  everything else the attempt read), without reordering objects and headers,
+  so the first real incremental build compiles only what changed. Files
+  older than the bake's build (headers an archive unpacked with their own
+  dates) keep their mtimes, as a real build leaves them. The executable,
+  placed last, is the newest.
+- The files in the tree that record the build itself are rewritten as the
+  copier copies them, the way this build would have written them:
+  `config-info` (configure's date, the attempt directory of the options and
+  thornlist it was given, make's jobserver fifo, which matches the replayed
+  config step's) and ExternalLibraries' `scratch/done/*` stamps (the date
+  each library was built), each date mapped like the mtimes.
+- The compile date and time Cactus prints in its banner ("Compiled on ...
+  at ..."; `__DATE__` and `__TIME__` in `datestamp.o`, which is linked last)
+  are the bake's in the baked executable. The copier rewrites them, in the
+  executable and in `datestamp.o`, to the end of this replay's build step:
+  the bake records the two strings, and the new ones have the same length.
 
 ### Build inventory
 
@@ -596,11 +655,12 @@ submits to `mylab` use `--ignore-machine` on the stock `tutorial`).
 
 cactup writes `cactup-config.toml`, the `sources`/`thorn-shapes` tables and the
 build attempt records itself, from the real repositories, so nothing cactup
-reports is fabricated; only the compiler's work was done ahead of time. Two
-traces are visible to anyone who looks: the Cactus banner's compile date (the
-date the image was baked), and a full build that took about thirty seconds, in
-the cell's output and in the build attempt's timestamps. The notebooks point
-out neither.
+reports is fabricated; only the compiler's work was done ahead of time.
+Traces remain for anyone who looks closely: a full build that took 45
+seconds (in the cell's output and the build attempt's timestamps), with
+configure and the external libraries passing quickly; a Ctrl-C that leaves
+an empty tree behind rather than a half-built one; and the shim's dot-files
+in the config directory. The notebooks point out none of them.
 
 ### Bakes
 
@@ -611,24 +671,43 @@ skeleton's `database.json` has no ghost installations and no cached machine;
 it does get the skeleton's `~/.cactup/cactupignore`).
 The bake container is identical to an attendee's at run time — same paths,
 hostname, machine, compilers, mirrors — which is what makes restored trees
-valid. It installs from the mirrors, runs real `cactup build`s with the shim in
-record mode, and harvests each result into `bakes/<fingerprint>/`, which the
-final image copies to `/opt/cactup-bakes/`. Bakes are cached outside Docker's
-layer cache, keyed by the fingerprint, so a rebuild only rebakes what changed.
+valid. `bake/bake.py` (run there as root, the builds themselves as `cactus`)
+installs from the mirrors and, for each bake, first runs its `cactup build`
+with the shim in probe mode: the config step records the fingerprint and
+fails the build on purpose, and the config is removed again. If the cache
+already has that fingerprint for this toolchain, that's all. Otherwise it
+runs the build for real with the shim recording every step's output with its
+timings (and cactup's whole transcript beside it), and harvests the result
+into `<toolchain>/<fingerprint>/` in the bake cache: the config's tree, the
+executable, the recordings, and a manifest the restore copies from. The
+cache lives outside Docker (`$CACTUP_TUTORIAL_BAKES`, default
+`~/.cache/cactup-tutorial/bakes`, mounted at `/bakes`), so a rebuild only
+rebakes what changed; `build.sh` passes the fingerprints this image needs as
+its `bakes` build context, and the image's last stage copies them to
+`/opt/cactup-bakes/`.
+
+A partial bake keeps everything in the config's tree but the objects:
+`build/` and `lib/` empty, and of `scratch/` only `scratch/external`
+(`bindings/`, `config-data/`, `piraha/` and the small files are kept, so the
+restored config is complete to cactup and Cactus alike).
 
 | ID | Build | Kept |
 |---|---|---|
-| B1 | stock `ET_2026_05_v0` install, config `tutorial` from `tutorial.th` | full object tree (notebooks 5 and 9 rebuild incrementally) |
-| B2a | install `et-mp` (from `tutorial.th`), config `tutorial` from its live thornlist, before the fork refetch | exe, `config-data`, `scratch/external` |
-| B2b | install `et-mp` after the fork refetch, config `tutorial` | exe, `config-data`, `scratch/external` |
-| B3 | `tutorial-gpu` (`gpu` optionlist variant) | exe, `config-data`, `scratch/external` |
-| B4 | `tutorial-debug` (`--debug`) | exe, `config-data`, `scratch/external` |
-| B5 | `tutorial-pinned` (`--universe pinned`) | exe, `config-data`, `scratch/external` |
+| B1 | stock `ET_2026_05_v0` install, config `tutorial` from `tutorial.th` | the whole tree (notebooks 5 and 9 rebuild incrementally) |
+| B2a | install `et-mp` (from `tutorial.th`), config `tutorial` from its live thornlist, before the fork refetch | all but the objects |
+| B2b | install `et-mp` after the fork refetch, config `tutorial` | all but the objects |
+| B3 | `tutorial-gpu` (`gpu` optionlist variant) | all but the objects |
+| B4 | `tutorial-debug` (`--debug`) | all but the objects |
+| B5 | `tutorial-pinned` (`--universe pinned`) | all but the objects |
 
 Every bake also keeps the `NAME-utils` programs under `exe/NAME/`, since the
-replayed output says they were built, and records the output of a
-`NAME-clean` run on a throwaway copy of its tree, which is what a replayed
-`--clean` step prints.
+replayed output says they were built, and records, after harvesting the
+tree, what a real `NAME-clean` of it prints (which is what a replayed
+`--clean` step prints) and what make prints when interrupted in each step.
+
+Only B1 exists so far; B2 to B5 are baked by the stages that write their
+notebooks (3, 4b and 5), with `bake/bake.py`'s table of bakes growing to
+match.
 
 Notebook 4a installs `carpetx.th` (the CarpetX-only thornlist the mirrors
 include) and `master` but does not build them. Notebook 3 already installed
@@ -646,8 +725,8 @@ compiled against other headers in a tree whose later incremental builds link
 them with new ones.
 
 Every bake keeps `scratch/external` because executables link shared libraries
-built there. `build.sh` checks with `ldd` that every baked executable resolves
-every library, and only inside the image or its own kept tree. `ldd` does not
+built there. `bake/bake.py` checks with `ldd` that every baked executable
+resolves every library, and only inside the image or its own kept tree. `ldd` does not
 see what is loaded with `dlopen` (OpenMPI's components, HDF5 and ADIOS2
 plugins, `libcuda`), but all of that comes from Debian packages or the GPU
 driver, never from a bake.
@@ -656,8 +735,8 @@ The toolchain is trixie's: gcc 14 and OpenMPI 5.0. The optionlist uses
 Debian's packaged libraries wherever they exist (OpenMPI, HDF5 1.14 with
 OpenMPI, FFTW, GSL, hwloc, yaml-cpp, zlib, ADIOS2 2.10, Silo, BLAS/LAPACK), so
 `scratch/external` holds only what Debian lacks. For `tutorial.th` that is
-AMReX alone (the optionlist would also build openPMD-api and NSIMD, for
-thornlists that use them). That keeps the trees, the image and the
+AMReX and NSIMD (the optionlist would also build openPMD-api, for
+thornlists that use it). That keeps the trees, the image and the
 per-attendee disk small; see sizing below.
 
 B3 needs CUDA, which exists only in the bake container used for it: CUDA
@@ -757,12 +836,17 @@ removes the stamp).
 
 ## Sizing
 
-Measured numbers go here as the bake stages land (per-config tree sizes, image
-size, restore time). Until then, the estimates the design is checked against,
-from the development machine: a full-ET config tree is 6–9 GB with
-ExternalLibraries built from source, and an install's sources are about
-1.8 GB (83 repositories). The subset thornlist and Debian's libraries are
-expected to cut a config tree several-fold.
+Measured on the development machine (a container limited to 4 CPUs):
+
+| What | Size | Time |
+|---|---|---|
+| B1, the `tutorial` config from `tutorial.th` | tree 1.5 GB (`build/` 570 MB, `lib/` 550 MB, `scratch/` 340 MB, of which AMReX and NSIMD), executable 340 MB | a real build: about 10 minutes |
+| B1 replayed (restore and replay) | | 46 s, longest pause 1.4 s |
+| a real incremental build on the restored tree (one Cottonmouth file) | | 13 s |
+| the image | 11.7 GB on disk (the lab image without the bakes: 9.4 GB) | |
+
+A full-ET config tree, for comparison, is 6–9 GB with ExternalLibraries built
+from source, and an install's sources are about 1.8 GB (83 repositories).
 
 Per attendee, after every notebook: up to four installs' sources (stock,
 `et-mp`, the `carpetx.th` install, `master`; about 1.8 GB each for the full release
@@ -771,9 +855,11 @@ tree, B2–B5's partial trees and simulation output. Until the bakes are
 measured, budget about 12 GB of disk per attendee, next to the 4 vCPU / 8 GB
 of memory.
 
-Acceptance targets, checked in the bake stage and again on the deployment VM:
+Acceptance targets (`tests/platform/replay.sh` checks the first for one
+replay, and the incremental builds; the concurrent ones are checked on the
+deployment VM):
 
-- a replayed build takes 25–40 s, and its output never pauses for more than
+- a replayed build takes 40–55 s, and its output never pauses for more than
   2 s, with as many restores running at once as the VM is sized for
   attendees (about 30), on the VM's disk class. If plain copies can't meet
   that, the bakes move to a reflink-capable filesystem (XFS with
@@ -793,9 +879,15 @@ Acceptance targets, checked in the bake stage and again on the deployment VM:
 ## Building
 
 ```sh
-tutorial/image/build.sh                  # the image, tagged cactup-tutorial:lab
+tutorial/image/build.sh                  # the image, tagged cactup-tutorial:tutorial
+tutorial/image/build.sh --target lab     # without the bakes, tagged cactup-tutorial:lab
 tutorial/image/build.sh --update-mirrors # the same, moving the mirrors to upstream's tips
 ```
+
+The whole image is built in three steps: the lab image (everything but the
+bakes), the bakes, in a bake container started from it (see Bakes; the first
+time, or after a toolchain change, this compiles every bake, about ten
+minutes each on four cores), and the lab image plus the bakes.
 
 The git mirrors live outside Docker, in `$CACTUP_TUTORIAL_MIRRORS` (default
 `~/.cache/cactup-tutorial/mirrors`; about 3 GB, a quarter of an hour to fetch
@@ -819,16 +911,17 @@ such commits.
 Checks:
 
 ```sh
-PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, session, mirrors
+PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, session, mirrors, make shim
 tutorial/tests/browser/run.sh cactup-tutorial:lab             # the frontend, in headless Chromium
 tutorial/tests/platform/smoke.sh cactup-tutorial:lab          # install, update, SLURM, a simulation
+tutorial/tests/platform/replay.sh cactup-tutorial:tutorial    # a replayed build, its executable, real rebuilds
 ```
 
 To try the image locally as one attendee:
 
 ```sh
 docker run --rm -p 8888:8888 --hostname cactup-tutorial \
-    --cpuset-cpus 0-3 --memory 8g --shm-size 1g cactup-tutorial:lab
+    --cpuset-cpus 0-3 --memory 8g --shm-size 1g cactup-tutorial:tutorial
 ```
 
 (Rootless Docker ignores `--cpuset-cpus` unless the cpuset cgroup controller

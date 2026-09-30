@@ -27,7 +27,7 @@ release and `master` lists.
   `tutorial.th` must be one the release itself enables. This is why the
   evolution is Cottonmouth's and not `SpacetimeX/Z4c`: the release checks
   out only `SpacetimeX/NewRadX`, so a stock install has no
-  `arrangements/SpacetimeX/Z4c`. Checked by script: all 36 thorns are
+  `arrangements/SpacetimeX/Z4c`. Checked by script: all 37 thorns are
   enabled in the release list.
 - **Repository names match the forks.** cactup names a repository's
   directory after `!NAME`, or else after the URL's basename. `tutorial.th`
@@ -46,7 +46,7 @@ FUNCTION`, `param.ccl` `SHARES`, `configuration.ccl` `REQUIRES`
 flesh's `BuildHeaders.pl` writes a used header even when no thorn provides
 it (CarpetX's only such include, `silo.hxx`, is guarded by
 `HAVE_CAPABILITY_Silo`). `OPTIONAL` capabilities are left out, to keep the
-object tree small.
+object tree small, with one exception found by building: NSIMD.
 
 | Thorn(s) | Why |
 |---|---|
@@ -57,19 +57,22 @@ object tree small.
 | `CactusBase/IOUtil` | CarpetX `SHARES: IO`, `REQUIRES IOUtil` |
 | `ExternalLibraries/AMReX` | CarpetX, Loop, Cottonmouth REQUIRE it; it REQUIRES MPI |
 | `ExternalLibraries/MPI`, `yaml_cpp`, `zlib` | CarpetX REQUIRES them |
+| `ExternalLibraries/NSIMD` | Arith's `OPTIONAL NSIMD` is not optional: `simd.hxx` includes `nsimd/nsimd-all.hpp` unless `SIMD_DISABLE` (or `SIMD_CPU`) is defined, and its own comment says a capability check there can't work. Without NSIMD, Arith's first object fails to compile |
 
 CarpetX implements `Driver`; CarpetX itself also REQUIRES Arith,
 CarpetXRegrid and Loop. Left out as OPTIONAL: ADIOS2, openPMD_api and Silo
-(CarpetX output formats beyond its own TSV and AMReX plotfiles), NSIMD
-(Arith), CMake (AMReX, yaml_cpp), hwloc (MPI), CUDA (CarpetX; a flesh and
+(CarpetX output formats beyond its own TSV and AMReX plotfiles), CMake
+(AMReX, yaml_cpp), hwloc (MPI), CUDA (CarpetX; a flesh and
 optionlist capability, no thorn), and the release's checkout-only CarpetX
 thorns Algo, PDESolvers and PoissonX.
 
 **Built from source:** with `mdb/cactup-tutorial/optionlists/default.toml`,
-MPI, yaml-cpp and zlib come from Debian, so AMReX is the only library
-ExternalLibraries builds into `scratch/external`. That optionlist's
-`OPENPMD_DIR`/`NSIMD_DIR = "BUILD"` are unused with this list (neither thorn
-is in it), as the optionlist's header and the README say.
+MPI, yaml-cpp and zlib come from Debian, so AMReX and NSIMD (which Debian
+doesn't package) are the libraries ExternalLibraries builds into
+`scratch/external`. That optionlist's `OPENPMD_DIR = "BUILD"` is unused with
+this list (the thorn is not in it). Defining `SIMD_DISABLE` in the machine's
+optionlist would have saved building NSIMD, but for every thornlist built on
+the machine, which a real site wouldn't do.
 
 ## A short linear-wave run (for notebook 2's parameter file)
 

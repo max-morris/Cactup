@@ -195,3 +195,10 @@ RUN install -o cactus -g cactus -m 0644 /dev/null /home/cactus/.cactup-tutorial-
 
 EXPOSE 8888
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/sbin/cactup-tutorial-entrypoint"]
+
+# -- tutorial -------------------------------------------------------------------
+# The lab image plus the precomputed builds the make shim restores (see
+# "Bakes" in the README). build.sh bakes them in a container started from the
+# lab image and passes the ones this image needs as the `bakes` context.
+FROM lab AS tutorial
+COPY --from=bakes / /opt/cactup-bakes/

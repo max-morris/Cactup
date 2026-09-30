@@ -11,7 +11,7 @@
 !cactup-init.sh
 !tutorial/
 tutorial/**/node_modules/
-tutorial/**/lib/
+tutorial/jupyter/labext/lib/
 tutorial/**/build-test/
 tutorial/**/labextension/
 tutorial/**/__pycache__/

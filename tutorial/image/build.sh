@@ -4,6 +4,15 @@
 # Usage: tutorial/image/build.sh [--target STAGE] [--tag TAG] [--update-mirrors]
 #                                [docker build args...]
 #
+# By default it builds the whole image, cactup-tutorial:tutorial: first the lab
+# image (cactup-tutorial:lab), then the bakes, in a bake container started from
+# it, then the lab image plus the bakes. --target lab (or an earlier stage)
+# stops before the bakes.
+#
+# The bakes are cached outside Docker, in $CACTUP_TUTORIAL_BAKES (default
+# ~/.cache/cactup-tutorial/bakes), per toolchain and fingerprint: a rebuild
+# only rebakes what changed (see "Bakes" in tutorial/README.md).
+#
 # The git mirrors the image serves installs from are kept outside Docker, in
 # $CACTUP_TUTORIAL_MIRRORS (default ~/.cache/cactup-tutorial/mirrors). Each
 # build first brings them to the committed lock, tutorial/mirrors/mirrors.lock,
@@ -22,7 +31,7 @@ set -eu
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$here/../.." && pwd)
 
-target=lab
+target=tutorial
 tag=cactup-tutorial
 update=no
 while [ $# -gt 0 ]; do
@@ -53,15 +62,51 @@ previous_date=$(printf '%s\n' "$stamps" | sed -n 2p | cut -d' ' -f2)
 [ -n "$previous_id" ] || { echo "build.sh: need two commits touching the cactup sources" >&2; exit 1; }
 
 echo "build.sh: cactup previous $previous_id ($previous_date), current $current_id ($current_date)"
-exec docker build \
-    -f "$here/Dockerfile" \
-    --target "$target" \
-    -t "$tag:$target" \
-    --build-arg CACTUP_PREVIOUS_ID="$previous_id" \
-    --build-arg CACTUP_PREVIOUS_DATE="$previous_date" \
-    --build-arg CACTUP_CURRENT_ID="$current_id" \
-    --build-arg CACTUP_CURRENT_DATE="$current_date" \
-    ${DEBIAN_SNAPSHOT:+--build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT"} \
-    --build-context mirrors="$mirrors" \
-    "$@" \
-    "$repo"
+
+bakes=${CACTUP_TUTORIAL_BAKES:-${XDG_CACHE_HOME:-$HOME/.cache}/cactup-tutorial/bakes}
+mkdir -p "$bakes"
+context=$bakes/.context
+
+build() {
+    stage=$1
+    shift
+    docker build \
+        -f "$here/Dockerfile" \
+        --target "$stage" \
+        -t "$tag:$stage" \
+        --build-arg CACTUP_PREVIOUS_ID="$previous_id" \
+        --build-arg CACTUP_PREVIOUS_DATE="$previous_date" \
+        --build-arg CACTUP_CURRENT_ID="$current_id" \
+        --build-arg CACTUP_CURRENT_DATE="$current_date" \
+        ${DEBIAN_SNAPSHOT:+--build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT"} \
+        --build-context mirrors="$mirrors" \
+        --build-context bakes="$context" \
+        "$@"
+}
+
+# (Every build names the bakes context; only the last stage reads it.)
+mkdir -p "$context"
+if [ "$target" != tutorial ]; then
+    build "$target" "$@" "$repo"
+    exit
+fi
+
+build lab "$@" "$repo"
+
+# The bakes: real installs and builds in a container identical to an
+# attendee's (hostname, user, paths, mirrors), with an empty home of its own.
+# Only what the bakes need; no network (installs come from the mirrors).
+echo "build.sh: baking"
+docker run --rm --hostname cactup-tutorial --network none \
+    --mount type=volume,dst=/home/cactus,volume-nocopy \
+    -v "$here/../bake:/bake:ro" -v "$bakes:/bakes" \
+    --entrypoint python3 "$tag:lab" /bake/bake.py B1
+
+toolchain=$(cat "$bakes/last-toolchain")
+rm -rf "$context"
+mkdir -p "$context"
+while read -r fp; do
+    cp -al "$bakes/$toolchain/$fp" "$context/$fp"
+done < "$bakes/$toolchain/wanted"
+
+build tutorial "$@" "$repo"
