@@ -52,8 +52,20 @@ pub fn fileserver_now(dir: &Path) -> Res<SystemTime> {
         .prefix(".cactup-clock.")
         .tempfile_in(dir)
         .with_context(|| format!("Failed to create clock probe file in {}", dir.display()))?;
-    file_mtime(probe.as_file())
-        .with_context(|| format!("Failed to read the mtime of {}", probe.path().display()))
+    let mtime = file_mtime(probe.as_file())
+        .with_context(|| format!("Failed to read the mtime of {}", probe.path().display()));
+    discard(probe);
+    mtime
+}
+
+/// Remove a temp file by closing it first and unlinking it second.
+/// `NamedTempFile`'s own drop (and its `close()`) unlinks while the file is
+/// still open, and an NFS client turns the unlink of an open file into a
+/// rename to a hidden `.nfsXXXX` name plus a second REMOVE once it is closed
+/// — two extra synchronous round trips for every lock attempt and clock
+/// probe.
+pub fn discard(temp: tempfile::NamedTempFile) {
+    drop(temp.into_temp_path());
 }
 
 /// How long ago `path` was last modified, in the fileserver's clock domain
@@ -228,12 +240,17 @@ impl LinkLock {
 
             let link_result = fs::hard_link(temp.path(), path);
 
-            // NFS can lose the *reply* to a successful LINK and report an
-            // error for a link that in fact happened; the temp file's link
-            // count is the ground truth.
+            // One fstat answers both questions below. NFS can lose the
+            // *reply* to a successful LINK and report an error for a link
+            // that in fact happened; the temp file's link count is the ground
+            // truth. And the temp file was just written, so its mtime is the
+            // fileserver's "now" — the same clock that stamped an existing
+            // lock's mtime.
+            let meta = temp.as_file().metadata();
+            discard(temp);
             let nlink = {
                 use std::os::unix::fs::MetadataExt;
-                temp.as_file().metadata().map(|m| m.nlink()).unwrap_or(1)
+                meta.as_ref().map(|m| m.nlink()).unwrap_or(1)
             };
 
             if link_result.is_ok() || nlink == 2 {
@@ -242,10 +259,8 @@ impl LinkLock {
 
             match link_result {
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    // The temp file was just written, so its mtime is the
-                    // fileserver's "now" — the same clock that stamped the
-                    // existing lock's mtime.
-                    let fs_now = file_mtime(temp.as_file())
+                    let fs_now = meta
+                        .and_then(|m| m.modified())
                         .with_context(|| "Failed to read lock temp file mtime")?;
                     match assess_holder(path, fs_now)? {
                         Holder::Vanished => continue, // released under us; retry
@@ -453,6 +468,7 @@ fn break_stale(path: &Path, fs_now: SystemTime) -> Res<()> {
         use std::os::unix::fs::MetadataExt;
         temp.as_file().metadata().map(|m| m.nlink()).unwrap_or(1)
     };
+    discard(temp);
     if !(link_result.is_ok() || nlink == 2) {
         return match link_result {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -530,6 +546,32 @@ mod tests {
 
         let _lock = LinkLock::acquire(&path).unwrap();
         assert!(path.exists());
+    }
+
+    /// Lock attempts, contended attempts and clock probes all clean up their
+    /// temp files. (Only cleanup: the close-before-unlink order `discard`
+    /// exists for is visible on NFS alone.)
+    #[test]
+    fn no_temp_files_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+        let names = || -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        fileserver_now(dir.path()).unwrap();
+        assert!(names().is_empty(), "{:?}", names());
+
+        let lock = LinkLock::acquire(&path).unwrap();
+        assert!(LinkLock::try_acquire(&path).unwrap().is_none());
+        assert_eq!(names(), ["test.lock"]);
+        drop(lock);
+        assert!(names().is_empty(), "{:?}", names());
     }
 
     #[test]

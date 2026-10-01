@@ -243,7 +243,11 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
 
         if snapshot.knob("user").is_none() && let Some(user) = snapshot.knob_or_default("user") {
             ctx.db.update(|db| {
-                db.set_knob("user", user);
+                // Re-checked under the lock: a derived default must never
+                // overwrite a value set since the snapshot was taken.
+                if db.knob("user").is_none() {
+                    db.set_knob("user", user);
+                }
                 Ok(())
             })?;
         }

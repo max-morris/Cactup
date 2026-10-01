@@ -7,8 +7,9 @@
 //! Locking follows §2.3 (D11): every mutation is a self-contained
 //! lock → re-read → mutate → persist → unlock via [`Db::update`], so the lock
 //! is never held across long-running work and a long command can never
-//! clobber an unrelated change made while it worked. Reads take a snapshot
-//! under the lock and release immediately. There is no whole-lifetime lock,
+//! clobber an unrelated change made while it worked. Reads take no lock:
+//! [`Db::read`] opens the file directly, since `update` only ever renames a
+//! complete file into place (§2.3). There is no whole-lifetime lock,
 //! and consequently no Drop/signal persistence: in-memory state never
 //! outlives the lock, so there is nothing to flush at exit.
 
@@ -19,6 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
+use std::time::Duration;
 
 use crate::lock::LinkLock;
 use crate::Res;
@@ -379,17 +381,22 @@ impl Database {
             .with_context(|| format!("Failed to read database from {}", path.display()))?;
         let db: Database = serde_json::from_str(&contents)
             .with_context(|| format!("Failed to parse database at {}", path.display()))?;
+        db.check_schema(path)?;
+        Ok(db)
+    }
 
-        if db.schema > SCHEMA {
+    /// The §2.1 schema guard: refuse a database written by a newer cactup.
+    fn check_schema(&self, path: &Path) -> Res<()> {
+        if self.schema > SCHEMA {
             bail!(
                 "{} has schema {} but this cactup ({}) understands at most schema {SCHEMA}. \
                  It was written by a newer cactup; please upgrade.",
                 path.display(),
-                db.schema,
+                self.schema,
                 crate::VERSION
             );
         }
-        Ok(db)
+        Ok(())
     }
 
     /// Write to `path` as pretty JSON, atomically (temp file + rename), so a
@@ -408,6 +415,10 @@ impl Database {
         Ok(())
     }
 }
+
+/// Lock-free reads of the database retry this many times on a stale NFS
+/// file handle (the file was renamed over mid-read) or an unparsable file before falling back to the locked read.
+const UNLOCKED_READ_ATTEMPTS: u32 = 3;
 
 /// Handle to the on-disk global DB. Cheap to construct; owns no lock. All
 /// access goes through [`Db::read`] / [`Db::update`].
@@ -430,18 +441,57 @@ impl Db {
         }
     }
 
-    /// Take a consistent snapshot: lock, read, release. A snapshot is for
-    /// reading only — never persist one (that would be the stale-clobber §2.3
-    /// forbids); mutate through [`Db::update`] instead.
+    /// Take a snapshot. A snapshot is for reading only — never persist one
+    /// (that would be the stale-clobber §2.3 forbids); mutate through
+    /// [`Db::update`] instead.
+    ///
+    /// Reads take no lock (§2.3): the only writer is [`Db::update`], which
+    /// renames a complete, fsynced file into place, so the path always names
+    /// one whole version and a read sees it or its successor, never a mix.
+    /// Locking here only cost every command several synchronous round trips
+    /// on NFS (and made a read racing an update fail outright). Anything odd
+    /// falls back to the locked read, so the worst case is the old behavior.
     pub fn read(&self) -> Res<Database> {
         let _span = crate::timing::span("Db::read");
-        self.ensure_dir()?;
-        let _lock = LinkLock::acquire(&self.lock_path)?;
-        let mut db = Database::read_from(&self.path)?;
+        let mut db = match self.read_unlocked() {
+            Some(db) => db?,
+            None => self.read_locked()?,
+        };
         // The `-K` overlay (§5.1) lives on snapshots only: `update` below
         // re-reads the disk state, so an override can never be persisted.
         db.apply_knob_overrides();
         Ok(db)
+    }
+
+    /// The lock-free read: `None` means "use the locked read instead". A
+    /// missing file goes there at once (no write has happened yet — or this
+    /// host still caches a negative lookup from before another host's first
+    /// write, which the lock's directory updates normally revalidate). A stale NFS file
+    /// handle (the file was renamed over while we read it) or a file that does
+    /// not parse is retried briefly first. The schema guard's verdict is final.
+    fn read_unlocked(&self) -> Option<Res<Database>> {
+        for attempt in 1..=UNLOCKED_READ_ATTEMPTS {
+            match fs::read_to_string(&self.path) {
+                Ok(contents) => {
+                    if let Ok(db) = serde_json::from_str::<Database>(&contents) {
+                        return Some(db.check_schema(&self.path).map(|()| db));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::StaleNetworkFileHandle => {}
+                Err(_) => return None,
+            }
+            if attempt < UNLOCKED_READ_ATTEMPTS {
+                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt)));
+            }
+        }
+        None
+    }
+
+    /// The locked read: lock, read, release.
+    fn read_locked(&self) -> Res<Database> {
+        self.ensure_dir()?;
+        let _lock = LinkLock::acquire(&self.lock_path)?;
+        Database::read_from(&self.path)
     }
 
     /// The §2.3 field-scoped read-modify-write: acquire the lock, re-read the
@@ -570,6 +620,72 @@ mod tests {
         // A custom installation registered before cactup recorded the thornlist
         // it came from still reads; `show`/`list` just cannot name the source.
         assert_eq!(snapshot.installations["et"].thornlist, None);
+    }
+
+    /// Reads take no lock: a read succeeds while another process holds the
+    /// database lock (it used to fail with "locked by …"), and leaves no
+    /// lock or temp files behind.
+    #[test]
+    fn read_needs_no_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        db.update(|d| {
+            d.set_knob("queue", "local".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let held = LinkLock::acquire(&dir.path().join("database.lock")).unwrap();
+        assert_eq!(db.read().unwrap().knob("queue"), Some("local"));
+        drop(held);
+        let names: Vec<_> =
+            fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["database.json"]);
+    }
+
+    /// No database yet: the read falls back to the locked path and returns a
+    /// fresh one, as before.
+    #[test]
+    fn read_of_a_missing_database_is_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(&dir.path().join("not-yet"));
+        let snapshot = db.read().unwrap();
+        assert!(snapshot.installations.is_empty() && snapshot.knobs.is_empty());
+        // The locked read ran: it creates the directory, and releases its lock.
+        assert!(dir.path().join("not-yet").is_dir());
+        assert!(!dir.path().join("not-yet/database.lock").exists());
+    }
+
+    /// A file that never parses is retried, then reported by the locked read
+    /// exactly as before.
+    #[test]
+    fn unparsable_database_still_reports_the_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("database.json"), "{ not json").unwrap();
+        let err = format!("{:#}", Db::in_dir(dir.path()).read().unwrap_err());
+        assert!(err.contains("Failed to parse database"), "{err}");
+    }
+
+    /// Reads racing a stream of updates always see one whole version.
+    #[test]
+    fn reads_racing_updates_never_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::in_dir(dir.path());
+        db.update(|_| Ok(())).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for i in 0..200 {
+                    db.update(|d| {
+                        d.set_knob("queue", format!("q{i}"));
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+            });
+            for _ in 0..500 {
+                db.read().unwrap();
+            }
+        });
+        assert_eq!(db.read().unwrap().knob("queue"), Some("q199"));
     }
 
     /// A custom installation's thornlist provenance survives a write/read
