@@ -251,6 +251,13 @@ impl BuildAttempt {
         self.dir.join("heartbeat")
     }
 
+    /// The build cache's files for this attempt (`crate::objcache`): its
+    /// frozen settings, the makefile fragment that wraps the compilers, and
+    /// the log of wrapped compiles. Absent when the cache is off.
+    pub fn cc_dir(&self) -> PathBuf {
+        self.dir.join("cc")
+    }
+
     /// Every attempt id present as a `%04d` directory under `.cactup-builds`,
     /// ascending. One `read_dir`, junk entries (non-`%04d`, non-directories)
     /// ignored — mirrors `sim::restart::list_ids`.

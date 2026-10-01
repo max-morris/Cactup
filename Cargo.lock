@@ -21,6 +21,7 @@ dependencies = [
  "ratatui",
  "regex",
  "reqwest",
+ "rustix",
  "serde",
  "serde_derive",
  "serde_json",

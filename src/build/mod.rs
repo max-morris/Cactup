@@ -1765,6 +1765,9 @@ pub fn prepare(
         .map(|db| db.knob("allocation").unwrap_or("").to_owned())
         .unwrap_or_default();
     vars.set("ALLOCATION", allocation);
+    // The build cache's knobs are maintenance knobs, so they are in no
+    // snapshot: resolved here, and frozen into the attempt below (D11).
+    let cache_settings = db.as_ref().map(crate::objcache::Settings::from_db).unwrap_or_default();
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
     // optionlist, make command and a build submit script — frozen into
     // `build.toml` with the vars, so `execute` never opens the DB (§5, D11).
@@ -1880,6 +1883,22 @@ pub fn prepare(
     // written at all for a virtual-executable build: that's a plain file
     // copy, not a script (see `BuildMeta::virtual_executable`'s doc comment).
     if let Some(make) = &make {
+        // The build cache (`crate::objcache`), when it is on: its settings
+        // frozen next to the script, and two steps of the script changed.
+        // `None` leaves the script exactly what it is without the cache.
+        let cache = crate::objcache::stage(
+            &attempt.cc_dir(),
+            &cache_settings,
+            &crate::objcache::StageInputs {
+                cactup: &crate::freeze::frozen_cactup(),
+                cactus_root: &cactus_root,
+                config_dir: &config_dir,
+                machine: &machine.name,
+                universe: attempt.meta.config_meta.universe.as_deref(),
+                build_env: &build_env,
+            },
+        )?;
+
         let mut steps: Vec<String> = Vec::new();
         if matches!(decision, RebuildDecision::Full(_)) && is_configured(&cactus_root, name) {
             steps.push(format!("{make} {name}-realclean"));
@@ -1889,10 +1908,18 @@ pub fn prepare(
             sh_quote(&attempt.optionlist_path()),
             sh_quote(&attempt.thornlist_path()),
         ));
+        // After the configure step, which writes the compiler settings the
+        // probe reads, and before anything compiles.
+        if let Some(cache) = &cache {
+            steps.push(cache.probe_step(make));
+        }
         if opts.clean {
             steps.push(format!("{make} {name}-clean"));
         }
-        steps.push(format!("{make} {name}"));
+        steps.push(match &cache {
+            Some(cache) => cache.build_step(make, name),
+            None => format!("{make} {name}"),
+        });
         steps.push(format!("{make} {name}-utils"));
 
         // `.cactup-builds/` is safe from `make <config>-realclean`: the flesh

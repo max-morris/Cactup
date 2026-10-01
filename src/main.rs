@@ -9,6 +9,7 @@ mod installation;
 mod lock;
 mod manifest;
 mod mdb;
+mod objcache;
 mod par;
 mod progress;
 mod scheduler;
@@ -71,6 +72,12 @@ fn compute_node_path(command: &Commands) -> bool {
 }
 
 fn main() -> Res<()> {
+    // Before anything else: as the build cache's compiler wrapper (or its
+    // probe) this process is not a cactup command at all. It runs once per
+    // compile with `make` waiting on it, and must stay clear of everything
+    // below — the interrupt handler, the DB, the update check.
+    objcache::wrapper::run_if_invoked();
+
     // First, while the process is still single-threaded: it removes an
     // environment variable.
     update::take_updated_marker();

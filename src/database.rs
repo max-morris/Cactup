@@ -86,6 +86,8 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("autoupdate", crate::update::validate_autoupdate),
     KnobSpec::maintenance("update-url", crate::update::validate_update_url),
     KnobSpec::maintenance("mdb-url", crate::update::validate_mdb_url),
+    KnobSpec::maintenance("build-cache", crate::objcache::validate_mode),
+    KnobSpec::maintenance("build-cache-dir", crate::objcache::validate_dir),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
@@ -324,6 +326,8 @@ impl Database {
             "autoupdate" => Some(crate::update::AutoUpdate::Auto.name().to_owned()),
             "update-url" => Some(crate::update::DEFAULT_UPDATE_URL.to_owned()),
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
+            "build-cache" => Some(crate::objcache::Mode::Off.name().to_owned()),
+            "build-cache-dir" => Some(crate::objcache::default_dir().display().to_string()),
             _ => None,
         }
     }
