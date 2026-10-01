@@ -218,10 +218,10 @@ go to the extra preprocessor runs only); one call in `execute` after make.
 
 ## Cache-side planned changes
 
-- 2026-10-01: M0a has passed its review gate (commit `300fd0b` on
-  `feature/build-cache`). M0b (keys, richer event log, `cactup cache
-  report` comparing two builds) is in review; then M0c (measurements).
-  Nothing is served until the measurements are reviewed.
+- 2026-10-01: M0a (`300fd0b`) and M0b (`045eb76`) have passed their review
+  gates on `feature/build-cache`. M0c (measurements) is running: it builds
+  in `~/cacti/build-cache` and in one more installation, alias
+  `build-cache-b`. Nothing is served until Max has seen the measurements.
 
 ## Cache-side landed changes
 
@@ -233,6 +233,12 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   HDF5's build or its installed `h5cc`); and the first configuration again
   on the flesh at `build-speedup` `996c71f` (357 objects, identical).
   Spec: §18 of `design/cactup-simfactory-design-new.md` on that branch.
+- 2026-10-01, on `feature/build-cache`: M0b. A recording build keys every
+  C and C++ compile it can (see A6, A10, C3) and `cactup cache report`
+  compares two builds. Same three configurations: objects still
+  byte-identical to a plain build; two configurations of one thornlist
+  share every key; a configuration with three thorns added shares 55%
+  (the generated headers of A10 (a) are why it is not more).
 
 ## Speed-side planned changes
 
@@ -293,3 +299,5 @@ every milestone.
   A6 is a current dependency (and says what `-MD` in the compile recipe
   would do); A10 added (generated headers must be deterministic and free of
   absolute paths; where absolute paths are tolerated); C3 and C4 updated.
+- 2026-10-01  cache side  M0b passed its review gate at `045eb76`; landed
+  and planned sections updated. No change to A or C since the last entry.

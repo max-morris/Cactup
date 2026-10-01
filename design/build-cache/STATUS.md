@@ -43,8 +43,8 @@ the last milestone, for when that host is not at hand.
 | Milestone | Scope | State |
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
-| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 4) |
-| M0c | Measurements in `~/cacti/build-cache`, written results | not started |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
+| M0c | Measurements in `~/cacti/build-cache`, written results | in progress |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
@@ -243,6 +243,8 @@ compiler but GCC, any machine but `plato`.
   round 3.
 - 2026-10-01: M0b review round 3: A signed off, B blocked on one finding
   (a Clang configuration file chosen by target). Fixed; sent to round 4.
+- 2026-10-01: M0b review round 4: both reviewers SIGN-OFF on `045eb76`.
+  M0b has passed its gate. M0c (measurements) started.
 
 ## Review verdicts
 
@@ -530,6 +532,32 @@ the configuration-file test skips where a copy of the Clang driver cannot
 run. (A, B) Both raised the cost of rejecting every GCC with a specs file
 on a Spack-based cluster: see below.
 
+### M0b, round 4 (on `045eb76`): SIGN-OFF by both
+
+Both re-ran their earlier experiments (every hole found in rounds 1 to 3
+still closed), confirmed that `-v` leaves the preprocessor's output
+unchanged (four drivers, up to eight flag sets each), that a configuration
+or specs file appearing during an attempt is caught by the next compile,
+that 2.7 MB of preprocessor warnings do not stall the wrapper, that the
+tests pass on glibc and musl with three makes, and that the real builds'
+objects are byte for byte those of a plain build. Neither found a new pair
+of compiles with one key and two objects.
+
+Non-blocking points left open, to take up at the start of the next code
+milestone (none can make a key wrong; each costs hits or robustness):
+
+- (both) A GCC that prints its messages in another language never says
+  "Using built-in specs." in those words, so every compile is declined,
+  with a reason that does not mention the locale. Run the preprocessor
+  with English messages if that can be done without changing how it reads
+  the source, or say so in the reason and the user docs.
+- (both) For Clang, silence on stderr reads as "no configuration file";
+  for GCC it does not. Require a line Clang always prints under `-v`
+  (`InstalledDir:`), so that a lost answer declines for both.
+- (both) A GCC with any `specs` file on disk is not cached (next
+  paragraph). Settle before measuring on a cluster with a Spack-built GCC.
+- (B) The per-attempt memo of file digests (see round 2).
+
 Known cost of the round 2 fixes, to measure in M0c: a GCC with a `specs`
 file on disk is not cached at all. Spack-built GCCs have one (Spack writes
 the library search path for `libgcc` into it), and many cluster compilers
@@ -576,7 +604,7 @@ M0b, and both want the M0c numbers first.
 
 ## Next step
 
-Take M0b through its review gate. Then M0c: a release build of cactup; a
+M0c: a release build of cactup; a
 second installation (`cactup install`, alias `build-cache-b`, same release)
 for cross-installation numbers; the full Einstein Toolkit thornlist; line
 directives on and off; edit-and-revert of a thorn; a fresh login session;
