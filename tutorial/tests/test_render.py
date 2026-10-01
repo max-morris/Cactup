@@ -27,11 +27,15 @@ def test_scrollback_keeps_lines_that_scroll_off():
     assert text[0] == "line 0" and text[-1] == "line 99" and len(text) == 100
 
 
-def test_scrollback_is_bounded():
+def test_scrollback_is_bounded_and_keeps_the_start_and_the_end():
+    from cactup_tutorial.render import HEAD_LINES
+
     lines = b"".join(b"%d\r\n" % i for i in range(MAX_LINES + 100))
     text = render(lines, rows=10).text().split("\n")
-    assert text[0].endswith("earlier lines not shown")
+    assert text[0] == "0" and text[HEAD_LINES - 1] == str(HEAD_LINES - 1)
+    assert text[HEAD_LINES].endswith("more lines not shown ...")
     assert text[-1] == str(MAX_LINES + 99)
+    assert len(text) <= MAX_LINES + 10 + 1
 
 
 def test_colors_use_jupyterlab_ansi_classes():
@@ -100,3 +104,13 @@ def test_long_output_goes_in_a_box_short_output_does_not():
     long_.feed(b"".join(b"%d\r\n" % i for i in range(BOX_LINES + 5)))
     assert "cactup-box" not in short.html()
     assert 'class="jp-RenderedText cactup-box"' in long_.html()
+
+
+def test_the_gap_sits_after_the_head_in_html_too():
+    from cactup_tutorial.render import HEAD_LINES
+
+    lines = b"".join(b"line%d\r\n" % i for i in range(MAX_LINES + 100))
+    html = render(lines, rows=10).html()
+    head_end = html.index(f"line{HEAD_LINES - 1}\n")
+    gap = html.index("more lines not shown")
+    assert head_end < gap < html.index(f"line{HEAD_LINES + 100}\n")

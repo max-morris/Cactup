@@ -52,7 +52,7 @@ STAGING = ".make-staging"
 TRASH = ".make-trash-"
 # Bumped whenever the harvest's layout changes: a cached bake of another
 # format is baked again.
-FORMAT = 7
+FORMAT = 8
 STEPS = ("config", "clean", "build", "utils")
 # A replay's longest silence, in seconds, and the fraction of the replay
 # the build step's output must still have to go when the copy has to catch up.

@@ -32,6 +32,9 @@ SAVED = HOME / "tutorial-saved"
 NOTEBOOKS = {
     "1": {"cactup": False},
     "2": {"cactup": True, "install": True},
+    # Notebook 3 compares its own installation with the stock one, but
+    # makes et-mp the active one itself (and may be run again after that).
+    "3": {"cactup": True, "install": True, "use": False},
 }
 
 
@@ -161,13 +164,13 @@ def ensure_cactup() -> None:
 # -- the install ----------------------------------------------------------------
 
 
-def ensure_install() -> None:
+def ensure_install(use: bool = True) -> None:
     listing = cactup("list").stdout
     if not re.search(rf"^- {RELEASE}\b", listing, re.M):
         say(f"installing {RELEASE} from the mirrors (notebook 1 does this; under a minute)")
         cactup("install", RELEASE, "--silent")
         listing = cactup("list").stdout
-    if not re.search(rf"^- {RELEASE}\b.*\(active\)", listing, re.M):
+    if use and not re.search(rf"^- {RELEASE}\b.*\(active\)", listing, re.M):
         cactup("use", RELEASE)
         say(f"made {RELEASE} the active installation")
     link = HOME / "Cactus"
@@ -198,7 +201,7 @@ def main(argv: list[str]) -> int:
     ensure_cactup()
     machine()
     if needs.get("install"):
-        ensure_install()
+        ensure_install(use=needs.get("use", True))
     return 0
 
 

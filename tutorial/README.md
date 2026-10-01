@@ -117,9 +117,9 @@ Constraints the notebooks must respect (each found by reading the code):
   origin differs from the thornlist ("remote URL changed") unless forced, so
   after the dry run the cell passes `--overwrite` for the flesh and CarpetX
   repositories, and the output shows cactup's "origin re-pointed" block.
-  B2a and B2b are baked exactly this way. (Pending bake B2b: stock NewRadX
-  may not compile against the fork's CarpetX, in which case SpacetimeX joins
-  them; see `thornlists/NOTES.md`.)
+  B2a and B2b are baked exactly this way (`bake/forks.py` makes the
+  notebook's thornlist edit). Stock NewRadX compiles against the fork's
+  CarpetX, so SpacetimeX stays stock (see `thornlists/NOTES.md`).
 - **4b:** flags are sticky but `cactup build EXISTING --debug` on an
   up-to-date config does nothing (the up-to-date check returns before flags
   are recorded), so the debug build is a new config, `tutorial-debug`.
@@ -301,7 +301,8 @@ configs, simulations). So:
   update check, so that running notebook 1 again (whose installer puts the
   older build back) shows the update again.
 - Catch-up only ever needs the stock `ET_2026_05_v0` install and the stock
-  `tutorial` build (B1): notebooks 2, 4a, 4b and 10 need the install,
+  `tutorial` build (B1): notebooks 2, 3 (which compares its own install with
+  it, but makes its own active), 4a, 4b and 10 need the install,
   notebooks 5 to 9 also need `tutorial`, and every other install or config
   (`et-mp`, the `carpetx.th` install, `master`, the variant configs) is made by the
   notebook that uses it. So a late arrival waits at most for one install from
@@ -574,7 +575,8 @@ objects), and nothing leaks into a later attempt.
 - A Ctrl-C during a replay stops it at once and exits 130 with make's own
   interrupt message: the bake records it for each step by interrupting a
   real make on the baked tree a moment in (sooner, until it lands, for
-  the quick steps), and
+  the quick steps; a step that always finishes first gets make's message
+  without the makefile's line number), and
   the replay prints the
   top-level make's line of it (the sub-makes' lines name whatever was
   compiling in the bake, not what is on the screen).
@@ -715,9 +717,13 @@ replayed output says they were built, and records, after harvesting the
 tree, what a real `NAME-clean` of it prints (which is what a replayed
 `--clean` step prints) and what make prints when interrupted in each step.
 
-Only B1 exists so far; B2 to B5 are baked by the stages that write their
-notebooks (3, 4b and 5), with `bake/bake.py`'s table of bakes growing to
-match.
+B1, B2a and B2b exist so far; B3 to B5 are baked by the stages that write
+their notebooks (4b and 5), with `bake/bake.py`'s table of bakes growing to
+match. A bake can first do to its installation what the notebook does
+before that build (`prepare`): for B2b, notebook 3's thornlist edit
+(`bake/forks.py`, the same three edits as the notebook's cell; a test checks
+they match) and its `--overwrite` refetch. These steps accumulate, so the
+bakes run in the order the notebooks build them.
 
 Notebook 4a installs `carpetx.th` (the CarpetX-only thornlist the mirrors
 include) and `master` but does not build them. Notebook 3 already installed

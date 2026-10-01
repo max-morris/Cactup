@@ -100,7 +100,7 @@ echo "build.sh: baking"
 docker run --rm --hostname cactup-tutorial --network none \
     --mount type=volume,dst=/home/cactus,volume-nocopy \
     -v "$here/../bake:/bake:ro" -v "$bakes:/bakes" \
-    --entrypoint python3 "$tag:lab" /bake/bake.py B1
+    --entrypoint python3 "$tag:lab" /bake/bake.py B1 B2a B2b
 
 toolchain=$(cat "$bakes/last-toolchain")
 rm -rf "$context"

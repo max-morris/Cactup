@@ -22,7 +22,10 @@ import pyte
 from .session import COLUMNS, ROWS
 
 # Kept lines (terminal rows, after wrapping): enough for a whole Cactus build.
+# Of a longer output, the first HEAD_LINES are kept too (a command often says
+# what it is about to do first), and the lines dropped are those in between.
 MAX_LINES = 12000
+HEAD_LINES = 200
 # Longer output goes in a box of its own height that starts scrolled to the
 # end, so a build's output doesn't push the rest of the notebook ninety
 # screens down.
@@ -72,6 +75,7 @@ class _LogScreen(pyte.Screen):
 
     def __init__(self, columns: int, lines: int):
         super().__init__(columns, lines)
+        self.head: list[dict] = []
         self.scrollback: list[dict] = []
         self.dropped = 0
 
@@ -79,10 +83,14 @@ class _LogScreen(pyte.Screen):
         top, bottom = self.margins or pyte.screens.Margins(0, self.lines - 1)
         if self.cursor.y == bottom and top == 0:
             self.scrollback.append(dict(self.buffer[0]))
-            if len(self.scrollback) > MAX_LINES:
-                excess = len(self.scrollback) - MAX_LINES
-                del self.scrollback[:excess]
-                self.dropped += excess
+            if len(self.head) + len(self.scrollback) > MAX_LINES:
+                # Keep the start: the first lines go to the head until it is full.
+                while len(self.head) < HEAD_LINES and self.scrollback:
+                    self.head.append(self.scrollback.pop(0))
+                excess = len(self.head) + len(self.scrollback) - MAX_LINES
+                if excess > 0:
+                    del self.scrollback[:excess]
+                    self.dropped += excess
         super().index()
 
 
@@ -118,22 +126,23 @@ class Terminal:
                 last = y
         if screen.cursor.x > 0:
             last = max(last, screen.cursor.y)
-        return screen.scrollback + rows[: last + 1]
+        return screen.head + screen.scrollback + rows[: last + 1]
+
+    def _gap(self) -> str:
+        return f"... {self.screen.dropped} more lines not shown ..."
 
     def text(self) -> str:
         lines = [_line_text(row, self.screen.columns) for row in self._rows()]
         if self.screen.dropped:
-            lines.insert(0, f"... {self.screen.dropped} earlier lines not shown")
+            lines.insert(len(self.screen.head), self._gap())
         return "\n".join(lines)
 
     def html(self) -> str:
         parts = []
-        if self.screen.dropped:
-            parts.append(
-                f'<span class="ansi-bold">... {self.screen.dropped} earlier lines not shown</span>\n'
-            )
         rows = self._rows()
-        for row in rows:
+        for i, row in enumerate(rows):
+            if self.screen.dropped and i == len(self.screen.head):
+                parts.append(f'<span class="ansi-bold">{self._gap()}</span>\n')
             parts.append(_line_html(row, self.screen.columns))
             parts.append("\n")
         body = "".join(parts).rstrip("\n")

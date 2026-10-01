@@ -20,7 +20,8 @@ For each notebook it checks that the outputs contain what they must
 (EXPECT, or on the second pass RERUN), that none contains what must never
 appear (NEVER), that no cell not marked --expect-fail printed an error on
 the way (a cell's status is only its last command's), and, in order, that
-catch-up had nothing to do. The executed notebooks are saved in --out.
+catch-up had nothing to do (on the second pass, but for notebook 2
+switching back to the stock installation). The executed notebooks are saved in --out.
 """
 
 from __future__ import annotations
@@ -48,6 +49,18 @@ EXPECT = {
         r"file:///opt/cactup-mirrors/",
         r"cactup-tutorial \(System MDB",
     ],
+    "03": [
+        r"Success! Installed custom thornlist",
+        r"Switched to installation et-mp",
+        r"Built config tutorial",
+        r"\+CarpetX/TestReal4",
+        r"flesh — SKIP: remote URL",
+        r"origin now points at https://github.com/max-morris/Cactus.git",
+        r"now on a different commit",
+        r"Rebuilding config tutorial from scratch: the Cactus flesh is not what it was",
+        r"Built config tutorial",
+        r"TestReal4\[state4\]: PASS",
+    ],
     "02": [
         r"Built config tutorial",
         r"status: complete",
@@ -69,6 +82,11 @@ RERUN = {
         r"is up to date|Built config tutorial",
         r"state: +FINISHED",
         r"21 snapshots of gt along x",
+    ],
+    "03": [
+        r"already exists",
+        r"is up to date",
+        r"TestReal4\[state4\]: PASS",
     ],
 }
 
@@ -176,7 +194,8 @@ class Container:
         docker("network", "rm", self.net, check=False)
 
 
-def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up: bool) -> list[str]:
+def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up: bool,
+          allowed_catch_up: str = r"$^") -> list[str]:
     """Problems with one executed notebook."""
     problems = []
     if result["error"]:
@@ -198,9 +217,12 @@ def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up:
         for pattern in patterns:
             if re.search(pattern, cell["text"]):
                 problems.append(f"{label} {notebook}: forbidden output {pattern!r} in cell:\n{cell['source']}")
-        if quiet_catch_up and "cactup-tutorial-catch-up" in cell["source"] and "catch-up:" in cell["text"]:
-            problems.append(f"{label} {notebook}: catch-up had things to do after the notebooks before it:\n"
-                            + cell["text"])
+        if quiet_catch_up and "cactup-tutorial-catch-up" in cell["source"]:
+            lines = [ln for ln in cell["text"].splitlines()
+                     if ln.startswith("catch-up:") and not re.search(allowed_catch_up, ln)]
+            if lines:
+                problems.append(f"{label} {notebook}: catch-up had things to do after the notebooks before it:\n"
+                                + "\n".join(lines))
     return problems
 
 
@@ -251,6 +273,23 @@ def scratch_notebook(box: Container, name: str, cells: list[str]) -> None:
                      "source": src} for i, src in enumerate(cells)]}
     subprocess.run(["docker", "exec", "-i", "-u", "cactus", box.name, "sh", "-c",
                     f"cat > /home/cactus/notebooks/{name}"], input=json.dumps(nb), text=True, check=True)
+
+
+def start_over(box: Container, nb3: str, out_dir: Path) -> list[str]:
+    """Notebook 3's optional "start over" cell, uncommented and run, then
+    the whole notebook again: as on its first run."""
+    source = subprocess.run(["docker", "exec", box.name, "cat", f"/opt/cactup-tutorial/notebooks/{nb3}"],
+                            capture_output=True, text=True, check=True).stdout
+    cells = ["".join(c["source"]) for c in json.loads(source)["cells"] if c["cell_type"] == "code"]
+    cell = next((c for c in cells if "# cactup uninstall et-mp" in c), None)
+    if cell is None:
+        return ["start over: notebook 3 has no start-over cell"]
+    uncommented = re.sub(r"(?m)^# (cactup|rm) ", r"\1 ", cell)
+    scratch_notebook(box, "zz-start-over.ipynb", [uncommented])
+    first = box.run("zz-start-over.ipynb", out_dir)
+    if first["error"]:
+        return [f"start over: the start-over cell failed:\n{first['error']}"]
+    return check("after starting over:", nb3, box.run(nb3, out_dir), EXPECT, False)
 
 
 def reset_then_catch_up(box: Container, out_dir: Path) -> list[str]:
@@ -318,10 +357,18 @@ def main() -> int:
                 print(f"{'ok  ' if not found else 'FAIL'} editor files after {nb}", flush=True)
         for nb in notebooks:
             started = time.monotonic()
-            found = check("again:", nb, box.run(nb, out / "again"), RERUN, True)
+            # (Except one thing: running notebook 2 after notebook 3 switches
+            # back to the stock installation, and says so.)
+            found = check("again:", nb, box.run(nb, out / "again"), RERUN, True,
+                          r"made ET_2026_05_v0 the active installation" if nb.startswith("02") else r"$^")
             problems += found
             print(f"{'ok  ' if not found else 'FAIL'} again: {nb} ({time.monotonic() - started:.0f} s)",
                   flush=True)
+        for nb3 in (nb for nb in notebooks if nb.startswith("03")):
+            (out / "start-over").mkdir(exist_ok=True)
+            found = start_over(box, nb3, out / "start-over")
+            problems += found
+            print(f"{'ok  ' if not found else 'FAIL'} notebook 3 again, after its start-over cell", flush=True)
         found = reset_then_catch_up(box, out / "again")
         problems += found
         print(f"{'ok  ' if not found else 'FAIL'} a full reset from a notebook, then catch-up", flush=True)

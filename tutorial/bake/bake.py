@@ -9,12 +9,14 @@ the host user who owns the cache).
 
     python3 /bake/bake.py B1 [B2a ...]
 
-For each bake it installs what the bake needs from the mirrors, runs the
-bake's `cactup build` once as a probe that only learns the build's
-fingerprint, and, unless the cache already has that bake for this toolchain,
-runs the build for real with the make shim recording, and harvests the
-result into /bakes/<toolchain>/<fingerprint>/. It writes the fingerprints the
-image needs to /bakes/<toolchain>/wanted.
+For each bake it installs what the bake needs from the mirrors, does what the
+notebook does to it first (`prepare`: notebook 3's thornlist edit and refetch
+for B2b; each step runs once, and they accumulate, so bakes run in the order
+the notebooks build them), runs the bake's `cactup build` once as a probe that
+only learns the build's fingerprint, and, unless the cache already has that
+bake for this toolchain, runs the build for real with the make shim recording,
+and harvests the result into /bakes/<toolchain>/<fingerprint>/. It writes the
+fingerprints the image needs to /bakes/<toolchain>/wanted.
 """
 
 from __future__ import annotations
@@ -46,7 +48,11 @@ THORNLISTS = Path("/opt/cactup-tutorial/thornlists")
 UPDATE_ROOT = Path("/opt/cactup-tutorial/update-root")
 RECORD = HOME / ".cactup-tutorial-record"
 
-# Each bake: what to install, then the build to bake, as a notebook runs them.
+# Each bake: what to install (once, whichever bake needs it first), what to
+# do to it first (in order, once), then the build to bake, as a notebook runs
+# them.
+ET_MP = ["cactup", "install", "--thornlist", str(THORNLISTS / "tutorial.th"), "--alias", "et-mp",
+         "--symlink-name", "et-mp", "--silent"]
 BAKES = {
     "B1": {
         "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
@@ -54,6 +60,24 @@ BAKES = {
         "root": "Cactus",
         "config": "tutorial",
         "kind": "full",
+    },
+    # Notebook 3: et-mp's tutorial config before and after the refetch to the
+    # mixed-precision forks.
+    "B2a": {
+        "install": [ET_MP],
+        "build": ["cactup", "build", "tutorial", "-I", "et-mp"],
+        "root": "et-mp",
+        "config": "tutorial",
+        "kind": "partial",
+    },
+    "B2b": {
+        "install": [ET_MP],
+        "prepare": [["python3", str(Path(__file__).resolve().parent / "forks.py")],
+                    ["cactup", "inst", "refetch", "--overwrite", "flesh,CarpetX", "-I", "et-mp"]],
+        "build": ["cactup", "build", "tutorial", "-I", "et-mp"],
+        "root": "et-mp",
+        "config": "tutorial",
+        "kind": "partial",
     },
 }
 
@@ -263,7 +287,7 @@ def harvest(spec: dict, rec: Path, out: Path) -> None:
         in a fraction of a second, so it tries again sooner and sooner until
         the interrupt lands while make still runs."""
         tmp = Path(f"/tmp/bake-interrupt-{step}.txt")
-        for delay in (after, after / 5, after / 30, after / 100, after / 300):
+        for delay in (after, after / 5, after / 30, after / 100, after / 300, *[after / 1000] * 6):
             tmp.unlink(missing_ok=True)
             as_user([sys.executable, "-I", __file__, "--interrupt", str(root), str(tmp), str(delay), "-j4",
                      *goal], check=False)
@@ -405,9 +429,12 @@ def main() -> int:
     cache.mkdir(parents=True, exist_ok=True)
     wanted = []
     installed: set[str] = set()
+    order = list(BAKES)
+    if [b for b in order if b in args.bakes] != args.bakes:
+        raise SystemExit(f"bake: bakes run in the notebooks' order: {' '.join(order)}")
     for bake_id in args.bakes:
         spec = {**BAKES[bake_id], "id": bake_id}
-        for cmd in spec["install"]:
+        for cmd in spec["install"] + spec.get("prepare", []):
             key = json.dumps(cmd)
             if key not in installed:
                 as_user(cmd)

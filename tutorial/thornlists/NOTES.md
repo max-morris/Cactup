@@ -156,7 +156,11 @@ fork's CarpetX changes what NewRadX builds against, and the SpacetimeX fork
 exists precisely to template `NewRadX_Apply` over the grid function's
 precision; so stock NewRadX may not compile against the fork's CarpetX, and
 repointing SpacetimeX too may be needed. `tutorial.th` keeps SpacetimeX's
-fork basename, so either works. To be confirmed when bake B2b is built.
+fork basename, so either works. Confirmed by building (Stage 5): stock
+NewRadX compiles against the fork's CarpetX, and the build of `tutorial.th`
+with only the flesh and CarpetX repointed (plus `CarpetX/TestReal4`) succeeds
+and runs TestReal4's `testreal4.par` to PASS. So notebook 3 repoints just the
+two.
 
 Also note that the forks list moves `ExternalLibraries-AMReX` (to
 `mpi-cmake-hints`) and `ExternalLibraries-MPI` (to
