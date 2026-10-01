@@ -370,9 +370,18 @@ pub fn clone(
 /// silently no-ops), point `refs/heads/<branch>` and `HEAD` at it, then check
 /// out the tree, deleting files the old checkout tracked that the new one
 /// doesn't. Returns the commit the repo ends on.
+///
+/// Only what changed is written: a repo already at the fetched tip is left
+/// alone entirely, and otherwise a file whose blob and mode are the same in
+/// both trees keeps its bytes, mtime and index stat (a full rewrite costs a
+/// create, write and close per file on NFS, and moves every mtime, so `make`
+/// rebuilds what never changed). `force_overwrite` — a forced refetch of a
+/// modified repo, or one whose `origin` was just repointed — opts out of
+/// both: there the full checkout is exactly what discards the local edits.
 pub fn align(
     repo_dir: &Path,
     branch: &str,
+    force_overwrite: bool,
     progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
 ) -> Res<ObjectId> {
     let _span = crate::timing::span("git align");
@@ -408,11 +417,26 @@ pub fn align(
         .with_context(|| format!("failed to resolve origin/{branch}"))?
         .detach();
 
+    let branch_ref: gix::refs::FullName = format!("refs/heads/{branch}")
+        .try_into()
+        .map_err(|e| anyhow!("invalid branch name {branch}: {e}"))?;
+
+    // Already there: HEAD names the branch and sits on the fetched tip, and
+    // the probe found the worktree clean, so there is nothing to write.
+    if !force_overwrite
+        && repo.head_name().ok().flatten().as_ref() == Some(&branch_ref)
+        && repo.head_id().ok().map(|id| id.detach()) == Some(target_id)
+    {
+        return Ok(target_id);
+    }
+
     // The old index tells us which tracked files may need deleting after the
-    // switch. Read it before touching anything.
-    let old_paths: Vec<BString> = repo
-        .open_index()
-        .map(|idx| idx.entries().iter().map(|e| e.path(&idx).to_owned()).collect())
+    // switch, and which ones are already right on disk. Read it before
+    // touching anything.
+    let old_index = repo.open_index().ok();
+    let old_paths: Vec<BString> = old_index
+        .as_ref()
+        .map(|idx| idx.entries().iter().map(|e| e.path(idx).to_owned()).collect())
         .unwrap_or_default();
 
     // Move refs/heads/<branch> (create or force-update — the probe guaranteed
@@ -422,9 +446,6 @@ pub fn align(
         force_create_reflog: false,
         message: msg.into(),
     };
-    let branch_ref: gix::refs::FullName = format!("refs/heads/{branch}")
-        .try_into()
-        .map_err(|e| anyhow!("invalid branch name {branch}: {e}"))?;
     repo.edit_references([
         RefEdit {
             change: Change::Update {
@@ -461,6 +482,9 @@ pub fn align(
     let mut index = repo
         .index_from_tree(&tree_id)
         .with_context(|| "failed to build index from tree")?;
+    if !force_overwrite && let Some(old) = &old_index {
+        keep_unchanged_entries(&mut index, old);
+    }
     let mut opts = repo
         .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
         .with_context(|| "failed to read checkout options")?;
@@ -483,34 +507,12 @@ pub fn align(
         opts,
     )
     .with_context(|| "worktree checkout failed")?;
-    index.write(Default::default()).with_context(|| "failed to write index")?;
 
-    // gix's checkout leaves files whose *content* already matches untouched,
-    // so a mode-only difference between branches (644 ↔ 755) would linger
-    // and read as a local modification on the next probe. Reconcile the
-    // executable bit with the index explicitly.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for entry in index.entries() {
-            let want_exec = entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE;
-            if !want_exec && entry.mode != gix::index::entry::Mode::FILE {
-                continue;
-            }
-            let path = workdir.join(entry.path(&index).to_str_lossy().as_ref());
-            if let Ok(meta) = std::fs::symlink_metadata(&path) {
-                if !meta.file_type().is_file() {
-                    continue;
-                }
-                let mode = meta.permissions().mode();
-                let has_exec = mode & 0o111 != 0;
-                if has_exec != want_exec {
-                    let new_mode = if want_exec { mode | 0o111 } else { mode & !0o111 };
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
-                }
-            }
-        }
+    reconcile_exec_bits(&mut index, &workdir);
+    for entry in index.entries_mut() {
+        entry.flags.remove(gix::index::entry::Flags::SKIP_WORKTREE);
     }
+    index.write(Default::default()).with_context(|| "failed to write index")?;
 
     // Delete tracked files that existed under the old checkout but not the
     // new one (gix's checkout only writes the new entries; it does not sweep).
@@ -538,6 +540,251 @@ pub fn align(
     }
 
     Ok(target_id)
+}
+
+/// gix's checkout adds the executable bit to a file it overwrites but never
+/// removes one, so a 755 → 644 change between branches would linger and read
+/// as a local modification on the next probe. Reconcile the bit for every
+/// entry checkout wrote (`SKIP_WORKTREE` marks the kept ones, whose mode is
+/// right by construction), and re-record the stat of each one changed: chmod
+/// moves its ctime, which the index compares.
+fn reconcile_exec_bits(index: &mut gix::index::File, workdir: &Path) {
+    use gix::index::entry::{Flags, Mode};
+    use std::os::unix::fs::PermissionsExt;
+    for (entry, rela_path) in index.entries_mut_with_paths() {
+        let want_exec = entry.mode == Mode::FILE_EXECUTABLE;
+        if entry.flags.contains(Flags::SKIP_WORKTREE) || (!want_exec && entry.mode != Mode::FILE) {
+            continue;
+        }
+        let path = workdir.join(rela_path.to_str_lossy().as_ref());
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        if (mode & 0o111 != 0) == want_exec {
+            continue;
+        }
+        let new_mode = if want_exec { mode | 0o111 } else { mode & !0o111 };
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
+        if let Ok(stat) = gix::index::fs::Metadata::from_path_no_follow(&path)
+            .map_err(|_| ())
+            .and_then(|m| gix::index::entry::Stat::from_fs(&m).map_err(|_| ()))
+        {
+            entry.stat = stat;
+        }
+    }
+}
+
+/// What [`settle_index`] did to one repo's index.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Settled {
+    /// No entry was racy: nothing to do.
+    Clean,
+    /// Rewritten with the same entries, so its mtime now post-dates them.
+    /// (Serialized by gix like any index it writes — the same as `align`'s own
+    /// write: optional extensions it does not carry, such as the untracked
+    /// cache, are dropped, which git simply rebuilds.)
+    Rewritten,
+    /// Left as it was: `index.lock` was held, an entry's content did not
+    /// verify, the only racy entries were future-dated, the second never
+    /// passed, Ctrl-C, or an I/O error. The index is still valid — only slower
+    /// to status.
+    Left,
+}
+
+/// Rewrite `repo_dir`'s index unchanged when any entry is "racy" against it,
+/// so later status walks match those entries by stat instead of hashing them.
+///
+/// git (and gix) cannot trust the stat of a file modified in the same second
+/// the index was written — a same-size edit later in that second would look
+/// identical — so status reads and hashes every such entry, every time. A
+/// checkout writes its files and then its index within the same second(s), so
+/// a fresh clone of a small repo is racy throughout, and gix's status never
+/// writes the refreshed index back the way `git status` does. Rewriting the
+/// same index once the fileserver's clock has moved past the newest entry
+/// fixes that at the source.
+///
+/// Safe by construction: the rewrite happens under git's own `index.lock`
+/// (a concurrent `git add` fails fast, or we skip), it re-reads the index
+/// under that lock, and it vouches only for entries whose content it has
+/// just hashed against the index. The remaining exposure — a same-size edit
+/// in the same second, after that hash — is the one git's own refresh has.
+/// Best effort throughout: any doubt leaves the index alone.
+pub fn settle_index(repo_dir: &Path) -> Res<Settled> {
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+    let repo = gix::open(repo_dir).with_context(|| format!("Failed to open {}", repo_dir.display()))?;
+    // Unlocked first look: most indexes are not racy, and this costs one
+    // read. (It cannot tell future-dated entries apart — there is no "now"
+    // yet — so a repo with any takes the lock below and lets go each time.)
+    let index = repo.open_index().with_context(|| "failed to read index")?;
+    if !index.entries().iter().any(|e| is_racy_in(e, &index)) {
+        return Ok(Settled::Clean);
+    }
+    drop(index);
+
+    let index_path = repo.index_path();
+    let Ok(mut lock) = gix::lock::File::acquire_to_update_resource(
+        &index_path,
+        gix::lock::acquire::Fail::Immediately,
+        None,
+    ) else {
+        return Ok(Settled::Left);
+    };
+    // Dropping `lock` from here on rolls back: the index stays as it was.
+    let index = repo.open_index().with_context(|| "failed to re-read index under its lock")?;
+    // The lock file was just created: its mtime is the fileserver's "now", in
+    // exactly the clock gix later compares entry mtimes against. Entries more
+    // than a second ahead of it are future-dated (a skewed writer, an
+    // unpacked archive) and no rewrite can ever settle them.
+    let now = lock.with_mut(|f| f.metadata()).with_context(|| "failed to stat index.lock")?;
+    let now_secs = file_secs(&now);
+    let mut newest = None;
+    // The earliest future-dated entry, which is never verified: if hashing
+    // ran long enough that the write lands in its second, the rewrite would
+    // vouch for it unchecked, so that write is rolled back instead.
+    let mut first_unverified = None;
+    for entry in index.entries() {
+        if gix::interrupt::is_triggered() {
+            return Ok(Settled::Left);
+        }
+        let secs = i64::from(entry.stat.mtime.secs);
+        if !is_racy_in(entry, &index) {
+            continue;
+        }
+        if secs > now_secs + 1 {
+            first_unverified = Some(first_unverified.map_or(secs, |first: i64| first.min(secs)));
+            continue;
+        }
+        if !content_matches(&repo, repo_dir, entry, entry.path(&index))? {
+            return Ok(Settled::Left);
+        }
+        newest = newest.max(Some(secs));
+    }
+    let Some(newest) = newest else { return Ok(Settled::Left) };
+
+    let mut bytes = Vec::new();
+    let skip_hash = index.checksum().is_none_or(|c| c.is_null());
+    index
+        .write_to(&mut bytes, gix::index::write::Options { extensions: Default::default(), skip_hash })
+        .with_context(|| "failed to serialize index")?;
+    // Write, then see what second the server stamped; while that is not past
+    // the newest racy entry, wait out the rest of the second and write again
+    // (the same bytes in place). At most two waits: `newest` is at most one
+    // second ahead of `now`.
+    for attempt in 0..3 {
+        let written = lock
+            .with_mut(|f| {
+                use std::io::{Seek, Write};
+                f.seek(std::io::SeekFrom::Start(0))?;
+                f.write_all(&bytes)?;
+                f.set_len(bytes.len() as u64)?;
+                f.metadata()
+            })
+            .with_context(|| "failed to write index.lock")?;
+        if first_unverified.is_some_and(|first| file_secs(&written) >= first) {
+            return Ok(Settled::Left);
+        }
+        if file_secs(&written) > newest {
+            lock.commit().map_err(|e| e.error).with_context(|| "failed to commit index.lock")?;
+            return Ok(Settled::Rewritten);
+        }
+        if attempt == 2 || gix::interrupt::is_triggered() {
+            break;
+        }
+        let stamped = written.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+        let nanos = stamped.map_or(0, |d| d.subsec_nanos());
+        let wait = Duration::from_nanos(1_000_000_000 - u64::from(nanos)) + Duration::from_millis(50);
+        // Interrupt-aware: Ctrl-C leaves the index as it was.
+        let until = Instant::now() + wait;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            if gix::interrupt::is_triggered() {
+                return Ok(Settled::Left);
+            }
+            std::thread::sleep(left.min(Duration::from_millis(25)));
+        }
+    }
+    Ok(Settled::Left)
+}
+
+/// gix's racy test with its default (seconds-only) stat options: an entry
+/// modified at or after the second its index was written.
+fn is_racy_in(entry: &gix::index::Entry, index: &gix::index::File) -> bool {
+    entry.stat.is_racy(index.timestamp(), gix::index::entry::stat::Options::default())
+}
+
+fn file_secs(meta: &std::fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.mtime()
+}
+
+/// Whether the worktree file behind `entry` still hashes to the entry's blob.
+/// Only plain files, executables and symlinks can be checked; anything else
+/// (a submodule's commit entry) counts as not verified. A file under a
+/// clean/smudge filter also fails to match — such a repo is just not settled.
+fn content_matches(
+    repo: &gix::Repository,
+    repo_dir: &Path,
+    entry: &gix::index::Entry,
+    rela_path: &gix::bstr::BStr,
+) -> Res<bool> {
+    use gix::index::entry::Mode;
+    let path = repo_dir.join(rela_path.to_str_lossy().as_ref());
+    let hash_kind = repo.object_hash();
+    let id = if entry.mode == Mode::FILE || entry.mode == Mode::FILE_EXECUTABLE {
+        // Streamed (and interrupt-aware): a racy entry can be a large file.
+        let Ok(mut file) = std::fs::File::open(&path) else { return Ok(false) };
+        let Ok(len) = file.metadata().map(|m| m.len()) else { return Ok(false) };
+        let discard = &mut gix::progress::Discard;
+        match gix::objs::compute_stream_hash(
+            hash_kind,
+            gix::objs::Kind::Blob,
+            &mut file,
+            len,
+            discard,
+            &gix::interrupt::IS_INTERRUPTED,
+        ) {
+            Ok(id) => id,
+            Err(_) => return Ok(false), // unreadable, or Ctrl-C
+        }
+    } else if entry.mode == Mode::SYMLINK {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(target) = std::fs::read_link(&path) else { return Ok(false) };
+        gix::objs::compute_hash(hash_kind, gix::objs::Kind::Blob, target.as_os_str().as_bytes())
+            .with_context(|| "failed to hash symlink target")?
+    } else {
+        return Ok(false);
+    };
+    Ok(id == entry.id)
+}
+
+/// Mark every entry of `new` that is already right on disk — same path,
+/// blob and mode in `old`, an index the probe just found clean — so the
+/// checkout skips it (`SKIP_WORKTREE`, honored by gix's checkout), and carry
+/// its recorded stat over so status keeps matching it by stat alone. An entry
+/// that was racy against `old` (modified in the same second `old` was written,
+/// so its stat cannot vouch for its content) is rewritten instead: copying
+/// that stat into a newer index would let a same-second, same-size edit hide.
+fn keep_unchanged_entries(new: &mut gix::index::File, old: &gix::index::File) {
+    use gix::index::entry::Flags;
+    let old_written = old.timestamp();
+    let stat_options = gix::index::entry::stat::Options::default();
+    for (entry, path) in new.entries_mut_with_paths() {
+        let Some(previous) = old.entry_by_path(path) else { continue };
+        // An entry whose flags make its stat say nothing about the file on
+        // disk (sparse, assume-unchanged, intent-to-add) is checked out
+        // normally instead.
+        let unreliable = Flags::SKIP_WORKTREE | Flags::ASSUME_VALID | Flags::INTENT_TO_ADD;
+        if previous.id == entry.id
+            && previous.mode == entry.mode
+            && previous.stage_raw() == 0
+            && !previous.flags.intersects(unreliable)
+            && !previous.stat.is_racy(old_written, stat_options)
+        {
+            entry.stat = previous.stat;
+            entry.flags.insert(Flags::SKIP_WORKTREE);
+        }
+    }
 }
 
 /// Rewrite `origin`'s fetch URL to `url`, persistently, in `<git_dir>/config`.
@@ -904,6 +1151,224 @@ mod source_state_tests {
     }
 }
 
+#[cfg(test)]
+mod align_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::time::{Duration, SystemTime};
+
+    /// An upstream with `files`, cloned into `<tmp>/clone`; returns the
+    /// upstream dir, the clone dir and the branch.
+    fn upstream_and_clone(tmp: &Path, files: &[(&str, &str, bool)]) -> (PathBuf, PathBuf, String) {
+        let upstream = tmp.join("upstream");
+        testrepo::init(&upstream);
+        testrepo::commit_tree(&upstream, files);
+        let (branch, _) = head_of(&upstream).unwrap();
+        let clone_dir = tmp.join("clone");
+        let mut progress = prodash::tree::Root::new().add_child("test clone");
+        clone(&upstream.to_string_lossy(), Some(&branch), &clone_dir, &mut progress).unwrap();
+        (upstream, clone_dir, branch)
+    }
+
+    fn align_now(dir: &Path, branch: &str, force: bool) -> ObjectId {
+        let mut progress = prodash::tree::Root::new().add_child("test align");
+        align(dir, branch, force, &mut progress).unwrap()
+    }
+
+    /// (mtime, inode) — a rewrite moves the first, a replace the second.
+    fn identity(path: &Path) -> (SystemTime, u64) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        (meta.modified().unwrap(), meta.ino())
+    }
+
+    fn set_mtime(path: &Path, when: SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    /// Back-date every worktree file a few seconds (and re-record the index),
+    /// so a later rewrite is visible in the mtime regardless of timestamp
+    /// granularity.
+    fn backdate(dir: &Path, names: &[&str]) {
+        let past = SystemTime::now() - Duration::from_secs(30);
+        for name in names {
+            set_mtime(&dir.join(name), past);
+        }
+        let repo = gix::open(dir).unwrap();
+        let mut index = repo.open_index().unwrap();
+        for (entry, path) in index.entries_mut_with_paths() {
+            let file = dir.join(path.to_str_lossy().as_ref());
+            let meta = gix::index::fs::Metadata::from_path_no_follow(&file).unwrap();
+            entry.stat = gix::index::entry::Stat::from_fs(&meta).unwrap();
+        }
+        index.write(Default::default()).unwrap();
+    }
+
+    #[test]
+    fn align_at_the_tip_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [("a", "alpha\n", false), ("b", "beta\n", false)];
+        let (_, dir, branch) = upstream_and_clone(tmp.path(), &files);
+        backdate(&dir, &["a", "b"]);
+        let identities = || ["a", "b", ".git/index"].map(|name| identity(&dir.join(name)));
+        let before = identities();
+        let (_, head) = head_of(&dir).unwrap();
+        assert_eq!(align_now(&dir, &branch, false), head);
+        let after = identities();
+        assert_eq!(before, after, "an up-to-date repo must not be touched");
+    }
+
+    #[test]
+    fn align_rewrites_only_what_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (upstream, dir, branch) = upstream_and_clone(
+            tmp.path(),
+            &[("a", "alpha\n", false), ("b", "beta\n", false), ("c", "gamma\n", false)],
+        );
+        backdate(&dir, &["a", "b", "c"]);
+        let a_before = identity(&dir.join("a"));
+        // Upstream: `b`'s content changes, `c` becomes executable, `a` stays.
+        let changed = [("a", "alpha\n", false), ("b", "BETA\n", false), ("c", "gamma\n", true)];
+        let tip = testrepo::commit_tree(&upstream, &changed);
+        assert_eq!(align_now(&dir, &branch, false), tip);
+        assert_eq!(identity(&dir.join("a")), a_before, "an unchanged file must be left alone");
+        assert_eq!(std::fs::read_to_string(dir.join("b")).unwrap(), "BETA\n");
+        assert_ne!(std::fs::metadata(dir.join("c")).unwrap().permissions().mode() & 0o111, 0);
+        assert_clean_by_stat(&dir, tip);
+
+        // And back: gix never clears an executable bit itself, so 755 → 644
+        // is align's own chmod — after which the recorded stat (ctime
+        // included) must still match the file.
+        let back = [("a", "alpha\n", false), ("b", "BETA\n", false), ("c", "gamma\n", false)];
+        let tip = testrepo::commit_tree(&upstream, &back);
+        assert_eq!(align_now(&dir, &branch, false), tip);
+        assert_eq!(std::fs::metadata(dir.join("c")).unwrap().permissions().mode() & 0o111, 0);
+        assert_clean_by_stat(&dir, tip);
+    }
+
+    /// The chmod's ctime is re-recorded. (Inside a real align the chmod
+    /// usually lands in the same coarse kernel clock tick as the checkout's
+    /// write, so only a pause makes a missing re-read visible.)
+    #[test]
+    fn reconcile_exec_bits_rerecords_the_stat_it_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &[("c", "gamma\n", false)]);
+        let c = dir.join("c");
+        std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let repo = gix::open(&dir).unwrap();
+        let mut index = repo.open_index().unwrap();
+        let stat_of = |path: &Path| {
+            let meta = gix::index::fs::Metadata::from_path_no_follow(path).unwrap();
+            gix::index::entry::Stat::from_fs(&meta).unwrap()
+        };
+        index.entries_mut()[0].stat = stat_of(&c);
+        std::thread::sleep(Duration::from_millis(50));
+        reconcile_exec_bits(&mut index, &dir);
+        assert_eq!(std::fs::metadata(&c).unwrap().permissions().mode() & 0o111, 0);
+        assert_eq!(index.entries()[0].stat, stat_of(&c), "the chmod's ctime must be recorded");
+    }
+
+    /// The repo reads clean at `tip`, every entry's recorded stat matches its
+    /// file exactly (so status never has to hash it), and no skip flag is
+    /// left behind.
+    fn assert_clean_by_stat(dir: &Path, tip: ObjectId) {
+        assert_eq!(source_state(dir).unwrap(), tip.to_string());
+        let index = gix::open(dir).unwrap().open_index().unwrap();
+        for entry in index.entries() {
+            let file = dir.join(entry.path(&index).to_str_lossy().as_ref());
+            let meta = gix::index::fs::Metadata::from_path_no_follow(&file).unwrap();
+            let on_disk = gix::index::entry::Stat::from_fs(&meta).unwrap();
+            assert_eq!(entry.stat, on_disk, "{} has a stale stat", file.display());
+            assert!(!entry.flags.contains(gix::index::entry::Flags::SKIP_WORKTREE));
+        }
+    }
+
+    /// The forced path (a backed-up dirty repo, or a repointed one) keeps
+    /// the full overwrite: it is what discards the local edit.
+    #[test]
+    fn forced_align_at_the_tip_restores_a_modified_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, branch) = upstream_and_clone(tmp.path(), &[("a", "alpha\n", false)]);
+        std::fs::write(dir.join("a"), "local edit\n").unwrap();
+        align_now(&dir, &branch, true);
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "alpha\n");
+    }
+
+    /// Make `dir`'s index racy: its mtime set to the newest entry's second.
+    fn make_racy(dir: &Path) {
+        let index = gix::open(dir).unwrap().open_index().unwrap();
+        let newest = index.entries().iter().map(|e| e.stat.mtime.secs).max().unwrap();
+        set_mtime(&dir.join(".git/index"), SystemTime::UNIX_EPOCH + Duration::from_secs(newest.into()));
+    }
+
+    fn racy_entries(dir: &Path) -> usize {
+        let index = gix::open(dir).unwrap().open_index().unwrap();
+        index.entries().iter().filter(|e| is_racy_in(e, &index)).count()
+    }
+
+    #[test]
+    fn settle_rewrites_a_racy_index_and_status_stops_hashing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [("a", "alpha\n", false), ("b", "beta\n", false)];
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &files);
+        make_racy(&dir);
+        assert_eq!(racy_entries(&dir), 2);
+        assert_eq!(settle_index(&dir).unwrap(), Settled::Rewritten);
+        assert_eq!(racy_entries(&dir), 0);
+        let (_, head) = head_of(&dir).unwrap();
+        assert_eq!(source_state(&dir).unwrap(), head.to_string());
+        // Settled once, it stays settled.
+        assert_eq!(settle_index(&dir).unwrap(), Settled::Clean);
+    }
+
+    #[test]
+    fn settle_leaves_an_index_alone_unless_it_can_vouch_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &[("a", "alpha\n", false)]);
+        let index_path = dir.join(".git/index");
+
+        // Not racy: nothing written.
+        set_mtime(&index_path, SystemTime::now() + Duration::from_secs(60));
+        let before = identity(&index_path);
+        assert_eq!(settle_index(&dir).unwrap(), Settled::Clean);
+        assert_eq!(identity(&index_path), before);
+
+        // Racy, but the file's content no longer matches its entry.
+        make_racy(&dir);
+        std::fs::write(dir.join("a"), "ALPHA\n").unwrap();
+        let before = identity(&index_path);
+        assert_eq!(settle_index(&dir).unwrap(), Settled::Left);
+        assert_eq!(identity(&index_path), before);
+        std::fs::write(dir.join("a"), "alpha\n").unwrap();
+
+        // Racy, but git holds the index lock.
+        std::fs::write(dir.join(".git/index.lock"), "").unwrap();
+        assert_eq!(settle_index(&dir).unwrap(), Settled::Left);
+        assert_eq!(identity(&index_path), before);
+        assert!(dir.join(".git/index.lock").exists(), "someone else's lock must survive");
+        std::fs::remove_file(dir.join(".git/index.lock")).unwrap();
+    }
+
+    #[test]
+    fn settle_ignores_future_dated_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &[("a", "alpha\n", false)]);
+        let repo = gix::open(&dir).unwrap();
+        let mut index = repo.open_index().unwrap();
+        let future = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() + 3600;
+        for entry in index.entries_mut() {
+            entry.stat.mtime.secs = future as u32;
+        }
+        index.write(Default::default()).unwrap();
+        let before = identity(&dir.join(".git/index"));
+        let started = std::time::Instant::now();
+        assert_eq!(settle_index(&dir).unwrap(), Settled::Left);
+        assert_eq!(identity(&dir.join(".git/index")), before, "no rewrite can settle a future entry");
+        // Recognized up front, not after waiting out seconds for it.
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+    }
+}
+
 /// Test-only repo builder: a real on-disk git repo, created with gix so the
 /// suite never depends on a `git` binary. Commits carry an empty tree — HEAD
 /// movement is what the source-tracking tests need, and an empty tree keeps
@@ -965,6 +1430,33 @@ pub(crate) mod testrepo {
         .expect("checkout");
         index.write(Default::default()).expect("write index");
         id.detach()
+    }
+
+    /// Commit a flat tree of `(name, content, executable)` files on HEAD —
+    /// objects and refs only, no worktree checkout: an upstream for
+    /// [`super::clone`] and [`super::align`] to fetch from.
+    pub(crate) fn commit_tree(dir: &Path, files: &[(&str, &str, bool)]) -> ObjectId {
+        let repo = gix::open(dir).expect("open repo");
+        let mut tree = gix::objs::Tree::empty();
+        for (name, content, executable) in files {
+            let blob = repo.write_blob(content.as_bytes()).expect("write blob").detach();
+            let kind = if *executable {
+                gix::objs::tree::EntryKind::BlobExecutable
+            } else {
+                gix::objs::tree::EntryKind::Blob
+            };
+            let entry = gix::objs::tree::Entry { mode: kind.into(), filename: (*name).into(), oid: blob };
+            tree.entries.push(entry);
+        }
+        tree.entries.sort();
+        let tree_id = repo.write_object(&tree).expect("write tree").detach();
+        let parents: Vec<ObjectId> = repo
+            .head()
+            .ok()
+            .and_then(|mut h| h.peel_to_commit().ok())
+            .map(|c| vec![c.id])
+            .unwrap_or_default();
+        repo.commit("HEAD", "tree", tree_id, parents).expect("commit").detach()
     }
 
     /// Add one commit on HEAD and return the new commit id.
