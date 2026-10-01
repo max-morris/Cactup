@@ -139,12 +139,11 @@ HWLOC_DIR  = "BUILD"
 BOOST_DIR  = "BUILD"
 LIBJPEG_DIR = "BUILD"
 
-ZLIB_DIR      = "/usr"
-# Ubuntu multiarch: libz.so lives in /usr/lib/x86_64-linux-gnu, which the
-# thorn's /usr/lib and /usr/lib64 probes miss ("ZLIB not found at /usr").
-ZLIB_LIB_DIRS = "/usr/lib/x86_64-linux-gnu"
-ZLIB_INC_DIRS = "/usr/include"
-ZLIB_LIBS     = "z"
+# Ubuntu multiarch: libz.so lives in /usr/lib/x86_64-linux-gnu, and the
+# thorn's detect.sh hands ZLIB_DIR to find_lib, which probes only lib and
+# lib64 under it and ignores ZLIB_LIB_DIRS ("ZLIB not found at /usr").
+# Building the thorn's own zlib takes a minute and sidesteps the probe.
+ZLIB_DIR = "BUILD"
 
 # OpenSSL 3.0.2 (libssl-dev): found in system paths.
 
