@@ -79,6 +79,26 @@ BAKES = {
         "config": "tutorial",
         "kind": "partial",
     },
+    # Notebook 4b: the GPU variant, in its own installation whose CarpetX has
+    # the fix nvcc needs (tutorial-gpu.th), baked in a container with the CUDA
+    # toolkit mounted (the image has none); and the debug build.
+    "B3": {
+        "install": [["cactup", "install", "--thornlist", str(THORNLISTS / "tutorial-gpu.th"), "--alias",
+                     "et-gpu", "--symlink-name", "et-gpu", "--silent"]],
+        "build": ["cactup", "build", "tutorial-gpu", "--variant", "gpu", "-I", "et-gpu"],
+        "root": "et-gpu",
+        "config": "tutorial-gpu",
+        "kind": "partial",
+        "cuda": True,
+    },
+    "B4": {
+        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
+        "build": ["cactup", "build", "tutorial-debug", "--debug", "--thornlist", str(THORNLISTS / "tutorial.th"),
+                  "-I", "ET_2026_05_v0"],
+        "root": "Cactus",
+        "config": "tutorial-debug",
+        "kind": "partial",
+    },
 }
 
 
@@ -208,7 +228,7 @@ def keep(spec: dict, rel: Path) -> bool:
     return True
 
 
-def harvest(spec: dict, rec: Path, out: Path) -> None:
+def harvest(spec: dict, rec: Path, out: Path, cuda: str | None = None) -> None:
     """Copy the config's tree, executables and recordings into `out`, and
     record what a clean prints on it."""
     root = cactus_root(spec).resolve()
@@ -316,6 +336,7 @@ def harvest(spec: dict, rec: Path, out: Path) -> None:
         "compile-stamp": compile_stamp(tree / "datestamp.o"),
         "id": spec["id"],
         "kind": spec["kind"],
+        "cuda": cuda,
         "attempt": str(rec_attempt(root, name, rec)),
         "thornlist-path": build_toml["config-meta"].get("thornlist", ""),
         "fingerprint": doc,
@@ -409,11 +430,49 @@ def interrupt(root: str, out: str, delay: float, args: list[str]) -> int:
     return 0
 
 
-def cached(bake: Path) -> bool:
+def cuda_toolkit(root: Path = Path("/usr/local")) -> Path | None:
+    """The CUDA toolkit mounted into this bake container, if any."""
+    found = sorted(root.glob("cuda-*/version.json"))
+    return found[0].parent if found else None
+
+
+def cuda_version(root: Path = Path("/usr/local")) -> str | None:
+    """Its version, which a GPU bake records: a bake made with another is
+    baked again."""
+    toolkit = cuda_toolkit(root)
+    for path in [toolkit / "version.json"] if toolkit else []:
+        try:
+            return json.loads(path.read_text())["cuda"]["version"]
+        except (OSError, ValueError, KeyError):
+            continue
+    return None
+
+
+def use_cuda() -> str:
+    """Point /usr/local/cuda, where the gpu optionlist looks, at the mounted
+    toolkit; its version."""
+    version = cuda_version()
+    if version is None:
+        raise SystemExit("bake: a GPU bake needs the CUDA toolkit mounted (see build.sh)")
+    link = Path("/usr/local/cuda")
+    if not link.exists():
+        link.symlink_to(cuda_toolkit().name)
+    return version
+
+
+def cached_format(bake: Path) -> bool:
     try:
         return json.loads((bake / "bake.json").read_text()).get("format") == make_shim.FORMAT
     except (OSError, ValueError):
         return False
+
+
+def cached(bake: Path, cuda: str | None) -> bool:
+    try:
+        info = json.loads((bake / "bake.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return info.get("format") == make_shim.FORMAT and info.get("cuda") == cuda
 
 
 def main() -> int:
@@ -422,6 +481,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("bakes", nargs="+", choices=sorted(BAKES))
     parser.add_argument("--cache", default="/bakes")
+    parser.add_argument("--wanted", default="wanted",
+                        help="file (in the toolchain's cache directory) listing the fingerprints the image needs")
     args = parser.parse_args()
     set_up_home()
     tool = toolchain()
@@ -434,6 +495,7 @@ def main() -> int:
         raise SystemExit(f"bake: bakes run in the notebooks' order: {' '.join(order)}")
     for bake_id in args.bakes:
         spec = {**BAKES[bake_id], "id": bake_id}
+        cuda = use_cuda() if spec.get("cuda") else None
         for cmd in spec["install"] + spec.get("prepare", []):
             key = json.dumps(cmd)
             if key not in installed:
@@ -441,20 +503,21 @@ def main() -> int:
                 installed.add(key)
         fp = make_shim.fingerprint(probe(spec))
         wanted.append(fp)
-        if cached(cache / fp):
+        if cached(cache / fp, cuda):
             log(f"{bake_id} ({fp}) is cached for toolchain {tool}")
             continue
         if (cache / fp).exists():
-            log(f"{bake_id} ({fp}): the cached bake is of an older format; baking again")
+            why = "made with another CUDA toolkit" if cuda and cached_format(cache / fp) else "of an older format"
+            log(f"{bake_id} ({fp}): the cached bake is {why}; baking again")
             shutil.rmtree(cache / fp)
         log(f"{bake_id} ({fp}): building")
         rec = record(spec)
         tmp = cache / f".{fp}.tmp"
         shutil.rmtree(tmp, ignore_errors=True)
-        harvest(spec, rec, tmp)
+        harvest(spec, rec, tmp, cuda)
         os.rename(tmp, cache / fp)
         log(f"{bake_id} ({fp}) baked")
-    (cache / "wanted").write_text("".join(f"{fp}\n" for fp in wanted))
+    (cache / args.wanted).write_text("".join(f"{fp}\n" for fp in wanted))
     (Path(args.cache) / "last-toolchain").write_text(f"{tool}\n")
     return 0
 

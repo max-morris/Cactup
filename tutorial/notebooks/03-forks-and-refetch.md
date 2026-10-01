@@ -215,6 +215,13 @@ cactup -I ET_2026_05_v0 config list
 git -C ~/Cactus/repos/flesh log --oneline -1
 ```
 
+Switch back to the stock installation, which the following notebooks use:
+
+```{code-cell} ipython3
+%%shell
+cactup use ET_2026_05_v0
+```
+
 ## Starting over
 
 To run this notebook again from the top, remove the installation, its link

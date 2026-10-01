@@ -7,7 +7,7 @@ use crate::args::InstallationCommand;
 use crate::database::{CactusInstallation, UnfetchedRepo, UnfetchedReason};
 use crate::installation::Installation;
 use crate::Res;
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use colored::Colorize;
 
 /// How loudly a `conformance_lines` line should be reported. A skip is a
@@ -161,20 +161,24 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
     }
 }
 
+/// Which installation `show` is about: the one named, else the one `-I`
+/// names, else the active one.
+fn shown_alias(named: Option<String>, dash_i: Option<&str>, active: Option<&str>) -> Option<String> {
+    named.or_else(|| dash_i.map(str::to_owned)).or_else(|| active.map(str::to_owned))
+}
+
 /// `cactup installation show [alias]`: the active installation, or a named
 /// one, in detail. Listing every installation is `cactup installation list`.
 pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let database = ctx.db.read()?;
 
-    // No alias → the contextually-relevant installation: the active one.
-    let alias = match alias {
-        Some(alias) => alias,
-        None => database.active_installation.clone().ok_or_else(|| {
-            anyhow!(
-                "no active installation; run `cactup install`, or `cactup use <alias>` \
-                 to activate an existing one (see `cactup list`)"
-            )
-        })?,
+    let Some(alias) =
+        shown_alias(alias, ctx.globals.installation.as_deref(), database.active_installation.as_deref())
+    else {
+        bail!(
+            "no active installation; run `cactup install`, or `cactup use <alias>` \
+             to activate an existing one (see `cactup list`)"
+        );
     };
 
     let Some(entry) = database.installations.get(&alias) else {
@@ -264,6 +268,15 @@ mod tests {
 
     fn failed(thorns: Vec<String>, detail: &str) -> UnfetchedRepo {
         UnfetchedRepo { reason: UnfetchedReason::Failed, thorns, detail: Some(detail.to_owned()) }
+    }
+
+    #[test]
+    fn show_is_about_the_named_then_the_dash_i_then_the_active_installation() {
+        let s = |v: &str| Some(v.to_owned());
+        assert_eq!(shown_alias(s("a"), Some("b"), Some("c")), s("a"));
+        assert_eq!(shown_alias(None, Some("b"), Some("c")), s("b"));
+        assert_eq!(shown_alias(None, None, Some("c")), s("c"));
+        assert_eq!(shown_alias(None, None, None), None);
     }
 
     #[test]

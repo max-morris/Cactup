@@ -35,7 +35,11 @@ NOTEBOOKS = {
     # Notebook 3 compares its own installation with the stock one, but
     # makes et-mp the active one itself (and may be run again after that).
     "3": {"cactup": True, "install": True, "use": False},
+    "4a": {"cactup": True, "install": True},
+    # Notebook 4b ends by switching back to the stock tutorial config.
+    "4b": {"cactup": True, "install": True, "tutorial": True},
 }
+THORNLIST = "/opt/cactup-tutorial/thornlists/tutorial.th"
 
 
 def say(line: str) -> None:
@@ -185,6 +189,27 @@ def ensure_install(use: bool = True) -> None:
             say("~/Cactus is not a link to the stock install; notebooks that use it will not find it")
 
 
+def ensure_tutorial() -> None:
+    """The stock install's tutorial config, built from tutorial.th (notebook
+    2's build). Quiet when cactup calls it up to date (seconds); otherwise one
+    line saying why, then cactup's own output as it comes, so a build never
+    looks like a hang."""
+    proc = subprocess.Popen([str(CACTUP), "-I", RELEASE, "build", "tutorial", "--thornlist", THORNLIST],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, env=plain_env())
+    first = proc.stdout.readline()
+    if re.search(r"\bis up to date\b", first):
+        proc.stdout.read()
+    else:
+        say(f"building the tutorial config in {RELEASE} (notebook 2 does this):")
+        sys.stdout.write(first)
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    if proc.wait() != 0:
+        raise SystemExit("catch-up: building the tutorial config failed")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in NOTEBOOKS:
         print(f"usage: cactup-tutorial-catch-up {{{','.join(NOTEBOOKS)}}}", file=sys.stderr)
@@ -202,6 +227,8 @@ def main(argv: list[str]) -> int:
     machine()
     if needs.get("install"):
         ensure_install(use=needs.get("use", True))
+    if needs.get("tutorial"):
+        ensure_tutorial()
     return 0
 
 

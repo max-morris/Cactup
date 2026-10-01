@@ -38,3 +38,34 @@ def test_the_fork_edit_applies_to_the_tutorial_thornlist():
     for old, new in edits_in((TUTORIAL / "bake" / "forks.py").read_text()):
         assert text.count(old) == 1, old
         assert new not in text, new
+
+
+def test_a_gpu_bake_is_cached_only_for_the_same_toolkit(tmp_path):
+    import json
+    import sys
+
+    sys.path.insert(0, str(TUTORIAL / "bake"))
+    import bake
+
+    entry = tmp_path / "fp"
+    entry.mkdir()
+    (entry / "bake.json").write_text(json.dumps({"format": bake.make_shim.FORMAT, "cuda": "13.4.2"}))
+    assert bake.cached(entry, "13.4.2")
+    assert not bake.cached(entry, "13.5.0")
+    assert bake.cached_format(entry)
+    (entry / "bake.json").write_text(json.dumps({"format": bake.make_shim.FORMAT}))
+    assert bake.cached(entry, None), "a CPU bake carries no toolkit"
+
+
+def test_the_mounted_toolkit_and_its_version(tmp_path):
+    import json
+    import sys
+
+    sys.path.insert(0, str(TUTORIAL / "bake"))
+    import bake
+
+    assert bake.cuda_version(tmp_path) is None
+    (tmp_path / "cuda-13.4").mkdir()
+    (tmp_path / "cuda-13.4" / "version.json").write_text(json.dumps({"cuda": {"version": "13.4.2"}}))
+    assert bake.cuda_toolkit(tmp_path).name == "cuda-13.4"
+    assert bake.cuda_version(tmp_path) == "13.4.2"

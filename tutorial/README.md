@@ -78,7 +78,8 @@ Constraints the notebooks must respect (each found by reading the code):
   source tree's root (`~/Cactus`) and silently replaces an existing one, and
   `uninstall` leaves it behind. So `~/Cactus` always means the stock install,
   which notebooks 5 and 9 and catch-up address through it, and each other
-  install gets its own link (`~/et-mp`, `~/carpetx`, `~/et-master`). 4a points
+  install gets its own link (`~/et-mp`, `~/carpetx`, `~/et-master`,
+  `~/et-gpu`). 4a points
   this out, and removes an uninstalled install's link. Catch-up puts
   `~/Cactus` back if it is missing or points elsewhere.
 
@@ -135,7 +136,16 @@ Constraints the notebooks must respect (each found by reading the code):
   throwaway simulation name and deletes it afterward. The same goes for the
   cell showing cactup's own refusal to put the GPU config on a CPU queue:
   cactup creates the simulation before it refuses, and running the cell again
-  would otherwise fail with "already exists".
+  would otherwise fail with "already exists". The release's CarpetX doesn't
+  compile with CUDA 13's nvcc (three static_asserts in `boundaries_impl.hxx`
+  trip over CUDA's global legacy `all(bool)`/`any(bool)`, and nvcc doesn't
+  find Arith's hidden-friend overloads there; CUDA 12.x can't be used
+  either, its math headers clash with trixie's glibc 2.41). So the GPU
+  config is built in an installation of its own, `et-gpu`, from
+  `thornlists/tutorial-gpu.th`: `tutorial.th` with CarpetX on the branch
+  `ET_2026_05-cuda13` of github.com/max-morris/CarpetX, the release plus
+  one commit stating those three assertions over the template parameters.
+  The notebook says so, and the stock installation stays the release.
 - **5:** its variant build is a separate config in a build universe,
   `build tutorial-pinned --universe pinned --thornlist tutorial.th` (bake
   B5), whose wrapper is `taskset -c @ENV(CACTUP_TUTORIAL_CPUS)@`: each
@@ -302,7 +312,8 @@ configs, simulations). So:
   older build back) shows the update again.
 - Catch-up only ever needs the stock `ET_2026_05_v0` install and the stock
   `tutorial` build (B1): notebooks 2, 3 (which compares its own install with
-  it, but makes its own active), 4a, 4b and 10 need the install,
+  it, but makes its own active), 4a and 10 need the install, 4b (which ends
+  by switching back to `tutorial`) needs the build,
   notebooks 5 to 9 also need `tutorial`, and every other install or config
   (`et-mp`, the `carpetx.th` install, `master`, the variant configs) is made by the
   notebook that uses it. So a late arrival waits at most for one install from
@@ -310,10 +321,11 @@ configs, simulations). So:
 - Notebooks 5 and 9 edit a fixed list of files in the stock install (a thorn
   source, a small thorn's `.ccl`, a flesh `.c` file, notebook 9's broken
   file). For every N ≥ 2, catch-up puts any of them that are modified back to
-  their committed state: the partial-tree configs (the variant configs of 4b,
-  `tutorial-pinned`) have no objects, so building one on an edited tree would
-  be a from-scratch real build (for `tutorial-gpu`, a CUDA build in a
-  container without CUDA), and the bakes all assume clean repositories. This
+  their committed state: the partial-tree configs in the stock install
+  (4b's `tutorial-debug`, `tutorial-pinned`) have no objects, so building one
+  on an edited tree would be a from-scratch real build, and the bakes all
+  assume clean repositories. (`tutorial-gpu` lives in `et-gpu`, which no
+  notebook edits.) This
   covers restarting the kernel and running all of notebook 5 in the middle of
   its hacking section, skipped revert cells, doing notebook 9 before
   notebook 5, and going back to 4b after either. Before restoring a file,
@@ -653,7 +665,7 @@ submits to `mylab` use `--ignore-machine` on the stock `tutorial`).
 | catch-up N ≥ 5, otherwise | the same | up to date | no make at all |
 | 3 | `build tutorial` (et-mp, before the refetch) | new config | hit B2a: restore + replay |
 | 3 | `build tutorial` (et-mp, after the fork refetch) | full rebuild: the flesh moved | realclean real; hit B2b: restore + replay |
-| 4b | `build tutorial-gpu --variant gpu --thornlist tutorial.th` | new config | hit B3 |
+| 4b | `-I et-gpu build tutorial-gpu --variant gpu` (et-gpu) | new config | hit B3 |
 | 4b | `build tutorial-debug --debug --thornlist tutorial.th` | new config | hit B4 |
 | 4b | `build tutorial-debug` again | up to date | no make at all |
 | 5 | `build tutorial-pinned --universe pinned --thornlist tutorial.th`, before the hacking | new config | hit B5: restore + replay |
@@ -708,7 +720,7 @@ restored config is complete to cactup and Cactus alike).
 | B1 | stock `ET_2026_05_v0` install, config `tutorial` from `tutorial.th` | the whole tree (notebooks 5 and 9 rebuild incrementally) |
 | B2a | install `et-mp` (from `tutorial.th`), config `tutorial` from its live thornlist, before the fork refetch | all but the objects |
 | B2b | install `et-mp` after the fork refetch, config `tutorial` | all but the objects |
-| B3 | `tutorial-gpu` (`gpu` optionlist variant) | all but the objects |
+| B3 | install `et-gpu` (from `tutorial-gpu.th`), config `tutorial-gpu` (`gpu` optionlist variant) | all but the objects |
 | B4 | `tutorial-debug` (`--debug`) | all but the objects |
 | B5 | `tutorial-pinned` (`--universe pinned`) | all but the objects |
 
@@ -717,9 +729,8 @@ replayed output says they were built, and records, after harvesting the
 tree, what a real `NAME-clean` of it prints (which is what a replayed
 `--clean` step prints) and what make prints when interrupted in each step.
 
-B1, B2a and B2b exist so far; B3 to B5 are baked by the stages that write
-their notebooks (4b and 5), with `bake/bake.py`'s table of bakes growing to
-match. A bake can first do to its installation what the notebook does
+B1 to B4 exist so far; B5 is baked by the stage that writes notebook 5,
+with `bake/bake.py`'s table of bakes growing to match. A bake can first do to its installation what the notebook does
 before that build (`prepare`): for B2b, notebook 3's thornlist edit
 (`bake/forks.py`, the same three edits as the notebook's cell; a test checks
 they match) and its `--overwrite` refetch. These steps accumulate, so the
@@ -732,8 +743,9 @@ from a thornlist file; 4a is about living with several installations:
 nothing, so those installs have no bakes.
 
 **Bake cache keys** add the toolchain's identity to the fingerprint: a hash
-of `dpkg-query -W` (every package and version in the bake container) and,
-for B3, the CUDA version. apt itself is pinned to a `snapshot.debian.org`
+of `dpkg-query -W` (every package and version in the bake container) names
+the cache directory, and a GPU bake records the CUDA version it was made
+with, so one made with another toolkit is baked again. apt itself is pinned to a `snapshot.debian.org`
 date (a build argument), so rebuilding the image months later installs the
 same packages and reuses the same bakes; moving the date is a deliberate
 rebake. Without this, a point release of HDF5 or OpenMPI would leave objects
@@ -757,7 +769,11 @@ per-attendee disk small; see sizing below.
 
 B3 needs CUDA, which exists only in the bake container used for it: CUDA
 13.x from NVIDIA's debian13 repository, which supports gcc 14 as nvcc's host
-compiler. (Debian's own `nvidia-cuda-toolkit` 12.4 wants g++-13, mixing host
+compiler. The image's `cuda` stage, built on the base image (so the lab
+image's rebuilds never download the toolkit again), holds the toolkit in a
+volume; `build.sh` keeps a container of it and runs the B3 bake in an
+ordinary lab-image bake container with `--volumes-from` that container. The
+toolkit's version is part of B3's cache entry, so a new one rebakes it. (Debian's own `nvidia-cuda-toolkit` 12.4 wants g++-13, mixing host
 compilers, and NVIDIA's 12.x packages exist only in its debian12 repository,
 whose signing key trixie's apt refuses.) The GPU executable links the CUDA
 runtime statically (and whatever else AMReX pulls in, such as cuRAND, is
@@ -859,17 +875,18 @@ Measured on the development machine (a container limited to 4 CPUs):
 | B1, the `tutorial` config from `tutorial.th` | tree 1.5 GB (`build/` 570 MB, `lib/` 550 MB, `scratch/` 340 MB, of which AMReX and NSIMD), executable 340 MB | a real build: about 10 minutes |
 | B1 replayed (restore and replay) | | 46 s, longest pause 1.4 s |
 | a real incremental build on the restored tree (one Cottonmouth file) | | 13 s |
-| the image | 11.7 GB on disk (the lab image without the bakes: 9.4 GB) | |
+| the image | 16.7 GB on disk (the lab image without the bakes: 9.4 GB) | |
 
 A full-ET config tree, for comparison, is 6–9 GB with ExternalLibraries built
 from source, and an install's sources are about 1.8 GB (83 repositories).
 
-Per attendee, after every notebook: up to four installs' sources (stock,
-`et-mp`, the `carpetx.th` install, `master`; about 1.8 GB each for the full release
-and `master`, much less for `et-mp` and the CarpetX-only thornlist), B1's full
-tree, B2–B5's partial trees and simulation output. Until the bakes are
-measured, budget about 12 GB of disk per attendee, next to the 4 vCPU / 8 GB
-of memory.
+Per attendee, after every notebook: up to five installs' sources (stock and
+`master`, about 1.3 and 1.9 GB; `et-mp`, `et-gpu` and the `carpetx.th`
+install, much less), the restored trees (B1's whole tree, 1.8 GB; the
+partial trees: B3's 1.3 GB with its 770 MB executable, B2b's 1.1 GB, B4's
+0.8 GB, B2a's 0.7 GB; B5 isn't baked yet) and simulation output. Budget about 12 GB of
+disk per attendee, next to the 4 vCPU / 8 GB of memory; the deployment stage
+measures it on the VM.
 
 Acceptance targets (`tests/platform/replay.sh` checks the first for one
 replay, and the incremental builds; the concurrent ones are checked on the

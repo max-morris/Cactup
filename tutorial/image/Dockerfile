@@ -93,6 +93,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # container must put the same files in the same places.
 RUN useradd --create-home --uid 1000 --shell /bin/bash cactus
 
+# -- cuda -----------------------------------------------------------------------
+# The CUDA toolkit, for baking the GPU config (B3) only: the tutorial image
+# has none (see "Bakes" in the README). CUDA 13 from NVIDIA's repository for
+# Debian 13, whose nvcc accepts gcc 14 as its host compiler. Its own stage on
+# the base image, so the lab image's rebuilds never download it again; the
+# bake container mounts the toolkit from a container of this image.
+FROM base AS cuda
+ARG CUDA_VERSION=13.4
+RUN set -eu; \
+    cd /tmp; \
+    curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb; \
+    dpkg -i cuda-keyring_1.1-1_all.deb; rm cuda-keyring_1.1-1_all.deb; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "cuda-toolkit-$(echo "$CUDA_VERSION" | tr . -)"; \
+    rm -rf /var/lib/apt/lists/*; \
+    "/usr/local/cuda-$CUDA_VERSION/bin/nvcc" --version
+VOLUME /usr/local/cuda-${CUDA_VERSION}
+
 # -- platform -------------------------------------------------------------------
 # What a cluster's login node would offer: compilers, MPI and the Debian
 # libraries the tutorial's optionlists use (see mdb/cactup-tutorial), and a

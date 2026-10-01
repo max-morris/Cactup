@@ -9,8 +9,9 @@ about how they were made, and what the tutorial relies on, is here.
 | `tutorial.th` | the `tutorial` config (stock install), the `et-mp` install (notebook 3) | curated from the release, below |
 | `carpetx.th` | the CarpetX-only install (notebook 4a) | Max's private `carpetx-mp.th`, with stock repositories |
 | `carpetx-mp-forks.th` | notebook 3's repoint to the forks | Max's `carpetx-mp-forks.th`, headers rewritten |
+| `tutorial-gpu.th` | the `et-gpu` install and its GPU config (notebook 4b, bake B3) | `tutorial.th` with CarpetX on a fix branch, below |
 
-All three are parsed by cactup's own parser (a scratch dump test over
+All four are parsed by cactup's own parser (a scratch dump test over
 `thornlist::parse_with_base`) with no warnings, and `mirrors/mirror.py`'s
 port of that parser gives identical components for them and for the
 release and `master` lists.
@@ -167,3 +168,28 @@ Also note that the forks list moves `ExternalLibraries-AMReX` (to
 `export-hwloc-in-mpi-libs`), both of which are in `tutorial.th`; they move
 only if notebook 3 copies those sections too. The tutorial image uses
 Debian's MPI, so neither fix is needed there.
+
+## `tutorial-gpu.th`
+
+`tutorial.th` with one change: CarpetX comes from the branch
+`ET_2026_05-cuda13` of `github.com/max-morris/CarpetX`, which is the
+release's CarpetX (`ET_2026_05`, ab62b9bc) plus one commit, f7747150. That
+commit rewrites three static_asserts in `CarpetX/src/boundaries_impl.hxx`
+(`!all(inormal == 0)` twice, `!any(symmetries == symmetry_t::periodic)`)
+over the template parameters. Found by building (Stage 6):
+
+- With CUDA 13.4 (NVIDIA's debian13 repository), nvcc reports the calls
+  ambiguous between CUDA's global legacy warp votes `all(bool)`/`any(bool)`
+  (`device_atomic_functions.h`, declared for all C++ under nvcc, with no
+  guard macro) and Arith's `all(bool)`/`any(bool)`. With those CUDA
+  declarations removed, nvcc still fails: it doesn't find Arith's
+  hidden-friend `all(const vect&)` in these constant expressions and can't
+  convert `vect<bool, 3>` to `bool`. The fork's `mixed-precision` branch has
+  the same code. Not fixed upstream.
+- CUDA 12.9 (NVIDIA's redist tarballs; its apt repository for Debian 12 is
+  refused by trixie's apt) fails earlier: its `math_functions.h` clashes
+  with glibc 2.41's `cospi`/`sinpi` declarations.
+
+With the commit, the GPU config builds with CUDA 13.4 and gcc 14; the
+executable links the CUDA runtime statically (every shared library it needs
+is in `/lib/x86_64-linux-gnu`). The mirrors lock the branch.

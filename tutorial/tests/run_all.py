@@ -60,6 +60,30 @@ EXPECT = {
         r"Rebuilding config tutorial from scratch: the Cactus flesh is not what it was",
         r"Built config tutorial",
         r"TestReal4\[state4\]: PASS",
+        r"Switched to installation ET_2026_05_v0",
+    ],
+    "04a": [
+        r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/carpetx.th",
+        r"Success! Installed release master",
+        r"- carpetx \(custom thornlist",
+        r"Switched to installation carpetx",
+        r"et-master\n  release: +master",
+        r"Switched to installation ET_2026_05_v0",
+        r"Uninstalled carpetx",
+    ],
+    "04b": [
+        r"gpu \[gpu\]",
+        r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/tutorial-gpu.th",
+        r"Built config tutorial-gpu",
+        r"gpu: true +compatible-queues: gpu",
+        r"only compatible with queue\(s\) gpu",
+        r"gpu +inact",
+        r"Required partition not available",
+        r"Built config tutorial-debug",
+        r"flags: debug=true",
+        r"Config tutorial-debug is now active",
+        r"Config tutorial is now active",
+        r"Deleted config tutorial-debug",
     ],
     "02": [
         r"Built config tutorial",
@@ -87,6 +111,17 @@ RERUN = {
         r"already exists",
         r"is up to date",
         r"TestReal4\[state4\]: PASS",
+    ],
+    "04a": [
+        r"Success! Installed custom thornlist /opt/cactup-tutorial/thornlists/carpetx.th",
+        r"already exists",
+        r"Uninstalled carpetx",
+    ],
+    "04b": [
+        r"already exists",
+        r"tutorial-gpu is up to date",
+        r"Required partition not available",
+        r"Built config tutorial-debug",
     ],
 }
 
@@ -194,6 +229,11 @@ class Container:
         docker("network", "rm", self.net, check=False)
 
 
+def number(notebook: str) -> str:
+    """A notebook's number as its file name spells it: "01", "04a"."""
+    return notebook.split("-", 1)[0]
+
+
 def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up: bool,
           allowed_catch_up: str = r"$^") -> list[str]:
     """Problems with one executed notebook."""
@@ -203,10 +243,10 @@ def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up:
     if not result["cells"]:
         problems.append(f"{label} {notebook}: no cells ran")
     text = "\n".join(c["text"] for c in result["cells"])
-    if notebook[:2] not in expect:
+    if number(notebook) not in expect:
         problems.append(f"{label} {notebook}: nothing to check it against (add it to EXPECT and RERUN)")
     position = 0
-    for pattern in expect.get(notebook[:2], []):
+    for pattern in expect.get(number(notebook), []):
         m = re.compile(pattern).search(text, position)
         if m is None:
             problems.append(f"{label} {notebook}: expected output not found (in order): {pattern}")
@@ -334,8 +374,8 @@ def main() -> int:
     listing = docker("run", "--rm", "--entrypoint", "ls", args.image, "/opt/cactup-tutorial/notebooks").stdout
     notebooks = sorted(n for n in listing.split() if n.endswith(".ipynb"))
     if args.only:
-        wanted = {n.zfill(2) for n in args.only.split(",")}
-        notebooks = [n for n in notebooks if n[:2] in wanted]
+        wanted = {n.zfill(2) if n.isdigit() else n.zfill(3) for n in args.only.split(",")}
+        notebooks = [n for n in notebooks if number(n) in wanted]
     if not notebooks:
         raise SystemExit("no notebooks to run")
     problems: list[str] = []
@@ -380,7 +420,7 @@ def main() -> int:
 
         def alone(nb: str) -> tuple[str, list[str], float]:
             started = time.monotonic()
-            box = Container(args.image, f"alone{nb[:2]}")
+            box = Container(args.image, f"alone{number(nb)}")
             try:
                 return nb, check("alone:", nb, box.run(nb, out / "alone"), EXPECT, False), time.monotonic() - started
             finally:

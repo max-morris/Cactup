@@ -97,16 +97,30 @@ build lab "$@" "$repo"
 # attendee's (hostname, user, paths, mirrors), with an empty home of its own.
 # Only what the bakes need; no network (installs come from the mirrors).
 echo "build.sh: baking"
-docker run --rm --hostname cactup-tutorial --network none \
-    --mount type=volume,dst=/home/cactus,volume-nocopy \
-    -v "$here/../bake:/bake:ro" -v "$bakes:/bakes" \
-    --entrypoint python3 "$tag:lab" /bake/bake.py B1 B2a B2b
+bake() {
+    docker run --rm --hostname cactup-tutorial --network none \
+        --mount type=volume,dst=/home/cactus,volume-nocopy \
+        -v "$here/../bake:/bake:ro" -v "$bakes:/bakes" \
+        "$@"
+}
+bake --entrypoint python3 "$tag:lab" /bake/bake.py B1 B2a B2b B4 --wanted wanted-cpu
+
+# The GPU bake: the same lab image, with the CUDA toolkit mounted from a
+# container of the cuda image (kept between builds while the image is the
+# same, so its volume is made once).
+build cuda "$@" "$repo"
+source=cactup-tutorial-cuda
+if [ "$(docker inspect -f '{{.Image}}' "$source" 2>/dev/null)" != "$(docker image inspect -f '{{.Id}}' "$tag:cuda")" ]; then
+    docker rm -f -v "$source" > /dev/null 2>&1 || true
+    docker create --name "$source" "$tag:cuda" true > /dev/null
+fi
+bake --volumes-from "$source:ro" --entrypoint python3 "$tag:lab" /bake/bake.py B3 --wanted wanted-cuda
 
 toolchain=$(cat "$bakes/last-toolchain")
 rm -rf "$context"
 mkdir -p "$context"
-while read -r fp; do
+cat "$bakes/$toolchain/wanted-cpu" "$bakes/$toolchain/wanted-cuda" | while read -r fp; do
     cp -al "$bakes/$toolchain/$fp" "$context/$fp"
-done < "$bakes/$toolchain/wanted"
+done
 
 build tutorial "$@" "$repo"

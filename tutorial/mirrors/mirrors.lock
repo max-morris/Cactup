@@ -5584,6 +5584,7 @@
   "github.com/max-morris/CarpetX.git": {
    "head": "refs/heads/main",
    "refs": {
+    "refs/heads/ET_2026_05-cuda13": "f774715088570562f9bb0004c184aa9c946fe0be",
     "refs/heads/main": "3527be21bf95e701b6986cb47553253c77f2b7e0",
     "refs/heads/mixed-precision": "239849018465950a71c2d090d2f5dc87a988e2be",
     "refs/tags/mixed-precision-1": "479505d16ae569b708a181773586d0ebdd48dad7",
