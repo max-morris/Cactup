@@ -507,8 +507,9 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     let mut links: Vec<&Component> = plan.links.iter().collect();
     links.sort_by_key(|c| c.target.contains("..") || c.checkout.contains(".."));
     let link_span = crate::timing::span("link pass");
+    let pass = link::LinkPass::new(install_root, &plan.root);
     for c in links {
-        match link::link_component(install_root, &plan.root, c) {
+        match pass.link(c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
             Err(e) => {
                 report.failures.push(Failure { what: c.checkout.clone(), error: format!("{e:#}") })

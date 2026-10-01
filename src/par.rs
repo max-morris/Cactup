@@ -12,9 +12,15 @@ use std::time::{Duration, Instant};
 
 /// Worker width: enough concurrency to hide per-stat round trips, capped so
 /// a wide login node does not aim dozens of concurrent walks at a shared
-/// filesystem (and gix's status may fan out threads of its own per walk).
+/// filesystem. Fixed rather than scaled to the CPU count: the work waits on
+/// the fileserver, not the CPU, so a login node that grants a process only a
+/// core or two (cgroups, affinity) needs the same overlap as any other.
+/// Status walks inside a fan-out keep a few threads of their own
+/// (`fetch::git`'s `FAN_OUT_STATUS_THREADS`), so the ceiling is the product.
+const WORKERS: usize = 8;
+
 fn workers_for(items: usize) -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(items.max(1))
+    WORKERS.min(items.max(1))
 }
 
 thread_local! {
@@ -106,10 +112,8 @@ mod tests {
     #[test]
     fn workers_know_they_are_in_a_fan_out() {
         assert!(!in_fan_out());
-        // As many workers as the machine allows (until the width is fixed):
-        // on a one-CPU box even three items are no fan-out.
         let seen = parallel_map(&[1, 2, 3], |_| in_fan_out()).unwrap();
-        assert_eq!(seen, [workers_for(3) > 1; 3]);
+        assert_eq!(seen, [true, true, true]);
         assert_eq!(parallel_map(&[1], |_| in_fan_out()).unwrap(), [false], "one item is no fan-out");
         assert!(!in_fan_out(), "the caller's thread is not a worker");
     }
