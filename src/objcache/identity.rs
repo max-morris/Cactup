@@ -3,22 +3,29 @@
 //!
 //! A compiler is identified by the bytes of what actually does the work —
 //! the driver the command names, for GCC the back ends and assembler it
-//! runs, and the shared libraries each of those loads (a distribution's
-//! Clang is a small driver in front of `libclang-cpp.so`) — plus what it
-//! says about itself (version, target, specs). Its
-//! path is not part of it, so two installations of the same compiler agree;
-//! its modification time is not either, so one compiler copied twice does.
+//! runs and its `specs` file if it has one, for Clang the configuration
+//! files it reads, and the shared libraries each program loads (a
+//! distribution's Clang is a small driver in front of `libclang-cpp.so`) —
+//! plus what it says about itself (version, target, built-in specs) and
+//! the name it was run by (`clang` and `clang++` are one file). Its path
+//! is not part of it, so two installations of the same compiler agree; its
+//! modification time is not either, so one compiler copied twice does.
 //!
 //! Only a compiler cactup can identify *as itself* is cached. A wrapper
 //! (`mpicc`, a Cray `cc`, a site script) adds flags and picks a compiler by
 //! rules of its own; it passes `--version` through to the compiler, and so
 //! looks like one. The driver's own bytes have to say what it is.
 //!
+//! What this cannot see: files a compiler reads by rules of its own that
+//! are named nowhere here — a plugin directory, lists in Clang's resource
+//! directory (which is why sanitizers are not cached), anything a later
+//! compiler version adds. The list above is what is known.
+//!
 //! Hashing a compiler takes a moment (GCC's `cc1plus` is tens of megabytes)
-//! and every compile of a build asks, so the answer is kept for the length
-//! of one build attempt, in `<attempt>/cc/compilers/`, and reused as long as
-//! every file it was computed from still looks the same (size, change time,
-//! inode).
+//! and every compile of a build asks, so the answer — also the answer "not
+//! one the cache works with" — is kept for the length of one build
+//! attempt, in `<attempt>/cc/compilers/`, and reused as long as every file
+//! it was computed from still looks the same (size, change time, inode).
 
 use super::hash::{bytes_digest, file_digest, Hasher};
 use crate::Res;
@@ -26,8 +33,10 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -43,12 +52,15 @@ pub enum Family {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Compiler {
-    /// The program the command line names, as an absolute path.
+    /// The file that runs when the command line names this compiler, as an
+    /// absolute path. The wrapper starts *this*, under the name the recipe
+    /// used: what was identified and what runs must be one file.
     pub path: PathBuf,
     pub family: Family,
-    /// Major and minor version, for what the family can do from which
-    /// version on.
-    pub version: (u32, u32),
+    /// Does this compiler, given the path map of `key::PathMap`, make one
+    /// object of the same sources in two different places? Found by trying
+    /// ([`relocates`]): the map stands on it.
+    pub relocates: bool,
     /// The digest that stands for this compiler in a key.
     pub id: String,
 }
@@ -84,7 +96,12 @@ impl Seen {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct Remembered {
-    compiler: Compiler,
+    /// The compiler, or …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiler: Option<Compiler>,
+    /// … why it is not one the cache works with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected: Option<String>,
     /// The environment that decides which helper programs the driver runs,
     /// as it was.
     env: String,
@@ -105,16 +122,20 @@ fn helper_env() -> String {
     hasher.hex()
 }
 
-/// The program the shell's `PATH` search finds for `program`, as an absolute
-/// path: the first executable regular file of that name.
+/// The file `execvp` would run for `program` from this working directory,
+/// as an absolute path: the name itself if it has a `/`, else the first
+/// executable regular file of that name on `PATH` — relative entries and
+/// empty ones (the working directory) included, as `execvp` includes them.
 pub fn find_program(program: &OsStr) -> Res<PathBuf> {
+    let absolute = |path: &Path| std::path::absolute(path).with_context(|| format!("Failed to resolve {}", path.display()));
     if program.as_bytes().contains(&b'/') {
-        return std::path::absolute(program).with_context(|| format!("Failed to resolve {}", program.to_string_lossy()));
+        return absolute(Path::new(program));
     }
     let executable = |path: &PathBuf| path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
     let path = std::env::var_os("PATH").context("PATH is not set")?;
-    let found = std::env::split_paths(&path).filter(|dir| dir.is_absolute()).map(|dir| dir.join(program)).find(executable);
-    found.with_context(|| format!("{} is not on PATH", program.to_string_lossy()))
+    let dirs = path.as_bytes().split(|b| *b == b':').map(|dir| if dir.is_empty() { Path::new(".") } else { Path::new(OsStr::from_bytes(dir)) });
+    let found = dirs.map(|dir| dir.join(program)).find(executable);
+    absolute(&found.with_context(|| format!("{} is not on PATH", program.to_string_lossy()))?)
 }
 
 /// Identify the compiler `program` names, reusing what an earlier compile of
@@ -122,30 +143,44 @@ pub fn find_program(program: &OsStr) -> Res<PathBuf> {
 /// this is not a compiler the cache works with.
 pub fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
     let path = find_program(program)?;
+    // The name it is run by is part of what it is.
+    let name = Path::new(program).file_name().unwrap_or(program);
     let memo_dir = cc_dir.join("compilers");
-    let memo = memo_dir.join(format!("{}.toml", bytes_digest(path.as_os_str().as_bytes())));
+    let mut memo_name = Hasher::new("compiler-memo");
+    memo_name.feed(path.as_os_str().as_bytes());
+    memo_name.feed(name.as_bytes());
+    let memo = memo_dir.join(format!("{}.toml", memo_name.hex()));
     let env = helper_env();
     if let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok())
         && remembered.env == env
         && remembered.files.iter().all(|seen| Seen::of(&seen.path).is_ok_and(|now| now == *seen))
     {
-        return Ok(remembered.compiler);
-    }
-
-    let (compiler, files) = examine(&path)?;
-    // Best-effort: without it the next compile just looks again. Written
-    // whole and moved into place, since every compile of the build reads it.
-    let remembered = Remembered { compiler: compiler.clone(), env, files };
-    if let Ok(text) = toml::to_string(&remembered)
-        && fs::create_dir_all(&memo_dir).is_ok()
-        && let Ok(mut temp) = tempfile::NamedTempFile::new_in(&memo_dir)
-    {
-        use std::io::Write;
-        if temp.write_all(text.as_bytes()).is_ok() {
-            let _ = temp.persist(&memo);
+        match (remembered.compiler, remembered.rejected) {
+            (Some(compiler), _) => return Ok(compiler),
+            (None, Some(why)) => bail!("{why}"),
+            (None, None) => {}
         }
     }
-    Ok(compiler)
+
+    let mut files = Vec::new();
+    let examined = fs::create_dir_all(&memo_dir)
+        .with_context(|| format!("Failed to create {}", memo_dir.display()))
+        .and_then(|()| examine(&path, name, &memo_dir, &mut files));
+    // Best-effort: without it the next compile just looks again. Written
+    // whole and moved into place, since every compile of the build reads it.
+    let remembered = Remembered {
+        compiler: examined.as_ref().ok().cloned(),
+        rejected: examined.as_ref().err().map(|e| format!("{e:#}")),
+        env,
+        files,
+    };
+    if let Ok(text) = toml::to_string(&remembered)
+        && let Ok(mut temp) = tempfile::NamedTempFile::new_in(&memo_dir)
+        && temp.write_all(text.as_bytes()).is_ok()
+    {
+        let _ = temp.persist(&memo);
+    }
+    examined
 }
 
 /// Run `program` with `args` and return its standard output, if it succeeds.
@@ -180,18 +215,82 @@ fn loaded_libraries(program: &Path) -> Vec<PathBuf> {
     listed.lines().filter_map(library).filter(|path| path.is_absolute()).collect()
 }
 
-/// `major.minor` at the start of `text`.
-fn version_of(text: &str) -> Option<(u32, u32)> {
-    let mut numbers = text.trim().split(|c: char| !c.is_ascii_digit()).map(str::parse);
-    Some((numbers.next()?.ok()?, numbers.next()?.ok()?))
+/// The sources of [`relocates`]' trial: a Cactus compile in miniature. The
+/// source is a build copy that says, as Cactus's do, which file it was
+/// copied from; it includes one header from the tree and one from the
+/// configuration, and each of the three records its own name.
+const TRIAL_SOURCE: &str = "#include \"file.h\"\n#include \"generated.h\"\n\
+    const char *cactup_trial_file = __FILE__;\nint cactup_trial(int x) { return twice(x) + *generated_file(); }\n";
+const TRIAL_HEADER: &str = "static inline int twice(int x) { return 2 * x; }\n";
+const TRIAL_GENERATED: &str = "static inline const char *generated_file(void) { return __FILE__; }\n";
+
+/// Compile the trial sources in a tree at `root` with a configuration
+/// called `config`, the way a serving cache compiles: from the
+/// configuration's `scratch`, with the tree and the configuration mapped to
+/// fixed names, the configuration's map last (as `key::PathMap::flags`
+/// gives them). The object, if the compile succeeds.
+fn trial_object(compiler: &Path, name: &OsStr, root: &Path, config: &str) -> Option<Vec<u8>> {
+    let config = root.join("configs").join(config);
+    let (src, build, bindings, scratch) = (root.join("src"), config.join("build"), config.join("bindings"), config.join("scratch"));
+    for dir in [&src, &build, &bindings, &scratch] {
+        fs::create_dir_all(dir).ok()?;
+    }
+    let original = src.join("file.c");
+    fs::write(&original, TRIAL_SOURCE).ok()?;
+    fs::write(build.join("file.c"), format!("#line 1 \"{}\"\n{TRIAL_SOURCE}", original.display())).ok()?;
+    fs::write(src.join("file.h"), TRIAL_HEADER).ok()?;
+    fs::write(bindings.join("generated.h"), TRIAL_GENERATED).ok()?;
+    let object = build.join("file.o");
+    let status = Command::new(compiler)
+        .arg0(name)
+        .args(["-g", "-c", "-o"])
+        .arg(&object)
+        .arg(build.join("file.c"))
+        .arg("-I")
+        .arg(&src)
+        .arg("-I")
+        .arg(&bindings)
+        .arg(format!("-ffile-prefix-map={}/=./", root.display()))
+        .arg(format!("-ffile-prefix-map={}/=./configs/@config/", config.display()))
+        .current_dir(&scratch)
+        .env("PWD", &scratch)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    status.success().then(|| fs::read(&object).ok()).flatten()
 }
 
-/// Look at the compiler at `path` from scratch: what it is, and every file
-/// its identity was computed from.
-fn examine(path: &Path) -> Res<(Compiler, Vec<Seen>)> {
+/// Does `compiler`, run as `name`, make one object of the same sources in
+/// two different places when given the key's path map? Tried in `dir`, on
+/// two small trees at paths of different length with configurations of
+/// different names, with debug information on.
+///
+/// This is the one way to know. What a compiler does with several
+/// `-ffile-prefix-map` options that match one path has differed between
+/// versions, and between `__FILE__` and debug information within one
+/// version; whether debug information carries a checksum of each source
+/// file's bytes (and so of the path in a build copy's first line) depends
+/// on the compiler and the format. A compiler without the option fails the
+/// trial like one that applies it differently.
+fn relocates(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
+    let Ok(trial) = tempfile::tempdir_in(dir) else { return false };
+    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
+    let one = trial_object(compiler, name, &trial_dir.join("one/Cactus"), "a");
+    let other = trial_object(compiler, name, &trial_dir.join("another/deeper/Cactus"), "bb");
+    one.is_some() && one == other
+}
+
+/// Look at the compiler at `path`, run as `name`, from scratch: what it is.
+/// Every file the answer was computed from goes into `files`, also when the
+/// answer is "not one the cache works with". `trial_dir` is a directory for
+/// [`relocates`] to try the compiler in.
+fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -> Res<Compiler> {
     // The file that runs, behind whatever links name it (`cc` -> `gcc` ->
     // `x86_64-linux-gnu-gcc-14`).
     let driver = fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?;
+    files.push(Seen::of(&driver)?);
     let bytes = fs::read(&driver).with_context(|| format!("Failed to read {}", driver.display()))?;
     if !bytes.starts_with(b"\x7fELF") {
         bail!("{} is a script, not a compiler cactup can identify", path.display());
@@ -215,19 +314,27 @@ fn examine(path: &Path) -> Res<(Compiler, Vec<Seen>)> {
     };
 
     let mut hasher = Hasher::new("compiler");
-    let mut files = vec![Seen::of(&driver)?];
-    hasher.feed(says.as_bytes());
+    hasher.feed(name.as_bytes());
     hasher.feed(bytes_digest(&bytes).as_bytes());
-    // The programs that do the work, each with the libraries it loads.
+    // The programs that do the work, each with the libraries it loads, and
+    // the files that steer them.
     let mut programs = vec![driver.clone()];
-    let version = match family {
+    let mut steering = Vec::new();
+    match family {
         Family::Clang => {
-            let after = says.split("clang version").nth(1).context("clang did not print its version")?;
-            version_of(after).context("clang printed a version cactup cannot read")?
+            // What it says, without where it is installed; and the
+            // configuration files it says it reads.
+            for line in says.lines() {
+                match line.split_once(": ") {
+                    Some(("InstalledDir", _)) => {}
+                    Some(("Configuration file", file)) => steering.push(PathBuf::from(file.trim())),
+                    _ => hasher.feed(line.as_bytes()),
+                }
+            }
         }
         Family::Gcc => {
-            // The programs the driver hands the work to, and the rules by
-            // which it builds their command lines.
+            hasher.feed(says.as_bytes());
+            // The programs the driver hands the work to.
             for helper in ["cc1", "cc1plus", "as"] {
                 let named = ask(path, &[&format!("-print-prog-name={helper}")])?;
                 // A bare name back means "whatever PATH has": a front end
@@ -248,13 +355,22 @@ fn examine(path: &Path) -> Res<(Compiler, Vec<Seen>)> {
                     None => bail!("{} names no {helper} cactup can find", path.display()),
                 }
             }
+            // The rules by which the driver builds their command lines: the
+            // built-in ones, and a `specs` file that overrides them (an
+            // absolute path back means there is one).
             for question in ["-dumpspecs", "-dumpmachine"] {
                 hasher.feed(ask(path, &[question])?.as_bytes());
             }
-            let full = ask(path, &["-dumpfullversion"]).or_else(|_| ask(path, &["-dumpversion"]))?;
-            version_of(&format!("{}.0", full.trim())).context("gcc printed a version cactup cannot read")?
+            let specs = ask(path, &["-print-file-name=specs"])?;
+            if Path::new(specs.trim()).is_absolute() {
+                steering.push(PathBuf::from(specs.trim()));
+            }
         }
-    };
+    }
+    for file in steering {
+        hasher.feed(file_digest(&file)?.as_bytes());
+        files.push(Seen::of(&file)?);
+    }
     let mut libraries: Vec<PathBuf> = programs.iter().flat_map(|program| loaded_libraries(program)).collect();
     libraries.sort();
     libraries.dedup();
@@ -263,7 +379,7 @@ fn examine(path: &Path) -> Res<(Compiler, Vec<Seen>)> {
         hasher.feed(file_digest(&library)?.as_bytes());
         files.push(Seen::of(&library)?);
     }
-    Ok((Compiler { path: path.to_owned(), family, version, id: hasher.hex() }, files))
+    Ok(Compiler { path: path.to_owned(), family, relocates: relocates(path, name, trial_dir), id: hasher.hex() })
 }
 
 #[cfg(test)]
@@ -271,47 +387,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_versions() {
-        assert_eq!(version_of("14.2.0"), Some((14, 2)));
-        assert_eq!(version_of(" 19.1.7 (3+b1)\nTarget: x"), Some((19, 1)));
-        assert_eq!(version_of("8.0"), Some((8, 0)));
-        assert_eq!(version_of("unknown"), None);
-    }
-
-    #[test]
-    fn finds_programs_the_way_a_shell_does() {
+    fn finds_programs_the_way_execvp_does() {
         let sh = find_program(OsStr::new("sh")).unwrap();
         assert!(sh.is_absolute() && sh.ends_with("sh"));
         assert_eq!(find_program(OsStr::new("/bin/sh")).unwrap(), Path::new("/bin/sh"));
         assert!(find_program(OsStr::new("no-such-compiler-anywhere")).is_err());
+        // A name with a slash is a path from the working directory.
+        assert_eq!(find_program(OsStr::new("./x/cc")).unwrap(), std::env::current_dir().unwrap().join("x/cc"));
+    }
+
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
     }
 
     #[test]
-    fn a_script_is_not_a_compiler() {
+    fn a_script_is_not_a_compiler_and_that_is_remembered() {
         let tmp = tempfile::tempdir().unwrap();
-        let script = tmp.path().join("mpicc");
-        fs::write(&script, "#!/bin/sh\nexec gcc \"$@\"\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let err = identify(tmp.path(), script.as_os_str()).unwrap_err().to_string();
+        let mpicc = script(tmp.path(), "mpicc", "exec gcc \"$@\"");
+        let err = identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string();
         assert!(err.contains("is a script"), "{err}");
+        // Remembered: the same answer, from the one file kept for it.
+        assert_eq!(fs::read_dir(tmp.path().join("compilers")).unwrap().count(), 1);
+        assert_eq!(identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string(), err);
+        // Until the file changes.
+        fs::write(&mpicc, "#!/bin/sh\nexec clang \"$@\"\n# changed\n").unwrap();
+        assert!(identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string().contains("is a script"));
     }
 
-    /// With a real GCC, if this host has one.
+    /// The real GCC of this host, if it has one.
+    fn gcc() -> Option<PathBuf> {
+        let gcc = find_program(OsStr::new("gcc")).ok()?;
+        ask(&gcc, &["--version"]).is_ok_and(|says| says.contains("Free Software Foundation")).then_some(gcc)
+    }
+
     #[test]
     fn identifies_gcc_and_remembers_it() {
-        let Ok(gcc) = find_program(OsStr::new("gcc")) else {
-            eprintln!("skipped: no gcc on this host");
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
             return;
         };
-        if !ask(&gcc, &["--version"]).is_ok_and(|says| says.contains("Free Software Foundation")) {
-            eprintln!("skipped: gcc here is not GCC");
-            return;
-        }
         let tmp = tempfile::tempdir().unwrap();
         let first = identify(tmp.path(), OsStr::new("gcc")).unwrap();
         assert_eq!(first.family, Family::Gcc);
         assert_eq!(first.path, gcc);
-        assert!(first.version.0 >= 4 && first.id.len() == 64);
+        assert!(first.relocates && first.id.len() == 64);
 
         // Remembered: one file, and the same answer from it.
         let memos: Vec<_> = fs::read_dir(tmp.path().join("compilers")).unwrap().collect();
@@ -329,6 +451,58 @@ mod tests {
         // g++ is another driver with the same back ends: another identity.
         if find_program(OsStr::new("g++")).is_ok() {
             assert_ne!(identify(tmp.path(), OsStr::new("g++")).unwrap().id, first.id);
+        }
+        // So is the same file under another name: a compiler may behave by
+        // the name it is run by.
+        let alias = tmp.path().join("cc-by-another-name");
+        std::os::unix::fs::symlink(&gcc, &alias).unwrap();
+        assert_ne!(identify(tmp.path(), alias.as_os_str()).unwrap().id, first.id);
+    }
+
+    #[test]
+    fn tries_whether_the_path_map_holds() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(relocates(&gcc, OsStr::new("gcc"), tmp.path()));
+        // Stand-ins that are GCC except for one thing each: applying the
+        // first matching map instead of the last (the maps handed over in
+        // the other order), ignoring the maps, not compiling at all.
+        let split = "maps=; rest=; for a; do case $a in -ffile-prefix-map=*) maps=\"$a $maps\";; *) rest=\"$rest $a\";; esac; done";
+        let first_wins = script(tmp.path(), "first-wins", &format!("{split}\nexec {} $rest $maps", gcc.display()));
+        let no_map = script(tmp.path(), "no-map", &format!("{split}\nexec {} $rest", gcc.display()));
+        for stand_in in [first_wins, no_map, script(tmp.path(), "broken", "exit 1"), PathBuf::from("/nonexistent/cc")] {
+            assert!(!relocates(&stand_in, stand_in.file_name().unwrap(), tmp.path()), "{}", stand_in.display());
+        }
+        // Nothing of the trials is left behind: only the three scripts.
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn a_relative_path_entry_finds_what_execvp_finds() {
+        let tmp = tempfile::tempdir().unwrap();
+        script(tmp.path(), "shadowcc", "exit 0");
+        // `find_program` reads PATH and the working directory of this
+        // process, which other tests share: ask a child, in its own.
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "objcache::identity::tests::child_resolves_shadowcc", "--nocapture", "--ignored"])
+            .current_dir(tmp.path())
+            .env("PATH", format!(".:{}", std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap();
+        let found = String::from_utf8_lossy(&out.stdout);
+        let expected = fs::canonicalize(tmp.path()).unwrap().join("shadowcc");
+        assert!(found.contains(&format!("found {}", expected.display())), "{found}{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Run only by `a_relative_path_entry_finds_what_execvp_finds`.
+    #[test]
+    #[ignore]
+    fn child_resolves_shadowcc() {
+        if let Ok(found) = find_program(OsStr::new("shadowcc")) {
+            println!("found {}", fs::canonicalize(found).unwrap().display());
         }
     }
 }

@@ -221,7 +221,14 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
             // it, run it, and check that the key still describes what was
             // compiled. Here only the compile has any effect.
             let (keyed, key_ms) = timed(|| key::key(&conf, cc_dir, &argv));
-            let (status, compile_ms) = timed(|| run(job, &argv));
+            // The file that was identified is the file that runs.
+            let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.as_path());
+            let (ran, compile_ms) = timed(|| run(job, &argv, identified));
+            let Some(status) = ran else {
+                leave_to(job, &conf, cc_dir, "the compiler cannot be started directly, so the recipe's shell runs it")
+            };
+            // A stop signal from here on ends this process on the spot
+            // (see `run`): nothing below is worth making `make` wait for.
             let (stable, recheck_ms) = timed(|| match &keyed {
                 Ok(keyed) if status.success() => Some(keyed.still_holds()),
                 _ => None,
@@ -238,8 +245,10 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
                 key: keyed.as_ref().ok().map(|keyed| keyed.parts.key()),
                 parts: keyed.as_ref().ok().map(|keyed| keyed.parts.clone()),
                 not_cached: keyed.as_ref().err().cloned(),
+                relocatable: keyed.as_ref().ok().map(key::Keyed::relocatable),
                 stable,
                 text_bytes: keyed.as_ref().ok().map(|keyed| keyed.text_bytes),
+                files: keyed.as_ref().ok().map(|keyed| keyed.files as u64),
                 object_bytes: output.and_then(|output| output.metadata().ok()).map(|meta| meta.len()),
                 key_ms,
                 compile_ms,
@@ -253,18 +262,28 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
     }
 }
 
-/// The compiler, started directly. A shell that sets `_` for the commands
-/// it starts (bash does) set it to this wrapper; the compiler is given what
-/// that shell would have given it, its own path. Under a shell that leaves
-/// `_` alone, so does this.
-fn direct(argv: &[OsString]) -> Command {
-    let mut command = Command::new(&argv[0]);
+/// The compiler, started directly: the file `identified` if the key was
+/// computed for one (under the name the recipe gave, as a `PATH` search
+/// would have started it), else whatever the name leads to now.
+///
+/// A shell that sets `_` for the commands it starts (bash does) set it to
+/// this wrapper; the compiler is given what that shell would have given
+/// it, its own path. Under a shell that leaves `_` alone, so does this.
+fn direct(argv: &[OsString], identified: Option<&Path>) -> Command {
+    let mut command = match identified {
+        Some(file) => {
+            let mut command = Command::new(file);
+            command.arg0(&argv[0]);
+            command
+        }
+        None => Command::new(&argv[0]),
+    };
     command.args(&argv[1..]);
     let set_for_us = std::env::var_os("_").zip(std::env::args_os().next()).is_some_and(|(set, me)| {
         set == me || std::env::current_exe().is_ok_and(|exe| Path::new(&set) == exe)
     });
     if set_for_us {
-        match super::identity::find_program(&argv[0]) {
+        match identified.map(Path::to_owned).ok_or(()).or_else(|()| super::identity::find_program(&argv[0])) {
             Ok(program) => command.env("_", program),
             Err(_) => command.env_remove("_"),
         };
@@ -288,8 +307,10 @@ fn leave_to(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) -> ! {
             key: None,
             parts: None,
             not_cached: Some(why.to_owned()),
+            relocatable: None,
             stable: None,
             text_bytes: None,
+            files: None,
             object_bytes: None,
             key_ms: 0,
             compile_ms: 0,
@@ -339,7 +360,7 @@ fn pass_through(job: &Job) -> ! {
     if let Some(argv) = job.argv() {
         // Returns only if the program could not be started this way; the
         // recipe's shell may still know how.
-        let _ = direct(&argv).exec();
+        let _ = direct(&argv, None).exec();
     }
     hand_to_shell(job)
 }
@@ -375,11 +396,15 @@ fn ignored_signals() -> Res<u64> {
     u64::from_str_radix(mask.trim(), 16).context("/proc/self/status has a SigIgn line that is not a hex mask")
 }
 
-/// Runs in signal context: atomics and one `kill(2)`, nothing else.
+/// Pass `signal` on to the compiler, or to the preprocessor run that
+/// checks the key after it. Runs in signal context: atomics and `kill(2)`,
+/// nothing else.
 fn pass_on(signal: i32) {
-    let child = rustix::process::Pid::from_raw(CHILD.load(Ordering::SeqCst));
-    if let (Some(child), Some(signal)) = (child, rustix::process::Signal::from_named_raw(signal)) {
-        let _ = rustix::process::kill_process(child, signal);
+    let Some(signal) = rustix::process::Signal::from_named_raw(signal) else { return };
+    for child in [&CHILD, &key::PREPROCESSOR] {
+        if let Some(child) = rustix::process::Pid::from_raw(child.load(Ordering::SeqCst)) {
+            let _ = rustix::process::kill_process(child, signal);
+        }
     }
 }
 
@@ -400,7 +425,11 @@ fn pass_on(signal: i32) {
 /// A terminal sends its signals to the whole foreground process group, so
 /// the compiler gets a Ctrl-C twice: once from the terminal, once passed
 /// on. It dies of the first.
-fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
+///
+/// `None`: the compiler could not be started this way, and nothing has
+/// run. The recipe's shell may still know how (a keyword such as `time`, a
+/// function, a script without an interpreter line).
+fn run(job: &Job, argv: &[OsString], identified: Option<&Path>) -> Option<ExitStatus> {
     // The build script's self-test has checked that this can be read here.
     let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
@@ -411,29 +440,41 @@ fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
             continue;
         }
         let on_signal = move || {
+            if PHASE.load(Ordering::SeqCst) == AFTER_COMPILE {
+                // The compiler has finished; what still runs is this
+                // process's own check of the key. End it and go, the way a
+                // compiler still running would have gone: by the signal, so
+                // that `make` discards the object as unfinished. (The
+                // preprocessor's driver is ended; a back end it started
+                // finds its output closed.)
+                pass_on(signal);
+                if signal != SIGQUIT {
+                    let _ = signal_hook::low_level::emulate_default_handler(signal);
+                }
+                signal_hook::low_level::exit(128 + signal);
+            }
             PENDING.store(signal, Ordering::SeqCst);
             pass_on(signal);
         };
-        // SAFETY: the handler touches atomics and makes one raw `kill`
-        // system call (rustix makes it without libc), all async-signal-safe.
+        // SAFETY: the handler touches atomics, makes raw `kill` system calls
+        // (rustix makes them without libc), and ends the process by the
+        // signal's default action or `_exit`: all async-signal-safe.
         if unsafe { signal_hook::low_level::register(signal, on_signal) }.is_err() {
             debug("cannot watch for signals");
             pass_through(job)
         }
     }
 
-    // Not startable this way: the recipe's shell may still know how (a
-    // keyword such as `time`, a function, a script without an interpreter
-    // line). The handlers above do not survive becoming that shell.
-    let Ok(mut child) = direct(argv).spawn() else {
+    // The handlers above do not survive becoming the shell that runs what
+    // cannot be started here.
+    let Ok(mut child) = direct(argv, identified).spawn() else {
         // Asked to stop before there was a compile to stop: becoming the
         // shell now would lose that signal and run the compile after all.
         if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
             let _ = signal_hook::low_level::emulate_default_handler(signal);
             std::process::exit(128 + signal);
         }
-        debug("the compiler cannot be started directly");
-        hand_to_shell(job)
+        return None;
     };
     CHILD.store(child.id() as i32, Ordering::SeqCst);
     PHASE.store(COMPILING, Ordering::SeqCst);
@@ -448,10 +489,10 @@ fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
     match child.wait() {
         Ok(status) => {
             EXIT_CODE.store(exit_code(status), Ordering::SeqCst);
-            PHASE.store(AFTER_COMPILE, Ordering::SeqCst);
             // The pid is free to be someone else's from here on.
             CHILD.store(0, Ordering::SeqCst);
-            status
+            PHASE.store(AFTER_COMPILE, Ordering::SeqCst);
+            Some(status)
         }
         Err(e) => {
             eprintln!("cactup: lost track of the compiler it was wrapping ({}): {e}", argv[0].to_string_lossy());

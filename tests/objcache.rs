@@ -26,10 +26,15 @@ impl Build {
 
     /// With the whole tree below a directory named `parent`.
     fn under(parent: &str, mode: &str) -> Self {
+        Self::named(parent, "sim", mode)
+    }
+
+    /// [`Self::under`], with the configuration called `config`.
+    fn named(parent: &str, config: &str, mode: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         // make compares physical paths; so does the probe.
         let root = fs::canonicalize(tmp.path()).unwrap().join(parent).join("Cactus");
-        let config = root.join("configs/sim");
+        let config = root.join("configs").join(config);
         let cc = config.join(".cactup-builds/0000/cc");
         for dir in [&cc, &config.join("config-data"), &config.join("build/Thorn"), &config.join("scratch")] {
             fs::create_dir_all(dir).unwrap();
@@ -316,7 +321,12 @@ fn a_compiler_that_cannot_start_fails_as_it_does_in_the_shell() {
         let build = Build::new(mode);
         let out = build.wrap("/nonexistent/bin/gcc", &["-c", "a.c"]).output().unwrap();
         assert_ran(&out, "", &text(&direct.stderr), 127);
-        assert!(build.events().is_empty(), "{mode}");
+        // A recording build says what became of the compile: the shell's.
+        let events = build.events();
+        match mode {
+            "record" => assert!(events.len() == 1 && events[0].contains("the recipe's shell runs it"), "{events:?}"),
+            _ => assert!(events.is_empty(), "{events:?}"),
+        }
     }
     // No compiler at all is not something a recipe can ask for.
     let build = Build::new("record");
@@ -619,4 +629,309 @@ fn the_probe_declines_with_one_line_and_its_own_status() {
     }
 
     declined(&Command::new(CACTUP).arg("__cc-probe").output().unwrap(), "without a configuration file");
+}
+
+// ---------------------------------------------------------------------------
+// Keys, with real compilers.
+
+/// Is `compiler` on this host, and one the cache keys? (A test that needs it
+/// says so and passes without it.)
+fn have(compiler: &str) -> bool {
+    let build = Build::new("record");
+    fs::write(build.config.join("build/Thorn/probe.c"), "int probe;\n").unwrap();
+    let ran = build.wrap(compiler, &["-c", "-o", "probe.o", "probe.c"]).current_dir(build.config.join("build/Thorn")).output();
+    let keyed = ran.is_ok_and(|out| out.status.success()) && build.events().first().is_some_and(|e| e.contains("\"key\""));
+    if !keyed {
+        eprintln!("skipped: no {compiler} on this host that the cache keys");
+    }
+    keyed
+}
+
+/// One Cactus-shaped compile: a thorn's source copied into the build
+/// directory with a line directive naming where it came from, a header from
+/// the thorn's source directory, and one from outside the tree.
+struct Unit<'a> {
+    build: &'a Build,
+    source: PathBuf,
+    object: PathBuf,
+    header: PathBuf,
+}
+
+const UNIT_HEADER: &str = "static inline int twice(int x) { return 2 * x; } /* doubled */\n";
+const UNIT_SOURCE: &str = "#include \"unit.h\"\n#include \"lib.h\"\n#include <assert.h>\n\
+    const char *where(void) { return __FILE__; }\n\
+    int sum(int n, const int *v) {\n  int s = LIB_START;\n\
+    #pragma omp parallel for reduction(+:s)\n  for (int i = 0; i < n; i++) s += twice(v[i]);\n\
+    \x20 assert(s >= 0);\n  return s;\n}\n";
+
+impl<'a> Unit<'a> {
+    /// `lib` is a directory outside every tree, the same for all of them.
+    fn new(build: &'a Build, suffix: &str, lib: &Path) -> Self {
+        Self::with_line_directive(build, suffix, lib, true)
+    }
+
+    /// With or without the line directive Cactus begins a build copy with
+    /// when the option list asks for line directives.
+    fn with_line_directive(build: &'a Build, suffix: &str, lib: &Path, line_directive: bool) -> Self {
+        let thorn = build.root.join("arrangements/Arr/Thorn/src");
+        fs::create_dir_all(&thorn).unwrap();
+        let original = thorn.join(format!("unit.{suffix}"));
+        let source = build.config.join(format!("build/Thorn/unit.{suffix}"));
+        fs::write(&original, UNIT_SOURCE).unwrap();
+        let directive = if line_directive { format!("#line 1 \"{}\"\n", original.display()) } else { String::new() };
+        fs::write(&source, format!("{directive}{UNIT_SOURCE}")).unwrap();
+        fs::write(thorn.join("unit.h"), UNIT_HEADER).unwrap();
+        fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
+        let object = build.config.join(format!("build/Thorn/unit.{suffix}.o"));
+        Self { build, source, object, header: thorn.join("unit.h") }
+    }
+
+    fn args(&self, flags: &[&str], lib: &Path) -> Vec<String> {
+        let mut args: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
+        let path = |path: &Path| path.display().to_string();
+        args.extend(["-c".to_owned(), "-o".to_owned(), path(&self.object), path(&self.source)]);
+        args.push(format!("-I{}", path(self.header.parent().unwrap())));
+        args.push(format!("-I{}", path(lib)));
+        args
+    }
+
+    /// Compile through the wrapper from `dir` (below the configuration),
+    /// and return what it logged: the key, and whether another tree can
+    /// share it. `None`: not keyed.
+    fn keyed_from(&self, dir: &str, compiler: &str, flags: &[&str], lib: &Path) -> Option<(String, bool)> {
+        let before = self.build.events().len();
+        let args = self.args(flags, lib);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let cwd = self.build.config.join(dir);
+        let out = self.build.wrap(compiler, &args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+        assert!(out.status.success(), "{compiler} {flags:?}: {}", text(&out.stderr));
+        let events = self.build.events();
+        assert_eq!(events.len(), before + 1);
+        let event: serde_json::Value = serde_json::from_str(&events[before]).unwrap();
+        Some((event.get("key")?.as_str()?.to_owned(), event["relocatable"].as_bool()?))
+    }
+
+    fn keyed(&self, compiler: &str, flags: &[&str], lib: &Path) -> Option<(String, bool)> {
+        self.keyed_from("scratch", compiler, flags, lib)
+    }
+
+    fn why_not(&self, compiler: &str, flags: &[&str], lib: &Path) -> String {
+        assert_eq!(self.keyed(compiler, flags, lib), None);
+        let event: serde_json::Value = serde_json::from_str(self.build.events().last().unwrap()).unwrap();
+        event["not_cached"].as_str().unwrap().to_owned()
+    }
+
+    /// The object of the same compile run the way a serving cache will run
+    /// it: with the Cactus root and the configuration directory mapped to
+    /// fixed names, the configuration's map last.
+    fn mapped_object(&self, compiler: &str, flags: &[&str], lib: &Path) -> Vec<u8> {
+        let mut args = self.args(flags, lib);
+        args.push(format!("-ffile-prefix-map={}/=./", self.build.root.display()));
+        args.push(format!("-ffile-prefix-map={}/=./configs/@config/", self.build.config.display()));
+        let cwd = self.build.config.join("scratch");
+        let out = Command::new(compiler).args(&args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+        assert!(out.status.success(), "{compiler} {args:?}: {}", text(&out.stderr));
+        fs::read(&self.object).unwrap()
+    }
+}
+
+/// The claim a cache stands on, tried for real: where two compiles in two
+/// trees — elsewhere on disk, under another configuration name — share a
+/// key, compiling them as a serving cache would gives one object, byte for
+/// byte. And the cases meant to share a key do.
+#[test]
+fn compiles_that_share_a_key_produce_the_same_object() {
+    let lib = tempfile::tempdir().unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap();
+    for (compiler, suffix) in [("gcc", "c"), ("g++", "cc"), ("clang", "c"), ("clang++", "cc")] {
+        if !have(compiler) {
+            continue;
+        }
+        let clang = compiler.starts_with("clang");
+        for flags in [
+            &["-O2"][..],
+            &["-g", "-O2"],
+            &["-g", "-O0"],
+            &["-g3", "-O0"],
+            &["-gdwarf-4", "-O1"],
+            &["-O2", "-fopenmp"],
+            &["-g", "-O2", "-fopenmp"],
+            &["-g", "-O2", "-fPIC", "-march=native", "-Wall"],
+            &["-g", "-O2", "-DNDEBUG"],
+        ] {
+            // Build copies with a line directive and without: with one,
+            // every name in the object is the original's; without, Clang's
+            // debug information has a checksum of each file.
+            for line_directive in [true, false] {
+                let (here, there) = (Build::named("a", "sim", "record"), Build::named("b/deeper", "sim-debug", "record"));
+                let unit = |build| Unit::with_line_directive(build, suffix, &lib, line_directive);
+                let (ours, theirs) = (unit(&here), unit(&there));
+                let what = format!("{compiler} {flags:?}, line directive: {line_directive}");
+                // `-march=native` is not keyed on a host whose processors
+                // differ: there the compiler itself makes two objects of
+                // one compile, by the core it happens to run on.
+                if flags.contains(&"-march=native") && ours.keyed(compiler, flags, &lib).is_none() {
+                    let why = ours.why_not(compiler, flags, &lib);
+                    assert!(why.contains("this host's processors are not all alike"), "{what}: {why}");
+                    continue;
+                }
+                let (key, relocatable) = ours.keyed(compiler, flags, &lib).unwrap_or_else(|| panic!("{what}: not keyed"));
+                let (their_key, _) = theirs.keyed(compiler, flags, &lib).unwrap_or_else(|| panic!("{what}: not keyed"));
+                // Clang's OpenMP puts source paths where no map reaches:
+                // such a key must know where the tree is. Everything else
+                // here is meant to be shared.
+                let shareable = !(clang && flags.contains(&"-fopenmp"));
+                assert_eq!(relocatable, shareable, "{what}");
+                assert_eq!(key == their_key, shareable, "{what}");
+                if key == their_key {
+                    let (object, their_object) = (ours.mapped_object(compiler, flags, &lib), theirs.mapped_object(compiler, flags, &lib));
+                    assert!(object == their_object, "{what}: one key, two objects");
+                    // The same tree compiled again is the same object, too.
+                    assert!(object == ours.mapped_object(compiler, flags, &lib), "{what}: not reproducible");
+                }
+            }
+        }
+    }
+}
+
+/// A header beside the tree, in a directory whose name only *begins* like
+/// the tree's (`Cactus-libs` beside `Cactus`): the compiler does not map
+/// it, and neither may the key.
+#[test]
+fn a_directory_that_begins_like_the_tree_is_not_the_tree() {
+    for compiler in ["gcc", "clang"] {
+        if !have(compiler) {
+            continue;
+        }
+        let (here, there) = (Build::named("a", "sim", "record"), Build::named("b", "sim", "record"));
+        // One library directory for both trees, named like `here`'s root.
+        let lib = PathBuf::from(format!("{}-libs", here.root.display()));
+        fs::create_dir_all(&lib).unwrap();
+        let (ours, theirs) = (Unit::new(&here, "c", &lib), Unit::new(&there, "c", &lib));
+        let flags = &["-g", "-O2"][..];
+        let (key, _) = ours.keyed(compiler, flags, &lib).unwrap();
+        let (their_key, _) = theirs.keyed(compiler, flags, &lib).unwrap();
+        assert_eq!(key, their_key, "{compiler}: the library's path is the same absolute path for both");
+        assert!(ours.mapped_object(compiler, flags, &lib) == theirs.mapped_object(compiler, flags, &lib), "{compiler}");
+    }
+}
+
+/// What changes the object changes the key: the cases two reviews found
+/// that an earlier key missed, each through the real wrapper.
+#[test]
+fn what_the_object_depends_on_is_in_the_key() {
+    let lib = tempfile::tempdir().unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap();
+    for compiler in ["gcc", "clang"] {
+        if !have(compiler) {
+            continue;
+        }
+        let build = Build::new("record");
+        let unit = Unit::new(&build, "c", &lib);
+        let key = |flags: &[&str]| unit.keyed(compiler, flags, &lib).unwrap_or_else(|| panic!("{compiler} {flags:?}: not keyed")).0;
+        let base = key(&["-g", "-O2"]);
+        assert_eq!(key(&["-g", "-O2"]), base, "{compiler}: the same compile again");
+
+        // Spacing, a comment, text the preprocessor drops: all of it is in
+        // debug information one way or another (columns, checksums).
+        let edits: [(&str, &dyn Fn(&str) -> String); 3] = [
+            ("spacing", &|text| text.replace("int s = LIB_START;", "int  s  =  LIB_START;")),
+            ("a comment", &|text| text.replace("return s;", "return s; /* the sum */")),
+            ("skipped text", &|text| format!("{text}#if 0\nnever compiled\n#endif\n")),
+        ];
+        for (what, edit) in edits {
+            let original = fs::read_to_string(&unit.source).unwrap();
+            fs::write(&unit.source, edit(&original)).unwrap();
+            assert_ne!(key(&["-g", "-O2"]), base, "{compiler}: {what} in the source");
+            fs::write(&unit.source, &original).unwrap();
+        }
+        fs::write(&unit.header, UNIT_HEADER.replace("doubled", "twice over")).unwrap();
+        assert_ne!(key(&["-g", "-O2"]), base, "{compiler}: a comment in a header");
+        fs::write(&unit.header, UNIT_HEADER).unwrap();
+        // Put back, the key is what it was: old entries stay good.
+        assert_eq!(key(&["-g", "-O2"]), base, "{compiler}: reverted");
+
+        // A header outside the tree.
+        fs::write(lib.join("lib.h"), "#define LIB_START 1\n").unwrap();
+        assert_ne!(key(&["-g", "-O2"]), base, "{compiler}: a library header");
+        fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
+
+        // The directory the compile runs in, with debug information.
+        let elsewhere = unit.keyed_from("build/Thorn", compiler, &["-g", "-O2"], &lib).unwrap().0;
+        assert_ne!(elsewhere, base, "{compiler}: the working directory");
+        let plain = key(&["-O2"]);
+        assert_eq!(unit.keyed_from("build/Thorn", compiler, &["-O2"], &lib).unwrap().0, plain, "{compiler}: without it, not");
+
+        // Flags the reader does not know for certain are not keyed at all.
+        for flags in [&["-x", "c++"][..], &["-grecord-gcc-switches"], &["-fsanitize=undefined"], &["-O4"]] {
+            let why = unit.why_not(compiler, flags, &lib);
+            assert!(why.contains("the cache"), "{compiler} {flags:?}: {why}");
+        }
+
+        // Another program of the compiler's name, first on PATH through a
+        // relative entry: that is what would run, and it is not a compiler
+        // the cache can identify.
+        let scratch = build.config.join("scratch");
+        executable(&scratch.join(compiler), &format!("#!/bin/sh\nexec /usr/bin/env PATH=\"${{PATH#.:}}\" {compiler} -O3 \"$@\"\n"));
+        let args = unit.args(&["-O2"], &lib);
+        let path = format!(".:{}", std::env::var("PATH").unwrap());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = build.wrap(compiler, &args).current_dir(&scratch).env("PATH", &path).output().unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let last = build.events().pop().unwrap();
+        assert!(last.contains("is a script, not a compiler cactup can identify") && !last.contains("\"key\""), "{last}");
+        fs::remove_file(scratch.join(compiler)).unwrap();
+    }
+}
+
+/// A stop signal while the key is being checked after the compile ends the
+/// wrapper at once, as it would have ended a compiler still running.
+#[test]
+fn a_signal_during_the_check_after_the_compile_is_not_waited_out() {
+    if !have("gcc") {
+        return;
+    }
+    // A check that never finishes: real GCC (only a compiler the cache
+    // identifies gets a check), and a header that is a pipe with nobody
+    // writing to it once the compile is through.
+    let build = Build::new("record");
+    let lib = tempfile::tempdir().unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap();
+    let unit = Unit::new(&build, "c", &lib);
+    let fifo = lib.join("lib.h");
+    fs::remove_file(&fifo).unwrap();
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    // One write for each reader before the check: the key's preprocessor
+    // run, the key's own read of the file, and the compile.
+    let feed = |times: usize| {
+        let fifo = fifo.clone();
+        std::thread::spawn(move || {
+            for _ in 0..times {
+                fs::write(&fifo, "#define LIB_START 0\n").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        })
+    };
+    let feeder = feed(3);
+    let args = unit.args(&["-O2"], &lib);
+    let cwd = build.config.join("scratch");
+    let mut child = build.wrap("gcc", &args.iter().map(String::as_str).collect::<Vec<_>>()).current_dir(&cwd).spawn().unwrap();
+    feeder.join().unwrap();
+    let waited = std::time::Instant::now();
+    while !unit.object.exists() {
+        assert!(waited.elapsed() < std::time::Duration::from_secs(20), "the compile never finished");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(child.try_wait().unwrap().is_none(), "the check should be waiting on the pipe");
+
+    let asked = std::time::Instant::now();
+    assert!(Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap().success());
+    let status = child.wait().unwrap();
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    assert!(asked.elapsed() < std::time::Duration::from_secs(2));
+    // Let go of the back end still waiting to open the pipe (not joined: if
+    // nothing is waiting, neither is there anything to let go of).
+    feed(1);
+    std::thread::sleep(std::time::Duration::from_millis(100));
 }

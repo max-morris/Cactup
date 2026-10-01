@@ -26,24 +26,37 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                 Some(name) => name,
                 None => installation.meta()?.active_config()?.to_owned(),
             };
+            // Both builds are found before anything is printed: a report
+            // that ends in an error is not half a report.
             let build = Recorded::open(&installation, &name, attempt, None)?;
-            println!("{}", build.title().bold());
-            print!("{}", summary(&build.events));
-
-            if against.is_none() && against_installation.is_none() && against_attempt.is_none() {
-                return Ok(());
-            }
-            let other_installation = match against_installation {
-                Some(alias) => named_installation(ctx, &alias)?,
-                None => Installation::new(installation.alias.clone(), installation.root.clone()),
+            let compare = against.is_some() || against_installation.is_some() || against_attempt.is_some();
+            let other = match compare {
+                false => None,
+                true => {
+                    let other_installation = match against_installation {
+                        Some(alias) => named_installation(ctx, &alias)?,
+                        None => Installation::new(installation.alias.clone(), installation.root.clone()),
+                    };
+                    let other_name = against.unwrap_or_else(|| name.clone());
+                    // Compared with itself, a build serves everything: the
+                    // build to compare with is another one.
+                    let same_config = other_installation.root == installation.root && other_name == name;
+                    if same_config && against_attempt == Some(build.attempt) {
+                        bail!(
+                            "build attempt {:04} of config \"{name}\" would be compared with itself; name another \
+                             attempt, config or installation to compare against",
+                            build.attempt
+                        );
+                    }
+                    Some(Recorded::open(&other_installation, &other_name, against_attempt, same_config.then_some(build.attempt))?)
+                }
             };
-            let other_name = against.unwrap_or_else(|| name.clone());
-            // Compared with itself, a build serves everything: the build to
-            // compare with is another one.
-            let same_config = other_installation.root == installation.root && other_name == name;
-            let other = Recorded::open(&other_installation, &other_name, against_attempt, same_config.then_some(build.attempt))?;
-            println!("\n{}", format!("against {}", other.title()).bold());
-            print!("{}", comparison(&build.events, &other.events, long));
+            println!("{}", build.title().bold());
+            print!("{}{}", build.unreadable_note(), summary(&build.events));
+            if let Some(other) = other {
+                println!("\n{}", format!("against {}", other.title()).bold());
+                print!("{}{}", other.unreadable_note(), comparison(&build.events, &other.events, long));
+            }
             Ok(())
         }
     }
@@ -62,6 +75,8 @@ struct Recorded {
     config: String,
     attempt: u32,
     events: Vec<Event>,
+    /// Lines of the log that are not events this cactup can read.
+    unreadable: usize,
 }
 
 impl Recorded {
@@ -91,8 +106,24 @@ impl Recorded {
                 })?
             }
         };
-        let events = event::read(&log(attempt))?;
-        Ok(Self { alias: installation.alias.clone(), config: name.to_owned(), attempt, events })
+        let (events, unreadable) = event::read(&log(attempt))?;
+        if events.is_empty() && unreadable > 0 {
+            bail!(
+                "build attempt {attempt:04} of config \"{name}\" recorded its compiles in a form this cactup cannot \
+                 read (another version wrote it); build it again with `cactup -K build-cache=record build {name}`"
+            );
+        }
+        Ok(Self { alias: installation.alias.clone(), config: name.to_owned(), attempt, events, unreadable })
+    }
+
+    /// A line for the report when part of the log could not be read, so the
+    /// numbers under it are not taken for the whole build.
+    fn unreadable_note(&self) -> String {
+        match self.unreadable {
+            0 => String::new(),
+            1 => format!("  {}\n", "1 line of this build's log cannot be read and is not counted".yellow()),
+            lines => format!("  {}\n", format!("{lines} lines of this build's log cannot be read and are not counted").yellow()),
+        }
     }
 
     fn title(&self) -> String {
@@ -155,6 +186,10 @@ fn summary(events: &[Event]) -> String {
         ));
     }
     out.push_str(&format!("  keyed: {} of {total} ({})\n", keyed.len(), percent(keyed.len() as u64, total)));
+    // The rest are keyed with this installation's and configuration's own
+    // paths in the key: sound, and of use to later builds of this one only.
+    let relocatable = keyed.iter().filter(|e| e.relocatable == Some(true)).count();
+    out.push_str(&format!("    with a key another installation or configuration can share: {relocatable} of {}\n", keyed.len()));
     let mut reasons = BTreeMap::new();
     for reason in events.iter().filter_map(|e| e.not_cached.as_deref()) {
         *reasons.entry(reason.to_owned()).or_default() += 1;
@@ -235,6 +270,7 @@ fn comparison(ours: &[Event], theirs: &[Event], long: bool) -> String {
                         ("arguments", mine.arguments != theirs.arguments),
                         ("environment", mine.environment != theirs.environment),
                         ("preprocessed text", mine.text != theirs.text),
+                        ("files read", mine.files != theirs.files),
                     ];
                     let differing: Vec<&str> = parts.iter().filter(|(_, differs)| *differs).map(|(part, _)| *part).collect();
                     match differing.as_slice() {
@@ -281,6 +317,7 @@ mod tests {
             arguments: arguments.into(),
             environment: "e".into(),
             text: text.into(),
+            files: format!("files of {text}"),
         }
     }
 
@@ -293,8 +330,10 @@ mod tests {
             key: Some(parts.key()),
             parts: Some(parts),
             not_cached: None,
+            relocatable: Some(true),
             stable: Some(true),
             text_bytes: Some(1_000_000),
+            files: Some(12),
             object_bytes: Some(500_000),
             key_ms: 10,
             compile_ms,
@@ -303,7 +342,16 @@ mod tests {
     }
 
     fn not_keyed(unit: &str, why: &str, compile_ms: u64) -> Event {
-        Event { key: None, parts: None, not_cached: Some(why.into()), stable: None, text_bytes: None, ..keyed(unit, parts("", ""), compile_ms) }
+        Event {
+            key: None,
+            parts: None,
+            not_cached: Some(why.into()),
+            relocatable: None,
+            stable: None,
+            text_bytes: None,
+            files: None,
+            ..keyed(unit, parts("", ""), compile_ms)
+        }
     }
 
     #[test]
@@ -324,6 +372,7 @@ mod tests {
         let text = summary(&events);
         assert!(text.contains("compiles recorded: 4\n"), "{text}");
         assert!(text.contains("keyed: 2 of 4 (50%)\n"), "{text}");
+        assert!(text.contains("with a key another installation or configuration can share: 2 of 2\n"), "{text}");
         assert!(text.contains("     2  Fortran is not cached yet\n"), "{text}");
         assert!(text.contains("Fortran       2 compiles,      0 keyed,     1.0 s compiling (20% of the build's)"), "{text}");
         assert!(text.contains("compiling 5.0 s; keying 0.0 s (1%)"), "{text}");
@@ -354,11 +403,11 @@ mod tests {
         assert!(text.contains("would be served: 2 of 6 keyed compiles (33%), 2.0 s of 10.5 s compile time (19%)"), "{text}");
         assert!(text.contains("would miss: 4\n"), "{text}");
         for line in [
-            "     1  differs in: preprocessed text\n",
+            "     1  differs in: preprocessed text, files read\n",
             "     1  differs in: arguments\n",
             "     1  not compiled in the other build\n",
             "     1  not stored by the other build (it failed there, or its key did not hold)\n",
-            "    T/edited.c.o: differs in: preprocessed text\n",
+            "    T/edited.c.o: differs in: preprocessed text, files read\n",
             "    T/new.c.o: not compiled in the other build\n",
         ] {
             assert!(text.contains(line), "{line:?} not in\n{text}");
@@ -385,7 +434,8 @@ mod tests {
 
         // Attempt 3 recorded nothing: the newest that did is 2.
         let newest = Recorded::open(&installation, "sim", None, None).unwrap();
-        assert_eq!((newest.attempt, newest.events.len()), (2, 2));
+        assert_eq!((newest.attempt, newest.events.len(), newest.unreadable), (2, 2, 0));
+        assert_eq!(newest.unreadable_note(), "");
         assert_eq!(newest.title(), "sim, build attempt 0002 (installation et)");
         assert_eq!(Recorded::open(&installation, "sim", None, Some(2)).unwrap().attempt, 1);
         assert_eq!(Recorded::open(&installation, "sim", Some(1), None).unwrap().attempt, 1);
@@ -395,5 +445,21 @@ mod tests {
         assert!(Recorded::open(&installation, "nope", None, None).err().unwrap().to_string().contains("no config named \"nope\""));
         std::fs::remove_file(log_path(&config_dir, 1)).unwrap();
         assert!(err(None, Some(2)).contains("no other build of config \"sim\""), "{}", err(None, Some(2)));
+
+        // Lines this cactup cannot read are counted and said; a log with
+        // nothing else is an error, not an empty build.
+        let append = |attempt: u32, line: &str| {
+            use std::io::Write;
+            let path = log_path(&config_dir, attempt);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut log = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+            writeln!(log, "{line}").unwrap();
+        };
+        append(2, "{\"compiler\":\"gcc\",\"some-older-format\":true}");
+        let partly = Recorded::open(&installation, "sim", Some(2), None).unwrap();
+        assert_eq!((partly.events.len(), partly.unreadable), (2, 1));
+        assert!(partly.unreadable_note().contains("1 line of this build's log cannot be read and is not counted"));
+        append(3, "{\"compiler\":\"gcc\",\"some-older-format\":true}");
+        assert!(err(Some(3), None).contains("in a form this cactup cannot read"), "{}", err(Some(3), None));
     }
 }

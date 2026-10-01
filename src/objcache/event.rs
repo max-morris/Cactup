@@ -32,13 +32,22 @@ pub struct Event {
     /// Why there is no key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_cached: Option<String>,
-    /// Was the preprocessed text the same after the compile as before it?
-    /// Only then would the object have been stored.
+    /// Is the key free of where the installation is and what the
+    /// configuration is called (`key::PathMap`)? Only such a key can be
+    /// shared with another installation or configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocatable: Option<bool>,
+    /// Were the preprocessed text and the files behind it the same after
+    /// the compile as before it? Only then would the object have been
+    /// stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable: Option<bool>,
-    /// How much preprocessed text the key covers, and how big the object is.
+    /// How much preprocessed text the key covers, how many files it was
+    /// made from, and how big the object is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_bytes: Option<u64>,
     /// Wall-clock milliseconds: computing the key, the compile itself, and
@@ -61,11 +70,16 @@ impl Event {
     }
 }
 
-/// Every event in the log at `path`. A line that does not parse (a write
-/// cut short by a full disk) is skipped: the rest is still worth reading.
-pub fn read(path: &Path) -> Res<Vec<Event>> {
+/// Every event in the log at `path`, and the number of lines that are not
+/// one: a write cut short by a full disk, or a log some other cactup wrote
+/// (the format is not kept between versions). The rest is still worth
+/// reading, as long as the reader is told.
+pub fn read(path: &Path) -> Res<(Vec<Event>, usize)> {
     let text = std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    Ok(text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect())
+    let lines = text.lines().count();
+    let events: Vec<Event> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let unreadable = lines - events.len();
+    Ok((events, unreadable))
 }
 
 #[cfg(test)]
@@ -84,8 +98,10 @@ mod tests {
             key: None,
             parts: None,
             not_cached: Some("Fortran is not cached yet".into()),
+            relocatable: None,
             stable: None,
             text_bytes: None,
+            files: None,
             object_bytes: Some(1024),
             key_ms: 1,
             compile_ms: 250,
@@ -94,7 +110,7 @@ mod tests {
         plain.append(&log);
         plain.append(&log);
         std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(b"{\"compiler\":\"cut sho").unwrap();
-        assert_eq!(read(&log).unwrap(), [plain.clone(), plain]);
+        assert_eq!(read(&log).unwrap(), (vec![plain.clone(), plain], 1));
         assert!(read(&tmp.path().join("missing")).is_err());
     }
 }

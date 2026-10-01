@@ -43,7 +43,7 @@ the last milestone, for when that host is not at hand.
 | Milestone | Scope | State |
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
-| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 1) |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 2, after a rework of the key) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
@@ -100,44 +100,83 @@ stored or served, and the real compile is untouched (spec §18.5, §18.6).
 - `src/objcache/hash.rs`: framed SHA-256.
 - `src/objcache/compile.rs`: the GCC/Clang command-line reader (a list of
   known flags; anything else is "not cached").
-- `src/objcache/identity.rs`: which compiler, by content (driver, GCC's
-  back ends and assembler, the shared libraries they load), remembered per
-  attempt.
+- `src/objcache/identity.rs`: which compiler, by content (the file `execvp`
+  would run, the name it is run by, GCC's back ends, assembler and `specs`
+  file, Clang's configuration files, the shared libraries they load),
+  remembered per attempt, also when the answer is "not one the cache works
+  with"; and the trial of the path map (`relocates`).
 - `src/objcache/platform.rs`: machine, universe, environment-setup digest
   (frozen by `prepare`), and the compiling host's architecture, processor
-  kinds and OS release.
+  kinds (with each processor's caches) and OS release; whether the host's
+  processors are all of one kind.
 - `src/objcache/environment.rs`: the allowlisted environment.
-- `src/objcache/key.rs`: the path map, the preprocessor run, the five-part
-  key.
+- `src/objcache/key.rs`: the path map, the preprocessor run, the bytes of
+  every file it names, the six-part key.
 - `src/objcache/event.rs`: the event log's format.
 - `src/commands/cache.rs`, `CacheCommand` in `src/args.rs`: `cactup cache
   report`.
+- `tests/objcache.rs`: besides the wrapper tests, the claim itself tried
+  with the real compilers of the host (`gcc`, `g++`, `clang`, `clang++`,
+  nine flag sets, build copies with and without a line directive): two
+  trees at different paths with configurations of different names; where
+  the keys agree, the objects compiled with the map's flags must be the
+  same bytes.
 - The points carried over from M0a's round 4 (all but the `SIGPIPE` one,
   which is documented in spec §18.4 as a limit): the compiler's `_`, the
   narrower `~` rule with a reason on record, the self-test's third run and
   its `&&` chains, a compiler on a continuation line, the `BASH_ENV`
   wording, the self-test test over `CACTUP_TEST_MAKES`, more shell words.
 
-First numbers (2026-10-01, `plato`, GCC 14.2, make 4.4.1, an *unoptimized*
+**How the key changed after review round 1** (both reviewers showed pairs
+of compiles with one key and two objects; see the verdicts below):
+
+- The key now has a sixth part: the bytes of every file the preprocessor
+  names. `-C` is gone (it turned a directive behind a comment into text).
+- The path map follows the compilers' own rule (a plain string prefix, at
+  the start of a name; maps given with a trailing `/`), and is used only
+  for a compiler that passed a trial: a miniature Cactus compile in two
+  places must give one object. Clang with `-fopenmp` keeps its paths.
+- Not keyed at all: `-x`, sanitizers, `-mllvm`, every `-g…`/`-O…` flag not
+  listed by name, a source with `.incbin`/`.include`, a compile that would
+  use a precompiled header, Clang with `-include`, and `-march=native` on a
+  host with more than one kind of processor.
+- The compiler that is identified is the file that runs.
+
+Numbers (2026-10-01, `plato`, GCC 14.2, make 4.4.1, an *unoptimized*
 cactup, `-j 8`; M0c is where these get measured properly):
 
-- `smoke` (25 thorns): 357 compiles, 307 keyed (all C and C++); the 50
-  Fortran compiles are 2% of the compile time. All 357 objects are byte for
-  byte those of a build without the cache.
+- `smoke` (25 thorns): 357 compiles, 307 keyed (all C and C++), all 307
+  with keys free of the installation's paths; the 50 Fortran compiles are
+  2% of the compile time. All 357 objects are byte for byte those of a
+  build without the cache.
 - `smoke2`, the same sources under another configuration name, against
   `smoke`: **307 of 307 keyed compiles would be served** (98% of the
   compile time).
-- `ext`, which adds HDF5 and two thorns that use it and builds from another
-  optionlist file, against `smoke`: 301 of 334 (90%); of the 33 misses, 27
-  are files `smoke` does not have and 6 differ in their preprocessed text.
-- Cost: keying summed to about 30% of the compile time and checking again
-  to about 25%; wall clock went from about 16 s to about 39 s for `smoke`.
-  The debug build of cactup is a large part of that (it reads 170 MB of
-  preprocessed text line by line), and the second preprocessor run is the
-  obvious thing to make cheaper. A release build has not been measured.
+- `ext`, which adds HDF5 and two thorns that use it, against `smoke`: 185
+  of 334 (55%, 65% of the compile time). Before the rework it was 301 of
+  334: 116 compiles now miss because a generated header they include
+  (`cctk_DefineThorn.h`, `CParameterStructNames.h`) has other bytes in a
+  configuration with more thorns, though it gives them the same tokens.
+  This is the price of keying bytes, and a decision for Max (below).
+- Cost: keying summed to 19% of the compile time and checking again to
+  17%; wall clock 18 s against 16 s plain for `smoke`. (Before the rework:
+  30% and 25%, 39 s; `-C` made the preprocessor's output much larger.)
+
+**Found on the way: `-march=native` is not a function of its inputs on
+`plato`.** Its sixteen cores are of three kinds, and GCC resolves `native`
+to three different sets of cache parameters depending on the core it lands
+on, so one compile run twice gave two objects (the audit test caught it as
+"one key, two objects", one run in six). Such compiles are now not keyed
+on a host whose processors differ. The configurations above do not use
+`-march=native`; 11 of the MDB's optionlists do.
+
+The logs behind these numbers are `smoke` attempt 0011, `smoke2` attempt
+0002 and `ext` attempt 0005 in `~/cacti/build-cache`, all recorded by the
+revision under review.
 
 "Would be served" rests on the path mapping of spec §18.5 producing the
-same object, which only audit mode (M1b) can show per compiler.
+same object, which the per-compiler trial and the audit test support and
+audit mode (M1b) has yet to try on real Cactus compiles.
 
 ## Verification done for M0a (2026-10-01)
 
@@ -193,6 +232,10 @@ compiler but GCC, any machine but `plato`.
   passed its gate.
 - 2026-10-01: M0b implemented, with the points carried over from M0a's
   round 4, and sent to the twin review.
+- 2026-10-01: M0b review round 1: both BLOCKED, on the soundness of the
+  key. Key reworked (bytes of every file read, compiler-faithful path map
+  behind a per-compiler trial, stricter flag list, compiles with no one
+  object declined), the audit test added; sent to round 2.
 
 ## Review verdicts
 
@@ -326,7 +369,55 @@ the shell. **This is the second known way, after the two-file stand-down
 scan, that the cache could change what gets compiled; both need a setup
 nobody is known to have, and both are Max's call.**
 
-### M0b, round 1: pending
+### M0b, round 1 (on `f8d632e`): BLOCKED by both
+
+Reviewer A found nine, reviewer B five, ways for two compiles to share a
+key and produce different objects, each reproduced with GCC 14.2 or Clang
+19.1 through the real wrapper. Record mode's own promises held (nothing
+added to the compile; objects identical to a plain build).
+
+1. (both) Whitespace: the preprocessed text collapses spacing, but debug
+   information records columns, and `__builtin_COLUMN` and
+   `std::source_location` put them into code. (A) Clang's debug information
+   also changes with a comment or with text in `#if 0`. *Fixed: the bytes
+   of every file read are in the key.*
+2. (A) `-C` made a directive behind a same-line comment into text, so the
+   header it includes was not read. *Fixed: no `-C`.*
+3. (both) Flags admitted by prefix: `-grecord-command-line`,
+   `-gembed-source` passed as "debug levels". (A) `-x` after the source was
+   keyed as if it applied. *Fixed: levels listed by name; `-x` not keyed.*
+4. (both) The path map did not reach everything: sanitizers and Clang's
+   OpenMP embed unmapped paths. *Fixed: sanitizers not keyed; Clang with
+   OpenMP keeps the installation's paths in the key.*
+5. (B; A as non-blocking) The map replaced whole path components, the
+   compilers replace string prefixes (`Cactus-libs` beside `Cactus`); (A)
+   and not only at the start of a path. *Fixed: maps end in `/`, the key
+   applies them as the compiler does.*
+6. (both) Inputs in no part of the key: `.incbin`, and a `.gch` beside a
+   header. *Fixed: both detected, such compiles not keyed.*
+7. (A blocking, B non-blocking) Clang with `-g`: the working directory is
+   in the object and was not in the key. *Fixed: keyed with debug
+   information, with `PWD`.*
+8. (A) GCC's on-disk `specs` file was not part of the compiler's identity.
+   *Fixed.*
+9. (A blocking, B non-blocking) Relative `PATH` entries: the compiler
+   identified could be another file than the one that ran. *Fixed: found
+   as `execvp` finds it, and the identified file is the one started.*
+
+Non-blocking points taken: "the last matching map wins" was checked on one
+Clang only (now tried per compiler, as part of a trial of the whole map);
+Clang's identity ignored the name it is run by and included its install
+path, and missed its configuration files; `stepping` and cache sizes in the
+platform; a compiler that fails identification was examined again on every
+compile (the answer is remembered now); a stop signal during the check
+after the compile was waited out (the wrapper now ends at once — and the
+first version of that fix hung, because the preprocessor's back end kept
+the pipe open; a test with a header that is a FIFO pins it); `cache
+report` compared an attempt with itself, skipped unreadable lines silently
+and printed half a report before an error; a failed direct start in record
+mode left no line in the log; `-g3 -g` was read as level 2; spec §18.5 now
+lists every residual it knows instead of naming the environment as the one
+weak part; the evidence above was regenerated with one revision.
 
 ### M0a, round 4 (on `300fd0b`): SIGN-OFF by both
 
@@ -369,9 +460,10 @@ compiled; see "What M0b is"):
 
 ## Decisions waiting for Max
 
-Neither blocks M0b; both are about what the cache may do in a setup nobody
-is known to have. They are the two known ways it could change what gets
-compiled.
+The first two are about what the cache may do in a setup nobody is known
+to have: the two known ways it could change what gets compiled. The other
+two came out of M0b and decide how much the cache is worth; neither blocks
+M0b, and both want the M0c numbers first.
 
 1. **A thorn's compile recipe defined indirectly** (in a file its
    `make.code.deps` includes, or under a computed name) is not seen by the
@@ -384,6 +476,22 @@ compiled.
    would be bypassed. Closing it means sending every compile to the shell
    wherever `BASH_ENV` is set, which module systems do, so the cache would
    be off on most clusters. Accept as a stated limit?
+
+3. **Keying every byte costs hits when generated headers change.** Adding
+   a thorn changes headers that nearly every source includes, and all of
+   those sources miss, though their tokens are the same (55% served where
+   the text alone gave 90%). The bytes matter to the object only through
+   debug information (columns; Clang's per-file checksums) and
+   `__builtin_COLUMN`. Options, for after M0c has numbers on a full
+   thornlist: accept it; or have a serving cache compile with
+   `-gno-column-info` and key the text plus line numbers (changes what
+   `gdb` knows about columns, as the path map changes the paths it sees);
+   or key bytes only for files that contribute text. The last two need the
+   same kind of proof as the path map.
+4. **`-march=native` on a machine with mixed cores** (`plato` is one) is
+   not cached, because the compiler itself is not deterministic there. A
+   cache could pin compiles to one kind of core instead, at the cost of
+   using fewer cores. Clusters are not affected.
 
 ## Next step
 

@@ -113,9 +113,30 @@ the planned keying and serving will rely on.
 - **A5 (M0a). GNU make.** Checked on 4.2.1, 4.3 and 4.4.1 (real Cactus
   trees on 4.3 and 4.4.1); a self-test in the build script decides for
   anything else. `/proc/self/status` must be readable where compiles run.
-- **A6 (later). Compile recipe shape.** One source file per compiler
-  invocation, with `-c` and `-o <absolute object path>`, run from cwd
-  `$(TOP)/scratch`, on the processed copy in `$(TOP)/build/<Thorn>/...`.
+- **A6 (M0b). Compile recipe shape.** One source file per compiler
+  invocation, with `-c` and `-o <object>`, and no flag that makes the
+  compiler write a second file. A compile of any other shape still runs
+  exactly as given, but gets no key and will never be served: in
+  particular, **adding `-MD`/`-MMD -MF ...` to the compile recipe would
+  turn the cache off for every compile** until the cache side has learned
+  to store the dependency file too. Tell us before that lands.
+- **A10 (M0b). What goes into a key, as far as the make system decides it.**
+  None of this can break a build or make the cache wrong; all of it decides
+  how often the cache can serve.
+  (a) The key covers the *bytes* of every file a compile reads: the
+  processed source copy and every header. Generated headers that most
+  sources include (`cctk_DefineThorn.h`, `CParameterStructNames.h`, the
+  per-thorn `cctk_Arguments` and parameter headers) therefore decide the
+  hit rate. They must be the same bytes for the same inputs: no
+  timestamps, no absolute paths, no ordering that varies from run to run
+  (today they are: two configurations of one thornlist share every key).
+  (b) Absolute paths are tolerated in exactly these places: file names on
+  the command line, `-I` directories, and the *first line* of a processed
+  source copy when it is `#line <n> "<absolute path of the original>"`
+  (what `C_LINE_DIRECTIVES = yes` writes today). An absolute path anywhere
+  else in a file a compile reads ties the object to its installation.
+  (c) Compiles run from `<config>/scratch`; the Cactus root and the
+  configuration directory are the two prefixes the cache maps away.
 - **A7 (later). Dependency files** come from a separate `$(CC) -E -M ...`
   run (`C_DEPEND` and friends), not from the compile itself.
 - **A8 (later). Fortran module files** all land flat in `$(TOP)/scratch`,
@@ -167,11 +188,12 @@ With `build-cache = record` (M0a, on `feature/build-cache` only):
 - **C3.** Each object compile runs as a child of a short-lived cactup
   process which appends one line to `<attempt>/cc/events.jsonl`.
   Compilers, flags and objects are unchanged. **Since M0b a recording
-  build is noticeably slower**: for every C and C++ compile, cactup also
-  runs the compiler's preprocessor twice (`-E -C`, before and after the
-  compile) to key it. On the 25-thorn test configuration that summed to
-  about half the compile time again, with an unoptimized cactup; proper
-  numbers come with M0c. Do not take speed measurements with
+  build is slower**: for every C and C++ compile, cactup also runs the
+  compiler's preprocessor twice (`-E`, before and after the compile) and
+  reads every file that run names, twice, to key it; once per build and
+  compiler it also compiles two tiny trial files. On the 25-thorn test
+  configuration that summed to about a third of the compile time again;
+  proper numbers come with M0c. Do not take speed measurements with
   `build-cache = record` on and compare them with ones taken with it off.
   **The recipe text changes**: with `SILENT=no`, or `make -n`, the compile
   line reads `'<cactup>' __cc '<conf>' 'gcc' '/bin/bash' <flags...>` where
@@ -180,7 +202,7 @@ With `build-cache = record` (M0a, on `feature/build-cache` only):
 - **C4.** One line in the build output after the compile step:
   `cactup: build cache: compiles recorded: N`. Files in the attempt
   directory: `cc/config.toml`, `cc/inject.mk`, `cc/selftest/`,
-  `cc/selftest.log`, `cc/events.jsonl`.
+  `cc/selftest.log`, `cc/events.jsonl`, `cc/compilers/`, `cc/hosts/`.
 - **C5.** Edits in the cactup repo: `Cargo.toml` (`rustix` as a direct
   dependency), `src/main.rs` (wrapper dispatch at the top of `main`),
   `src/build/mod.rs` (`prepare`: two build-script steps, through one call
@@ -266,3 +288,8 @@ every milestone.
   (a recording build now runs the preprocessor twice more per C/C++
   compile) updated; A1's command position now allows a continuation line
   after a separator.
+- 2026-10-01  cache side  M0b after its first review: the key now covers
+  the bytes of every file a compile reads, not only the preprocessed text.
+  A6 is a current dependency (and says what `-MD` in the compile recipe
+  would do); A10 added (generated headers must be deterministic and free of
+  absolute paths; where absolute paths are tolerated); C3 and C4 updated.

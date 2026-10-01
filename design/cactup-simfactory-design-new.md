@@ -4698,7 +4698,9 @@ cannot start itself goes to a shell of the same kind:
 - **A plain command** is what the cache works with: words the shell would
   pass on unchanged, the first naming a program the shell would take from
   `PATH` or by its path (`gcc`, `nvcc --compiler-bindir /usr/bin/g++`). The
-  wrapper starts it directly. If that fails — a script without a `#!` line,
+  wrapper starts it directly — where the cache has identified the compiler
+  (§18.5), the very file it identified, under the name the recipe gave. If
+  that fails — a script without a `#!` line,
   a name only the shell's lookup finds — the shell runs it, and its message
   and exit status are the shell's own if it cannot either.
 - **A name the shell resolves itself** goes to the shell even when a
@@ -4742,60 +4744,81 @@ script run by hand from such a parent can show that.
   `<attempt>/cc/events.jsonl`, best-effort (`objcache::event::Event`): the
   compiler, the object's name below `build/`, the key and its parts or the
   reason there is none (§18.5), the exit status, and the time keying, the
-  compile and the check afterward took. A compile left to the shell, or to
-  another wrapper, gets a line with the reason and nothing else — the
-  wrapper becomes that compile and does not see how it ends. A thorn the
-  fragment stood down for is not in the log at all.
+  compile and the check afterward took. A compile left to the shell (also
+  one the wrapper tried to start and could not), or to another wrapper,
+  gets a line with the reason and nothing else — the wrapper becomes that
+  compile and does not see how it ends. A thorn the fragment stood down for
+  is not in the log at all.
 
 Passing a signal on needs `kill(2)`, which std does not offer; the wrapper
 uses `rustix` (D13).
 
 ### 18.5 Keys
 
-A key is a digest that two compiles share exactly when they would produce
-the same object (rule 1). `objcache::key` builds it from five parts, each a
+A key is a digest that two compiles share only when they would produce the
+same object (rule 1). `objcache::key` builds it from six parts, each a
 SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
 so that two builds can be compared part by part:
 
 - **Preprocessed text.** The output of the same compiler with the same
-  arguments and `-E` in place of `-c -o <object>`. Whatever the source
-  includes, however include paths and macros are set, is in that text, so
-  no header is tracked or guessed at. Comments are kept (`-C`: an edit to
-  one moves no code but can move a column in a diagnostic or in debug
-  information; a comment inside a directive is dropped with the directive
-  and moves nothing), and with `-g3` so are macro definitions (`-dD`),
-  since the object's debug information then has them.
+  arguments and `-E` in place of `-c -o <object>`. It shows what the include
+  paths and macro definitions made of the source: which files were found,
+  which branches were taken. No header is tracked or guessed at. With `-g3`
+  macro definitions are kept (`-dD`), since the object's debug information
+  then has them.
+- **Files read.** The bytes of every file the preprocessor names in its
+  line markers: the source and every header. The text alone forgets what
+  the compiler does not. Spacing and comments move the columns that debug
+  information, `__builtin_COLUMN` and `std::source_location` record; Clang's
+  debug information carries a checksum of each file. So an edit to a
+  comment, or to text inside `#if 0`, changes the key. A file a `#line`
+  names that cannot be read is keyed as absent (generated code names its
+  origin so; the file that was really read is named too).
 - **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
-  and `-I`/`-D`/`-U` (whose whole effect is in the text), in order, plus
-  the language. `objcache::compile` reads GCC and Clang command lines from
-  a list of what it knows: a flag that is not on it, or one that names
-  another input (plugins, profiles, precompiled headers, LTO), another
-  output (`-MD`, split DWARF, coverage) or another program (`-B`, `-Wa,`),
-  makes the whole command line "not cached".
-- **Compiler.** `objcache::identity`: the bytes of the driver, for GCC of
-  `cc1`, `cc1plus` and the assembler it names, and of every shared library
-  each of those loads (as the dynamic loader resolves them), plus what the
-  driver says of itself (`--version`, and for GCC its specs and target).
-  Not its path and not its modification time. The driver's own bytes must
-  say it is GCC or Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes
-  `--version` on to a compiler and is not one, and is not cached. Fortran
-  is not cached yet. The answer is remembered per build attempt
-  (`<attempt>/cc/compilers/`) and reused while every file it came from
-  still has the same size, change time and inode.
+  and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
+  order, plus the language by the source's suffix, and with debug
+  information the working directory (and `PWD`, which compilers prefer when
+  it names the same place). `objcache::compile` reads GCC and Clang command
+  lines from a list of what it knows. A flag that is not on it makes the
+  whole command line "not cached"; so does one that names another input
+  (plugins, profiles, precompiled headers, LTO, sanitizer lists), another
+  output (`-MD`, split DWARF, coverage), another program (`-B`, `-Wa,`), or
+  whose meaning depends on where it stands (`-x`). Optimization and debug
+  levels are listed one by one, since `-g…` also begins flags that record
+  the command line or embed the source. Two families are admitted by
+  prefix, because their members are too many to list and none of them names
+  a file: `-W…` (diagnostics) and `-m…` (machine options; `-mllvm` and
+  Clang's `-module…` excepted).
+- **Compiler.** `objcache::identity`: the bytes of the file that would run
+  (found as `execvp` finds it, relative and empty `PATH` entries included),
+  the name it is run by (`clang` and `clang++` are one file), for GCC the
+  bytes of `cc1`, `cc1plus` and the assembler it names and of its `specs`
+  file if it has one, for Clang of the configuration files it says it
+  reads, and of every shared library each program loads (as the dynamic
+  loader resolves them), plus what the driver says of itself (`--version`
+  without the installation directory, and for GCC its built-in specs and
+  target). Not its path and not its modification time. The driver's own
+  bytes must say it is GCC or Clang: a wrapper (`mpicc`, a Cray `cc`, a
+  script) passes `--version` on to a compiler and is not one, and is not
+  cached. Fortran is not cached yet. The answer — also "not one the cache
+  works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)
+  and reused while every file it came from still has the same size, change
+  time and inode. The wrapper starts the file that was identified, under
+  the name the recipe gave.
 - **Platform** (D15). `objcache::platform`: what `prepare` froze — the
   cactup machine, the build universe, the digest of the build-phase
   environment setup — and what the wrapper finds on the host that compiles:
-  the architecture, each kind of processor in `/proc/cpuinfo` (vendor,
-  family, model, feature flags; not speed or microcode), and
+  the architecture, each kind of processor (from `/proc/cpuinfo`: vendor,
+  family, model, stepping, feature flags, cache size; and its caches as
+  `/sys/devices/system/cpu` describes them; not speed or microcode), and
   `/etc/os-release`. The host half is there because the machine name can be
   wrong or too coarse (detection keeps the last machine when no machine
   claims a host; `generic` covers every unclaimed one; login and compute
-  nodes may differ), and it is always in the key, so `-march=native`,
-  `-xHost` and compilers that tune for the build host unasked need no
-  special case. A change of machine keys differently and invalidates
-  nothing; so does a change of hardware or of the operating system under
-  one machine. Remembered per attempt, host and boot
-  (`<attempt>/cc/hosts/`).
+  nodes may differ), and it is always in the key, so `-march=native` and
+  compilers that tune for the build host unasked need no flag to say so. A
+  change of machine keys differently and invalidates nothing; so does a
+  change of hardware or of the operating system under one machine.
+  Remembered per attempt, host and boot (`<attempt>/cc/hosts/`).
 - **Environment.** `objcache::environment`: the variables compilers are
   known to read — locale, `SOURCE_DATE_EPOCH`, the loader's and the
   compiler's search paths, the loaded-modules lists, and the families MPI
@@ -4803,36 +4826,120 @@ so that two builds can be compared part by part:
   write another file (`DEPENDENCIES_OUTPUT`, …) makes the compile not
   cached. The whole environment cannot be keyed: Cactus's makefiles export
   well over a hundred variables into every recipe, many of them the
-  configuration's own paths. **This is the part that can be wrong**: a
-  variable on no list that changes some compiler's output would be a false
-  hit. The environment-setup digest in the platform part and the
-  loaded-modules variables narrow that; it is not closed.
+  configuration's own paths.
+
+**Compiles with no one object.** Some compiles the cache declines because
+nothing it could key would say what comes out:
+
+- A source whose text makes the assembler read a file (`.incbin`,
+  `.include`): the object holds bytes no part of the key covers.
+- A precompiled header that would be used unasked. GCC takes
+  `<header>.gch` beside a header in place of the header; its `-E` is asked
+  to say so (`-fpch-preprocess`), and such a compile is not cached. Clang
+  looks for one only beside a file given with `-include`, and its `-E`
+  does not say; a Clang compile with `-include` or `-imacros` is not
+  cached.
+- `-march=native` (or `-mtune=`, `-mcpu=`) on a host whose processors are
+  not all of one kind (performance and efficiency cores): the compiler
+  targets the core it happens to run on. Seen on a hybrid Intel
+  workstation: one compile, run twice, gave two objects (GCC resolved three
+  different cache sizes across its sixteen cores).
 
 **Paths.** Cactus compiles with absolute paths, and an object records them:
-`__FILE__` in every `CCTK_WARN`, the compile directory in debug information.
-As it stands an object belongs to one configuration of one installation.
-For compilers that take `-ffile-prefix-map` (GCC 8, Clang 10), the key is
-computed as if the compile ran with the Cactus root mapped to `.` and the
-configuration directory to `./configs/@config` (`key::PathMap`), which is
-how a serving cache will run it: the map's flags go to the preprocessor run
-(the compiler then maps `__FILE__` where the text uses it), and the
-directories are replaced by the same names in the keyed arguments and in
-the text's line markers, which the compiler does not map. The flags name
-the Cactus root first and the configuration last: of several maps that
-match, GCC and Clang take the last given (checked on GCC 14.2 and Clang
-19.1; a serving cache has to check it per compiler, in audit mode). A
-compiler without the flag keeps its paths in the key, and with debug
-information its working directory too. **Nothing is added to the real
-compile while the cache only records**: the objects of a recording build
-are byte for byte those of a build without the cache.
+`__FILE__` in every `CCTK_WARN`, file names and the compile directory in
+debug information. As it stands an object belongs to one configuration of
+one installation. Where it is known to hold, the key is computed as if the
+compile ran with the Cactus root mapped to `./` and the configuration
+directory to `./configs/@config/` (`key::PathMap`), which is how a serving
+cache will run it:
+
+- The compiler is given `-ffile-prefix-map=<root>/=./` and then
+  `-ffile-prefix-map=<config>/=./configs/@config/` for the preprocessor
+  run, and maps `__FILE__` where the text uses it. Each directory is given
+  with its trailing `/`, in the spelling cactup has for it and in its
+  physical one.
+- The key maps what the compiler does not map in `-E` output — the file
+  names in line markers — and the keyed arguments and the working
+  directory, by the compiler's own rule: a plain string prefix at the start
+  of a name, the most specific directory first. `<root>-libs/include` is
+  not under `<root>/`, for the compiler and for the key alike.
+- Each file's bytes are keyed under its mapped name. Cactus begins a build
+  copy with `#line 1 "<absolute path of the original>"` when the option
+  list asks for line directives; in a file's *first line* such a name is
+  keyed as mapped (the compiler takes a name from that line and nothing
+  else). Further down, what looks like a directive may be the inside of a
+  comment or a string, and is keyed as the bytes it is.
+- **Whether the map holds is tried, per compiler** (`identity::relocates`,
+  once per build attempt): a Cactus compile in miniature — a build copy
+  with a line directive, a header from the tree, one from the
+  configuration, `__FILE__` in each, debug information on — is compiled in
+  two trees at different paths with configurations of different names, with
+  the flags above, and the two objects must be the same bytes. A compiler
+  without the option, one that applies the first matching map and not the
+  last (compilers have differed, between versions and between `__FILE__`
+  and debug information), or one whose debug information carries the
+  unmapped path some other way, fails the trial and keeps the
+  installation's paths in its keys.
+- Clang with `-fopenmp` keeps them too: its OpenMP source-location strings
+  hold the unmapped path.
+
+A key made without the map is sound and of use to later builds of the same
+configuration only. The log says for each key whether it is free of the
+installation's paths. **Nothing is added to the real compile while the
+cache only records**: the objects of a recording build are byte for byte
+those of a build without the cache.
 
 **Record mode** does around each compile what a serving cache does around
-one it has to run: key it, run it, and compute the text digest again to see
-whether the key still describes what was compiled (a header edited during
-the compile would otherwise leave an object of the new text under the key
-of the old). Only the compile has any effect. The two preprocessor runs are
-the cost a build pays for the cache on a miss, and the log has what each
-took.
+one it has to run: key it, run it, and compute the text and file digests
+again to see whether the key still describes what was compiled (a header
+edited during the compile would otherwise leave an object of the new text
+under the key of the old). Only the compile has any effect. The two
+preprocessor runs and the reading of the files are the cost a build pays
+for the cache on a miss, and the log has what each took. A stop signal that
+arrives during the check afterward ends the wrapper on the spot, by that
+signal (`make` then discards the object, as it would have with the compiler
+still running); the compile is not logged.
+
+**What the key rests on, and where it could be wrong.** Stated so that
+nobody has to find out:
+
+- *What the compiler reads that the preprocessor does not name.* The key
+  covers the files in `-E`'s line markers. A file read some other way that
+  this section does not list is not in it. Known and handled: assembler
+  includes, precompiled headers, `#embed` (its bytes are in the text).
+  Known and excluded by the flag list: plugins, profiles, sanitizer lists,
+  module maps.
+- *A file changed and changed back* between the key and the check after the
+  compile, with the compile reading the changed bytes in between, passes
+  the check.
+- *The flag families.* A `-W…` or `-m…` flag that names a file or records
+  something outside the key would be admitted. None is known besides the
+  two excepted.
+- *The compiler's identity.* Files a compiler reads by rules of its own
+  that are named nowhere above — a plugin directory, lists in Clang's
+  resource directory, whatever a later version adds — are not hashed.
+- *The path map.* The trial shows the map holds for the trial's compile. A
+  flag on the list that puts an unmapped path into the object where the
+  trial does not look would give two installations one key for two objects
+  (differing in a recorded path, not in code). Known and excluded:
+  sanitizers, Clang's OpenMP. Audit mode (the serving milestone's gate) is
+  what tries it on real compiles.
+- *The environment.* A variable on no list that changes some compiler's
+  output. The environment-setup digest in the platform part and the
+  loaded-modules variables narrow that; it is not closed.
+- *The host.* Two hosts alike in everything the platform part reads and
+  different in something a compiler targets.
+
+**What the key costs in hits.** Keying files by their bytes means that an
+edit which changes no token still misses: every source that includes a
+header misses when that header's bytes change. Cactus generates headers
+that nearly every thorn source includes and that list the configuration's
+thorns (`cctk_DefineThorn.h`, `CParameterStructNames.h`), so adding a thorn
+to a configuration costs more than the new thorn's compiles (measured:
+§18.6's report on a 25-thorn configuration against the same with three
+thorns added dropped from 90% served, with the text alone, to 55%).
+Narrowing that is a design question for the serving milestone, not a
+soundness one.
 
 ### 18.6 `cactup cache report`
 
@@ -4843,17 +4950,23 @@ cactup cache report [<config>] [--attempt N]
 
 Reads the event log of a recording build (the newest attempt of the config
 that has one, or `--attempt`) and prints how many compiles were keyed, per
-language and with the share of compile time; why the others were not; how
+language and with the share of compile time; how many of the keys are free
+of the installation's paths; why the other compiles were not keyed; how
 many keys no longer held after the compile; and what keying and checking
 again cost against the compiles themselves.
 
+The log's format is not kept between versions of cactup (§2.4: no backward
+compatibility). Lines the reader cannot parse are counted and the count is
+printed; a log with nothing else is an error that says to build again.
+
 With any of the `--against` flags it compares with another recording build
 — another config, another installation, or an earlier attempt of the same
-one (never the same attempt) — and says what a cache filled by that build
+one (never the same attempt: naming it is an error) — and says what a cache filled by that build
 would have served: a compile is served if the other build has a compile
 with the same key that succeeded and whose key still held, under whatever
 name. For the rest it finds the same object (by its name below `build/`) in
 the other build and names the parts of the key that differ; `--long` lists
-them one by one. Nothing is read from or written to a cache: both builds
-only recorded, and "would be served" stands on the premise of §18.5's path
-mapping, which serving has yet to prove per compiler.
+them one by one. Both builds are found before anything is printed.
+Nothing is read from or written to a cache: both builds only recorded, and
+"would be served" stands on §18.5's path mapping, which the per-compiler
+trial supports and audit mode has yet to try on real compiles.

@@ -566,8 +566,9 @@ show cactup in front of the compiler.
 
 A recording build is slower than a plain one: for every C and C++ file,
 cactup runs the compiler's preprocessor twice more, before and after the
-compile, which is what a cache has to do for a file it cannot serve.
-`cactup cache report` says what that cost, and what it would buy:
+compile, and reads the source and every header it includes, which is what a
+cache has to do for a file it cannot serve. `cactup cache report` says what
+that cost, and what it would buy:
 
 ```sh
 cactup cache report myconfig                        # what this build recorded
@@ -581,7 +582,23 @@ why the others did not (Fortran is not keyed yet; a compiler cactup does not
 recognize; a flag it does not know). The comparing forms say how many of
 this build's compiles a cache filled by the other build would have served,
 and for the rest, which part of the key differs — the compiler, its
-arguments, the platform, the environment, or the preprocessed source.
+arguments, the platform, the environment, the preprocessed source, or the
+files it was made from.
+
+A key covers every byte of every file a compile reads, so an edit that
+changes no code — a comment, the spacing — is still a different key: debug
+information records columns, and the cache only ever hands back the exact
+object a compile would have produced. Three kinds of compile get no key at
+all, because no key could say what comes out of them: a source that pulls
+in a file through the assembler (`.incbin`), a compile that would use a
+precompiled header, and `-march=native` on a machine whose processor cores
+are not all of one kind (a laptop or workstation with performance and
+efficiency cores: there the compiler targets whichever core it happens to
+run on, and the same compile gives different objects from one run to the
+next).
+
+The log is for the cactup that wrote it: after an update, `cactup cache
+report` may tell you to record the build again.
 
 cactup checks, where the build actually runs, that it can do this safely. If
 it cannot (inside a container that does not see the cactup binary, with a
