@@ -73,6 +73,13 @@ pub struct Compile {
     /// `-march=native` or one of its like: the compiler targets the
     /// processor it finds itself running on.
     pub native: bool,
+    /// The flags that have the compiler write a dependency file while it
+    /// compiles (`-MD -MP -MF <file> -MT <target>`), as given. They change
+    /// neither the object nor the preprocessed text, so they are not in the
+    /// key; and they are kept from the preprocessor runs that make the key,
+    /// which would write the file too. (A cache that serves an object has
+    /// to see that file written: that is what they are kept for.)
+    pub depend: Vec<OsString>,
 }
 
 /// Flags that take their value as the next argument, and go into the key.
@@ -92,7 +99,8 @@ const WITH_VALUE: &[&str] = &[
 /// preprocessed text does not show, or outputs besides the object, or
 /// another program that takes part in the compile. Matched as prefixes.
 const NOT_CACHED: &[&str] = &[
-    // Not compiles to an object.
+    // Not compiles to an object (`-M`, `-MM`; with the rest of the `-M…`
+    // flags that `parse` does not take as dependency output).
     "-E", "-S", "-M",
     // Its effect depends on where it stands among the input files.
     "-x",
@@ -185,7 +193,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     let mut args = args.iter();
     let mut compile_only = false;
     let (mut source, mut output) = (None, None);
-    let (mut preprocess, mut keyed) = (Vec::new(), Vec::new());
+    let (mut preprocess, mut keyed, mut depend) = (Vec::new(), Vec::new(), Vec::new());
     let (mut level, mut openmp, mut forced_include, mut native) = (0, false, false, false);
 
     while let Some(arg) = args.next() {
@@ -210,6 +218,12 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             if output.replace(PathBuf::from(file)).is_some() {
                 return Err("-o is given more than once".to_owned());
             }
+        } else if matches!(flag, "-MD" | "-MMD" | "-MP") {
+            // A dependency file written while compiling.
+            depend.push(arg.clone());
+        } else if let Some((name, value)) = ["-MF", "-MT", "-MQ"].iter().find_map(|name| Some((name, value_of(name).transpose()?))) {
+            depend.push(OsString::from(name));
+            depend.push(value?);
         } else if NOT_CACHED.iter().any(|prefix| flag.starts_with(prefix)) {
             return Err(format!("{flag} is a flag the cache does not follow"));
         } else if let Some(value) = ["-I", "-D", "-U"].iter().find_map(|name| value_of(name).transpose()) {
@@ -265,7 +279,12 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
         return Err("the source file's name has a line break in it".to_owned());
     }
     let (debug, macros_in_debug) = (level > 0, level == 3);
-    Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native })
+    // Where the file goes without `-MF` depends on `-o`, which the
+    // preprocessor runs do not have: a cache could not have it written.
+    if !depend.is_empty() && !depend.iter().any(|flag| flag == "-MF") {
+        return Err("a dependency file is asked for without -MF to say where".to_owned());
+    }
+    Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, depend })
 }
 
 #[cfg(test)]
@@ -349,6 +368,22 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_file_written_while_compiling_is_set_aside() {
+        // What the Cactus recipe gives when dependencies come from the
+        // compile: neither keyed nor handed to the preprocessor.
+        let base = parsed(CACTUS).unwrap();
+        let mut args = vec!["-MD", "-MP", "-MF", "/c/build/T/a.c.d", "-MT", "a.c.o"];
+        args.extend(CACTUS);
+        let compile = parsed(&args).unwrap();
+        assert_eq!(compile.depend, os(&["-MD", "-MP", "-MF", "/c/build/T/a.c.d", "-MT", "a.c.o"]));
+        assert_eq!((&compile.keyed, &compile.preprocess), (&base.keyed, &base.preprocess));
+        assert!(base.depend.is_empty());
+        // Joined values, and the other spellings.
+        let compile = parsed(&["-MMD", "-MFa.d", "-MQ", "a b.o", "-c", "-o", "a.o", "a.c"]).unwrap();
+        assert_eq!(compile.depend, os(&["-MMD", "-MF", "a.d", "-MQ", "a b.o"]));
+    }
+
+    #[test]
     fn flags_with_values_keep_them() {
         let compile = parsed(&["-isystem", "/opt/inc", "--param", "x=1", "-include", "pre.h", "-c", "-o", "a.o", "a.c"]).unwrap();
         assert_eq!(compile.keyed, os(&["-isystem", "/opt/inc", "--param", "x=1", "-include", "pre.h"]));
@@ -365,8 +400,11 @@ mod tests {
             (&["-c", "-o", "a.o", "a.c", "b.c"], "more than one input"),
             (&["-c", "-o", "a.o", "-o", "b.o", "a.c"], "more than once"),
             (&["-E", "-o", "a.i", "a.c"], "-E is a flag"),
-            (&["-c", "-o", "a.o", "a.c", "-MD"], "-MD is a flag"),
-            (&["-c", "-o", "a.o", "a.c", "-MF", "a.d"], "-MF is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-MD"], "without -MF"),
+            (&["-c", "-o", "a.o", "a.c", "-M"], "-M is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-MM"], "-MM is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-MG", "-MD", "-MF", "a.d"], "-MG is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-MD", "-MF"], "nothing after it"),
             (&["-c", "-o", "a.o", "a.c", "-fprofile-use=p"], "does not follow"),
             (&["-c", "-o", "a.o", "a.c", "-flto"], "does not follow"),
             (&["-c", "-o", "a.o", "a.c", "@args"], "does not follow"),

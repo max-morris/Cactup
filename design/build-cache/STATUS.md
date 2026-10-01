@@ -44,7 +44,7 @@ the last milestone, for when that host is not at hand.
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
-| M0c | Measurements in `~/cacti/build-cache`, written results | in progress |
+| M0c | Measurements in `~/cacti/build-cache`, written results | measured; results in `RESULTS-M0c.md`, **waiting for Max**; the code changed since M0b's gate is in review |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
@@ -180,6 +180,36 @@ revision under review.
 same object, which the per-compiler trial and the audit test support and
 audit mode (M1b) has yet to try on real Cactus compiles.
 
+## What M0c is
+
+`RESULTS-M0c.md` has the numbers and what they mean. How they were taken:
+
+- A static release build of cactup at `045eb76`, copied to
+  `~/tmp/build-cache-m0c/cactup`; scripts and build logs beside it.
+- A second installation, `cactup install master -a build-cache-b`
+  (`~/.cactup/cacti/build-cache-b`). The active installation was not
+  changed.
+- In `~/cacti/build-cache`: thornlist `et-trim.th` (the master thornlist
+  minus the CarpetX stack, which does not build on `plato`: ADIOS2 and
+  AMReX do not find the from-source MPI) with option list `et.toml`
+  (config `et`: attempt 0007 recorded, 0008 plain); `linedir.toml`
+  (configs `ld1`, `ld2`, line directives on); `depend.toml` (config `dep`,
+  dependencies written by the compile, built with the flesh at the
+  build-speed branch `5d8deb7` and the flesh then put back on master);
+  `smoke` attempts 0014 to 0017 (edit and revert of a source and a
+  header, both restored); `smoke2` built from `env -i` login shells.
+- In `~/cacti/build-cache-b`: `et` (attempt 0002) and `ld1`.
+
+Code changed after M0b's gate (to go through the reviewers before anything
+builds on it):
+
+- Dependency output written by the compile (`-MD`/`-MMD`, `-MP`, `-MF`,
+  `-MT`/`-MQ`) is understood: not keyed, kept from the preprocessor runs.
+  The build-speed side's recipe needs it (contract A6).
+- The two round 4 remarks: the driver is asked in English
+  (`LC_MESSAGES=C`, other locale categories untouched), and Clang's answer
+  must carry `InstalledDir:` or it is no answer.
+
 ## Verification done for M0a (2026-10-01)
 
 All in `~/cacti/build-cache`, machine `plato`, GCC 14.2, GNU make 4.4.1,
@@ -245,6 +275,10 @@ compiler but GCC, any machine but `plato`.
   (a Clang configuration file chosen by target). Fixed; sent to round 4.
 - 2026-10-01: M0b review round 4: both reviewers SIGN-OFF on `045eb76`.
   M0b has passed its gate. M0c (measurements) started.
+- 2026-10-01: M0c measured and written up (`RESULTS-M0c.md`). Found on
+  the way: the build-speed branch can add `-MD -MP -MF -MT` to compiles;
+  the cache now understands that. The code changed since the gate sent to
+  the reviewers.
 
 ## Review verdicts
 
@@ -570,9 +604,9 @@ shows in `cache report` on a real cluster ("reads a specs file").
 ## Decisions waiting for Max
 
 The first two are about what the cache may do in a setup nobody is known
-to have: the two known ways it could change what gets compiled. The other
-two came out of M0b and decide how much the cache is worth; neither blocks
-M0b, and both want the M0c numbers first.
+to have: the two known ways it could change what gets compiled. The others
+decide how much the cache is worth; `RESULTS-M0c.md` has the numbers for
+them.
 
 1. **A thorn's compile recipe defined indirectly** (in a file its
    `make.code.deps` includes, or under a computed name) is not seen by the
@@ -602,11 +636,20 @@ M0b, and both want the M0c numbers first.
    cache could pin compiles to one kind of core instead, at the cost of
    using fewer cores. Clusters are not affected.
 
+5. **The locale is in the key**, so a session without `LANG` shares
+   nothing with one that has it (measured: 0 of 307). Keep it, narrow it
+   to `LC_CTYPE`/`LC_ALL`, or take it out and store the compiler's
+   messages as they came?
+6. **A GCC with a `specs` file is not cached**, which is every Spack-built
+   GCC. Build the refinement (accept a specs file that differs from the
+   built-in specs in link sections only) before measuring on a cluster?
+7. **Fortran is 31% of the compile time** on the 278-thorn build. The plan
+   has it after C and C++ are served; say if it should move up.
+8. **Go-ahead for M1** (the store, then serving with audit mode): nothing
+   is stored or served until Max has read the results.
+
 ## Next step
 
-M0c: a release build of cactup; a
-second installation (`cactup install`, alias `build-cache-b`, same release)
-for cross-installation numbers; the full Einstein Toolkit thornlist; line
-directives on and off; edit-and-revert of a thorn; a fresh login session;
-wall-clock overhead against an unwrapped build. Write the results up for
-Max before any M1 work: nothing is stored or served until he has seen them.
+Wait for Max on `RESULTS-M0c.md` and the decisions above. Meanwhile only:
+take the code changed since M0b's gate through the reviewers. Then M1a
+(the store), on Max's go-ahead.

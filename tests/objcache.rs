@@ -803,6 +803,49 @@ fn compiles_that_share_a_key_produce_the_same_object() {
     assert!(shared > 0 || !["gcc", "g++", "clang", "clang++"].iter().any(|compiler| have(compiler)), "no compile shared a key");
 }
 
+/// A recipe that has the compiler write its dependency file while it
+/// compiles (`-MD -MP -MF <file> -MT <target>`): the same key and the same
+/// object as without, and the file written by the compile alone — not by
+/// the preprocessor runs that make the key, before or after.
+#[test]
+fn a_dependency_file_written_by_the_compile_changes_nothing() {
+    let lib = tempfile::tempdir().unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap();
+    for (compiler, suffix) in [("gcc", "c"), ("g++", "cc"), ("clang", "c"), ("clang++", "cc")] {
+        if !have(compiler) {
+            continue;
+        }
+        let build = Build::new("record");
+        let unit = Unit::new(&build, suffix, &lib);
+        let (key, _) = unit.keyed(compiler, &["-g", "-O2"], &lib).unwrap();
+        let object = fs::read(&unit.object).unwrap();
+
+        let depfile = unit.object.with_extension("d");
+        let (depfile_name, target) = (depfile.display().to_string(), unit.object.display().to_string());
+        let flags = ["-g", "-O2", "-MD", "-MP", "-MF", &depfile_name, "-MT", &target];
+        let (with_key, _) = unit.keyed(compiler, &flags, &lib).unwrap_or_else(|| panic!("{compiler}: not keyed"));
+        assert_eq!(with_key, key, "{compiler}");
+        assert!(fs::read(&unit.object).unwrap() == object, "{compiler}: the object changed");
+        let written = fs::read_to_string(&depfile).unwrap();
+        assert!(written.starts_with(&format!("{target}:")) && written.contains("unit.h"), "{compiler}: {written}");
+        // Written once, by the compile: a file that is in the way of the
+        // preprocessor runs is not written to.
+        let event: serde_json::Value = serde_json::from_str(build.events().last().unwrap()).unwrap();
+        assert_eq!(event["stable"], true, "{compiler}");
+        fs::remove_file(&depfile).unwrap();
+        fs::create_dir(&depfile).unwrap();
+        let scratch = build.config.join("scratch");
+        let args = unit.args(&flags, &lib);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = build.wrap(compiler, &args).current_dir(&scratch).env("PWD", &scratch).output().unwrap();
+        // The compile cannot write its file and says so; the key was made
+        // all the same, without touching it.
+        assert!(!out.status.success(), "{compiler}");
+        let last = build.events().pop().unwrap();
+        assert!(last.contains(&format!("\"key\":\"{key}\"")) && !last.contains("\"exit\":0"), "{compiler}: {last}");
+    }
+}
+
 /// A path of the tree as the value of a flag. Where the compiler uses it
 /// only to find files, the key has it mapped, and the objects must agree;
 /// where the object keeps the flag as written (GCC records its command

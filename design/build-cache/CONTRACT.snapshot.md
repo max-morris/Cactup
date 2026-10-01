@@ -115,11 +115,20 @@ the planned keying and serving will rely on.
   anything else. `/proc/self/status` must be readable where compiles run.
 - **A6 (M0b). Compile recipe shape.** One source file per compiler
   invocation, with `-c` and `-o <object>`, and no flag that makes the
-  compiler write a second file. A compile of any other shape still runs
-  exactly as given, but gets no key and will never be served: in
-  particular, **adding `-MD`/`-MMD -MF ...` to the compile recipe would
-  turn the cache off for every compile** until the cache side has learned
-  to store the dependency file too. Tell us before that lands.
+  compiler write a second file — with one exception, added for the speed
+  side's `C_DEPEND_COMPILE_FLAGS` recipe (seen in `~/cacti/speedup-build`
+  on 2026-10-01): **dependency output written by the compile is
+  understood** in the form `-MD` or `-MMD`, optional `-MP`, **`-MF <file>`
+  given explicitly**, optional `-MT`/`-MQ <target>`. Those flags are not
+  part of the key (same object with and without them) and are kept from
+  the cache's preprocessor runs. When the cache serves an object it will
+  have the dependency file written by its own preprocessor run with the
+  same flags, so what the cache needs from the recipe is: (a) `-MF` always
+  explicit (without it the file's place depends on `-o`); (b) the fix-up
+  of the file (`DEPEND_COMPILE_FIXER`) stays a recipe line of its own,
+  after the compile, not part of the compiler command; (c) no `-MG`, no
+  `-MJ`. A compile of any other shape still runs exactly as given, but
+  gets no key and will never be served.
 - **A10 (M0b). What goes into a key, as far as the make system decides it.**
   None of this can break a build or make the cache wrong; all of it decides
   how often the cache can serve.
@@ -301,3 +310,20 @@ every milestone.
   absolute paths; where absolute paths are tolerated); C3 and C4 updated.
 - 2026-10-01  cache side  M0b passed its review gate at `045eb76`; landed
   and planned sections updated. No change to A or C since the last entry.
+- 2026-10-01  cache side  **Load on plato:** M0c runs full Einstein Toolkit
+  builds (`-j 8`) in `~/cacti/build-cache` and `~/cacti/build-cache-b`
+  from about 21:00 local for a few hours. Timings either side takes on
+  this host meanwhile are not comparable with quiet-host timings.
+- 2026-10-01  cache side  A6 rewritten: the speed side's
+  `C_DEPEND_COMPILE_FLAGS = -MD -MP` recipe (`-MF ... -MT ...` in
+  `COMPILE_C/CXX/CU`, fix-up in `POSTPROCESS_*`) is being taken up by the
+  cache as it stands; (a)-(c) say what must stay true of it. Not yet
+  through review on the cache side.
+- 2026-10-01  cache side  Load on plato is over (M0c builds finished about
+  22:00). Tested against `build-speedup` `5d8deb7` with
+  `C_DEPEND_COMPILE_FLAGS`/`CXX_DEPEND_COMPILE_FLAGS = -MD -MP`, in the
+  cache side's own installation (flesh checked out at that commit, then
+  put back): 25 thorns, 307 of 307 C/C++ compiles keyed with the same keys
+  as with the option off, and all 357 objects and 357 `.d` files byte for
+  byte those of a build without the cache. Your uncommitted changes to
+  `lib/sbin/CST` and `CSTUtils.pl` were not part of that test.

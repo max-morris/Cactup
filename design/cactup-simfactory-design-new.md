@@ -4790,11 +4790,19 @@ so that two builds can be compared part by part:
   lines from a list of what it knows. A flag that is not on it makes the
   whole command line "not cached"; so does one that names another input
   (plugins, profiles, precompiled headers, LTO, sanitizer lists), another
-  output (`-MD`, split DWARF, coverage), another program (`-B`, `-Wa,`),
+  output (split DWARF, coverage), another program (`-B`, `-Wa,`),
   whose meaning depends on where it stands (`-x`), or that reads a file the
   preprocessor's output does not name (`-imacros`). Optimization and debug
   levels are listed one by one, since `-g…` also begins flags that record
-  the command line or embed the source. Two families are admitted by
+  the command line or embed the source. One second output is understood: a
+  dependency file written while compiling, in the form `-MD` or `-MMD`,
+  `-MP`, `-MF <file>` (required: without it the file's place follows from
+  `-o`), `-MT`/`-MQ <target>` — the form a Cactus recipe gives when
+  dependencies come from the compile itself. These flags change neither
+  the object nor the text, so they are not in the key, and they are kept
+  from the preprocessor runs that make the key, which would write the file
+  too. (A serving cache has to have the file written on a hit; its own
+  preprocessor run, given the flags, does that.) Two families are admitted by
   prefix, because their members are too many to list and none of them names
   a file: `-W…` (diagnostics) and `-m…` (machine options; `-mllvm` and
   Clang's `-module…` excepted).
@@ -4815,7 +4823,11 @@ so that two builds can be compared part by part:
   compile (Clang picks a configuration file by target, so `-m32` can bring
   one in), so **every compile is asked**: the preprocessor run is given
   `-v`, and the driver says on stderr whether it read a configuration file
-  (Clang) or its built-in specs (GCC, which must say so in so many words).
+  (Clang) or its built-in specs (GCC). Each must say a line it always says
+  (`InstalledDir:`, `Using built-in specs.`): an answer without it is no
+  answer, and no key. That run is given English messages (`LC_MESSAGES=C`,
+  no `LANGUAGE`, and `LC_ALL` taken apart into the other categories, which
+  stay as they were: a compiler may read its source by `LC_CTYPE`).
   The compiler as a whole is asked too, once, to spare the compiles the
   asking. Fortran is not cached yet. The answer — also "not one the cache
   works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)

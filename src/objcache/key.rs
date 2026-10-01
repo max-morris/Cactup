@@ -414,6 +414,12 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     if let Some(map) = map {
         command.args(map.flags());
     }
+    for (variable, value) in english_messages(std::env::var_os("LC_ALL")) {
+        match value {
+            Some(value) => command.env(variable, value),
+            None => command.env_remove(variable),
+        };
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -477,19 +483,39 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// to save the asking (`identity::examine`).
 fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
     let said = String::from_utf8_lossy(said);
+    // Silence is not a "no": each family has a line it always prints, and
+    // an answer without it (lost, cut short, in another version's or
+    // another language's wording) is no answer.
     match family {
         Family::Clang => match said.lines().find_map(|line| line.strip_prefix("Configuration file: ")) {
             Some(file) => Err(format!("the compiler reads a configuration file ({file}), which can add flags the cache does not see")),
-            None => Ok(()),
+            None if said.lines().any(|line| line.starts_with("InstalledDir: ")) => Ok(()),
+            None => Err("the compiler does not say whether it reads a configuration file".to_owned()),
         },
-        // GCC says one or the other. Neither (a translation, another
-        // version's wording) is not a "no".
         Family::Gcc => match said.lines().find_map(|line| line.strip_prefix("Reading specs from ")) {
             Some(file) => Err(format!("the compiler reads a specs file ({file}), which can add flags the cache does not see")),
             None if said.lines().any(|line| line == "Using built-in specs.") => Ok(()),
             None => Err("the compiler does not say whether it reads a specs file".to_owned()),
         },
     }
+}
+
+/// The changes to the environment of a preprocessor run that make the
+/// driver's own messages English (GCC translates "Using built-in specs."),
+/// and nothing else: every other locale category stays what it was, since
+/// a compiler may read its source by `LC_CTYPE`. `lc_all` is the value of
+/// `LC_ALL`, which overrides every category and so has to be taken apart
+/// into them.
+fn english_messages(lc_all: Option<OsString>) -> Vec<(&'static str, Option<OsString>)> {
+    // `LANGUAGE` picks message catalogs, ahead of `LC_MESSAGES`.
+    let mut changes = vec![("LC_MESSAGES", Some(OsString::from("C"))), ("LANGUAGE", None)];
+    if let Some(all) = lc_all {
+        changes.push(("LC_ALL", None));
+        for category in ["LC_CTYPE", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"] {
+            changes.push((category, Some(all.clone())));
+        }
+    }
+    changes
 }
 
 /// The names compilers give what is not a file, in line markers.
@@ -654,7 +680,16 @@ mod tests {
         assert!(gcc("").unwrap_err().contains("does not say"));
         assert!(gcc("Es werden eingebaute Spezifikationen verwendet.\n").is_err());
 
+        // A translated GCC is asked in English, with the rest of the
+        // locale left alone.
+        assert_eq!(english_messages(None), [("LC_MESSAGES", Some("C".into())), ("LANGUAGE", None)]);
+        let taken_apart = english_messages(Some("de_DE.UTF-8".into()));
+        assert!(taken_apart.contains(&("LC_ALL", None)) && taken_apart.contains(&("LC_CTYPE", Some("de_DE.UTF-8".into()))));
+        assert!(taken_apart.contains(&("LC_MESSAGES", Some("C".into()))));
+
         let clang = |said: &str| flags_from_elsewhere(Family::Clang, said.as_bytes());
+        assert!(clang("").unwrap_err().contains("does not say"));
+        assert!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\n").is_err());
         assert_eq!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\nInstalledDir: /usr/bin\n"), Ok(()));
         let err = clang("clang version 19.1.7\nTarget: i386-pc-linux-gnu\nConfiguration file: /opt/bin/i386-pc-linux-gnu-clang.cfg\n");
         assert!(err.unwrap_err().contains("i386-pc-linux-gnu-clang.cfg"));
@@ -861,7 +896,8 @@ mod tests {
             return;
         }
         let tree = Tree::new();
-        assert!(tree.why_not(&["-MD"]).contains("-MD is a flag"));
+        assert!(tree.why_not(&["-MD"]).contains("without -MF"));
+        assert!(tree.why_not(&["-MM"]).contains("-MM is a flag"));
         assert!(tree.why_not(&["-fsanitize=address"]).contains("does not follow"));
 
         std::fs::write(tree.source(), "__asm__(\".incbin \\\"blob.bin\\\"\");\n").unwrap();
