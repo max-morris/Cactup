@@ -79,12 +79,16 @@ the planned keying and serving will rely on.
 - **A1 (M0a). The compile recipes are canned sequences** named `COMPILE_C`,
   `COMPILE_CXX`, `COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90`,
   each defined in `configs/<name>/config-data/make.config.rules` exactly
-  once, unconditionally (not inside `ifeq`/`ifdef`), as `define NAME` ...
-  `endef` with nothing else assigning to it, and no nested `define`. Each
+  once, unconditionally (not inside `ifeq`/`ifdef`), as a line `define NAME`
+  with nothing after the name (no `=`, no comment), then `endef`, with
+  nothing else assigning to it and no nested `define`. The rules file must
+  not `include` other makefiles (the probe then declines for the whole
+  build: it cannot see what they define). Each
   body contains exactly one reference to its compiler variable, spelled
   `$(CC)`, `$(CXX)`, `$(CUCC)`, `$(F77)`, `$(F90)`, `$(F90)` respectively,
-  **in command position** (at the start of a recipe line or right after
-  `;`, `&&` or `||`) and as a word of its own. The probe copies the body
+  **in command position** (at the start of a recipe line that does not
+  continue the one above, or right after `;`, `&&` or `||`, outside quotes
+  and backticks) and as a word of its own. The probe copies the body
   and replaces that one reference. A recipe that does not fit is left
   unwrapped (that language is then not cached): so `cd x ; $(CC) ...`
   works, `cd x ; $(LAUNCHER) $(CC) ...` builds fine but uncached.
@@ -248,3 +252,7 @@ every milestone.
   definition; A2 (d), A3's limit and A5's `/proc` added; C2-C5 completed
   (the echoed recipe text, `MAKEFILE_LIST`, the count line, `Cargo.toml`,
   CI). The wrapper now takes the compiler text as an argument.
+- 2026-10-01  cache side  After review round 3: A1 also requires that the
+  rules file includes no other makefile and that `define NAME` has nothing
+  after the name; command position excludes quoted text and continuation
+  lines.

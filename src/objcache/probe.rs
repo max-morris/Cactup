@@ -67,6 +67,14 @@ pub fn selftest_untouched(cc_dir: &Path) -> PathBuf {
     selftest_dir(cc_dir).join("untouched.mk")
 }
 
+/// The file a self-test makefile (`wrapped` or `untouched`) leaves behind
+/// when every one of its checks ran and passed. The build script takes the
+/// file, not make's exit status alone, as the pass: a make that found
+/// nothing to do also exits 0.
+pub fn selftest_passed(cc_dir: &Path, which: &str) -> PathBuf {
+    selftest_dir(cc_dir).join(format!("{which}.passed"))
+}
+
 /// `cactup __cc-probe <config.toml>`: exit 0 with the fragment and the
 /// self-test written, or [`PROBE_DECLINED`] with one line on stderr saying
 /// why the cache stays out of this build.
@@ -94,16 +102,29 @@ fn probe(conf_file: &Path) -> Res<()> {
         bail!("{} is not visible here", conf.cactup.display());
     }
     // Where Cactus's object sub-makes run. make compares its own working
-    // directory against this, and make's is the physical one.
-    let config_dir = fs::canonicalize(&conf.config_dir)
-        .with_context(|| format!("cannot resolve {}", conf.config_dir.display()))?;
-    let build_dir = config_dir.join("build");
-    for path in [&conf.cactup, cc_dir, &build_dir] {
+    // directory against this, and make's is the physical one: `build` may
+    // itself be a link to somewhere roomier. After a `realclean` it is not
+    // there at all (make recreates it as it goes); it is created below, as
+    // a plain directory.
+    let build_dir = conf.config_dir.join("build");
+    let build_dir = match fs::canonicalize(&build_dir) {
+        Ok(physical) => physical,
+        Err(_) => fs::canonicalize(&conf.config_dir)
+            .with_context(|| format!("cannot resolve {}", conf.config_dir.display()))?
+            .join("build"),
+    };
+    let selftest = selftest_dir(cc_dir);
+    for path in [&conf.cactup, cc_dir, &build_dir, &selftest] {
         carried_by_make(path)?;
     }
 
     let rules_path = conf.config_dir.join("config-data/make.config.rules");
     let rules = fs::read_to_string(&rules_path).with_context(|| format!("cannot read {}", rules_path.display()))?;
+    // A recipe redefined in a file the rules include would be one more
+    // definition this reader does not see.
+    if rules.lines().any(|line| matches!(line.split_whitespace().next(), Some("include" | "-include" | "sinclude"))) {
+        bail!("{} includes other makefiles, which cactup does not follow", rules_path.display());
+    }
     let wrapped: Vec<Wrapped> = RECIPES
         .iter()
         .filter_map(|(recipe, var)| {
@@ -116,18 +137,19 @@ fn probe(conf_file: &Path) -> Res<()> {
     }
 
     // Nothing is written before this point: a probe that declines leaves
-    // the configuration as it found it. After a `realclean` there is no
-    // `build` directory yet (make recreates it as it goes), and the
-    // self-test runs in it.
+    // the configuration as it found it.
     let write = |path: PathBuf, text: String| {
         fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))
     };
     fs::create_dir_all(&build_dir).with_context(|| format!("cannot create {}", build_dir.display()))?;
-    let selftest = selftest_dir(cc_dir);
+    // Fresh: what a self-test or a build left here before says nothing
+    // about this one.
+    let _ = fs::remove_dir_all(&selftest);
+    let _ = fs::remove_file(super::events_path(cc_dir));
     fs::create_dir_all(&selftest).with_context(|| format!("cannot create {}", selftest.display()))?;
     write(inject_path(cc_dir), inject_mk(&conf.cactup, conf_file, &inject_path(cc_dir), &build_dir, &wrapped))?;
-    write(selftest_wrapped(cc_dir), selftest_wrapped_mk(&wrapped))?;
-    write(selftest_untouched(cc_dir), SELFTEST_UNTOUCHED.to_owned())?;
+    write(selftest_wrapped(cc_dir), selftest_wrapped_mk(&wrapped, &selftest_passed(cc_dir, "wrapped")))?;
+    write(selftest_untouched(cc_dir), selftest_untouched_mk(&selftest, &selftest_passed(cc_dir, "untouched")))?;
     Ok(())
 }
 
@@ -174,17 +196,24 @@ fn opens_define(line: &str) -> bool {
 /// the like in front?
 fn defines(line: &str, name: &str) -> bool {
     let mut rest = line;
-    while let Some(after) = ["override", "export", "private", "define"]
+    let mut by_define = false;
+    while let Some((word, after)) = ["override", "export", "private", "define"]
         .iter()
-        .find_map(|word| rest.strip_prefix(word).filter(|after| after.starts_with(char::is_whitespace)))
+        .find_map(|word| Some((*word, rest.strip_prefix(word).filter(|after| after.starts_with(char::is_whitespace))?)))
     {
+        by_define |= word == "define";
         rest = after.trim_start();
     }
-    let Some(after) = rest.strip_prefix(name) else { return false };
+    // `COMPILE_CXX` is not `COMPILE_C`: the name has to end where it ends.
+    let Some(after) = rest.strip_prefix(name).filter(|after| !after.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+    else {
+        return false;
+    };
     let after = after.trim_start();
-    // `define NAME` ends the line; an assignment goes on with an operator.
-    // `COMPILE_CXX` is not `COMPILE_C`: its `XX` is neither.
-    (after.is_empty() && rest.len() < line.len()) || ["=", ":=", "::=", "+=", "?=", "!="].iter().any(|op| after.starts_with(op))
+    // After `define` (or `export`), the name is all it takes; whatever
+    // follows it is an operator or a comment. A bare assignment goes on
+    // with an operator.
+    by_define || (after.is_empty() && rest.len() < line.len()) || ["=", ":=", "::=", "+=", "?=", "!="].iter().any(|op| after.starts_with(op))
 }
 
 /// The lines between `define <name>` and its `endef` in `rules` (a
@@ -238,9 +267,10 @@ fn define_body<'a>(rules: &'a str, name: &str) -> Option<&'a str> {
 
 /// `body` with its one `$(VAR)` replaced by the wrapper call — if that
 /// reference is the command of a simple command: at the start of a recipe
-/// line or right after `;`, `&&` or `||`, and a word of its own. A compiler
-/// that is referred to more than once, or behind something else (`nice
-/// $(CC)`, `X=$(CC)`), is not a shape cactup stands in front of.
+/// line or right after `;`, `&&` or `||`, outside any quotes, and a word of
+/// its own. A compiler that is referred to more than once, or behind
+/// something else (`nice $(CC)`, `X=$(CC)`, `echo "…; $(CC)"`), is not a
+/// shape cactup stands in front of.
 fn wrap_recipe(body: &str, var: &str) -> Option<String> {
     let reference = format!("$({var})");
     let at = body.find(&reference)?;
@@ -248,11 +278,15 @@ fn wrap_recipe(body: &str, var: &str) -> Option<String> {
     if after.contains(&reference) {
         return None;
     }
-    let line = before.rsplit('\n').next().unwrap_or(before).trim_end();
-    let starts_line = line.trim_start_matches(['@', '-', '+', ' ', '\t']).is_empty();
+    let (earlier, line) = before.rsplit_once('\n').unwrap_or(("", before));
+    let line = line.trim_end();
+    // A line that continues the one above (`\` at its end) starts nothing.
+    let starts_line =
+        line.trim_start_matches(['@', '-', '+', ' ', '\t']).is_empty() && !earlier.trim_end().ends_with('\\');
     let starts_command = starts_line || [";", "&&", "||"].iter().any(|sep| line.ends_with(sep));
+    let quoted = ['\'', '"', '`'].iter().any(|quote| before.matches(*quote).count() % 2 == 1);
     let own_word = after.is_empty() || after.starts_with([' ', '\t', '\n']);
-    (starts_command && own_word).then(|| format!("{before}$(call cactup_cc_run,{reference}){after}"))
+    (starts_command && !quoted && own_word).then(|| format!("{before}$(call cactup_cc_run,{reference}){after}"))
 }
 
 /// The injection fragment.
@@ -316,16 +350,17 @@ fn inject_mk(cactup: &Path, conf_file: &Path, inject: &Path, build_dir: &Path, w
 }
 
 /// The self-test for the sub-makes the fragment is for. The build script
-/// runs it from the configuration's `build` directory with `CCTK_TARGET`
-/// set, under `MAKEFILES=<fragment>`, with the build's own `make`.
+/// runs its `all` from the configuration's `build` directory with
+/// `CCTK_TARGET` set, under `MAKEFILES=<fragment>`, with the build's own
+/// `make`.
 ///
 /// It defines each recipe the way `make.config.rules` does — after the
 /// fragment, plainly — as a command that fails, and then runs it. So it
-/// passes only if this make lets the fragment's definition win, hides the
-/// fragment from `MAKEFILE_LIST` and from child makes, and the *real*
-/// wrapped recipe text, quoting and all, reaches a cactup that can wrap a
-/// compile from here ([`SELFTEST_COMPILER`]).
-fn selftest_wrapped_mk(wrapped: &[Wrapped]) -> String {
+/// passes (and writes `passed`) only if this make lets the fragment's
+/// definition win, hides the fragment from `MAKEFILE_LIST` and from child
+/// makes, and the *real* wrapped recipe text, quoting and all, reaches a
+/// cactup that can wrap a compile from here ([`SELFTEST_COMPILER`]).
+fn selftest_wrapped_mk(wrapped: &[Wrapped], passed: &Path) -> String {
     let recipes: Vec<&str> = wrapped.iter().map(|w| w.recipe).collect();
     let mut out = format!(
         "GET_WD = pwd\n\
@@ -342,35 +377,48 @@ fn selftest_wrapped_mk(wrapped: &[Wrapped]) -> String {
     out.push_str(&format!(
         ".PHONY: all {names}\n\
          all: {names}\n\
+         \t@: > '{passed}'\n\
          {names}:\n\
          \t@test '$(origin $@)' = override\n\
          \t@test '$(notdir $(firstword $(MAKEFILE_LIST)))' = wrapped.mk\n\
          \t@test -z \"$$MAKEFILES\"\n\
          \t@$($@)\n",
         names = recipes.join(" "),
+        passed = passed.display(),
     ));
     out
 }
 
-/// The self-test for every other make that reads the fragment: run from the
-/// attempt's own directory, it must find its recipe as it defined it and
-/// itself first in `MAKEFILE_LIST`. Its match-anything rule stands for a
-/// forwarding makefile's: make tries to remake every makefile it reads,
-/// and must not run that rule for the fragment.
-const SELFTEST_UNTOUCHED: &str = "\
-$(lastword $(MAKEFILE_LIST)): ;
-define COMPILE_C
-exit 1
-endef
-.PHONY: all cactup-selftest-force
-all:
-\t@test '$(origin COMPILE_C)' = file
-\t@test '$(origin cactup_cc_run)' = undefined
-\t@test '$(notdir $(firstword $(MAKEFILE_LIST)))' = untouched.mk
-cactup-selftest-force: ;
-%: cactup-selftest-force
-\t@exit 1
-";
+/// The self-test for every other make that reads the fragment. The build
+/// script runs its `all` from the attempt's own directory. It passes (and
+/// writes `passed`) only if it finds its recipe as it defined it, nothing
+/// of the fragment's defined, and itself first in `MAKEFILE_LIST`.
+///
+/// Its match-anything rule stands for a forwarding makefile's. make tries
+/// to remake every makefile it reads, before anything else, and the rule
+/// must not be run for the fragment: it leaves `remade` behind if it is,
+/// for `all` to find (make itself shrugs off a makefile it failed to
+/// remake).
+fn selftest_untouched_mk(selftest: &Path, passed: &Path) -> String {
+    format!(
+        "$(lastword $(MAKEFILE_LIST)): ;\n\
+         define COMPILE_C\n\
+         exit 1\n\
+         endef\n\
+         .PHONY: all cactup-selftest-force\n\
+         all:\n\
+         \t@test '$(origin COMPILE_C)' = file\n\
+         \t@test '$(origin cactup_cc_run)' = undefined\n\
+         \t@test '$(notdir $(firstword $(MAKEFILE_LIST)))' = untouched.mk\n\
+         \t@test ! -e '{remade}'\n\
+         \t@: > '{passed}'\n\
+         cactup-selftest-force: ;\n\
+         %: cactup-selftest-force\n\
+         \t@: > '{remade}'\n",
+        remade = selftest.join("remade").display(),
+        passed = passed.display(),
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -427,6 +475,8 @@ endef
             ("COMPILE_C = $(CC) -c\ndefine COMPILE_C\n$(CC) -c\nendef\n", "also assigned"),
             ("define COMPILE_C\n$(CC) -c\nendef\noverride define COMPILE_C\nx\nendef\n", "overridden"),
             ("define COMPILE_C =\n$(CC) -c\nendef\n", "defined with an operator"),
+            ("define COMPILE_C\n$(CC) -c\nendef\ndefine COMPILE_C # again\nx\nendef\n", "defined again, with a comment"),
+            ("define COMPILE_C # the C recipe\n$(CC) -c\nendef\n", "defined with a comment after the name"),
             ("ifeq ($(A),b)\ndefine COMPILE_C\n$(CC) -c\nendef\nendif\n", "defined conditionally"),
             ("ifdef A\nelse\ndefine COMPILE_C\n$(CC) -c\nendef\nendif\n", "defined in an else branch"),
             ("define COMPILE_C\n$(CC) -c\n", "never closed"),
@@ -464,6 +514,12 @@ endef
             "cat x | $(CC) -c",
             // Part of a longer word.
             "$(CC)-13 -c",
+            // Inside quotes, or a command substitution: text, not a command.
+            "echo \"compiling; $(CC) -c\"",
+            "echo 'x' ; echo 'y; $(CC)'",
+            "v=`cd x && $(CC) --version`",
+            // Continuing the line above.
+            "nice \\\n\t$(CC) -c",
         ] {
             assert_eq!(wrap_recipe(body, "CC"), None, "{body}");
         }
@@ -471,7 +527,17 @@ endef
 
     #[test]
     fn recognizes_definitions_of_a_variable() {
-        for line in ["define COMPILE_C", "COMPILE_C = x", "COMPILE_C:=x", "COMPILE_C += x", "override COMPILE_C ?= x", "export override define COMPILE_C", "define COMPILE_C :="] {
+        for line in [
+            "define COMPILE_C",
+            "COMPILE_C = x",
+            "COMPILE_C:=x",
+            "COMPILE_C += x",
+            "override COMPILE_C ?= x",
+            "export override define COMPILE_C",
+            "define COMPILE_C :=",
+            "define COMPILE_C # a comment",
+            "export COMPILE_C",
+        ] {
             assert!(defines(line, "COMPILE_C"), "{line}");
         }
         for line in ["COMPILE_CXX = x", "define COMPILE_CXX", "\t$(COMPILE_C)", "COMPILE_C", "%.o: COMPILE_C = x", "# COMPILE_C = x", "undefine COMPILE_C"] {
@@ -545,6 +611,32 @@ endef
     }
 
     #[test]
+    fn a_new_probe_starts_the_attempts_cache_files_afresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let cc = fake_build(&root, RULES);
+        fs::create_dir_all(selftest_dir(&cc)).unwrap();
+        fs::write(selftest_passed(&cc, "wrapped"), "").unwrap();
+        fs::write(super::super::events_path(&cc), "{}\n").unwrap();
+        probe(&conf_path(&cc)).unwrap();
+        assert!(!selftest_passed(&cc, "wrapped").exists(), "an earlier self-test's pass is not this one's");
+        assert!(!super::super::events_path(&cc).exists(), "an earlier run's compiles are not this build's");
+    }
+
+    #[test]
+    fn a_build_directory_that_is_a_link_is_named_by_where_it_leads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let cc = fake_build(&root, RULES);
+        let roomy = root.join("scratch-fs/sim-build");
+        fs::create_dir_all(&roomy).unwrap();
+        std::os::unix::fs::symlink(&roomy, root.join("Cactus/configs/sim/build")).unwrap();
+        probe(&conf_path(&cc)).unwrap();
+        let text = fs::read_to_string(inject_path(&cc)).unwrap();
+        assert!(text.contains(&format!("ifneq ($(findstring |{}/,|$(CURDIR)/),)\n", roomy.display())), "{text}");
+    }
+
+    #[test]
     fn a_probe_that_declines_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(tmp.path()).unwrap();
@@ -554,6 +646,11 @@ endef
         let cc = fake_build(&root, "%.c.o: $(SRCDIR)/%.c\n\t$(CC) -c $<\n");
         let err = format!("{:#}", probe(&conf_path(&cc)).unwrap_err());
         assert!(err.contains("defines no compile recipe cactup knows how to wrap"), "{err}");
+
+        // Rules spread over several files.
+        fs::write(config.join("config-data/make.config.rules"), format!("{RULES}include $(CONFIG)/more.rules\n")).unwrap();
+        let err = format!("{:#}", probe(&conf_path(&cc)).unwrap_err());
+        assert!(err.contains("includes other makefiles"), "{err}");
 
         // Not configured yet.
         fs::remove_file(config.join("config-data/make.config.rules")).unwrap();

@@ -3575,10 +3575,11 @@ mod tests {
     /// The build script `prepare` stages with the build cache in `mode`,
     /// its lines after the environment setup, plus whether `<attempt>/cc`
     /// was written.
-    fn staged_script(mode: crate::objcache::Mode) -> (Vec<String>, bool) {
+    fn staged_script(mode: crate::objcache::Mode, clean: bool) -> (Vec<String>, bool) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
+        let (_mdb, machine, inst, mut opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
+        opts.clean = clean;
         let cache = Some((mode, "/opt/cactup/bin/cactup-abc1234"));
         let attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, cache).unwrap() {
             Prepared::Ready(a, _) => a,
@@ -3599,11 +3600,11 @@ mod tests {
         let config = "echo yes | /fakemake -j1 sim-config options='/inst/Cactus/configs/sim/.cactup-builds/0000/\
                       cactup-optionlist.cfg' THORNLIST='/inst/Cactus/configs/sim/.cactup-builds/0000/cactup-thornlist.th'";
 
-        let (off, wrote) = staged_script(Mode::Off);
+        let (off, wrote) = staged_script(Mode::Off, false);
         assert_eq!(off, [config, "/fakemake -j1 sim", "/fakemake -j1 sim-utils"]);
         assert!(!wrote, "an off build writes nothing for the cache");
 
-        let (record, wrote) = staged_script(Mode::Record);
+        let (record, wrote) = staged_script(Mode::Record, false);
         assert!(wrote);
         assert_eq!(record[0], config);
         assert_eq!(record[1], "CACTUP_CC_MAKEFILES=");
@@ -3615,6 +3616,11 @@ mod tests {
         assert!(record[build + 1].ends_with("export MAKEFILES; /fakemake -j1 sim )"), "{}", record[build + 1]);
         let plain = record.iter().rposition(|l| l == "else").unwrap();
         assert_eq!(&record[plain..], ["else", "  /fakemake -j1 sim", "fi", "/fakemake -j1 sim-utils"]);
+
+        // The probe looks at the configuration's build directory, which a
+        // clean removes: it runs after it.
+        let (clean, _) = staged_script(Mode::Record, true);
+        assert_eq!(&clean[..3], [config, "/fakemake -j1 sim-clean", "CACTUP_CC_MAKEFILES="]);
     }
 
     /// The staged script, cache steps included, runs to a finished build

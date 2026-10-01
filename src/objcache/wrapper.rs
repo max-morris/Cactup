@@ -73,9 +73,11 @@ struct Job {
 impl Job {
     /// The command line as words, if the compiler is a plain command: words
     /// the shell would have passed on exactly as they are, the first of
-    /// them the command's name. Anything else (`LANG=C gcc`, `gcc -DX="a
-    /// b"`, a pipeline) means what it means only to a shell, so it goes
-    /// back to one (see [`pass_through`]) and the cache stays out of it.
+    /// them naming a program the shell would have found on `PATH` or by its
+    /// path. Anything else (`LANG=C gcc`, `gcc -DX="a b"`, a pipeline, a
+    /// name the shell has a meaning of its own for) means what it means
+    /// only to a shell, so it goes back to one (see [`pass_through`]) and
+    /// the cache stays out of it.
     fn argv(&self) -> Option<Vec<OsString>> {
         let plain = |b: &u8| b.is_ascii_alphanumeric() || b"_-+./:,@%=~ \t".contains(b);
         let text = self.compiler.as_bytes();
@@ -87,6 +89,9 @@ impl Job {
         // something into, by position: `~` at the start of a word, and `=`
         // after a name at the start of the command.
         if words.iter().any(|word| word.starts_with(b"~")) || is_assignment(words.first()?) {
+            return None;
+        }
+        if shell_resolves_differently(OsStr::from_bytes(words[0])) {
             return None;
         }
         let argv = words.into_iter().map(|w| OsString::from_vec(w.to_vec()));
@@ -102,6 +107,54 @@ fn is_assignment(word: &[u8]) -> bool {
     };
     let start = |b: &u8| b.is_ascii_alphabetic() || *b == b'_';
     name.first().is_some_and(start) && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// Words a POSIX shell or bash gives a meaning before it looks for a
+/// program: reserved words and builtins. `time gcc` is bash's keyword even
+/// where `/usr/bin/time` exists.
+const SHELL_WORDS: &[&str] = &[
+    "!", ".", ":", "[", "[[", "alias", "bg", "break", "builtin", "caller", "case", "cd", "command", "compgen",
+    "complete", "compopt", "continue", "coproc", "declare", "dirs", "disown", "do", "done", "echo", "elif", "else",
+    "enable", "esac", "eval", "exec", "exit", "export", "false", "fc", "fg", "fi", "for", "function", "getopts",
+    "hash", "help", "history", "if", "in", "jobs", "kill", "let", "local", "logout", "mapfile", "popd", "printf",
+    "pushd", "pwd", "read", "readarray", "readonly", "return", "select", "set", "shift", "shopt", "source",
+    "suspend", "test", "then", "time", "times", "trap", "true", "type", "typeset", "ulimit", "umask", "unalias",
+    "unset", "until", "wait", "while", "{", "}",
+];
+
+/// Would the recipe's shell run something else for the command name
+/// `program` than the program a `PATH` search finds? It would for a name
+/// the shell itself gives a meaning ([`SHELL_WORDS`]), for a function
+/// exported to it under that name (bash's `export -f`), and whenever `PATH`
+/// has an entry beginning with `~`, which bash expands as it searches and
+/// nothing else does. A name with a `/` in it is a path to all of them.
+///
+/// What this cannot see is a function or alias the shell defines for
+/// itself at startup (bash reads the file `BASH_ENV` names). Such a file
+/// would have to define one named like the compiler.
+fn shell_resolves_differently(program: &OsStr) -> bool {
+    let name = program.as_bytes();
+    if name.contains(&b'/') {
+        return false;
+    }
+    if program.to_str().is_some_and(|name| SHELL_WORDS.contains(&name)) {
+        return true;
+    }
+    // bash exports a function as `BASH_FUNC_<name>%%` (`BASH_FUNC_<name>()`
+    // in some patched 4.x builds); before that, as a variable of the same
+    // name whose value begins `() {`.
+    let exported_function = |(var, value): (OsString, OsString)| {
+        let var = var.as_bytes();
+        match var.strip_prefix(b"BASH_FUNC_") {
+            Some(rest) => rest.strip_suffix(b"%%").or_else(|| rest.strip_suffix(b"()")) == Some(name),
+            None => var == name && value.as_bytes().starts_with(b"() {"),
+        }
+    };
+    if std::env::vars_os().any(exported_function) {
+        return true;
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    path.as_bytes().split(|b| *b == b':').any(|entry| entry.starts_with(b"~"))
 }
 
 // Where a compile stands, for the panic hook.
@@ -271,6 +324,12 @@ fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
     // keyword such as `time`, a function, a script without an interpreter
     // line). The handlers above do not survive becoming that shell.
     let Ok(mut child) = Command::new(&argv[0]).args(&argv[1..]).spawn() else {
+        // Asked to stop before there was a compile to stop: becoming the
+        // shell now would lose that signal and run the compile after all.
+        if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
+            let _ = signal_hook::low_level::emulate_default_handler(signal);
+            std::process::exit(128 + signal);
+        }
         debug("the compiler cannot be started directly");
         hand_to_shell(job)
     };
@@ -441,6 +500,19 @@ mod tests {
         ] {
             assert_eq!(argv(compiler, &["-c"]), None, "{compiler:?}");
         }
+    }
+
+    #[test]
+    fn a_name_the_shell_has_its_own_meaning_for_is_not_plain() {
+        for compiler in ["time gcc", "command gcc", "exec gcc", "builtin echo", "test", "[ -f x ]", "true"] {
+            assert_eq!(argv(compiler, &["-c"]), None, "{compiler}");
+        }
+        // Only as the command's name, and only as a bare name.
+        assert!(argv("gcc time", &[]).is_some());
+        assert!(argv("/usr/bin/time gcc", &[]).is_some());
+        assert!(argv("./time", &[]).is_some());
+        assert!(shell_resolves_differently(OsStr::new("time")));
+        assert!(!shell_resolves_differently(OsStr::new("/usr/bin/time")));
     }
 
     #[test]

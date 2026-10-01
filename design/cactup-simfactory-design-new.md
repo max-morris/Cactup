@@ -4570,7 +4570,10 @@ report 126/127, which the script turns into the same kind of line.
 Otherwise it writes `<attempt>/cc/inject.mk`, which `make` reads through the
 `MAKEFILES` environment variable for the `make <name>` step alone, and
 creates the configuration's `build/` directory if a `realclean` removed it
-(the self-test runs there; make would create it moments later). The
+(the self-test runs there; make would create it moments later). A `build/`
+that is a link is named by where it leads, since that is the working
+directory make reports. The probe also clears what an earlier run left in
+`<attempt>/cc/` (self-test results, the event log). The
 fragment redefines Cactus's compile recipes — `COMPILE_C`, `COMPILE_CXX`,
 `COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90` — each copied from
 the configuration's own `make.config.rules` with its one compiler reference
@@ -4637,26 +4640,35 @@ Why this shape (rule 3):
   with the real compilers, with no cactup involved.
 
 The probe wraps a recipe only if `make.config.rules` defines it exactly
-once, plainly (`define NAME` … `endef`, no other assignment to it) and
-outside any conditional — otherwise the body it reads might not be the one
-make ends up with — and only if the body has exactly one reference to its
-compiler variable, as a word of its own in command position (at the start
-of a recipe line, or right after `;`, `&&` or `||`): a recipe that runs the
-compiler behind something else is not a shape cactup stands in front of.
-It refuses (declines) paths with characters that mean something to make or
-the shell — anything but letters, digits and `/ . _ - + @ ~` — rather than
+once, plainly (a line `define NAME` with nothing after the name, then
+`endef`; no other assignment to it) and outside any conditional — otherwise
+the body it reads might not be the one make ends up with — and declines
+altogether if the rules file includes other makefiles, which it does not
+follow. The body must have exactly one reference to its compiler variable,
+as a word of its own in command position: at the start of a recipe line
+(not one continuing the line above), or right after `;`, `&&` or `||`, and
+outside quotes. A recipe that runs the compiler behind something else, or
+only mentions it, is not a shape cactup stands in front of. The probe
+refuses (declines) paths with characters that mean something to make or the
+shell — anything but letters, digits and `/ . _ - + @ ~` — rather than
 escape them for every context they appear in.
 
-The script then runs two throwaway makefiles under the fragment, with the
-build's own `make` command (`<attempt>/cc/selftest/`, output in
-`<attempt>/cc/selftest.log`): one the way an object sub-make runs, in which
-each wrapped recipe must win over a later plain definition and, run for
-real with the compiler `cactup:selftest`, must reach a cactup that can read
-its configuration and `/proc/self/status`; and one the way any other make
-runs, which must find nothing changed and its match-anything rule not run
-for the fragment. A `make` that fails either builds uncached. This holds on
-GNU make 4.2.1, 4.3 and 4.4.1 (tested; real Cactus trees on 4.3 and 4.4.1);
-for anything else the self-test is the judge.
+The script then runs the goal `all` of two throwaway makefiles under the
+fragment, with the build's own `make` command (`<attempt>/cc/selftest/`,
+output in `<attempt>/cc/selftest.log`): one the way an object sub-make
+runs, in which each wrapped recipe must win over a later plain definition
+and, run for real with the compiler `cactup:selftest`, must reach a cactup
+that can read its configuration and `/proc/self/status`; and one the way
+any other make runs, which must find nothing of the fragment's defined,
+itself first in `MAKEFILE_LIST`, and its match-anything rule not run for
+the fragment (that rule leaves a file behind if it is). Each makefile
+writes a `.passed` file when all its checks have run, and the script takes
+those two files, not make's exit status alone, as the pass: a make that
+exits 0 having run nothing proves nothing. A `make` that fails either
+builds uncached. A unit test feeds the self-test the fragment broken in
+each of the ways it exists to catch. This holds on GNU make 4.2.1, 4.3 and
+4.4.1 (tested; real Cactus trees on 4.3 and 4.4.1); for anything else the
+self-test is the judge.
 
 ### 18.4 The wrapper
 
@@ -4674,20 +4686,29 @@ what the compiler text means and how to start it. Whatever the wrapper
 cannot start itself goes to a shell of the same kind:
 `<shell> -c '<compiler> "$@"' <shell> <args…>`.
 
-- **A plain command** (words the shell would pass on unchanged, the first
-  the command's name: `gcc`, `nvcc --compiler-bindir /usr/bin/g++`) is what
-  the cache works with. The wrapper starts it directly. If that fails — the
-  name is a shell keyword or builtin (`time gcc`), a shell function, a
-  script without a `#!` line, something only the shell's `PATH` lookup
-  finds — the shell runs it, and its message and exit status are the
-  shell's own if it cannot either.
+- **A plain command** is what the cache works with: words the shell would
+  pass on unchanged, the first naming a program the shell would take from
+  `PATH` or by its path (`gcc`, `nvcc --compiler-bindir /usr/bin/g++`). The
+  wrapper starts it directly. If that fails — a script without a `#!` line,
+  a name only the shell's lookup finds — the shell runs it, and its message
+  and exit status are the shell's own if it cannot either.
+- **A name the shell resolves itself** goes to the shell even when a
+  program of that name exists: a reserved word or builtin (`time gcc`,
+  `command gcc`, `exec gcc`), a function exported to the shell under that
+  name (bash's `export -f`), and any bare name while `PATH` has an entry
+  beginning with `~`, which only bash expands.
 - **Anything else** (`LANG=C gcc`, quotes, any shell syntax) means what it
   means only to a shell, and goes to one without being looked at further.
-  So does a compiler already behind another wrapper (ccache, sccache,
-  distcc, …): cactup does not stack. One difference from the recipe
-  remains: it is a new shell, so a compiler text that uses the recipe's own
-  shell variables (`$$current_wd`) does not find them. No makefile cactup
-  knows of does that.
+- **A compiler already behind another wrapper** (ccache, sccache, distcc,
+  …) is started as it is and left alone: cactup does not stack.
+
+Two differences from the recipe's own shell remain, and both are stated
+limits. It is a *new* shell, so a compiler text that uses the recipe's
+shell variables (`$$current_wd`) does not find them. And a function or
+alias the shell defines for itself at startup (bash reads the file
+`BASH_ENV` names; module systems set it) is invisible to the wrapper: one
+named like the compiler would be run by the recipe and bypassed by the
+wrapper. No makefile or site setup cactup knows of does either.
 - **Unreadable configuration, mode `off`, any internal error, a panic:** the
   process becomes the compile, by `exec`: same stdin, signal dispositions
   and jobserver descriptors, nothing of cactup in between.
@@ -4700,7 +4721,10 @@ cannot start itself goes to a shell of the same kind:
   as the compiler ended: same exit code, or killed by the same
   `SIGHUP`/`SIGINT`/`SIGTERM`; any other fatal signal becomes the shell's
   `128 + signal`. One JSON line per compile goes to
-  `<attempt>/cc/events.jsonl`, best-effort.
+  `<attempt>/cc/events.jsonl`, best-effort. Only compiles the wrapper
+  started itself are logged, so the count the build prints can be below the
+  number of objects: a compile handed to the shell, or a thorn the fragment
+  stood down for, was compiled and not recorded.
 
 Passing a signal on needs `kill(2)`, which std does not offer; the wrapper
 uses `rustix` (D13).

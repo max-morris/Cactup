@@ -172,8 +172,10 @@ impl Staged {
     /// the fragment: once where and how Cactus's object sub-makes run (in
     /// the configuration's `build` directory, with `CCTK_TARGET` set), and
     /// once as any other make below the build would (see
-    /// `probe::selftest_wrapped_mk`). Its output goes to
-    /// `<attempt>/cc/selftest.log`.
+    /// `probe::selftest_wrapped_mk`). Each makefile leaves a file behind
+    /// when all its checks ran and passed, and those two files are the
+    /// pass: a make that exits 0 having done nothing proves nothing. The
+    /// output goes to `<attempt>/cc/selftest.log`.
     pub fn probe_step(&self, make: &str) -> String {
         let cactup = sh_quote(&self.cactup);
         let inject = sh_quote(&inject_path(&self.cc_dir));
@@ -182,8 +184,9 @@ impl Staged {
             "CACTUP_CC_MAKEFILES=\n\
              if {cactup} {PROBE_VERB} {conf}; then\n\
              \x20 if ( MAKEFILES={inject}; export MAKEFILES\n\
-             \x20      cd {build} && {make} -s -f {wrapped} CCTK_TARGET=cactup-selftest SRCDIR=. &&\n\
-             \x20      cd {cc} && {make} -s -f {untouched} CCTK_TARGET=cactup-selftest SRCDIR=. ) > {log} 2>&1; then\n\
+             \x20      cd {build} && {make} -s -f {wrapped} all CCTK_TARGET=cactup-selftest SRCDIR=. &&\n\
+             \x20      cd {cc} && {make} -s -f {untouched} all CCTK_TARGET=cactup-selftest SRCDIR=. ) > {log} 2>&1 &&\n\
+             \x20    [ -f {wrapped_passed} ] && [ -f {untouched_passed} ]; then\n\
              \x20   CACTUP_CC_MAKEFILES={inject}\n\
              \x20 else\n\
              \x20   echo 'cactup: build cache off for this build: its self-test failed with this make (see '{log}')' >&2\n\
@@ -197,6 +200,8 @@ impl Staged {
             cc = sh_quote(&self.cc_dir),
             wrapped = sh_quote(&probe::selftest_wrapped(&self.cc_dir)),
             untouched = sh_quote(&probe::selftest_untouched(&self.cc_dir)),
+            wrapped_passed = sh_quote(&probe::selftest_passed(&self.cc_dir, "wrapped")),
+            untouched_passed = sh_quote(&probe::selftest_passed(&self.cc_dir, "untouched")),
         )
     }
 
@@ -282,7 +287,7 @@ mod tests {
         );
         assert!(
             probe.contains(
-                "cd '/work/cfg/build' && make -j8 -s -f '/work/cfg/.cactup-builds/0003/cc/selftest/wrapped.mk' \
+                "cd '/work/cfg/build' && make -j8 -s -f '/work/cfg/.cactup-builds/0003/cc/selftest/wrapped.mk' all \
                  CCTK_TARGET=cactup-selftest SRCDIR=. &&"
             ),
             "{probe}"
@@ -338,6 +343,10 @@ mod tests {
         }
     }
 
+    /// A self-test "make" that passes: like the real one running a
+    /// self-test makefile to the end, it leaves `<makefile minus .mk>.passed`.
+    const PASSES: &str = r#"sh -c 'makefile=$3; : > "${makefile%.mk}.passed"' --"#;
+
     /// A build "make" that prints the `MAKEFILES` it was given.
     const SHOW: &str = r#"sh -c 'echo "make $1 with [$MAKEFILES]"' --"#;
     /// What the script says after a build in which no compile was recorded
@@ -347,17 +356,17 @@ mod tests {
 
     #[test]
     fn the_build_reads_the_fragment_only_when_probe_and_selftest_both_pass() {
-        let ran = run_steps(Some("exit 0"), "true", SHOW, None);
+        let ran = run_steps(Some("exit 0"), PASSES, SHOW, None);
         assert_eq!(ran.stdout, format!("make sim with [<inject.mk>]\n{NONE_RECORDED}after the build\n"));
         assert_eq!(ran.stderr, "");
 
         // A MAKEFILES the user already had stays in front.
-        let ran = run_steps(Some("exit 0"), "true", SHOW, Some("/home/me/extra.mk"));
+        let ran = run_steps(Some("exit 0"), PASSES, SHOW, Some("/home/me/extra.mk"));
         assert_eq!(ran.stdout, format!("make sim with [/home/me/extra.mk <inject.mk>]\n{NONE_RECORDED}after the build\n"));
 
         // A build whose compiles were logged says how many.
         let log_two = r#"sh -c 'printf "{}\n{}\n" >> "$(dirname "$MAKEFILES")/events.jsonl"' --"#;
-        let ran = run_steps(Some("exit 0"), "true", log_two, None);
+        let ran = run_steps(Some("exit 0"), PASSES, log_two, None);
         assert_eq!(ran.stdout, "cactup: build cache: compiles recorded: 2\nafter the build\n");
     }
 
@@ -381,12 +390,84 @@ mod tests {
         assert_eq!(ran.stdout, "make sim with []\nafter the build\n");
         assert!(ran.stderr.trim_end().ends_with("could not check it here (exit status 1)"), "{}", ran.stderr);
 
-        // The probe is fine but the self-test fails with this make.
-        let ran = run_steps(Some("exit 0"), "false", SHOW, Some("/home/me/extra.mk"));
-        assert_eq!(ran.stdout, "make sim with [/home/me/extra.mk]\nafter the build\n");
-        assert!(ran.stderr.starts_with("cactup: build cache off for this build: its self-test failed"), "{}", ran.stderr);
-        assert_eq!(ran.stderr.lines().count(), 1, "{}", ran.stderr);
-        assert!(ran.success);
+        // The probe is fine but the self-test fails with this make — or
+        // "succeeds" without having run: a make that exits 0 and did nothing
+        // has shown nothing.
+        for selftest_make in ["false", "true"] {
+            let ran = run_steps(Some("exit 0"), selftest_make, SHOW, Some("/home/me/extra.mk"));
+            assert_eq!(ran.stdout, "make sim with [/home/me/extra.mk]\nafter the build\n", "{selftest_make}");
+            assert!(
+                ran.stderr.starts_with("cactup: build cache off for this build: its self-test failed"),
+                "{selftest_make}: {}",
+                ran.stderr
+            );
+            assert_eq!(ran.stderr.lines().count(), 1, "{}", ran.stderr);
+            assert!(ran.success);
+        }
+    }
+
+    /// The probe step as the build script runs it, with the real `make` and
+    /// the fragment and self-test makefiles the real probe wrote — then
+    /// with the fragment broken in each way the self-test exists to catch.
+    /// A self-test that passes a broken fragment is worse than none: it is
+    /// the only judge for a `make` nobody has tried.
+    #[test]
+    fn the_selftest_passes_the_real_fragment_and_fails_every_broken_one() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::process::Command::new("make").arg("--version").output().is_err() {
+            eprintln!("skipped: no make on this host");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let config_dir = root.join("Cactus/configs/sim");
+        fs::create_dir_all(config_dir.join("config-data")).unwrap();
+        fs::write(
+            config_dir.join("config-data/make.config.rules"),
+            "define COMPILE_C\ncurrent_wd=`$(GET_WD)` ; cd $(SCRATCH_BUILD) ; $(CC) $(CFLAGS) -c -o $@ $<\nendef\n",
+        )
+        .unwrap();
+        // Stands in for cactup where the script and the wrapped recipe run
+        // it: a probe that has nothing more to do, and a wrapper that can
+        // wrap the self-test's compile.
+        let cactup = root.join("cactup-abc");
+        fs::write(&cactup, "#!/bin/sh\ncase \"$1 $3\" in '__cc-probe '|'__cc cactup:selftest') exit 0;; esac\nexit 1\n")
+            .unwrap();
+        fs::set_permissions(&cactup, fs::Permissions::from_mode(0o755)).unwrap();
+        let cc_dir = config_dir.join(".cactup-builds/0000/cc");
+        let staged = stage(&cc_dir, Mode::Record, cactup.to_str().unwrap(), &config_dir).unwrap().unwrap();
+        let inject = inject_path(&cc_dir);
+
+        // The fragment, rewritten by `breakage`, as the probe step judges it.
+        let judge = |breakage: &dyn Fn(String) -> String| {
+            assert_eq!(probe::run(Some(conf_path(&cc_dir).into())), 0);
+            let fragment = breakage(fs::read_to_string(&inject).unwrap());
+            fs::write(&inject, fragment).unwrap();
+            let script = format!("set -e\n{}\necho \"use=[$CACTUP_CC_MAKEFILES]\"\n", staged.probe_step("make"));
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env_remove("MAKEFILES").output().unwrap();
+            let log = fs::read_to_string(cc_dir.join("selftest.log")).unwrap_or_default();
+            (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), log)
+        };
+
+        let (stdout, stderr, log) = judge(&|fragment| fragment);
+        assert_eq!((stdout, stderr), (format!("use=[{}]\n", inject.display()), String::new()), "{log}");
+
+        let own_rule = format!("{}: ;\n", inject.display());
+        let breakages: [(&str, &dyn Fn(String) -> String); 5] = [
+            ("its recipes do not win over the rules file's", &|f| f.replace("override define", "define")),
+            ("it acts in every make", &|f| {
+                let guard = f.lines().find(|l| l.starts_with("ifneq ($(findstring |")).unwrap().to_owned();
+                f.replace(&guard, "ifneq (anywhere,)")
+            }),
+            ("it stays in MAKEFILE_LIST", &|f| f.replace("MAKEFILE_LIST := ", "CACTUP_UNUSED := ")),
+            ("it stays in MAKEFILES", &|f| f.replace("MAKEFILES := ", "CACTUP_UNUSED := ")),
+            ("a forwarding rule is run for it", &|f| f.replace(&own_rule, "")),
+        ];
+        for (what, breakage) in breakages {
+            let (stdout, stderr, log) = judge(breakage);
+            assert_eq!(stdout, "use=[]\n", "{what}: the self-test passed a broken fragment\n{log}");
+            assert!(stderr.starts_with("cactup: build cache off for this build: its self-test failed"), "{what}: {stderr}");
+        }
     }
 
     #[test]

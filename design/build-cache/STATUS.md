@@ -42,7 +42,7 @@ the last milestone, for when that host is not at hand.
 
 | Milestone | Scope | State |
 |---|---|---|
-| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | reworked after review rounds 1 and 2; in review (round 3) |
+| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | reworked after review rounds 1 to 3; in review (round 4) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | not started |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
@@ -119,7 +119,7 @@ All in `~/cacti/build-cache`, machine `plato`, GCC 14.2, GNU make 4.4.1,
   the cache, so real trees are covered on 4.3 (by reviewer B, on a copy)
   and 4.4.1 only.
 
-The builds above were all repeated after the round 2 changes.
+The builds above were all repeated after the round 2 and round 3 changes.
 
 Not verified: a container universe, a compute node, NFS or Lustre, any
 compiler but GCC, any machine but `plato`.
@@ -138,7 +138,10 @@ compiler but GCC, any machine but `plato`.
   (commit `07cbd2b`).
 - 2026-10-01: Review round 2: both BLOCKED again, on the wrapper's starting
   of compilers and on recipes with the compiler behind something else.
-  Fixed; sent to round 3.
+  Fixed (commit `6bdd9b8`); sent to round 3.
+- 2026-10-01: Review round 3: reviewer A signed off, reviewer B blocked on
+  a self-test that had stopped testing and on shell-shadowed compiler
+  names. Fixed; sent to round 4.
 
 ## Review verdicts
 
@@ -233,7 +236,46 @@ Stated as limits rather than fixed, with the reason:
   changed (Modeling, aging, afterward). `OPTIMISE` there is Cactus's own
   option name and stays.
 
-### M0a, round 3: pending
+### M0a, round 3 (on `6bdd9b8`): A SIGN-OFF, B BLOCKED
+
+Both confirmed the round 2 blockers resolved. Reviewer B blocked on two
+things, the second of which reviewer A had listed as non-blocking:
+
+1. (B) The second self-test makefile ran none of its checks: `6bdd9b8` gave
+   it a first rule (an empty rule for itself), which became the default
+   goal. And its match-anything check could not fail, because make ignores
+   a failed remake of a makefile. The fragment was sound on every make
+   tried; the gate for untried makes was hollow. *Fixed: the script runs
+   the goal `all` of each self-test and requires the `.passed` file each
+   writes when its checks have all run; the forwarding rule leaves evidence
+   that `all` checks; and a unit test runs the real probe step against the
+   fragment broken in five ways (on make 4.2.1, 4.3 and 4.4.1).*
+2. (B blocking, A non-blocking) A compiler name the recipe's shell would
+   resolve to something other than the program on `PATH` — an exported
+   function of that name, a `~` entry in `PATH`, a keyword such as `time`
+   where `/usr/bin/time` exists — was started directly: a silently
+   different compiler for object compiles only. *Fixed: such names go to
+   the shell.*
+
+Non-blocking points taken: the rules reader rejects `define NAME` followed
+by anything, and the probe declines when the rules file includes other
+makefiles; a `build/` that is a link is named by where it leads; a stop
+signal that arrives just before a failed direct start is honored instead of
+lost; the probe clears an earlier run's event log and self-test results;
+command position excludes quoted text and continuation lines; a test pins
+the probe step after the clean step; spec wording for compilers behind
+another wrapper and for what the count covers.
+
+One more stated limit, added to the list under round 2 (spec §18.4): a
+function or alias the shell defines for itself at startup (bash's
+`BASH_ENV`, which module systems set) is invisible to the wrapper. One
+named like the compiler would run in the recipe and be bypassed by the
+wrapper. Exported functions are caught; these cannot be without running
+the shell. **This is the second known way, after the two-file stand-down
+scan, that the cache could change what gets compiled; both need a setup
+nobody is known to have, and both are Max's call.**
+
+### M0a, round 4: pending
 
 ## Next step
 

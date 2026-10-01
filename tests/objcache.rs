@@ -165,6 +165,50 @@ fn a_compiler_already_behind_another_wrapper_is_left_to_it() {
     assert!(build.events().is_empty());
 }
 
+/// A name the recipe's shell would not take from `PATH` — because a function
+/// of that name was exported to it, or because `PATH` has a `~` entry that
+/// only the shell expands — is the shell's to resolve, even when a program
+/// of that name could be started directly.
+#[test]
+fn a_compiler_the_shell_resolves_differently_is_left_to_the_shell() {
+    let bash = Path::new("/bin/bash");
+    if !bash.exists() {
+        eprintln!("skipped: no /bin/bash on this host");
+        return;
+    }
+    let build = Build::new("record");
+    let (bin, home_bin) = (build.root.join("bin"), build.root.join("home/bin"));
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&home_bin).unwrap();
+    executable(&bin.join("mycc"), "#!/bin/sh\necho \"the program on PATH: $*\"\n");
+    executable(&home_bin.join("mycc"), "#!/bin/sh\necho \"the program in ~/bin: $*\"\n");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+
+    // An exported function shadows the program.
+    let out = build
+        .wrap_under(bash, "mycc -O2", &["-c", "a.c"])
+        .env("PATH", &path)
+        .env("BASH_FUNC_mycc%%", "() { echo \"the function: $*\"; }")
+        .output()
+        .unwrap();
+    assert_ran(&out, "the function: -O2 -c a.c\n", "", 0);
+
+    // A `~` entry in PATH: whatever this bash makes of it is the answer.
+    let tilde_path = format!("~/bin:{path}");
+    let home = build.root.join("home").display().to_string();
+    let env = [("PATH", tilde_path.as_str()), ("HOME", home.as_str())];
+    let reference = Command::new(bash).args(["-c", "mycc \"$@\"", "bash", "-c", "a.c"]).envs(env).output().unwrap();
+    let out = build.wrap_under(bash, "mycc", &["-c", "a.c"]).envs(env).output().unwrap();
+    assert_ran(&out, &text(&reference.stdout), "", 0);
+
+    // Neither was this process's to start, so neither is logged; the plain
+    // case is.
+    assert!(build.events().is_empty());
+    let out = build.wrap_under(bash, "mycc", &["-c", "a.c"]).env("PATH", &path).output().unwrap();
+    assert_ran(&out, "the program on PATH: -c a.c\n", "", 0);
+    assert_eq!(build.events().len(), 1);
+}
+
 /// What the recipe's shell can start and this process cannot, the shell
 /// starts: the build must not fail where it works without cactup.
 #[test]
@@ -428,20 +472,22 @@ impl<'a> Tree<'a> {
         Command::new(CACTUP).arg("__cc-probe").arg(self.build.conf()).output().unwrap()
     }
 
-    /// The build script's self-test (`Staged::probe_step`), by hand.
+    /// The build script's self-test (`Staged::probe_step`), by hand: each
+    /// makefile's `all`, and the file it leaves when its checks all ran.
     fn selftest(&self, make: &Path) -> bool {
-        let run = |dir: &Path, makefile: &str| {
+        let selftest = self.build.cc.join("selftest");
+        let run = |dir: &Path, which: &str| {
             let out = Command::new(make)
                 .current_dir(dir)
                 .args(["-s", "-f"])
-                .arg(self.build.cc.join("selftest").join(makefile))
-                .args(["CCTK_TARGET=cactup-selftest", "SRCDIR=."])
+                .arg(selftest.join(format!("{which}.mk")))
+                .args(["all", "CCTK_TARGET=cactup-selftest", "SRCDIR=."])
                 .env("MAKEFILES", self.inject())
                 .output()
                 .unwrap();
-            out.status.success()
+            out.status.success() && selftest.join(format!("{which}.passed")).is_file()
         };
-        run(&self.build.config.join("build"), "wrapped.mk") && run(&self.build.cc, "untouched.mk")
+        run(&self.build.config.join("build"), "wrapped") && run(&self.build.cc, "untouched")
     }
 
     /// Run the object sub-make in a fresh build directory, with the
