@@ -275,6 +275,9 @@ compiler but GCC, any machine but `plato`.
   (a Clang configuration file chosen by target). Fixed; sent to round 4.
 - 2026-10-01: M0b review round 4: both reviewers SIGN-OFF on `045eb76`.
   M0b has passed its gate. M0c (measurements) started.
+- 2026-10-01: M0c review: both reviewers found the code sound and the
+  numbers right, and blocked on one wrong sentence in the results'
+  summary. Corrected, with their other remarks; sent back.
 - 2026-10-01: M0c measured and written up (`RESULTS-M0c.md`). Found on
   the way: the build-speed branch can add `-MD -MP -MF -MT` to compiles;
   the cache now understands that. The code changed since the gate sent to
@@ -601,6 +604,34 @@ every section other than the link ones is byte for byte the built-in one
 purpose: it is new ground for a review round, and whether it is needed
 shows in `cache report` on a real cluster ("reads a specs file").
 
+### M0c (on `5411e68`): BLOCKED by both, on the results document
+
+Both found the code changed since M0b's gate sound (dependency output:
+same key and same object with and without the flags, four drivers, every
+accepted spelling, and no preprocessor run touching the file; English
+messages: the preprocessor's output unchanged across seven locale setups;
+reviewer B confirmed with a German GCC message catalog that a translated
+GCC is now keyed), and both checked the results' numbers against the logs
+and found them right. Both blocked on the same sentence of the summary:
+it said a serving cache pays about half the recording cost on a miss. A
+miss pays all of it; a hit pays about half and does not compile. *Fixed.*
+
+Also corrected in the results: 275 thorns, not 278; the wall-time
+overhead is 6 to 9% from single runs; the dependency-file check was made
+with a debug build of the working tree (its hash lists are now kept);
+which attempt `smoke` means; what "objects untouched" does and does not
+cover; a forced rebuild is in the table and an option list edit is said
+to be unmeasured; Fortran's share is given for both builds.
+
+Non-blocking code points taken (B): `-MF` as the value of `-MT`/`-MQ` no
+longer counts as naming the file; an empty `LC_ALL` is no `LC_ALL`;
+Clang's answer must reach the compiler proper's command line, since it
+names a configuration file after `InstalledDir:`; the dependency-file
+test also checks that nothing wrote the file after the compile.
+
+`PLAN.md` still lists `-MD` as not cached: it is the plan as approved,
+and its first lines say where the work has moved since.
+
 ## Decisions waiting for Max
 
 The first two are about what the cache may do in a setup nobody is known
@@ -643,13 +674,17 @@ them.
 6. **A GCC with a `specs` file is not cached**, which is every Spack-built
    GCC. Build the refinement (accept a specs file that differs from the
    built-in specs in link sections only) before measuring on a cluster?
-7. **Fortran is 31% of the compile time** on the 278-thorn build. The plan
+7. **Fortran is 31% of the compile time** on the 275-thorn build. The plan
    has it after C and C++ are served; say if it should move up.
 8. **Go-ahead for M1** (the store, then serving with audit mode): nothing
    is stored or served until Max has read the results.
 
 ## Next step
 
-Wait for Max on `RESULTS-M0c.md` and the decisions above. Meanwhile only:
-take the code changed since M0b's gate through the reviewers. Then M1a
-(the store), on Max's go-ahead.
+1. **Owed: the second M0c review round.** The corrections above are
+   committed but not yet re-reviewed (the session ran out of usage before
+   sending them). Send the commit after `5411e68` to both reviewers with
+   the same brief (`git diff 5411e68 HEAD`), and iterate to two sign-offs
+   on one commit.
+2. Wait for Max on `RESULTS-M0c.md` and the decisions above.
+3. Then M1a (the store), on Max's go-ahead.

@@ -4825,9 +4825,13 @@ so that two builds can be compared part by part:
   `-v`, and the driver says on stderr whether it read a configuration file
   (Clang) or its built-in specs (GCC). Each must say a line it always says
   (`InstalledDir:`, `Using built-in specs.`): an answer without it is no
-  answer, and no key. That run is given English messages (`LC_MESSAGES=C`,
-  no `LANGUAGE`, and `LC_ALL` taken apart into the other categories, which
-  stay as they were: a compiler may read its source by `LC_CTYPE`).
+  answer, and no key (Clang names a configuration file between
+  `InstalledDir:` and the command line of the compiler proper, so it has
+  to have printed both). That run is given English messages
+  (`LC_MESSAGES=C`, no `LANGUAGE`, and a non-empty `LC_ALL` taken apart
+  into `LC_CTYPE`, `LC_COLLATE`, `LC_NUMERIC`, `LC_TIME` and
+  `LC_MONETARY`, which thus stay what they were: a compiler may read its
+  source by `LC_CTYPE`).
   The compiler as a whole is asked too, once, to spare the compiles the
   asking. Fortran is not cached yet. The answer — also "not one the cache
   works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)

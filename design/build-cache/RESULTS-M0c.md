@@ -9,20 +9,26 @@ build has a successful compile with the same key.
 
 The builds are in `~/cacti/build-cache` (A) and `~/cacti/build-cache-b`
 (B, a second `cactup install master`); logs and scripts in
-`~/tmp/build-cache-m0c/`.
+`~/tmp/build-cache-m0c/`. Every timing is one run.
 
 ## The short version
 
 - **A second installation of the same sources would get every C and C++
-  object from the cache**: 2781 of 2782 keyed compiles on a 278-thorn
-  build, the one miss being a file that embeds the compile time.
+  compile that goes through the cache from it**: 2781 of 2782 keyed
+  compiles on a 275-thorn build, the one miss being a file that embeds the
+  compile time. (Five more objects are built by thorns' own rules and
+  never reach the cache.)
 - **That is 65% of the compile time, not 100%, because Fortran is not
-  cached yet** and is 31% of the compile time on a real thornlist (it was
-  2% on the 25-thorn sample).
-- **Recording costs about 9% wall time** on the whole build; a serving
-  cache pays about half of that on a miss and saves the compile on a hit.
-- **Objects are untouched**: 3380 of 3381 byte-identical to a build
-  without the cache, the other one again the compile-time file.
+  cached yet** and is about a third of the compile time on a real
+  thornlist (31% in A's build, 35% in B's; 2% on the 25-thorn sample).
+- **Recording cost 6 to 9% wall time** on the whole build (one plain run,
+  two record runs). A serving cache pays that same cost on a miss; on a
+  hit it pays about half of it and does not compile.
+- **Record mode leaves objects untouched**: 3380 of 3381 byte-identical to
+  a build without the cache, the other one again the compile-time file.
+  (A serving cache will compile with the path map's flags: its objects
+  then name files as `./arrangements/...`, which is the "relocatable
+  paths" decision, and is not what was measured here.)
 - Three things cost hits and are yours to decide: generated headers that
   change with the thornlist, the locale, and `-march=native` on this
   workstation. A fourth will matter on clusters: Spack-built GCCs.
@@ -31,13 +37,13 @@ The builds are in `~/cacti/build-cache` (A) and `~/cacti/build-cache-b`
 
 `et`: the Einstein Toolkit master thornlist without the CarpetX stack (42
 entries removed: ADIOS2 and AMReX do not find the from-source MPI on this
-host, which has nothing to do with the cache). 278 thorns, 3381 objects,
+host, which has nothing to do with the cache). 275 thorns, 3381 objects,
 external libraries (hwloc, OpenMPI, HDF5, ...) built from source.
 
 | | |
 |---|---|
-| Wall time, plain build | 548 s |
-| Wall time, record mode | 597 s (+9%) |
+| Wall time, plain build | 548 s (one run, after the record run) |
+| Wall time, record mode | 597 s in A (+9%), 581 s in B (+6%); one run each |
 | Compiles through the wrapper | 3376 (5 objects are built by thorns' own rules for utility programs) |
 | Keyed | 2782: every C (2224) and C++ (558) compile |
 | Not keyed | 594 Fortran compiles |
@@ -54,9 +60,13 @@ where the libraries come from modules the compiles are most of a build.
 
 ## What a cache filled by one build would serve another
 
+`smoke` below is its attempt 0013 throughout (`--against-attempt 13`: later
+attempts of `smoke` are the small edit-and-revert rebuilds).
+
 | This build | Against | Would be served | Share of compile time |
 |---|---|---|---|
 | B `et` (other installation) | A `et` | 2781 of 2782 | 65% (the rest is Fortran) |
+| A `smoke`, rebuilt with `-f` | A `smoke`, the build before | 307 of 307 | 98% |
 | A `smoke2` (other configuration name, 25 thorns) | A `smoke` | 307 of 307 | 98% |
 | A `ld1` (line directives on) | A `ld2` | 307 of 307 | 98% |
 | B `ld1` (other installation, line directives on) | A `ld1` | 307 of 307 | 98% |
@@ -74,9 +84,11 @@ Edit and revert, on `smoke`:
 | The header put back | 10 | 10 |
 
 So the cases the cache is for behave as intended: a new installation, a
-configuration under another name, a rebuild after `-f` or after an option
-list edit that forces one, and going back to an earlier state of a thorn,
-all find their objects, with line directives on or off.
+configuration under another name, a forced rebuild, and going back to an
+earlier state of a thorn, all find their objects, with line directives on
+or off. Not measured: a rebuild forced by an option list edit. One that
+changes a compile flag changes every key, as it must; one that does not
+(a library path, `VERSION`) should behave like `-f`.
 
 ## What costs hits
 
@@ -95,7 +107,8 @@ all find their objects, with line directives on or off.
    not columns); or key bytes only for files that contribute text. The
    last two need the same kind of proof the path map got.
 3. **The locale is in the key.** A build from a session without `LANG`
-   shares nothing with one that has `LANG=en_US.UTF-8`. A batch job and a
+   shares nothing with one that has `LANG=en_US.UTF-8`
+   (`fresh-env.sh` beside the logs is how that was run). A batch job and a
    login shell can differ that way. The locale is keyed because a compiler
    may read its source by it and words its messages by it; GCC and Clang
    in practice do neither for the object. Options: keep it; or key only
@@ -117,9 +130,11 @@ all find their objects, with line directives on or off.
 
 Per keyed compile: two extra preprocessor runs (41 ms and 38 ms on
 average, against 373 ms for the compile) and two reads of the 150 files
-they name. On the whole build that was +9% wall time. A serving cache does
-the first run always and the second only on a miss; on a hit it does not
-compile. On a network filesystem the file reads will cost more than here;
+they name. On the whole build that was +9% wall time in A and +6% in B,
+against A's one plain run; three runs are not a statistic. A serving cache does the first
+run always and the second only on a miss, so a miss costs what recording
+costs (plus storing the object, not measured), and a hit costs the first
+run in place of the compile. On a network filesystem the file reads will cost more than here;
 that is not measured (this host has no NFS or Lustre), and a memo of file
 digests per build would cut it at the price of trusting change times.
 
@@ -129,9 +144,12 @@ Its flesh branch `build-speedup` (at `5d8deb7`) can have the compiler
 write dependency files while compiling (`-MD -MP -MF ... -MT ...`). As
 signed off at `045eb76` the cache declined every such compile. It now
 understands those flags (not in the key, kept from its preprocessor runs).
-Checked on that branch with the option on: 307 of 307 keyed, the same keys
-as with the option off, and all 357 objects and 357 dependency files byte
-for byte those of a build without the cache. The contract file says what
+Checked on that branch with the option on (configs `dep` and `dep0`,
+recorded by a debug build of the working tree, not by the release binary
+the other numbers come from): 307 of 307 keyed, the same keys as with the
+option off, and all 357 objects and 357 dependency files byte for byte
+those of a build without the cache (`objs-dep-record.txt` and
+`objs-dep-plain.txt` beside the other logs). The contract file says what
 has to stay true of that recipe.
 
 ## Not measured

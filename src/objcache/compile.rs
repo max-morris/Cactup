@@ -195,6 +195,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     let (mut source, mut output) = (None, None);
     let (mut preprocess, mut keyed, mut depend) = (Vec::new(), Vec::new(), Vec::new());
     let (mut level, mut openmp, mut forced_include, mut native) = (0, false, false, false);
+    let mut depend_file = false;
 
     while let Some(arg) = args.next() {
         let Some(flag) = arg.to_str() else {
@@ -222,6 +223,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             // A dependency file written while compiling.
             depend.push(arg.clone());
         } else if let Some((name, value)) = ["-MF", "-MT", "-MQ"].iter().find_map(|name| Some((name, value_of(name).transpose()?))) {
+            depend_file |= *name == "-MF";
             depend.push(OsString::from(name));
             depend.push(value?);
         } else if NOT_CACHED.iter().any(|prefix| flag.starts_with(prefix)) {
@@ -281,7 +283,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     let (debug, macros_in_debug) = (level > 0, level == 3);
     // Where the file goes without `-MF` depends on `-o`, which the
     // preprocessor runs do not have: a cache could not have it written.
-    if !depend.is_empty() && !depend.iter().any(|flag| flag == "-MF") {
+    if !depend.is_empty() && !depend_file {
         return Err("a dependency file is asked for without -MF to say where".to_owned());
     }
     Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, depend })
@@ -401,6 +403,9 @@ mod tests {
             (&["-c", "-o", "a.o", "-o", "b.o", "a.c"], "more than once"),
             (&["-E", "-o", "a.i", "a.c"], "-E is a flag"),
             (&["-c", "-o", "a.o", "a.c", "-MD"], "without -MF"),
+            // `-MF` as the *value* of another flag is a target's name.
+            (&["-c", "-o", "a.o", "a.c", "-MD", "-MT", "-MF"], "without -MF"),
+            (&["-c", "-o", "a.o", "a.c", "-MD", "-MQ", "-MF"], "without -MF"),
             (&["-c", "-o", "a.o", "a.c", "-M"], "-M is a flag"),
             (&["-c", "-o", "a.o", "a.c", "-MM"], "-MM is a flag"),
             (&["-c", "-o", "a.o", "a.c", "-MG", "-MD", "-MF", "a.d"], "-MG is a flag"),

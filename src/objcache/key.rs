@@ -483,13 +483,15 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// to save the asking (`identity::examine`).
 fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
     let said = String::from_utf8_lossy(said);
-    // Silence is not a "no": each family has a line it always prints, and
-    // an answer without it (lost, cut short, in another version's or
-    // another language's wording) is no answer.
+    // Silence is not a "no": each family has lines it always prints, and
+    // an answer without them (lost, cut short, in another version's or
+    // another language's wording) is no answer. Clang names a
+    // configuration file after `InstalledDir:` and before the command line
+    // of the compiler proper, so it has to have got as far as that.
     match family {
         Family::Clang => match said.lines().find_map(|line| line.strip_prefix("Configuration file: ")) {
             Some(file) => Err(format!("the compiler reads a configuration file ({file}), which can add flags the cache does not see")),
-            None if said.lines().any(|line| line.starts_with("InstalledDir: ")) => Ok(()),
+            None if said.lines().any(|line| line.starts_with("InstalledDir: ")) && said.lines().any(runs_cc1) => Ok(()),
             None => Err("the compiler does not say whether it reads a configuration file".to_owned()),
         },
         Family::Gcc => match said.lines().find_map(|line| line.strip_prefix("Reading specs from ")) {
@@ -500,16 +502,24 @@ fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Is `line` of a Clang driver's `-v` output the command line of the
+/// compiler proper (`"/usr/bin/clang" -cc1 -triple …`; older versions quote
+/// every word)?
+fn runs_cc1(line: &str) -> bool {
+    line.split_whitespace().nth(1).is_some_and(|word| word.trim_matches('"') == "-cc1")
+}
+
 /// The changes to the environment of a preprocessor run that make the
 /// driver's own messages English (GCC translates "Using built-in specs."),
 /// and nothing else: every other locale category stays what it was, since
 /// a compiler may read its source by `LC_CTYPE`. `lc_all` is the value of
 /// `LC_ALL`, which overrides every category and so has to be taken apart
-/// into them.
+/// into them (the ones a compiler could read; an empty value is no value,
+/// as the C library has it).
 fn english_messages(lc_all: Option<OsString>) -> Vec<(&'static str, Option<OsString>)> {
     // `LANGUAGE` picks message catalogs, ahead of `LC_MESSAGES`.
     let mut changes = vec![("LC_MESSAGES", Some(OsString::from("C"))), ("LANGUAGE", None)];
-    if let Some(all) = lc_all {
+    if let Some(all) = lc_all.filter(|all| !all.is_empty()) {
         changes.push(("LC_ALL", None));
         for category in ["LC_CTYPE", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"] {
             changes.push((category, Some(all.clone())));
@@ -686,11 +696,18 @@ mod tests {
         let taken_apart = english_messages(Some("de_DE.UTF-8".into()));
         assert!(taken_apart.contains(&("LC_ALL", None)) && taken_apart.contains(&("LC_CTYPE", Some("de_DE.UTF-8".into()))));
         assert!(taken_apart.contains(&("LC_MESSAGES", Some("C".into()))));
+        // An empty `LC_ALL` overrides nothing, and nothing is put in its place.
+        assert_eq!(english_messages(Some("".into())), english_messages(None));
 
         let clang = |said: &str| flags_from_elsewhere(Family::Clang, said.as_bytes());
         assert!(clang("").unwrap_err().contains("does not say"));
         assert!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\n").is_err());
-        assert_eq!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\nInstalledDir: /usr/bin\n"), Ok(()));
+        for cc1 in [" \"/usr/lib/llvm-19/bin/clang\" -cc1 -triple x86_64-pc-linux-gnu -E\n", " \"/usr/bin/clang\" \"-cc1\" \"-triple\" \"x86_64\"\n"] {
+            assert_eq!(clang(&format!("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\nInstalledDir: /usr/bin\n{cc1}")), Ok(()), "{cc1}");
+        }
+        // Cut short after `InstalledDir:`, where a configuration file would
+        // have been named next: no answer.
+        assert!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\nInstalledDir: /usr/bin\n").is_err());
         let err = clang("clang version 19.1.7\nTarget: i386-pc-linux-gnu\nConfiguration file: /opt/bin/i386-pc-linux-gnu-clang.cfg\n");
         assert!(err.unwrap_err().contains("i386-pc-linux-gnu-clang.cfg"));
     }
