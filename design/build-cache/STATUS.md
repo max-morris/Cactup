@@ -1,9 +1,14 @@
 # Build cache: status
 
 Read this first when picking the work up. The plan is `PLAN.md` in this
-directory; the interface contract with the build-speed work is
-`~/tmp/build-cache-speedup-contract/CONTRACT.md`; the spec is §18 of
-`design/cactup-simfactory-design-new.md`.
+directory (as approved; this file and the spec say where the work has moved
+since); the spec is §18 of `design/cactup-simfactory-design-new.md`.
+
+The interface contract with the build-speed work is a live file outside the
+repository, `~/tmp/build-cache-speedup-contract/CONTRACT.md` on the host
+where both workstreams run (Max's workstation, `plato`): the other side
+cannot write to this branch. `CONTRACT.snapshot.md` here is a copy taken at
+the last milestone, for when that host is not at hand.
 
 ## Rules that are easy to forget
 
@@ -14,15 +19,21 @@ directory; the interface contract with the build-speed work is
   alias `build-cache-b` for cross-installation measurements.
   `/home/max/Cactus-2026` is read-only reference. Never write in
   `~/cacti/speedup-build`.
-- Turn the cache on per command (`cactup -K build-cache=record build …`),
-  never with `cactup knob`: the instance's database is shared with other
-  sessions and with installed cactup builds that do not know the knob.
+- While developing on this shared instance, turn the cache on per command
+  (`cactup -K build-cache=record build …`), not with `cactup knob`: the
+  instance's database is shared with other sessions and with installed
+  cactup builds that do not know the knob yet. (Users of a released cactup
+  set the knob normally.)
 - Every milestone ends at a review gate: two independent harsh reviewer
   agents, same brief, full milestone diff. Fix or answer every blocking
   finding and re-review until both sign off in the same round. Record the
   verdicts below.
-- Re-read the contract file at every milestone and keep the cache-side
-  sections current.
+- Re-read the contract file at every milestone, keep the cache-side
+  sections current, and refresh the snapshot.
+- Test the make-facing parts against more than one GNU make:
+  `CACTUP_TEST_MAKES=/path/to/make-4.2.1:/path/to/make-4.3 cargo test
+  --test objcache` (build them from ftp.gnu.org; 3.82 does not run on a
+  current glibc).
 - `CLAUDE.md` is untracked and shared by every session in the repository:
   do not edit it from this branch. Its text waits in `CLAUDE-contract.md`.
 - Commits carry no AI attribution. Never run `cargo fmt`.
@@ -31,52 +42,137 @@ directory; the interface contract with the build-speed work is
 
 | Milestone | Scope | State |
 |---|---|---|
-| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knobs | implemented; in review |
-| M0b | Argument parser, platform/identity/environment digests, key, `events.jsonl`, `cache report` | not started |
+| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | reworked after review round 1; in review (round 2) |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | not started |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
-| M1a | Store: publish, restore, invalidate | not started |
+| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
-| M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md`, user docs | not started |
+| M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 
 ## What M0a is
 
-- `src/objcache/mod.rs`: knobs (`build-cache`, `build-cache-dir`), the
-  frozen per-build `BuildConf` (`<attempt>/cc/config.toml`), `stage` (called
-  from `prepare`), and the two build-script steps.
+- `src/objcache/mod.rs`: the `build-cache` knob, the frozen per-build
+  `BuildConf` (`<attempt>/cc/config.toml`), `stage` (called from `prepare`),
+  and the two build-script steps.
 - `src/objcache/probe.rs`: `cactup __cc-probe`, the `inject.mk` writer, the
-  make self-test.
-- `src/objcache/wrapper.rs`: `cactup __cc` / `cactup-cc`, dispatched first
-  thing in `main`; pass-through, record mode, signal forwarding, panic hook.
-- `tests/objcache.rs`: the binary driven as make drives it, including one
-  test under real `make`.
-- Design decisions made while building it, beyond the plan:
-  - The wrapper is told which make variable it stands in for (`CC:1`), and
-    honors a thorn that reassigns the compiler after the fragment is read
-    (it finds the exported global in its environment). No thorn in the
-    current Einstein Toolkit does this, but replacing a thorn's compiler
-    silently would be a change in what gets built.
-  - `rustix` is a direct dependency, for `kill(2)` and `waitpid(2)` only.
-- Smoke build (2026-10-01): `~/cacti/build-cache/smoke.th` (25 thorns: C,
-  C++, F77, F90), config `smoke`, machine `plato`, GNU make 4.4.1, GCC 14.2.
-  357 events for 357 objects; every object byte-identical to a rebuild
-  without the wrapper; `config-data` untouched; no wrapper text in the build
-  output.
+  two self-test makefiles.
+- `src/objcache/wrapper.rs`: `cactup __cc`, dispatched first thing in
+  `main`; pass-through, record mode, signal handling, panic hook.
+- `tests/objcache.rs`: the binary driven as make drives it, including a
+  miniature Cactus sub-make under every make in `CACTUP_TEST_MAKES`.
+- Tests in `src/build/mod.rs` that drive `prepare`/`execute` with the cache
+  on and off.
+
+How the design differs from the plan (the plan's "Interposition" section
+describes what review round 1 rejected):
+
+- **Injection redefines Cactus's compile recipes** (`override define
+  COMPILE_C …`), copied from the configuration's own `make.config.rules`
+  with the compiler reference replaced. The plan's pattern-specific
+  `private` compiler variables leak into the environment of prerequisite
+  recipes on GNU make before 4.4 (so into ExternalLibraries builds),
+  silently beat a thorn's less specific pattern, and pin a foreign
+  makefile's `.c.o` objects to Cactus's compiler.
+- **The fragment decides when it is read** whether it is in a Cactus object
+  sub-make (`CCTK_TARGET` set, working directory under the configuration's
+  `build/`), unexports `MAKEFILES` there, stands down for a thorn that
+  mentions the compile recipes in its own make fragments, and removes
+  itself from `MAKEFILE_LIST` everywhere.
+- **The compiler text travels in the environment** (`CACTUP_CC_CMD`), so
+  the wrapper sees exactly what `$(CC)` expanded to for that target and
+  hands anything that is not a plain command back to make's shell.
+- **`rustix` is a direct dependency**, for `kill(2)` and `waitpid(2)` only
+  (spec D13 says so).
+- **Dropped from M0a** as not yet needed: the `build-cache-dir` knob and
+  the cache root, machine, universe and environment digest in `BuildConf`
+  (they come back with the code that reads them), the configuration format
+  version, and the `cactup-cc` file-name entry point (it returns with the
+  rustc adapter).
+
+## Verification done for M0a (2026-10-01)
+
+All in `~/cacti/build-cache`, machine `plato`, GCC 14.2, GNU make 4.4.1,
+`cactup -K build-cache=record build …`:
+
+- `smoke` (thornlist `~/cacti/build-cache/smoke.th`: 25 thorns, C, C++,
+  F77, F90): 357 events for 357 objects; every object byte-identical to a
+  rebuild without the wrapper; `config-data` names the real compilers; no
+  line from cactup in the build output.
+- `ext` (`ext.th` and `ext.toml`: the same plus HDF5 built from source):
+  384 events for 384 Cactus objects; HDF5's installed `h5cc` has
+  `CCBASE="gcc"`; nothing under `scratch/external` or `scratch/build`
+  mentions cactup.
+- `smoke` again with the flesh at the build-speed branch `build-speedup`
+  `996c71f` (checked out in this install's flesh, then restored to master):
+  357 events, 357 objects, identical.
+- A full rebuild (`-f`) first showed the fail-open path for real: after
+  `realclean` there is no `build/` directory, the probe declined, the build
+  ran uncached with one line. The probe now creates the directory.
+- `cargo test` with `CACTUP_TEST_MAKES` naming make 4.2.1 and 4.3: all
+  pass. Make 3.82 could not be run on this host.
+
+Not verified: a container universe, a compute node, NFS or Lustre, any
+compiler but GCC, any machine but `plato`.
 
 ## Log
 
 - 2026-10-01: Plan approved. Worktree and branch created from master
   `47c67f5`. Contract file written; the build-speed session
   (`speedup-build-d4`) was not reachable by direct message, so coordination
-  runs through the contract file. Questions a-d in the contract are open.
-- 2026-10-01: M0a implemented and smoke-tested; spec §18 and D15 written;
-  sent to the twin review.
+  runs through the contract file. Questions a-d in the contract are open and
+  the speed side has not written in the file yet.
+- 2026-10-01: M0a implemented (commit `781984e`) and sent to the twin
+  review.
+- 2026-10-01: Review round 1: both reviewers BLOCKED (see below). Injection
+  redesigned, wrapper reworked, tests rewritten, spec §18 rewritten.
 
 ## Review verdicts
 
-(M0a: pending)
+### M0a, round 1 (on `781984e`): BLOCKED by both
+
+Both reviewers independently reproduced the same five defects; reviewer A
+added a sixth.
+
+1. The self-test (rightly) rejected every GNU make before 4.4: there a
+   `private` pattern-specific value of an exported variable is exported
+   into the object recipe's and the prerequisites' environment. The cache
+   would have been off on most clusters, and CI (make 4.3) red.
+   *Fixed by the recipe-override injection.*
+2. Replacing inherited "ignore" signal dispositions: a build under `nohup`
+   died on hangup. *Fixed: signals ignored on entry are left alone.*
+3. A comma or parenthesis in a path broke every wrapped compile, and the
+   self-test did not notice. *Fixed: paths outside a plain character set
+   make the probe decline; the self-test now runs the real wrapped recipe.*
+4. With the guard off, the fragment still pinned a foreign makefile's
+   `.c.o` objects to Cactus's compiler, and `MAKEFILES` put the fragment
+   first in every make's `MAKEFILE_LIST`. *Fixed: the fragment defines
+   nothing outside Cactus's object sub-makes, unexports `MAKEFILES` there,
+   and removes itself from `MAKEFILE_LIST`.*
+5. A compiler that is a script without a `#!` line failed (the static musl
+   binary has no `execvp` fallback). *Fixed: such a file is handed to
+   make's shell.*
+6. (A) A thorn setting its compiler by a less specific pattern was silently
+   replaced. *Fixed: the wrapper no longer sets or reads compiler
+   variables.*
+
+Non-blocking points taken: panic-hook hang and reap window (no thread any
+more; exit status recorded immediately after the wait), `stage` failing
+`prepare` (now a warning and an uncached build), the duplicate `sh_quote`,
+the configuration format version, unused `BuildConf` fields and knob, the
+`cactup-cc` entry with no producer, `$(SHELL)` for non-plain compilers,
+tests through `prepare`/`execute`, a test that a failed build step stops
+the script, spec drift (SIGQUIT, rule list, D13), user docs for the knob,
+the contract's A and C lists.
+
+Left as is, with the reason: with `SILENT=no` Cactus echoes its recipes, so
+the wrapper shows in front of the compiler on each echoed line (that is
+make's output; spec §18.1 rule 4 says so). `PLAN.md` stays as approved, with
+a note at its top.
+
+### M0a, round 2: pending
 
 ## Next step
 
-Take M0a through the review gate. Then M0b: per-family argument parser (GCC,
+Take M0a through review round 2. Then M0b: per-family argument parser (GCC,
 Clang), platform fingerprint, compiler identity, environment digest, the key,
 richer `events.jsonl` lines, and `cactup cache report`.

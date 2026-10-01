@@ -214,20 +214,19 @@ pub(crate) enum Commands {
     /// Manage Cactus configurations in the active installation
     #[clap(subcommand)]
     Config(ConfigCommand),
-    /// Build (or rebuild) a config in the active installation, and manage build attempts
+    /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
     ///
-    /// Two machine-global knobs control the build cache. It is being brought
+    /// One machine-global knob controls the build cache. It is being brought
     /// up, and so far it only measures:
     ///
-    ///   build-cache      off (the default), or record: run every object
-    ///                    compile through cactup and log it in the build
-    ///                    attempt's cc/events.jsonl. Nothing is cached yet.
-    ///   build-cache-dir  Where the cache will live (default
-    ///                    $CACTUP_HOME/cache). An absolute path.
+    ///   build-cache  off (the default), or record: run every object compile
+    ///                through cactup and log it in the build attempt's
+    ///                cc/events.jsonl. Nothing is cached yet.
     ///
-    /// Set them with `cactup knob`:
+    /// Set it with `cactup knob`, or for one build with -K:
     ///
     ///   cactup knob build-cache record
+    ///   cactup -K build-cache=record build
     #[command(args_conflicts_with_subcommands = true)]
     #[clap(verbatim_doc_comment)]
     Build {

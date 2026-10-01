@@ -1,5 +1,12 @@
 # Shared build cache for Cactup: feasibility findings and plan
 
+> This is the plan as Max approved it on 2026-10-01, kept as it was written
+> (in the first person, by the session that did the investigation, on the
+> host it ran on). It is the record of what was agreed and why, not a
+> description of the code. Where the work has since moved — the injection
+> mechanism above all, which review replaced — `STATUS.md` and spec §18 say
+> what is true now.
+
 ## Context
 
 Every Cactus installation under one Cactup instance compiles every thorn from

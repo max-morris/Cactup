@@ -158,7 +158,7 @@ impl Default for BuildFlags {
 /// other, and re-supplying either flag is what moves it between them.
 ///
 /// Serialized flattened into `cactup-config.toml`, where it is the single key
-/// `variant = "cuda"` or `optionlist = "/abs/path/my.cfg"`. Modelling it as a
+/// `variant = "cuda"` or `optionlist = "/abs/path/my.cfg"`. Modeling it as a
 /// sum rather than two optional keys is what keeps "exactly one" true by
 /// construction: neither the metadata nor the resolver below can express a
 /// config that is both, or neither.
@@ -1477,6 +1477,21 @@ pub fn prepare(
     opts: &BuildOpts,
     submit: Option<&SubmitReservation>,
 ) -> Res<Prepared> {
+    prepare_with_cache(installation, machine, name, opts, submit, None)
+}
+
+/// [`prepare`], with the build cache's mode given instead of read from the
+/// `build-cache` knob (`None`: the knob). The knob lives in the global DB
+/// and its `-K` overlay is process-wide, so a test cannot set either for
+/// itself.
+fn prepare_with_cache(
+    installation: &Installation,
+    machine: &Machine,
+    name: &str,
+    opts: &BuildOpts,
+    submit: Option<&SubmitReservation>,
+    cache_mode: Option<crate::objcache::Mode>,
+) -> Res<Prepared> {
     let cactus_root = installation.cactus_root();
     if !cactus_root.is_dir() {
         bail!("no Cactus tree at {}", cactus_root.display());
@@ -1590,7 +1605,7 @@ pub fn prepare(
     let parsed_list = crate::thornlist::parse(&thornlist_processed).ok();
     // When this whole reading was taken, for the [`SourceProbe`] handed back
     // below. Stamped BEFORE the walks, not after: the reading describes the
-    // tree as it was when the first walk started, so ageing it from then is
+    // tree as it was when the first walk started, so aging it from then is
     // the conservative end.
     let probed_at = std::time::Instant::now();
     // How the source trees now differ from what this config was built with
@@ -1765,9 +1780,10 @@ pub fn prepare(
         .map(|db| db.knob("allocation").unwrap_or("").to_owned())
         .unwrap_or_default();
     vars.set("ALLOCATION", allocation);
-    // The build cache's knobs are maintenance knobs, so they are in no
-    // snapshot: resolved here, and frozen into the attempt below (D11).
-    let cache_settings = db.as_ref().map(crate::objcache::Settings::from_db).unwrap_or_default();
+    // The build cache's knob is a maintenance knob, so it is in no snapshot:
+    // resolved here, and frozen into the attempt below (D11).
+    let cache_mode =
+        cache_mode.unwrap_or_else(|| db.as_ref().map(crate::objcache::Mode::from_db).unwrap_or_default());
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
     // optionlist, make command and a build submit script — frozen into
     // `build.toml` with the vars, so `execute` never opens the DB (§5, D11).
@@ -1883,21 +1899,16 @@ pub fn prepare(
     // written at all for a virtual-executable build: that's a plain file
     // copy, not a script (see `BuildMeta::virtual_executable`'s doc comment).
     if let Some(make) = &make {
-        // The build cache (`crate::objcache`), when it is on: its settings
-        // frozen next to the script, and two steps of the script changed.
-        // `None` leaves the script exactly what it is without the cache.
-        let cache = crate::objcache::stage(
-            &attempt.cc_dir(),
-            &cache_settings,
-            &crate::objcache::StageInputs {
-                cactup: &crate::freeze::frozen_cactup(),
-                cactus_root: &cactus_root,
-                config_dir: &config_dir,
-                machine: &machine.name,
-                universe: attempt.meta.config_meta.universe.as_deref(),
-                build_env: &build_env,
-            },
-        )?;
+        // The build cache (§18.2), when it is on: its settings frozen next
+        // to the script, and two steps of the script changed. `None` leaves
+        // the script exactly what it is without the cache — also when the
+        // settings cannot be written: the cache never costs a build.
+        let staged =
+            crate::objcache::stage(&attempt.cc_dir(), cache_mode, &crate::freeze::frozen_cactup(), &config_dir);
+        let cache = staged.unwrap_or_else(|e| {
+            println!("{} build cache off for this build: {e:#}", "warning:".yellow().bold());
+            None
+        });
 
         let mut steps: Vec<String> = Vec::new();
         if matches!(decision, RebuildDecision::Full(_)) && is_configured(&cactus_root, name) {
@@ -2361,7 +2372,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
 /// before this split — `cactup build` still runs both back to back today;
 /// only a later submit-path chunk lets time pass between them. Returns the
 /// stored metadata. The global DB is never touched by `execute` (§2.3); the
-/// caller updates the active-config pointer afterwards.
+/// caller updates the active-config pointer afterward.
 pub fn build(
     installation: &Installation,
     machine: &Machine,
@@ -2415,7 +2426,7 @@ fn generate_id(kind: &str, name: &str, machine: &str, now: DateTime<Utc>) -> Str
     )
 }
 
-fn sh_quote(path: &Path) -> String {
+pub(crate) fn sh_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
@@ -3555,6 +3566,65 @@ mod tests {
         for sub in ["build", "lib", "scratch", "config-data"] {
             assert!(!config_dir.join(sub).exists(), "{sub}/ must not exist before execute() runs");
         }
+    }
+
+    /// The build script `prepare` stages with the build cache in `mode`,
+    /// its lines after the environment setup, plus whether `<attempt>/cc`
+    /// was written.
+    fn staged_script(mode: crate::objcache::Mode) -> (Vec<String>, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
+        let attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, Some(mode)).unwrap() {
+            Prepared::Ready(a, _) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        let script = fs::read_to_string(attempt.script_path()).unwrap().replace(&root.display().to_string(), "");
+        let steps = script.lines().skip_while(|l| !l.starts_with("echo yes | ")).map(str::to_owned).collect();
+        (steps, attempt.cc_dir().exists())
+    }
+
+    /// §18.2: with the build cache off, the build script is the three make
+    /// steps it always was and nothing is written for the cache; with it on,
+    /// the probe step sits between configure and build, and the same build
+    /// step runs either way.
+    #[test]
+    fn the_build_cache_changes_the_script_only_when_it_is_on() {
+        use crate::objcache::Mode;
+        let config = "echo yes | /fakemake -j1 sim-config options='/inst/Cactus/configs/sim/.cactup-builds/0000/\
+                      cactup-optionlist.cfg' THORNLIST='/inst/Cactus/configs/sim/.cactup-builds/0000/cactup-thornlist.th'";
+
+        let (off, wrote) = staged_script(Mode::Off);
+        assert_eq!(off, [config, "/fakemake -j1 sim", "/fakemake -j1 sim-utils"]);
+        assert!(!wrote, "an off build writes nothing for the cache");
+
+        let (record, wrote) = staged_script(Mode::Record);
+        assert!(wrote);
+        assert_eq!(record[0], config);
+        assert_eq!(record[1], "CACTUP_CC_MAKEFILES=");
+        assert!(record[2].contains(" __cc-probe '/inst/Cactus/configs/sim/.cactup-builds/0000/cc/config.toml'; then"));
+        let build = record.iter().position(|l| l == "if [ -n \"$CACTUP_CC_MAKEFILES\" ]; then").unwrap();
+        assert!(record[build + 1].ends_with("export MAKEFILES; /fakemake -j1 sim )"), "{}", record[build + 1]);
+        assert_eq!(&record[build + 2..], ["else", "  /fakemake -j1 sim", "fi", "/fakemake -j1 sim-utils"]);
+    }
+
+    /// The staged script, cache steps included, runs to a finished build
+    /// under `execute`: the probe step can only ever turn the cache off.
+    /// (Here "cactup" is this test binary and `make` a stand-in, so nothing
+    /// is wrapped; the wrapper itself is driven in `tests/objcache.rs`.)
+    #[test]
+    fn a_build_with_the_cache_on_still_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (_mdb, machine, inst, opts, _repos) = source_tracking_tree(root);
+        let mode = Some(crate::objcache::Mode::Record);
+        let mut attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, mode).unwrap() {
+            Prepared::Ready(a, _) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        assert!(crate::objcache::conf_path(&attempt.cc_dir()).is_file());
+        let meta = execute(&mut attempt, true, None).unwrap();
+        assert!(meta.built.is_some());
     }
 
     /// Stage a fake Cactus tree whose machine `make` is `make_body` (a `case

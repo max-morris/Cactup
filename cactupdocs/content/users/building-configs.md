@@ -531,6 +531,42 @@ cactup build container-build --universe et-sif
 cactup build native-build --no-universe
 ```
 
+## The build cache (in development)
+
+cactup is growing a build cache shared by all the installations of one
+`~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
+objects an earlier build already compiled. It does not cache anything yet.
+What exists is the groundwork, behind the `build-cache` knob:
+
+| Value | What a build does |
+|-------|-------------------|
+| `off` (the default) | Nothing: the build is exactly what it is without the cache |
+| `record` | Runs every object compile through cactup and logs it, to measure what a cache would save. Nothing is stored or reused |
+
+```sh
+cactup -K build-cache=record build myconfig   # for this one build
+cactup knob build-cache record                # for every build from now on
+cactup knob delete build-cache                # back to the default, off
+```
+
+With `record`, each compile of a Cactus source file adds one line to
+`cc/events.jsonl` in the build attempt's directory (see "Where build output
+goes" above). The compilers, their flags and the objects are untouched, and
+so is everything that is not a Cactus object compile — external libraries
+are built exactly as before.
+
+cactup checks, where the build actually runs, that it can do this safely. If
+it cannot (inside a container that does not see the cactup binary, with a
+`make` that does not behave as needed, in an installation whose path has
+unusual characters) the build goes ahead without it and says so in one line:
+
+```
+cactup: build cache off for this build: <reason>
+```
+
+Like the knobs that control updating, `build-cache` describes your cactup
+installation rather than a job.
+
 ## Full build command reference
 
 {{cactup:cli command="build"}}

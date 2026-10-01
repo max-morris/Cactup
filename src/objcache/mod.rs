@@ -18,15 +18,16 @@
 //!   does not fully understand, ends in the real compiler running exactly as
 //!   `make` asked for it.
 //! - **Hermetic on the compute node (D11).** The wrapper and the probe read
-//!   only the attempt's own frozen [`BuildConf`], the configuration
-//!   directory and the cache root named in it: never the global DB, the
-//!   registry, the MDB or knobs.
+//!   only the attempt's own frozen [`BuildConf`] and the configuration
+//!   directory named in it: never the global DB, the registry, the MDB or
+//!   knobs.
 //! - **Quiet.** The wrapper's stdout and stderr are the compiler's. It adds
 //!   nothing of its own to a compile that runs.
 
 pub mod probe;
 pub mod wrapper;
 
+use crate::build::sh_quote;
 use crate::database::Database;
 use crate::Res;
 use anyhow::{bail, Context};
@@ -35,27 +36,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The verb the injected makefile fragment runs the wrapper by:
-/// `cactup __cc <config.toml> <VAR>:<n> <compiler…> <args…>`. Dispatched
-/// before clap ever sees the command line, so it is in no help output.
+/// `cactup __cc <config.toml> <args…>`, with the compiler command in the
+/// environment (`wrapper::CMD_ENV`). Dispatched before clap ever sees the
+/// command line, so it is in no help output.
 pub const WRAP_VERB: &str = "__cc";
 
 /// The verb the build script runs the probe by: `cactup __cc-probe
 /// <config.toml>`.
 pub const PROBE_VERB: &str = "__cc-probe";
-
-/// The file name under which cactup is the wrapper with no verb at all, for
-/// callers that can only name a program (cargo's `RUSTC_WRAPPER`): `cactup-cc
-/// <compiler> <args…>`, with the configuration named by [`CONF_ENV`].
-pub const WRAP_ARGV0: &str = "cactup-cc";
-
-/// Names the [`BuildConf`] for the [`WRAP_ARGV0`] form.
-pub const CONF_ENV: &str = "CACTUP_CC_CONF";
-
-/// The [`BuildConf`] format this binary writes and reads. A wrapper handed
-/// any other version runs the real compiler: the cactup that staged a build
-/// and the one wrapping its compiles are the same frozen binary, so a
-/// mismatch means something is off, and guessing is not an option.
-pub const CONF_VERSION: u32 = 1;
 
 /// The probe's exit status for "the cache cannot be used here, and the
 /// reason is already printed" — as opposed to the probe not running at all
@@ -69,8 +57,8 @@ pub enum Mode {
     /// Not involved: the build script is exactly what it is without the cache.
     #[default]
     Off,
-    /// Wrap the compilers and log what each compile would have been keyed
-    /// by, but serve nothing and store nothing.
+    /// Wrap the compilers and log each compile, but serve nothing and store
+    /// nothing.
     Record,
 }
 
@@ -90,63 +78,19 @@ impl Mode {
             None => bail!("invalid build-cache value \"{s}\" (valid: off, record)"),
         }
     }
+
+    /// The effective `build-cache` setting, read leniently like
+    /// `update::autoupdate`: a stored value that no longer parses means
+    /// `off` rather than a failed build. Resolved on the login node only
+    /// (D11): [`stage`] freezes it.
+    pub fn from_db(db: &Database) -> Self {
+        db.knob_or_default("build-cache").and_then(|v| Self::parse(&v).ok()).unwrap_or_default()
+    }
 }
 
 /// Knob validator (§5): `build-cache` stores the name form.
 pub fn validate_mode(value: &str) -> Res<String> {
     Ok(Mode::parse(value.trim())?.name().to_owned())
-}
-
-/// Knob validator (§5): `build-cache-dir` is an absolute directory. It is
-/// frozen into every build as written, and a build may run on another node
-/// or in another working directory, where a relative path would name
-/// somewhere else.
-pub fn validate_dir(value: &str) -> Res<String> {
-    let dir = crate::shell::expand_path(value.trim());
-    if dir.is_empty() {
-        bail!("build-cache-dir cannot be empty (`cactup knob delete build-cache-dir` restores the default)");
-    }
-    if !Path::new(&dir).is_absolute() {
-        bail!("invalid build-cache-dir \"{value}\": expected an absolute path");
-    }
-    Ok(dir)
-}
-
-/// Where the cache lives unless `build-cache-dir` says otherwise.
-pub fn default_dir() -> PathBuf {
-    crate::CACTUP_ROOT.join("cache")
-}
-
-/// The cache settings in force for a build, resolved on the login node from
-/// the knobs. They never reach the compute node as knobs (D11): [`stage`]
-/// freezes them.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Settings {
-    pub mode: Mode,
-    pub root: PathBuf,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { mode: Mode::Off, root: default_dir() }
-    }
-}
-
-impl Settings {
-    /// Read leniently, like `update::autoupdate`: a stored value that no
-    /// longer parses means the default rather than a failed build.
-    pub fn from_db(db: &Database) -> Self {
-        let mode = db
-            .knob_or_default("build-cache")
-            .and_then(|v| Mode::parse(&v).ok())
-            .unwrap_or_default();
-        let root = db
-            .knob_or_default("build-cache-dir")
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_absolute())
-            .unwrap_or_else(default_dir);
-        Self { mode, root }
-    }
 }
 
 /// One build's cache settings (§18.2), frozen by [`stage`] as
@@ -155,42 +99,18 @@ impl Settings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct BuildConf {
-    pub version: u32,
     pub mode: Mode,
     /// The cactup that wraps this build's compiles: the versioned binary
     /// (`freeze::frozen_cactup`), so an update mid-build changes nothing.
     pub cactup: PathBuf,
-    pub cache_root: PathBuf,
-    pub cactus_root: PathBuf,
     pub config_dir: PathBuf,
-    /// The cactup machine this build was prepared for. Objects are keyed by
-    /// it, so two machines sharing one filesystem never share objects.
-    pub machine: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub universe: Option<String>,
-    /// SHA-256 of the build-phase environment setup the build script runs:
-    /// an edit to a machine's modules keys every object differently.
-    pub build_env_digest: String,
 }
 
 impl BuildConf {
-    /// Read and check a frozen configuration. Any failure — unreadable,
-    /// unparsable, another [`CONF_VERSION`] — is the caller's cue to leave
+    /// Read a frozen configuration. Any failure is the caller's cue to leave
     /// the cache out of it.
     pub fn load(path: &Path) -> Res<Self> {
-        #[derive(Deserialize)]
-        struct Versioned {
-            version: u32,
-        }
         let text = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-        let Versioned { version } =
-            toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
-        if version != CONF_VERSION {
-            bail!(
-                "{} is build-cache configuration version {version}, and this cactup reads version {CONF_VERSION}",
-                path.display()
-            );
-        }
         toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))
     }
 }
@@ -207,7 +127,7 @@ pub fn inject_path(cc_dir: &Path) -> PathBuf {
 }
 
 /// Two throwaway makefiles the build script runs to check that this `make`
-/// scopes the injected variables the way the fragment needs.
+/// takes the fragment the way it is meant.
 pub fn selftest_dir(cc_dir: &Path) -> PathBuf {
     cc_dir.join("selftest")
 }
@@ -217,58 +137,28 @@ pub fn events_path(cc_dir: &Path) -> PathBuf {
     cc_dir.join("events.jsonl")
 }
 
-/// The lowercase hex SHA-256 of `bytes`.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes);
-    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// What `prepare` knows about the build it is staging.
-pub struct StageInputs<'a> {
-    pub cactup: &'a str,
-    pub cactus_root: &'a Path,
-    pub config_dir: &'a Path,
-    pub machine: &'a str,
-    pub universe: Option<&'a str>,
-    pub build_env: &'a str,
-}
-
 /// A build with the cache staged: the shell text `prepare` splices into the
 /// build script.
 #[derive(Debug)]
 pub struct Staged {
     cactup: PathBuf,
     cc_dir: PathBuf,
+    config_dir: PathBuf,
 }
 
-/// Freeze `settings` for one build into `cc_dir` (`<attempt>/cc`). `None`
-/// when the cache is off: nothing is written, and the build script comes out
+/// Freeze `mode` for one build into `cc_dir` (`<attempt>/cc`). `None` when
+/// the cache is off: nothing is written, and the build script comes out
 /// byte for byte what it is without this module.
-pub fn stage(cc_dir: &Path, settings: &Settings, inputs: &StageInputs) -> Res<Option<Staged>> {
-    if settings.mode == Mode::Off {
+pub fn stage(cc_dir: &Path, mode: Mode, cactup: &str, config_dir: &Path) -> Res<Option<Staged>> {
+    if mode == Mode::Off {
         return Ok(None);
     }
-    let conf = BuildConf {
-        version: CONF_VERSION,
-        mode: settings.mode,
-        cactup: PathBuf::from(inputs.cactup),
-        cache_root: settings.root.clone(),
-        cactus_root: inputs.cactus_root.to_owned(),
-        config_dir: inputs.config_dir.to_owned(),
-        machine: inputs.machine.to_owned(),
-        universe: inputs.universe.map(str::to_owned),
-        build_env_digest: sha256_hex(inputs.build_env.as_bytes()),
-    };
+    let conf = BuildConf { mode, cactup: PathBuf::from(cactup), config_dir: config_dir.to_owned() };
     fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create {}", cc_dir.display()))?;
     let path = conf_path(cc_dir);
     let text = toml::to_string(&conf).context("Failed to serialize the build-cache configuration")?;
     fs::write(&path, text).with_context(|| format!("Failed to write {}", path.display()))?;
-    Ok(Some(Staged { cactup: conf.cactup, cc_dir: cc_dir.to_owned() }))
-}
-
-/// Single-quote `s` for `/bin/sh`.
-fn sh_quote(s: &Path) -> String {
-    format!("'{}'", s.display().to_string().replace('\'', "'\\''"))
+    Ok(Some(Staged { cactup: conf.cactup, cc_dir: cc_dir.to_owned(), config_dir: conf.config_dir }))
 }
 
 impl Staged {
@@ -279,26 +169,35 @@ impl Staged {
     /// inside a container universe the cactup binary or the attempt
     /// directory may simply not be visible.
     ///
-    /// `make` is the build's own frozen `make` command, so the self-test
-    /// exercises the very `make` that will read the fragment.
+    /// The self-test runs the build's own frozen `make` command twice under
+    /// the fragment: once where and how Cactus's object sub-makes run (in
+    /// the configuration's `build` directory, with `CCTK_TARGET` set), and
+    /// once as any other make below the build would (see
+    /// `probe::selftest_wrapped_mk`). Its output goes to
+    /// `<attempt>/cc/selftest.log`.
     pub fn probe_step(&self, make: &str) -> String {
         let cactup = sh_quote(&self.cactup);
         let inject = sh_quote(&inject_path(&self.cc_dir));
-        let guarded = sh_quote(&probe::selftest_guarded(&self.cc_dir));
-        let unguarded = sh_quote(&probe::selftest_unguarded(&self.cc_dir));
+        let log = sh_quote(&self.cc_dir.join("selftest.log"));
         format!(
             "CACTUP_CC_MAKEFILES=\n\
              if {cactup} {PROBE_VERB} {conf}; then\n\
-             \x20 if ( MAKEFILES={inject}; export MAKEFILES; {make} -s -f {guarded} && {make} -s -f {unguarded} ) >/dev/null 2>&1; then\n\
+             \x20 if ( MAKEFILES={inject}; export MAKEFILES\n\
+             \x20      cd {build} && {make} -s -f {wrapped} CCTK_TARGET=cactup-selftest SRCDIR=. &&\n\
+             \x20      cd {cc} && {make} -s -f {untouched} CCTK_TARGET=cactup-selftest SRCDIR=. ) > {log} 2>&1; then\n\
              \x20   CACTUP_CC_MAKEFILES={inject}\n\
              \x20 else\n\
-             \x20   echo 'cactup: build cache off for this build: this make cannot limit the compiler wrapper to object rules (GNU make 3.82 or later is needed)' >&2\n\
+             \x20   echo 'cactup: build cache off for this build: its self-test failed with this make (see '{log}')' >&2\n\
              \x20 fi\n\
              else\n\
              \x20 cactup_cc_status=$?\n\
              \x20 [ $cactup_cc_status -eq {PROBE_DECLINED} ] || echo 'cactup: build cache off for this build: '{cactup}\" could not check it here (exit status $cactup_cc_status)\" >&2\n\
              fi",
             conf = sh_quote(&conf_path(&self.cc_dir)),
+            build = sh_quote(&self.config_dir.join("build")),
+            cc = sh_quote(&self.cc_dir),
+            wrapped = sh_quote(&probe::selftest_wrapped(&self.cc_dir)),
+            untouched = sh_quote(&probe::selftest_untouched(&self.cc_dir)),
         )
     }
 
@@ -321,17 +220,6 @@ impl Staged {
 mod tests {
     use super::*;
 
-    fn inputs<'a>(root: &'a Path, config: &'a Path) -> StageInputs<'a> {
-        StageInputs {
-            cactup: "/opt/cactup/bin/cactup-abc1234",
-            cactus_root: root,
-            config_dir: config,
-            machine: "mel5",
-            universe: Some("host"),
-            build_env: "module load gcc\n",
-        }
-    }
-
     #[test]
     fn mode_knob_accepts_exactly_its_names() {
         assert_eq!(validate_mode(" record ").unwrap(), "record");
@@ -341,17 +229,10 @@ mod tests {
     }
 
     #[test]
-    fn dir_knob_requires_an_absolute_path() {
-        assert_eq!(validate_dir("/scratch/me/cache").unwrap(), "/scratch/me/cache");
-        assert!(validate_dir("cache").unwrap_err().to_string().contains("absolute"));
-        assert!(validate_dir("  ").unwrap_err().to_string().contains("cannot be empty"));
-    }
-
-    #[test]
     fn off_stages_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let cc = tmp.path().join("cc");
-        let staged = stage(&cc, &Settings::default(), &inputs(tmp.path(), tmp.path())).unwrap();
+        let staged = stage(&cc, Mode::Off, "/opt/cactup/bin/cactup-abc1234", tmp.path()).unwrap();
         assert!(staged.is_none());
         assert!(!cc.exists(), "an off build must not even create the directory");
     }
@@ -360,29 +241,19 @@ mod tests {
     fn staged_configuration_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let cc = tmp.path().join("cc");
-        let settings = Settings { mode: Mode::Record, root: PathBuf::from("/scratch/cache") };
-        let root = tmp.path().join("Cactus");
-        let config = root.join("configs/sim");
-        stage(&cc, &settings, &inputs(&root, &config)).unwrap().unwrap();
+        let config = tmp.path().join("Cactus/configs/sim");
+        stage(&cc, Mode::Record, "/opt/cactup/bin/cactup-abc1234", &config).unwrap().unwrap();
 
         let conf = BuildConf::load(&conf_path(&cc)).unwrap();
-        assert_eq!(conf.mode, Mode::Record);
-        assert_eq!(conf.cache_root, Path::new("/scratch/cache"));
-        assert_eq!(conf.config_dir, config);
-        assert_eq!(conf.machine, "mel5");
-        assert_eq!(conf.universe.as_deref(), Some("host"));
-        assert_eq!(conf.build_env_digest, sha256_hex(b"module load gcc\n"));
-    }
-
-    #[test]
-    fn another_configuration_version_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        // Only the version is checked before the rest is even looked at: a
-        // future format need not resemble this one.
-        fs::write(&path, format!("version = {}\nshape = \"unknown\"\n", CONF_VERSION + 1)).unwrap();
-        let err = BuildConf::load(&path).unwrap_err().to_string();
-        assert!(err.contains("reads version"), "{err}");
+        assert_eq!(
+            conf,
+            BuildConf {
+                mode: Mode::Record,
+                cactup: PathBuf::from("/opt/cactup/bin/cactup-abc1234"),
+                config_dir: config,
+            }
+        );
+        assert!(BuildConf::load(&cc.join("missing.toml")).is_err());
     }
 
     #[test]
@@ -390,10 +261,20 @@ mod tests {
         let staged = Staged {
             cactup: PathBuf::from("/opt/it's here/cactup-abc"),
             cc_dir: PathBuf::from("/work/cfg/.cactup-builds/0003/cc"),
+            config_dir: PathBuf::from("/work/cfg"),
         };
         let probe = staged.probe_step("make -j8");
-        assert!(probe.contains(r"'/opt/it'\''s here/cactup-abc' __cc-probe '/work/cfg/.cactup-builds/0003/cc/config.toml'"), "{probe}");
-        assert!(probe.contains("make -j8 -s -f '/work/cfg/.cactup-builds/0003/cc/selftest/lib/make/make.subdir'"), "{probe}");
+        assert!(
+            probe.contains(r"'/opt/it'\''s here/cactup-abc' __cc-probe '/work/cfg/.cactup-builds/0003/cc/config.toml'"),
+            "{probe}"
+        );
+        assert!(
+            probe.contains(
+                "cd '/work/cfg/build' && make -j8 -s -f '/work/cfg/.cactup-builds/0003/cc/selftest/wrapped.mk' \
+                 CCTK_TARGET=cactup-selftest SRCDIR=. &&"
+            ),
+            "{probe}"
+        );
         assert!(probe.contains("[ $cactup_cc_status -eq 3 ] || echo"), "{probe}");
 
         let build = staged.build_step("make -j8", "sim");
@@ -401,12 +282,18 @@ mod tests {
         assert!(build.trim_end().ends_with("fi"), "{build}");
     }
 
-    /// Run the two script steps the way the build script does (`set -e`),
-    /// with a stand-in for cactup (`probe`: a script body, or `None` for a
-    /// binary that is not there), `selftest_make` as the self-test's make,
-    /// and a build "make" that prints the `MAKEFILES` it was given.
-    /// Returns (stdout, stderr); the script itself must always succeed.
-    fn run_steps(probe: Option<&str>, selftest_make: &str, makefiles: Option<&str>) -> (String, String) {
+    /// What the two script steps did, run the way the build script runs them.
+    struct Ran {
+        stdout: String,
+        stderr: String,
+        success: bool,
+    }
+
+    /// Run the two script steps under `set -e` with stand-ins: `probe` is the
+    /// body of a script standing in for cactup (`None`: a binary that is not
+    /// there), `selftest_make` is the self-test's make, and the build's
+    /// "make" is `build_make`.
+    fn run_steps(probe: Option<&str>, selftest_make: &str, build_make: &str, makefiles: Option<&str>) -> Ran {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let cactup = tmp.path().join("cactup-abc");
@@ -414,11 +301,16 @@ mod tests {
             fs::write(&cactup, format!("#!/bin/sh\n{body}\n")).unwrap();
             fs::set_permissions(&cactup, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let staged = Staged { cactup, cc_dir: PathBuf::from("/attempt/cc") };
+        let config_dir = tmp.path().join("cfg");
+        let cc_dir = config_dir.join(".cactup-builds/0000/cc");
+        fs::create_dir_all(selftest_dir(&cc_dir)).unwrap();
+        fs::create_dir_all(config_dir.join("build")).unwrap();
+        let inject = inject_path(&cc_dir).display().to_string();
+        let staged = Staged { cactup, cc_dir, config_dir };
         let script = format!(
-            "set -e\n{}\n{}\n",
+            "set -e\n{}\n{}\necho after the build\n",
             staged.probe_step(selftest_make),
-            staged.build_step(r#"sh -c 'echo "make $1 with [$MAKEFILES]"' --"#, "sim"),
+            staged.build_step(build_make, "sim"),
         );
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(script).env_remove("MAKEFILES");
@@ -426,47 +318,60 @@ mod tests {
             cmd.env("MAKEFILES", makefiles);
         }
         let out = cmd.output().unwrap();
-        let (stdout, stderr) =
-            (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned());
-        assert!(out.status.success(), "the build script failed: {stdout}{stderr}");
-        (stdout, stderr)
+        Ran {
+            stdout: String::from_utf8_lossy(&out.stdout).replace(&inject, "<inject.mk>"),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: out.status.success(),
+        }
     }
+
+    /// A build "make" that prints the `MAKEFILES` it was given.
+    const SHOW: &str = r#"sh -c 'echo "make $1 with [$MAKEFILES]"' --"#;
 
     #[test]
     fn the_build_reads_the_fragment_only_when_probe_and_selftest_both_pass() {
-        let (stdout, stderr) = run_steps(Some("exit 0"), "true", None);
-        assert_eq!((stdout.as_str(), stderr.as_str()), ("make sim with [/attempt/cc/inject.mk]\n", ""));
+        let ran = run_steps(Some("exit 0"), "true", SHOW, None);
+        assert_eq!((ran.stdout.as_str(), ran.stderr.as_str()), ("make sim with [<inject.mk>]\nafter the build\n", ""));
 
         // A MAKEFILES the user already had stays in front.
-        let (stdout, _) = run_steps(Some("exit 0"), "true", Some("/home/me/extra.mk"));
-        assert_eq!(stdout, "make sim with [/home/me/extra.mk /attempt/cc/inject.mk]\n");
+        let ran = run_steps(Some("exit 0"), "true", SHOW, Some("/home/me/extra.mk"));
+        assert_eq!(ran.stdout, "make sim with [/home/me/extra.mk <inject.mk>]\nafter the build\n");
     }
 
     #[test]
     fn every_way_the_probe_can_fail_leaves_a_plain_build_and_one_line() {
         // Declined: the probe has said why itself, the script adds nothing.
         let declined = format!("echo 'cactup: build cache off for this build: reasons' >&2; exit {PROBE_DECLINED}");
-        let (stdout, stderr) = run_steps(Some(&declined), "true", None);
-        assert_eq!(stdout, "make sim with []\n");
-        assert_eq!(stderr, "cactup: build cache off for this build: reasons\n");
+        let ran = run_steps(Some(&declined), "true", SHOW, None);
+        assert_eq!(ran.stdout, "make sim with []\nafter the build\n");
+        assert_eq!(ran.stderr, "cactup: build cache off for this build: reasons\n");
 
         // Not there at all (a container that does not see the binary).
-        let (stdout, stderr) = run_steps(None, "true", None);
-        assert_eq!(stdout, "make sim with []\n");
-        let ours: Vec<&str> = stderr.lines().filter(|l| l.starts_with("cactup: ")).collect();
-        assert_eq!(ours.len(), 1, "{stderr}");
-        assert!(ours[0].starts_with("cactup: build cache off for this build: "), "{stderr}");
-        assert!(ours[0].ends_with("could not check it here (exit status 127)"), "{stderr}");
+        let ran = run_steps(None, "true", SHOW, None);
+        assert_eq!(ran.stdout, "make sim with []\nafter the build\n");
+        let ours: Vec<&str> = ran.stderr.lines().filter(|l| l.starts_with("cactup: ")).collect();
+        assert_eq!(ours.len(), 1, "{}", ran.stderr);
+        assert!(ours[0].ends_with("could not check it here (exit status 127)"), "{}", ran.stderr);
 
         // Crashed, or anything else that is not the probe's own "declined".
-        let (stdout, stderr) = run_steps(Some("exit 1"), "true", None);
-        assert_eq!(stdout, "make sim with []\n");
-        assert!(stderr.trim_end().ends_with("could not check it here (exit status 1)"), "{stderr}");
+        let ran = run_steps(Some("exit 1"), "true", SHOW, None);
+        assert_eq!(ran.stdout, "make sim with []\nafter the build\n");
+        assert!(ran.stderr.trim_end().ends_with("could not check it here (exit status 1)"), "{}", ran.stderr);
 
-        // The probe is fine but this make fails the self-test.
-        let (stdout, stderr) = run_steps(Some("exit 0"), "false", Some("/home/me/extra.mk"));
-        assert_eq!(stdout, "make sim with [/home/me/extra.mk]\n");
-        assert!(stderr.contains("GNU make 3.82 or later is needed"), "{stderr}");
-        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        // The probe is fine but the self-test fails with this make.
+        let ran = run_steps(Some("exit 0"), "false", SHOW, Some("/home/me/extra.mk"));
+        assert_eq!(ran.stdout, "make sim with [/home/me/extra.mk]\nafter the build\n");
+        assert!(ran.stderr.starts_with("cactup: build cache off for this build: its self-test failed"), "{}", ran.stderr);
+        assert_eq!(ran.stderr.lines().count(), 1, "{}", ran.stderr);
+        assert!(ran.success);
+    }
+
+    #[test]
+    fn a_failing_build_step_still_stops_the_script() {
+        for probe in ["exit 0", "exit 3"] {
+            let ran = run_steps(Some(probe), "true", "false", None);
+            assert!(!ran.success, "{probe}");
+            assert_eq!(ran.stdout, "", "{probe}: nothing after a failed make may run");
+        }
     }
 }

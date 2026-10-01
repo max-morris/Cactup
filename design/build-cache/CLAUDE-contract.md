@@ -6,7 +6,7 @@ session working in the repository reads it. Editing it from this branch
 would put a contract in front of sessions whose tree does not have the code
 it describes. So the text below waits here until the build cache lands on
 master, and is then added to `CLAUDE.md` before the "On-disk formats"
-section, with Max's go-ahead. The spec carries the same rules now (§18.1).
+section, with Max's go-ahead. The spec carries the same seven rules now (§18.1).
 
 ---
 
@@ -14,8 +14,8 @@ section, with Max's go-ahead. The spec carries the same rules now (§18.1).
 
 `src/objcache/` puts cactup in front of Cactus's object compiles as a
 compiler wrapper (`cactup __cc …`, dispatched at the very top of `main`).
-It runs thousands of times per build with `make` waiting on it. Hold these
-when touching it:
+It runs thousands of times per build with `make` waiting on it. The rules
+are spec §18.1; hold them when touching it:
 
 - **Never a stale object.** A hit must be byte for byte what the compile
   would produce here and now. Whatever a key or an adapter does not fully
@@ -26,20 +26,24 @@ when touching it:
   aborts on one, so the wrapper installs a hook) — ends in `pass_through`,
   which `exec`s the real compiler exactly as `make` asked. After it has
   run, its exit status is the wrapper's, whatever else goes wrong.
+- **Nothing outside Cactus's object compiles.** Injection is the fragment
+  the probe writes: it redefines Cactus's compile recipes, only inside
+  Cactus's object sub-makes, and is read through `MAKEFILES`. Never set a
+  compiler variable (not per target either: before GNU make 4.4 that leaks
+  into the environment of prerequisite recipes), never a `make CC=…`
+  override, never an optionlist rewrite. ExternalLibraries builds,
+  configure runs, dependency generation and `config-data` must not see
+  cactup.
 - **Quiet.** The wrapper's stdout and stderr are the compiler's. Nothing of
   cactup's goes there on a compile that runs (`CACTUP_CC_DEBUG` is the
   opt-in exception). A whole build going uncached gets one line.
+- **Signals and exit statuses pass through.** Forward stop signals to the
+  compiler, leave ignored ones ignored (`nohup`), and end the way the
+  compiler ended. `rustix` is there for `kill(2)`/`waitpid(2)` only.
 - **Hermetic (D11).** The wrapper and the probe read the attempt's frozen
-  `cc/config.toml`, the configuration directory, and the cache root named in
-  it — never the global DB, the registry, the MDB, or knobs. Cache knobs are
-  resolved in `prepare` and frozen.
-- **No wrapper outside object rules.** Injection is the pattern-specific
-  `private` fragment the probe writes, read through `MAKEFILES`. Never a
-  `make CC=…` override and never an optionlist rewrite: both leak the
-  wrapper into ExternalLibraries builds, configure runs and `config-data`.
-- **Signals pass through.** A wrapper that outlives or outruns its compiler
-  corrupts builds: forward stop signals to the child and end the way it
-  ended. `rustix` is there for `kill(2)`/`waitpid(2)` only.
+  `cc/config.toml` and the configuration directory named in it — never the
+  global DB, the registry, the MDB, or knobs. Cache knobs are resolved in
+  `prepare` and frozen.
 - **No eviction on its own**, and no flock: the store is lock-free
   (immutable entries, link-based publication), like everything else under
   `$CACTUP_HOME`.
