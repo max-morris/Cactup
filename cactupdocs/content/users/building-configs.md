@@ -142,15 +142,23 @@ The `-j max` option is useful in batch environments: it uses all threads availab
 
 ### Reconfiguration and cleaning
 
-Force a full rebuild:
+Rebuild a config that cactup considers up to date:
 
 ```sh
-cactup build myconfig --reconfig --clean --force
+cactup build myconfig --reconfig   # reconfigure, then rebuild what make thinks is stale
+cactup build myconfig -f           # rebuild from scratch
 ```
 
-- `--reconfig` — Re-run `configure` before building
-- `--clean` — Run `make clean` before building
-- `--force` — Rebuild even if the config is already built
+- `--reconfig` — Re-run `configure` and `make`, even if nothing changed.
+  This is incremental: compiled objects are kept and `make` decides what to
+  recompile.
+- `-f`/`--force` — Rebuild from scratch: `make <config>-realclean` first, so
+  everything is recompiled, including external libraries built from source.
+- `--clean` — Run `make <config>-clean` after configuring, before building.
+
+If cactup changes its mind about what is needed (the optionlist changed, say),
+`--reconfig` doesn't stop it: you get at least what a plain `cactup build`
+would have done.
 
 ### Thornlist
 
@@ -232,6 +240,16 @@ A config is built from two things, and cactup tracks changes to both:
   `Cactus/repos/`. At every build, cactup records the commit each of that
   config's repos was on and whether its worktree had local modifications, then
   compares that against the tree at the next build.
+
+  The thornlist can be in GetComponents (CRL) form or a plain Cactus
+  `ThornList` (one `Arrangement/Thorn` per line). For a plain list, cactup
+  finds each thorn's repo by following its `arrangements/<A>/<T>` link into
+  `Cactus/repos/`. A thorn that isn't such a link (a directory you created by
+  hand, say) is still built, but its sources aren't tracked, and every build
+  names it. If cactup can't track a config's sources at all (none of its
+  repos can be found or read), every build says so and why, and source
+  changes go unnoticed. After editing such a config's sources, rebuild it with
+  `--reconfig`. `cactup config delta <name>` gives the same explanation.
 
 The second half is what makes ordinary source work visible. All of these are
 picked up by a plain `cactup build <name>`, with no `-f`:

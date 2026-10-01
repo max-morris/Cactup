@@ -307,7 +307,7 @@ fn submit_impl(
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
-    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
     let force_queue = args.force_queue || args.force;
     let fit = vars::QueueFit::from_config(&cfg);
     let mut topo = vars::resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
@@ -545,7 +545,7 @@ fn run_interactive(
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
-    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent);
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
     let force_queue = args.start.force_queue || args.start.force;
     let fit = vars::QueueFit::from_config(&cfg);
     let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &fit, force_queue)?;

@@ -2651,6 +2651,30 @@ date. The baseline for all five is recorded on **every** build, including under
 `-f`: a config that always rebuilds with `-f` could otherwise never acquire one
 to diff a later plain rebuild against.
 
+The processed thornlist may be a CRL list or a plain Cactus `ThornList`. A
+plain list is resolved through the tree: each `arrangements/<A>/<T>` that links
+into `repos/<repo>/…` counts as that repo, and the flesh is whatever repo the
+root `Makefile` links into. A thorn that is no such link keeps its provider and
+shape entries but has no source state, and neither the up-to-date line nor
+`config delta` may then claim "same sources" without naming it (nor the flesh,
+when the `Makefile` is not a link). Resolving reads the tree rather than the
+installation's CRL list, because the links are what the build compiles from.
+
+A source tree cactup cannot read at all yields no reading. That happens when the
+processed thornlist is neither kind of list, a CRL list names no git repo, no
+thorn of a plain list is a link into `repos/`, none of the repos is on disk, or
+none of them opens. No reading means no baseline and no source diff: the
+config behaves as it did before source tracking. That is never silent. Every
+build of such a config says why there is no reading, the up-to-date line does
+not claim "same sources", and `config delta` names the cause rather than
+advising a rebuild that cannot record a baseline either.
+
+Two flags override the short-circuit. `-f` forces `Full` (realclean +
+reconfigure + build). `--reconfig` forces `Incremental` (reconfigure + `make`,
+no realclean), but only in place of `UpToDate`: any decision the diffs reached
+on their own stands. `--reconfig` is the only incremental rebuild available
+for a config whose sources cactup cannot track.
+
 ---
 
 ### 7.9 Queued builds

@@ -625,8 +625,11 @@ pub(crate) fn committed(state: &str) -> &str {
 /// is a full gix status walk with the same "looks hung without progress"
 /// duration [`plan`]'s probe loop pays. `progress` is init'ed to the repo
 /// count, shows each in-flight repo as a child, and counts probes as they
-/// finish. `Ok(None)` only when the tree holds no readable repo at all —
-/// callers must read that as "no information", never as "nothing changed".
+/// finish. `Ok(Err(why))` only when the tree holds no readable repo at all —
+/// callers must read that as "no information", never as "nothing changed",
+/// and should show `why`: a config whose sources cactup cannot read gets no
+/// baseline and no edit detection, and the user cannot fix what nobody names.
+/// `Err` only on interrupt (§2.4).
 ///
 /// A repo that cannot be probed is never guessed at, but it is not dropped on
 /// the floor either: it lands in `unreadable` (directory present, not a
@@ -638,12 +641,18 @@ pub fn source_heads(
     install_root: &Path,
     list: &Thornlist,
     progress: &mut prodash::tree::Item,
-) -> Res<Option<SourceHeads>> {
+) -> Res<Result<SourceHeads, NoSources>> {
     let repos_dir = install_root.join(list.root()).join("repos");
     let mut out = SourceHeads::default();
     let mut seen = std::collections::BTreeSet::new();
     let mut repos: Vec<String> = Vec::new();
     for c in list.components() {
+        // Only a list resolved by `thornlist::parse_config_list` carries
+        // these (a CRL parse drops them): a plain-list thorn with no repo
+        // behind it, which has no source state to take.
+        if c.ty == ComponentType::Ignore {
+            continue;
+        }
         if out.flesh.is_none() && is_flesh(list.root(), c) {
             out.flesh = Some(c.repo.clone());
         }
@@ -665,15 +674,23 @@ pub fn source_heads(
     let progress = std::sync::Mutex::new(progress);
     let states = crate::par::parallel_map(&repos, |repo| {
         let current = progress.lock().expect("source_heads progress poisoned").add_child(repo.clone());
-        let state = git::source_state(&repos_dir.join(repo)).ok();
+        let state = git::source_state(&repos_dir.join(repo)).map_err(|e| format!("{e:#}"));
         drop(current);
         progress.lock().expect("source_heads progress poisoned").inc();
         state
     })?;
+    // The first probe failure, kept for `NoSources::NoneReadable`: when every
+    // repo fails, the reason is almost always the same one, and it is the
+    // only clue to what is wrong with the tree.
+    let mut first_error: Option<(String, String)> = None;
     for (repo, state) in repos.into_iter().zip(states) {
-        let Some(state) = state else {
-            out.unreadable.insert(repo);
-            continue;
+        let state = match state {
+            Ok(state) => state,
+            Err(e) => {
+                first_error.get_or_insert_with(|| (repo.clone(), e));
+                out.unreadable.insert(repo);
+                continue;
+            }
         };
         if state.contains("+") {
             out.dirty.insert(repo.clone());
@@ -686,9 +703,92 @@ pub fn source_heads(
     // baseline, so an empty map would be stored and every later comparison
     // would then find nothing to compare and read as "unchanged" forever.
     if out.heads.is_empty() {
-        return Ok(None);
+        return Ok(Err(match first_error {
+            Some((repo, error)) => NoSources::NoneReadable { repos_dir, count: out.unreadable.len(), repo, error },
+            None if out.missing.is_empty() && list.is_plain() => NoSources::NoLinkedThorns { repos_dir },
+            None if out.missing.is_empty() => NoSources::NoGitRepos,
+            None => NoSources::NoneOnDisk { repos_dir, count: out.missing.len(), plain: list.is_plain() },
+        }));
     }
-    Ok(Some(out))
+    Ok(Ok(out))
+}
+
+/// Why a [`source_heads`] probe produced no reading — said out loud, because
+/// a config cactup cannot read the sources of gets no baseline and therefore
+/// no edit or refetch detection, and nothing else would tell the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoSources {
+    /// The config's processed thornlist is neither a CRL list nor a plain
+    /// Cactus `ThornList` (see `thornlist::parse_config_list`, whose reason
+    /// this carries verbatim).
+    Unparseable(String),
+    /// A CRL list with no git component: nothing to take a HEAD of.
+    NoGitRepos,
+    /// A plain `ThornList` none of whose thorns (nor the flesh) is a link
+    /// into `repos/`: a tree cactup did not fetch, e.g. thorns cloned
+    /// straight into `arrangements/`.
+    NoLinkedThorns { repos_dir: PathBuf },
+    /// Not one of the list's git repos is on disk: for a CRL list, where its
+    /// `!DEFINE ROOT` puts them; for a plain list, where its links point.
+    NoneOnDisk { repos_dir: PathBuf, count: usize, plain: bool },
+    /// The repos are there, but none opened as a git repo.
+    NoneReadable { repos_dir: PathBuf, count: usize, repo: String, error: String },
+}
+
+impl std::fmt::Display for NoSources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoSources::Unparseable(why) => write!(f, "{why}"),
+            NoSources::NoGitRepos => write!(f, "its thornlist names no git repos"),
+            NoSources::NoLinkedThorns { repos_dir } => write!(
+                f,
+                "none of its thorns is a link into {}, so cactup cannot tell which repo each \
+                 comes from",
+                repos_dir.display()
+            ),
+            NoSources::NoneOnDisk { repos_dir, count, plain } => {
+                write!(f, "none of the {count} git repo(s) its thornlist names is in {}", repos_dir.display())?;
+                if !repos_dir.is_dir() {
+                    write!(f, " (that directory does not exist")?;
+                    if !plain {
+                        // The likeliest cause by far: a custom CRL list whose
+                        // `!DEFINE ROOT` is not this installation's source root.
+                        write!(f, "; does the thornlist's `!DEFINE ROOT` name this installation's Cactus directory?")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+            NoSources::NoneReadable { repos_dir, count, repo, error } => write!(
+                f,
+                "none of the {count} repo(s) in {} could be read as a git repo ({repo}: {error})",
+                repos_dir.display()
+            ),
+        }
+    }
+}
+
+/// What [`probe_sources`] found: the reading (or why there is none), plus the
+/// thorns of a plain `ThornList` that no reading can cover (see
+/// `thornlist::Thornlist::untracked`), which every report must name too, or
+/// "matches what this config was built from" overclaims for them.
+pub struct SourceReading {
+    pub heads: Result<SourceHeads, NoSources>,
+    pub untracked: Vec<String>,
+}
+
+/// [`source_heads_with_progress`] off a config's processed thornlist *text*
+/// (CRL or plain, see `thornlist::parse_config_list`), folding a parse
+/// failure into [`NoSources::Unparseable`] so every caller reports it the
+/// same way. `Err` only on interrupt (§2.4).
+pub fn probe_sources(install_root: &Path, cactus_root: &Path, processed_thornlist: &str) -> Res<SourceReading> {
+    Ok(match crate::thornlist::parse_config_list(processed_thornlist, install_root, cactus_root)? {
+        Ok(list) => SourceReading {
+            heads: source_heads_with_progress(install_root, &list)?,
+            untracked: list.untracked().to_vec(),
+        },
+        Err(why) => SourceReading { heads: Err(NoSources::Unparseable(why)), untracked: Vec::new() },
+    })
 }
 
 /// [`source_heads`] behind its own phase-scoped line renderer, for callers
@@ -699,7 +799,7 @@ pub fn source_heads(
 pub fn source_heads_with_progress(
     install_root: &Path,
     list: &Thornlist,
-) -> Res<Option<SourceHeads>> {
+) -> Res<Result<SourceHeads, NoSources>> {
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let mut probing = progress.add_child("probe sources");
     let result = source_heads(install_root, list, &mut probing);
@@ -796,6 +896,8 @@ pub fn plan(list: &Thornlist, install_root: &Path, progress: &mut prodash::tree:
             ComponentType::Svn | ComponentType::Cvs | ComponentType::Hg | ComponentType::Darcs => {
                 external.push(c.clone());
             }
+            // `parse` drops them; only `thornlist::parse_config_list` makes
+            // any, and its lists never reach the fetch planner.
             ComponentType::Ignore => unreachable!("ignore components are dropped by the parser"),
         }
     }
@@ -998,7 +1100,38 @@ mod tests {
         // No repos on disk at all: no information, which callers must not read
         // as "nothing changed".
         let mut progress = prodash::tree::Root::new().add_child("test probe");
-        assert!(source_heads(tmp.path(), &list, &mut progress).unwrap().is_none());
+        let why = source_heads(tmp.path(), &list, &mut progress).unwrap().unwrap_err();
+        assert!(matches!(why, NoSources::NoneOnDisk { .. }), "{why:?}");
+        // The message names where it looked, and that the directory is not
+        // there at all: the clue to a `!DEFINE ROOT` mismatch.
+        let said = why.to_string();
+        assert!(said.contains(&tmp.path().join("Cactus/repos").display().to_string()), "{said}");
+        assert!(said.contains("does not exist"), "{said}");
+
+        // Neither a CRL list nor a plain ThornList: the reason names the line.
+        let junk =
+            probe_sources(tmp.path(), &tmp.path().join("Cactus"), "not a thornlist\n").unwrap().heads.unwrap_err();
+        assert!(matches!(junk, NoSources::Unparseable(_)), "{junk:?}");
+        assert!(junk.to_string().contains("line 1"), "{junk}");
+
+        // A plain list on a tree with no links into repos/ (thorns cloned
+        // straight into arrangements/): its own reason, not "names no git
+        // repos" (it never names any) nor a `!DEFINE ROOT` hint (it has none).
+        std::fs::create_dir_all(tmp.path().join("Cactus/arrangements/CactusBase/Boundary")).unwrap();
+        let unlinked = probe_sources(tmp.path(), &tmp.path().join("Cactus"), "CactusBase/Boundary\n").unwrap();
+        let why = unlinked.heads.unwrap_err();
+        assert!(matches!(why, NoSources::NoLinkedThorns { .. }), "{why:?}");
+        assert!(!why.to_string().contains("DEFINE ROOT"), "{why}");
+        assert_eq!(unlinked.untracked, ["the Cactus flesh".to_string(), "CactusBase/Boundary".to_string()]);
+
+        // Repos that are there but not git repos: the probe's own error is
+        // the clue, so it must survive into the message.
+        let repos = tmp.path().join("Cactus/repos");
+        for name in ["core", "cactusbase", "simfactory2"] {
+            std::fs::create_dir_all(repos.join(name)).unwrap();
+        }
+        let why = source_heads(tmp.path(), &list, &mut progress).unwrap().unwrap_err();
+        assert!(matches!(why, NoSources::NoneReadable { count: 3, .. }), "{why:?}");
     }
 
     #[test]

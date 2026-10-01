@@ -474,7 +474,8 @@ pub(crate) struct TopologyFlags {
 /// Build flags for `cactup build`.
 #[derive(clap::Args, Debug)]
 pub(crate) struct BuildOpts {
-    /// Rebuild even if the config is already built (implies --ignore-machine).
+    /// Rebuild from scratch (`make <config>-realclean` first), even if the
+    /// config is up to date (implies --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
     // §7.4
@@ -509,7 +510,9 @@ pub(crate) struct BuildOpts {
     /// Profiling build.
     #[clap(long)]
     pub profile: bool,
-    /// Force reconfiguration before building.
+    // §7.8
+    /// Reconfigure and rebuild even if the config is up to date: incremental
+    /// unless a change needs a from-scratch rebuild (-f always does one).
     #[clap(long)]
     pub reconfig: bool,
     /// Clean the config before building.

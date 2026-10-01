@@ -1048,8 +1048,10 @@ fn print_dry_run(
         }
     }
     if !configs.is_empty() {
-        // Configs with no recorded source HEADs have no baseline to diff, so
-        // they need one `-f` rebuild before a refetch can invalidate them.
+        // Configs with no recorded source HEADs have no baseline to diff, so a
+        // refetch cannot invalidate them: a plain build would read as up to
+        // date. Why they have none (an old cactup, or sources cactup cannot
+        // read) is `config delta`'s to say.
         let (pre, tracked): (Vec<_>, Vec<_>) = configs
             .iter()
             .map(|(n, m)| (n.as_str(), m))
@@ -1066,9 +1068,9 @@ fn print_dry_run(
         }
         if !pre.is_empty() {
             println!(
-                "Config(s) {} were built before source tracking and have no baseline to \
-                 compare against — each needs `cactup build <name> -f` once, after which \
-                 refetches are picked up automatically.",
+                "Config(s) {} have no source baseline to compare against, so a refetch \
+                 would go unnoticed — rebuild each with `cactup build <name> -f`; \
+                 `cactup config delta <name>` says why it has no baseline.",
                 names(&pre)
             );
         }
@@ -1287,15 +1289,16 @@ fn report_configs(
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {
-        // No recorded HEADs = built before source tracking landed, so there is
-        // no baseline to diff and the build would read as up to date. One `-f`
-        // rebuild establishes the baseline; every refetch after that is
-        // detected automatically.
+        // No recorded HEADs = no baseline to diff, so the build would read as
+        // up to date. Either the config predates source tracking (one rebuild
+        // records a baseline) or cactup cannot read its sources at all (no
+        // rebuild ever will) — `config delta` tells the two apart, so point
+        // there rather than guess.
         if meta.as_ref().is_some_and(|m| m.sources.is_none()) {
             println!(
-                "  {} — {} built before source tracking, so it has no baseline to compare \
-                 against; run `cactup build {name} -f` once and later refetches are picked \
-                 up on their own.",
+                "  {} — {} it has no source baseline to compare against, so this refetch \
+                 goes unnoticed; run `cactup build {name} -f` (`cactup config delta {name}` \
+                 says why it has no baseline).",
                 name.bold(),
                 "needs -f:".yellow()
             );

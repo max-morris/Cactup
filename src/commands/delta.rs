@@ -293,18 +293,33 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     let processed = cactus_root.join("configs").join(&name).join(build::THORNLIST_PROCESSED);
     let text = std::fs::read_to_string(&processed)
         .with_context(|| format!("Failed to read {}", processed.display()))?;
-    let live = crate::thornlist::parse(&text)
-        .ok()
-        .and_then(|list| fetch::source_heads_with_progress(&inst.root, &list).ok().flatten());
+    let probe = fetch::probe_sources(&inst.root, &cactus_root, &text)?;
+    let live = &probe.heads;
 
-    let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref());
+    let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref().ok());
     if delta == SourceDelta::Unknown {
-        println!(
-            "{} no source baseline recorded for this config{}. Run `cactup build {name}` to \
-             establish one; after that, every later change is reported here.",
-            "note:".yellow().bold(),
-            if meta.sources.is_none() { " (built before source tracking)" } else { "" }
-        );
+        // Three different situations, and only one of them is fixed by
+        // running `cactup build`: telling a user whose sources cactup cannot
+        // read to build "to establish a baseline" sends them in a circle.
+        match (live, &meta.sources) {
+            (Err(why), None) => println!(
+                "{} cactup cannot track this config's sources: {why}. It records no source \
+                 baseline, so there is nothing to compare; after changing the sources, \
+                 `cactup build {name} --reconfig` rebuilds incrementally.",
+                "note:".yellow().bold()
+            ),
+            (Err(why), Some(_)) => println!(
+                "{} cactup can no longer read this config's sources: {why}.",
+                "note:".yellow().bold()
+            ),
+            (Ok(_), _) => println!(
+                "{} no source baseline recorded for this config yet. The next `cactup build \
+                 {name}` records the sources as they are then (it does not compare them with \
+                 the last build), and every change after that is reported here. If they \
+                 changed since the last build, `cactup build {name} --reconfig` rebuilds them.",
+                "note:".yellow().bold()
+            ),
+        }
         return Ok(());
     }
 
@@ -358,7 +373,20 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         println!("    {}", dir.display().to_string().dimmed());
     }
 
+    // A plain-list thorn with no repo behind it has no state to compare, so
+    // nothing above can speak for it — and "matches" must not either.
+    if !probe.untracked.is_empty() {
+        println!(
+            "  {} — {}",
+            build::summarize(&probe.untracked).bold(),
+            "not a link into the installation's repos/, so not tracked: edits to it go unnoticed".yellow()
+        );
+    }
+
     match delta {
+        SourceDelta::Unchanged if !probe.untracked.is_empty() => {
+            println!("  {}", "everything else matches what this config was built from.".green());
+        }
         SourceDelta::Unchanged => {
             println!("  {}", "the source tree matches what this config was built from.".green());
         }
@@ -383,20 +411,20 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
 /// build` — and a run whose sources have moved is often exactly what was
 /// intended (the executable is already built and frozen per simulation).
 /// Suppressed by `-s/--silent`, and any inspection failure is swallowed:
-/// nothing here may stand between the user and their job.
-pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: bool) {
+/// nothing here may stand between the user and their job. The one error is
+/// an interrupt during the probe (§2.4): the user asked cactup to stop, so
+/// the submit or run must not go ahead.
+pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: bool) -> Res<()> {
     if silent || meta.sources.is_none() {
-        return;
+        return Ok(());
     }
     let processed =
         inst.cactus_root().join("configs").join(&meta.name).join(build::THORNLIST_PROCESSED);
-    let Ok(text) = std::fs::read_to_string(&processed) else { return };
-    let live = crate::thornlist::parse(&text)
-        .ok()
-        .and_then(|list| fetch::source_heads_with_progress(&inst.root, &list).ok().flatten());
-    let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref());
+    let Ok(text) = std::fs::read_to_string(&processed) else { return Ok(()) };
+    let Ok(live) = fetch::probe_sources(&inst.root, &inst.cactus_root(), &text)?.heads else { return Ok(()) };
+    let (delta, change) = build::source_delta(meta.sources.as_ref(), Some(&live));
     if matches!(delta, SourceDelta::Unknown | SourceDelta::Unchanged) {
-        return;
+        return Ok(());
     }
     let mut what = Vec::new();
     if !change.moved.is_empty() {
@@ -418,6 +446,7 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         meta.name,
         meta.name
     );
+    Ok(())
 }
 
 /// A build is not portable across machines (§7.4): refuse to use `what` (a

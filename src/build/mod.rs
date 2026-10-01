@@ -1106,6 +1106,51 @@ pub fn rebuild_decision(
     }
 }
 
+/// The line a short-circuited build prints. It must never claim "same
+/// sources" for anything cactup did not actually compare: not when the probe
+/// found no sources at all (`no_sources`), not when there was no baseline to
+/// compare with (`had_baseline`), and not for the thorns of a plain
+/// `ThornList` that have no repo behind them (`untracked`) — each of those is
+/// a way for an edit to be silently ignored, which is the one thing a user
+/// must be told.
+fn up_to_date_message(
+    name: &str,
+    no_sources: Option<&crate::fetch::NoSources>,
+    had_baseline: bool,
+    untracked: &[String],
+) -> String {
+    const AGAIN: &str = "pass --reconfig to rebuild incrementally, or -f to rebuild from scratch";
+    if let Some(why) = no_sources {
+        return format!(
+            "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+             universe, same thornlist), but it cannot track this config's sources: {why}. Source \
+             edits and refetches go unnoticed; {AGAIN}."
+        );
+    }
+    let untracked_note = if untracked.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Not tracked, since they are not links into the installation's repos/, so edits to \
+             them go unnoticed: {}.",
+            summarize(untracked)
+        )
+    };
+    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
+    if !had_baseline {
+        format!(
+            "Config {name} is up to date (same optionlist, same universe, same thornlist). It had \
+             no source baseline, so the sources as they stand now become one and later changes \
+             are detected.{untracked_note} If they changed since the last build, {AGAIN}."
+        )
+    } else {
+        format!(
+            "Config {name} is up to date (same optionlist, same universe, same thornlist, \
+             {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
+        )
+    }
+}
+
 /// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4):
 /// CLI → optionlist → [build].universe → declared host → None.
 /// `--no-universe` stays the true bare escape hatch, bypassing even a
@@ -1388,7 +1433,7 @@ pub struct BuildOutcome {
 
 /// Join names for a one-line message, capping the tail: a release bump moves
 /// every repo in the list, and 81 names is not a message.
-fn summarize(names: &[String]) -> String {
+pub(crate) fn summarize(names: &[String]) -> String {
     const SHOWN: usize = 8;
     let head = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
     match names.len().checked_sub(SHOWN) {
@@ -1586,8 +1631,10 @@ pub fn prepare(
     // no inspectable repo, yields `None` for either — which `source_delta`/
     // `provider_delta` read as "no information" and which therefore leaves
     // the rebuild decision exactly as it was before source/provenance
-    // tracking. A build must never fail over this.
-    let parsed_list = crate::thornlist::parse(&thornlist_processed).ok();
+    // tracking. A build never fails over this (only an interrupt stops it,
+    // §2.4), but it does say so: see `no_sources` below.
+    let parsed_list =
+        crate::thornlist::parse_config_list(&thornlist_processed, &installation.root, &cactus_root)?;
     // When this whole reading was taken, for the [`SourceProbe`] handed back
     // below. Stamped BEFORE the walks, not after: the reading describes the
     // tree as it was when the first walk started, so ageing it from then is
@@ -1597,9 +1644,22 @@ pub fn prepare(
     // (§7.4) — a refetch, a manual checkout, or a hand-edited thorn. None of
     // the text diffs above can see any of it: they all leave the thornlist
     // byte-identical.
-    let fresh_sources = parsed_list
-        .as_ref()
-        .and_then(|l| crate::fetch::source_heads_with_progress(&installation.root, l).ok().flatten());
+    //
+    // `no_sources` is why there is no reading, when there is none. Such a
+    // config gets no baseline, so nothing will ever notice its sources
+    // changing; that must be said on every build, or "up to date" reads as
+    // "same sources" when cactup has not looked at them at all.
+    let (fresh_sources, no_sources) = match &parsed_list {
+        Ok(l) => match crate::fetch::source_heads_with_progress(&installation.root, l)? {
+            Ok(heads) => (Some(heads), None),
+            Err(why) => (None, Some(why)),
+        },
+        Err(why) => (None, Some(crate::fetch::NoSources::Unparseable(why.clone()))),
+    };
+    let parsed_list = parsed_list.ok();
+    // The partial version of the same gap: a plain `ThornList` whose thorns
+    // are not all links into `repos/` (see `thornlist::parse_config_list`).
+    let untracked = parsed_list.as_ref().map(|l| l.untracked().to_vec()).unwrap_or_default();
     let fresh_providers = parsed_list.as_ref().map(|l| l.thorn_providers());
     // Computed unconditionally, even under `-f`: the baseline must be
     // recorded on every build, or a config that always rebuilds with `-f`
@@ -1637,22 +1697,25 @@ pub fn prepare(
         &changed_providers,
         &changed_shapes,
     );
-    if opts.force || opts.reconfig {
-        decision = RebuildDecision::Full("-f/--reconfig given");
+    if opts.force {
+        decision = RebuildDecision::Full("-f given");
     } else if stored_meta.as_ref().is_some_and(|m| m.machine != machine.name) {
         // Only reachable with --ignore-machine (the check above refused
         // otherwise): nothing built for the other machine may be reused,
         // and the metadata written below re-records this one.
         decision = RebuildDecision::Full("the machine changed");
+    } else if opts.reconfig && decision == RebuildDecision::UpToDate {
+        // `--reconfig` is the incremental counterpart of `-f`: rebuild now,
+        // whatever the diffs say, but reconfigure + `make` only. It is the
+        // only way to ask for that when the diffs cannot see a change — most
+        // of all for a config whose sources cactup cannot track. Anything
+        // the diffs DID find keeps its own (equal or stronger) decision.
+        decision = RebuildDecision::Incremental("--reconfig given");
     } else if decision == RebuildDecision::UpToDate
         && is_complete(&cactus_root, name)
         && let Some(stored) = stored_meta.clone()
     {
-        println!(
-            "Config {} is up to date (same optionlist, same universe, same thornlist, same \
-             sources); pass -f to rebuild.",
-            name
-        );
+        println!("{}", up_to_date_message(name, no_sources.as_ref(), stored.sources.is_some(), &untracked));
         // Record the source/provider/shape baseline even though nothing was
         // built. A config last built by a cactup without source, provenance,
         // or shape tracking has none of them, and without this it could never
@@ -1680,6 +1743,22 @@ pub fn prepare(
             stored.store(&cactus_root)?;
         }
         return Ok(Prepared::UpToDate(stored));
+    }
+    if let Some(why) = &no_sources {
+        println!(
+            "{} cactup cannot track config {name}'s sources: {why}. This build records no \
+             source baseline, so later edits and refetches will not trigger a rebuild; pass \
+             --reconfig to rebuild after changing them.",
+            "note:".yellow().bold()
+        );
+    }
+    if !untracked.is_empty() && fresh_sources.is_some() {
+        println!(
+            "{} cactup does not track these sources of config {name}, which are not links into \
+             the installation's repos/: {}.",
+            "note:".yellow().bold(),
+            summarize(&untracked)
+        );
     }
     // Say which cheaper path is being taken, so a thornlist edit does not look
     // like it was ignored (it used to be) and a *reconfigure* is not mistaken
@@ -2049,13 +2128,16 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                 // installation registry, or knob (D11-clean).
                 let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
                     .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
-                let fresh_list = crate::thornlist::parse(&processed_thornlist).ok();
+                let fresh_list =
+                    crate::thornlist::parse_config_list(&processed_thornlist, &install_root, &cactus_root)?.ok();
                 // Best-effort, matching `prepare`'s own tolerance: an
                 // unparseable thornlist or a tree with no inspectable repo
-                // yields no baseline rather than failing the build outright.
-                let sources = fresh_list
-                    .as_ref()
-                    .and_then(|l| crate::fetch::source_heads_with_progress(&install_root, l).ok().flatten());
+                // yields no baseline rather than failing the build outright
+                // (`prepare` already said why). An interrupt still stops it.
+                let sources = match &fresh_list {
+                    Some(l) => crate::fetch::source_heads_with_progress(&install_root, l)?.ok(),
+                    None => None,
+                };
                 let providers = fresh_list.as_ref().map(|l| l.thorn_providers());
                 // Unlike `sources` above, a `thorn_shapes` failure is NOT
                 // swallowed: since this chunk gave it proper interrupt
@@ -3813,12 +3895,16 @@ mod tests {
         assert!(err.contains("built for machine \"elsewhere\""), "{err}");
 
         opts.ignore_machine = true;
+        // `--reconfig` must not soften it: nothing built elsewhere is reused.
+        opts.reconfig = true;
         queue_fit(&cactus, &machine, "sim", &opts).unwrap();
         let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
             Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a foreign build must never read as up to date"),
         };
         assert_eq!(attempt.meta.decision, "the machine changed");
+        assert!(attempt.meta.full_rebuild);
+        opts.reconfig = false;
         execute(&mut attempt, true, None).unwrap();
         assert_eq!(ConfigMeta::load(&cactus, "sim").unwrap().unwrap().machine, "fake");
         // Back on its own machine, the usual short-circuit applies again.
@@ -3983,6 +4069,139 @@ mod tests {
         let unknown = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(!unknown.rebuilt, "without inspectable sources nothing is claimed to have changed");
         assert!(log().is_empty(), "no make at all: {}", log());
+    }
+
+    /// `--reconfig` is the incremental counterpart of `-f`: it rebuilds an
+    /// up-to-date config with a reconfigure + `make` and no realclean. It is
+    /// the only way to get an incremental rebuild of a config whose sources
+    /// cactup cannot track (here: no repos on disk at all), where nothing
+    /// else would ever trigger one. It used to realclean exactly like `-f`.
+    #[test]
+    fn reconfig_rebuilds_incrementally_and_force_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        let first = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(first.rebuilt);
+        assert!(first.meta.sources.is_none(), "no repos on disk, so no baseline");
+        assert!(!build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "nothing to see: up to date");
+
+        clear_log();
+        let mut reconfig = BuildOpts::default_for_tests();
+        reconfig.reconfig = true;
+        assert!(build(&inst, &machine, "sim", &reconfig).unwrap().rebuilt, "--reconfig must rebuild");
+        assert!(log().contains("sim-config"), "--reconfig must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "--reconfig must not realclean: {}", log());
+
+        clear_log();
+        let mut forced = BuildOpts::default_for_tests();
+        forced.force = true;
+        assert!(build(&inst, &machine, "sim", &forced).unwrap().rebuilt, "-f must rebuild");
+        assert!(log().contains("sim-realclean"), "-f rebuilds from scratch: {}", log());
+
+        // `--reconfig` never downgrades what the diffs decided on their own:
+        // an optionlist edit still rebuilds from scratch under it.
+        let optionlist = root.join("my.cfg");
+        fs::write(&optionlist, "VERSION = 1\nCC = gcc\n").unwrap();
+        let mut own = BuildOpts::default_for_tests();
+        own.optionlist = Some(optionlist.clone());
+        assert!(build(&inst, &machine, "sim", &own).unwrap().rebuilt);
+        fs::write(&optionlist, "VERSION = 2\nCC = gcc\n").unwrap();
+        clear_log();
+        assert!(build(&inst, &machine, "sim", &reconfig).unwrap().rebuilt);
+        assert!(log().contains("sim-realclean"), "an optionlist edit outranks --reconfig: {}", log());
+    }
+
+    /// The up-to-date line never says "same sources" for anything cactup did
+    /// not compare: no reading at all, no baseline yet, or untracked thorns.
+    #[test]
+    fn up_to_date_message_never_overclaims_the_sources() {
+        let plain = up_to_date_message("bcx", None, true, &[]);
+        assert!(plain.contains("same sources)"), "{plain}");
+
+        let untracked = up_to_date_message("bcx", None, true, &["Local/Mine".to_string()]);
+        assert!(!untracked.contains("same sources)"), "{untracked}");
+        assert!(untracked.contains("Local/Mine") && untracked.contains("--reconfig"), "{untracked}");
+
+        let fresh = up_to_date_message("bcx", None, false, &["Local/Mine".to_string()]);
+        assert!(!fresh.contains("same sources"), "{fresh}");
+        assert!(fresh.contains("no source baseline") && fresh.contains("Local/Mine"), "{fresh}");
+
+        let why = crate::fetch::NoSources::NoGitRepos;
+        let blind = up_to_date_message("bcx", Some(&why), true, &[]);
+        assert!(!blind.contains("same sources"), "{blind}");
+        assert!(blind.contains("names no git repos") && blind.contains("--reconfig"), "{blind}");
+    }
+
+    /// The bug report this exists for: a config built only with `-f` from a
+    /// plain Cactus `ThornList` (a hand-written benchmark list, no
+    /// `!CRL_VERSION`) recorded no source baseline, so a later edit read as
+    /// "up to date (same sources)" forever. Its thorns are links into
+    /// `repos/`, and that is now enough to track them.
+    #[test]
+    fn a_plain_thornlist_is_tracked_through_the_tree() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let repos = cactus.join("repos");
+        for name in ["flesh", "cactusbase"] {
+            crate::fetch::git::testrepo::init(&repos.join(name));
+        }
+        crate::fetch::git::testrepo::commit_file(&repos.join("flesh"), "Makefile", "all:\n");
+        // The thorn is the repo's root here: `commit_file` only writes
+        // top-level files, and where in the repo the link lands is immaterial.
+        crate::fetch::git::testrepo::commit_file(&repos.join("cactusbase"), "b.cc", "int a;\n");
+        let _ = fs::remove_file(cactus.join("Makefile"));
+        symlink("repos/flesh/Makefile", cactus.join("Makefile")).unwrap();
+        fs::create_dir_all(cactus.join("arrangements/CactusBase")).unwrap();
+        symlink("../../repos/cactusbase", cactus.join("arrangements/CactusBase/Boundary")).unwrap();
+        let list = root.join("bench.th");
+        fs::write(&list, "CactusBase/Boundary\n").unwrap();
+
+        let mut forced = BuildOpts::default_for_tests();
+        forced.thornlist = Some(list.clone());
+        forced.force = true;
+        let first = build(&inst, &machine, "sim", &forced).unwrap();
+        let recorded = first.meta.sources.clone().expect("a -f build from a plain list records a baseline");
+        assert_eq!(recorded.keys().cloned().collect::<Vec<_>>(), ["cactusbase", "flesh"]);
+        assert!(!build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "nothing changed");
+
+        let _ = fs::remove_file(root.join("make.log"));
+        fs::write(repos.join("cactusbase/b.cc"), "int a; int b;\n").unwrap();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(edited.rebuilt, "an edit under a plain list must rebuild");
+        assert!(!log().contains("realclean"), "an edit needs no realclean: {}", log());
     }
 
     #[test]
