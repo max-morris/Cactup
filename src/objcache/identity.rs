@@ -192,7 +192,11 @@ pub fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
 
 /// Run `program` with `args` and return its standard output, if it succeeds.
 fn ask(program: &Path, args: &[&str]) -> Res<String> {
-    let out = Command::new(program)
+    // In English: what a driver says of itself goes into its identity, and
+    // must not depend on the language of the session that asked first.
+    let mut command = Command::new(program);
+    super::key::in_english(&mut command);
+    let out = command
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())

@@ -24,6 +24,9 @@ the last milestone, for when that host is not at hand.
   instance's database is shared with other sessions and with installed
   cactup builds that do not know the knob yet. (Users of a released cactup
   set the knob normally.)
+- While reviewers are at work, leave the worktree alone: they build and
+  read in it, and edits appearing under them cost them a clean export.
+  Prepare fixes only once both have reported (or in a second worktree).
 - Every milestone ends at a review gate: two independent harsh reviewer
   agents, same brief, full milestone diff. Fix or answer every blocking
   finding and re-review until both sign off in the same round. Record the
@@ -275,13 +278,15 @@ compiler but GCC, any machine but `plato`.
   (a Clang configuration file chosen by target). Fixed; sent to round 4.
 - 2026-10-01: M0b review round 4: both reviewers SIGN-OFF on `045eb76`.
   M0b has passed its gate. M0c (measurements) started.
-- 2026-10-01: M0c review: both reviewers found the code sound and the
-  numbers right, and blocked on one wrong sentence in the results'
-  summary. Corrected, with their other remarks; sent back.
 - 2026-10-01: M0c measured and written up (`RESULTS-M0c.md`). Found on
   the way: the build-speed branch can add `-MD -MP -MF -MT` to compiles;
   the cache now understands that. The code changed since the gate sent to
   the reviewers.
+- 2026-10-01: M0c review: both reviewers found the code sound and the
+  numbers right, and blocked on one wrong sentence in the results'
+  summary. Corrected, with their other remarks; sent back.
+- 2026-10-02: M0c review round 2: B blocked on a test assertion that does
+  not hold for Clang. Fixed; sent back.
 
 ## Review verdicts
 
@@ -629,6 +634,25 @@ Clang's answer must reach the compiler proper's command line, since it
 names a configuration file after `InstalledDir:`; the dependency-file
 test also checks that nothing wrote the file after the compile.
 
+### M0c, round 2 (on `13c7471`)
+
+Reviewer B: the results document is right now, the code fixes hold; one
+blocking finding, in a test. The assertion added in round 1 (the
+dependency file is no newer than the object) assumed the compiler writes
+the object last. Clang writes the dependency file last, so the test
+failed 3 runs in 40. *Fixed: the time check is for GCC only, and a unit
+test pins the preprocessor's command line (both runs are that command)
+to carry none of the dependency flags.* Also taken: the compiler is asked
+for its identity in English too (B showed the compiler part of the key
+depended on the language of the first session to ask); `runs_cc1`'s
+comment names both lines that satisfy it; `fresh-env.sh` says it was
+written down after the runs.
+
+Reviewer A: SIGN-OFF on `13c7471` (results right, code holds, tests green
+on a clean export of the commit), with the same remark on `runs_cc1` and
+a note that the dependency-build hash lists do not show their own
+provenance (the results now say so).
+
 `PLAN.md` still lists `-MD` as not cached: it is the plan as approved,
 and its first lines say where the work has moved since.
 
@@ -681,10 +705,7 @@ them.
 
 ## Next step
 
-1. **Owed: the second M0c review round.** The corrections above are
-   committed but not yet re-reviewed (the session ran out of usage before
-   sending them). Send the commit after `5411e68` to both reviewers with
-   the same brief (`git diff 5411e68 HEAD`), and iterate to two sign-offs
-   on one commit.
+1. Take the M0c changes to two sign-offs on one commit (round 3: A signed
+   off on `13c7471`, B blocked on a test; the fix is the commit after).
 2. Wait for Max on `RESULTS-M0c.md` and the decisions above.
 3. Then M1a (the store), on Max's go-ahead.

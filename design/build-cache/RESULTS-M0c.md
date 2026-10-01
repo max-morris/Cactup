@@ -88,7 +88,7 @@ configuration under another name, a forced rebuild, and going back to an
 earlier state of a thorn, all find their objects, with line directives on
 or off. Not measured: a rebuild forced by an option list edit. One that
 changes a compile flag changes every key, as it must; one that does not
-(a library path, `VERSION`) should behave like `-f`.
+(`VERSION`, a linker flag) should behave like `-f`.
 
 ## What costs hits
 
@@ -149,7 +149,9 @@ recorded by a debug build of the working tree, not by the release binary
 the other numbers come from): 307 of 307 keyed, the same keys as with the
 option off, and all 357 objects and 357 dependency files byte for byte
 those of a build without the cache (`objs-dep-record.txt` and
-`objs-dep-plain.txt` beside the other logs). The contract file says what
+`objs-dep-plain.txt` beside the other logs; both lists were copied there
+together afterward, so they do not themselves show which build each was
+taken from, and both reviewers repeated the comparison independently). The contract file says what
 has to stay true of that recipe.
 
 ## Not measured

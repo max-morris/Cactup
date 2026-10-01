@@ -386,6 +386,41 @@ fn assembler_include(line: &[u8]) -> bool {
     })
 }
 
+/// The preprocessor run for `compile`: the compiler that was identified,
+/// under the name the recipe ran it by, with the compile's arguments and
+/// `-E` in place of `-c -o <object>` — and without the flags that would
+/// have it write a dependency file (`Compile::depend`), which is the
+/// compile's to write.
+fn preprocessor(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>) -> Command {
+    let mut command = Command::new(&compiler.path);
+    // `-v`: the driver then says, on stderr, where it takes flags from
+    // besides its command line (see `flags_from_elsewhere`).
+    command.arg0(name).args(&compile.preprocess).args(["-E", "-v"]);
+    if compile.macros_in_debug {
+        command.arg("-dD");
+    }
+    if compiler.family == Family::Gcc {
+        command.arg("-fpch-preprocess");
+    }
+    if let Some(map) = map {
+        command.args(map.flags());
+    }
+    in_english(&mut command);
+    command
+}
+
+/// Have `command`, a compiler driver, word its own messages in English
+/// ([`english_messages`]).
+pub fn in_english(command: &mut Command) {
+    for (variable, value) in english_messages(std::env::var_os("LC_ALL")) {
+        match value {
+            Some(value) => command.env(variable, value),
+            None => command.env_remove(variable),
+        };
+    }
+}
+
+
 /// Run the preprocessor for `compile` and digest what it prints and what it
 /// read: the compiler that was identified, under the name the recipe ran it
 /// by, with the compile's arguments and `-E` in place of `-c -o <object>`.
@@ -401,25 +436,7 @@ fn assembler_include(line: &[u8]) -> bool {
 /// those are mapped here, the way the compiler maps names; and each named
 /// file's bytes are digested under its mapped name.
 fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
-    let mut command = Command::new(&compiler.path);
-    // `-v`: the driver then says, on stderr, where it takes flags from
-    // besides its command line (see `flags_from_elsewhere`).
-    command.arg0(name).args(&compile.preprocess).args(["-E", "-v"]);
-    if compile.macros_in_debug {
-        command.arg("-dD");
-    }
-    if compiler.family == Family::Gcc {
-        command.arg("-fpch-preprocess");
-    }
-    if let Some(map) = map {
-        command.args(map.flags());
-    }
-    for (variable, value) in english_messages(std::env::var_os("LC_ALL")) {
-        match value {
-            Some(value) => command.env(variable, value),
-            None => command.env_remove(variable),
-        };
-    }
+    let mut command = preprocessor(compiler, name, compile, map);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -504,7 +521,10 @@ fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
 
 /// Is `line` of a Clang driver's `-v` output the command line of the
 /// compiler proper (`"/usr/bin/clang" -cc1 -triple …`; older versions quote
-/// every word)?
+/// every word), or the compiler proper's own first line (`clang -cc1
+/// version …`, which is what is found when the driver's path has a space
+/// in it)? Either comes after the place where a configuration file is
+/// named.
 fn runs_cc1(line: &str) -> bool {
     line.split_whitespace().nth(1).is_some_and(|word| word.trim_matches('"') == "-cc1")
 }
@@ -677,6 +697,26 @@ mod tests {
         // text, and is kept as it is.
         let below = |root: &str| format!("int a;\n/*\n#line 1 \"{root}/x.c\"\n*/\n");
         assert_ne!(digest(&below("/w/Cactus"), Some(&map)), digest(&below("/v/elsewhere/Cactus"), Some(&map)));
+    }
+
+    #[test]
+    fn the_preprocessor_is_not_asked_for_the_compiles_dependency_file() {
+        // Both preprocessor runs, before the compile and after it, are this
+        // command. Nothing of the flags that write a dependency file may be
+        // in it: the file is the compile's to write, once.
+        let os = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+        let depend = ["-MD", "-MMD", "-MP", "-MF", "/c/build/T/a.c.d", "-MT", "a.c.o", "-MQ", "b.o"];
+        let mut args = os(&["-g3", "-O2", "-c", "-o", "/c/build/T/a.c.o", "/c/build/T/a.c", "-I/src/T", "-DX=1"]);
+        args.splice(2..2, os(&depend));
+        let compile = compile::parse(&args).unwrap();
+        assert_eq!(compile.depend, os(&depend));
+        for family in [Family::Gcc, Family::Clang] {
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, id: String::new() };
+            let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None);
+            let given: Vec<&OsStr> = command.get_args().collect();
+            assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");
+            assert!(!given.iter().any(|arg| arg.as_bytes().starts_with(b"-M") || depend.contains(&arg.to_str().unwrap())), "{given:?}");
+        }
     }
 
     #[test]

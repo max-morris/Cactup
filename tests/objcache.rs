@@ -833,10 +833,14 @@ fn a_dependency_file_written_by_the_compile_changes_nothing() {
         let event: serde_json::Value = serde_json::from_str(build.events().last().unwrap()).unwrap();
         assert_eq!(event["stable"], true, "{compiler}");
         // Nor after it: the check after the compile ran (the key was found
-        // stable), and the file is no newer than the object, which the
-        // compiler writes last.
-        let modified = |path: &Path| fs::metadata(path).unwrap().modified().unwrap();
-        assert!(modified(&depfile) <= modified(&unit.object), "{compiler}: the dependency file was written after the compile");
+        // stable), and with GCC, which writes the object last, the file is
+        // no newer than the object. (Clang writes the file last, so its
+        // times say nothing. What both runs are given is pinned for both
+        // families by a unit test of the preprocessor's command line.)
+        if !compiler.starts_with("clang") {
+            let modified = |path: &Path| fs::metadata(path).unwrap().modified().unwrap();
+            assert!(modified(&depfile) <= modified(&unit.object), "{compiler}: the dependency file was written after the compile");
+        }
         fs::remove_file(&depfile).unwrap();
         fs::create_dir(&depfile).unwrap();
         let scratch = build.config.join("scratch");
