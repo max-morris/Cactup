@@ -4495,10 +4495,11 @@ rebuilt from scratch after an optionlist edit, compiles only what no build
 of this instance has compiled before.
 
 **Status.** Built in stages; the plan and the state of each stage are in
-`design/build-cache/`. What exists now is the interposition (§18.2–§18.4):
-cactup can stand in front of every object compile and log it (`build-cache =
-record`). Keys, the store, and serving objects are not written yet, and this
-section will grow with them.
+`design/build-cache/`. What exists now is the interposition (§18.2–§18.4)
+and the keys (§18.5): with `build-cache = record`, cactup stands in front of
+every object compile, works out the key it would be cached under, and logs
+it; `cactup cache report` (§18.6) reads the logs. The store and serving
+objects are not written yet, and this section will grow with them.
 
 ### 18.1 Rules
 
@@ -4542,9 +4543,11 @@ them.
 With `build-cache` off, a build attempt and its build script are exactly
 what they are without this section. Otherwise `prepare` writes
 `<attempt>/cc/config.toml` (`objcache::BuildConf`): the mode, the versioned
-cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), and the
-configuration directory. If that cannot be written, the build goes on
-without the cache and says so.
+cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
+directory and the Cactus root, and what keys objects to their platform
+(§18.5): the machine, the build universe, and a SHA-256 of the build-phase
+environment setup. If that cannot be written, the build goes on without the
+cache and says so.
 
 The build script gains one step and changes one (`objcache::Staged`):
 
@@ -4647,26 +4650,32 @@ altogether if the rules file includes other makefiles, which it does not
 follow. The body must have exactly one reference to its compiler variable,
 as a word of its own in command position: at the start of a recipe line
 (not one continuing the line above), or right after `;`, `&&` or `||`, and
-outside quotes. A recipe that runs the compiler behind something else, or
-only mentions it, is not a shape cactup stands in front of. The probe
+outside quotes. (A line ending in `\` goes on in the next: the compiler
+may stand at the start of a continuation line if a separator ends the line
+before it.) A recipe that runs the compiler behind something else, or only
+mentions it, is not a shape cactup stands in front of. The probe
 refuses (declines) paths with characters that mean something to make or the
 shell — anything but letters, digits and `/ . _ - + @ ~` — rather than
 escape them for every context they appear in.
 
 The script then runs the goal `all` of two throwaway makefiles under the
 fragment, with the build's own `make` command (`<attempt>/cc/selftest/`,
-output in `<attempt>/cc/selftest.log`): one the way an object sub-make
-runs, in which each wrapped recipe must win over a later plain definition
-and, run for real with the compiler `cactup:selftest`, must reach a cactup
-that can read its configuration and `/proc/self/status`; and one the way
-any other make runs, which must find nothing of the fragment's defined,
-itself first in `MAKEFILE_LIST`, and its match-anything rule not run for
-the fragment (that rule leaves a file behind if it is). Each makefile
-writes a `.passed` file when all its checks have run, and the script takes
-those two files, not make's exit status alone, as the pass: a make that
-exits 0 having run nothing proves nothing. A `make` that fails either
-builds uncached. A unit test feeds the self-test the fragment broken in
-each of the ways it exists to catch. This holds on GNU make 4.2.1, 4.3 and
+output in `<attempt>/cc/selftest.log`), three times in all. One run is the
+way an object sub-make runs: each wrapped recipe must win over a later
+plain definition and, run for real with the compiler `cactup:selftest`,
+must reach a cactup that can read its configuration and
+`/proc/self/status`. Two runs are the way other makes run — in `build/`
+without `CCTK_TARGET`, and with it somewhere else, so that each half of the
+fragment's guard is tried on its own — and each must find nothing of the
+fragment's defined, itself first in `MAKEFILE_LIST`, and its match-anything
+rule not run for the fragment (that rule leaves a file behind if it is).
+Every check of a recipe is one `&&` chain ending in a marker file, and a
+run writes its `.passed` file only when its checks have all run; the script
+takes those three files, not make's exit status alone, as the pass. So a
+make that exits 0 having run nothing, or one told to carry on past errors
+(`-i`, `-k`), proves nothing. A `make` that fails any of it builds
+uncached. A unit test feeds the self-test the fragment broken in each of
+the ways it exists to catch. This holds on GNU make 4.2.1, 4.3 and
 4.4.1 (tested; real Cactus trees on 4.3 and 4.4.1); for anything else the
 self-test is the judge.
 
@@ -4695,8 +4704,9 @@ cannot start itself goes to a shell of the same kind:
 - **A name the shell resolves itself** goes to the shell even when a
   program of that name exists: a reserved word or builtin (`time gcc`,
   `command gcc`, `exec gcc`), a function exported to the shell under that
-  name (bash's `export -f`), and any bare name while `PATH` has an entry
-  beginning with `~`, which only bash expands.
+  name (bash's `export -f`), and a bare name when `PATH` has an entry
+  beginning with `~` ahead of the directory the program is in (bash expands
+  such an entry as it searches; other shells and the wrapper do not).
 - **Anything else** (`LANG=C gcc`, quotes, any shell syntax) means what it
   means only to a shell, and goes to one without being looked at further.
 - **A compiler already behind another wrapper** (ccache, sccache, distcc,
@@ -4704,11 +4714,19 @@ cannot start itself goes to a shell of the same kind:
 
 Two differences from the recipe's own shell remain, and both are stated
 limits. It is a *new* shell, so a compiler text that uses the recipe's
-shell variables (`$$current_wd`) does not find them. And a function or
-alias the shell defines for itself at startup (bash reads the file
-`BASH_ENV` names; module systems set it) is invisible to the wrapper: one
-named like the compiler would be run by the recipe and bypassed by the
-wrapper. No makefile or site setup cactup knows of does either.
+shell variables (`$$current_wd`) does not find them. And whatever the shell
+sets up for itself at startup that changes how it looks a name up — a
+function or alias, or a `hash -p` (bash reads the file `BASH_ENV` names;
+module systems set it) — is invisible to the wrapper: something there named
+like the compiler would be run by the recipe and bypassed by the wrapper.
+No makefile or site setup cactup knows of does either.
+
+A started compiler's environment is the recipe's, with one adjustment: a
+shell that sets `_` for each command it starts (bash) set it to cactup, and
+the compiler is given its own path there instead, as that shell would have.
+A `SIGPIPE` the recipe was started ignoring reaches the compiler at its
+default (the Rust runtime and `std::process` both touch it); only a build
+script run by hand from such a parent can show that.
 - **Unreadable configuration, mode `off`, any internal error, a panic:** the
   process becomes the compile, by `exec`: same stdin, signal dispositions
   and jobserver descriptors, nothing of cactup in between.
@@ -4721,10 +4739,121 @@ wrapper. No makefile or site setup cactup knows of does either.
   as the compiler ended: same exit code, or killed by the same
   `SIGHUP`/`SIGINT`/`SIGTERM`; any other fatal signal becomes the shell's
   `128 + signal`. One JSON line per compile goes to
-  `<attempt>/cc/events.jsonl`, best-effort. Only compiles the wrapper
-  started itself are logged, so the count the build prints can be below the
-  number of objects: a compile handed to the shell, or a thorn the fragment
-  stood down for, was compiled and not recorded.
+  `<attempt>/cc/events.jsonl`, best-effort (`objcache::event::Event`): the
+  compiler, the object's name below `build/`, the key and its parts or the
+  reason there is none (§18.5), the exit status, and the time keying, the
+  compile and the check afterward took. A compile left to the shell, or to
+  another wrapper, gets a line with the reason and nothing else — the
+  wrapper becomes that compile and does not see how it ends. A thorn the
+  fragment stood down for is not in the log at all.
 
 Passing a signal on needs `kill(2)`, which std does not offer; the wrapper
 uses `rustix` (D13).
+
+### 18.5 Keys
+
+A key is a digest that two compiles share exactly when they would produce
+the same object (rule 1). `objcache::key` builds it from five parts, each a
+SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
+so that two builds can be compared part by part:
+
+- **Preprocessed text.** The output of the same compiler with the same
+  arguments and `-E` in place of `-c -o <object>`. Whatever the source
+  includes, however include paths and macros are set, is in that text, so
+  no header is tracked or guessed at. Comments are kept (`-C`: an edit to
+  one moves no code but can move a column in a diagnostic or in debug
+  information; a comment inside a directive is dropped with the directive
+  and moves nothing), and with `-g3` so are macro definitions (`-dD`),
+  since the object's debug information then has them.
+- **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
+  and `-I`/`-D`/`-U` (whose whole effect is in the text), in order, plus
+  the language. `objcache::compile` reads GCC and Clang command lines from
+  a list of what it knows: a flag that is not on it, or one that names
+  another input (plugins, profiles, precompiled headers, LTO), another
+  output (`-MD`, split DWARF, coverage) or another program (`-B`, `-Wa,`),
+  makes the whole command line "not cached".
+- **Compiler.** `objcache::identity`: the bytes of the driver, for GCC of
+  `cc1`, `cc1plus` and the assembler it names, and of every shared library
+  each of those loads (as the dynamic loader resolves them), plus what the
+  driver says of itself (`--version`, and for GCC its specs and target).
+  Not its path and not its modification time. The driver's own bytes must
+  say it is GCC or Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes
+  `--version` on to a compiler and is not one, and is not cached. Fortran
+  is not cached yet. The answer is remembered per build attempt
+  (`<attempt>/cc/compilers/`) and reused while every file it came from
+  still has the same size, change time and inode.
+- **Platform** (D15). `objcache::platform`: what `prepare` froze — the
+  cactup machine, the build universe, the digest of the build-phase
+  environment setup — and what the wrapper finds on the host that compiles:
+  the architecture, each kind of processor in `/proc/cpuinfo` (vendor,
+  family, model, feature flags; not speed or microcode), and
+  `/etc/os-release`. The host half is there because the machine name can be
+  wrong or too coarse (detection keeps the last machine when no machine
+  claims a host; `generic` covers every unclaimed one; login and compute
+  nodes may differ), and it is always in the key, so `-march=native`,
+  `-xHost` and compilers that tune for the build host unasked need no
+  special case. A change of machine keys differently and invalidates
+  nothing; so does a change of hardware or of the operating system under
+  one machine. Remembered per attempt, host and boot
+  (`<attempt>/cc/hosts/`).
+- **Environment.** `objcache::environment`: the variables compilers are
+  known to read — locale, `SOURCE_DATE_EPOCH`, the loader's and the
+  compiler's search paths, the loaded-modules lists, and the families MPI
+  wrappers and vendor toolchains use. A variable that makes a compiler
+  write another file (`DEPENDENCIES_OUTPUT`, …) makes the compile not
+  cached. The whole environment cannot be keyed: Cactus's makefiles export
+  well over a hundred variables into every recipe, many of them the
+  configuration's own paths. **This is the part that can be wrong**: a
+  variable on no list that changes some compiler's output would be a false
+  hit. The environment-setup digest in the platform part and the
+  loaded-modules variables narrow that; it is not closed.
+
+**Paths.** Cactus compiles with absolute paths, and an object records them:
+`__FILE__` in every `CCTK_WARN`, the compile directory in debug information.
+As it stands an object belongs to one configuration of one installation.
+For compilers that take `-ffile-prefix-map` (GCC 8, Clang 10), the key is
+computed as if the compile ran with the Cactus root mapped to `.` and the
+configuration directory to `./configs/@config` (`key::PathMap`), which is
+how a serving cache will run it: the map's flags go to the preprocessor run
+(the compiler then maps `__FILE__` where the text uses it), and the
+directories are replaced by the same names in the keyed arguments and in
+the text's line markers, which the compiler does not map. The flags name
+the Cactus root first and the configuration last: of several maps that
+match, GCC and Clang take the last given (checked on GCC 14.2 and Clang
+19.1; a serving cache has to check it per compiler, in audit mode). A
+compiler without the flag keeps its paths in the key, and with debug
+information its working directory too. **Nothing is added to the real
+compile while the cache only records**: the objects of a recording build
+are byte for byte those of a build without the cache.
+
+**Record mode** does around each compile what a serving cache does around
+one it has to run: key it, run it, and compute the text digest again to see
+whether the key still describes what was compiled (a header edited during
+the compile would otherwise leave an object of the new text under the key
+of the old). Only the compile has any effect. The two preprocessor runs are
+the cost a build pays for the cache on a miss, and the log has what each
+took.
+
+### 18.6 `cactup cache report`
+
+```
+cactup cache report [<config>] [--attempt N]
+                    [--against <config>] [--against-installation <alias>] [--against-attempt N] [--long]
+```
+
+Reads the event log of a recording build (the newest attempt of the config
+that has one, or `--attempt`) and prints how many compiles were keyed, per
+language and with the share of compile time; why the others were not; how
+many keys no longer held after the compile; and what keying and checking
+again cost against the compiles themselves.
+
+With any of the `--against` flags it compares with another recording build
+— another config, another installation, or an earlier attempt of the same
+one (never the same attempt) — and says what a cache filled by that build
+would have served: a compile is served if the other build has a compile
+with the same key that succeeded and whose key still held, under whatever
+name. For the rest it finds the same object (by its name below `build/`) in
+the other build and names the parts of the key that differ; `--long` lists
+them one by one. Nothing is read from or written to a cache: both builds
+only recorded, and "would be served" stands on the premise of §18.5's path
+mapping, which serving has yet to prove per compiler.

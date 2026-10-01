@@ -67,8 +67,8 @@ pub fn selftest_untouched(cc_dir: &Path) -> PathBuf {
     selftest_dir(cc_dir).join("untouched.mk")
 }
 
-/// The file a self-test makefile (`wrapped` or `untouched`) leaves behind
-/// when every one of its checks ran and passed. The build script takes the
+/// The file a self-test run (`wrapped`, `untouched`, or `elsewhere`) leaves
+/// behind when every one of its checks ran and passed. The build script takes the
 /// file, not make's exit status alone, as the pass: a make that found
 /// nothing to do also exits 0.
 pub fn selftest_passed(cc_dir: &Path, which: &str) -> PathBuf {
@@ -149,7 +149,7 @@ fn probe(conf_file: &Path) -> Res<()> {
     fs::create_dir_all(&selftest).with_context(|| format!("cannot create {}", selftest.display()))?;
     write(inject_path(cc_dir), inject_mk(&conf.cactup, conf_file, &inject_path(cc_dir), &build_dir, &wrapped))?;
     write(selftest_wrapped(cc_dir), selftest_wrapped_mk(&wrapped, &selftest_passed(cc_dir, "wrapped")))?;
-    write(selftest_untouched(cc_dir), selftest_untouched_mk(&selftest, &selftest_passed(cc_dir, "untouched")))?;
+    write(selftest_untouched(cc_dir), selftest_untouched_mk(&selftest))?;
     Ok(())
 }
 
@@ -278,11 +278,12 @@ fn wrap_recipe(body: &str, var: &str) -> Option<String> {
     if after.contains(&reference) {
         return None;
     }
-    let (earlier, line) = before.rsplit_once('\n').unwrap_or(("", before));
-    let line = line.trim_end();
-    // A line that continues the one above (`\` at its end) starts nothing.
-    let starts_line =
-        line.trim_start_matches(['@', '-', '+', ' ', '\t']).is_empty() && !earlier.trim_end().ends_with('\\');
+    // The logical line the reference is on: a line that ends in `\` goes on
+    // in the next. So `… ; \` followed by `$(CC)` has the compiler after
+    // the `;`, and `nice \` followed by `$(CC)` has it after `nice`.
+    let joined = before.replace("\\\n", " ");
+    let line = joined.rsplit('\n').next().unwrap_or_default().trim_end();
+    let starts_line = line.trim_start_matches(['@', '-', '+', ' ', '\t']).is_empty();
     let starts_command = starts_line || [";", "&&", "||"].iter().any(|sep| line.ends_with(sep));
     let quoted = ['\'', '"', '`'].iter().any(|quote| before.matches(*quote).count() % 2 == 1);
     let own_word = after.is_empty() || after.starts_with([' ', '\t', '\n']);
@@ -360,8 +361,14 @@ fn inject_mk(cactup: &Path, conf_file: &Path, inject: &Path, build_dir: &Path, w
 /// definition win, hides the fragment from `MAKEFILE_LIST` and from child
 /// makes, and the *real* wrapped recipe text, quoting and all, reaches a
 /// cactup that can wrap a compile from here ([`SELFTEST_COMPILER`]).
+///
+/// Every check of a recipe is one shell command chained with `&&`, ending
+/// in the recipe's own marker file, and `passed` is written only when
+/// every marker is there: a make told to carry on past errors (`-i`, `-k`)
+/// leaves markers out, not a pass behind.
 fn selftest_wrapped_mk(wrapped: &[Wrapped], passed: &Path) -> String {
     let recipes: Vec<&str> = wrapped.iter().map(|w| w.recipe).collect();
+    let selftest = passed.parent().unwrap_or(Path::new(".")).display();
     let mut out = format!(
         "GET_WD = pwd\n\
          SCRATCH_BUILD = .\n\
@@ -374,32 +381,38 @@ fn selftest_wrapped_mk(wrapped: &[Wrapped], passed: &Path) -> String {
     for recipe in &recipes {
         out.push_str(&format!("define {recipe}\nexit 1\nendef\n"));
     }
+    let markers: Vec<String> = recipes.iter().map(|recipe| format!("test -e '{selftest}/wrapped.{recipe}'")).collect();
     out.push_str(&format!(
         ".PHONY: all {names}\n\
          all: {names}\n\
-         \t@: > '{passed}'\n\
+         \t@{markers} && : > '{passed}'\n\
          {names}:\n\
-         \t@test '$(origin $@)' = override\n\
-         \t@test '$(notdir $(firstword $(MAKEFILE_LIST)))' = wrapped.mk\n\
-         \t@test -z \"$$MAKEFILES\"\n\
-         \t@$($@)\n",
+         \t@test '$(origin $@)' = override && \\\n\
+         \t test '$(notdir $(firstword $(MAKEFILE_LIST)))' = wrapped.mk && \\\n\
+         \t test -z \"$$MAKEFILES\" && \\\n\
+         \t {{ $($@) ; }} && \\\n\
+         \t : > '{selftest}/wrapped.$@'\n",
         names = recipes.join(" "),
+        markers = markers.join(" && "),
         passed = passed.display(),
     ));
     out
 }
 
 /// The self-test for every other make that reads the fragment. The build
-/// script runs its `all` from the attempt's own directory. It passes (and
-/// writes `passed`) only if it finds its recipe as it defined it, nothing
-/// of the fragment's defined, and itself first in `MAKEFILE_LIST`.
+/// script runs its `all` twice: from the attempt's own directory with
+/// `CCTK_TARGET` set (a third-party build below an object sub-make inherits
+/// it), and from the configuration's `build` directory without it (anything
+/// else Cactus starts there). Each run passes (and writes its `passed`
+/// file, named by `RUN`) only if it finds its recipe as it defined it,
+/// nothing of the fragment's defined, and itself first in `MAKEFILE_LIST`.
 ///
 /// Its match-anything rule stands for a forwarding makefile's. make tries
 /// to remake every makefile it reads, before anything else, and the rule
 /// must not be run for the fragment: it leaves `remade` behind if it is,
 /// for `all` to find (make itself shrugs off a makefile it failed to
 /// remake).
-fn selftest_untouched_mk(selftest: &Path, passed: &Path) -> String {
+fn selftest_untouched_mk(selftest: &Path) -> String {
     format!(
         "$(lastword $(MAKEFILE_LIST)): ;\n\
          define COMPILE_C\n\
@@ -407,16 +420,16 @@ fn selftest_untouched_mk(selftest: &Path, passed: &Path) -> String {
          endef\n\
          .PHONY: all cactup-selftest-force\n\
          all:\n\
-         \t@test '$(origin COMPILE_C)' = file\n\
-         \t@test '$(origin cactup_cc_run)' = undefined\n\
-         \t@test '$(notdir $(firstword $(MAKEFILE_LIST)))' = untouched.mk\n\
-         \t@test ! -e '{remade}'\n\
-         \t@: > '{passed}'\n\
+         \t@test '$(origin COMPILE_C)' = file && \\\n\
+         \t test '$(origin cactup_cc_run)' = undefined && \\\n\
+         \t test '$(notdir $(firstword $(MAKEFILE_LIST)))' = untouched.mk && \\\n\
+         \t test ! -e '{remade}' && \\\n\
+         \t : > '{selftest}/$(RUN).passed'\n\
          cactup-selftest-force: ;\n\
          %: cactup-selftest-force\n\
          \t@: > '{remade}'\n",
         remade = selftest.join("remade").display(),
-        passed = passed.display(),
+        selftest = selftest.display(),
     )
 }
 
@@ -498,6 +511,7 @@ endef
             ("cd x && $(CC) -c", "cd x && $(call cactup_cc_run,$(CC)) -c"),
             ("test -d x || $(CC)", "test -d x || $(call cactup_cc_run,$(CC))"),
             ("echo compiling\n\t@$(CC) -c", "echo compiling\n\t@$(call cactup_cc_run,$(CC)) -c"),
+            ("cd x ; \\\n\t$(CC) -c", "cd x ; \\\n\t$(call cactup_cc_run,$(CC)) -c"),
         ] {
             assert_eq!(wrap_recipe(body, "CC").as_deref(), Some(wrapped), "{body}");
         }
@@ -567,7 +581,8 @@ endef
         let cactup = tmp.join("cactup-abc");
         fs::write(&cactup, "").unwrap();
         let cc = config.join(".cactup-builds/0000/cc");
-        super::super::stage(&cc, super::super::Mode::Record, cactup.to_str().unwrap(), &config).unwrap().unwrap();
+        let inputs = crate::objcache::tests::inputs(cactup.to_str().unwrap(), &config);
+        crate::objcache::stage(&cc, crate::objcache::Mode::Record, &inputs).unwrap().unwrap();
         cc
     }
 

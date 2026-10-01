@@ -290,6 +290,10 @@ pub(crate) enum Commands {
     ///   cactup knob wisdom-kind relevant
     #[clap(verbatim_doc_comment)]
     Wisdom,
+    // §18.5
+    /// Inspect the build cache (so far: what a recording build measured)
+    #[clap(subcommand)]
+    Cache(CacheCommand),
     // §17, §5
     /// Update cactup and its machine database (--help for how to configure)
     ///
@@ -648,6 +652,46 @@ pub(crate) enum BuildCommand {
         name: Option<String>,
         #[clap(long, value_name = "N", help = "Number of most-recent attempts to keep.")]
         keep: Option<u32>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CacheCommand {
+    /// Summarize what a build recorded about its compiles, and compare it with another build
+    ///
+    /// A build made with the build-cache knob set to record logs, for every
+    /// compile of a Cactus source file, the key it would be cached under.
+    /// This prints how many compiles got a key, why the others did not, and
+    /// what working out the keys cost.
+    ///
+    /// With --against, --against-installation or --against-attempt it also
+    /// says how many of this build's compiles the other build's cache
+    /// entries would have served, and for the rest, which part of the key
+    /// differs. Nothing is read from or written to a cache: both builds
+    /// only recorded.
+    ///
+    ///   cactup cache report sim --against sim-debug
+    ///   cactup cache report sim --against-installation other-install
+    ///   cactup cache report sim --against-attempt 3
+    #[clap(verbatim_doc_comment)]
+    Report {
+        /// Config whose build to report on (default: the active config).
+        name: Option<String>,
+        /// Build attempt to report on (default: the newest that recorded its compiles).
+        #[clap(long, value_name = "N")]
+        attempt: Option<u32>,
+        /// Compare with a build of this config (default: the same config).
+        #[clap(long, value_name = "CONFIG")]
+        against: Option<String>,
+        /// Compare with a build in this installation (default: the same installation).
+        #[clap(long, value_name = "ALIAS")]
+        against_installation: Option<String>,
+        /// Compare with this build attempt (default: the newest other one that recorded its compiles).
+        #[clap(long, value_name = "N")]
+        against_attempt: Option<u32>,
+        /// Also list every compile the other build would not have served, with the reason.
+        #[clap(long)]
+        long: bool,
     },
 }
 

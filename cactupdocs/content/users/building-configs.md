@@ -542,7 +542,7 @@ What exists is the groundwork, behind the `build-cache` knob:
 | Value | What a build does |
 |-------|-------------------|
 | `off` (the default) | Nothing: the build is exactly what it is without the cache |
-| `record` | Runs every object compile through cactup and logs it, to measure what a cache would save. Nothing is stored or reused |
+| `record` | Runs every object compile through cactup, works out the key it would be cached under, and logs it, to measure what a cache would save. Nothing is stored or reused |
 
 ```sh
 cactup -K build-cache=record build myconfig   # for this one build
@@ -563,6 +563,25 @@ everything that is not a Cactus object compile — external libraries are
 built exactly as before. One thing you will see: if you build with
 `SILENT=no`, where Cactus prints each command it runs, the compile lines
 show cactup in front of the compiler.
+
+A recording build is slower than a plain one: for every C and C++ file,
+cactup runs the compiler's preprocessor twice more, before and after the
+compile, which is what a cache has to do for a file it cannot serve.
+`cactup cache report` says what that cost, and what it would buy:
+
+```sh
+cactup cache report myconfig                        # what this build recorded
+cactup cache report myconfig --against otherconfig  # what otherconfig's build would have served
+cactup cache report myconfig --against-installation other-install
+cactup cache report myconfig --against-attempt 3 --long
+```
+
+The first form counts the compiles that got a key, per language, and lists
+why the others did not (Fortran is not keyed yet; a compiler cactup does not
+recognize; a flag it does not know). The comparing forms say how many of
+this build's compiles a cache filled by the other build would have served,
+and for the rest, which part of the key differs — the compiler, its
+arguments, the platform, the environment, or the preprocessed source.
 
 cactup checks, where the build actually runs, that it can do this safely. If
 it cannot (inside a container that does not see the cactup binary, with a

@@ -20,14 +20,13 @@
 //! interpreter line — it hands to that same kind of shell
 //! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
+use super::event::Event;
 use super::probe::SELFTEST_COMPILER;
-use super::{events_path, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
+use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
 use crate::Res;
 use anyhow::Context;
-use serde::Serialize;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -115,7 +114,8 @@ fn is_assignment(word: &[u8]) -> bool {
 const SHELL_WORDS: &[&str] = &[
     "!", ".", ":", "[", "[[", "alias", "bg", "break", "builtin", "caller", "case", "cd", "command", "compgen",
     "complete", "compopt", "continue", "coproc", "declare", "dirs", "disown", "do", "done", "echo", "elif", "else",
-    "enable", "esac", "eval", "exec", "exit", "export", "false", "fc", "fg", "fi", "for", "function", "getopts",
+    "bind", "chdir", "enable", "esac", "eval", "exec", "exit", "export", "false", "fc", "fg", "fi", "for", "function",
+    "getopts",
     "hash", "help", "history", "if", "in", "jobs", "kill", "let", "local", "logout", "mapfile", "popd", "printf",
     "pushd", "pwd", "read", "readarray", "readonly", "return", "select", "set", "shift", "shopt", "source",
     "suspend", "test", "then", "time", "times", "trap", "true", "type", "typeset", "ulimit", "umask", "unalias",
@@ -125,9 +125,11 @@ const SHELL_WORDS: &[&str] = &[
 /// Would the recipe's shell run something else for the command name
 /// `program` than the program a `PATH` search finds? It would for a name
 /// the shell itself gives a meaning ([`SHELL_WORDS`]), for a function
-/// exported to it under that name (bash's `export -f`), and whenever `PATH`
-/// has an entry beginning with `~`, which bash expands as it searches and
-/// nothing else does. A name with a `/` in it is a path to all of them.
+/// exported to it under that name (bash's `export -f`), and it might when
+/// `PATH` has an entry beginning with `~` ahead of the directory that has
+/// the program: bash expands such an entry as it searches, other shells
+/// and this process do not. A name with a `/` in it is a path to all of
+/// them.
 ///
 /// What this cannot see is a function or alias the shell defines for
 /// itself at startup (bash reads the file `BASH_ENV` names). Such a file
@@ -153,8 +155,12 @@ fn shell_resolves_differently(program: &OsStr) -> bool {
     if std::env::vars_os().any(exported_function) {
         return true;
     }
+    // A `~` entry matters only if the shell reaches it: that is, if it
+    // comes before the directory the program is found in.
     let path = std::env::var_os("PATH").unwrap_or_default();
-    path.as_bytes().split(|b| *b == b':').any(|entry| entry.starts_with(b"~"))
+    let has_program = |dir: &[u8]| Path::new(OsStr::from_bytes(dir)).join(program).is_file();
+    let reached = path.as_bytes().split(|b| *b == b':').take_while(|dir| !has_program(dir));
+    reached.into_iter().any(|entry| entry.starts_with(b"~"))
 }
 
 // Where a compile stands, for the panic hook.
@@ -198,36 +204,132 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
         debug("its configuration cannot be read");
         pass_through(job)
     };
+    let cc_dir = conf_file.parent().unwrap_or(Path::new("."));
     let Some(argv) = job.argv() else {
-        debug("the compiler is more than a plain command");
-        pass_through(job)
+        leave_to(job, &conf, cc_dir, "the compiler is not a plain command naming a program, so the recipe's shell runs it")
     };
     let program = Path::new(&argv[0]).file_name().and_then(OsStr::to_str);
     if program.is_some_and(|p| OTHER_WRAPPERS.contains(&p)) {
-        debug("the compiler already runs through another wrapper");
-        pass_through(job)
+        leave_to(job, &conf, cc_dir, "the compiler already runs through another wrapper")
     }
     match conf.mode {
         // `stage` writes no configuration for an off build; this is one
         // edited by hand.
         Mode::Off => pass_through(job),
         Mode::Record => {
-            let started = Instant::now();
-            let status = run(job, &argv);
+            // What a serving cache does around a compile it has to run: key
+            // it, run it, and check that the key still describes what was
+            // compiled. Here only the compile has any effect.
+            let (keyed, key_ms) = timed(|| key::key(&conf, cc_dir, &argv));
+            let (status, compile_ms) = timed(|| run(job, &argv));
+            let (stable, recheck_ms) = timed(|| match &keyed {
+                Ok(keyed) if status.success() => Some(keyed.still_holds()),
+                _ => None,
+            });
+            let output = match &keyed {
+                Ok(keyed) => Some(keyed.compile.output.clone()),
+                Err(_) => output_of(&argv[1..]),
+            };
             let event = Event {
                 compiler: argv[0].to_string_lossy().into_owned(),
+                unit: output.as_deref().and_then(|output| unit(&conf, output)),
                 exit: status.code(),
                 signal: status.signal(),
-                wall_ms: started.elapsed().as_millis() as u64,
+                key: keyed.as_ref().ok().map(|keyed| keyed.parts.key()),
+                parts: keyed.as_ref().ok().map(|keyed| keyed.parts.clone()),
+                not_cached: keyed.as_ref().err().cloned(),
+                stable,
+                text_bytes: keyed.as_ref().ok().map(|keyed| keyed.text_bytes),
+                object_bytes: output.and_then(|output| output.metadata().ok()).map(|meta| meta.len()),
+                key_ms,
+                compile_ms,
+                recheck_ms,
             };
-            if let Some(cc_dir) = conf_file.parent() {
-                event.append(&events_path(cc_dir));
-            }
+            event.append(&events_path(cc_dir));
             #[cfg(debug_assertions)]
             test_panic("after");
             leave_as(status)
         }
     }
+}
+
+/// The compiler, started directly. A shell that sets `_` for the commands
+/// it starts (bash does) set it to this wrapper; the compiler is given what
+/// that shell would have given it, its own path. Under a shell that leaves
+/// `_` alone, so does this.
+fn direct(argv: &[OsString]) -> Command {
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    let set_for_us = std::env::var_os("_").zip(std::env::args_os().next()).is_some_and(|(set, me)| {
+        set == me || std::env::current_exe().is_ok_and(|exe| Path::new(&set) == exe)
+    });
+    if set_for_us {
+        match super::identity::find_program(&argv[0]) {
+            Ok(program) => command.env("_", program),
+            Err(_) => command.env_remove("_"),
+        };
+    }
+    command
+}
+
+/// Pass a compile through that the cache stays out of for a reason worth
+/// knowing afterward, and say so in the log first: a build whose every
+/// compile went this way would otherwise have recorded nothing, and nobody
+/// could tell why. What happens to the compile is not known here (this
+/// process becomes it), so the line has a reason and nothing else.
+fn leave_to(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) -> ! {
+    debug(why);
+    if conf.mode == Mode::Record {
+        let event = Event {
+            compiler: job.compiler.to_string_lossy().into_owned(),
+            unit: output_of(&job.args).and_then(|output| unit(conf, &output)),
+            exit: None,
+            signal: None,
+            key: None,
+            parts: None,
+            not_cached: Some(why.to_owned()),
+            stable: None,
+            text_bytes: None,
+            object_bytes: None,
+            key_ms: 0,
+            compile_ms: 0,
+            recheck_ms: 0,
+        };
+        event.append(&events_path(cc_dir));
+    }
+    pass_through(job)
+}
+
+/// What `work` returns, and the wall-clock milliseconds it took.
+fn timed<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    let started = Instant::now();
+    let done = work();
+    (done, started.elapsed().as_millis() as u64)
+}
+
+/// The value of `-o` on a compiler command line, read without knowing any
+/// other flag (for a compile the cache has no reader for).
+fn output_of(args: &[OsString]) -> Option<PathBuf> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_bytes().strip_prefix(b"-o") {
+            Some(b"") => return args.next().map(PathBuf::from),
+            Some(joined) => return Some(PathBuf::from(OsStr::from_bytes(joined))),
+            None => {}
+        }
+    }
+    None
+}
+
+/// The name of the compile that writes `output`: the object's path below
+/// the configuration's `build` directory, which is the same in every
+/// build of every configuration of every installation.
+fn unit(conf: &BuildConf, output: &Path) -> Option<String> {
+    let output = std::path::absolute(output).ok()?;
+    let build = conf.config_dir.join("build");
+    let physical = std::fs::canonicalize(&build).ok();
+    let below = [Some(build), physical].into_iter().flatten().find_map(|dir| output.strip_prefix(dir).ok().map(Path::to_owned));
+    Some(below?.to_string_lossy().into_owned())
 }
 
 /// Become the compiler: the same process, so the same stdin, signal
@@ -237,7 +339,7 @@ fn pass_through(job: &Job) -> ! {
     if let Some(argv) = job.argv() {
         // Returns only if the program could not be started this way; the
         // recipe's shell may still know how.
-        let _ = Command::new(&argv[0]).args(&argv[1..]).exec();
+        let _ = direct(&argv).exec();
     }
     hand_to_shell(job)
 }
@@ -323,7 +425,7 @@ fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
     // Not startable this way: the recipe's shell may still know how (a
     // keyword such as `time`, a function, a script without an interpreter
     // line). The handlers above do not survive becoming that shell.
-    let Ok(mut child) = Command::new(&argv[0]).args(&argv[1..]).spawn() else {
+    let Ok(mut child) = direct(argv).spawn() else {
         // Asked to stop before there was a compile to stop: becoming the
         // shell now would lose that signal and run the compile after all.
         if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
@@ -418,30 +520,6 @@ fn debug(why: &str) {
     }
 }
 
-/// One line of `<attempt>/cc/events.jsonl`.
-#[derive(Serialize)]
-struct Event {
-    compiler: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    signal: Option<i32>,
-    wall_ms: u64,
-}
-
-impl Event {
-    /// Best-effort: the log is for measurement, and a compile that ran is
-    /// never failed over it. One `write` of one whole line in append mode,
-    /// so the parallel compiles of a build do not interleave their lines.
-    fn append(&self, path: &Path) {
-        let Ok(mut line) = serde_json::to_string(self) else { return };
-        line.push('\n');
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = file.write_all(line.as_bytes());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +591,30 @@ mod tests {
         assert!(argv("./time", &[]).is_some());
         assert!(shell_resolves_differently(OsStr::new("time")));
         assert!(!shell_resolves_differently(OsStr::new("/usr/bin/time")));
+    }
+
+    #[test]
+    fn finds_the_output_and_names_the_unit() {
+        let os = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(output_of(&os(&["-c", "-o", "/b/T/a.c.o", "a.c"])), Some(PathBuf::from("/b/T/a.c.o")));
+        assert_eq!(output_of(&os(&["-c", "-o/b/T/a.c.o", "a.c"])), Some(PathBuf::from("/b/T/a.c.o")));
+        assert_eq!(output_of(&os(&["-c", "a.c"])), None);
+        assert_eq!(output_of(&os(&["-c", "a.c", "-o"])), None);
+
+        let conf = BuildConf {
+            mode: Mode::Record,
+            cactup: PathBuf::from("/opt/cactup"),
+            config_dir: PathBuf::from("/w/Cactus/configs/sim"),
+            cactus_root: PathBuf::from("/w/Cactus"),
+            machine: "m".into(),
+            universe: None,
+            build_env_digest: String::new(),
+        };
+        let name = |output: &str| unit(&conf, Path::new(output));
+        assert_eq!(name("/w/Cactus/configs/sim/build/Boundary/a.c.o").as_deref(), Some("Boundary/a.c.o"));
+        assert_eq!(name("/w/Cactus/configs/sim/build/T/sub/a.F90.o").as_deref(), Some("T/sub/a.F90.o"));
+        assert_eq!(name("/w/Cactus/configs/other/build/T/a.c.o"), None);
+        assert_eq!(name("/tmp/conftest.o"), None);
     }
 
     #[test]

@@ -86,8 +86,8 @@ the planned keying and serving will rely on.
   build: it cannot see what they define). Each
   body contains exactly one reference to its compiler variable, spelled
   `$(CC)`, `$(CXX)`, `$(CUCC)`, `$(F77)`, `$(F90)`, `$(F90)` respectively,
-  **in command position** (at the start of a recipe line that does not
-  continue the one above, or right after `;`, `&&` or `||`, outside quotes
+  **in command position** (at the start of a recipe line, or right after
+  `;`, `&&` or `||` — also across a `\` line continuation — outside quotes
   and backticks) and as a word of its own. The probe copies the body
   and replaces that one reference. A recipe that does not fit is left
   unwrapped (that language is then not cached): so `cd x ; $(CC) ...`
@@ -153,7 +153,7 @@ script is byte for byte what it is without the cache.
 
 With `build-cache = record` (M0a, on `feature/build-cache` only):
 
-- **C1.** One probe run and two tiny self-test `make` runs per build, after
+- **C1.** One probe run and three tiny self-test `make` runs per build, after
   `make <config>-config` (and after `-clean`). The probe creates
   `configs/<name>/build/` if a `realclean` removed it.
 - **C2.** `make <config>` runs in a subshell with `MAKEFILES` naming
@@ -165,9 +165,14 @@ With `build-cache = record` (M0a, on `feature/build-cache` only):
   `MAKEFILES` handed on to child processes, and runs one `cat` of the
   thorn's two make fragments while parsing.
 - **C3.** Each object compile runs as a child of a short-lived cactup
-  process (on the order of a millisecond on top of the compiler; to be
-  measured properly in M0c) which appends one line to
-  `<attempt>/cc/events.jsonl`. Compilers, flags and objects are unchanged.
+  process which appends one line to `<attempt>/cc/events.jsonl`.
+  Compilers, flags and objects are unchanged. **Since M0b a recording
+  build is noticeably slower**: for every C and C++ compile, cactup also
+  runs the compiler's preprocessor twice (`-E -C`, before and after the
+  compile) to key it. On the 25-thorn test configuration that summed to
+  about half the compile time again, with an unoptimized cactup; proper
+  numbers come with M0c. Do not take speed measurements with
+  `build-cache = record` on and compare them with ones taken with it off.
   **The recipe text changes**: with `SILENT=no`, or `make -n`, the compile
   line reads `'<cactup>' __cc '<conf>' 'gcc' '/bin/bash' <flags...>` where
   it read `gcc <flags...>`. Anything that parses make's echoed commands
@@ -184,18 +189,17 @@ With `build-cache = record` (M0a, on `feature/build-cache` only):
   `src/objcache/` and `tests/objcache.rs`, and one step in
   `.github/workflows/ci.yml`.
 
-Planned, not there yet: an extra preprocessor run (`-E`) per cached unit
-(one on a hit, two on a miss), which speed measurements taken with the cache
-on will include; `-ffile-prefix-map=...` flags added by the wrapper for GCC
-and Clang family compilers; a `cactup cache` command; one call in `execute`
-after make.
+Planned, not there yet: serving (then one preprocessor run on a hit, two on
+a miss, and no compile on a hit); `-ffile-prefix-map=...` flags added by the
+wrapper to the real compile for GCC and Clang family compilers (today they
+go to the extra preprocessor runs only); one call in `execute` after make.
 
 ## Cache-side planned changes
 
 - 2026-10-01: M0a has passed its review gate (commit `300fd0b` on
-  `feature/build-cache`). Next M0b (keys, richer event log, a report
-  comparing two builds), then M0c (measurements). Nothing is served until
-  the measurements are reviewed.
+  `feature/build-cache`). M0b (keys, richer event log, `cactup cache
+  report` comparing two builds) is in review; then M0c (measurements).
+  Nothing is served until the measurements are reviewed.
 
 ## Cache-side landed changes
 
@@ -258,3 +262,7 @@ every milestone.
   after the name; command position excludes quoted text and continuation
   lines.
 - 2026-10-01  cache side  M0a passed its review gate at `300fd0b`.
+- 2026-10-01  cache side  M0b in review: C1 (three self-test runs) and C3
+  (a recording build now runs the preprocessor twice more per C/C++
+  compile) updated; A1's command position now allows a continuation line
+  after a separator.

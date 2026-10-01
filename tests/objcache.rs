@@ -36,7 +36,12 @@ impl Build {
         }
         fs::write(
             cc.join("config.toml"),
-            format!("mode = \"{mode}\"\ncactup = \"{CACTUP}\"\nconfig-dir = \"{}\"\n", config.display()),
+            format!(
+                "mode = \"{mode}\"\ncactup = \"{CACTUP}\"\nconfig-dir = \"{}\"\ncactus-root = \"{}\"\n\
+                 machine = \"test\"\nbuild-env-digest = \"\"\n",
+                config.display(),
+                root.display()
+            ),
         )
         .unwrap();
         Self { _tmp: tmp, root, config, cc }
@@ -152,7 +157,10 @@ fn a_compiler_that_needs_a_shell_gets_makes_shell_and_is_not_logged() {
     executable(&shell, "#!/bin/sh\necho \"recipe shell got: $*\"\n");
     let out = build.wrap_under(&shell, "FOO=1 gcc", &["-c", "a.c"]).output().unwrap();
     assert_ran(&out, &format!("recipe shell got: -c FOO=1 gcc \"$@\" {} -c a.c\n", shell.display()), "", 0);
-    assert!(build.events().is_empty());
+    // Each is on record as left to the shell, with nothing about how it went.
+    let events = build.events();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events.iter().all(|e| e.contains("\"not_cached\":\"the compiler is not a plain command") && !e.contains("exit")));
 }
 
 #[test]
@@ -162,7 +170,7 @@ fn a_compiler_already_behind_another_wrapper_is_left_to_it() {
     executable(&ccache, "#!/bin/sh\necho \"ccache ran: $*\"\n");
     let out = build.wrap(&format!("{} gcc", ccache.display()), &["-c", "a.c"]).output().unwrap();
     assert_ran(&out, "ccache ran: gcc -c a.c\n", "", 0);
-    assert!(build.events().is_empty());
+    assert!(build.events()[0].contains("already runs through another wrapper"));
 }
 
 /// A name the recipe's shell would not take from `PATH` — because a function
@@ -201,12 +209,14 @@ fn a_compiler_the_shell_resolves_differently_is_left_to_the_shell() {
     let out = build.wrap_under(bash, "mycc", &["-c", "a.c"]).envs(env).output().unwrap();
     assert_ran(&out, &text(&reference.stdout), "", 0);
 
-    // Neither was this process's to start, so neither is logged; the plain
-    // case is.
-    assert!(build.events().is_empty());
+    // Neither was this process's to start: both are on record as left to
+    // the shell. The plain case is started here.
+    let events = build.events();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|e| e.contains("the recipe's shell runs it")), "{events:?}");
     let out = build.wrap_under(bash, "mycc", &["-c", "a.c"]).env("PATH", &path).output().unwrap();
     assert_ran(&out, "the program on PATH: -c a.c\n", "", 0);
-    assert_eq!(build.events().len(), 1);
+    assert!(build.events()[2].contains("\"exit\":0"));
 }
 
 /// What the recipe's shell can start and this process cannot, the shell
@@ -345,7 +355,6 @@ fn an_empty_compiler_runs_what_the_recipe_would_have_run() {
     // argument as the command. So does the wrapper.
     let build = Build::new("record");
     assert_ran(&build.wrap("", &["echo", "ran"]).output().unwrap(), "ran\n", "", 0);
-    assert!(build.events().is_empty());
 }
 
 #[test]
@@ -473,21 +482,25 @@ impl<'a> Tree<'a> {
     }
 
     /// The build script's self-test (`Staged::probe_step`), by hand: each
-    /// makefile's `all`, and the file it leaves when its checks all ran.
+    /// run's `all`, and the file it leaves when its checks all ran.
     fn selftest(&self, make: &Path) -> bool {
         let selftest = self.build.cc.join("selftest");
-        let run = |dir: &Path, which: &str| {
+        let build = self.build.config.join("build");
+        let run = |dir: &Path, makefile: &str, args: &[&str], passed: &str| {
             let out = Command::new(make)
                 .current_dir(dir)
                 .args(["-s", "-f"])
-                .arg(selftest.join(format!("{which}.mk")))
-                .args(["all", "CCTK_TARGET=cactup-selftest", "SRCDIR=."])
+                .arg(selftest.join(makefile))
+                .args(["all", "SRCDIR=."])
+                .args(args)
                 .env("MAKEFILES", self.inject())
                 .output()
                 .unwrap();
-            out.status.success() && selftest.join(format!("{which}.passed")).is_file()
+            out.status.success() && selftest.join(passed).is_file()
         };
-        run(&self.build.config.join("build"), "wrapped") && run(&self.build.cc, "untouched")
+        run(&build, "wrapped.mk", &["CCTK_TARGET=cactup-selftest"], "wrapped.passed")
+            && run(&build, "untouched.mk", &["RUN=elsewhere"], "elsewhere.passed")
+            && run(&self.build.cc, "untouched.mk", &["RUN=untouched", "CCTK_TARGET=cactup-selftest"], "untouched.passed")
     }
 
     /// Run the object sub-make in a fresh build directory, with the

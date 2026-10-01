@@ -43,7 +43,7 @@ the last milestone, for when that host is not at hand.
 | Milestone | Scope | State |
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
-| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | next |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 1) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
@@ -91,6 +91,53 @@ describes what review round 1 rejected):
   (they come back with the code that reads them), the configuration format
   version, and the `cactup-cc` file-name entry point (it returns with the
   rustc adapter).
+
+## What M0b is
+
+Record mode now keys every compile it can and logs the key; nothing is
+stored or served, and the real compile is untouched (spec §18.5, §18.6).
+
+- `src/objcache/hash.rs`: framed SHA-256.
+- `src/objcache/compile.rs`: the GCC/Clang command-line reader (a list of
+  known flags; anything else is "not cached").
+- `src/objcache/identity.rs`: which compiler, by content (driver, GCC's
+  back ends and assembler, the shared libraries they load), remembered per
+  attempt.
+- `src/objcache/platform.rs`: machine, universe, environment-setup digest
+  (frozen by `prepare`), and the compiling host's architecture, processor
+  kinds and OS release.
+- `src/objcache/environment.rs`: the allowlisted environment.
+- `src/objcache/key.rs`: the path map, the preprocessor run, the five-part
+  key.
+- `src/objcache/event.rs`: the event log's format.
+- `src/commands/cache.rs`, `CacheCommand` in `src/args.rs`: `cactup cache
+  report`.
+- The points carried over from M0a's round 4 (all but the `SIGPIPE` one,
+  which is documented in spec §18.4 as a limit): the compiler's `_`, the
+  narrower `~` rule with a reason on record, the self-test's third run and
+  its `&&` chains, a compiler on a continuation line, the `BASH_ENV`
+  wording, the self-test test over `CACTUP_TEST_MAKES`, more shell words.
+
+First numbers (2026-10-01, `plato`, GCC 14.2, make 4.4.1, an *unoptimized*
+cactup, `-j 8`; M0c is where these get measured properly):
+
+- `smoke` (25 thorns): 357 compiles, 307 keyed (all C and C++); the 50
+  Fortran compiles are 2% of the compile time. All 357 objects are byte for
+  byte those of a build without the cache.
+- `smoke2`, the same sources under another configuration name, against
+  `smoke`: **307 of 307 keyed compiles would be served** (98% of the
+  compile time).
+- `ext`, which adds HDF5 and two thorns that use it and builds from another
+  optionlist file, against `smoke`: 301 of 334 (90%); of the 33 misses, 27
+  are files `smoke` does not have and 6 differ in their preprocessed text.
+- Cost: keying summed to about 30% of the compile time and checking again
+  to about 25%; wall clock went from about 16 s to about 39 s for `smoke`.
+  The debug build of cactup is a large part of that (it reads 170 MB of
+  preprocessed text line by line), and the second preprocessor run is the
+  obvious thing to make cheaper. A release build has not been measured.
+
+"Would be served" rests on the path mapping of spec §18.5 producing the
+same object, which only audit mode (M1b) can show per compiler.
 
 ## Verification done for M0a (2026-10-01)
 
@@ -144,6 +191,8 @@ compiler but GCC, any machine but `plato`.
   names. Fixed (commit `300fd0b`); sent to round 4.
 - 2026-10-01: Review round 4: both reviewers SIGN-OFF on `300fd0b`. M0a has
   passed its gate.
+- 2026-10-01: M0b implemented, with the points carried over from M0a's
+  round 4, and sent to the twin review.
 
 ## Review verdicts
 
@@ -277,6 +326,8 @@ the shell. **This is the second known way, after the two-file stand-down
 scan, that the cache could change what gets compiled; both need a setup
 nobody is known to have, and both are Max's call.**
 
+### M0b, round 1: pending
+
 ### M0a, round 4 (on `300fd0b`): SIGN-OFF by both
 
 Both confirmed every round 3 finding resolved, on GNU make 4.0 to 4.4.1,
@@ -285,8 +336,8 @@ tree under make 4.3. Both confirmed the two limits stated for Max are
 described accurately, reproduced the `BASH_ENV` one, and know of no third
 way the cache could change what gets compiled.
 
-Non-blocking points left open, to be taken up in M0b (none changes what
-gets compiled):
+Non-blocking points left open, taken up in M0b (none changes what gets
+compiled; see "What M0b is"):
 
 - Under bash the compiler's environment has `_` naming cactup instead of
   the compiler (bash sets `_` for each command it starts). Set it when the
@@ -336,8 +387,9 @@ compiled.
 
 ## Next step
 
-M0b: per-family argument parser (GCC, Clang), platform fingerprint, compiler
-identity, environment digest, the key, richer `events.jsonl` lines, and
-`cactup cache report`; plus the non-blocking points carried over from M0a's
-round 4 (above). Record-only still: nothing is stored or served until M0c's
-measurements have been looked at.
+Take M0b through its review gate. Then M0c: a release build of cactup; a
+second installation (`cactup install`, alias `build-cache-b`, same release)
+for cross-installation numbers; the full Einstein Toolkit thornlist; line
+directives on and off; edit-and-revert of a thorn; a fresh login session;
+wall-clock overhead against an unwrapped build. Write the results up for
+Max before any M1 work: nothing is stored or served until he has seen them.

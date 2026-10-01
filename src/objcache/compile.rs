@@ -1,0 +1,346 @@
+//! What one compiler command line asks for, as far as the cache needs to
+//! know: is it a compile the cache understands *completely*, and if so,
+//! which arguments decide the object and which only feed the preprocessor.
+//!
+//! This reader is for the GCC and Clang drivers. It works from a list of
+//! what it knows (§18.1 rule 1): a flag that is not on it makes the whole
+//! command line "not cached", whatever the flag would have done. A miss
+//! costs a compile; a flag misread could cost a wrong object.
+
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+/// The source language of a compile the cache understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    C,
+    Cxx,
+}
+
+impl Language {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Cxx => "c++",
+        }
+    }
+
+    /// By the source file's suffix, as the compiler driver decides it.
+    fn of_source(source: &Path) -> Result<Self, String> {
+        match source.extension().and_then(OsStr::to_str) {
+            Some("c") => Ok(Self::C),
+            Some("cc" | "cp" | "cxx" | "cpp" | "CPP" | "c++" | "C") => Ok(Self::Cxx),
+            Some(other) => Err(format!("sources ending in .{other} are not cached")),
+            None => Err("the source file has no suffix to tell its language by".to_owned()),
+        }
+    }
+
+    /// By `-x <language>`.
+    fn of_flag(language: &str) -> Result<Self, String> {
+        match language {
+            "c" => Ok(Self::C),
+            "c++" => Ok(Self::Cxx),
+            other => Err(format!("-x {other} is not cached")),
+        }
+    }
+}
+
+/// A compile of one source file to one object.
+#[derive(Debug, PartialEq)]
+pub struct Compile {
+    pub language: Language,
+    pub source: PathBuf,
+    pub output: PathBuf,
+    /// The command line of the matching preprocessor run, minus the `-E`:
+    /// every argument but `-c` and `-o <file>`.
+    pub preprocess: Vec<OsString>,
+    /// The arguments that go into the key as they are: every argument but
+    /// `-c`, `-o <file>`, the source file, and `-I`/`-D`/`-U`, whose whole
+    /// effect is in the preprocessed text. In the order given: for most
+    /// flags the last one wins, and cactup does not know for which.
+    pub keyed: Vec<OsString>,
+    /// Debug information is on (`-g…`, not `-g0`): the object then also
+    /// records where it was compiled.
+    pub debug: bool,
+    /// `-g3`: the object's debug information also records macros, which the
+    /// preprocessed text alone does not show.
+    pub macros_in_debug: bool,
+}
+
+/// Flags that take their value as the next argument, and go into the key.
+const WITH_VALUE: &[&str] = &[
+    "-isystem",
+    "-iquote",
+    "-idirafter",
+    "-include",
+    "-imacros",
+    "-iprefix",
+    "-iwithprefix",
+    "-iwithprefixbefore",
+    "-isysroot",
+    "--param",
+];
+
+/// Flags the cache knows it cannot follow: they name inputs the
+/// preprocessed text does not show, or outputs besides the object, or
+/// another program that takes part in the compile. Matched as prefixes.
+const NOT_CACHED: &[&str] = &[
+    // Not compiles to an object.
+    "-E", "-S", "-M",
+    // More inputs: plugins, specs, profiles, lists, precompiled headers,
+    // modules, link-time optimization.
+    "@", "-fplugin", "-specs", "--specs", "-Xclang", "-Xpreprocessor", "-Xassembler", "-Wp,", "-Wa,", "-B",
+    "-wrapper", "-fprofile-", "-fauto-profile", "-fbranch-probabilities", "-fxray-", "-fthinlto-index",
+    "-flto", "-fno-lto", "-fmodule", "-fpch", "-include-pch", "-fopenmp-targets", "-foffload", "-ipo",
+    // More outputs.
+    "--coverage", "-ftest-coverage", "-gsplit-dwarf", "-fstack-usage", "-ftime-trace", "-ftime-report",
+    "-fdump-", "-save-temps", "-frecord-gcc-switches", "-fcallgraph-info", "-fopt-info", "-aux-info",
+    "-dumpbase", "-dumpdir", "-fdiagnostics-format",
+];
+
+/// `-f<name>` and `-fno-<name>` flags that only change the object or the
+/// diagnostics, with no file but the object written and none read.
+const F_FLAGS: &[&str] = &[
+    "PIC", "pic", "PIE", "pie", "openmp", "openmp-simd", "strict-aliasing", "fast-math", "math-errno",
+    "unsafe-math-optimizations", "finite-math-only", "associative-math", "reciprocal-math", "signed-zeros",
+    "trapping-math", "rounding-math", "signaling-nans", "unroll-loops", "unroll-all-loops",
+    "omit-frame-pointer", "exceptions", "rtti", "stack-protector", "stack-protector-strong",
+    "stack-protector-all", "stack-clash-protection", "common", "tree-vectorize", "tree-loop-vectorize",
+    "tree-slp-vectorize", "vectorize", "slp-vectorize", "signed-char", "unsigned-char", "wrapv", "trapv",
+    "inline", "inline-functions", "inline-small-functions", "permissive", "check-new", "function-sections",
+    "data-sections", "asynchronous-unwind-tables", "unwind-tables", "plt", "semantic-interposition",
+    "delete-null-pointer-checks", "strict-overflow", "builtin", "gnu89-inline", "lax-vector-conversions",
+    "ms-extensions", "threadsafe-statics", "keep-inline-functions", "merge-all-constants", "short-enums",
+    "ident", "expensive-optimizations", "peel-loops", "prefetch-loop-arrays", "tree-loop-distribution",
+    "loop-interchange", "cx-limited-range", "cx-fortran-rules", "elide-constructors", "implicit-templates",
+    "sized-deallocation", "aligned-new", "char8_t", "concepts", "coroutines", "show-column",
+    "diagnostics-show-option", "diagnostics-show-caret", "caret-diagnostics", "color-diagnostics",
+    "colored-diagnostics", "spell-checking", "float-store", "pack-struct",
+];
+
+/// `-f<name>=<value>` flags of the same kind.
+const F_FLAGS_WITH_VALUE: &[&str] = &[
+    "visibility", "diagnostics-color", "message-length", "fp-contract", "excess-precision", "template-depth",
+    "constexpr-depth", "constexpr-loop-limit", "constexpr-steps", "sanitize", "sanitize-recover",
+    "max-errors", "error-limit", "inline-limit", "tls-model", "cf-protection", "debug-prefix-map",
+    "file-prefix-map", "macro-prefix-map", "abi-version", "align-functions", "align-loops", "align-jumps",
+    "align-labels", "tabstop", "input-charset", "exec-charset", "openmp-version", "vect-cost-model",
+    "simd-cost-model", "pack-struct", "random-seed", "zero-call-used-regs", "strict-flex-arrays", "fp-model",
+];
+
+/// Is `flag` one of the flags the cache knows to be a plain setting?
+fn is_setting(flag: &str) -> bool {
+    if matches!(flag, "-g" | "-w" | "-ansi" | "-pedantic" | "-pedantic-errors" | "-pthread" | "-pipe" | "-nostdinc"
+        | "-nostdinc++" | "-undef" | "-trigraphs" | "-rdynamic" | "-shared" | "-static")
+    {
+        return true;
+    }
+    if let Some(name) = flag.strip_prefix("-f") {
+        let name = name.strip_prefix("no-").unwrap_or(name);
+        return match name.split_once('=') {
+            Some((name, _)) => F_FLAGS_WITH_VALUE.contains(&name),
+            None => F_FLAGS.contains(&name),
+        };
+    }
+    // `-O2`, `-g3`, `-ggdb`, `-gdwarf-5`, `-std=gnu99`, `-Wall`, `-march=…`.
+    ["-O", "-g", "-std=", "-W", "-m"].iter().any(|prefix| flag.starts_with(prefix))
+}
+
+/// Read the arguments of one compiler command line (everything after the
+/// program's name). `Err` says why this command line is not cached; it
+/// still compiles exactly as given.
+pub fn parse(args: &[OsString]) -> Result<Compile, String> {
+    let mut args = args.iter();
+    let mut compile_only = false;
+    let (mut source, mut output, mut language) = (None, None, None);
+    let (mut preprocess, mut keyed) = (Vec::new(), Vec::new());
+    let (mut debug, mut macros_in_debug) = (false, false);
+
+    while let Some(arg) = args.next() {
+        let Some(flag) = arg.to_str() else {
+            return Err("an argument is not valid UTF-8".to_owned());
+        };
+        // `-o file`, `-ofile`, `-I dir`, `-Idir`, …: the value, wherever it is.
+        let mut value_of = |name: &str| -> Result<Option<OsString>, String> {
+            match flag.strip_prefix(name) {
+                Some("") => match args.next() {
+                    Some(value) => Ok(Some(value.clone())),
+                    None => Err(format!("{name} has nothing after it")),
+                },
+                Some(joined) => Ok(Some(OsString::from(joined))),
+                None => Ok(None),
+            }
+        };
+
+        if flag == "-c" {
+            compile_only = true;
+        } else if let Some(file) = value_of("-o")? {
+            if output.replace(PathBuf::from(file)).is_some() {
+                return Err("-o is given more than once".to_owned());
+            }
+        } else if NOT_CACHED.iter().any(|prefix| flag.starts_with(prefix)) {
+            return Err(format!("{flag} is a flag the cache does not follow"));
+        } else if let Some(value) = ["-I", "-D", "-U"].iter().find_map(|name| value_of(name).transpose()) {
+            // Their whole effect is in the preprocessed text.
+            preprocess.push(OsString::from(&flag[..2]));
+            preprocess.push(value?);
+        } else if let Some(value) = value_of("-x")? {
+            language = Some(Language::of_flag(&value.to_string_lossy())?);
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(OsString::from("-x"));
+                list.push(value.clone());
+            }
+        } else if WITH_VALUE.contains(&flag) {
+            let Some(value) = args.next() else {
+                return Err(format!("{flag} has nothing after it"));
+            };
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(arg.clone());
+                list.push(value.clone());
+            }
+        } else if flag == "-" {
+            return Err("the source comes from standard input".to_owned());
+        } else if flag.starts_with('-') {
+            if !is_setting(flag) {
+                return Err(format!("{flag} is not a flag the cache knows"));
+            }
+            // The level flags, of which the last one wins. Any other `-g…`
+            // (`-gdwarf-5`, `-gz`) counts as debug information being on:
+            // saying so too often only costs sharing.
+            if flag.starts_with("-g") {
+                debug = !matches!(flag, "-g0" | "-ggdb0");
+                macros_in_debug = matches!(flag, "-g3" | "-ggdb3");
+            }
+            preprocess.push(arg.clone());
+            keyed.push(arg.clone());
+        } else {
+            if source.replace(PathBuf::from(arg)).is_some() {
+                return Err("there is more than one input file".to_owned());
+            }
+            preprocess.push(arg.clone());
+        }
+    }
+
+    if !compile_only {
+        return Err("it is not a compile to an object (no -c)".to_owned());
+    }
+    let source = source.ok_or("there is no input file")?;
+    let output = output.ok_or("there is no -o")?;
+    let language = match language {
+        Some(language) => language,
+        None => Language::of_source(&source)?,
+    };
+    // A path with a newline in it could pass for two lines of a
+    // preprocessor's output.
+    if source.as_os_str().as_bytes().contains(&b'\n') {
+        return Err("the source file's name has a line break in it".to_owned());
+    }
+    Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn parsed(args: &[&str]) -> Result<Compile, String> {
+        parse(&os(args))
+    }
+
+    /// The shape of a Cactus compile line.
+    const CACTUS: &[&str] = &[
+        "-g", "-std=gnu99", "-O3", "-c", "-o", "/c/build/T/a.c.o", "/c/build/T/a.c", "-I/src/T", "-I", "/c/bindings",
+        "-DCCODE", "-DX=1",
+    ];
+
+    #[test]
+    fn reads_a_cactus_compile() {
+        let compile = parsed(CACTUS).unwrap();
+        assert_eq!(compile.language, Language::C);
+        assert_eq!(compile.source, Path::new("/c/build/T/a.c"));
+        assert_eq!(compile.output, Path::new("/c/build/T/a.c.o"));
+        assert_eq!(compile.keyed, os(&["-g", "-std=gnu99", "-O3"]));
+        assert_eq!(
+            compile.preprocess,
+            os(&["-g", "-std=gnu99", "-O3", "/c/build/T/a.c", "-I", "/src/T", "-I", "/c/bindings", "-D", "CCODE", "-D", "X=1"])
+        );
+        assert!(compile.debug && !compile.macros_in_debug);
+    }
+
+    #[test]
+    fn tells_the_language_by_suffix_or_by_flag() {
+        for (source, language) in [("a.c", Language::C), ("a.cc", Language::Cxx), ("a.cxx", Language::Cxx), ("a.C", Language::Cxx)] {
+            assert_eq!(parsed(&["-c", "-o", "a.o", source]).unwrap().language, language, "{source}");
+        }
+        assert_eq!(parsed(&["-x", "c++", "-c", "-o", "a.o", "a.c"]).unwrap().language, Language::Cxx);
+        assert_eq!(parsed(&["-xc", "-c", "-o", "a.o", "a.cc"]).unwrap().language, Language::C);
+        for source in ["a.f90", "a.F", "a.cu", "a.S", "a.m", "a"] {
+            assert!(parsed(&["-c", "-o", "a.o", source]).is_err(), "{source}");
+        }
+        assert!(parsed(&["-x", "assembler", "-c", "-o", "a.o", "a.c"]).is_err());
+    }
+
+    #[test]
+    fn debug_information_is_noticed() {
+        let debug = |flags: &[&str]| {
+            let mut args = flags.to_vec();
+            args.extend(["-c", "-o", "a.o", "a.c"]);
+            let compile = parsed(&args).unwrap();
+            (compile.debug, compile.macros_in_debug)
+        };
+        assert_eq!(debug(&[]), (false, false));
+        assert_eq!(debug(&["-g"]), (true, false));
+        assert_eq!(debug(&["-ggdb3"]), (true, true));
+        assert_eq!(debug(&["-g3", "-g"]), (true, false));
+        assert_eq!(debug(&["-g", "-g0"]), (false, false));
+    }
+
+    #[test]
+    fn flags_with_values_keep_them() {
+        let compile = parsed(&["-isystem", "/opt/inc", "--param", "x=1", "-include", "pre.h", "-c", "-o", "a.o", "a.c"]).unwrap();
+        assert_eq!(compile.keyed, os(&["-isystem", "/opt/inc", "--param", "x=1", "-include", "pre.h"]));
+        assert!(parsed(&["-c", "-o", "a.o", "a.c", "-isystem"]).unwrap_err().contains("nothing after it"));
+        assert!(parsed(&["-c", "a.c", "-o"]).unwrap_err().contains("nothing after it"));
+    }
+
+    #[test]
+    fn what_it_does_not_fully_understand_is_not_cached() {
+        for (args, why) in [
+            (&["-o", "a.o", "a.c"][..], "no -c"),
+            (&["-c", "a.c"], "no -o"),
+            (&["-c", "-o", "a.o"], "no input file"),
+            (&["-c", "-o", "a.o", "a.c", "b.c"], "more than one input"),
+            (&["-c", "-o", "a.o", "-o", "b.o", "a.c"], "more than once"),
+            (&["-E", "-o", "a.i", "a.c"], "-E is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-MD"], "-MD is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-MF", "a.d"], "-MF is a flag"),
+            (&["-c", "-o", "a.o", "a.c", "-fprofile-use=p"], "does not follow"),
+            (&["-c", "-o", "a.o", "a.c", "-flto"], "does not follow"),
+            (&["-c", "-o", "a.o", "a.c", "@args"], "does not follow"),
+            (&["-c", "-o", "a.o", "a.c", "-Wa,-adhln"], "does not follow"),
+            (&["-c", "-o", "a.o", "a.c", "-fsanitize-ignorelist=l"], "not a flag the cache knows"),
+            (&["-c", "-o", "a.o", "a.c", "-fnew-flag-of-next-year"], "not a flag the cache knows"),
+            (&["-c", "-o", "a.o", "a.c", "--weird"], "not a flag the cache knows"),
+            (&["-c", "-o", "a.o", "-"], "standard input"),
+        ] {
+            let err = parsed(args).unwrap_err();
+            assert!(err.contains(why), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn settings_it_knows() {
+        for flag in [
+            "-O2", "-Ofast", "-g", "-ggdb", "-gdwarf-5", "-std=c++17", "-Wall", "-Wno-unused", "-Werror=vla", "-w",
+            "-march=native", "-mavx2", "-mtune=generic", "-fPIC", "-fopenmp", "-fno-strict-aliasing", "-ffast-math",
+            "-fvisibility=hidden", "-fno-omit-frame-pointer", "-fdiagnostics-color=always", "-fsanitize=address",
+            "-ffile-prefix-map=/a=/b", "-pthread", "-pipe", "-rdynamic", "-D_GNU_SOURCE", "-UNDEBUG",
+        ] {
+            assert!(parsed(&[flag, "-c", "-o", "a.o", "a.c"]).is_ok(), "{flag}");
+        }
+    }
+}

@@ -1907,7 +1907,18 @@ fn prepare_with_cache(
         // the script exactly what it is without the cache — also when the
         // settings cannot be written: the cache never costs a build.
         let wrapper = cache.map_or_else(crate::freeze::frozen_cactup, |(_, cactup)| cactup.to_owned());
-        let staged = crate::objcache::stage(&attempt.cc_dir(), cache_mode, &wrapper, &config_dir);
+        let staged = crate::objcache::stage(
+            &attempt.cc_dir(),
+            cache_mode,
+            &crate::objcache::StageInputs {
+                cactup: &wrapper,
+                config_dir: &config_dir,
+                cactus_root: &cactus_root,
+                machine: &machine.name,
+                universe: attempt.meta.config_meta.universe.as_deref(),
+                build_env: &build_env,
+            },
+        );
         let cache = staged.unwrap_or_else(|e| {
             println!("{} build cache off for this build: {e:#}", "warning:".yellow().bold());
             None

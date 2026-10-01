@@ -181,6 +181,7 @@ fn main() -> Res<()> {
         Commands::Machine(cmd) => commands::machine::dispatch(&ctx, cmd),
         Commands::Wisdom => commands::wisdom::dispatch(&ctx),
         Commands::Update { check, prune } => commands::update::dispatch(&ctx, check, prune),
+        Commands::Cache(cmd) => commands::cache::dispatch(&ctx, cmd),
     };
 
     // Wisdom after failure would be flippant — and gating on Ok also keeps
