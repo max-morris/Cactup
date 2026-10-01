@@ -49,6 +49,7 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
 /// matches are cached; the zero-match fallback is not, so a later `machine
 /// create` is picked up.
 pub fn resolve(ctx: &Ctx) -> Res<Machine> {
+    let _span = crate::timing::span("machine resolve");
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
     resolve_with(
         &ctx.db,

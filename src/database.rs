@@ -434,6 +434,7 @@ impl Db {
     /// reading only — never persist one (that would be the stale-clobber §2.3
     /// forbids); mutate through [`Db::update`] instead.
     pub fn read(&self) -> Res<Database> {
+        let _span = crate::timing::span("Db::read");
         self.ensure_dir()?;
         let _lock = LinkLock::acquire(&self.lock_path)?;
         let mut db = Database::read_from(&self.path)?;
@@ -448,6 +449,7 @@ impl Db {
     /// persist, release. Callers must keep the closure brief — long-running
     /// work happens strictly outside.
     pub fn update<T>(&self, mutate: impl FnOnce(&mut Database) -> Res<T>) -> Res<T> {
+        let _span = crate::timing::span("Db::update");
         self.ensure_dir()?;
         let _lock = LinkLock::acquire(&self.lock_path)?;
         let mut db = Database::read_from(&self.path)?;

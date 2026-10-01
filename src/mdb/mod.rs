@@ -117,6 +117,7 @@ impl Mdb {
     // `test run --test-dir` (testsuite/run.rs `start`) all return into their
     // compute paths before anything calls `Mdb::open`.
     pub fn open(mdb_path_override: Option<&Path>, db: &crate::database::Db) -> Res<Mdb> {
+        let _span = crate::timing::span("Mdb::open");
         let system_root = match mdb_path_override {
             Some(path) => {
                 check_root_generation(path)?;

@@ -47,6 +47,7 @@ const ACQUIRE_ATTEMPTS: u32 = 8;
 /// throttle stamps) must be measured from this, never from the local clock,
 /// which may be skewed from the clock that stamped the mtime (§2.3).
 pub fn fileserver_now(dir: &Path) -> Res<SystemTime> {
+    let _span = crate::timing::span("fileserver clock probe");
     let probe = tempfile::Builder::new()
         .prefix(".cactup-clock.")
         .tempfile_in(dir)
@@ -204,6 +205,8 @@ impl LinkLock {
     /// The shared acquire path: `Ok(Err(holder))` means a live holder owns the
     /// lock (soft failure); `Err` is an actual I/O problem.
     fn acquire_inner(path: &Path) -> Res<Result<LinkLock, String>> {
+        // Counts attempts: try_acquire misses and acquire_wait polls too.
+        let _span = crate::timing::span("LinkLock acquire attempt");
         let dir = lock_dir(path)?;
         fs::create_dir_all(dir)
             .with_context(|| format!("Failed to create lock directory {}", dir.display()))?;
@@ -340,6 +343,7 @@ impl Drop for HeartbeatLock {
 
 impl Drop for LinkLock {
     fn drop(&mut self) {
+        let _span = crate::timing::span("LinkLock release");
         // Unlink only while the file is still ours: if we went quiet past
         // LOCK_STALE_SECS, another process may have broken the lock and
         // re-acquired it, and then the path no longer belongs to us.

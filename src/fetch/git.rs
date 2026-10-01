@@ -88,6 +88,7 @@ pub struct Probe {
 /// Classify `repo_dir` against the thornlist's `wanted_url`/`wanted_branch`.
 /// Infallible by design: any inspection error becomes `Dirty(Unknown)`.
 pub fn probe(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Probe {
+    let _span = crate::timing::span("git probe");
     if !repo_dir.exists() {
         return Probe { state: RepoState::Absent, untracked: Vec::new() };
     }
@@ -334,6 +335,7 @@ pub fn clone(
     dest: &Path,
     progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
 ) -> Res<()> {
+    let _span = crate::timing::span("git clone");
     std::fs::create_dir_all(dest)
         .with_context(|| format!("Failed to create {}", dest.display()))?;
 
@@ -373,6 +375,7 @@ pub fn align(
     branch: &str,
     progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
 ) -> Res<ObjectId> {
+    let _span = crate::timing::span("git align");
     let mut repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
     // Every ref the fetch below moves gets a reflog entry, and gix refuses
@@ -584,14 +587,15 @@ pub fn set_origin_url(repo_dir: &Path, url: &str) -> Res<()> {
 /// know about. Shared by [`probe`] and [`source_state`], which need the same
 /// walk but draw different conclusions from it.
 fn status_paths(repo: &gix::Repository) -> Res<(Vec<String>, Vec<String>)> {
+    let walk_span = crate::timing::span("gix status walk");
     let mut modified = Vec::new();
     let mut untracked = Vec::new();
-    let iter = repo
+    let mut iter = repo
         .status(gix::progress::Discard)
         .with_context(|| "failed to prepare status")?
         .into_iter(Vec::<BString>::new())
         .with_context(|| "failed to run status")?;
-    for item in iter {
+    for item in iter.by_ref() {
         let item = item.with_context(|| "status iteration failed")?;
         match item {
             gix::status::Item::TreeIndex(change) => {
@@ -615,6 +619,21 @@ fn status_paths(repo: &gix::Repository) -> Res<(Vec<String>, Vec<String>)> {
                     modified.push(path);
                 }
             }
+        }
+    }
+    drop(walk_span);
+    if crate::timing::enabled()
+        && let Some(outcome) = iter.outcome_mut()
+    {
+        use crate::timing::count;
+        let tracked = &outcome.index_worktree.tracked_file_modification;
+        count("status: entries", tracked.entries_processed as u64);
+        count("status: lstat calls", tracked.symlink_metadata_calls as u64);
+        count("status: racy-clean entries", tracked.racy_clean as u64);
+        count("status: files read (hashed)", tracked.worktree_files_read as u64);
+        count("status: bytes read", tracked.worktree_bytes);
+        if let Some(dirwalk) = &outcome.index_worktree.dirwalk {
+            count("status: dirwalk read_dir calls", dirwalk.read_dir_calls as u64);
         }
     }
     modified.sort();

@@ -487,6 +487,7 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     // list's Fuka section does exactly this), so those resolve last.
     let mut links: Vec<&Component> = plan.links.iter().collect();
     links.sort_by_key(|c| c.target.contains("..") || c.checkout.contains(".."));
+    let link_span = crate::timing::span("link pass");
     for c in links {
         match link::link_component(install_root, &plan.root, c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
@@ -495,6 +496,8 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
             }
         }
     }
+    drop(link_span);
+    let _branch_check_span = crate::timing::span("post-fetch branch check");
     for r in &report.repos {
         if let Some(expected) = &r.branch
             && let Ok((actual, _)) = git::head_of(&install_root.join(&plan.root).join("repos").join(&r.repo))
