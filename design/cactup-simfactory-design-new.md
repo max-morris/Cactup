@@ -4833,7 +4833,9 @@ so that two builds can be compared part by part:
   `LC_MONETARY`, which thus stay what they were: a compiler may read its
   source by `LC_CTYPE`).
   The compiler as a whole is asked too, once, to spare the compiles the
-  asking. Fortran is not cached yet. The answer — also "not one the cache
+  asking; and whatever a driver is asked for its identity (`--version`,
+  its specs), it is asked in English the same way, so that the identity
+  does not depend on the language of the session that asked. Fortran is not cached yet. The answer — also "not one the cache
   works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)
   and reused while every file it came from still has the same size, change
   time and inode. The wrapper starts the file that was identified, under

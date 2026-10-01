@@ -151,7 +151,10 @@ option off, and all 357 objects and 357 dependency files byte for byte
 those of a build without the cache (`objs-dep-record.txt` and
 `objs-dep-plain.txt` beside the other logs; both lists were copied there
 together afterward, so they do not themselves show which build each was
-taken from, and both reviewers repeated the comparison independently). The contract file says what
+taken from. Both reviewers checked the claim independently: one rebuilt
+the 25 thorns on that branch both ways in a tree of its own, the other
+compared objects and dependency files compile by compile through the
+wrapper). The contract file says what
 has to stay true of that recipe.
 
 ## Not measured

@@ -47,7 +47,7 @@ the last milestone, for when that host is not at hand.
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
-| M0c | Measurements in `~/cacti/build-cache`, written results | measured; results in `RESULTS-M0c.md`, **waiting for Max**; the code changed since M0b's gate is in review |
+| M0c | Measurements in `~/cacti/build-cache`, written results | measured; results in `RESULTS-M0c.md`, **waiting for Max**; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
@@ -285,8 +285,11 @@ compiler but GCC, any machine but `plato`.
 - 2026-10-01: M0c review: both reviewers found the code sound and the
   numbers right, and blocked on one wrong sentence in the results'
   summary. Corrected, with their other remarks; sent back.
-- 2026-10-02: M0c review round 2: B blocked on a test assertion that does
-  not hold for Clang. Fixed; sent back.
+- 2026-10-01: M0c review round 2: A signed off, B blocked on a test
+  assertion that does not hold for Clang. Fixed; sent back.
+- 2026-10-01: M0c review round 3: both reviewers SIGN-OFF on `129ecf7`.
+  Everything on the branch up to that commit has passed review. Waiting
+  for Max.
 
 ## Review verdicts
 
@@ -653,6 +656,26 @@ on a clean export of the commit), with the same remark on `runs_cc1` and
 a note that the dependency-build hash lists do not show their own
 provenance (the results now say so).
 
+### M0c, round 3 (on `129ecf7`): SIGN-OFF by both
+
+Both confirmed the dependency-file test stable (60 of 60 runs each, also
+under load and on musl; A reproduced the old failure and showed, by
+breaking `preprocessor()` in an export, that the new unit test and GCC's
+time check both catch a dependency flag reaching the preprocessor), the
+refactoring a pure move (A recorded every driver run's arguments and
+environment before and after: identical), and the compiler identities
+unchanged in an English session and equal in a German one (B, with a
+German GCC catalog mounted: the identity that used to differ no longer
+does; A has no catalog and could only confirm "no difference").
+
+Non-blocking points left open, for the start of the next code milestone:
+
+- No test pins that the compiler is asked for its identity in English; a
+  later edit could drop it unnoticed (A).
+- A doubled blank line after `in_english` in `src/objcache/key.rs` (both).
+- Carried from M0b's round 4 and still open: the specs-file refinement
+  for Spack-built GCCs, and the per-attempt memo of file digests.
+
 `PLAN.md` still lists `-MD` as not cached: it is the plan as approved,
 and its first lines say where the work has moved since.
 
@@ -705,7 +728,7 @@ them.
 
 ## Next step
 
-1. Take the M0c changes to two sign-offs on one commit (round 3: A signed
-   off on `13c7471`, B blocked on a test; the fix is the commit after).
-2. Wait for Max on `RESULTS-M0c.md` and the decisions above.
-3. Then M1a (the store), on Max's go-ahead.
+Everything up to `129ecf7` is reviewed. **Wait for Max** on
+`RESULTS-M0c.md` and the decisions above: nothing is stored or served
+before he has answered. Then M1a (the store), starting with the open
+non-blocking points listed under "M0c, round 3".

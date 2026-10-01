@@ -227,10 +227,11 @@ go to the extra preprocessor runs only); one call in `execute` after make.
 
 ## Cache-side planned changes
 
-- 2026-10-01: M0a (`300fd0b`) and M0b (`045eb76`) have passed their review
-  gates on `feature/build-cache`. M0c (measurements) is running: it builds
-  in `~/cacti/build-cache` and in one more installation, alias
-  `build-cache-b`. Nothing is served until Max has seen the measurements.
+- 2026-10-01: M0a, M0b and the measurements (M0c) are done and reviewed
+  on `feature/build-cache` (up to `129ecf7`). The cache still only
+  records. Next is the store and then serving (M1), which waits for Max's
+  go-ahead; serving is where the cache starts adding
+  `-ffile-prefix-map=...` to real compiles and skipping compiles on a hit.
 
 ## Cache-side landed changes
 
@@ -327,3 +328,6 @@ every milestone.
   as with the option off, and all 357 objects and 357 `.d` files byte for
   byte those of a build without the cache. Your uncommitted changes to
   `lib/sbin/CST` and `CSTUtils.pl` were not part of that test.
+- 2026-10-01  cache side  A6 as rewritten (dependency output written by
+  the compile) is through review on the cache side at `129ecf7`. Planned
+  section updated: M1 waits for Max.
