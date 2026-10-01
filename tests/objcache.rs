@@ -54,12 +54,16 @@ impl Build {
         }
     }
 
-    /// `CACTUP_CC_CMD=<compiler> cactup __cc <conf> <args…>`, the way an
-    /// injected recipe runs it.
+    /// `cactup __cc <conf> <compiler> <shell> <args…>`, the way an injected
+    /// recipe runs it.
     fn wrap(&self, compiler: &str, args: &[&str]) -> Command {
+        self.wrap_under(Path::new("/bin/sh"), compiler, args)
+    }
+
+    /// [`Self::wrap`], with `shell` as the recipe's shell.
+    fn wrap_under(&self, shell: &Path, compiler: &str, args: &[&str]) -> Command {
         let mut cmd = Command::new(CACTUP);
-        cmd.arg("__cc").arg(self.conf()).args(args);
-        cmd.env("CACTUP_CC_CMD", compiler).env("CACTUP_CC_SHELL", "/bin/sh");
+        cmd.arg("__cc").arg(self.conf()).arg(compiler).arg(shell).args(args);
         cmd.env_remove("CACTUP_CC_TEST_PANIC").env_remove("CACTUP_CC_DEBUG");
         cmd
     }
@@ -86,8 +90,7 @@ const COMPILE: &str = "echo out; echo err >&2; exit 3";
 #[test]
 fn without_a_readable_configuration_it_is_just_the_compiler() {
     let out = Command::new(CACTUP)
-        .args(["__cc", "/nonexistent/cc/config.toml", "-c", COMPILE])
-        .env("CACTUP_CC_CMD", "sh")
+        .args(["__cc", "/nonexistent/cc/config.toml", "sh", "/bin/sh", "-c", COMPILE])
         .output()
         .unwrap();
     assert_ran(&out, "out\n", "err\n", 3);
@@ -122,10 +125,8 @@ fn the_compiler_gets_the_recipes_stdin_and_environment() {
         child.stdin.take().unwrap().write_all(b"int main;\n").unwrap();
         assert_eq!(text(&child.wait_with_output().unwrap().stdout), "int main;\n", "{mode}");
 
-        // The two variables the fragment adds for the wrapper stop at it.
-        let show = "echo \"[$CACTUP_CC_CMD][$CACTUP_CC_SHELL][$KEPT]\"";
-        let out = build.wrap("sh", &["-c", show]).env("KEPT", "yes").output().unwrap();
-        assert_ran(&out, "[][][yes]\n", "", 0);
+        let out = build.wrap("sh", &["-c", "echo \"[$KEPT]\""]).env("KEPT", "yes").output().unwrap();
+        assert_ran(&out, "[yes]\n", "", 0);
     }
 }
 
@@ -149,7 +150,7 @@ fn a_compiler_that_needs_a_shell_gets_makes_shell_and_is_not_logged() {
     // The shell is the one make runs the recipe with.
     let shell = build.root.join("recipe-shell");
     executable(&shell, "#!/bin/sh\necho \"recipe shell got: $*\"\n");
-    let out = build.wrap("FOO=1 gcc", &["-c", "a.c"]).env("CACTUP_CC_SHELL", &shell).output().unwrap();
+    let out = build.wrap_under(&shell, "FOO=1 gcc", &["-c", "a.c"]).output().unwrap();
     assert_ran(&out, &format!("recipe shell got: -c FOO=1 gcc \"$@\" {} -c a.c\n", shell.display()), "", 0);
     assert!(build.events().is_empty());
 }
@@ -164,19 +165,40 @@ fn a_compiler_already_behind_another_wrapper_is_left_to_it() {
     assert!(build.events().is_empty());
 }
 
+/// What the recipe's shell can start and this process cannot, the shell
+/// starts: the build must not fail where it works without cactup.
 #[test]
-fn a_script_without_an_interpreter_line_still_runs() {
+fn a_compiler_only_a_shell_can_start_is_handed_to_the_shell() {
     for mode in ["off", "record"] {
         let build = Build::new(mode);
         let bin = build.root.join("bin");
         fs::create_dir_all(&bin).unwrap();
+        // An executable script without an interpreter line: the kernel will
+        // not run it, a shell will. Named by path, and found through PATH.
         executable(&bin.join("sitecc"), "echo \"site compiler: $*\"\n");
-        // Named by path, and found through PATH.
         let by_path = bin.join("sitecc").display().to_string();
-        assert_ran(&build.wrap(&by_path, &["-c", "a.c"]).output().unwrap(), "site compiler: -c a.c\n", "", 0);
+        let out = build.wrap(&by_path, &["-c", "a.c"]).output().unwrap();
+        assert_ran(&out, "site compiler: -c a.c\n", "", 0);
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-        let out = build.wrap("sitecc -O2", &["-c", "a.c"]).env("PATH", path).output().unwrap();
-        assert_ran(&out, "site compiler: -O2 -c a.c\n", "", 0);
+        let out = build.wrap("sitecc -O2", &["-c", "a b.c"]).env("PATH", &path).output().unwrap();
+        assert_ran(&out, "site compiler: -O2 -c a b.c\n", "", 0);
+
+        // A shell builtin in front of the compiler (`command`, `exec`, and
+        // under bash the keyword `time`).
+        let out = build.wrap("command printf", &["%s|", "-c", "a b.c"]).output().unwrap();
+        assert_ran(&out, "-c|a b.c|", "", 0);
+        let out = build.wrap("exec printf", &["%s|", "-c", "a b.c"]).output().unwrap();
+        assert_ran(&out, "-c|a b.c|", "", 0);
+
+        // A shell function, exported the way bash exports them.
+        if Path::new("/bin/bash").exists() {
+            let out = build
+                .wrap_under(Path::new("/bin/bash"), "mycc -O2", &["-c", "a.c"])
+                .env("BASH_FUNC_mycc%%", "() { echo \"function compiler: $*\"; }")
+                .output()
+                .unwrap();
+            assert_ran(&out, "function compiler: -O2 -c a.c\n", "", 0);
+        }
     }
 }
 
@@ -216,8 +238,8 @@ fn a_signal_the_build_ignores_stays_ignored() {
     let mask = "grep SigIgn /proc/self/status";
     let ignoring = |compile: &str, build: &Build| {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "trap '' HUP; exec \"$@\"", "sh", CACTUP, "__cc"]).arg(build.conf()).args(["-c", compile]);
-        cmd.env("CACTUP_CC_CMD", "sh").output().unwrap()
+        cmd.args(["-c", "trap '' HUP; exec \"$@\"", "sh", CACTUP, "__cc"]).arg(build.conf());
+        cmd.args(["sh", "/bin/sh", "-c", compile]).output().unwrap()
     };
     let bare = Command::new("sh").args(["-c", &format!("trap '' HUP; exec sh -c '{mask}'")]).output().unwrap();
     for mode in ["off", "record"] {
@@ -232,17 +254,21 @@ fn a_signal_the_build_ignores_stays_ignored() {
 }
 
 #[test]
-fn a_compiler_that_cannot_start_fails_as_it_would_in_the_shell() {
+fn a_compiler_that_cannot_start_fails_as_it_does_in_the_shell() {
+    let direct = Command::new("/bin/sh").args(["-c", "/nonexistent/bin/gcc \"$@\"", "/bin/sh", "-c", "a.c"]).output().unwrap();
+    assert_eq!(direct.status.code(), Some(127));
     for mode in ["off", "record"] {
+        // The message and the status are the shell's own, as without cactup.
         let build = Build::new(mode);
         let out = build.wrap("/nonexistent/bin/gcc", &["-c", "a.c"]).output().unwrap();
-        assert_eq!(out.status.code(), Some(127), "{mode}");
-        assert!(text(&out.stderr).starts_with("cactup: /nonexistent/bin/gcc: "), "{mode}: {}", text(&out.stderr));
+        assert_ran(&out, "", &text(&direct.stderr), 127);
+        assert!(build.events().is_empty(), "{mode}");
     }
     // No compiler at all is not something a recipe can ask for.
     let build = Build::new("record");
-    let out = Command::new(CACTUP).arg("__cc").arg(build.conf()).env_remove("CACTUP_CC_CMD").output().unwrap();
+    let out = Command::new(CACTUP).arg("__cc").arg(build.conf()).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stderr).starts_with("cactup: "), "{}", text(&out.stderr));
 }
 
 /// Meaningful in a debug build only: the release binary has no test panics.
@@ -267,6 +293,15 @@ fn the_selftest_compiler_answers_whether_a_compile_could_be_wrapped() {
     let out = build.wrap("cactup:selftest", &["-c", "a.c"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).starts_with("cactup: Failed to read "), "{}", text(&out.stderr));
+}
+
+#[test]
+fn an_empty_compiler_runs_what_the_recipe_would_have_run() {
+    // `$(CC)` expanding to nothing leaves the recipe running its first
+    // argument as the command. So does the wrapper.
+    let build = Build::new("record");
+    assert_ran(&build.wrap("", &["echo", "ran"]).output().unwrap(), "ran\n", "", 0);
+    assert!(build.events().is_empty());
 }
 
 #[test]
@@ -421,10 +456,16 @@ impl<'a> Tree<'a> {
         cmd.arg(format!("SRCDIR={}", self.src.display()));
         cmd.arg(format!("LOG={}", self.log.display()));
         cmd.arg(format!("FOREIGN={}", self.build.root.join("foreign").display()));
-        cmd.env_remove("CC").env_remove("CXX").env_remove("MAKEFILES").env_remove("MAKEFLAGS");
+        cmd.env_remove("CC").env_remove("CXX").env_remove("MAKEFLAGS");
+        // The user has a MAKEFILES of their own, with or without the cache.
+        let user = self.build.root.join("user.mk");
+        fs::write(&user, "").unwrap();
+        let mut makefiles = user.into_os_string();
         if fragment {
-            cmd.env("MAKEFILES", self.inject());
+            makefiles.push(" ");
+            makefiles.push(self.inject());
         }
+        cmd.env("MAKEFILES", makefiles);
         let out = cmd.output().unwrap();
         assert!(out.status.success(), "{}{}", text(&out.stdout), text(&out.stderr));
         let log = fs::read_to_string(&self.log).unwrap();
@@ -444,7 +485,7 @@ fn under_make_only_cactus_object_compiles_go_through_the_wrapper() {
     for make in makes() {
         let version = text(&Command::new(&make).arg("--version").output().unwrap().stdout);
         let version = version.lines().next().unwrap_or_default().to_owned();
-        let build = Build::under("et_2026-05+x@y=z~", "record");
+        let build = Build::under("et_2026-05+x@y~", "record");
         let tree = Tree::new(&build);
         assert_ran(&tree.probe(), "", "", 0);
         assert!(tree.selftest(&make), "the self-test fails under {version}");
@@ -457,16 +498,17 @@ fn under_make_only_cactus_object_compiles_go_through_the_wrapper() {
                 "cc -E -M a.c",
                 "cc -c -o a.c.o a.c",
                 "cxx -std=c++17 -c -o b.cc.o b.cc",
-                "external CC=cc MAKEFILES=[]",
-                "foreign makefile=Makefile MAKEFILES=[]",
+                "external CC=cc MAKEFILES=[user.mk]",
+                "foreign makefile=user.mk MAKEFILES=[user.mk]",
                 "foreign-cc -c lib.c -o lib.c.o",
             ],
             "{version}"
         );
         assert!(build.events().is_empty());
 
-        // With it, every compiler ran exactly as before, the prerequisite's
-        // script and the third-party make saw nothing of it …
+        // With it, every compiler ran exactly as before, and the
+        // prerequisite's script and the third-party make saw nothing of it:
+        // not in their environment, not in MAKEFILE_LIST …
         assert_eq!(tree.make(&make, "wrapped", true), plain, "{version}");
         // … and the two object compiles, and only they, went through cactup.
         let events = build.events();
@@ -510,7 +552,7 @@ fn the_probe_declines_with_one_line_and_its_own_status() {
     assert!(!build.cc.join("inject.mk").exists());
 
     // A path make would take apart.
-    for parent in ["my (old) trees", "et,2026"] {
+    for parent in ["my (old) trees", "et,2026", "gcc=13"] {
         let build = Build::under(parent, "record");
         let tree = Tree::new(&build);
         declined(&tree.probe(), "does not pass through make");

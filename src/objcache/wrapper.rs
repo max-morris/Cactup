@@ -1,5 +1,5 @@
-//! cactup as a compiler wrapper (§18.4): `CACTUP_CC_CMD='<compiler>' cactup
-//! __cc <conf> <args…>`, the form the injected recipes run (`probe::inject_mk`).
+//! cactup as a compiler wrapper (§18.4): `cactup __cc <conf> <compiler>
+//! <shell> <args…>`, the form the injected recipes run (`probe::inject_mk`).
 //!
 //! This is the one part of cactup that runs thousands of times per build
 //! with a `make` recipe waiting on it, so it stays out of everything `main`
@@ -12,29 +12,29 @@
 //! profile aborts on one, so [`install_panic_hook`] gets there first).
 //! Once the compiler has run, its exit status is this process's exit status
 //! and nothing after it can change that.
+//!
+//! **The recipe's shell is the reference.** Without cactup, the shell that
+//! runs the recipe decides what the compiler text means and how to start
+//! it. So whatever this process cannot start itself — a text that is more
+//! than plain words, a shell keyword or function, a script without an
+//! interpreter line — it hands to that same kind of shell
+//! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
 use super::probe::SELFTEST_COMPILER;
 use super::{events_path, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
+use crate::Res;
+use anyhow::Context;
 use serde::Serialize;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
-
-/// Carries what the recipe's compiler variable (`$(CC)`, `$(CXX)`, …)
-/// expanded to, as one quoted value: the shell must not take it apart
-/// before the wrapper has seen whether it is a plain command.
-pub const CMD_ENV: &str = "CACTUP_CC_CMD";
-
-/// Carries make's `$(SHELL)`, the shell the recipe itself runs under.
-pub const SHELL_ENV: &str = "CACTUP_CC_SHELL";
 
 /// Set to anything to have the wrapper say on stderr why it only passed a
 /// compile through. Off by default: the wrapper's stderr is the compiler's.
@@ -51,7 +51,7 @@ const OTHER_WRAPPERS: &[&str] =
 pub fn run_if_invoked() {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
-        Some(verb) if verb == WRAP_VERB => wrap(args.next(), args.collect()),
+        Some(verb) if verb == WRAP_VERB => wrap(args),
         Some(verb) if verb == PROBE_VERB => std::process::exit(super::probe::run(args.next())),
         _ => {}
     }
@@ -73,9 +73,9 @@ struct Job {
 impl Job {
     /// The command line as words, if the compiler is a plain command: words
     /// the shell would have passed on exactly as they are, the first of
-    /// them a program. Anything else (`LANG=C gcc`, `gcc -DX="a b"`, a
-    /// pipeline) means what it means only to a shell, so it goes back to
-    /// one (see [`pass_through`]) and the cache stays out of it.
+    /// them the command's name. Anything else (`LANG=C gcc`, `gcc -DX="a
+    /// b"`, a pipeline) means what it means only to a shell, so it goes
+    /// back to one (see [`pass_through`]) and the cache stays out of it.
     fn argv(&self) -> Option<Vec<OsString>> {
         let plain = |b: &u8| b.is_ascii_alphanumeric() || b"_-+./:,@%=~ \t".contains(b);
         let text = self.compiler.as_bytes();
@@ -118,31 +118,30 @@ static CHILD: AtomicI32 = AtomicI32::new(0);
 /// A stop signal that arrived before there was a compiler to pass it to.
 static PENDING: AtomicI32 = AtomicI32::new(0);
 
-/// Be the wrapper for one compile.
-fn wrap(conf: Option<OsString>, args: Vec<OsString>) -> ! {
+/// Be the wrapper for one compile: `<conf> <compiler> <shell> <args…>`.
+fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
     install_panic_hook();
-    let Some(compiler) = std::env::var_os(CMD_ENV).filter(|c| !c.is_empty()) else {
+    let (Some(conf_file), Some(compiler), Some(shell)) = (args.next(), args.next(), args.next()) else {
         eprintln!("cactup: the compiler wrapper was run without a compiler to wrap");
         std::process::exit(2);
     };
-    let shell = std::env::var_os(SHELL_ENV).filter(|s| !s.is_empty()).map_or_else(|| "/bin/sh".into(), PathBuf::from);
-    let job = JOB.get_or_init(|| Job { compiler, args, shell });
+    let shell = if shell.is_empty() { PathBuf::from("/bin/sh") } else { PathBuf::from(shell) };
+    let job = JOB.get_or_init(|| Job { compiler, args: args.collect(), shell });
     #[cfg(debug_assertions)]
     test_panic("before");
 
-    let conf_file = conf.map(PathBuf::from);
-    let conf = conf_file.as_deref().map(BuildConf::load);
+    let conf_file = Path::new(&conf_file);
+    let conf = BuildConf::load(conf_file);
     // The build script's self-test (`probe::selftest_wrapped_mk`): no
     // compiler to run, only the question whether one could be wrapped here.
     if job.compiler == SELFTEST_COMPILER {
-        match conf {
-            Some(Ok(_)) => std::process::exit(0),
-            Some(Err(e)) => eprintln!("cactup: {e:#}"),
-            None => eprintln!("cactup: no configuration was named"),
+        let ready = conf.and_then(|_| ignored_signals());
+        if let Err(e) = &ready {
+            eprintln!("cactup: {e:#}");
         }
-        std::process::exit(1);
+        std::process::exit(if ready.is_ok() { 0 } else { 1 });
     }
-    let (Some(conf_file), Some(Ok(conf))) = (conf_file, conf) else {
+    let Ok(conf) = conf else {
         debug("its configuration cannot be read");
         pass_through(job)
     };
@@ -178,80 +177,47 @@ fn wrap(conf: Option<OsString>, args: Vec<OsString>) -> ! {
     }
 }
 
-/// `argv` as a command, in the environment the recipe had before the
-/// fragment's two variables were added to it.
-fn command(program: &OsStr, args: &[OsString]) -> Command {
-    let mut command = Command::new(program);
-    command.args(args).env_remove(CMD_ENV).env_remove(SHELL_ENV);
-    command
-}
-
 /// Become the compiler: the same process, so the same stdin, signal
 /// dispositions and make jobserver file descriptors, with nothing of cactup
 /// left in between.
 fn pass_through(job: &Job) -> ! {
-    let Some(argv) = job.argv() else {
-        // What `make` would have handed the shell: the compiler variable's
-        // value as shell text (so its quotes and expansions mean what they
-        // meant in the recipe), then the arguments, which `"$@"` passes on
-        // untouched.
-        let mut script = job.compiler.clone();
-        script.push(" \"$@\"");
-        let err = command(job.shell.as_os_str(), &[]).arg("-c").arg(script).arg(&job.shell).args(&job.args).exec();
-        could_not_start(job.shell.as_os_str(), &err)
-    };
-    let err = command(&argv[0], &argv[1..]).exec();
-    if let Some(script) = script_without_interpreter(&argv[0], &err) {
-        let err = command(job.shell.as_os_str(), &argv[1..]).arg(&script).exec();
-        could_not_start(script.as_os_str(), &err);
+    if let Some(argv) = job.argv() {
+        // Returns only if the program could not be started this way; the
+        // recipe's shell may still know how.
+        let _ = Command::new(&argv[0]).args(&argv[1..]).exec();
     }
-    could_not_start(&argv[0], &err)
+    hand_to_shell(job)
 }
 
-/// The compiler as a child process, for when the wrapper has work to do
-/// after it.
-fn spawn(job: &Job, argv: &[OsString]) -> std::io::Result<Child> {
-    match command(&argv[0], &argv[1..]).spawn() {
-        Err(err) => match script_without_interpreter(&argv[0], &err) {
-            Some(script) => {
-                let mut shell = command(job.shell.as_os_str(), &[]);
-                shell.arg(script).args(&argv[1..]).spawn()
-            }
-            None => Err(err),
-        },
-        spawned => spawned,
-    }
+/// What `make` would have handed the shell: the compiler variable's value
+/// as shell text (so its quotes, its keywords and its `PATH` lookup mean
+/// what they meant in the recipe), then the arguments, which `"$@"` passes
+/// on untouched. It is a new shell of the recipe's kind, not the recipe's
+/// own: the recipe's shell variables are not there for the text to use.
+fn shell_command(job: &Job) -> Command {
+    let mut script = job.compiler.clone();
+    script.push(" \"$@\"");
+    let mut command = Command::new(&job.shell);
+    command.arg("-c").arg(script).arg(&job.shell).args(&job.args);
+    command
 }
 
-/// An executable text file with no `#!` line is a script to the shell that
-/// runs a recipe (and to glibc's `execvp`), which answers the kernel's
-/// `ENOEXEC` by interpreting the file itself. The kernel gives this process
-/// the same error and no such help, so it must ask a shell. Returns the
-/// file `program` names, if `err` is that case.
-fn script_without_interpreter(program: &OsStr, err: &std::io::Error) -> Option<PathBuf> {
-    if err.raw_os_error() != Some(rustix::io::Errno::NOEXEC.raw_os_error()) {
-        return None;
-    }
-    if program.as_bytes().contains(&b'/') {
-        return Some(PathBuf::from(program));
-    }
-    let executable = |path: &PathBuf| path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(program)).find(executable)
-}
-
-/// The compiler never ran: say so the way the shell would have, and leave
-/// with the status the shell would have left with.
-fn could_not_start(program: &OsStr, err: &std::io::Error) -> ! {
-    eprintln!("cactup: {}: {err}", program.to_string_lossy());
+/// Let a shell of the recipe's kind run the compile, as this process. If
+/// the compiler cannot be run at all, the message and the exit status are
+/// the shell's, as they are without cactup.
+fn hand_to_shell(job: &Job) -> ! {
+    let err = shell_command(job).exec();
+    eprintln!("cactup: {}: {err}", job.shell.display());
     std::process::exit(if err.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 });
 }
 
-/// The stop signals this process was started ignoring, from the `SigIgn`
-/// mask in `/proc/self/status`.
-fn ignored_signals() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let mask = status.lines().find_map(|line| line.strip_prefix("SigIgn:"))?;
-    u64::from_str_radix(mask.trim(), 16).ok()
+/// The signals this process was started ignoring: the `SigIgn` mask in
+/// `/proc/self/status`.
+fn ignored_signals() -> Res<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").context("Failed to read /proc/self/status")?;
+    let mask = status.lines().find_map(|line| line.strip_prefix("SigIgn:"));
+    let mask = mask.context("/proc/self/status has no SigIgn line")?;
+    u64::from_str_radix(mask.trim(), 16).context("/proc/self/status has a SigIgn line that is not a hex mask")
 }
 
 /// Runs in signal context: atomics and one `kill(2)`, nothing else.
@@ -275,8 +241,13 @@ fn pass_on(signal: i32) {
 /// reaches the compiler ignored, as it would have without the wrapper: a
 /// build under `nohup` must survive the hangup. (A handler would not do: a
 /// caught signal is back at its default action in the child.)
+///
+/// A terminal sends its signals to the whole foreground process group, so
+/// the compiler gets a Ctrl-C twice: once from the terminal, once passed
+/// on. It dies of the first.
 fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
-    let Some(ignored) = ignored_signals() else {
+    // The build script's self-test has checked that this can be read here.
+    let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
         pass_through(job)
     };
@@ -296,9 +267,12 @@ fn run(job: &Job, argv: &[OsString]) -> ExitStatus {
         }
     }
 
-    let mut child = match spawn(job, argv) {
-        Ok(child) => child,
-        Err(e) => could_not_start(&argv[0], &e),
+    // Not startable this way: the recipe's shell may still know how (a
+    // keyword such as `time`, a function, a script without an interpreter
+    // line). The handlers above do not survive becoming that shell.
+    let Ok(mut child) = Command::new(&argv[0]).args(&argv[1..]).spawn() else {
+        debug("the compiler cannot be started directly");
+        hand_to_shell(job)
     };
     CHILD.store(child.id() as i32, Ordering::SeqCst);
     PHASE.store(COMPILING, Ordering::SeqCst);
@@ -417,7 +391,7 @@ mod tests {
         Job {
             compiler: OsString::from(compiler),
             args: args.iter().map(OsString::from).collect(),
-            shell: PathBuf::from("/bin/sh"),
+            shell: PathBuf::from("/bin/bash"),
         }
     }
 
@@ -467,5 +441,14 @@ mod tests {
         ] {
             assert_eq!(argv(compiler, &["-c"]), None, "{compiler:?}");
         }
+    }
+
+    #[test]
+    fn the_shell_gets_the_compiler_as_text_and_the_arguments_as_arguments() {
+        let command = shell_command(&job("time gcc -DX=\"a b\"", &["-c", "my file.c"]));
+        assert_eq!(command.get_program(), "/bin/bash");
+        let args: Vec<&OsStr> = command.get_args().collect();
+        // `-c <script> <name for $0> <arguments for "$@">`
+        assert_eq!(args, ["-c", "time gcc -DX=\"a b\" \"$@\"", "/bin/bash", "-c", "my file.c"]);
     }
 }

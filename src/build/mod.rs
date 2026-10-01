@@ -1480,17 +1480,18 @@ pub fn prepare(
     prepare_with_cache(installation, machine, name, opts, submit, None)
 }
 
-/// [`prepare`], with the build cache's mode given instead of read from the
-/// `build-cache` knob (`None`: the knob). The knob lives in the global DB
-/// and its `-K` overlay is process-wide, so a test cannot set either for
-/// itself.
+/// [`prepare`], with the build cache's mode and the cactup that wraps the
+/// compiles given, instead of the `build-cache` knob and this binary
+/// (`None`: those). A test cannot set the knob for itself — it lives in the
+/// global DB and its `-K` overlay is process-wide — and the binary a unit
+/// test runs as is the test harness, not cactup.
 fn prepare_with_cache(
     installation: &Installation,
     machine: &Machine,
     name: &str,
     opts: &BuildOpts,
     submit: Option<&SubmitReservation>,
-    cache_mode: Option<crate::objcache::Mode>,
+    cache: Option<(crate::objcache::Mode, &str)>,
 ) -> Res<Prepared> {
     let cactus_root = installation.cactus_root();
     if !cactus_root.is_dir() {
@@ -1782,8 +1783,10 @@ fn prepare_with_cache(
     vars.set("ALLOCATION", allocation);
     // The build cache's knob is a maintenance knob, so it is in no snapshot:
     // resolved here, and frozen into the attempt below (D11).
-    let cache_mode =
-        cache_mode.unwrap_or_else(|| db.as_ref().map(crate::objcache::Mode::from_db).unwrap_or_default());
+    let cache_mode = match cache {
+        Some((mode, _)) => mode,
+        None => db.as_ref().map(crate::objcache::Mode::from_db).unwrap_or_default(),
+    };
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
     // optionlist, make command and a build submit script — frozen into
     // `build.toml` with the vars, so `execute` never opens the DB (§5, D11).
@@ -1903,8 +1906,8 @@ fn prepare_with_cache(
         // to the script, and two steps of the script changed. `None` leaves
         // the script exactly what it is without the cache — also when the
         // settings cannot be written: the cache never costs a build.
-        let staged =
-            crate::objcache::stage(&attempt.cc_dir(), cache_mode, &crate::freeze::frozen_cactup(), &config_dir);
+        let wrapper = cache.map_or_else(crate::freeze::frozen_cactup, |(_, cactup)| cactup.to_owned());
+        let staged = crate::objcache::stage(&attempt.cc_dir(), cache_mode, &wrapper, &config_dir);
         let cache = staged.unwrap_or_else(|e| {
             println!("{} build cache off for this build: {e:#}", "warning:".yellow().bold());
             None
@@ -1919,13 +1922,14 @@ fn prepare_with_cache(
             sh_quote(&attempt.optionlist_path()),
             sh_quote(&attempt.thornlist_path()),
         ));
-        // After the configure step, which writes the compiler settings the
-        // probe reads, and before anything compiles.
-        if let Some(cache) = &cache {
-            steps.push(cache.probe_step(make));
-        }
         if opts.clean {
             steps.push(format!("{make} {name}-clean"));
+        }
+        // After the configure step, which writes the rules the probe reads,
+        // and after a clean, which removes the directory it looks at; before
+        // anything compiles.
+        if let Some(cache) = &cache {
+            steps.push(cache.probe_step(make));
         }
         steps.push(match &cache {
             Some(cache) => cache.build_step(make, name),
@@ -3575,7 +3579,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let (_mdb, machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
-        let attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, Some(mode)).unwrap() {
+        let cache = Some((mode, "/opt/cactup/bin/cactup-abc1234"));
+        let attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, cache).unwrap() {
             Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
         };
@@ -3602,29 +3607,42 @@ mod tests {
         assert!(wrote);
         assert_eq!(record[0], config);
         assert_eq!(record[1], "CACTUP_CC_MAKEFILES=");
-        assert!(record[2].contains(" __cc-probe '/inst/Cactus/configs/sim/.cactup-builds/0000/cc/config.toml'; then"));
+        assert_eq!(
+            record[2],
+            "if '/opt/cactup/bin/cactup-abc1234' __cc-probe '/inst/Cactus/configs/sim/.cactup-builds/0000/cc/config.toml'; then"
+        );
         let build = record.iter().position(|l| l == "if [ -n \"$CACTUP_CC_MAKEFILES\" ]; then").unwrap();
         assert!(record[build + 1].ends_with("export MAKEFILES; /fakemake -j1 sim )"), "{}", record[build + 1]);
-        assert_eq!(&record[build + 2..], ["else", "  /fakemake -j1 sim", "fi", "/fakemake -j1 sim-utils"]);
+        let plain = record.iter().rposition(|l| l == "else").unwrap();
+        assert_eq!(&record[plain..], ["else", "  /fakemake -j1 sim", "fi", "/fakemake -j1 sim-utils"]);
     }
 
     /// The staged script, cache steps included, runs to a finished build
-    /// under `execute`: the probe step can only ever turn the cache off.
-    /// (Here "cactup" is this test binary and `make` a stand-in, so nothing
-    /// is wrapped; the wrapper itself is driven in `tests/objcache.rs`.)
+    /// under `execute` when the probe declines: it can only ever turn the
+    /// cache off, and says so once. (The stand-in for cactup here declines
+    /// like the real probe; the real probe and wrapper are driven in
+    /// `tests/objcache.rs`.)
     #[test]
-    fn a_build_with_the_cache_on_still_builds() {
+    fn a_build_whose_probe_declines_still_builds() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let (_mdb, machine, inst, opts, _repos) = source_tracking_tree(root);
-        let mode = Some(crate::objcache::Mode::Record);
-        let mut attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, mode).unwrap() {
+        let cactup = root.join("cactup-abc1234");
+        fs::write(&cactup, "#!/bin/sh\necho 'cactup: build cache off for this build: a reason' >&2\nexit 3\n").unwrap();
+        fs::set_permissions(&cactup, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cache = Some((crate::objcache::Mode::Record, cactup.to_str().unwrap()));
+        let mut attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, cache).unwrap() {
             Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
         };
         assert!(crate::objcache::conf_path(&attempt.cc_dir()).is_file());
         let meta = execute(&mut attempt, true, None).unwrap();
         assert!(meta.built.is_some());
+        let err = fs::read_to_string(attempt.err_path()).unwrap();
+        let ours: Vec<&str> = err.lines().filter(|l| l.starts_with("cactup:")).collect();
+        assert_eq!(ours, ["cactup: build cache off for this build: a reason"], "{err}");
     }
 
     /// Stage a fake Cactus tree whose machine `make` is `make_body` (a `case

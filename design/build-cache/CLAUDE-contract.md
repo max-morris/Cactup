@@ -24,8 +24,11 @@ are spec §18.1; hold them when touching it:
   compiled. Every error path before the compiler has run — unreadable
   configuration, unknown flag, I/O error, a panic (the release profile
   aborts on one, so the wrapper installs a hook) — ends in `pass_through`,
-  which `exec`s the real compiler exactly as `make` asked. After it has
-  run, its exit status is the wrapper's, whatever else goes wrong.
+  which becomes the compile exactly as `make` asked. The recipe's shell is
+  the reference: what the wrapper cannot start itself (a shell keyword, a
+  function, a script without `#!`, any shell syntax) it hands to a shell of
+  that kind, never fails. After the compiler has run, its exit status is
+  the wrapper's, whatever else goes wrong.
 - **Nothing outside Cactus's object compiles.** Injection is the fragment
   the probe writes: it redefines Cactus's compile recipes, only inside
   Cactus's object sub-makes, and is read through `MAKEFILES`. Never set a
@@ -36,7 +39,8 @@ are spec §18.1; hold them when touching it:
   cactup.
 - **Quiet.** The wrapper's stdout and stderr are the compiler's. Nothing of
   cactup's goes there on a compile that runs (`CACTUP_CC_DEBUG` is the
-  opt-in exception). A whole build going uncached gets one line.
+  opt-in exception). A build says in one line that the cache stayed out,
+  or how many compiles went through it.
 - **Signals and exit statuses pass through.** Forward stop signals to the
   compiler, leave ignored ones ignored (`nohup`), and end the way the
   compiler ended. `rustix` is there for `kill(2)`/`waitpid(2)` only.

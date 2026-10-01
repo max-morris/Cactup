@@ -36,9 +36,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The verb the injected makefile fragment runs the wrapper by:
-/// `cactup __cc <config.toml> <args…>`, with the compiler command in the
-/// environment (`wrapper::CMD_ENV`). Dispatched before clap ever sees the
-/// command line, so it is in no help output.
+/// `cactup __cc <config.toml> <compiler> <shell> <args…>`. Dispatched before
+/// clap ever sees the command line, so it is in no help output.
 pub const WRAP_VERB: &str = "__cc";
 
 /// The verb the build script runs the probe by: `cactup __cc-probe
@@ -205,10 +204,23 @@ impl Staged {
     /// fragment when the probe step allowed it. The fragment goes on in a
     /// subshell, so it applies to this one `make` and to nothing after it,
     /// whatever shell syntax the machine's `make` command is.
+    ///
+    /// A build that went through the cache ends with one line saying how
+    /// many compiles did: the fragment acts only where it recognizes
+    /// Cactus's object sub-makes, and if it recognized none, a build that
+    /// compiled a lot and recorded nothing must not look like one that
+    /// worked.
     pub fn build_step(&self, make: &str, target: &str) -> String {
+        let events = sh_quote(&events_path(&self.cc_dir));
         format!(
             "if [ -n \"$CACTUP_CC_MAKEFILES\" ]; then\n\
              \x20 ( MAKEFILES=\"${{MAKEFILES:+$MAKEFILES }}$CACTUP_CC_MAKEFILES\"; export MAKEFILES; {make} {target} )\n\
+             \x20 cactup_cc_count=$(( $(cat {events} 2>/dev/null | wc -l) ))\n\
+             \x20 if [ $cactup_cc_count -gt 0 ]; then\n\
+             \x20   echo \"cactup: build cache: compiles recorded: $cactup_cc_count\"\n\
+             \x20 else\n\
+             \x20   echo 'cactup: build cache: no compile recorded (nothing needed compiling, or the cache did not apply to this build)'\n\
+             \x20 fi\n\
              else\n\
              \x20 {make} {target}\n\
              fi"
@@ -279,6 +291,7 @@ mod tests {
 
         let build = staged.build_step("make -j8", "sim");
         assert!(build.contains("export MAKEFILES; make -j8 sim )"), "{build}");
+        assert!(build.contains("$(cat '/work/cfg/.cactup-builds/0003/cc/events.jsonl' 2>/dev/null | wc -l)"), "{build}");
         assert!(build.trim_end().ends_with("fi"), "{build}");
     }
 
@@ -327,15 +340,25 @@ mod tests {
 
     /// A build "make" that prints the `MAKEFILES` it was given.
     const SHOW: &str = r#"sh -c 'echo "make $1 with [$MAKEFILES]"' --"#;
+    /// What the script says after a build in which no compile was recorded
+    /// (the stand-in make compiles nothing).
+    const NONE_RECORDED: &str = "cactup: build cache: no compile recorded \
+                                 (nothing needed compiling, or the cache did not apply to this build)\n";
 
     #[test]
     fn the_build_reads_the_fragment_only_when_probe_and_selftest_both_pass() {
         let ran = run_steps(Some("exit 0"), "true", SHOW, None);
-        assert_eq!((ran.stdout.as_str(), ran.stderr.as_str()), ("make sim with [<inject.mk>]\nafter the build\n", ""));
+        assert_eq!(ran.stdout, format!("make sim with [<inject.mk>]\n{NONE_RECORDED}after the build\n"));
+        assert_eq!(ran.stderr, "");
 
         // A MAKEFILES the user already had stays in front.
         let ran = run_steps(Some("exit 0"), "true", SHOW, Some("/home/me/extra.mk"));
-        assert_eq!(ran.stdout, "make sim with [/home/me/extra.mk <inject.mk>]\nafter the build\n");
+        assert_eq!(ran.stdout, format!("make sim with [/home/me/extra.mk <inject.mk>]\n{NONE_RECORDED}after the build\n"));
+
+        // A build whose compiles were logged says how many.
+        let log_two = r#"sh -c 'printf "{}\n{}\n" >> "$(dirname "$MAKEFILES")/events.jsonl"' --"#;
+        let ran = run_steps(Some("exit 0"), "true", log_two, None);
+        assert_eq!(ran.stdout, "cactup: build cache: compiles recorded: 2\nafter the build\n");
     }
 
     #[test]

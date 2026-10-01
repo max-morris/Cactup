@@ -64,7 +64,7 @@ redefines Cactus's compile recipes inside Cactus's object sub-makes:
 ```make
 override define COMPILE_C
 <the body copied from this configuration's make.config.rules, with $(CC)
- replaced by: CACTUP_CC_CMD='$(CC)' CACTUP_CC_SHELL='$(SHELL)' <cactup> __cc <conf>>
+ replaced by: '<cactup>' __cc '<conf>' '$(CC)' '$(SHELL)'>
 endef
 ```
 
@@ -78,29 +78,37 @@ the planned keying and serving will rely on.
 
 - **A1 (M0a). The compile recipes are canned sequences** named `COMPILE_C`,
   `COMPILE_CXX`, `COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90`,
-  each defined exactly once in `configs/<name>/config-data/make.config.rules`
-  as `define NAME` ... `endef` (both at the start of a line, no nested
-  `define`), and each containing exactly one reference to its compiler
-  variable, spelled `$(CC)`, `$(CXX)`, `$(CUCC)`, `$(F77)`, `$(F90)`,
-  `$(F90)` respectively, as the command the compile runs. The probe copies
-  the body and replaces that one reference. A recipe that does not fit is
-  left unwrapped (that language is then not cached).
+  each defined in `configs/<name>/config-data/make.config.rules` exactly
+  once, unconditionally (not inside `ifeq`/`ifdef`), as `define NAME` ...
+  `endef` with nothing else assigning to it, and no nested `define`. Each
+  body contains exactly one reference to its compiler variable, spelled
+  `$(CC)`, `$(CXX)`, `$(CUCC)`, `$(F77)`, `$(F90)`, `$(F90)` respectively,
+  **in command position** (at the start of a recipe line or right after
+  `;`, `&&` or `||`) and as a word of its own. The probe copies the body
+  and replaces that one reference. A recipe that does not fit is left
+  unwrapped (that language is then not cached): so `cd x ; $(CC) ...`
+  works, `cd x ; $(LAUNCHER) $(CC) ...` builds fine but uncached.
 - **A2 (M0a). Object compiles run in a sub-make that** (a) is given
   `CCTK_TARGET=...` on its command line (`make.thornlib` does this for
   `make.subdir`), (b) runs with its working directory under
-  `configs/<name>/build/`, and (c) is given `SRCDIR=<the thorn's source
-  directory>`. The fragment acts only when (a) and (b) hold, and reads
-  `$(SRCDIR)/make.code.defn` and `$(SRCDIR)/make.code.deps` to stand down
-  for a thorn that mentions `COMPILE_` in them.
+  `configs/<name>/build/`, (c) is given `SRCDIR=<the thorn's source
+  directory>`, and (d) is started by a make that itself read `MAKEFILES`
+  (so the variable is still in its environment). The fragment acts only
+  when (a) and (b) hold, and reads `$(SRCDIR)/make.code.defn` and
+  `$(SRCDIR)/make.code.deps` to stand down for a thorn that mentions
+  `COMPILE_` in them.
 - **A3 (M0a). The object rules' recipes use those canned sequences**
-  (`$(COMPILE_C)` and so on) and `make.config.rules` is included after the
-  fragment is read. The fragment's `override define` must win over the
-  plain `define` there.
+  (`$(COMPILE_C)` and so on), `make.config.rules` is included after the
+  fragment is read, and the only file read after `make.config.rules` that
+  may redefine a `COMPILE_*` sequence is the thorn's own `make.code.deps`
+  (directly: a redefinition in a file it includes, or under a computed
+  name, is not noticed and loses to the fragment's `override`).
 - **A4 (M0a). `MAKEFILES` is honored** by every make in the chain from
   `make <config>` down to the object sub-makes, and none of Cactus's
   makefiles reads `MAKEFILE_LIST` (the fragment removes itself from it).
-- **A5 (M0a). GNU make.** Checked on 4.2.1, 4.3 and 4.4.1; a self-test in
-  the build script decides for anything else.
+- **A5 (M0a). GNU make.** Checked on 4.2.1, 4.3 and 4.4.1 (real Cactus
+  trees on 4.3 and 4.4.1); a self-test in the build script decides for
+  anything else. `/proc/self/status` must be readable where compiles run.
 - **A6 (later). Compile recipe shape.** One source file per compiler
   invocation, with `-c` and `-o <absolute object path>`, run from cwd
   `$(TOP)/scratch`, on the processed copy in `$(TOP)/build/<Thorn>/...`.
@@ -142,25 +150,35 @@ script is byte for byte what it is without the cache.
 With `build-cache = record` (M0a, on `feature/build-cache` only):
 
 - **C1.** One probe run and two tiny self-test `make` runs per build, after
-  `make <config>-config`. The probe creates `configs/<name>/build/` if a
-  `realclean` removed it.
+  `make <config>-config` (and after `-clean`). The probe creates
+  `configs/<name>/build/` if a `realclean` removed it.
 - **C2.** `make <config>` runs in a subshell with `MAKEFILES` naming
-  `<attempt>/cc/inject.mk`. Every make below it reads that file; it defines
-  something only in Cactus's object sub-makes (the `COMPILE_*` overrides
-  and one helper variable, `cactup_cc_run`), where it also does
-  `unexport MAKEFILES`. Each of those sub-makes also runs one `cat` of the
+  `<attempt>/cc/inject.mk` (after any entries the user already had). Every
+  make below it reads that file. In every one of them it defines an empty
+  rule for itself and reassigns `MAKEFILE_LIST` to drop its own name. In
+  Cactus's object sub-makes it also defines the `COMPILE_*` overrides and
+  one helper variable (`cactup_cc_run`), removes itself from the
+  `MAKEFILES` handed on to child processes, and runs one `cat` of the
   thorn's two make fragments while parsing.
 - **C3.** Each object compile runs as a child of a short-lived cactup
   process (on the order of a millisecond on top of the compiler; to be
   measured properly in M0c) which appends one line to
   `<attempt>/cc/events.jsonl`. Compilers, flags and objects are unchanged.
-- **C4.** Files in the attempt directory: `cc/config.toml`, `cc/inject.mk`,
-  `cc/selftest/`, `cc/selftest.log`, `cc/events.jsonl`.
-- **C5.** Edits in the cactup repo: `src/main.rs` (wrapper dispatch at the
-  top of `main`), `src/build/mod.rs` (`prepare`: two build-script steps,
-  through one call into the new module), `src/build/attempt.rs` (one path
-  helper), `src/database.rs` and `src/args.rs` (the knob and its help), and
-  the new `src/objcache/` and `tests/objcache.rs`.
+  **The recipe text changes**: with `SILENT=no`, or `make -n`, the compile
+  line reads `'<cactup>' __cc '<conf>' 'gcc' '/bin/bash' <flags...>` where
+  it read `gcc <flags...>`. Anything that parses make's echoed commands
+  sees that.
+- **C4.** One line in the build output after the compile step:
+  `cactup: build cache: compiles recorded: N`. Files in the attempt
+  directory: `cc/config.toml`, `cc/inject.mk`, `cc/selftest/`,
+  `cc/selftest.log`, `cc/events.jsonl`.
+- **C5.** Edits in the cactup repo: `Cargo.toml` (`rustix` as a direct
+  dependency), `src/main.rs` (wrapper dispatch at the top of `main`),
+  `src/build/mod.rs` (`prepare`: two build-script steps, through one call
+  into the new module), `src/build/attempt.rs` (one path helper),
+  `src/database.rs` and `src/args.rs` (the knob and its help), the new
+  `src/objcache/` and `tests/objcache.rs`, and one step in
+  `.github/workflows/ci.yml`.
 
 Planned, not there yet: an extra preprocessor run (`-E`) per cached unit
 (one on a hit, two on a miss), which speed measurements taken with the cache
@@ -225,3 +243,8 @@ every milestone.
   redefines the `COMPILE_*` recipes instead of setting compiler variables
   per target): rewrote the A list (A1-A5 current, A6-A8 for later) and the
   C list (C1-C5 current). Noted that `build-speedup` `996c71f` was tested.
+- 2026-10-01  cache side  After review round 2: A1 now requires the
+  compiler reference in command position and an unconditional single
+  definition; A2 (d), A3's limit and A5's `/proc` added; C2-C5 completed
+  (the echoed recipe text, `MAKEFILE_LIST`, the count line, `Cargo.toml`,
+  CI). The wrapper now takes the compiler text as an argument.

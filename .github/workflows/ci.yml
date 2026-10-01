@@ -81,6 +81,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --workspace --locked
+      # The build cache's compiler wrapper replaces itself with other
+      # programs, which is exactly where the libc cactup ships with (musl)
+      # and the one the step above tests with (glibc) behave differently:
+      # glibc's exec falls back to a shell for a script without an
+      # interpreter line, musl's does not. So its tests also run against
+      # the shipped target.
+      - name: cargo test (compiler wrapper, musl)
+        run: |
+          set -eu
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools cmake
+          target="$(uname -m)-unknown-linux-musl"
+          rustup target add "$target"
+          # cc-rs would look for <triple>-gcc; musl-gcc is the native musl
+          # wrapper on both runners (as in the build job).
+          export "CC_$(printf '%s' "$target" | tr - _)=musl-gcc"
+          cargo test --locked --target "$target" --test objcache
       - name: shellcheck
         if: matrix.os == 'ubuntu-24.04'
         run: |

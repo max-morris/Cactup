@@ -35,7 +35,7 @@ These were settled during design review and are treated as fixed below.
 | D12 | OptionList-variant ↔ queue compatibility | **The optionlist variant declares its compatible queues** (and therefore which run/submit variants it can pair with). `sim submit`/`sim run` enforce it (see §4.4, §7.4). |
 | D13 | Linking & system libraries | **Fully static MUSL binary.** cactup deploys to clusters as a single copyable binary: the release artifact targets `x86_64-unknown-linux-musl` and must stay fully statically linked (`ldd`: "statically linked"). No crate that binds a system shared library (no openssl/native-tls — reqwest uses rustls; no libgit2 — git is pure-Rust gix; no pkg-config'd C deps); C code a dependency compiles in statically at cargo-build time is fine. Our own code never uses the `libc` crate directly — OS facts come from `/proc` or std (e.g. §2.3's pid probing). The one thing neither offers is sending a signal to another process and waiting on it by pid, which the build cache's compiler wrapper must do (§18.4); it uses `rustix` for exactly `kill(2)` and `waitpid(2)`. `rustix` makes Linux system calls itself, without libc, so the binary stays static. |
 | D14 | Distribution, self-update & MDB generations | **CI builds, publishes and deploys; installed binaries keep themselves current.** Every passing `master` push builds static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (reused unchanged when no build input changed), publishes `mdb/` as the `mdb` git branch, and deploys docs + binaries + `cactup-init.sh` + `latest.json` to GitHub Pages. A binary is a **dist** build iff CI stamped it (`CACTUP_DIST=1`, build id, date); any local cargo build is a **dev** build (repo `mdb/`, no sync, no self-update). Dist builds clone the MDB into `~/.cactup/mdb`, sync the newest commit of their own **MDB generation** (warning loudly when a newer generation exists), and update themselves per the `autoupdate` knob (`auto`/`notify`/`off`). Each build lives at `~/.cactup/bin/cactup-<build>` behind a `bin/cactup` symlink and substitutes that path for `@CACTUP@`, so a job runs the exact build it was submitted with. The published MDB is the one on-disk artifact with a compatibility promise, and the generation is its only mechanism (§17). |
-| D15 | Shared build cache | **A compiler wrapper inside cactup, over an instance-wide store.** Objects one installation or configuration of an instance built are reused by the others whenever, and only when, compiling afresh would produce the same bytes. No existing compiler cache fits (none handles Fortran module files, and none shares a directory between hosts over NFS without POSIX locks), so cactup is its own: it stands in front of Cactus's object compiles, injected by a makefile fragment that leaves the optionlist and `config-data` untouched. The cache may only ever cost a miss: anything it does not fully understand compiles as if it were not there. Objects are keyed by the cactup machine and by the host that compiles them, so one filesystem spanning several architectures never mixes them. Nothing is evicted automatically. Being brought up in stages (§18); so far only the interposition exists and nothing is cached. |
+| D15 | Shared build cache | **A compiler wrapper inside cactup, over an instance-wide store.** Objects one installation or configuration of an instance built are reused by the others whenever, and only when, compiling afresh would produce the same bytes. No existing compiler cache fits (none handles Fortran module files, and none shares a directory between hosts over NFS without POSIX locks), so cactup is its own: it stands in front of Cactus's object compiles, injected by a makefile fragment that leaves the optionlist and `config-data` untouched. The cache may only ever cost a miss: anything it does not fully understand compiles as if it were not there. Objects will be keyed by the cactup machine and by the host that compiles them, so that one filesystem spanning several architectures never mixes them, and nothing will be evicted automatically. Being brought up in stages (§18); so far only the interposition exists: nothing is keyed, stored or served. |
 
 Everything marked **ASSUMPTION** in this document is a smaller decision made to
 keep the spec complete; flag any you want changed.
@@ -4512,26 +4512,28 @@ them.
    gets compiled. The cache sits strictly below `make`: `make` and cactup
    (§7.8) still decide *whether* to compile and *with what*; the cache only
    answers *what the compile would produce*. Every failure inside the
-   wrapper or the probe ends in the real compiler running exactly as `make`
-   asked.
-3. **Nothing outside Cactus's object compiles.** No compiler variable, no
-   recipe environment, and no makefile other than Cactus's object sub-makes
-   may see anything of the cache: not an ExternalLibraries build, not a
-   configure run, not dependency generation, not `config-data`. That rules
-   out a `make CC=…` override and an optionlist rewrite; §18.3 is what is
-   left.
+   wrapper or the probe ends in the compile running as `make` asked.
+3. **Nothing outside Cactus's object compiles.** No compiler variable and
+   no recipe's environment may change, and no build other than Cactus's
+   object compiles may behave differently: not an ExternalLibraries build,
+   not a configure run, not dependency generation; `config-data` stays as
+   configured. That rules out a `make CC=…` override and an optionlist
+   rewrite; §18.3 is what is left. (The makes *above* the object sub-makes
+   do read the fragment, and it does nothing there: see §18.3.)
 4. **Quiet.** A wrapped compile's stdout and stderr are the compiler's own;
    the wrapper adds nothing. (With `SILENT=no` Cactus echoes its recipes,
    and the echoed compile line then shows the wrapper in front of the
-   compiler — that is make's output, and the truth.) When the cache stays
-   out of a whole build, the build output says so in one line.
+   compiler — that is make's output, and the truth.) The build output says
+   in one line that the cache stayed out of a build, or how many compiles
+   went through it.
 5. **Signals and exit statuses pass through.** The wrapper stands between
    `make` and a compiler: a stop signal must reach the compiler, an ignored
    one must stay ignored, and the wrapper must end the way the compiler
    ended.
 6. **Hermetic on the compute node (D11).** The wrapper and the probe read
    the attempt's frozen settings and the configuration directory named in
-   them. Never the global DB, the registry, the MDB, or knobs.
+   them (and `/proc/self/status`). Never the global DB, the registry, the
+   MDB, or knobs.
 7. **No eviction without being asked.** Old entries are what make reverting
    a thorn cheap. (Nothing is stored yet.)
 
@@ -4548,34 +4550,40 @@ The build script gains one step and changes one (`objcache::Staged`):
 
 ```sh
 echo yes | make … <name>-config …          # unchanged: real compilers
+make … <name>-clean                        # unchanged (only with --clean)
 <probe step>                               # may only turn the cache off
-<build step>                               # make <name>, reading inject.mk if allowed
+<build step>                               # make <name>, reading inject.mk if allowed;
+                                           #   then one line: how many compiles it recorded
 make … <name>-utils                        # unchanged
 ```
 
 ### 18.3 The probe and the injected fragment
 
 `cactup __cc-probe <attempt>/cc/config.toml` runs inside the build script,
-after the configure step — so where the compiles will run (compute node,
-container universe) and after `config-data/make.config.rules` exists. It
-declines (exit 3, one line on stderr, the build goes on uncached) when it
-cannot do its job there; a container that cannot see the binary at all makes
-the shell report 126/127, which the script turns into the same kind of line.
+after the configure and clean steps — so where the compiles will run
+(compute node, container universe) and after
+`config-data/make.config.rules` exists. It declines (exit 3, one line on
+stderr, the build goes on uncached, nothing written) when it cannot do its
+job there; a container that cannot see the binary at all makes the shell
+report 126/127, which the script turns into the same kind of line.
 
 Otherwise it writes `<attempt>/cc/inject.mk`, which `make` reads through the
-`MAKEFILES` environment variable for the `make <name>` step alone. The
+`MAKEFILES` environment variable for the `make <name>` step alone, and
+creates the configuration's `build/` directory if a `realclean` removed it
+(the self-test runs there; make would create it moments later). The
 fragment redefines Cactus's compile recipes — `COMPILE_C`, `COMPILE_CXX`,
 `COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90` — each copied from
 the configuration's own `make.config.rules` with its one compiler reference
 replaced:
 
 ```make
+<attempt>/cc/inject.mk: ;
 ifdef CCTK_TARGET
 ifneq ($(findstring |<config>/build/,|$(CURDIR)/),)
-unexport MAKEFILES
+MAKEFILES := $(filter-out <attempt>/cc/inject.mk,$(MAKEFILES))
 ifeq ($(findstring COMPILE_,$(shell cat '$(SRCDIR)/make.code.defn' '$(SRCDIR)/make.code.deps' 2>/dev/null)),)
 define cactup_cc_run
-CACTUP_CC_CMD='$(subst ','\'',$1)' CACTUP_CC_SHELL='$(subst ','\'',$(SHELL))' '<cactup>' __cc '<config.toml>'
+'<cactup>' __cc '<config.toml>' '$(subst ','\'',$1)' '$(subst ','\'',$(SHELL))'
 endef
 override define COMPILE_C
 current_wd=`$(GET_WD)` ; cd $(SCRATCH_BUILD) ; $(call cactup_cc_run,$(CC)) $(CPPFLAGS) $(CFLAGS) …
@@ -4604,66 +4612,95 @@ Why this shape (rule 3):
   set (`make.thornlib` passes it to the `make.subdir` sub-make) *and* the
   working directory is under this configuration's `build/`. A third-party
   build started below one inherits `CCTK_TARGET` through `MAKEFLAGS` but
-  runs in its own tree; and the object sub-make stops handing the fragment
-  on (`unexport MAKEFILES`).
-- **Invisible elsewhere.** Where it does not act it defines nothing, and in
-  every make it takes its own name back out of `MAKEFILE_LIST`, so a
-  makefile that locates itself with `$(firstword $(MAKEFILE_LIST))` still
-  finds itself.
-- **A thorn's own recipe wins.** `override` would silently beat a thorn
-  that redefines `COMPILE_C` in its `make.code.deps`; the fragment stands
-  down for a source directory whose make fragments mention the compile
-  recipes at all.
+  runs in its own tree; and the object sub-make takes the fragment out of
+  the `MAKEFILES` it hands on (a user's own entries stay).
+- **Inert elsewhere.** Every other make that reads it — Cactus's makes
+  above the object sub-makes, and anything they start — gets an empty rule
+  for the fragment itself and nothing more. (make tries to remake each
+  makefile it reads; without that rule a forwarding makefile's
+  match-anything rule would be run for the fragment.) And in every make the
+  fragment takes its own name back out of `MAKEFILE_LIST`, so a makefile
+  that locates itself with `$(firstword $(MAKEFILE_LIST))` still finds
+  itself.
+- **A thorn's own recipe wins — as far as the fragment can see it.**
+  `override` would silently beat a thorn that redefines `COMPILE_C` in its
+  `make.code.deps` (the one place a plain redefinition takes effect, since
+  it is read after the rules). The fragment stands down for a source
+  directory whose `make.code.defn` or `make.code.deps` mentions the compile
+  recipes at all. It reads those two files as text and nothing else: a
+  recipe a thorn defines in a file it includes from them, or under a
+  computed name, is not seen, and the stock recipe would then run in its
+  place. No thorn in the Einstein Toolkit defines a compile recipe; this is
+  the known limit of the mechanism, and it is listed in the contract with
+  the Cactus build work.
 - **`config-data` stays pristine**: a `make <name>` run by hand later builds
   with the real compilers, with no cactup involved.
 
-The probe wraps a recipe only if the rules file defines it exactly once,
-plainly, with exactly one reference to its compiler variable. It refuses
-(declines) paths with characters that mean something to make or the shell —
-anything but letters, digits and `/ . _ - + : @ = ~` — rather than escape
-them for every context they appear in.
+The probe wraps a recipe only if `make.config.rules` defines it exactly
+once, plainly (`define NAME` … `endef`, no other assignment to it) and
+outside any conditional — otherwise the body it reads might not be the one
+make ends up with — and only if the body has exactly one reference to its
+compiler variable, as a word of its own in command position (at the start
+of a recipe line, or right after `;`, `&&` or `||`): a recipe that runs the
+compiler behind something else is not a shape cactup stands in front of.
+It refuses (declines) paths with characters that mean something to make or
+the shell — anything but letters, digits and `/ . _ - + @ ~` — rather than
+escape them for every context they appear in.
 
 The script then runs two throwaway makefiles under the fragment, with the
 build's own `make` command (`<attempt>/cc/selftest/`, output in
-`<attempt>/cc/selftest.log`): one the way an object sub-make runs, in which each wrapped recipe
-must win over a later plain definition and, run for real with the compiler
-`cactup:selftest`, must reach a cactup that can read its configuration; and
-one the way any other make runs, which must find nothing changed. A `make`
-that fails either builds uncached. This holds on GNU make 4.2.1, 4.3 and
-4.4.1 (tested); for anything else the self-test is the judge.
+`<attempt>/cc/selftest.log`): one the way an object sub-make runs, in which
+each wrapped recipe must win over a later plain definition and, run for
+real with the compiler `cactup:selftest`, must reach a cactup that can read
+its configuration and `/proc/self/status`; and one the way any other make
+runs, which must find nothing changed and its match-anything rule not run
+for the fragment. A `make` that fails either builds uncached. This holds on
+GNU make 4.2.1, 4.3 and 4.4.1 (tested; real Cactus trees on 4.3 and 4.4.1);
+for anything else the self-test is the judge.
 
 ### 18.4 The wrapper
 
-`CACTUP_CC_CMD='<compiler>' CACTUP_CC_SHELL='<shell>' cactup __cc
-<config.toml> <args…>`. It is dispatched as the first statement of `main`,
-before the interrupt handler, clap, the DB and the update check: it runs
-once per compile with `make` waiting.
+`cactup __cc <config.toml> <compiler> <shell> <args…>`. It is dispatched as
+the first statement of `main`, before the interrupt handler, clap, the DB
+and the update check: it runs once per compile with `make` waiting.
 
-`CACTUP_CC_CMD` is what the recipe's compiler variable expanded to, passed
-as one quoted value so that the shell does not interpret it before the
-wrapper has looked at it. Neither variable reaches the compiler.
+`<compiler>` is what the recipe's compiler variable expanded to, and
+`<shell>` is make's `$(SHELL)`, each passed as one quoted argument, so that
+the recipe's shell does not interpret the compiler text before the wrapper
+has looked at it.
 
-- **A plain command** (words the shell would pass on unchanged, the first a
-  program: `gcc`, `nvcc --compiler-bindir /usr/bin/g++`) is what the cache
-  works with.
+**The recipe's shell is the reference.** Without cactup, that shell decides
+what the compiler text means and how to start it. Whatever the wrapper
+cannot start itself goes to a shell of the same kind:
+`<shell> -c '<compiler> "$@"' <shell> <args…>`.
+
+- **A plain command** (words the shell would pass on unchanged, the first
+  the command's name: `gcc`, `nvcc --compiler-bindir /usr/bin/g++`) is what
+  the cache works with. The wrapper starts it directly. If that fails — the
+  name is a shell keyword or builtin (`time gcc`), a shell function, a
+  script without a `#!` line, something only the shell's `PATH` lookup
+  finds — the shell runs it, and its message and exit status are the
+  shell's own if it cannot either.
 - **Anything else** (`LANG=C gcc`, quotes, any shell syntax) means what it
-  means only to a shell: the wrapper `exec`s `<shell> -c '<compiler> "$@"'`
-  with the arguments, as the recipe would have run it, and stays out. So
-  does a compiler already behind another wrapper (ccache, sccache, distcc,
-  …): cactup does not stack.
+  means only to a shell, and goes to one without being looked at further.
+  So does a compiler already behind another wrapper (ccache, sccache,
+  distcc, …): cactup does not stack. One difference from the recipe
+  remains: it is a new shell, so a compiler text that uses the recipe's own
+  shell variables (`$$current_wd`) does not find them. No makefile cactup
+  knows of does that.
 - **Unreadable configuration, mode `off`, any internal error, a panic:** the
-  process `exec`s the compiler. Same stdin, signal dispositions and
-  jobserver descriptors; nothing of cactup in between. A compiler that is
-  an executable script without a `#!` line is handed to the shell, as the
-  recipe's shell would have done on the kernel's `ENOEXEC`.
+  process becomes the compile, by `exec`: same stdin, signal dispositions
+  and jobserver descriptors, nothing of cactup in between.
 - **`record`:** the compiler runs as a child with inherited stdio. `SIGHUP`,
   `SIGINT`, `SIGQUIT` and `SIGTERM` are passed on to it (`make` signals the
   recipe, not the recipe's children) — except those the wrapper was started
   ignoring, which stay ignored for the compiler too (a build under `nohup`
-  survives the hangup). The wrapper then ends as the compiler ended: same
-  exit code, or killed by the same `SIGHUP`/`SIGINT`/`SIGTERM`; any other
-  fatal signal becomes the shell's `128 + signal`. One JSON line per compile
-  goes to `<attempt>/cc/events.jsonl`, best-effort.
+  survives the hangup). A terminal's own signal thus reaches the compiler
+  twice, once from the terminal and once passed on. The wrapper then ends
+  as the compiler ended: same exit code, or killed by the same
+  `SIGHUP`/`SIGINT`/`SIGTERM`; any other fatal signal becomes the shell's
+  `128 + signal`. One JSON line per compile goes to
+  `<attempt>/cc/events.jsonl`, best-effort.
 
 Passing a signal on needs `kill(2)`, which std does not offer; the wrapper
 uses `rustix` (D13).

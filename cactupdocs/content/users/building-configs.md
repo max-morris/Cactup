@@ -96,6 +96,7 @@ under the config's own directory:
     build-script  # the frozen build steps this attempt ran
     build.out     # make's stdout
     build.err     # make's stderr
+    cc/           # only with the build cache on (see "The build cache" below)
   0002/
     ...
 ```
@@ -551,9 +552,17 @@ cactup knob delete build-cache                # back to the default, off
 
 With `record`, each compile of a Cactus source file adds one line to
 `cc/events.jsonl` in the build attempt's directory (see "Where build output
-goes" above). The compilers, their flags and the objects are untouched, and
-so is everything that is not a Cactus object compile — external libraries
-are built exactly as before.
+goes" above), and the build output ends its compile step with a count:
+
+```
+cactup: build cache: compiles recorded: 357
+```
+
+The compilers, their flags and the objects are untouched, and so is
+everything that is not a Cactus object compile — external libraries are
+built exactly as before. One thing you will see: if you build with
+`SILENT=no`, where Cactus prints each command it runs, the compile lines
+show cactup in front of the compiler.
 
 cactup checks, where the build actually runs, that it can do this safely. If
 it cannot (inside a container that does not see the cactup binary, with a

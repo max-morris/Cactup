@@ -42,7 +42,7 @@ the last milestone, for when that host is not at hand.
 
 | Milestone | Scope | State |
 |---|---|---|
-| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | reworked after review round 1; in review (round 2) |
+| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | reworked after review rounds 1 and 2; in review (round 3) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | not started |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
@@ -78,9 +78,12 @@ describes what review round 1 rejected):
   `build/`), unexports `MAKEFILES` there, stands down for a thorn that
   mentions the compile recipes in its own make fragments, and removes
   itself from `MAKEFILE_LIST` everywhere.
-- **The compiler text travels in the environment** (`CACTUP_CC_CMD`), so
-  the wrapper sees exactly what `$(CC)` expanded to for that target and
-  hands anything that is not a plain command back to make's shell.
+- **The compiler text travels as one quoted argument**, with make's
+  `$(SHELL)` as another, so the wrapper sees exactly what `$(CC)` expanded
+  to for that target. The recipe's shell is the reference: anything that is
+  not a plain command, and any plain command the wrapper cannot start
+  itself (a shell keyword, a function, a script without `#!`), goes to a
+  shell of that kind.
 - **`rustix` is a direct dependency**, for `kill(2)` and `waitpid(2)` only
   (spec D13 says so).
 - **Dropped from M0a** as not yet needed: the `build-cache-dir` knob and
@@ -101,15 +104,22 @@ All in `~/cacti/build-cache`, machine `plato`, GCC 14.2, GNU make 4.4.1,
 - `ext` (`ext.th` and `ext.toml`: the same plus HDF5 built from source):
   384 events for 384 Cactus objects; HDF5's installed `h5cc` has
   `CCBASE="gcc"`; nothing under `scratch/external` or `scratch/build`
-  mentions cactup.
+  carries a trace of the wrapper (`__cc`, `inject.mk`).
 - `smoke` again with the flesh at the build-speed branch `build-speedup`
   `996c71f` (checked out in this install's flesh, then restored to master):
   357 events, 357 objects, identical.
 - A full rebuild (`-f`) first showed the fail-open path for real: after
   `realclean` there is no `build/` directory, the probe declined, the build
   ran uncached with one line. The probe now creates the directory.
+- `smoke -f --clean`: the probe runs after the clean step; 357 events.
 - `cargo test` with `CACTUP_TEST_MAKES` naming make 4.2.1 and 4.3: all
-  pass. Make 3.82 could not be run on this host.
+  pass, on the glibc build and on `--target x86_64-unknown-linux-musl`
+  (`--test objcache`; CI now runs that too). Make 3.82 could not be run on
+  this host, and 4.2.1 crashes on Cactus's real `Makefile` with or without
+  the cache, so real trees are covered on 4.3 (by reviewer B, on a copy)
+  and 4.4.1 only.
+
+The builds above were all repeated after the round 2 changes.
 
 Not verified: a container universe, a compute node, NFS or Lustre, any
 compiler but GCC, any machine but `plato`.
@@ -124,7 +134,11 @@ compiler but GCC, any machine but `plato`.
 - 2026-10-01: M0a implemented (commit `781984e`) and sent to the twin
   review.
 - 2026-10-01: Review round 1: both reviewers BLOCKED (see below). Injection
-  redesigned, wrapper reworked, tests rewritten, spec §18 rewritten.
+  redesigned, wrapper reworked, tests rewritten, spec §18 rewritten
+  (commit `07cbd2b`).
+- 2026-10-01: Review round 2: both BLOCKED again, on the wrapper's starting
+  of compilers and on recipes with the compiler behind something else.
+  Fixed; sent to round 3.
 
 ## Review verdicts
 
@@ -169,7 +183,57 @@ the wrapper shows in front of the compiler on each echoed line (that is
 make's output; spec §18.1 rule 4 says so). `PLAN.md` stays as approved, with
 a note at its top.
 
-### M0a, round 2: pending
+### M0a, round 2 (on `07cbd2b`): BLOCKED by both
+
+Both confirmed the round 1 blockers resolved (the injection on make 4.0
+through 4.4.1, on real Cactus under 4.3 by reviewer B) except the script
+without `#!`, and found:
+
+1. (both) The fallback for a script without `#!` put the arguments before
+   the script on the pass-through path. Only the static musl binary shows
+   it; glibc's `exec` does the fallback itself, so the tests were green.
+   *Fixed by removing that code: whatever cannot be started directly goes
+   to the recipe's shell. The wrapper tests now also run against the musl
+   target, locally and in CI.*
+2. (both) A compiler only a shell can resolve — `time gcc` under bash,
+   `command gcc`, an exported shell function, `~` in `PATH` — failed with
+   127 where the recipe works. *Fixed by the same rule.*
+3. (A) A recipe with the compiler behind something else (`$(LAUNCHER)
+   $(CC)`) was wrapped and every compile failed; the self-test passed.
+   *Fixed twice over: the probe wraps only a reference in command
+   position, and the wrapper is now run as a plain command with quoted
+   arguments instead of an environment-assignment prefix.*
+
+Non-blocking points taken: a user's own `MAKEFILES` entries survive below
+object sub-makes (the fragment filters itself out instead of unexporting);
+the self-test also checks `/proc/self/status`, and every build with the
+cache on ends its compile step with a count, so a build the cache sat out
+is visible; an empty rule for the fragment itself, so a forwarding
+makefile's match-anything rule is not run for it; the rules file is read
+strictly (one unconditional plain definition); the probe writes nothing
+before it has decided, and runs after the clean step; the end-to-end test
+no longer runs the test harness as "cactup"; spec, user docs and contract
+brought in line.
+
+Stated as limits rather than fixed, with the reason:
+
+- The stand-down for a thorn's own compile recipe reads two files as text.
+  A recipe defined in a file the thorn includes from them, or under a
+  computed name, is not seen and loses to the fragment. No thorn in the
+  Einstein Toolkit defines a compile recipe; following includes would mean
+  re-implementing make. Spec §18.3 and contract A3 say so. **Max should
+  know this one: it is the remaining way the cache could change what gets
+  compiled, and accepting it is his call.**
+- A compiler text that is not a plain command runs in a new shell, so it
+  cannot use the recipe's own shell variables. Spec §18.4 says so.
+- A terminal's signal reaches the compiler twice (terminal, then passed
+  on). Harmless for compilers; spec §18.4 says so.
+- The spelling hook rejects British spellings anywhere in a file it sees
+  edited, so three pre-existing comment words in `src/build/mod.rs` were
+  changed (Modeling, aging, afterward). `OPTIMISE` there is Cactus's own
+  option name and stays.
+
+### M0a, round 3: pending
 
 ## Next step
 
