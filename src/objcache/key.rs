@@ -35,9 +35,9 @@ use super::{environment, platform, BuildConf};
 use crate::Res;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -101,13 +101,7 @@ impl PathMap {
     /// and for debug information. Shortest directory first, so that the
     /// last map that matches a name is the most specific one.
     pub fn flags(&self) -> Vec<OsString> {
-        let flag = |(from, to): &(Vec<u8>, &str)| {
-            let mut flag = OsString::from("-ffile-prefix-map=");
-            flag.push(OsStr::from_bytes(from));
-            flag.push(format!("={to}"));
-            flag
-        };
-        self.from_to.iter().rev().map(flag).collect()
+        self.from_to.iter().rev().map(|(from, to)| map_flag(from, to)).collect()
     }
 
     /// The file name `name` as a mapped compile records it.
@@ -118,15 +112,32 @@ impl PathMap {
         }
     }
 
-    /// An argument with the file name in it mapped: the whole argument, or
-    /// what follows its `=` (`--sysroot=<dir>`).
-    fn apply_to_argument(&self, argument: &[u8]) -> Vec<u8> {
-        match argument.iter().position(|b| *b == b'=') {
-            Some(at) if !argument.starts_with(b"/") => [&argument[..=at], self.apply(&argument[at + 1..]).as_slice()].concat(),
-            _ => self.apply(argument),
-        }
-    }
 }
+
+/// The compiler flag that maps the directory `from` (with its trailing `/`)
+/// to the name `to`.
+fn map_flag(from: &[u8], to: &str) -> OsString {
+    let mut flag = OsString::from("-ffile-prefix-map=");
+    flag.push(OsStr::from_bytes(from));
+    flag.push(format!("={to}"));
+    flag
+}
+
+/// The flags of a [`PathMap`] for a Cactus tree at `root` and its
+/// configuration directory `config`, for `identity::relocates` to try a
+/// compiler with: built by the same code as the flags a key is made with.
+pub fn trial_flags(root: &Path, config: &Path) -> Vec<OsString> {
+    let dir = |path: &Path| [path.as_os_str().as_bytes(), b"/"].concat();
+    vec![map_flag(&dir(root), ROOT_NAME), map_flag(&dir(config), CONFIG_NAME)]
+}
+
+/// The flags whose value is a file name that the compiler uses to find
+/// files and records nowhere but in the names of what it finds — tried,
+/// like the map itself, by the audit in `tests/objcache.rs`. Their values
+/// are keyed as mapped. Every other argument is keyed as it stands: GCC
+/// records its command line in debug information, unmapped, so a path of
+/// the tree in `-frandom-seed=<path>` is part of the object.
+const MAPPED_VALUES: &[&str] = &["-isystem", "-iquote", "-idirafter", "-include"];
 
 /// The digests a key is made of. Kept apart in the event log, so that two
 /// builds can be compared part by part: which part differed is why a
@@ -195,11 +206,13 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString]) -> Result<Keyed, 
     // suffix, and it is in the compiler part; this is the suffix.
     arguments.feed(compile.language.name().as_bytes());
     arguments.feed(if map.is_some() { b"mapped" } else { b"unmapped" });
+    let mut value_of_a_path_flag = false;
     for argument in &compile.keyed {
-        match &map {
-            Some(map) => arguments.feed(&map.apply_to_argument(argument.as_bytes())),
-            None => arguments.feed(argument.as_bytes()),
+        match value_of_a_path_flag {
+            true => arguments.feed(&mapped(argument.as_bytes())),
+            false => arguments.feed(argument.as_bytes()),
         }
+        value_of_a_path_flag = !value_of_a_path_flag && argument.to_str().is_some_and(|flag| MAPPED_VALUES.contains(&flag));
     }
     // Debug information records the directory the compiler ran in, under
     // the name the compiler has for it: the physical one, or `$PWD` when
@@ -253,33 +266,83 @@ struct Read {
     count: usize,
 }
 
-/// A line marker of preprocessor output, `# 12 "dir/file.h" 1`, taken
-/// apart: what stands before the file name, the name with its escapes
-/// undone, and what follows the closing quote.
-fn line_marker(line: &[u8]) -> Option<(&[u8], Vec<u8>, &[u8])> {
-    line_directive(line, b"# ")
+/// A line that names a file: a line marker of preprocessor output
+/// (`# 12 "dir/file.h" 1`), or a line directive of a source (`#line 12
+/// "file.c"`).
+struct Naming<'a> {
+    /// What stands before the file name, the opening quote included.
+    head: &'a [u8],
+    /// The name, with its escapes undone.
+    name: Vec<u8>,
+    /// What follows the name, from the closing quote on.
+    tail: &'a [u8],
 }
 
-/// A line that begins with `opening` (`# ` in preprocessor output, `#line `
-/// in a source), then a line number and a quoted file name, taken apart as
-/// for [`line_marker`].
-fn line_directive<'a>(line: &'a [u8], opening: &[u8]) -> Option<(&'a [u8], Vec<u8>, &'a [u8])> {
-    let rest = line.strip_prefix(opening)?;
-    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-    let quoted = rest[digits..].strip_prefix(b" \"")?;
-    if digits == 0 {
-        return None;
+impl Naming<'_> {
+    /// Does the marker say the preprocessor *entered* the file (flag `1`)?
+    /// Then it opened it. A marker without the flag returns to a file, or
+    /// repeats what a `#line` in the source said.
+    fn enters(&self) -> bool {
+        self.tail[1..].split(|b| b.is_ascii_whitespace()).any(|flag| flag == b"1")
     }
+}
+
+/// Take apart a line that begins with `opening` (`# ` in preprocessor
+/// output, `#line ` in a source), then a line number and a quoted file
+/// name. `Ok(None)`: the line does not begin so. `Err`: it does, and the
+/// name cannot be read — which must not pass for "names no file".
+///
+/// Compilers write a name as a C string: GCC and Clang escape `\\` and
+/// `"`, and write bytes they take for unprintable (a tab, anything outside
+/// ASCII) as octal.
+fn naming<'a>(line: &'a [u8], opening: &[u8]) -> Result<Option<Naming<'a>>, String> {
+    let Some(rest) = line.strip_prefix(opening) else { return Ok(None) };
+    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    let Some(quoted) = rest[digits..].strip_prefix(b" \"").filter(|_| digits > 0) else { return Ok(None) };
     let head = &line[..line.len() - quoted.len()];
-    let (mut name, mut bytes) = (Vec::new(), quoted.iter().enumerate());
-    while let Some((at, byte)) = bytes.next() {
+    let unreadable = || format!("a file name in a line marker cannot be read: {}", String::from_utf8_lossy(line).trim_end());
+    let (mut name, mut at) = (Vec::new(), 0);
+    loop {
+        let byte = *quoted.get(at).ok_or_else(unreadable)?;
+        at += 1;
         match byte {
-            b'"' => return Some((head, name, &quoted[at..])),
-            b'\\' => name.push(*bytes.next()?.1),
-            byte => name.push(*byte),
+            b'"' => return Ok(Some(Naming { head, name, tail: &quoted[at - 1..] })),
+            b'\\' => {
+                let escape = *quoted.get(at).ok_or_else(unreadable)?;
+                at += 1;
+                name.push(match escape {
+                    b'\\' | b'"' | b'\'' | b'?' => escape,
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b'f' => 0x0c,
+                    b'n' => b'\n',
+                    b'r' => b'\r',
+                    b't' => b'\t',
+                    b'v' => 0x0b,
+                    b'0'..=b'7' => {
+                        // Up to three octal digits, the first already read.
+                        let mut value = u32::from(escape - b'0');
+                        for _ in 0..2 {
+                            match quoted.get(at) {
+                                Some(digit @ b'0'..=b'7') => value = value * 8 + u32::from(digit - b'0'),
+                                _ => break,
+                            }
+                            at += 1;
+                        }
+                        u8::try_from(value).map_err(|_| unreadable())?
+                    }
+                    b'x' => {
+                        let digits = quoted[at..].iter().take_while(|b| b.is_ascii_hexdigit()).count();
+                        let text = std::str::from_utf8(&quoted[at..at + digits]).map_err(|_| unreadable())?;
+                        at += digits;
+                        u8::from_str_radix(text, 16).map_err(|_| unreadable())?
+                    }
+                    _ => return Err(unreadable()),
+                });
+            }
+            byte => name.push(byte),
         }
     }
-    None
 }
 
 /// The bytes of the file at `path` as they go into a key.
@@ -296,8 +359,10 @@ fn content_digest(path: &Path, map: Option<&PathMap>) -> Res<String> {
     let bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let first = bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |at| at + 1);
     let mut hasher = Hasher::new("file");
-    match line_directive(&bytes[..first], b"#line ") {
-        Some((head, name, tail)) => {
+    // A first line that is no such directive, or one whose name cannot be
+    // read, is bytes like any other.
+    match naming(&bytes[..first], b"#line ").ok().flatten() {
+        Some(Naming { head, name, tail }) => {
             hasher.feed(b"line directive");
             hasher.feed(head);
             hasher.feed(&map.apply(&name));
@@ -357,34 +422,48 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let read = digest_output(&mut child, map);
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
-    let (text, text_bytes, named) = read?;
+    let (text, text_bytes, mut named) = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
     }
+    // The source itself, whatever the markers call it.
+    let source = compile.source.as_os_str().as_bytes();
+    named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    // The files, each under its mapped name. One that cannot be read is one
-    // a `#line` made up (generated code names its origin so); the
-    // preprocessor read the file it stands in, which is named too.
+    // The files, each under its mapped name. A file the preprocessor
+    // entered, it opened: if that cannot be read here, its name was misread
+    // or it is gone, and there is no key. A name that only a `#line` gave
+    // (generated code names its origin so) may be of no file at all; the
+    // bytes compiled are those of the file the directive stands in, which
+    // was entered.
     let mut files = Hasher::new("files");
-    for (mapped, path) in &named {
+    for ((mapped, path), entered) in &named {
         files.feed(mapped);
+        // "Not there" is the one thing a made-up name may be: any other
+        // failure to read is a failure to key.
+        let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
         match content_digest(path, map) {
             Ok(digest) => files.feed(digest.as_bytes()),
-            Err(_) => files.feed(b"no such file"),
+            Err(_) if !entered && absent() => files.feed(b"no such file"),
+            Err(e) => bail!("a file the compile reads cannot be read to key it ({e:#})"),
         }
     }
     Ok(Read { text, text_bytes, files: files.hex(), count: named.len() })
 }
 
+/// The files a preprocessor run names, each by its mapped name and its
+/// path (two files can share a mapped name — `./x.h` in the working
+/// directory and `x.h` in the Cactus root — and both are read), with
+/// whether the preprocessor entered it.
+type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
+
 /// Digest the preprocessor's output as it comes, and collect the files it
-/// names: each as its mapped name and its path. (Two files can share a
-/// mapped name — `./x.h` in the working directory and `x.h` in the Cactus
-/// root — and both are read.)
-fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, BTreeSet<(Vec<u8>, PathBuf)>)> {
+/// names.
+fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
     let mut output = BufReader::new(child.stdout.take().context("the preprocessor has no output")?);
     let mut hasher = Hasher::new("text");
-    let mut named = BTreeSet::new();
+    let mut named = Named::new();
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -398,17 +477,18 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
             hasher.stream(part);
             bytes += part.len() as u64;
         };
-        match line_marker(&line) {
-            Some((head, name, tail)) => {
-                let mapped = map.map_or_else(|| name.clone(), |map| map.apply(&name));
-                feed(head);
+        match naming(&line, b"# ").map_err(anyhow::Error::msg)? {
+            Some(marker) => {
+                let mapped = map.map_or_else(|| marker.name.clone(), |map| map.apply(&marker.name));
+                feed(marker.head);
                 feed(&mapped);
-                feed(tail);
+                feed(marker.tail);
                 // `<built-in>`, `<command-line>`: not files. A name ending
                 // in `//` is GCC's note of the working directory.
-                let pseudo = name.starts_with(b"<") || name.ends_with(b"//") || name.is_empty();
+                let pseudo = marker.name.starts_with(b"<") || marker.name.ends_with(b"//") || marker.name.is_empty();
                 if !pseudo {
-                    named.insert((mapped, PathBuf::from(OsString::from_vec(name))));
+                    let entered = marker.enters();
+                    *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
                 }
             }
             None if line.starts_with(b"#pragma GCC pch_preprocess") => {
@@ -454,24 +534,35 @@ mod tests {
         // The flags name the less specific directory first.
         let flags: Vec<String> = map.flags().into_iter().map(|f| f.into_string().unwrap()).collect();
         assert_eq!(flags, ["-ffile-prefix-map=/w/Cactus/=./", "-ffile-prefix-map=/w/Cactus/configs/sim/=./configs/@config/"]);
-        // In an argument: the whole of it, or what follows `=`.
-        let argument = |text: &str| String::from_utf8(map.apply_to_argument(text.as_bytes())).unwrap();
-        assert_eq!(argument("/w/Cactus/x.h"), "./x.h");
-        assert_eq!(argument("--sysroot=/w/Cactus/sys"), "--sysroot=./sys");
-        assert_eq!(argument("-O2"), "-O2");
+        // The trial's flags are spelled by the same code.
+        assert_eq!(trial_flags(Path::new("/w/Cactus"), Path::new("/w/Cactus/configs/sim")), map.flags());
     }
 
     #[test]
     fn takes_line_markers_apart() {
-        let marker = |line: &str| line_marker(line.as_bytes()).map(|(head, name, tail)| {
-            (String::from_utf8_lossy(head).into_owned(), String::from_utf8(name).unwrap(), String::from_utf8_lossy(tail).into_owned())
-        });
-        assert_eq!(marker("# 12 \"a.h\" 1\n"), Some(("# 12 \"".into(), "a.h".into(), "\" 1\n".into())));
-        assert_eq!(marker("# 0 \"<built-in>\"\n"), Some(("# 0 \"".into(), "<built-in>".into(), "\"\n".into())));
-        // Escapes in a name are undone.
+        let marker = |line: &str| {
+            let marker = naming(line.as_bytes(), b"# ").unwrap()?;
+            let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+            Some((text(marker.head), text(&marker.name), text(marker.tail), marker.enters()))
+        };
+        assert_eq!(marker("# 12 \"a.h\" 1\n"), Some(("# 12 \"".into(), "a.h".into(), "\" 1\n".into(), true)));
+        assert_eq!(marker("# 12 \"a.h\" 1 3 4\n").unwrap().3, true);
+        assert_eq!(marker("# 12 \"a.h\" 2\n").unwrap().3, false);
+        assert_eq!(marker("# 12 \"a.h\" 3\n").unwrap().3, false);
+        assert_eq!(marker("# 0 \"<built-in>\"\n"), Some(("# 0 \"".into(), "<built-in>".into(), "\"\n".into(), false)));
+        // Escapes in a name are undone: the ones GCC and Clang write (a
+        // backslash, a quote, octal for a tab or a byte outside ASCII), and
+        // the rest of C's.
         assert_eq!(marker("# 1 \"a\\\\b\\\"c.h\"\n").unwrap().1, "a\\b\"c.h");
-        for not in ["#define X 1\n", "#pragma once\n", "# pragma omp\n", "int x; # 1 \"a\"\n", "#\n", "", "# 1\n", "# x \"a.h\"\n", "# 1 \"open\n"] {
+        assert_eq!(marker("# 1 \"biblioth\\303\\250que/a\\011b\\tc.h\" 1\n").unwrap().1, "bibliothèque/a\tb\tc.h");
+        assert_eq!(marker("# 1 \"a\\x41\\0b\\7.h\"\n").unwrap().1, "aA\0b\u{7}.h");
+        for not in ["#define X 1\n", "#pragma once\n", "# pragma omp\n", "int x; # 1 \"a\"\n", "#\n", "", "# 1\n", "# x \"a.h\"\n"] {
             assert_eq!(marker(not), None, "{not:?}");
+        }
+        // What begins like a marker and cannot be read is an error, never
+        // "no file named here".
+        for unreadable in ["# 1 \"open\n", "# 1 \"a\\qb.h\"\n", "# 1 \"a\\777.h\"\n", "# 1 \"a\\x.h\"\n", "# 1 \"a\\"] {
+            assert!(naming(unreadable.as_bytes(), b"# ").is_err(), "{unreadable:?}");
         }
     }
 

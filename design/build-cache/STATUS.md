@@ -43,7 +43,7 @@ the last milestone, for when that host is not at hand.
 | Milestone | Scope | State |
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
-| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 2, after a rework of the key) |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 3) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
@@ -136,10 +136,12 @@ of compiles with one key and two objects; see the verdicts below):
   the start of a name; maps given with a trailing `/`), and is used only
   for a compiler that passed a trial: a miniature Cactus compile in two
   places must give one object. Clang with `-fopenmp` keeps its paths.
-- Not keyed at all: `-x`, sanitizers, `-mllvm`, every `-g…`/`-O…` flag not
-  listed by name, a source with `.incbin`/`.include`, a compile that would
-  use a precompiled header, Clang with `-include`, and `-march=native` on a
-  host with more than one kind of processor.
+- Not keyed at all: `-x`, `-imacros`, sanitizers, `-mllvm`, every
+  `-g…`/`-O…` flag not listed by name, a source with `.incbin`/`.include`,
+  a compile that would use a precompiled header, Clang with `-include`,
+  `-march=native` on a host with more than one kind of processor, and a
+  compiler that takes flags from behind its command line (a GCC `specs`
+  file, a Clang configuration file, `CCC_OVERRIDE_OPTIONS`).
 - The compiler that is identified is the file that runs.
 
 Numbers (2026-10-01, `plato`, GCC 14.2, make 4.4.1, an *unoptimized*
@@ -153,13 +155,13 @@ cactup, `-j 8`; M0c is where these get measured properly):
   `smoke`: **307 of 307 keyed compiles would be served** (98% of the
   compile time).
 - `ext`, which adds HDF5 and two thorns that use it, against `smoke`: 185
-  of 334 (55%, 65% of the compile time). Before the rework it was 301 of
+  of 334 (55%, 63% of the compile time). Before the rework it was 301 of
   334: 116 compiles now miss because a generated header they include
   (`cctk_DefineThorn.h`, `CParameterStructNames.h`) has other bytes in a
   configuration with more thorns, though it gives them the same tokens.
   This is the price of keying bytes, and a decision for Max (below).
 - Cost: keying summed to 19% of the compile time and checking again to
-  17%; wall clock 18 s against 16 s plain for `smoke`. (Before the rework:
+  18%; wall clock 18 to 21 s against 16 s plain for `smoke`. (Before the rework:
   30% and 25%, 39 s; `-C` made the preprocessor's output much larger.)
 
 **Found on the way: `-march=native` is not a function of its inputs on
@@ -170,8 +172,8 @@ on, so one compile run twice gave two objects (the audit test caught it as
 on a host whose processors differ. The configurations above do not use
 `-march=native`; 11 of the MDB's optionlists do.
 
-The logs behind these numbers are `smoke` attempt 0011, `smoke2` attempt
-0002 and `ext` attempt 0005 in `~/cacti/build-cache`, all recorded by the
+The logs behind these numbers are `smoke` attempt 0012, `smoke2` attempt
+0003 and `ext` attempt 0006 in `~/cacti/build-cache`, all recorded by the
 revision under review.
 
 "Would be served" rests on the path mapping of spec §18.5 producing the
@@ -236,6 +238,9 @@ compiler but GCC, any machine but `plato`.
   key. Key reworked (bytes of every file read, compiler-faithful path map
   behind a per-compiler trial, stricter flag list, compiles with no one
   object declined), the audit test added; sent to round 2.
+- 2026-10-01: M0b review round 2: every round 1 finding confirmed
+  resolved; both BLOCKED on new ones (three between them). Fixed; sent to
+  round 3.
 
 ## Review verdicts
 
@@ -457,6 +462,58 @@ compiled; see "What M0b is"):
   only the `make` on `PATH`; run it over `CACTUP_TEST_MAKES` too.
 - `SHELL_WORDS` lacks a few builtins (`bind`, dash's `chdir`, zsh's and
   ksh's). None is a plausible compiler name.
+
+### M0b, round 2 (on `2ffce06`): BLOCKED by both
+
+Both confirmed every round 1 finding resolved, the tests green on glibc
+and musl, the real builds' objects identical to a plain build, and the
+audit test not vacuous. Each found two new pairs of compiles with one key
+and two objects (one of them the same):
+
+1. (both) Clang writes a file name in a line marker as a C string, with
+   octal for a tab or a byte outside ASCII; the reader undid only `\\` and
+   `\"`, took the misread name for a file that is not there, and keyed it
+   as absent — so a header under `bibliothèque/` was not in the key.
+   *Fixed: every C escape is undone and an unreadable name is an error; a
+   file the preprocessor entered must be readable, or there is no key;
+   only a name no marker enters (a `#line`'s) may be absent, and only
+   absent.*
+2. (A) `-frandom-seed=<path under the tree>` was mapped in the key, but GCC
+   records its command line in debug information, unmapped. *Fixed: only
+   the values of `-isystem`, `-iquote`, `-idirafter` and `-include` are
+   mapped (the audit now tries each); everything else is keyed as
+   written.*
+3. (B) Flags that reach a compiler from behind its command line never pass
+   the reader: a Clang configuration file adding `-fopenmp` or
+   `-grecord-command-line`, or including another file; and
+   `CCC_OVERRIDE_OPTIONS`. *Fixed: a Clang that reads a configuration file
+   and a GCC with a specs file on disk are not cached; the override
+   variables make a compile not cached.*
+
+Non-blocking points taken: `-mcpu=native+ext` (the prefix is matched now);
+`-imacros` (not keyed: the preprocessor's output does not name the file);
+the audit asserted that every compiler relocates (it now requires only
+that keys agree exactly where the wrapper says they can, and that some
+compile did); the map's flags for the trial come from the code that makes
+them for a key; the report's note under "against" said "this build's log";
+spec §18.5's list gained the textual `.incbin` check, files that appear
+during an attempt, and flags from behind the command line.
+
+Left open, with the reason: (B) each keyed compile reads about 110 files
+twice on top of two preprocessor runs, and a per-attempt memo of file
+digests by size, change time and inode would save most of that. It would
+also trust a file's change time where the check after the compile now
+reads its bytes; that trade wants the M0c numbers on a network filesystem
+first.
+
+Known cost of the round 2 fixes, to measure in M0c: a GCC with a `specs`
+file on disk is not cached at all. Spack-built GCCs have one (Spack writes
+the library search path for `libgcc` into it), and many cluster compilers
+are Spack-built. A refinement that stays sound: accept a specs file whose
+every section other than the link ones is byte for byte the built-in one
+(`gcc -dumpspecs`) and that includes no other file. Not done yet, on
+purpose: it is new ground for a review round, and whether it is needed
+shows in `cache report` on a real cluster ("reads a specs file").
 
 ## Decisions waiting for Max
 

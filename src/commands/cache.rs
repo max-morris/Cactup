@@ -52,10 +52,10 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                 }
             };
             println!("{}", build.title().bold());
-            print!("{}{}", build.unreadable_note(), summary(&build.events));
+            print!("{}{}", build.unreadable_note("this"), summary(&build.events));
             if let Some(other) = other {
                 println!("\n{}", format!("against {}", other.title()).bold());
-                print!("{}{}", other.unreadable_note(), comparison(&build.events, &other.events, long));
+                print!("{}{}", other.unreadable_note("that"), comparison(&build.events, &other.events, long));
             }
             Ok(())
         }
@@ -117,13 +117,15 @@ impl Recorded {
     }
 
     /// A line for the report when part of the log could not be read, so the
-    /// numbers under it are not taken for the whole build.
-    fn unreadable_note(&self) -> String {
-        match self.unreadable {
-            0 => String::new(),
-            1 => format!("  {}\n", "1 line of this build's log cannot be read and is not counted".yellow()),
-            lines => format!("  {}\n", format!("{lines} lines of this build's log cannot be read and are not counted").yellow()),
-        }
+    /// numbers under it are not taken for the whole build. `which` build
+    /// the line stands under: "this" one, or "that" one compared against.
+    fn unreadable_note(&self, which: &str) -> String {
+        let note = match self.unreadable {
+            0 => return String::new(),
+            1 => format!("1 line of {which} build's log cannot be read and is not counted"),
+            lines => format!("{lines} lines of {which} build's log cannot be read and are not counted"),
+        };
+        format!("  {}\n", note.yellow())
     }
 
     fn title(&self) -> String {
@@ -435,7 +437,7 @@ mod tests {
         // Attempt 3 recorded nothing: the newest that did is 2.
         let newest = Recorded::open(&installation, "sim", None, None).unwrap();
         assert_eq!((newest.attempt, newest.events.len(), newest.unreadable), (2, 2, 0));
-        assert_eq!(newest.unreadable_note(), "");
+        assert_eq!(newest.unreadable_note("this"), "");
         assert_eq!(newest.title(), "sim, build attempt 0002 (installation et)");
         assert_eq!(Recorded::open(&installation, "sim", None, Some(2)).unwrap().attempt, 1);
         assert_eq!(Recorded::open(&installation, "sim", Some(1), None).unwrap().attempt, 1);
@@ -458,7 +460,7 @@ mod tests {
         append(2, "{\"compiler\":\"gcc\",\"some-older-format\":true}");
         let partly = Recorded::open(&installation, "sim", Some(2), None).unwrap();
         assert_eq!((partly.events.len(), partly.unreadable), (2, 1));
-        assert!(partly.unreadable_note().contains("1 line of this build's log cannot be read and is not counted"));
+        assert!(partly.unreadable_note("that").contains("1 line of that build's log cannot be read and is not counted"));
         append(3, "{\"compiler\":\"gcc\",\"some-older-format\":true}");
         assert!(err(Some(3), None).contains("in a form this cactup cannot read"), "{}", err(Some(3), None));
     }

@@ -27,7 +27,7 @@ const KEYED: &[&str] = &[
     "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX",
     "SDKROOT",
     // Behavior switches.
-    "GCC_COMPARE_DEBUG", "GCC_COLORS", "CCC_OVERRIDE_OPTIONS", "CLANG_NO_DEFAULT_CONFIG",
+    "GCC_COLORS", "CLANG_NO_DEFAULT_CONFIG",
     // The modules a machine's environment setup loaded.
     "LOADEDMODULES", "_LMFILES_",
 ];
@@ -38,8 +38,13 @@ const KEYED_PREFIXES: &[&str] =
 
 /// Variables that make a compiler write a file besides its object: a hit
 /// would skip writing it.
-const NOT_CACHED: &[&str] =
+const MORE_OUTPUT: &[&str] =
     &["DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "CC_PRINT_OPTIONS", "CC_PRINT_HEADERS", "CC_LOG_DIAGNOSTICS"];
+
+/// Variables that add to a compiler's flags or rewrite them. Such flags
+/// never pass the reader of the command line (`compile`), so nothing it
+/// would decline is declined: keying the variable's value is not enough.
+const MORE_FLAGS: &[&str] = &["CCC_OVERRIDE_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS", "GCC_COMPARE_DEBUG"];
 
 /// The digest of the keyed part of `vars`, or the variable that rules
 /// caching out.
@@ -47,8 +52,11 @@ fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>) -> Result<String,
     let mut keyed = Vec::new();
     for (name, value) in vars {
         let Some(name) = name.to_str() else { continue };
-        if NOT_CACHED.contains(&name) {
+        if MORE_OUTPUT.contains(&name) {
             return Err(format!("{name} is set, which makes the compiler write another file"));
+        }
+        if MORE_FLAGS.contains(&name) {
+            return Err(format!("{name} is set, which changes the compiler's flags behind its command line"));
         }
         if KEYED.contains(&name) || KEYED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
             keyed.push((name.to_owned(), value));
@@ -94,8 +102,10 @@ mod tests {
     }
 
     #[test]
-    fn a_variable_that_adds_an_output_rules_caching_out() {
+    fn a_variable_that_adds_an_output_or_flags_rules_caching_out() {
         let err = of(&[("LANG", "C"), ("DEPENDENCIES_OUTPUT", "deps.d")]).unwrap_err();
         assert!(err.starts_with("DEPENDENCIES_OUTPUT is set"), "{err}");
+        let err = of(&[("LANG", "C"), ("CCC_OVERRIDE_OPTIONS", "# +-grecord-command-line")]).unwrap_err();
+        assert_eq!(err, "CCC_OVERRIDE_OPTIONS is set, which changes the compiler's flags behind its command line");
     }
 }

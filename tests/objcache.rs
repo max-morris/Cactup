@@ -681,6 +681,7 @@ impl<'a> Unit<'a> {
         let directive = if line_directive { format!("#line 1 \"{}\"\n", original.display()) } else { String::new() };
         fs::write(&source, format!("{directive}{UNIT_SOURCE}")).unwrap();
         fs::write(thorn.join("unit.h"), UNIT_HEADER).unwrap();
+        fs::write(thorn.join("forced.h"), "#define FORCED 1 /* for -include */\n").unwrap();
         fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
         let object = build.config.join(format!("build/Thorn/unit.{suffix}.o"));
         Self { build, source, object, header: thorn.join("unit.h") }
@@ -723,7 +724,9 @@ impl<'a> Unit<'a> {
 
     /// The object of the same compile run the way a serving cache will run
     /// it: with the Cactus root and the configuration directory mapped to
-    /// fixed names, the configuration's map last.
+    /// fixed names, the configuration's map last. (Spelled out here as spec
+    /// §18.5 gives them; `key::tests::maps_names_as_the_compiler_does` pins
+    /// cactup's own spelling to the same strings.)
     fn mapped_object(&self, compiler: &str, flags: &[&str], lib: &Path) -> Vec<u8> {
         let mut args = self.args(flags, lib);
         args.push(format!("-ffile-prefix-map={}/=./", self.build.root.display()));
@@ -743,6 +746,7 @@ impl<'a> Unit<'a> {
 fn compiles_that_share_a_key_produce_the_same_object() {
     let lib = tempfile::tempdir().unwrap();
     let lib = fs::canonicalize(lib.path()).unwrap();
+    let mut shared = 0;
     for (compiler, suffix) in [("gcc", "c"), ("g++", "cc"), ("clang", "c"), ("clang++", "cc")] {
         if !have(compiler) {
             continue;
@@ -778,17 +782,70 @@ fn compiles_that_share_a_key_produce_the_same_object() {
                 let (key, relocatable) = ours.keyed(compiler, flags, &lib).unwrap_or_else(|| panic!("{what}: not keyed"));
                 let (their_key, _) = theirs.keyed(compiler, flags, &lib).unwrap_or_else(|| panic!("{what}: not keyed"));
                 // Clang's OpenMP puts source paths where no map reaches:
-                // such a key must know where the tree is. Everything else
-                // here is meant to be shared.
-                let shareable = !(clang && flags.contains(&"-fopenmp"));
-                assert_eq!(relocatable, shareable, "{what}");
-                assert_eq!(key == their_key, shareable, "{what}");
+                // such a key must know where the tree is. So must every
+                // key of a compiler that failed the trial of the map (an
+                // old one: the test has nothing to say against it).
+                if clang && flags.contains(&"-fopenmp") {
+                    assert!(!relocatable, "{what}");
+                }
+                assert_eq!(key == their_key, relocatable, "{what}");
                 if key == their_key {
                     let (object, their_object) = (ours.mapped_object(compiler, flags, &lib), theirs.mapped_object(compiler, flags, &lib));
                     assert!(object == their_object, "{what}: one key, two objects");
                     // The same tree compiled again is the same object, too.
                     assert!(object == ours.mapped_object(compiler, flags, &lib), "{what}: not reproducible");
+                    shared += 1;
                 }
+            }
+        }
+    }
+    // Not for nothing: of the compilers this host has, some relocate.
+    assert!(shared > 0 || !["gcc", "g++", "clang", "clang++"].iter().any(|compiler| have(compiler)), "no compile shared a key");
+}
+
+/// A path of the tree as the value of a flag. Where the compiler uses it
+/// only to find files, the key has it mapped, and the objects must agree;
+/// where the object keeps the flag as written (GCC records its command
+/// line in debug information), two trees must not share a key.
+#[test]
+fn a_path_of_the_tree_in_a_flag_is_shared_only_where_the_object_does_not_keep_it() {
+    let lib = tempfile::tempdir().unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap();
+    for (compiler, suffix) in [("gcc", "c"), ("g++", "cc"), ("clang", "c"), ("clang++", "cc")] {
+        if !have(compiler) {
+            continue;
+        }
+        let clang = compiler.starts_with("clang");
+        let thorn = |unit: &Unit| unit.header.parent().unwrap().display().to_string();
+        let rows: [(&dyn Fn(&Unit) -> Vec<String>, bool); 6] = [
+            (&|unit| vec!["-isystem".into(), thorn(unit)], true),
+            (&|unit| vec!["-iquote".into(), thorn(unit)], true),
+            (&|unit| vec!["-idirafter".into(), thorn(unit)], true),
+            (&|unit| vec!["-include".into(), format!("{}/forced.h", thorn(unit))], true),
+            (&|unit| vec![format!("-frandom-seed={}", unit.source.display())], false),
+            (&|unit| vec![format!("-fdebug-prefix-map={}=/elsewhere", unit.build.root.display())], false),
+        ];
+        for (tree_flags, shared) in rows {
+            let (here, there) = (Build::named("a", "sim", "record"), Build::named("b/deeper", "sim-debug", "record"));
+            let (ours, theirs) = (Unit::new(&here, suffix, &lib), Unit::new(&there, suffix, &lib));
+            let flags = |unit: &Unit| [vec!["-g".to_owned(), "-O2".to_owned()], tree_flags(unit)].concat();
+            let (our_flags, their_flags) = (flags(&ours), flags(&theirs));
+            let (our_flags, their_flags): (Vec<&str>, Vec<&str>) =
+                (our_flags.iter().map(String::as_str).collect(), their_flags.iter().map(String::as_str).collect());
+            let what = format!("{compiler} {our_flags:?}");
+            if clang && our_flags.contains(&"-include") {
+                // Clang may take a precompiled header in the file's place.
+                assert!(ours.why_not(compiler, &our_flags, &lib).contains("-include with Clang"), "{what}");
+                continue;
+            }
+            let (key, relocatable) = ours.keyed(compiler, &our_flags, &lib).unwrap_or_else(|| panic!("{what}: not keyed"));
+            let (their_key, _) = theirs.keyed(compiler, &their_flags, &lib).unwrap_or_else(|| panic!("{what}: not keyed"));
+            let shared = shared && relocatable;
+            assert_eq!(key == their_key, shared, "{what}");
+            if shared {
+                let (object, their_object) =
+                    (ours.mapped_object(compiler, &our_flags, &lib), theirs.mapped_object(compiler, &their_flags, &lib));
+                assert!(object == their_object, "{what}: one key, two objects");
             }
         }
     }
@@ -820,8 +877,12 @@ fn a_directory_that_begins_like_the_tree_is_not_the_tree() {
 /// that an earlier key missed, each through the real wrapper.
 #[test]
 fn what_the_object_depends_on_is_in_the_key() {
+    // The library's directory has a name compilers escape when they print
+    // it (Clang writes the tab and the bytes outside ASCII in octal): a
+    // name misread is a file not read.
     let lib = tempfile::tempdir().unwrap();
-    let lib = fs::canonicalize(lib.path()).unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap().join("bibliothèque\tà part");
+    fs::create_dir_all(&lib).unwrap();
     for compiler in ["gcc", "clang"] {
         if !have(compiler) {
             continue;
@@ -851,10 +912,13 @@ fn what_the_object_depends_on_is_in_the_key() {
         // Put back, the key is what it was: old entries stay good.
         assert_eq!(key(&["-g", "-O2"]), base, "{compiler}: reverted");
 
-        // A header outside the tree.
+        // A header outside the tree: its tokens, and its bytes alone.
         fs::write(lib.join("lib.h"), "#define LIB_START 1\n").unwrap();
         assert_ne!(key(&["-g", "-O2"]), base, "{compiler}: a library header");
+        fs::write(lib.join("lib.h"), "#define LIB_START 0 /* zero */\n").unwrap();
+        assert_ne!(key(&["-g", "-O2"]), base, "{compiler}: a comment in a library header");
         fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
+        assert_eq!(key(&["-g", "-O2"]), base, "{compiler}: reverted");
 
         // The directory the compile runs in, with debug information.
         let elsewhere = unit.keyed_from("build/Thorn", compiler, &["-g", "-O2"], &lib).unwrap().0;
@@ -934,4 +998,69 @@ fn a_signal_during_the_check_after_the_compile_is_not_waited_out() {
     // nothing is waiting, neither is there anything to let go of).
     feed(1);
     std::thread::sleep(std::time::Duration::from_millis(100));
+}
+
+/// Flags that reach a compiler from somewhere other than its command line
+/// never pass the reader that decides what the cache can follow. A compiler
+/// set up to take some — a Clang with a configuration file, a GCC with a
+/// specs file, an override in the environment — is not keyed.
+#[test]
+fn a_compiler_given_flags_behind_its_command_line_is_not_keyed() {
+    let compile = |build: &Build, compiler: &str, env: &[(&str, &str)]| {
+        let dir = build.config.join("build/Thorn");
+        fs::write(dir.join("plain.c"), "int plain;\n").unwrap();
+        let out = build.wrap(compiler, &["-O2", "-c", "-o", "plain.o", "plain.c"]).current_dir(&dir).envs(env.iter().copied()).output().unwrap();
+        assert!(out.status.success(), "{compiler}: {}", text(&out.stderr));
+        build.events().pop().unwrap()
+    };
+    let found = |compiler: &str| {
+        let out = Command::new("sh").args(["-c", &format!("command -v {compiler}")]).output().unwrap();
+        fs::canonicalize(text(&out.stdout).trim()).unwrap()
+    };
+
+    if have("clang") {
+        // Clang reads `clang.cfg` beside its driver, unasked.
+        let build = Build::new("record");
+        let bin = tempfile::tempdir().unwrap();
+        let bin = fs::canonicalize(bin.path()).unwrap();
+        fs::copy(found("clang"), bin.join("clang")).unwrap();
+        let own = bin.join("clang").display().to_string();
+        assert!(compile(&build, &own, &[]).contains("\"key\""), "a copy of the driver is a compiler like the original");
+        fs::write(bin.join("clang.cfg"), "-grecord-command-line\n").unwrap();
+        // What a build attempt remembers of a compiler watches the files
+        // it was made from, not the places one could appear: the next
+        // attempt sees it.
+        let build = Build::new("record");
+        let event = compile(&build, &own, &[]);
+        assert!(event.contains("reads a configuration file") && !event.contains("\"key\""), "{event}");
+        // That answer is remembered too, and forgotten when the file goes.
+        assert!(compile(&build, &own, &[]).contains("reads a configuration file"));
+        fs::remove_file(bin.join("clang.cfg")).unwrap();
+        assert!(compile(&build, &own, &[]).contains("\"key\""));
+
+        let event = compile(&build, "clang", &[("CCC_OVERRIDE_OPTIONS", "# +-grecord-command-line")]);
+        assert!(event.contains("CCC_OVERRIDE_OPTIONS is set") && !event.contains("\"key\""), "{event}");
+    }
+
+    if have("gcc") {
+        // GCC reads `specs` from the directories it finds its own programs
+        // in; `GCC_EXEC_PREFIX` names another such directory (which then
+        // has to have the compiler proper, too).
+        let build = Build::new("record");
+        let says = |question: &str| text(&Command::new("gcc").arg(question).output().unwrap().stdout).trim().to_owned();
+        let version = Path::new(&says("-dumpmachine")).join(says("-dumpversion"));
+        let prefix = build.root.join("own-gcc/lib/gcc");
+        let (dir, programs) = (prefix.join(&version), build.root.join("own-gcc/libexec/gcc").join(&version));
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(says("-print-prog-name=cc1"), programs.join("cc1")).unwrap();
+        let prefix = format!("{}/", prefix.display());
+        assert!(compile(&build, "gcc", &[("GCC_EXEC_PREFIX", &prefix)]).contains("\"key\""));
+        fs::write(dir.join("specs"), "*cc1:\n+ -O3\n\n").unwrap();
+        // The directory is new to this attempt's memory of the compiler
+        // only through the variable, which is the same: a new attempt.
+        let later = Build::new("record");
+        let event = compile(&later, "gcc", &[("GCC_EXEC_PREFIX", &prefix)]);
+        assert!(event.contains("reads a specs file") && !event.contains("\"key\""), "{event}");
+    }
 }

@@ -42,7 +42,6 @@ impl Language {
             None => Err("the source file has no suffix to tell its language by".to_owned()),
         }
     }
-
 }
 
 /// A compile of one source file to one object.
@@ -68,8 +67,8 @@ pub struct Compile {
     /// `-fopenmp`: Clang then puts source locations in the object that
     /// `-ffile-prefix-map` does not reach.
     pub openmp: bool,
-    /// `-include` or `-imacros` is given: Clang looks for a precompiled
-    /// header beside such a file.
+    /// `-include` is given: Clang looks for a precompiled header beside
+    /// such a file.
     pub forced_include: bool,
     /// `-march=native` or one of its like: the compiler targets the
     /// processor it finds itself running on.
@@ -82,7 +81,6 @@ const WITH_VALUE: &[&str] = &[
     "-iquote",
     "-idirafter",
     "-include",
-    "-imacros",
     "-iprefix",
     "-iwithprefix",
     "-iwithprefixbefore",
@@ -98,6 +96,8 @@ const NOT_CACHED: &[&str] = &[
     "-E", "-S", "-M",
     // Its effect depends on where it stands among the input files.
     "-x",
+    // Reads a file the preprocessor's output does not name.
+    "-imacros",
     // Read lists from the compiler's own directories, and put source paths
     // where no path map reaches.
     "-fsanitize", "-fno-sanitize",
@@ -220,7 +220,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             let Some(value) = args.next() else {
                 return Err(format!("{flag} has nothing after it"));
             };
-            forced_include |= matches!(flag, "-include" | "-imacros");
+            forced_include |= flag == "-include";
             for list in [&mut preprocess, &mut keyed] {
                 list.push(arg.clone());
                 list.push(value.clone());
@@ -241,7 +241,8 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             openmp |= flag == "-fopenmp";
             // Not undone by a later `-march=<name>`: the tuning may still
             // be the host's, and which flag wins is the compiler's to say.
-            native |= matches!(flag, "-march=native" | "-mtune=native" | "-mcpu=native");
+            // (`-mcpu=native+nosve`: with extensions it is still the host.)
+            native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| flag.starts_with(native));
             preprocess.push(arg.clone());
             keyed.push(arg.clone());
         } else {
@@ -343,7 +344,8 @@ mod tests {
         assert!(parsed(&["-fopenmp", "-c", "-o", "a.o", "a.c"]).unwrap().openmp);
         assert!(!parsed(&["-fno-openmp", "-c", "-o", "a.o", "a.c"]).unwrap().openmp);
         assert!(parsed(&["-include", "pre.h", "-c", "-o", "a.o", "a.c"]).unwrap().forced_include);
-        assert!(parsed(&["-imacros", "pre.h", "-c", "-o", "a.o", "a.c"]).unwrap().forced_include);
+        assert!(parsed(&["-imacros", "pre.h", "-c", "-o", "a.o", "a.c"]).unwrap_err().contains("does not follow"));
+        assert!(parsed(&["-mcpu=native+nosve", "-c", "-o", "a.o", "a.c"]).unwrap().native);
     }
 
     #[test]

@@ -588,14 +588,15 @@ files it was made from.
 A key covers every byte of every file a compile reads, so an edit that
 changes no code — a comment, the spacing — is still a different key: debug
 information records columns, and the cache only ever hands back the exact
-object a compile would have produced. Three kinds of compile get no key at
-all, because no key could say what comes out of them: a source that pulls
-in a file through the assembler (`.incbin`), a compile that would use a
-precompiled header, and `-march=native` on a machine whose processor cores
-are not all of one kind (a laptop or workstation with performance and
-efficiency cores: there the compiler targets whichever core it happens to
-run on, and the same compile gives different objects from one run to the
-next).
+object a compile would have produced. Some compiles get no key at all,
+because no key could say what comes out of them: a source that pulls in a
+file through the assembler (`.incbin`), a compile that would use a
+precompiled header, a compiler that takes flags from a file of its own (a
+GCC `specs` file, a Clang configuration file), and `-march=native` on a
+machine whose processor cores are not all of one kind (a laptop or
+workstation with performance and efficiency cores: there the compiler
+targets whichever core it happens to run on, and the same compile gives
+different objects from one run to the next).
 
 The log is for the cactup that wrote it: after an update, `cactup cache
 report` may tell you to record the build again.

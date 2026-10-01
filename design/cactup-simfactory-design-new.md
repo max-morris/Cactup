@@ -4771,9 +4771,15 @@ so that two builds can be compared part by part:
   the compiler does not. Spacing and comments move the columns that debug
   information, `__builtin_COLUMN` and `std::source_location` record; Clang's
   debug information carries a checksum of each file. So an edit to a
-  comment, or to text inside `#if 0`, changes the key. A file a `#line`
-  names that cannot be read is keyed as absent (generated code names its
-  origin so; the file that was really read is named too).
+  comment, or to text inside `#if 0`, changes the key. The names are read
+  as the compilers write them, as C strings (Clang writes a tab or a byte
+  outside ASCII in octal); a marker whose name cannot be read leaves the
+  compile without a key. So does a file the preprocessor *entered* (marker
+  flag `1`) that cannot be read afterward, and the source itself. Only a
+  name that no marker enters — one a `#line` in the source gave, as
+  generated code names its origin — may be of no file, and is then keyed
+  as absent: the bytes compiled are those of the file the directive stands
+  in, which was entered.
 - **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
   and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
   order, plus the language by the source's suffix, and with debug
@@ -4782,8 +4788,9 @@ so that two builds can be compared part by part:
   lines from a list of what it knows. A flag that is not on it makes the
   whole command line "not cached"; so does one that names another input
   (plugins, profiles, precompiled headers, LTO, sanitizer lists), another
-  output (`-MD`, split DWARF, coverage), another program (`-B`, `-Wa,`), or
-  whose meaning depends on where it stands (`-x`). Optimization and debug
+  output (`-MD`, split DWARF, coverage), another program (`-B`, `-Wa,`),
+  whose meaning depends on where it stands (`-x`), or that reads a file the
+  preprocessor's output does not name (`-imacros`). Optimization and debug
   levels are listed one by one, since `-g…` also begins flags that record
   the command line or embed the source. Two families are admitted by
   prefix, because their members are too many to list and none of them names
@@ -4792,15 +4799,17 @@ so that two builds can be compared part by part:
 - **Compiler.** `objcache::identity`: the bytes of the file that would run
   (found as `execvp` finds it, relative and empty `PATH` entries included),
   the name it is run by (`clang` and `clang++` are one file), for GCC the
-  bytes of `cc1`, `cc1plus` and the assembler it names and of its `specs`
-  file if it has one, for Clang of the configuration files it says it
-  reads, and of every shared library each program loads (as the dynamic
-  loader resolves them), plus what the driver says of itself (`--version`
-  without the installation directory, and for GCC its built-in specs and
-  target). Not its path and not its modification time. The driver's own
-  bytes must say it is GCC or Clang: a wrapper (`mpicc`, a Cray `cc`, a
-  script) passes `--version` on to a compiler and is not one, and is not
-  cached. Fortran is not cached yet. The answer — also "not one the cache
+  bytes of `cc1`, `cc1plus` and the assembler it names, and of every shared
+  library each program loads (as the dynamic loader resolves them), plus
+  what the driver says of itself (`--version` without the installation
+  directory, and for GCC its built-in specs and target). Not its path and
+  not its modification time. The driver's own bytes must say it is GCC or
+  Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes `--version` on
+  to a compiler and is not one, and is not cached. Neither is a compiler
+  that takes flags from a file of its own — a GCC with a `specs` file on
+  disk, a Clang that says it reads a configuration file: what such a file
+  adds never passes the reader of the command line, so nothing that reader
+  declines would be declined. Fortran is not cached yet. The answer — also "not one the cache
   works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)
   and reused while every file it came from still has the same size, change
   time and inode. The wrapper starts the file that was identified, under
@@ -4823,8 +4832,9 @@ so that two builds can be compared part by part:
   known to read — locale, `SOURCE_DATE_EPOCH`, the loader's and the
   compiler's search paths, the loaded-modules lists, and the families MPI
   wrappers and vendor toolchains use. A variable that makes a compiler
-  write another file (`DEPENDENCIES_OUTPUT`, …) makes the compile not
-  cached. The whole environment cannot be keyed: Cactus's makefiles export
+  write another file (`DEPENDENCIES_OUTPUT`, …), or that rewrites its flags
+  behind the command line (`CCC_OVERRIDE_OPTIONS`, `GCC_COMPARE_DEBUG`),
+  makes the compile not cached. The whole environment cannot be keyed: Cactus's makefiles export
   well over a hundred variables into every recipe, many of them the
   configuration's own paths.
 
@@ -4837,10 +4847,9 @@ nothing it could key would say what comes out:
   `<header>.gch` beside a header in place of the header; its `-E` is asked
   to say so (`-fpch-preprocess`), and such a compile is not cached. Clang
   looks for one only beside a file given with `-include`, and its `-E`
-  does not say; a Clang compile with `-include` or `-imacros` is not
-  cached.
-- `-march=native` (or `-mtune=`, `-mcpu=`) on a host whose processors are
-  not all of one kind (performance and efficiency cores): the compiler
+  does not say; a Clang compile with `-include` is not cached.
+- `-march=native` (or `-mtune=`, `-mcpu=`, with or without extensions
+  after `native`) on a host whose processors are not all of one kind (performance and efficiency cores): the compiler
   targets the core it happens to run on. Seen on a hybrid Intel
   workstation: one compile, run twice, gave two objects (GCC resolved three
   different cache sizes across its sixteen cores).
@@ -4859,10 +4868,16 @@ cache will run it:
   with its trailing `/`, in the spelling cactup has for it and in its
   physical one.
 - The key maps what the compiler does not map in `-E` output — the file
-  names in line markers — and the keyed arguments and the working
-  directory, by the compiler's own rule: a plain string prefix at the start
-  of a name, the most specific directory first. `<root>-libs/include` is
-  not under `<root>/`, for the compiler and for the key alike.
+  names in line markers — and the working directory, by the compiler's own
+  rule: a plain string prefix at the start of a name, the most specific
+  directory first. `<root>-libs/include` is not under `<root>/`, for the
+  compiler and for the key alike.
+- Of the keyed arguments, only the values of `-isystem`, `-iquote`,
+  `-idirafter` and `-include` are mapped: the compiler uses them to find
+  files and keeps them nowhere but in the names of what it finds. Every
+  other argument is keyed as written. GCC records its command line in debug
+  information, unmapped, so a path of the tree in `-frandom-seed=<path>` is
+  part of the object, and two installations do not share such a key.
 - Each file's bytes are keyed under its mapped name. Cactus begins a build
   copy with `#line 1 "<absolute path of the original>"` when the option
   list asks for line directives; in a file's *first line* such a name is
@@ -4905,24 +4920,38 @@ nobody has to find out:
 
 - *What the compiler reads that the preprocessor does not name.* The key
   covers the files in `-E`'s line markers. A file read some other way that
-  this section does not list is not in it. Known and handled: assembler
-  includes, precompiled headers, `#embed` (its bytes are in the text).
-  Known and excluded by the flag list: plugins, profiles, sanitizer lists,
-  module maps.
+  this section does not list is not in it. Known and handled: precompiled
+  headers, `#embed` (its bytes are in the text). Known and excluded by the
+  flag list: plugins, profiles, sanitizer lists, module maps, `-imacros`.
+- *Assembler includes are found by their spelling.* `.incbin` or
+  `.include` followed by a quote, in the preprocessed text. A source that
+  assembles the directive from pieces (`".inc" "bin \"blob\""`) is not
+  noticed, and the file it pulls in is not in the key. Nobody writes that
+  by accident.
 - *A file changed and changed back* between the key and the check after the
   compile, with the compile reading the changed bytes in between, passes
   the check.
 - *The flag families.* A `-W…` or `-m…` flag that names a file or records
   something outside the key would be admitted. None is known besides the
   two excepted.
+- *Flags from behind the command line.* The reader sees the command line.
+  Known other sources are ruled out: a response file, a GCC `specs` file, a
+  Clang configuration file, the override variables. Flags a distribution
+  built into its compiler are part of the compiler, and of its identity;
+  one that built in a flag the reader would decline is not noticed.
 - *The compiler's identity.* Files a compiler reads by rules of its own
   that are named nowhere above — a plugin directory, lists in Clang's
-  resource directory, whatever a later version adds — are not hashed.
+  resource directory, whatever a later version adds — are not hashed. And
+  the remembered identity watches the files it was computed from, not the
+  places where one could appear: a `specs` file or a Clang configuration
+  file *added* while a build attempt runs is seen by the next attempt, not
+  by the rest of this one.
 - *The path map.* The trial shows the map holds for the trial's compile. A
-  flag on the list that puts an unmapped path into the object where the
-  trial does not look would give two installations one key for two objects
-  (differing in a recorded path, not in code). Known and excluded:
-  sanitizers, Clang's OpenMP. Audit mode (the serving milestone's gate) is
+  flag on the list that makes the compiler put an unmapped path *it worked
+  out itself* into the object, where the trial does not look, would give
+  two installations one key for two objects (differing in a recorded path,
+  not in code). Known and excluded: sanitizers, Clang's OpenMP. (A path
+  written in a flag is not such a case: it is keyed as written.) Audit mode (the serving milestone's gate) is
   what tries it on real compiles.
 - *The environment.* A variable on no list that changes some compiler's
   output. The environment-setup digest in the platform part and the

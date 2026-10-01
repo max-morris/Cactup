@@ -3,11 +3,10 @@
 //!
 //! A compiler is identified by the bytes of what actually does the work —
 //! the driver the command names, for GCC the back ends and assembler it
-//! runs and its `specs` file if it has one, for Clang the configuration
-//! files it reads, and the shared libraries each program loads (a
-//! distribution's Clang is a small driver in front of `libclang-cpp.so`) —
-//! plus what it says about itself (version, target, built-in specs) and
-//! the name it was run by (`clang` and `clang++` are one file). Its path
+//! runs, and the shared libraries each program loads (a distribution's
+//! Clang is a small driver in front of `libclang-cpp.so`) — plus what it
+//! says about itself (version, target, built-in specs) and the name it was
+//! run by (`clang` and `clang++` are one file). Its path
 //! is not part of it, so two installations of the same compiler agree; its
 //! modification time is not either, so one compiler copied twice does.
 //!
@@ -15,6 +14,13 @@
 //! (`mpicc`, a Cray `cc`, a site script) adds flags and picks a compiler by
 //! rules of its own; it passes `--version` through to the compiler, and so
 //! looks like one. The driver's own bytes have to say what it is.
+//!
+//! For the same reason a compiler that takes flags from a file of its own
+//! is not cached: a GCC with a `specs` file on disk, a Clang that reads a
+//! configuration file. What such a file adds never passes the reader of
+//! the command line (`compile`), so nothing the cache declines there — a
+//! flag that records the command line, one that puts unmapped paths into
+//! the object — would be declined.
 //!
 //! What this cannot see: files a compiler reads by rules of its own that
 //! are named nowhere here — a plugin directory, lists in Clang's resource
@@ -250,8 +256,7 @@ fn trial_object(compiler: &Path, name: &OsStr, root: &Path, config: &str) -> Opt
         .arg(&src)
         .arg("-I")
         .arg(&bindings)
-        .arg(format!("-ffile-prefix-map={}/=./", root.display()))
-        .arg(format!("-ffile-prefix-map={}/=./configs/@config/", config.display()))
+        .args(super::key::trial_flags(root, &config))
         .current_dir(&scratch)
         .env("PWD", &scratch)
         .stdin(Stdio::null())
@@ -316,18 +321,25 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
     let mut hasher = Hasher::new("compiler");
     hasher.feed(name.as_bytes());
     hasher.feed(bytes_digest(&bytes).as_bytes());
-    // The programs that do the work, each with the libraries it loads, and
-    // the files that steer them.
+    // The programs that do the work, each with the libraries it loads.
     let mut programs = vec![driver.clone()];
-    let mut steering = Vec::new();
     match family {
         Family::Clang => {
-            // What it says, without where it is installed; and the
-            // configuration files it says it reads.
+            // What it says, without where it is installed. A configuration
+            // file it says it reads rules it out (and is watched, so that
+            // the answer changes when the file goes).
             for line in says.lines() {
                 match line.split_once(": ") {
                     Some(("InstalledDir", _)) => {}
-                    Some(("Configuration file", file)) => steering.push(PathBuf::from(file.trim())),
+                    Some(("Configuration file", file)) => {
+                        let file = Path::new(file.trim());
+                        files.extend(Seen::of(file));
+                        bail!(
+                            "{} reads a configuration file ({}), which can add flags the cache does not see",
+                            path.display(),
+                            file.display()
+                        );
+                    }
                     _ => hasher.feed(line.as_bytes()),
                 }
             }
@@ -356,20 +368,18 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
                 }
             }
             // The rules by which the driver builds their command lines: the
-            // built-in ones, and a `specs` file that overrides them (an
-            // absolute path back means there is one).
+            // built-in ones. A `specs` file on disk overrides them (an
+            // absolute path back means there is one), and rules it out.
             for question in ["-dumpspecs", "-dumpmachine"] {
                 hasher.feed(ask(path, &[question])?.as_bytes());
             }
             let specs = ask(path, &["-print-file-name=specs"])?;
-            if Path::new(specs.trim()).is_absolute() {
-                steering.push(PathBuf::from(specs.trim()));
+            let specs = Path::new(specs.trim());
+            if specs.is_absolute() {
+                files.extend(Seen::of(specs));
+                bail!("{} reads a specs file ({}), which can add flags the cache does not see", path.display(), specs.display());
             }
         }
-    }
-    for file in steering {
-        hasher.feed(file_digest(&file)?.as_bytes());
-        files.push(Seen::of(&file)?);
     }
     let mut libraries: Vec<PathBuf> = programs.iter().flat_map(|program| loaded_libraries(program)).collect();
     libraries.sort();
