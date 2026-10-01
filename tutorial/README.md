@@ -183,26 +183,45 @@ Constraints the notebooks must respect (each found by reading the code):
   homes and knobs), `--machine mylab` on the commands that use it, fixing
   `[hardware]` as the first exercise, and `machine delete mylab` plus
   `machine forget` at the end. `--from-existing` copies the optionlists and
-  scripts verbatim but writes `mylab/meta.toml` afresh, without the
-  original's comments, with `[paths]` spelled out and `[hardware]`
-  autodetected; 6a shows the commented original (the file `machine show
-  cactup-tutorial` names) next to the attendee's copy, since its comments
-  explain what the first exercise fixes. The copy also keeps
-  `nickname = "cactup-tutorial"`, which the first exercise fixes along with
-  `[hardware]`. A config built for `cactup-tutorial` is
-  refused on `mylab` (`check_machine`), so submits there use
-  `--ignore-machine` on the stock `tutorial`. 6b builds nothing. `mylab`
-  lives from the start of 6a to the end of 6b: `machine create` refuses an
-  existing name, so catch-up 6a moves a leftover `mylab` to
-  `~/tutorial-saved/<time>/mylab` (and forgets it) and says so, and that the
-  notebook continues from its `machine create` cell. Catch-up 6b
-  creates `mylab` with 6a's finished entry if it is missing, and otherwise
-  checks the keys 6a sets (`[hardware]`: cores and memory, and the rest of
-  6a's edits): any that differ from 6a's finished values, for example because
-  the `[hardware]` exercise was skipped and `/proc`'s values are still there,
-  it sets, after saving the attendee's `meta.toml` to `~/tutorial-saved/`,
-  with one line saying so. It touches only 6a's keys, so running it again in
-  the middle of 6b keeps 6b's additions.
+  scripts verbatim but writes `mylab/meta.toml` afresh: without the
+  original's comments, with `[paths]` naming the simulation and install
+  homes, `[hardware]` autodetected, `nickname` set to this host's short name
+  (`cactup-tutorial`, which the first exercise fixes along with
+  `[hardware]`), and `[cactup]` recording the MDB generation and the entry
+  it was copied from. 6a shows the commented original
+  (`~/.cactup/mdb/gen-1/cactup-tutorial/meta.toml`: `gen-1` links to the
+  content-addressed commit directory, whose name changes with any edit
+  under `mdb/`) next to the attendee's copy, since its comments explain what
+  the first exercise fixes. 6a also shows `meta.toml`'s strictness (a
+  misspelled key, put back) and the generation gate (`mdb-generation = 2`,
+  put back). A config built for `cactup-tutorial` is refused on `mylab`
+  (`check_machine`), so submits there use `--ignore-machine` on the stock
+  `tutorial`. 6b builds nothing: its optionlist variant `small` is shown with
+  `machine show --variants` only (a `--virtual-executable` build would copy
+  a 328 MB executable and leave the config `[incomplete]`). Its new queue
+  `long` maps onto the `batch` partition, and since the stock config's
+  recorded `compatible-queues` lack it, its `-q long` submits pass
+  `--force-queue`. Its
+  discovery exercise gives `mylab` a `hostname.regexp`, then a `discover.py`,
+  for another host name, and tries them with `--hostname`, so `mylab` never
+  claims this host. Every submit uses a fresh simulation name (or
+  `--overwrite`): cactup treats the active restart of a simulation whose
+  `simulation.toml` is less than 60 seconds old as live without asking SLURM,
+  so a quick resubmit of the same simulation would chain behind a finished
+  job.
+
+  `mylab` lives from the start of 6a to the end of 6b: `machine create`
+  refuses an existing name, so catch-up 6a moves a leftover `mylab` to
+  `~/tutorial-saved/<time>/mylab` and says so, and that the notebook makes
+  it anew in its `machine create` cell. Catch-up 6b creates `mylab` with 6a's
+  finished entry if it is missing, and otherwise sets the lines 6a sets
+  (`nickname`, `max-cpus-per-node`, `memory`, `mdb-generation`, and 6a's
+  misspelled `max-cpu-per-node`) wherever they differ from 6a's finished
+  values, after saving the attendee's `meta.toml` to `~/tutorial-saved/`,
+  with one line saying so. It touches only those lines, so running it again
+  in the middle of 6b keeps 6b's additions. Catch-up's check for user
+  entries that claim this host runs a `discover.py` (as cactup does, a
+  failing one claiming nothing) rather than assuming it claims.
 - **7:** walltime chaining runs on the `short` partition (3 minutes), in two
   segments; the parfile's checkpoint and recovery path is validated before the
   notebook is written. Every `short` submit passes `--checkpt-buffer
@@ -296,17 +315,19 @@ configs, simulations). So:
 
 - Every notebook's first code cell runs `cactup-tutorial-catch-up N`
   (`image/rootfs/usr/local/bin/`; each notebook's stage adds that
-  notebook's steps, so far those of notebooks 1 to 5), which
+  notebook's steps, so far those of notebooks 1 to 6b), which
   brings the container to the state notebook N assumes (installing from the
   mirrors and building from the bakes if needed, selecting the right
   installation and config). It is idempotent and prints one line per thing it
   had to do, nothing when there was nothing to do. It also undoes what would
-  derail later notebooks: it removes a `~/.hostname`, a user overlay named
-  `cactup-tutorial` and a cached detection of any other machine, and moves
-  aside (to `~/tutorial-saved/`) any other user machine whose
-  `hostname.regexp` or `discover.py` claims this host, for example one made
-  without `--no-discover` (with two claimants cactup refuses to pick one
-  without a terminal, and asks in a cell). Its own
+  derail later notebooks: it removes a `~/.hostname` and forgets a cached
+  detection of any other machine, and it moves aside (to
+  `~/tutorial-saved/`, saying why) a user overlay named `cactup-tutorial`
+  (which would replace the tutorial's entry) and any other user machine
+  whose `hostname.regexp` matches this host or whose `discover.py`, run as
+  cactup runs it, claims it: for example one made without `--no-discover`
+  (with two claimants cactup refuses to pick one without a terminal, and
+  asks in a cell). Its own
   cactup calls never run on a terminal (so they never trigger the update
   check). For N ≥ 2 it runs the installer if cactup is missing and applies
   the pending update with `cactup update` itself, so an attendee who skipped

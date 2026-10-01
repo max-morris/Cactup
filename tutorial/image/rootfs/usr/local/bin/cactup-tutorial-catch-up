@@ -39,6 +39,9 @@ NOTEBOOKS = {
     # Notebook 4b ends by switching back to the stock tutorial config.
     "4b": {"cactup": True, "install": True, "tutorial": True},
     "5": {"cactup": True, "install": True, "tutorial": True},
+    # Notebook 6a makes the machine entry mylab; 6b goes on with it.
+    "6a": {"cactup": True, "install": True, "tutorial": True, "mylab": "fresh"},
+    "6b": {"cactup": True, "install": True, "tutorial": True, "mylab": "finished"},
 }
 THORNLIST = "/opt/cactup-tutorial/thornlists/tutorial.th"
 
@@ -94,8 +97,29 @@ def saved_dir() -> Path:
 # -- the machine ----------------------------------------------------------------
 
 
+def discover_claims(script: Path) -> bool:
+    """Whether a discover.py's is_machine() says yes for this host, run as
+    cactup runs it; one that fails or hangs claims nothing."""
+    # Like cactup: the script's own output goes to stderr, and anything it
+    # raises, even SystemExit, means no claim.
+    code = ("import contextlib, runpy, sys\n"
+            "claims = False\n"
+            "try:\n"
+            "    with contextlib.redirect_stdout(sys.stderr):\n"
+            "        claims = bool(runpy.run_path(sys.argv[1])['is_machine'](sys.argv[2]))\n"
+            "except BaseException:\n"
+            "    pass\n"
+            "print(claims)")
+    try:
+        proc = subprocess.run(["python3", "-c", code, str(script), MACHINE], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "True"
+
+
 def claims_this_host(entry: Path) -> bool:
-    if (entry / "discover.py").exists():
+    if (entry / "discover.py").exists() and discover_claims(entry / "discover.py"):
         return True
     try:
         pattern = (entry / "hostname.regexp").read_text().strip()
@@ -119,9 +143,11 @@ def machine(forget: bool = True) -> None:
     if user.is_dir():
         for entry in sorted(user.iterdir()):
             if entry.is_dir() and (entry.name == MACHINE or claims_this_host(entry)):
+                why = ("it has the tutorial machine's name, so cactup would use it instead"
+                       if entry.name == MACHINE else "it claims this host")
                 dest = saved_dir() / entry.name
                 shutil.move(str(entry), dest)
-                say(f"moved your machine entry {entry.name} to {dest} (it claims this host)")
+                say(f"moved your machine entry {entry.name} to {dest} ({why})")
     try:
         detected = json.loads((CACTUP_HOME / "database.json").read_text()).get("detected") or {}
     except (OSError, ValueError):
@@ -129,6 +155,52 @@ def machine(forget: bool = True) -> None:
     if forget and detected.get("name") not in (None, MACHINE) and CACTUP.exists():
         cactup("machine", "forget")
         say(f"forgot the cached machine {detected['name']}")
+
+
+# What notebook 6a sets in its machine entry, mylab: the lines catch-up 6b
+# checks (a pattern for each line, and the line 6a leaves). The first
+# pattern also takes 6a's deliberate typo.
+MYLAB = "mylab"
+MYLAB_LINES = [
+    (r"^nickname\s*=.*$", 'nickname = "mylab"'),
+    (r"^max-cpus?-per-node\s*=.*$", "max-cpus-per-node = 4"),
+    (r"^memory\s*=.*$", "memory = 7372"),
+    (r"^mdb-generation\s*=.*$", "mdb-generation = 1"),
+]
+
+
+def mylab(state: str) -> None:
+    """Notebook 6a's machine entry: gone before 6a (`machine create` refuses
+    an existing name), as 6a leaves it before 6b."""
+    entry = CACTUP_HOME / "machines" / MYLAB
+    if state == "fresh":
+        if entry.exists():
+            dest = saved_dir() / MYLAB
+            shutil.move(str(entry), dest)
+            say(f"moved your machine entry mylab to {dest}; this notebook makes it anew in its "
+                "`machine create` cell")
+        return
+    if not entry.exists():
+        cactup("machine", "create", MYLAB, "--from-existing", MACHINE, "--no-discover", "--silent")
+        meta = entry / "meta.toml"
+        meta.write_text(set_lines(meta.read_text()))
+        say("made your machine entry mylab as notebook 6a leaves it")
+        return
+    meta = entry / "meta.toml"
+    text = meta.read_text()
+    fixed = set_lines(text)
+    if fixed != text:
+        copy = saved_dir() / "mylab-meta.toml"
+        copy.write_text(text)
+        meta.write_text(fixed)
+        say(f"set mylab's nickname, [hardware] and mdb-generation as notebook 6a does; your "
+            f"meta.toml is at ~/{copy.relative_to(HOME)}")
+
+
+def set_lines(text: str) -> str:
+    for pattern, line in MYLAB_LINES:
+        text = re.sub(pattern, line, text, count=1, flags=re.M)
+    return text
 
 
 # -- cactup ---------------------------------------------------------------------
@@ -295,6 +367,8 @@ def main(argv: list[str]) -> int:
         restore_edited()
     if needs.get("tutorial"):
         ensure_tutorial()
+    if needs.get("mylab"):
+        mylab(needs["mylab"])
     return 0
 
 

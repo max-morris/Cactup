@@ -149,3 +149,78 @@ def test_the_active_config_must_be_tutorial_itself() -> None:
     assert module.active_is_tutorial("- tutorial [built 2026-10-01 09:57] (active)\n")
     assert not module.active_is_tutorial("- tutorial [built 2026-10-01 09:57]\n"
                                          "- tutorial-pinned [built 2026-10-01 10:02] (active)\n")
+
+
+def test_a_discover_py_claims_this_host_only_if_it_says_so(install: Path) -> None:
+    module = catch_up(install)
+    entry = install / ".cactup/machines/lab"
+    entry.mkdir(parents=True)
+    (entry / "discover.py").write_text("def is_machine(hostname):\n    return hostname.endswith('.example.org')\n")
+    assert not module.claims_this_host(entry)
+    (entry / "discover.py").write_text("def is_machine(hostname):\n    return hostname == 'cactup-tutorial'\n")
+    assert module.claims_this_host(entry)
+    (entry / "discover.py").write_text("def is_machine(hostname):\n    raise ValueError(hostname)\n")
+    assert not module.claims_this_host(entry)
+    # What the script prints isn't its answer, and exiting isn't one either.
+    (entry / "discover.py").write_text("def is_machine(hostname):\n    print(True)\n    return False\n")
+    assert not module.claims_this_host(entry)
+    (entry / "discover.py").write_text("import sys\n\ndef is_machine(hostname):\n    print(True)\n    sys.exit(0)\n")
+    assert not module.claims_this_host(entry)
+
+
+MYLAB_AS_CREATED = """[machine]
+name = "mylab"
+nickname = "cactup-tutorial"
+
+[hardware]
+max-cpu-per-node = 16
+memory = 63795
+
+[queues.long]
+name = "batch"
+
+[cactup]
+mdb-generation = 2
+"""
+
+
+def test_catch_up_6b_sets_6as_lines_and_keeps_the_rest(install: Path, capsys) -> None:
+    module = catch_up(install)
+    meta = install / ".cactup/machines/mylab/meta.toml"
+    meta.parent.mkdir(parents=True)
+    meta.write_text(MYLAB_AS_CREATED)
+    module.mylab("finished")
+    text = meta.read_text()
+    for line in ('nickname = "mylab"', "max-cpus-per-node = 4", "memory = 7372", "mdb-generation = 1",
+                 "[queues.long]"):
+        assert line in text
+    out = capsys.readouterr().out
+    assert "set mylab's nickname, [hardware] and mdb-generation as notebook 6a does" in out
+    [saved] = (install / "tutorial-saved").iterdir()
+    assert (saved / "mylab-meta.toml").read_text() == MYLAB_AS_CREATED
+    # As 6a leaves it: nothing to do.
+    module.mylab("finished")
+    assert capsys.readouterr().out == ""
+
+
+def test_catch_up_6a_moves_a_leftover_mylab_away(install: Path, capsys) -> None:
+    module = catch_up(install)
+    entry = install / ".cactup/machines/mylab"
+    entry.mkdir(parents=True)
+    (entry / "meta.toml").write_text(MYLAB_AS_CREATED)
+    module.mylab("fresh")
+    assert not entry.exists()
+    assert "this notebook makes it anew in its `machine create` cell" in capsys.readouterr().out
+    [saved] = (install / "tutorial-saved").iterdir()
+    assert (saved / "mylab/meta.toml").exists()
+
+
+def test_a_user_entry_named_like_the_tutorial_machine_is_moved_with_its_reason(install: Path, capsys) -> None:
+    module = catch_up(install)
+    entry = install / ".cactup/machines/cactup-tutorial"
+    entry.mkdir(parents=True)
+    (entry / "meta.toml").write_text("[machine]\n")
+    module.machine(forget=False)
+    out = capsys.readouterr().out
+    assert not entry.exists()
+    assert "it has the tutorial machine's name, so cactup would use it instead" in out

@@ -110,6 +110,46 @@ EXPECT = {
         r"the source tree matches what this config was built from",
         r"Moved simulation wave-pinned to",
     ],
+    "06a": [
+        r"- cactup-tutorial \(Cactup tutorial\) \[personal\] \(detected\)",
+        r"\./hostname\.regexp",
+        r"Created machine mylab in the user MDB",
+        r"max-cpus-per-node = \d+",
+        r"nickname: mylab",
+        r"hardware: max-cpus-per-node=4 .*\n?.*memory=7372 MB",
+        r"unknown field `max-cpu-per-node`",
+        r"mdb-generation = 1",
+        r"was written for MDB\s+generation 2, which requires a newer cactup",
+        r"config \"tutorial\" was built for machine \"cactup-tutorial\" but this is machine \"mylab\"",
+        r"Submitted lab1 restart output-0000 as job",
+        r"state:\s+FINISHED",
+        r"machine:\s+mylab",
+        r"--machine=mylab --restart-id=0",
+        r"Moved simulation lab1 to",
+    ],
+    "06b": [
+        r"long  max-walltime 01:00:00",
+        r"only compatible with queue\(s\) debug, short, batch \(not \"long\"\)",
+        r"queue = \"long\"\nQUEUE = \"batch\"",
+        r"submitscripts: default \(default\), test \[test\], long",
+        r"#SBATCH --comment=long-queue",
+        r"the long queue is for multithreaded runs, but this one asks for 1 thread per task",
+        r"Lab note: set for one command",
+        r"(Created custom knob|Set) lab-note = kept by cactup",
+        r"Lab note: kept by cactup",
+        r"Deleted custom knob lab-note",
+        r"- small\n\s+The CPU build without Cottonmouth, for the short and long queues\n\s+compatible queues: short, long",
+        r"disabled thorns: Cottonmouth/CottonmouthZ4c4m, Cottonmouth/CottonmouthLinearWaveID",
+        r"universes: pinned, nice",
+        r"LAB_UNIVERSE=nice\nLAB_WRAPPED=yes",
+        r"Detected machine changed from cactup-tutorial to mylab",
+        r"Detected machine changed from mylab to cactup-tutorial",
+        r"Detected machine changed from cactup-tutorial to mylab",
+        r"Detected machine changed from mylab to cactup-tutorial",
+        r"Moved simulation u1 to",
+        r"Deleted user-MDB machine mylab",
+        r"cactup-tutorial \(System MDB",
+    ],
     "02": [
         r"Built config tutorial",
         r"status: complete",
@@ -172,6 +212,46 @@ RERUN = {
         r"built with local edits, now reverted",
         r"the source tree matches what this config was built from",
         r"Moved simulation wave-pinned to",
+    ],
+    "06a": [
+        r"- cactup-tutorial \(Cactup tutorial\) \[personal\] \(detected\)",
+        r"\./hostname\.regexp",
+        r"Created machine mylab in the user MDB",
+        r"max-cpus-per-node = \d+",
+        r"nickname: mylab",
+        r"hardware: max-cpus-per-node=4 .*\n?.*memory=7372 MB",
+        r"unknown field `max-cpu-per-node`",
+        r"mdb-generation = 1",
+        r"was written for MDB\s+generation 2, which requires a newer cactup",
+        r"config \"tutorial\" was built for machine \"cactup-tutorial\" but this is machine \"mylab\"",
+        r"Submitted lab1 restart output-0000 as job",
+        r"state:\s+FINISHED",
+        r"machine:\s+mylab",
+        r"--machine=mylab --restart-id=0",
+        r"Moved simulation lab1 to",
+    ],
+    "06b": [
+        r"long  max-walltime 01:00:00",
+        r"only compatible with queue\(s\) debug, short, batch \(not \"long\"\)",
+        r"queue = \"long\"\nQUEUE = \"batch\"",
+        r"submitscripts: default \(default\), test \[test\], long",
+        r"#SBATCH --comment=long-queue",
+        r"the long queue is for multithreaded runs, but this one asks for 1 thread per task",
+        r"Lab note: set for one command",
+        r"(Created custom knob|Set) lab-note = kept by cactup",
+        r"Lab note: kept by cactup",
+        r"Deleted custom knob lab-note",
+        r"- small\n\s+The CPU build without Cottonmouth, for the short and long queues\n\s+compatible queues: short, long",
+        r"disabled thorns: Cottonmouth/CottonmouthZ4c4m, Cottonmouth/CottonmouthLinearWaveID",
+        r"universes: pinned, nice",
+        r"LAB_UNIVERSE=nice\nLAB_WRAPPED=yes",
+        r"Detected machine changed from cactup-tutorial to mylab",
+        r"Detected machine changed from mylab to cactup-tutorial",
+        r"Detected machine changed from cactup-tutorial to mylab",
+        r"Detected machine changed from mylab to cactup-tutorial",
+        r"Moved simulation u1 to",
+        r"Deleted user-MDB machine mylab",
+        r"cactup-tutorial \(System MDB",
     ],
 }
 
@@ -415,6 +495,30 @@ def stop_in_hacking(box: Container, nb5: str, out_dir: Path, then: str) -> list[
     return problems
 
 
+# Where to stop a notebook partway before running it again from the top (the
+# last cell to run, by a piece of its text), and what its catch-up may say
+# then.
+STOPS = {
+    "06a": ("cactup sim show lab1", r"moved your machine entry mylab to"),
+    "06b": ("node7.example.org", r"$^"),
+}
+
+
+def stop_and_rerun(box: Container, notebook: str, out_dir: Path) -> list[str]:
+    """NOTEBOOK run up to its stop cell (STOPS), then again from the top: as
+    on a second run."""
+    marker, allowed = STOPS[number(notebook)]
+    cells = code_cells(box, notebook)
+    stop = next((i for i, c in enumerate(cells) if marker in c), None)
+    if stop is None:
+        return [f"stop and rerun: {notebook} has no cell with {marker!r}"]
+    scratch_notebook(box, "zz-stop.ipynb", cells[1:stop + 1])
+    first = box.run("zz-stop.ipynb", out_dir)
+    if first["error"]:
+        return [f"stop and rerun: {notebook}'s first cells failed:\n{first['error']}"]
+    return check(f"{notebook} after stopping partway:", notebook, box.run(notebook, out_dir), RERUN, True, allowed)
+
+
 def reset_then_catch_up(box: Container, out_dir: Path) -> list[str]:
     """A full reset run from a notebook, then catch-up in the same kernel,
     and a kernel started afterward: the server and the kernel's shell must
@@ -499,6 +603,11 @@ def main() -> int:
                 problems += found
                 print(f"{'ok  ' if not found else 'FAIL'} {then} after stopping in notebook 5's hacking",
                       flush=True)
+        for nb in (nb for nb in notebooks if number(nb) in STOPS):
+            (out / "stopped").mkdir(exist_ok=True)
+            found = stop_and_rerun(box, nb, out / "stopped")
+            problems += found
+            print(f"{'ok  ' if not found else 'FAIL'} {nb} again, after stopping partway", flush=True)
         found = reset_then_catch_up(box, out / "again")
         problems += found
         print(f"{'ok  ' if not found else 'FAIL'} a full reset from a notebook, then catch-up", flush=True)
