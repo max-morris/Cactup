@@ -134,7 +134,7 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
         // clobbers the worktree. So pay for the status walk here too, even
         // though a bare URL mismatch is the rare case: skipping it would
         // silently drop edits that were never backed up.
-        let (modified, untracked) = status_paths(&repo).unwrap_or_default();
+        let (modified, untracked) = status_paths(&repo, Untracked::List).unwrap_or_default();
         return Ok(Probe {
             state: RepoState::Dirty(DirtyReason::RemoteUrlChanged {
                 on_disk: on_disk_url,
@@ -157,7 +157,7 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
 
     // Worktree + index state. `into_iter(..)` covers both HEAD↔index (staged)
     // and index↔worktree (unstaged + untracked) changes.
-    let (modified, untracked) = status_paths(&repo)?;
+    let (modified, untracked) = status_paths(&repo, Untracked::List)?;
     if !modified.is_empty() {
         return Ok(dirty(DirtyReason::WorktreeModified(modified), untracked));
     }
@@ -827,21 +827,41 @@ pub fn set_origin_url(repo_dir: &Path, url: &str) -> Res<()> {
     Ok(())
 }
 
-/// The branch and commit a repo is currently on, for post-pass assertions and
-/// `fetch-state.toml`.
+/// gix status threads per walk inside a [`crate::par::parallel_map`] fan-out.
+const FAN_OUT_STATUS_THREADS: usize = 4;
+
+/// Whether a status walk also lists untracked files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Untracked {
+    /// Walk every directory of the worktree for files git does not know.
+    List,
+    /// Skip that walk: the caller would throw the list away.
+    Skip,
+}
+
 /// `(modified, untracked)` for a repo. Modified = tracked files differing from
 /// HEAD or the index (staged *and* unstaged); untracked = files git does not
-/// know about. Shared by [`probe`] and [`source_state`], which need the same
-/// walk but draw different conclusions from it.
-fn status_paths(repo: &gix::Repository) -> Res<(Vec<String>, Vec<String>)> {
+/// know about (always empty with [`Untracked::Skip`]). Shared by [`probe`] and
+/// [`source_diff`], which need the same walk but draw different conclusions
+/// from it.
+fn status_paths(repo: &gix::Repository, untracked_files: Untracked) -> Res<(Vec<String>, Vec<String>)> {
     let walk_span = crate::timing::span("gix status walk");
     let mut modified = Vec::new();
     let mut untracked = Vec::new();
-    let mut iter = repo
-        .status(gix::progress::Discard)
-        .with_context(|| "failed to prepare status")?
-        .into_iter(Vec::<BString>::new())
-        .with_context(|| "failed to run status")?;
+    let mut platform = repo.status(gix::progress::Discard).with_context(|| "failed to prepare status")?;
+    if untracked_files == Untracked::Skip {
+        platform = platform.untracked_files(gix::status::UntrackedFiles::None);
+    }
+    // Inside a fan-out over repos the walks already run side by side, so
+    // gix's own per-walk pool (as wide as the machine: ~100 threads per walk
+    // on a big node, times the fan-out) only adds threads. A few are kept so
+    // that one large repo finishing last still overlaps its lstats.
+    if crate::par::in_fan_out() {
+        platform = platform
+            .index_worktree_options_mut(|o| o.thread_limit = Some(FAN_OUT_STATUS_THREADS));
+    }
+    let mut iter =
+        platform.into_iter(Vec::<BString>::new()).with_context(|| "failed to run status")?;
     for item in iter.by_ref() {
         let item = item.with_context(|| "status iteration failed")?;
         match item {
@@ -902,7 +922,9 @@ fn status_paths(repo: &gix::Repository) -> Res<(Vec<String>, Vec<String>)> {
 /// excluded on purpose: the Einstein Toolkit test harness leaves output inside
 /// the source tree, and that must not read as a source change.
 pub fn source_state(repo_dir: &Path) -> Res<String> {
-    Ok(source_diff(repo_dir)?.state())
+    // The untracked list plays no part in the state, so skip the directory
+    // walk that would find it.
+    Ok(source_diff_walking(repo_dir, Untracked::Skip)?.state())
 }
 
 /// The full reading behind [`source_state`], for `cactup inst delta` /
@@ -933,6 +955,10 @@ impl SourceDiff {
 }
 
 pub fn source_diff(repo_dir: &Path) -> Res<SourceDiff> {
+    source_diff_walking(repo_dir, Untracked::List)
+}
+
+fn source_diff_walking(repo_dir: &Path, untracked_files: Untracked) -> Res<SourceDiff> {
     let repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
     let head_ref = repo.head().with_context(|| "failed to read HEAD")?;
@@ -943,7 +969,7 @@ pub fn source_diff(repo_dir: &Path) -> Res<SourceDiff> {
         .id()
         .map(|id| id.detach())
         .unwrap_or_else(|| ObjectId::null(gix::hash::Kind::Sha1));
-    let (modified, untracked) = status_paths(&repo)?;
+    let (modified, untracked) = status_paths(&repo, untracked_files)?;
     let newest_mtime = modified
         .iter()
         .filter_map(|rel| std::fs::metadata(repo_dir.join(rel)).ok()?.modified().ok())
@@ -954,6 +980,8 @@ pub fn source_diff(repo_dir: &Path) -> Res<SourceDiff> {
     Ok(SourceDiff { head, branch, modified, untracked, newest_mtime })
 }
 
+/// The branch and commit a repo is currently on, for post-pass assertions and
+/// `fetch-state.toml`.
 pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     let repo = gix::open(repo_dir)
         .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
@@ -1244,6 +1272,72 @@ mod align_tests {
         assert_eq!(align_now(&dir, &branch, false), tip);
         assert_eq!(std::fs::metadata(dir.join("c")).unwrap().permissions().mode() & 0o111, 0);
         assert_clean_by_stat(&dir, tip);
+    }
+
+    /// Status walks are read-only (the index is never written back) and list
+    /// untracked files only when asked; skipping that walk changes nothing
+    /// about the tracked changes reported.
+    #[test]
+    fn status_walks_are_read_only_and_skip_the_untracked_walk_on_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &[("a", "alpha\n", false)]);
+        std::fs::write(dir.join("output.log"), "test output\n").unwrap();
+        let index_before = identity(&dir.join(".git/index"));
+        let repo = gix::open(&dir).unwrap();
+
+        let (modified, untracked) = status_paths(&repo, Untracked::List).unwrap();
+        assert!(modified.is_empty());
+        assert_eq!(untracked, ["output.log"]);
+        let (modified, untracked) = status_paths(&repo, Untracked::Skip).unwrap();
+        assert!(modified.is_empty() && untracked.is_empty());
+        // `delta` still sees untracked files; the state string never did.
+        assert_eq!(source_diff(&dir).unwrap().untracked, ["output.log"]);
+        let (_, head) = head_of(&dir).unwrap();
+        assert_eq!(source_state(&dir).unwrap(), head.to_string());
+        // Inside a fan-out (two items: one would not be one), too.
+        let dirs = [dir.clone(), dir.clone()];
+        let states = crate::par::parallel_map(&dirs, |d| source_state(d).unwrap()).unwrap();
+        assert_eq!(states, [head.to_string(), head.to_string()]);
+
+        assert_eq!(identity(&dir.join(".git/index")), index_before, "status must not write the index");
+
+        // A dirty repo: an edited file, a deleted one, a new untracked one.
+        // Both walks report the same tracked changes.
+        let files = [("a", "alpha\n", false), ("b", "beta\n", false), ("c", "gamma\n", false)];
+        let tmp2 = tempfile::tempdir().unwrap();
+        let (_, dirty, _) = upstream_and_clone(tmp2.path(), &files);
+        std::fs::write(dirty.join("a"), "edited\n").unwrap();
+        std::fs::remove_file(dirty.join("b")).unwrap();
+        std::fs::write(dirty.join("b-renamed"), "beta\n").unwrap();
+        let repo = gix::open(&dirty).unwrap();
+        let (listed, untracked) = status_paths(&repo, Untracked::List).unwrap();
+        let (skipped, _) = status_paths(&repo, Untracked::Skip).unwrap();
+        assert_eq!(listed, ["a", "b"]);
+        assert_eq!(untracked, ["b-renamed"]);
+        assert_eq!(skipped, listed);
+    }
+
+    /// `source_state` really skips the untracked walk: an unreadable untracked
+    /// directory breaks the walk (`source_diff` fails) but not the state.
+    #[test]
+    fn source_state_does_not_walk_untracked_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &[("a", "alpha\n", false)]);
+        let locked = dir.join("unreadable");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("x"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions do not bind, nothing to show.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let diff = source_diff(&dir);
+        let state = source_state(&dir);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(diff.is_err(), "the untracked walk should trip over the unreadable directory");
+        let (_, head) = head_of(&dir).unwrap();
+        assert_eq!(state.unwrap(), head.to_string());
     }
 
     /// The chmod's ctime is re-recorded. (Inside a real align the chmod

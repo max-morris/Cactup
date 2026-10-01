@@ -17,6 +17,17 @@ fn workers_for(items: usize) -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(items.max(1))
 }
 
+thread_local! {
+    static IN_FAN_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the current thread is one of several [`parallel_map`] workers.
+/// Work that could fan out on its own (gix's per-walk thread pool) stays
+/// small there: the fan-out already supplies the parallelism.
+pub(crate) fn in_fan_out() -> bool {
+    IN_FAN_OUT.with(|flag| flag.get())
+}
+
 /// Map `f` over `items` on a [`workers_for`]-wide pool, returning results in
 /// input order. `f` runs on worker threads — anything shared (a progress
 /// item, a cache) must sit behind a lock. Honors Ctrl-C: workers stop
@@ -31,9 +42,14 @@ pub(crate) fn parallel_map<T: Sync, R: Send>(
     // published through it), and the collecting loop below is ordered after
     // every slot write by scope's join of all workers.
     let next = AtomicUsize::new(0);
+    let fan_out = workers_for(items.len()) > 1;
     std::thread::scope(|scope| {
         for _ in 0..workers_for(items.len()) {
             scope.spawn(|| loop {
+                // A one-item map is no fan-out: its single walk keeps all the
+                // parallelism it can get. Re-marked on every pass, which costs
+                // nothing and keeps the `|| loop` shape the other pools use.
+                IN_FAN_OUT.with(|flag| flag.set(fan_out));
                 if gix::interrupt::is_triggered() {
                     return;
                 }
@@ -86,6 +102,17 @@ pub(crate) fn join_with_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workers_know_they_are_in_a_fan_out() {
+        assert!(!in_fan_out());
+        // As many workers as the machine allows (until the width is fixed):
+        // on a one-CPU box even three items are no fan-out.
+        let seen = parallel_map(&[1, 2, 3], |_| in_fan_out()).unwrap();
+        assert_eq!(seen, [workers_for(3) > 1; 3]);
+        assert_eq!(parallel_map(&[1], |_| in_fan_out()).unwrap(), [false], "one item is no fan-out");
+        assert!(!in_fan_out(), "the caller's thread is not a worker");
+    }
 
     #[test]
     fn preserves_input_order_and_covers_every_item() {
