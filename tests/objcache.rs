@@ -920,6 +920,18 @@ fn what_the_object_depends_on_is_in_the_key() {
         fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
         assert_eq!(key(&["-g", "-O2"]), base, "{compiler}: reverted");
 
+        // A header whose name begins like the compilers' names for what is
+        // not a file, reached by a relative name: a file all the same.
+        let odd = build.config.join("build/Thorn/<odd>.h");
+        let original = fs::read_to_string(&unit.source).unwrap();
+        fs::write(&unit.source, format!("{original}#include \"<odd>.h\"\n")).unwrap();
+        fs::write(&odd, "static inline int odd(void) { return 1; } /* one */\n").unwrap();
+        let from_build = |unit: &Unit| unit.keyed_from("build/Thorn", compiler, &["-g", "-O2"], &lib).unwrap().0;
+        let with_odd = from_build(&unit);
+        fs::write(&odd, "static inline int odd(void) { return 1; } /* 1 */\n").unwrap();
+        assert_ne!(from_build(&unit), with_odd, "{compiler}: a comment in a header named <odd>.h");
+        fs::write(&unit.source, &original).unwrap();
+
         // The directory the compile runs in, with debug information.
         let elsewhere = unit.keyed_from("build/Thorn", compiler, &["-g", "-O2"], &lib).unwrap().0;
         assert_ne!(elsewhere, base, "{compiler}: the working directory");
@@ -1018,26 +1030,50 @@ fn a_compiler_given_flags_behind_its_command_line_is_not_keyed() {
         fs::canonicalize(text(&out.stdout).trim()).unwrap()
     };
 
-    if have("clang") {
-        // Clang reads `clang.cfg` beside its driver, unasked.
+    // Clang reads `clang.cfg` beside its driver, unasked. (A copy of the
+    // driver that cannot run where it is put — one that finds its libraries
+    // relative to itself — leaves this part untried.)
+    let bin = tempfile::tempdir().unwrap();
+    let bin = fs::canonicalize(bin.path()).unwrap();
+    let own = bin.join("clang").display().to_string();
+    let copy_runs = have("clang")
+        && fs::copy(found("clang"), bin.join("clang")).is_ok()
+        && Command::new(&own).arg("--version").output().is_ok_and(|out| out.status.success());
+    if copy_runs {
         let build = Build::new("record");
-        let bin = tempfile::tempdir().unwrap();
-        let bin = fs::canonicalize(bin.path()).unwrap();
-        fs::copy(found("clang"), bin.join("clang")).unwrap();
-        let own = bin.join("clang").display().to_string();
         assert!(compile(&build, &own, &[]).contains("\"key\""), "a copy of the driver is a compiler like the original");
         fs::write(bin.join("clang.cfg"), "-grecord-command-line\n").unwrap();
-        // What a build attempt remembers of a compiler watches the files
-        // it was made from, not the places one could appear: the next
-        // attempt sees it.
-        let build = Build::new("record");
+        // Every compile says for itself whether it reads one: no waiting
+        // for the next attempt.
         let event = compile(&build, &own, &[]);
         assert!(event.contains("reads a configuration file") && !event.contains("\"key\""), "{event}");
-        // That answer is remembered too, and forgotten when the file goes.
+        // The next attempt rules the compiler out as a whole, remembers
+        // that, and forgets it when the file goes.
+        let build = Build::new("record");
+        assert!(compile(&build, &own, &[]).contains("reads a configuration file"));
+        assert!(compile(&build, &own, &[]).contains("reads a configuration file"));
+        // Turned off for one compile, the file is not read by that compile.
+        assert!(compile(&build, &own, &[("CLANG_NO_DEFAULT_CONFIG", "1")]).contains("\"key\""));
         assert!(compile(&build, &own, &[]).contains("reads a configuration file"));
         fs::remove_file(bin.join("clang.cfg")).unwrap();
         assert!(compile(&build, &own, &[]).contains("\"key\""));
 
+        // A configuration file for another target is read by the compiles
+        // for that target only, and `clang --version` does not show it.
+        let target = text(&Command::new(&own).args(["-m32", "--version"]).output().unwrap().stdout);
+        if let Some(target) = target.lines().find_map(|line| line.strip_prefix("Target: ")) {
+            fs::write(bin.join(format!("{target}-clang.cfg")), "-grecord-command-line\n").unwrap();
+            let build = Build::new("record");
+            assert!(compile(&build, &own, &[]).contains("\"key\""));
+            let dir = build.config.join("build/Thorn");
+            let out = build.wrap(&own, &["-m32", "-O2", "-c", "-o", "plain.o", "plain.c"]).current_dir(&dir).output().unwrap();
+            assert!(out.status.success(), "{}", text(&out.stderr));
+            let event = build.events().pop().unwrap();
+            assert!(event.contains("reads a configuration file") && !event.contains("\"key\""), "{event}");
+        }
+    }
+    if have("clang") {
+        let build = Build::new("record");
         let event = compile(&build, "clang", &[("CCC_OVERRIDE_OPTIONS", "# +-grecord-command-line")]);
         assert!(event.contains("CCC_OVERRIDE_OPTIONS is set") && !event.contains("\"key\""), "{event}");
     }
@@ -1057,8 +1093,10 @@ fn a_compiler_given_flags_behind_its_command_line_is_not_keyed() {
         let prefix = format!("{}/", prefix.display());
         assert!(compile(&build, "gcc", &[("GCC_EXEC_PREFIX", &prefix)]).contains("\"key\""));
         fs::write(dir.join("specs"), "*cc1:\n+ -O3\n\n").unwrap();
-        // The directory is new to this attempt's memory of the compiler
-        // only through the variable, which is the same: a new attempt.
+        // The compile says so itself, in the same attempt; and the next
+        // attempt rules the compiler out as a whole.
+        let event = compile(&build, "gcc", &[("GCC_EXEC_PREFIX", &prefix)]);
+        assert!(event.contains("reads a specs file") && !event.contains("\"key\""), "{event}");
         let later = Build::new("record");
         let event = compile(&later, "gcc", &[("GCC_EXEC_PREFIX", &prefix)]);
         assert!(event.contains("reads a specs file") && !event.contains("\"key\""), "{event}");

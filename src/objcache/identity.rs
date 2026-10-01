@@ -115,9 +115,10 @@ struct Remembered {
 }
 
 /// The variables that decide which back ends and libraries a driver picks
-/// up. A change in one of them may mean another compiler under the same
-/// driver.
-const HELPER_ENV: &[&str] = &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_LIBRARY_PATH", "LD_PRELOAD"];
+/// up, and whether Clang reads its configuration files. A change in one of
+/// them may mean another compiler under the same driver.
+const HELPER_ENV: &[&str] =
+    &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_LIBRARY_PATH", "LD_PRELOAD", "CLANG_NO_DEFAULT_CONFIG"];
 
 fn helper_env() -> String {
     let mut hasher = Hasher::new("compiler-env");
@@ -224,9 +225,11 @@ fn loaded_libraries(program: &Path) -> Vec<PathBuf> {
 /// The sources of [`relocates`]' trial: a Cactus compile in miniature. The
 /// source is a build copy that says, as Cactus's do, which file it was
 /// copied from; it includes one header from the tree and one from the
-/// configuration, and each of the three records its own name.
+/// configuration, and each of the three records its own name (the source
+/// both ways a compiler offers).
 const TRIAL_SOURCE: &str = "#include \"file.h\"\n#include \"generated.h\"\n\
-    const char *cactup_trial_file = __FILE__;\nint cactup_trial(int x) { return twice(x) + *generated_file(); }\n";
+    const char *cactup_trial_file = __FILE__;\nconst char *cactup_trial_where(void) { return __builtin_FILE(); }\n\
+    int cactup_trial(int x) { return twice(x) + *generated_file(); }\n";
 const TRIAL_HEADER: &str = "static inline int twice(int x) { return 2 * x; }\n";
 const TRIAL_GENERATED: &str = "static inline const char *generated_file(void) { return __FILE__; }\n";
 
@@ -327,7 +330,9 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
         Family::Clang => {
             // What it says, without where it is installed. A configuration
             // file it says it reads rules it out (and is watched, so that
-            // the answer changes when the file goes).
+            // the answer changes when the file goes). This spares every
+            // compile the asking; which file a given compile reads is that
+            // compile's to say (`key::flags_from_elsewhere`).
             for line in says.lines() {
                 match line.split_once(": ") {
                     Some(("InstalledDir", _)) => {}

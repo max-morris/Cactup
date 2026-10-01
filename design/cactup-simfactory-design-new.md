@@ -4767,7 +4767,9 @@ so that two builds can be compared part by part:
   macro definitions are kept (`-dD`), since the object's debug information
   then has them.
 - **Files read.** The bytes of every file the preprocessor names in its
-  line markers: the source and every header. The text alone forgets what
+  line markers: the source and every header (everything but the compilers'
+  own names for what is not a file, `<built-in>` and its like, matched
+  exactly). The text alone forgets what
   the compiler does not. Spacing and comments move the columns that debug
   information, `__builtin_COLUMN` and `std::source_location` record; Clang's
   debug information carries a checksum of each file. So an edit to a
@@ -4809,7 +4811,13 @@ so that two builds can be compared part by part:
   that takes flags from a file of its own — a GCC with a `specs` file on
   disk, a Clang that says it reads a configuration file: what such a file
   adds never passes the reader of the command line, so nothing that reader
-  declines would be declined. Fortran is not cached yet. The answer — also "not one the cache
+  declines would be declined. Which file a driver reads depends on the
+  compile (Clang picks a configuration file by target, so `-m32` can bring
+  one in), so **every compile is asked**: the preprocessor run is given
+  `-v`, and the driver says on stderr whether it read a configuration file
+  (Clang) or its built-in specs (GCC, which must say so in so many words).
+  The compiler as a whole is asked too, once, to spare the compiles the
+  asking. Fortran is not cached yet. The answer — also "not one the cache
   works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)
   and reused while every file it came from still has the same size, change
   time and inode. The wrapper starts the file that was identified, under
@@ -4935,8 +4943,9 @@ nobody has to find out:
   something outside the key would be admitted. None is known besides the
   two excepted.
 - *Flags from behind the command line.* The reader sees the command line.
-  Known other sources are ruled out: a response file, a GCC `specs` file, a
-  Clang configuration file, the override variables. Flags a distribution
+  Known other sources are ruled out: a response file, a GCC `specs` file
+  and a Clang configuration file (by what the driver says of each
+  compile), the override variables. Flags a distribution
   built into its compiler are part of the compiler, and of its identity;
   one that built in a flag the reader would decline is not noticed.
 - *The compiler's identity.* Files a compiler reads by rules of its own

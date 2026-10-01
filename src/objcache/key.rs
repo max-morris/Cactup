@@ -37,7 +37,7 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, ErrorKind};
+use std::io::{BufRead, BufReader, ErrorKind, Read as _};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -402,7 +402,9 @@ fn assembler_include(line: &[u8]) -> bool {
 /// file's bytes are digested under its mapped name.
 fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
     let mut command = Command::new(&compiler.path);
-    command.arg0(name).args(&compile.preprocess).arg("-E");
+    // `-v`: the driver then says, on stderr, where it takes flags from
+    // besides its command line (see `flags_from_elsewhere`).
+    command.arg0(name).args(&compile.preprocess).args(["-E", "-v"]);
     if compile.macros_in_debug {
         command.arg("-dD");
     }
@@ -415,18 +417,29 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("Failed to run {} as a preprocessor", compiler.path.display()))?;
     PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
+    // Read aside, so that a preprocessor with much to say (warnings) does
+    // not stop on a full pipe while its output is being read here.
+    let said = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut said = Vec::new();
+            let _ = stderr.read_to_end(&mut said);
+            said
+        })
+    });
     let read = digest_output(&mut child, map);
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
+    let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
     let (text, text_bytes, mut named) = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
     }
+    flags_from_elsewhere(compiler.family, &said).map_err(anyhow::Error::msg)?;
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
@@ -451,6 +464,36 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     }
     Ok(Read { text, text_bytes, files: files.hex(), count: named.len() })
 }
+
+/// Does the driver take flags for this compile from a file of its own? It
+/// says so itself when run with `-v`: `said` is what the preprocessor run
+/// — the compile's own arguments and environment — wrote to stderr.
+///
+/// Such flags never pass the reader of the command line (`compile`), so
+/// nothing it would decline is declined. Which file a driver reads depends
+/// on the compile (Clang picks a configuration file by target, so `-m32`
+/// can bring one in; an environment variable can turn them off), which is
+/// why this is asked of every compile, and of the compiler as a whole only
+/// to save the asking (`identity::examine`).
+fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
+    let said = String::from_utf8_lossy(said);
+    match family {
+        Family::Clang => match said.lines().find_map(|line| line.strip_prefix("Configuration file: ")) {
+            Some(file) => Err(format!("the compiler reads a configuration file ({file}), which can add flags the cache does not see")),
+            None => Ok(()),
+        },
+        // GCC says one or the other. Neither (a translation, another
+        // version's wording) is not a "no".
+        Family::Gcc => match said.lines().find_map(|line| line.strip_prefix("Reading specs from ")) {
+            Some(file) => Err(format!("the compiler reads a specs file ({file}), which can add flags the cache does not see")),
+            None if said.lines().any(|line| line == "Using built-in specs.") => Ok(()),
+            None => Err("the compiler does not say whether it reads a specs file".to_owned()),
+        },
+    }
+}
+
+/// The names compilers give what is not a file, in line markers.
+const NOT_FILES: &[&[u8]] = &[b"<built-in>", b"<command-line>", b"<command line>", b"<stdin>", b"<scratch space>"];
 
 /// The files a preprocessor run names, each by its mapped name and its
 /// path (two files can share a mapped name — `./x.h` in the working
@@ -483,9 +526,10 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
                 feed(marker.head);
                 feed(&mapped);
                 feed(marker.tail);
-                // `<built-in>`, `<command-line>`: not files. A name ending
-                // in `//` is GCC's note of the working directory.
-                let pseudo = marker.name.starts_with(b"<") || marker.name.ends_with(b"//") || marker.name.is_empty();
+                // Not files: the compilers' names for what they made up, by
+                // name (a header may be called `<odd>.h`); and a name
+                // ending in `//`, GCC's note of the working directory.
+                let pseudo = NOT_FILES.contains(&marker.name.as_slice()) || marker.name.ends_with(b"//") || marker.name.is_empty();
                 if !pseudo {
                     let entered = marker.enters();
                     *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
@@ -597,6 +641,23 @@ mod tests {
         // text, and is kept as it is.
         let below = |root: &str| format!("int a;\n/*\n#line 1 \"{root}/x.c\"\n*/\n");
         assert_ne!(digest(&below("/w/Cactus"), Some(&map)), digest(&below("/v/elsewhere/Cactus"), Some(&map)));
+    }
+
+    #[test]
+    fn hears_a_driver_say_where_else_it_takes_flags_from() {
+        let gcc = |said: &str| flags_from_elsewhere(Family::Gcc, said.as_bytes());
+        assert_eq!(gcc("Using built-in specs.\nCOLLECT_GCC=gcc\nTarget: x86_64-linux-gnu\n"), Ok(()));
+        assert!(gcc("Reading specs from /opt/gcc/lib/gcc/x86_64-linux-gnu/14/specs\nCOLLECT_GCC=gcc\n").unwrap_err().contains("/14/specs"));
+        // Both, as with `-specs=`: one file read is one too many.
+        assert!(gcc("Using built-in specs.\nReading specs from extra.specs\n").is_err());
+        // Silence, or another language, is not "built-in".
+        assert!(gcc("").unwrap_err().contains("does not say"));
+        assert!(gcc("Es werden eingebaute Spezifikationen verwendet.\n").is_err());
+
+        let clang = |said: &str| flags_from_elsewhere(Family::Clang, said.as_bytes());
+        assert_eq!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\nInstalledDir: /usr/bin\n"), Ok(()));
+        let err = clang("clang version 19.1.7\nTarget: i386-pc-linux-gnu\nConfiguration file: /opt/bin/i386-pc-linux-gnu-clang.cfg\n");
+        assert!(err.unwrap_err().contains("i386-pc-linux-gnu-clang.cfg"));
     }
 
     #[test]

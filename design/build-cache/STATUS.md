@@ -43,7 +43,7 @@ the last milestone, for when that host is not at hand.
 | Milestone | Scope | State |
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
-| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 3) |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | implemented; in review (round 4) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
@@ -155,13 +155,13 @@ cactup, `-j 8`; M0c is where these get measured properly):
   `smoke`: **307 of 307 keyed compiles would be served** (98% of the
   compile time).
 - `ext`, which adds HDF5 and two thorns that use it, against `smoke`: 185
-  of 334 (55%, 63% of the compile time). Before the rework it was 301 of
+  of 334 (55%, 64% of the compile time). Before the rework it was 301 of
   334: 116 compiles now miss because a generated header they include
   (`cctk_DefineThorn.h`, `CParameterStructNames.h`) has other bytes in a
   configuration with more thorns, though it gives them the same tokens.
   This is the price of keying bytes, and a decision for Max (below).
 - Cost: keying summed to 19% of the compile time and checking again to
-  18%; wall clock 18 to 21 s against 16 s plain for `smoke`. (Before the rework:
+  18%; wall clock 17 to 21 s against 16 s plain for `smoke`. (Before the rework:
   30% and 25%, 39 s; `-C` made the preprocessor's output much larger.)
 
 **Found on the way: `-march=native` is not a function of its inputs on
@@ -172,8 +172,8 @@ on, so one compile run twice gave two objects (the audit test caught it as
 on a host whose processors differ. The configurations above do not use
 `-march=native`; 11 of the MDB's optionlists do.
 
-The logs behind these numbers are `smoke` attempt 0012, `smoke2` attempt
-0003 and `ext` attempt 0006 in `~/cacti/build-cache`, all recorded by the
+The logs behind these numbers are `smoke` attempt 0013, `smoke2` attempt
+0004 and `ext` attempt 0007 in `~/cacti/build-cache`, all recorded by the
 revision under review.
 
 "Would be served" rests on the path mapping of spec §18.5 producing the
@@ -241,6 +241,8 @@ compiler but GCC, any machine but `plato`.
 - 2026-10-01: M0b review round 2: every round 1 finding confirmed
   resolved; both BLOCKED on new ones (three between them). Fixed; sent to
   round 3.
+- 2026-10-01: M0b review round 3: A signed off, B blocked on one finding
+  (a Clang configuration file chosen by target). Fixed; sent to round 4.
 
 ## Review verdicts
 
@@ -505,6 +507,28 @@ digests by size, change time and inode would save most of that. It would
 also trust a file's change time where the check after the compile now
 reads its bytes; that trade wants the M0c numbers on a network filesystem
 first.
+
+### M0b, round 3 (on `b8ceb51`): A SIGN-OFF, B BLOCKED
+
+Both confirmed the round 2 blockers resolved and accepted the stated
+limits (the textual `.incbin` check, steering files that appear during an
+attempt, the deferred file-digest memo) as accurate and non-blocking.
+
+1. (B, blocking) Whether Clang reads a configuration file was asked once,
+   by a bare `clang --version`. Clang picks the file by target, so
+   `i386-pc-linux-gnu-clang.cfg` is read by `-m32` compiles only; and a
+   first compile with `CLANG_NO_DEFAULT_CONFIG` set left an answer that
+   later compiles without it reused. *Fixed: every compile's own
+   preprocessor run is given `-v`, and the driver says whether it read a
+   configuration file (Clang) or its built-in specs (GCC); the variable is
+   part of what the remembered identity depends on.*
+
+Non-blocking points taken: (A) a header whose own name begins with `<`
+was taken for a pseudo-file (the compilers' pseudo names are matched
+exactly now); (A) the trial of the map also uses `__builtin_FILE()`; (B)
+the configuration-file test skips where a copy of the Clang driver cannot
+run. (A, B) Both raised the cost of rejecting every GCC with a specs file
+on a Spack-based cluster: see below.
 
 Known cost of the round 2 fixes, to measure in M0c: a GCC with a `specs`
 file on disk is not cached at all. Spack-built GCCs have one (Spack writes
