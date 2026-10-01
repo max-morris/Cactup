@@ -42,8 +42,8 @@ the last milestone, for when that host is not at hand.
 
 | Milestone | Scope | State |
 |---|---|---|
-| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | reworked after review rounds 1 to 3; in review (round 4) |
-| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | not started |
+| M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
+| M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | next |
 | M0c | Measurements in `~/cacti/build-cache`, written results | not started |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
 | M1b | Serving, double check, audit mode, two-installation audit build | not started |
@@ -141,7 +141,9 @@ compiler but GCC, any machine but `plato`.
   Fixed (commit `6bdd9b8`); sent to round 3.
 - 2026-10-01: Review round 3: reviewer A signed off, reviewer B blocked on
   a self-test that had stopped testing and on shell-shadowed compiler
-  names. Fixed; sent to round 4.
+  names. Fixed (commit `300fd0b`); sent to round 4.
+- 2026-10-01: Review round 4: both reviewers SIGN-OFF on `300fd0b`. M0a has
+  passed its gate.
 
 ## Review verdicts
 
@@ -275,10 +277,67 @@ the shell. **This is the second known way, after the two-file stand-down
 scan, that the cache could change what gets compiled; both need a setup
 nobody is known to have, and both are Max's call.**
 
-### M0a, round 4: pending
+### M0a, round 4 (on `300fd0b`): SIGN-OFF by both
+
+Both confirmed every round 3 finding resolved, on GNU make 4.0 to 4.4.1,
+on the glibc and the static musl build, and (reviewer B) on a real Cactus
+tree under make 4.3. Both confirmed the two limits stated for Max are
+described accurately, reproduced the `BASH_ENV` one, and know of no third
+way the cache could change what gets compiled.
+
+Non-blocking points left open, to be taken up in M0b (none changes what
+gets compiled):
+
+- Under bash the compiler's environment has `_` naming cactup instead of
+  the compiler (bash sets `_` for each command it starts). Set it when the
+  wrapper resolves the compiler's path, which M0b needs anyway for the
+  compiler's identity; until then spec §18.1 rule 3 is off by this one
+  variable.
+- A `SIGPIPE` ignored on entry reaches the compiler at its default (the
+  Rust runtime and `std::process` both touch it). Reachable only by running
+  the frozen build script by hand from a parent that ignores `SIGPIPE`.
+- Any `PATH` entry beginning with `~` sends every bare compiler name to the
+  shell, also under a shell that does not expand `~` and when the entry
+  comes after the compiler's directory. Safe, but it costs such a user the
+  cache with no reason given. Narrow it to bash-like shells and to entries
+  that precede the compiler's directory, and make the debug line and the
+  "no compile recorded" line say why.
+- The self-test does not try the `CCTK_TARGET` half of the fragment's guard
+  on its own (a third run, from `build/` without `CCTK_TARGET`), and a
+  machine `make` command carrying `-i` would pass anything.
+- A recipe with the compiler on a continuation line right after `;` is not
+  wrapped (fail-open; contract A1 says so). Plausible reformatting on the
+  build-speed side.
+- The `BASH_ENV` limit is really "anything the shell sets up for itself at
+  startup that changes how it looks a name up" (also `hash -p`, another
+  shell's startup file); say so in spec §18.4.
+- `the_selftest_passes_the_real_fragment_and_fails_every_broken_one` runs
+  only the `make` on `PATH`; run it over `CACTUP_TEST_MAKES` too.
+- `SHELL_WORDS` lacks a few builtins (`bind`, dash's `chdir`, zsh's and
+  ksh's). None is a plausible compiler name.
+
+## Decisions waiting for Max
+
+Neither blocks M0b; both are about what the cache may do in a setup nobody
+is known to have. They are the two known ways it could change what gets
+compiled.
+
+1. **A thorn's compile recipe defined indirectly** (in a file its
+   `make.code.deps` includes, or under a computed name) is not seen by the
+   stand-down scan, and Cactus's stock recipe would run in its place. No
+   Einstein Toolkit thorn defines a compile recipe. Accept as a stated
+   limit, or have the probe do more (for example, decline for the whole
+   build if any thorn make fragment has an `include`)?
+2. **Functions or aliases a shell defines for itself at startup**
+   (`BASH_ENV`) are invisible to the wrapper; one named like the compiler
+   would be bypassed. Closing it means sending every compile to the shell
+   wherever `BASH_ENV` is set, which module systems do, so the cache would
+   be off on most clusters. Accept as a stated limit?
 
 ## Next step
 
-Take M0a through review round 2. Then M0b: per-family argument parser (GCC,
-Clang), platform fingerprint, compiler identity, environment digest, the key,
-richer `events.jsonl` lines, and `cactup cache report`.
+M0b: per-family argument parser (GCC, Clang), platform fingerprint, compiler
+identity, environment digest, the key, richer `events.jsonl` lines, and
+`cactup cache report`; plus the non-blocking points carried over from M0a's
+round 4 (above). Record-only still: nothing is stored or served until M0c's
+measurements have been looked at.

@@ -192,7 +192,8 @@ after make.
 
 ## Cache-side planned changes
 
-- 2026-10-01: M0a is in review. Then M0b (keys, richer event log, a report
+- 2026-10-01: M0a has passed its review gate (commit `300fd0b` on
+  `feature/build-cache`). Next M0b (keys, richer event log, a report
   comparing two builds), then M0c (measurements). Nothing is served until
   the measurements are reviewed.
 
@@ -256,3 +257,4 @@ every milestone.
   rules file includes no other makefile and that `define NAME` has nothing
   after the name; command position excludes quoted text and continuation
   lines.
+- 2026-10-01  cache side  M0a passed its review gate at `300fd0b`.
