@@ -85,6 +85,31 @@ EXPECT = {
         r"Config tutorial is now active",
         r"Deleted config tutorial-debug",
     ],
+    "05": [
+        r"Submitted shape-4x1 restart output-0000 as job",
+        r"#SBATCH --ntasks=4\n#SBATCH --ntasks-per-node=4\n#SBATCH --cpus-per-task=1",
+        r"#SBATCH --ntasks=2\n#SBATCH --ntasks-per-node=2\n#SBATCH --cpus-per-task=2",
+        r"this machine is a single node, but this run asks for 2 nodes",
+        r"shape-4x1\.out:MPI initialized with 4 MPI processes",
+        r"shape-4x1\.out:OMP initialized with 1 OMP threads",
+        r"shape-2x2\.out:MPI initialized with 2 MPI processes",
+        r"shape-2x2\.out:OMP initialized with 2 OMP threads",
+        r"Moved simulation shape-2n to",
+        r"universes: pinned",
+        r"Built config tutorial-pinned",
+        r"universe: pinned \(coerce-run-universe: true\)",
+        r'name = "pinned"',
+        r"CarpetX — locally edited since the build",
+        r"Built config tutorial \(",
+        r"INFO \(WaveToyX\): Hello from notebook 5: initial condition Gaussian",
+        r"changed contents \(removing their stale per-thorn build state\): WaveToyX",
+        r"INFO \(WaveToyX\): Hello from a parameter file: initial condition Gaussian",
+        r"flesh — locally edited since the build",
+        r"Edited in: +notebook 5",
+        r"built with local edits, now reverted",
+        r"the source tree matches what this config was built from",
+        r"Moved simulation wave-pinned to",
+    ],
     "02": [
         r"Built config tutorial",
         r"status: complete",
@@ -122,6 +147,31 @@ RERUN = {
         r"tutorial-gpu is up to date",
         r"Required partition not available",
         r"Built config tutorial-debug",
+    ],
+    "05": [
+        r"Submitted shape-4x1 restart output-0000 as job",
+        r"#SBATCH --ntasks=4\n#SBATCH --ntasks-per-node=4\n#SBATCH --cpus-per-task=1",
+        r"#SBATCH --ntasks=2\n#SBATCH --ntasks-per-node=2\n#SBATCH --cpus-per-task=2",
+        r"this machine is a single node, but this run asks for 2 nodes",
+        r"shape-4x1\.out:MPI initialized with 4 MPI processes",
+        r"shape-4x1\.out:OMP initialized with 1 OMP threads",
+        r"shape-2x2\.out:MPI initialized with 2 MPI processes",
+        r"shape-2x2\.out:OMP initialized with 2 OMP threads",
+        r"Moved simulation shape-2n to",
+        r"universes: pinned",
+        r"Config tutorial-pinned is up to date",
+        r"universe: pinned \(coerce-run-universe: true\)",
+        r'name = "pinned"',
+        r"CarpetX — locally edited since the build",
+        r"Built config tutorial \(",
+        r"INFO \(WaveToyX\): Hello from notebook 5: initial condition Gaussian",
+        r"changed contents \(removing their stale per-thorn build state\): WaveToyX",
+        r"INFO \(WaveToyX\): Hello from a parameter file: initial condition Gaussian",
+        r"flesh — locally edited since the build",
+        r"Edited in: +notebook 5",
+        r"built with local edits, now reverted",
+        r"the source tree matches what this config was built from",
+        r"Moved simulation wave-pinned to",
     ],
 }
 
@@ -318,9 +368,7 @@ def scratch_notebook(box: Container, name: str, cells: list[str]) -> None:
 def start_over(box: Container, nb3: str, out_dir: Path) -> list[str]:
     """Notebook 3's optional "start over" cell, uncommented and run, then
     the whole notebook again: as on its first run."""
-    source = subprocess.run(["docker", "exec", box.name, "cat", f"/opt/cactup-tutorial/notebooks/{nb3}"],
-                            capture_output=True, text=True, check=True).stdout
-    cells = ["".join(c["source"]) for c in json.loads(source)["cells"] if c["cell_type"] == "code"]
+    cells = code_cells(box, nb3)
     cell = next((c for c in cells if "# cactup uninstall et-mp" in c), None)
     if cell is None:
         return ["start over: notebook 3 has no start-over cell"]
@@ -330,6 +378,41 @@ def start_over(box: Container, nb3: str, out_dir: Path) -> list[str]:
     if first["error"]:
         return [f"start over: the start-over cell failed:\n{first['error']}"]
     return check("after starting over:", nb3, box.run(nb3, out_dir), EXPECT, False)
+
+
+def code_cells(box: Container, notebook: str) -> list[str]:
+    source = subprocess.run(["docker", "exec", box.name, "cat", f"/opt/cactup-tutorial/notebooks/{notebook}"],
+                            capture_output=True, text=True, check=True).stdout
+    return ["".join(c["source"]) for c in json.loads(source)["cells"] if c["cell_type"] == "code"]
+
+
+# What catch-up may say after an attendee stopped in the middle of notebook
+# 5's hacking: it puts the edited files back and rebuilds from them.
+RESTORED = r"put ~/Cactus/\S+ back to its committed state|rebuilding the tutorial config"
+
+
+def stop_in_hacking(box: Container, nb5: str, out_dir: Path, then: str) -> list[str]:
+    """Notebook 5 run to the end of its hacking section (all three files
+    edited and built, none reverted), then notebook THEN from the top: its
+    catch-up puts the files back, and nothing else differs."""
+    cells = code_cells(box, nb5)
+    flesh = next((i for i, c in enumerate(cells) if "Banner.c" in c and "write_text" in c), None)
+    stop = next((i for i, c in enumerate(cells) if flesh is not None and i > flesh
+                 and "cactup build tutorial" in c), None)
+    if stop is None:
+        return ["stop in hacking: notebook 5 has no flesh edit and build to stop after"]
+    scratch_notebook(box, "zz-stop-in-hacking.ipynb", cells[1:stop + 1])
+    first = box.run("zz-stop-in-hacking.ipynb", out_dir)
+    if first["error"]:
+        return [f"stop in hacking: notebook 5's first cells failed:\n{first['error']}"]
+    result = box.run(then, out_dir)
+    problems = check(f"{then} after stopping in notebook 5:", then, result, RERUN, True, RESTORED)
+    catch_up = next((c["text"] for c in result["cells"] if "cactup-tutorial-catch-up" in c["source"]), "")
+    restored = set(re.findall(r"put ~/Cactus/(\S+) back to its committed state", catch_up))
+    if len(restored) != 3:
+        problems.append(f"{then} after stopping in notebook 5: catch-up didn't put back all three files:\n"
+                        f"{catch_up}")
+    return problems
 
 
 def reset_then_catch_up(box: Container, out_dir: Path) -> list[str]:
@@ -409,6 +492,13 @@ def main() -> int:
             found = start_over(box, nb3, out / "start-over")
             problems += found
             print(f"{'ok  ' if not found else 'FAIL'} notebook 3 again, after its start-over cell", flush=True)
+        for nb5 in (nb for nb in notebooks if nb.startswith("05")):
+            (out / "stopped").mkdir(exist_ok=True)
+            for then in [nb for nb in notebooks if nb.startswith("04b")] + [nb5]:
+                found = stop_in_hacking(box, nb5, out / "stopped", then)
+                problems += found
+                print(f"{'ok  ' if not found else 'FAIL'} {then} after stopping in notebook 5's hacking",
+                      flush=True)
         found = reset_then_catch_up(box, out / "again")
         problems += found
         print(f"{'ok  ' if not found else 'FAIL'} a full reset from a notebook, then catch-up", flush=True)

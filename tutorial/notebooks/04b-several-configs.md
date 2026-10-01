@@ -194,5 +194,5 @@ cactup config list
 - [Running simulations](https://max-morris.github.io/Cactup/users/running-simulations.html)
   (queues, `--force-queue`)
 
-Next: **notebook 5**, topology, the delta checker while hacking on thorns,
-and universes.
+Next: **notebook 5**, the shape of a run, a build universe, and hacking on
+thorns with `config delta`.

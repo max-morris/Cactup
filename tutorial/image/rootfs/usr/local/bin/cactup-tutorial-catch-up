@@ -38,8 +38,20 @@ NOTEBOOKS = {
     "4a": {"cactup": True, "install": True},
     # Notebook 4b ends by switching back to the stock tutorial config.
     "4b": {"cactup": True, "install": True, "tutorial": True},
+    "5": {"cactup": True, "install": True, "tutorial": True},
 }
 THORNLIST = "/opt/cactup-tutorial/thornlists/tutorial.th"
+
+# The files notebooks edit in the stock install's source tree (relative to
+# its Cactus directory), and which notebook edits each. Catch-up puts them
+# back: the bakes all assume clean repositories, and the configs other than
+# `tutorial` have no objects, so building one on an edited tree would
+# compile everything.
+EDITED = {
+    "arrangements/CarpetX/WaveToyX/src/wavetoyx.cxx": "5",
+    "arrangements/CarpetX/WaveToyX/param.ccl": "5",
+    "src/main/Banner.c": "5",
+}
 
 
 def say(line: str) -> None:
@@ -170,11 +182,11 @@ def ensure_cactup() -> None:
 
 def ensure_install(use: bool = True) -> None:
     listing = cactup("list").stdout
-    if not re.search(rf"^- {RELEASE}\b", listing, re.M):
+    if not re.search(rf"^- {re.escape(RELEASE)}(?=[ \t]|$)", listing, re.M):
         say(f"installing {RELEASE} from the mirrors (notebook 1 does this; under a minute)")
         cactup("install", RELEASE, "--silent")
         listing = cactup("list").stdout
-    if use and not re.search(rf"^- {RELEASE}\b.*\(active\)", listing, re.M):
+    if use and not re.search(rf"^- {re.escape(RELEASE)}[ \t].*\(active\)", listing, re.M):
         cactup("use", RELEASE)
         say(f"made {RELEASE} the active installation")
     link = HOME / "Cactus"
@@ -189,17 +201,66 @@ def ensure_install(use: bool = True) -> None:
             say("~/Cactus is not a link to the stock install; notebooks that use it will not find it")
 
 
+def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, check=check)
+
+
+def restore_edited() -> None:
+    """Put the files notebooks edit back to their committed state, saving
+    the attendee's versions outside the Cactus tree (a copy beside one would
+    change its thorn's shape)."""
+    cactus = CACTUP_HOME / "cacti" / RELEASE / "Cactus"
+    saved = None
+    for rel, notebook in EDITED.items():
+        path = cactus / rel
+        # The arrangements and src are links into the repositories.
+        real = path.resolve()
+        if not real.parent.is_dir():
+            continue
+        repo = Path(git(real.parent, "rev-parse", "--show-toplevel").stdout.strip())
+        name = str(real.relative_to(repo))
+        if git(repo, "diff", "--quiet", "HEAD", "--", name, check=False).returncode == 0:
+            continue
+        if saved is None:
+            saved = saved_dir()
+        shown = f"~/Cactus/{rel}"
+        if real.exists():
+            copy = saved / rel
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(real, copy)
+            where = f"your version is at ~/{copy.relative_to(HOME)}"
+        else:
+            where = "you had deleted it"
+        git(repo, "checkout", "HEAD", "--", name)
+        say(f"put {shown} back to its committed state (notebook {notebook} edits it); {where}")
+
+
+def active_is_tutorial(listing: str) -> bool:
+    """Whether `cactup config list` shows `tutorial` itself as the active
+    config (not `tutorial-pinned` or another config whose name starts so)."""
+    return re.search(r"^- tutorial[ \t].*\(active\)", listing, re.M) is not None
+
+
 def ensure_tutorial() -> None:
     """The stock install's tutorial config, built from tutorial.th (notebook
-    2's build). Quiet when cactup calls it up to date (seconds); otherwise one
-    line saying why, then cactup's own output as it comes, so a build never
-    looks like a hang."""
+    2's build), and the active config. Quiet when cactup calls it up to date
+    (seconds); otherwise one line saying why, then cactup's own output as it
+    comes, so a build never looks like a hang."""
+    exists = (CACTUP_HOME / "cacti" / RELEASE / "Cactus" / "configs" / "tutorial").is_dir()
     proc = subprocess.Popen([str(CACTUP), "-I", RELEASE, "build", "tutorial", "--thornlist", THORNLIST],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, env=plain_env())
     first = proc.stdout.readline()
     if re.search(r"\bis up to date\b", first):
         proc.stdout.read()
+    elif exists:
+        say(f"rebuilding the tutorial config in {RELEASE}: its sources changed since it was built "
+            "(notebooks 5 and 9 edit some):")
+        sys.stdout.write(first)
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
     else:
         say(f"building the tutorial config in {RELEASE} (notebook 2 does this):")
         sys.stdout.write(first)
@@ -208,6 +269,9 @@ def ensure_tutorial() -> None:
             sys.stdout.flush()
     if proc.wait() != 0:
         raise SystemExit("catch-up: building the tutorial config failed")
+    if not active_is_tutorial(cactup("-I", RELEASE, "config", "list").stdout):
+        cactup("-I", RELEASE, "config", "use", "tutorial")
+        say(f"made tutorial the active config of {RELEASE}")
 
 
 def main(argv: list[str]) -> int:
@@ -227,6 +291,8 @@ def main(argv: list[str]) -> int:
     machine()
     if needs.get("install"):
         ensure_install(use=needs.get("use", True))
+        # Restoring always comes before building.
+        restore_edited()
     if needs.get("tutorial"):
         ensure_tutorial()
     return 0

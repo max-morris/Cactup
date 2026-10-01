@@ -1,0 +1,122 @@
+#!/usr/bin/python3 -I
+"""Check that the stock installation's sources are as fetched.
+
+    cactup-tutorial-sources-clean
+
+Notebook 5 runs it before building `tutorial-pinned`: that build is
+precomputed for the sources as fetched, and a config with no objects built
+from anything else would compile everything. For the repositories and
+thorns the stock `tutorial` config is built from (tutorial.th's), it checks
+what the precomputed build's fingerprint covers:
+
+- each repository is on the commit cactup fetched, with no edits to
+  tracked files;
+- no thorn has extra files (untracked ones, git-ignored ones included) at
+  its top level or under its `src/`, other than those the ignore files
+  exempt: such a file changes the thorn's shape.
+
+It prints nothing and exits 0 when all is as fetched, and otherwise lists
+what isn't, says what to do, and exits 1.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+RELEASE = "ET_2026_05_v0"
+CACTUP_HOME = Path.home() / ".cactup"
+INSTALL = CACTUP_HOME / "cacti" / RELEASE
+CACTUS = INSTALL / "Cactus"
+
+
+def git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} in {repo} failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def patterns(path: Path) -> list[str]:
+    """The patterns of an ignore file: the forms the tutorial's files use
+    (a name or glob, matched against every path component; a trailing `/`
+    for directories only)."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+
+
+def exempt(rel: str, rules: list[str]) -> bool:
+    parts = rel.split("/")
+    for rule in rules:
+        if rule.endswith("/"):
+            if any(fnmatch.fnmatchcase(part, rule[:-1]) for part in parts[:-1]):
+                return True
+        elif any(fnmatch.fnmatchcase(part, rule) for part in parts):
+            return True
+    return False
+
+
+def problems() -> list[str]:
+    with open(CACTUS / "configs" / "tutorial" / "cactup-config.toml", "rb") as f:
+        meta = tomllib.load(f)
+    with open(INSTALL / ".cactup" / "fetch-state.toml", "rb") as f:
+        fetched = {name: record["head"] for name, record in tomllib.load(f).get("repos", {}).items()}
+    found = []
+    for repo in sorted(meta.get("sources", {})):
+        root = CACTUS / "repos" / repo
+        head = git(root, "rev-parse", "HEAD").strip()
+        if repo in fetched and head != fetched[repo]:
+            found.append(f"~/Cactus/repos/{repo} is on commit {head[:7]}, not the fetched {fetched[repo][:7]}")
+        found += [f"~/Cactus/repos/{repo}/{name} is edited"
+                  for name in git(root, "diff", "--name-only", "HEAD").split("\n") if name]
+    global_rules = patterns(CACTUP_HOME / "cactupignore")
+    for thorn, provider in sorted(meta.get("thorn-providers", {}).items()):
+        real = (CACTUS / provider).resolve()
+        if not real.is_dir():
+            continue
+        root = Path(git(real, "rev-parse", "--show-toplevel").strip())
+        rules = global_rules + patterns(root / ".cactupignore")
+        prefix = str(real.relative_to(root))
+        listing = git(root, "status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=all", "--", prefix)
+        for entry in listing.split("\0"):
+            if entry[:3] not in ("?? ", "!! "):
+                continue
+            rel = entry[3:] if prefix == "." else entry[3:][len(prefix) + 1:]
+            # The ignore files themselves aren't part of a shape.
+            if rel.rsplit("/", 1)[-1] == ".cactupignore":
+                continue
+            if ("/" not in rel or rel.startswith("src/")) and not exempt(rel, rules):
+                found.append(f"~/Cactus/{provider}/{rel} is an extra file in thorn {thorn}")
+    return found
+
+
+def main() -> int:
+    try:
+        found = problems()
+    except OSError:
+        print("The stock installation or its tutorial config isn't there yet; run this notebook's first cell "
+              "(catch-up).", file=sys.stderr)
+        return 1
+    except RuntimeError as e:
+        found = [str(e)]
+    if not found:
+        return 0
+    print("The stock installation's sources aren't as fetched:", file=sys.stderr)
+    for line in found:
+        print(f"  {line}", file=sys.stderr)
+    print("Run this notebook's first cell (catch-up), which puts back the files the notebooks edit and\n"
+          "saves your versions; undo anything else yourself (git -C <repository> checkout -- <file>,\n"
+          "move an extra file out of the thorn, or check out the fetched commit). Then run this cell again.",
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

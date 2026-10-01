@@ -11,7 +11,7 @@ if _token:
     c.IdentityProvider.token = _token
 
 c.ServerApp.root_dir = "/home/cactus"
-c.ServerApp.default_url = "/lab/tree/tutorial/01-intro.ipynb"
+c.ServerApp.default_url = "/lab/tree/notebooks/01-getting-started.ipynb"
 # A terminal is part of the tutorial (the follow view in notebook 7).
 c.ServerApp.terminals_enabled = True
 c.ServerApp.terminado_settings = {"shell_command": ["/bin/bash", "-l"]}

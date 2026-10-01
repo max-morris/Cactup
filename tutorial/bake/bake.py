@@ -99,6 +99,16 @@ BAKES = {
         "config": "tutorial-debug",
         "kind": "partial",
     },
+    # Notebook 5: the tutorial thornlist again, built in the machine's
+    # `pinned` universe (under taskset), before the notebook edits anything.
+    "B5": {
+        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
+        "build": ["cactup", "build", "tutorial-pinned", "--universe", "pinned", "--thornlist",
+                  str(THORNLISTS / "tutorial.th"), "-I", "ET_2026_05_v0"],
+        "root": "Cactus",
+        "config": "tutorial-pinned",
+        "kind": "partial",
+    },
 }
 
 
@@ -484,6 +494,11 @@ def main() -> int:
     parser.add_argument("--wanted", default="wanted",
                         help="file (in the toolchain's cache directory) listing the fingerprints the image needs")
     args = parser.parse_args()
+    # The `pinned` universe's taskset reads the container's CPUs from here;
+    # the entrypoint exports it, but a bake container doesn't run that.
+    if "CACTUP_TUTORIAL_CPUS" not in os.environ:
+        status = Path("/proc/self/status").read_text()
+        os.environ["CACTUP_TUTORIAL_CPUS"] = re.search(r"^Cpus_allowed_list:\s*(\S+)", status, re.M).group(1)
     set_up_home()
     tool = toolchain()
     cache = Path(args.cache) / tool

@@ -38,9 +38,9 @@ pages.
 | 1 | Intro and tour: the terminal cells, installing cactup with the documented installer, auto-update, a SimFactory-to-cactup cheat sheet, `releases`, installing `ET_2026_05_v0` | 30 min |
 | 2 | Build a config, submit a short simulation, look at and plot the results | 30 min |
 | 3 | A second install to experiment on; point the flesh and CarpetX at the mixed-precision forks; refetch | 30 min |
-| 4a | Multiple installations: the CarpetX-only thornlist `carpetx.th`, `master`, switching, provenance | 25 min |
-| 4b | Multiple configs: a GPU variant and a debug build, config management | 25 min |
-| 5 | Topology on submit, the delta checker while hacking on thorns and the flesh, optionlist variants and universes | 40 min |
+| 4a | Multiple installations: the CarpetX-only thornlist `carpetx.th`, `master`, switching, provenance | 15 min |
+| 4b | Multiple configs: a GPU variant and a debug build, config management | 20 min |
+| 5 | Topology on submit, a build universe, the delta checker while hacking on a thorn and the flesh | 40 min |
 | 6a | MDB overlays, and a first machine entry of your own | 30 min |
 | 6b | Complex entries: queues, per-queue script variants, `.py` scripts, knobs, optionlist headers, universes | 40 min |
 | 7 | Monitoring and restarts: logs, the follow view, walltime chaining, checkpoint and recovery | 30 min |
@@ -160,8 +160,19 @@ Constraints the notebooks must respect (each found by reading the code):
   points back to 4b for optionlist variants rather than baking another.
 - **5 and 9:** their hacking builds only the stock `tutorial`. The other
   configs keep partial trees (no objects), so after a source edit their next
-  build would be a real from-scratch one. The `.ccl` edit is in a small test
-  thorn, and the flesh edit is to a `.c` file, not a widely included header.
+  build would be a real from-scratch one. Notebook 5's edits are all in one
+  small thorn, WaveToyX (a hello line in its one source file, then a
+  `greeting` parameter in its `param.ccl`), and the flesh edit is a line in
+  `src/main/Banner.c`, not a widely included header; each edit shows up in a
+  one-second run of WaveToyX's `radiative` test. Before building
+  `tutorial-pinned`, notebook 5 runs `cactup-tutorial-sources-clean` (in
+  `image/rootfs/usr/local/bin/`). For the repositories and thorns the stock
+  `tutorial` config records, it checks what B5's fingerprint covers: each
+  repository on the commit the install fetched (`.cactup/fetch-state.toml`)
+  with no tracked-file edits, and no extra files (untracked or git-ignored)
+  at a thorn's top level or under its `src/` beyond what the ignore files
+  exempt. If anything differs, it lists it, says what to do, and fails the
+  cell.
   Opening a thorn's files in the editor must not change the thorn: see
   Editor files below.
 - **6a/6b:** `machine create` without `--no-discover` claims this host (it
@@ -285,7 +296,7 @@ configs, simulations). So:
 
 - Every notebook's first code cell runs `cactup-tutorial-catch-up N`
   (`image/rootfs/usr/local/bin/`; each notebook's stage adds that
-  notebook's steps, so far those of notebooks 1 and 2), which
+  notebook's steps, so far those of notebooks 1 to 5), which
   brings the container to the state notebook N assumes (installing from the
   mirrors and building from the bakes if needed, selecting the right
   installation and config). It is idempotent and prints one line per thing it
@@ -318,9 +329,9 @@ configs, simulations). So:
   (`et-mp`, the `carpetx.th` install, `master`, the variant configs) is made by the
   notebook that uses it. So a late arrival waits at most for one install from
   the mirrors (within 10 minutes under load, see Sizing) and one restore.
-- Notebooks 5 and 9 edit a fixed list of files in the stock install (a thorn
-  source, a small thorn's `.ccl`, a flesh `.c` file, notebook 9's broken
-  file). For every N ≥ 2, catch-up puts any of them that are modified back to
+- Notebooks 5 and 9 edit a fixed list of files in the stock install
+  (catch-up's `EDITED`: WaveToyX's source and `param.ccl`, the flesh's
+  `Banner.c`, notebook 9's broken file). For every N ≥ 2, catch-up puts any of them that are modified back to
   their committed state: the partial-tree configs in the stock install
   (4b's `tutorial-debug`, `tutorial-pinned`) have no objects, so building one
   on an edited tree would be a from-scratch real build, and the bakes all
@@ -334,10 +345,10 @@ configs, simulations). So:
   file: `put <file> back to its committed state (notebook 5 edits it); your
   version is at ~/tutorial-saved/<time>/<file>`. Restoring always comes before
   building.
-- For N ≥ 5, catch-up then always runs `cactup build tutorial --thornlist
+- For 4b and N ≥ 5, catch-up then always runs `cactup build tutorial --thornlist
   tutorial.th` on the stock install, whether or not it restored anything this
   time: the executable may have been built from edits an earlier catch-up
-  (say, 4b's after a stopped notebook 5) put back. It is quiet when cactup
+  (say, 4a's after a stopped notebook 5) put back. It is quiet when cactup
   says the config is up to date (seconds). Otherwise (a restore of B1 for a
   late arrival, or a real incremental build of the restored files when the
   executable was built from edits) it first prints one line saying which and
@@ -365,15 +376,16 @@ configs, simulations). So:
 
 The headless end-to-end test runs every notebook both in order and alone in a
 fresh container (the "alone" runs in parallel, relying on catch-up), plus
-four out-of-order cases: notebook 3 run twice, with its "start over" cell
-between; notebook 9 before notebook 5; notebook 5 run again
-from the top after stopping in the middle of its hacking section; and notebook
-4b after stopping in the middle of notebook 5, then on through notebook 7,
-asserting that cactup's "source tree has moved" note never appears. Every
+out-of-order cases: notebook 3 run twice, with its "start over" cell
+between; notebook 5 run again from the top after stopping at the end of its
+hacking section (all three files edited and built); and notebook 4b after
+stopping there, asserting that cactup's "source tree has moved" note never
+appears. Two more come with later stages: notebook 9 before notebook 5, and
+going on from 4b through notebook 7 after stopping in notebook 5. Every
 notebook's cells must be safe to run again: the `tutorial-pinned` cell in
-notebook 5, for instance, checks every repository in `tutorial.th` for
-modified tracked files (B5's fingerprint covers them all) and, if any is,
-lists them and says to run the notebook's catch-up cell (which restores the
+notebook 5, for instance, runs `cactup-tutorial-sources-clean` (above) and,
+if the sources aren't as fetched, lists what differs and says to run the
+notebook's catch-up cell (which restores the
 files notebooks 5 and 9 edit, saving the attendee's versions) and to revert
 anything else by hand, instead of building (a config with no objects on an
 edited tree would be a from-scratch build). In every run the shim's "not
@@ -667,11 +679,10 @@ submits to `mylab` use `--ignore-machine` on the stock `tutorial`).
 | 3 | `build tutorial` (et-mp, after the fork refetch) | full rebuild: the flesh moved | realclean real; hit B2b: restore + replay |
 | 4b | `-I et-gpu build tutorial-gpu --variant gpu` (et-gpu) | new config | hit B3 |
 | 4b | `build tutorial-debug --debug --thornlist tutorial.th` | new config | hit B4 |
-| 4b | `build tutorial-debug` again | up to date | no make at all |
 | 5 | `build tutorial-pinned --universe pinned --thornlist tutorial.th`, before the hacking | new config | hit B5: restore + replay |
 | 5 | `build tutorial` after a thorn source edit | incremental | miss: real, one thorn |
-| 5 | `build tutorial` after a `.ccl` edit in a small test thorn | incremental, thorn shape changed | miss: real, that thorn from scratch |
-| 5 | `build tutorial` after a flesh `.c` edit | incremental | miss: real |
+| 5 | `build tutorial` after a `.ccl` edit in WaveToyX | incremental, thorn shape changed | miss: real, that thorn from scratch |
+| 5 | `build tutorial` after a flesh `.c` edit (`Banner.c`) | incremental | miss: real |
 | 5 | `build tutorial` after reverting the edits | incremental | hit B1, built on: real, the reverted files (all of the `.ccl`'s thorn) |
 | 9 | `build tutorial` after a deliberate syntax error | incremental | miss: real, fails after CST and configure |
 | 9 | `build tutorial` after the fix (not the original text) | incremental | miss: real, one file |
@@ -729,8 +740,10 @@ replayed output says they were built, and records, after harvesting the
 tree, what a real `NAME-clean` of it prints (which is what a replayed
 `--clean` step prints) and what make prints when interrupted in each step.
 
-B1 to B4 exist so far; B5 is baked by the stage that writes notebook 5,
-with `bake/bake.py`'s table of bakes growing to match. A bake can first do to its installation what the notebook does
+B1 to B5 exist, in `bake/bake.py`'s table of bakes. B5's build runs in the
+`pinned` universe, so its `taskset` needs `CACTUP_TUTORIAL_CPUS`, which the
+entrypoint exports; a bake container doesn't run the entrypoint, so
+`bake.py` sets it the same way when it isn't set. A bake can first do to its installation what the notebook does
 before that build (`prepare`): for B2b, notebook 3's thornlist edit
 (`bake/forks.py`, the same three edits as the notebook's cell; a test checks
 they match) and its `--overwrite` refetch. These steps accumulate, so the
@@ -875,7 +888,7 @@ Measured on the development machine (a container limited to 4 CPUs):
 | B1, the `tutorial` config from `tutorial.th` | tree 1.5 GB (`build/` 570 MB, `lib/` 550 MB, `scratch/` 340 MB, of which AMReX and NSIMD), executable 340 MB | a real build: about 10 minutes |
 | B1 replayed (restore and replay) | | 46 s, longest pause 1.4 s |
 | a real incremental build on the restored tree (one Cottonmouth file) | | 13 s |
-| the image | 16.7 GB on disk (the lab image without the bakes: 9.4 GB) | |
+| the image | 17.6 GB on disk (the lab image without the bakes: 9.4 GB) | |
 
 A full-ET config tree, for comparison, is 6–9 GB with ExternalLibraries built
 from source, and an install's sources are about 1.8 GB (83 repositories).
@@ -884,7 +897,7 @@ Per attendee, after every notebook: up to five installs' sources (stock and
 `master`, about 1.3 and 1.9 GB; `et-mp`, `et-gpu` and the `carpetx.th`
 install, much less), the restored trees (B1's whole tree, 1.8 GB; the
 partial trees: B3's 1.3 GB with its 770 MB executable, B2b's 1.1 GB, B4's
-0.8 GB, B2a's 0.7 GB; B5 isn't baked yet) and simulation output. Budget about 12 GB of
+0.8 GB, B2a's and B5's 0.7 GB each) and simulation output. Budget about 12 GB of
 disk per attendee, next to the 4 vCPU / 8 GB of memory; the deployment stage
 measures it on the VM.
 
@@ -902,7 +915,7 @@ deployment VM):
 - as many concurrent `cactup install ET_2026_05_v0` runs from the mirrors
   finish within 10 minutes each, inside notebook 1's 30; the subset installs
   (notebook 3's `et-mp`, 4a's named thornlist) within 3 minutes, and 4a's
-  `master` within 10, inside 4a's 25;
+  `master` within 10, inside 4a's 15;
 - every "miss: real" build in the inventory (a one-file thorn edit, the small
   thorn's `.ccl` edit, the flesh `.c` edit, the reverts, notebook 9's broken
   and fixed builds, each of which re-runs `NAME-config`, Cactus's CST and
