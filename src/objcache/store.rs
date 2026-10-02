@@ -701,7 +701,10 @@ mod tests {
             fs::remove_file(fx.entry()).unwrap();
             fs::write(fx.entry(), body).unwrap();
         };
-        let edits: [(&str, &dyn Fn(String) -> String); 4] = [
+        let edits: [(&str, &dyn Fn(String) -> String); 5] = [
+            // Another cactup's key label: its parts digest to another key
+            // under this one's, which is not damage.
+            ("another label", &|h| h.replacen("label = \"key-3\"\n", "label = \"key-2\"\n", 1)),
             ("a field more", &|h| h.replacen("format = 1\n", "format = 1\nextra = 2\n", 1)),
             ("a field more in the parts", &|h| h.replacen("[parts]\n", "[parts]\nextra = \"x\"\n", 1)),
             ("a field more about it", &|h| h.replacen("[about]\n", "[about]\nextra = \"x\"\n", 1)),

@@ -341,13 +341,24 @@ fn a_compiler_only_a_shell_can_start_is_handed_to_the_shell() {
 
 #[test]
 fn it_dies_of_the_signal_that_stopped_the_compiler() {
+    // A signal this test was started ignoring (a background job of a
+    // non-interactive shell ignores SIGINT and SIGQUIT) reaches the compiler
+    // ignored, rightly: such a case says nothing here.
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let ignored = status.lines().find_map(|line| line.strip_prefix("SigIgn:")).unwrap();
+    let ignored = u64::from_str_radix(ignored.trim(), 16).unwrap();
+    let ignoring = |signal: u32| ignored & (1 << (signal - 1)) != 0;
     let build = Build::new("record");
-    let status = build.wrap("sh", &["-c", "kill -TERM $$"]).status().unwrap();
-    assert_eq!(status.signal(), Some(15), "{status:?}");
-    assert!(build.events()[0].contains("\"signal\":15"));
+    if !ignoring(15) {
+        let status = build.wrap("sh", &["-c", "kill -TERM $$"]).status().unwrap();
+        assert_eq!(status.signal(), Some(15), "{status:?}");
+        assert!(build.events()[0].contains("\"signal\":15"));
+    }
     // SIGQUIT and a crashed compiler are exit codes, not core files of cactup.
-    let status = build.wrap("sh", &["-c", "kill -QUIT $$"]).status().unwrap();
-    assert_eq!(status.code(), Some(128 + 3), "{status:?}");
+    if !ignoring(3) {
+        let status = build.wrap("sh", &["-c", "kill -QUIT $$"]).status().unwrap();
+        assert_eq!(status.code(), Some(128 + 3), "{status:?}");
+    }
     let status = build.wrap("sh", &["-c", "kill -SEGV $$"]).status().unwrap();
     assert_eq!(status.code(), Some(128 + 11), "{status:?}");
 }
