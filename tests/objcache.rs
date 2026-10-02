@@ -603,6 +603,40 @@ fn under_make_only_cactus_object_compiles_go_through_the_wrapper() {
         assert_eq!(with, tree.make(&make, "thorn-recipe-plain", false), "{version}");
         assert!(with.contains(&"cc --thorn-recipe -o a.c.o".to_owned()), "{version}: {with:?}");
         assert_eq!(build.events().len(), 6, "{version}: nothing of that directory is wrapped");
+        fs::remove_file(tree.src.join("make.code.deps")).unwrap();
+
+        // So does one that could define a recipe where the fragment cannot
+        // see it: the build is the plain one, and nothing is wrapped. One
+        // that only looks like it is wrapped as before.
+        fs::write(tree.src.join("extra.mk"), "").unwrap();
+        for (i, (file, text)) in [
+            ("make.code.defn", "include $(SRCDIR)/extra.mk\n"),
+            ("make.code.deps", "-include $(SRCDIR)/missing.mk\n"),
+            ("make.code.defn", "define UNUSED\nx\nendef\n"),
+            ("make.code.deps", "$(eval UNUSED := 1)\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fs::write(tree.src.join(file), text).unwrap();
+            let with = tree.make(&make, &format!("indirect-{i}"), true);
+            assert_eq!(with, plain, "{version}: {text:?}");
+            assert_eq!(build.events().len(), 6, "{version}: {text:?} was wrapped");
+            fs::remove_file(tree.src.join(file)).unwrap();
+        }
+        // A file that cannot be read might say anything.
+        let unreadable = tree.src.join("make.code.deps");
+        fs::write(&unreadable, "").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0)).unwrap();
+        if fs::read(&unreadable).is_err() {
+            assert_eq!(tree.make(&make, "unreadable", true), plain, "{version}");
+            assert_eq!(build.events().len(), 6, "{version}: a thorn with an unreadable make.code.deps was wrapped");
+        }
+        fs::remove_file(&unreadable).unwrap();
+        fs::write(tree.src.join("make.code.defn"), "INCLUDE_DIRS += include\n# include and define, in words\n").unwrap();
+        assert_eq!(tree.make(&make, "words", true), plain, "{version}");
+        assert_eq!(build.events().len(), 8, "{version}: words alone stood the fragment down");
+        fs::remove_file(tree.src.join("make.code.defn")).unwrap();
     }
 }
 

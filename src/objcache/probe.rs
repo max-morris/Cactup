@@ -302,11 +302,12 @@ fn wrap_recipe(body: &str, var: &str) -> Option<String> {
 /// - the working directory is under this configuration's `build/`, where
 ///   those sub-makes run (a third-party build below one of them inherits
 ///   `CCTK_TARGET` through `MAKEFLAGS`, but runs in its own build tree), and
-/// - the thorn's own make fragments do not mention the compile recipes: a
-///   thorn that defines its own `COMPILE_C` in `make.code.deps` keeps it,
-///   where `override` would silently win. (Only those two files are read:
-///   a recipe the thorn defines in a file it includes from them, or under a
-///   computed name, is not seen.)
+/// - the thorn's own make fragments neither mention the compile recipes nor
+///   could define one out of sight ([`STAND_DOWN`]): a thorn that defines
+///   its own `COMPILE_C` in `make.code.deps` keeps it, where `override`
+///   would silently win. `grep` reads the two files, and the fragment wraps
+///   only on its "no match": no file, an unreadable one, or no `grep`
+///   leaves the thorn to plain make.
 ///
 /// There it redefines the recipes so that the compiler runs as
 ///
@@ -323,9 +324,36 @@ fn wrap_recipe(body: &str, var: &str) -> Option<String> {
 /// makefile it reads, and a foreign makefile's match-anything rule would
 /// otherwise be run for it — and removes itself from `MAKEFILE_LIST`, for
 /// makefiles that find themselves by `$(firstword $(MAKEFILE_LIST))`.
+/// What in a thorn's `make.code.defn` or `make.code.deps` makes the fragment
+/// stand down for it (§18.3), as a POSIX extended regular expression: any
+/// mention of the compile recipes, and the directives by which a recipe
+/// could be defined where a reading of these two files does not see it —
+/// an `include` (`-include`, `sinclude`), a `define` (behind `override`,
+/// `export`, `private` or `unexport` too) and `$(eval` (or `${eval`).
+/// Directives, not words: `INCLUDE_DIRS`, or a comment that says "include",
+/// is no reason. A line that merely continues the one before and begins with
+/// `include` is matched all the same; that costs the thorn the cache, never
+/// its recipe.
+///
+/// It goes into the fragment inside `$(shell …)` and single quotes, so it
+/// has no `'`, no `#` (make's comment) and no unbalanced parenthesis.
+const STAND_DOWN: &str = "COMPILE_\
+    |^[[:space:]]*(-|s)?include([[:space:]]|$)\
+    |^[[:space:]]*((override|export|private|unexport)[[:space:]]+)*define([[:space:]]|$)\
+    |[$].eval[[:space:]]";
+
 fn inject_mk(cactup: &Path, conf_file: &Path, inject: &Path, build_dir: &Path, wrapped: &[Wrapped]) -> String {
     let (cactup, conf_file, inject, build_dir) =
         (cactup.display(), conf_file.display(), inject.display(), build_dir.display());
+    // Each of the two files that is there, and `/dev/null` so that `grep`
+    // never reads its standard input. (Not by `$(wildcard …)`: GNU make
+    // 4.2.1 built against a current C library crashes in it.) For make, a
+    // `$` is `$$`.
+    let scan = format!(
+        "for f in '$(SRCDIR)/make.code.defn' '$(SRCDIR)/make.code.deps'; do [ -e \"$$f\" ] && set -- \"$$@\" \"$$f\"; done; \
+         grep -Eq -e '{}' /dev/null \"$$@\"",
+        STAND_DOWN.replace('$', "$$")
+    );
     let mut out = format!(
         "# Written by cactup for one build attempt and read through MAKEFILES.\n\
          # It runs the compilers of Cactus's object rules through cactup's build cache.\n\
@@ -333,7 +361,7 @@ fn inject_mk(cactup: &Path, conf_file: &Path, inject: &Path, build_dir: &Path, w
          ifdef CCTK_TARGET\n\
          ifneq ($(findstring |{build_dir}/,|$(CURDIR)/),)\n\
          MAKEFILES := $(filter-out {inject},$(MAKEFILES))\n\
-         ifeq ($(findstring COMPILE_,$(shell cat '$(SRCDIR)/make.code.defn' '$(SRCDIR)/make.code.deps' 2>/dev/null)),)\n\
+         ifeq ($(shell {scan}; echo $$?),1)\n\
          define cactup_cc_run\n\
          '{cactup}' {WRAP_VERB} '{conf_file}' '$(subst ','\\'',$1)' '$(subst ','\\'',$(SHELL))'\n\
          endef\n"
@@ -469,6 +497,55 @@ endef
 %.c.o: $(SRCDIR)/%.c
 \t$(COMPILE_C)
 ";
+
+    /// The stand-down pattern, as `grep -E` reads it: what defines or could
+    /// define a recipe out of sight is found, words that only look like it
+    /// are not.
+    #[test]
+    fn the_stand_down_pattern_finds_directives_not_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("make.code.deps");
+        let matches = |text: &str| {
+            fs::write(&file, text).unwrap();
+            let status = std::process::Command::new("grep").args(["-Eq", "-e", STAND_DOWN, "/dev/null"]).arg(&file).status().unwrap();
+            match status.code() {
+                Some(0) => true,
+                Some(1) => false,
+                other => panic!("grep failed ({other:?}) on {text:?}"),
+            }
+        };
+        for found in [
+            "COMPILE_C = $(CC) -c\n",
+            "SRCS = a.c\n  $(COMPILE_CXX)\n",
+            "include extra.mk\n",
+            "  -include $(SRCDIR)/more.mk\n",
+            "sinclude x.mk\n",
+            "\tinclude x.mk\n",
+            "include\n",
+            "define RECIPE\nx\nendef\n",
+            "override define RECIPE\nendef\n",
+            "export  override define RECIPE =\nendef\n",
+            "private define X\nendef\n",
+            "$(eval X := 1)\n",
+            "${eval X := 1}\n",
+            "FOO := $(foreach t,a b,$(eval $(t)_y := 1))\n",
+        ] {
+            assert!(matches(found), "{found:?}");
+        }
+        for ignored in [
+            "SRCS = a.c b.cc\n",
+            "INCLUDE_DIRS += $(SRCDIR)/include\n",
+            "# include the generated header\n",
+            "CXXFLAGS += -include config.h\n",
+            "undefine X\n",
+            "redefine = no\n",
+            "defines := -DX\n",
+            "X = $(evaluate)\n",
+            "\n",
+        ] {
+            assert!(!matches(ignored), "{ignored:?}");
+        }
+    }
 
     #[test]
     fn finds_a_recipe_by_its_define() {

@@ -4591,7 +4591,7 @@ replaced:
 ifdef CCTK_TARGET
 ifneq ($(findstring |<config>/build/,|$(CURDIR)/),)
 MAKEFILES := $(filter-out <attempt>/cc/inject.mk,$(MAKEFILES))
-ifeq ($(shell grep -Eq -e '<stand-down pattern>' /dev/null $(wildcard $(SRCDIR)/make.code.defn $(SRCDIR)/make.code.deps); echo $$?),1)
+ifeq ($(shell <grep -Eq for the stand-down pattern in /dev/null and whichever of $(SRCDIR)/make.code.defn and make.code.deps exist>; echo $$?),1)
 define cactup_cc_run
 '<cactup>' __cc '<config.toml>' '$(subst ','\'',$1)' '$(subst ','\'',$(SHELL))'
 endef
@@ -4645,9 +4645,10 @@ Why this shape (rule 3):
   "include" does not count, while a line that only continues the one
   before and begins with `include` does (that costs the thorn the cache,
   never a wrong recipe). `grep -E` does the reading, once per object
-  sub-make, and the fragment wraps only on its "no match" (exit 1): no
-  file, an unreadable one or no `grep` at all leaves the thorn to plain
-  make, and the self-test's wrapped run, which needs the "no match", turns
+  sub-make (the shell picks the files that exist; make's `$(wildcard …)`
+  crashes GNU make 4.2.1 built against a current C library), and the
+  fragment wraps only on its "no match" (exit 1): an unreadable file or no
+  `grep` at all leaves the thorn to plain make, and the self-test's wrapped run, which needs the "no match", turns
   the cache off for a build where `grep` cannot run. None of the 348
   thorns of the Einstein Toolkit has any of these (counted 2026-10-02), so
   this costs nothing there. What is left: a thorn that redefines a compile

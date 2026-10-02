@@ -562,7 +562,7 @@ mod tests {
         assert_eq!((stdout, stderr), (format!("use=[{}]\n", inject.display()), String::new()), "{make}: {log}");
 
         let own_rule = format!("{}: ;\n", inject.display());
-        let breakages: [(&str, &dyn Fn(String) -> String); 6] = [
+        let breakages: [(&str, &dyn Fn(String) -> String); 7] = [
             ("its recipes do not win over the rules file's", &|f| f.replace("override define", "define")),
             ("it acts wherever CCTK_TARGET is set", &|f| {
                 let guard = f.lines().find(|l| l.starts_with("ifneq ($(findstring |")).unwrap().to_owned();
@@ -572,6 +572,8 @@ mod tests {
             ("it stays in MAKEFILE_LIST", &|f| f.replace("MAKEFILE_LIST := ", "CACTUP_UNUSED := ")),
             ("it stays in MAKEFILES", &|f| f.replace("MAKEFILES := ", "CACTUP_UNUSED := ")),
             ("a forwarding rule is run for it", &|f| f.replace(&own_rule, "")),
+            // As on a host without `grep`: every thorn would stand down.
+            ("its scan of a thorn's make fragments cannot run", &|f| f.replace("grep -Eq", "cactup-no-such-grep -Eq")),
         ];
         for (what, breakage) in breakages {
             let (stdout, stderr, log) = judge(breakage);
