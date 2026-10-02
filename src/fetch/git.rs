@@ -7,7 +7,7 @@
 //! `git`) choice viable.
 
 use crate::Res;
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use gix::bstr::{BString, ByteSlice};
 use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 use gix::refs::Target;
@@ -134,7 +134,13 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
         // clobbers the worktree. So pay for the status walk here too, even
         // though a bare URL mismatch is the rare case: skipping it would
         // silently drop edits that were never backed up.
-        let (modified, untracked) = status_paths(&repo, Untracked::List).unwrap_or_default();
+        // Interrupted, the walk saw only some files: never report its partial
+        // (or empty) list as everything there is to back up.
+        let (modified, untracked) = match status_paths(&repo, Untracked::List) {
+            Ok(paths) => paths,
+            Err(e) if gix::interrupt::is_triggered() => return Err(e),
+            Err(_) => Default::default(),
+        };
         return Ok(Probe {
             state: RepoState::Dirty(DirtyReason::RemoteUrlChanged {
                 on_disk: on_disk_url,
@@ -361,6 +367,15 @@ pub fn clone(
     let (_repo, _outcome) = checkout
         .main_worktree(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
         .with_context(|| format!("Failed to check out {url} (branch {branch_desc})"))?;
+    // gix's checkout returns `Ok` when interrupted, with only part of the
+    // tree written: that clone must not be reported as done.
+    if gix::interrupt::is_triggered() {
+        let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
+        bail!(
+            "interrupted during checkout: {} is incomplete; delete it, then fetch {name} again",
+            dest.display()
+        );
+    }
     Ok(())
 }
 
@@ -469,20 +484,43 @@ pub fn align(
     .with_context(|| format!("failed to update refs for branch {branch}"))?;
 
     // Check out the new tree over the existing worktree.
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| anyhow!("{} is bare", repo_dir.display()))?
-        .to_owned();
     let tree_id = repo
         .find_object(target_id)
         .with_context(|| "fetched commit missing from odb")?
         .peel_to_tree()
         .with_context(|| "fetched commit has no tree")?
         .id;
+    let old = if force_overwrite { None } else { old_index.as_ref() };
+    check_out_tree(&repo, tree_id, old, &old_paths, progress, &gix::interrupt::IS_INTERRUPTED)?;
+    Ok(target_id)
+}
+
+/// Check `tree_id` out over `repo`'s worktree and write its index, keeping the
+/// entries of `old` that are already right on disk (`None`: rewrite all), and
+/// delete the files `old_paths` tracked that the new tree does not.
+///
+/// gix's checkout returns `Ok` when `should_interrupt` cuts it short, with
+/// only part of the tree written; that is reported as an "interrupted" error
+/// here, never as a finished checkout. The index is left as it was: under the
+/// HEAD that already moved it reads as staged changes, so the repo is plainly
+/// modified, and it still lists the old tree's paths — which the recovering
+/// refetch needs to delete the files the new tree dropped.
+fn check_out_tree(
+    repo: &gix::Repository,
+    tree_id: ObjectId,
+    old: Option<&gix::index::File>,
+    old_paths: &[BString],
+    progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
+    should_interrupt: &std::sync::atomic::AtomicBool,
+) -> Res<()> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("{} is bare", repo.git_dir().display()))?
+        .to_owned();
     let mut index = repo
         .index_from_tree(&tree_id)
         .with_context(|| "failed to build index from tree")?;
-    if !force_overwrite && let Some(old) = &old_index {
+    if let Some(old) = old {
         keep_unchanged_entries(&mut index, old);
     }
     let mut opts = repo
@@ -503,10 +541,18 @@ pub fn align(
         repo.objects.clone().into_arc().with_context(|| "failed to reopen odb")?,
         &files,
         &bytes,
-        &gix::interrupt::IS_INTERRUPTED,
+        should_interrupt,
         opts,
     )
     .with_context(|| "worktree checkout failed")?;
+    if should_interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+        let name = workdir.file_name().unwrap_or(workdir.as_os_str()).to_string_lossy();
+        bail!(
+            "interrupted during checkout: {} is only partly updated \
+             (`cactup inst refetch --overwrite {name}` finishes it)",
+            workdir.display()
+        );
+    }
 
     reconcile_exec_bits(&mut index, &workdir);
     for entry in index.entries_mut() {
@@ -520,7 +566,7 @@ pub fn align(
         index.entries().iter().map(|e| e.path(&index).to_owned()).collect();
     let mut dirs = std::collections::BTreeSet::new();
     for old in old_paths {
-        if !new_paths.contains(&old) {
+        if !new_paths.contains(old) {
             let path = workdir.join(old.to_str_lossy().as_ref());
             let _ = std::fs::remove_file(&path);
             let mut parent = path.parent().map(Path::to_path_buf);
@@ -538,8 +584,7 @@ pub fn align(
     for dir in dirs.iter().rev() {
         let _ = std::fs::remove_dir(dir);
     }
-
-    Ok(target_id)
+    Ok(())
 }
 
 /// gix's checkout adds the executable bit to a file it overwrites but never
@@ -845,10 +890,24 @@ enum Untracked {
 /// [`source_diff`], which need the same walk but draw different conclusions
 /// from it.
 fn status_paths(repo: &gix::Repository, untracked_files: Untracked) -> Res<(Vec<String>, Vec<String>)> {
+    status_paths_until(repo, untracked_files, &gix::interrupt::IS_INTERRUPTED)
+}
+
+/// [`status_paths`], stopping when `should_interrupt` is set. A walk cut short
+/// has not seen every file, so it fails rather than return a list that would
+/// read as "nothing else changed".
+fn status_paths_until(
+    repo: &gix::Repository,
+    untracked_files: Untracked,
+    should_interrupt: &'static std::sync::atomic::AtomicBool,
+) -> Res<(Vec<String>, Vec<String>)> {
     let walk_span = crate::timing::span("gix status walk");
     let mut modified = Vec::new();
     let mut untracked = Vec::new();
-    let mut platform = repo.status(gix::progress::Discard).with_context(|| "failed to prepare status")?;
+    let mut platform = repo
+        .status(gix::progress::Discard)
+        .with_context(|| "failed to prepare status")?
+        .should_interrupt_shared(should_interrupt);
     if untracked_files == Untracked::Skip {
         platform = platform.untracked_files(gix::status::UntrackedFiles::None);
     }
@@ -863,7 +922,12 @@ fn status_paths(repo: &gix::Repository, untracked_files: Untracked) -> Res<(Vec<
     let mut iter =
         platform.into_iter(Vec::<BString>::new()).with_context(|| "failed to run status")?;
     for item in iter.by_ref() {
-        let item = item.with_context(|| "status iteration failed")?;
+        let item = match item {
+            Ok(item) => item,
+            // gix ends an interrupted walk with an error item; say what it is.
+            Err(_) if should_interrupt.load(std::sync::atomic::Ordering::Relaxed) => bail!("interrupted"),
+            Err(e) => return Err(e).with_context(|| "status iteration failed"),
+        };
         match item {
             gix::status::Item::TreeIndex(change) => {
                 modified.push(change.location().to_string());
@@ -887,6 +951,9 @@ fn status_paths(repo: &gix::Repository, untracked_files: Untracked) -> Res<(Vec<
                 }
             }
         }
+    }
+    if should_interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("interrupted");
     }
     drop(walk_span);
     if crate::timing::enabled()
@@ -1315,6 +1382,76 @@ mod align_tests {
         assert_eq!(listed, ["a", "b"]);
         assert_eq!(untracked, ["b-renamed"]);
         assert_eq!(skipped, listed);
+    }
+
+    /// Set from the start, so every interruptible step sees Ctrl-C at once —
+    /// without touching the process-wide flag the other tests share.
+    static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+    /// A status walk under a set interrupt flag fails instead of returning a
+    /// list that would read as "nothing else changed". (Whether gix itself
+    /// stops early is gix's business; this pins cactup's verdict.)
+    #[test]
+    fn an_interrupted_status_walk_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &[("a", "alpha\n", false)]);
+        std::fs::write(dir.join("a"), "edited\n").unwrap();
+        let repo = gix::open(&dir).unwrap();
+        let err = status_paths_until(&repo, Untracked::List, &INTERRUPTED).unwrap_err();
+        assert_eq!(err.to_string(), "interrupted");
+    }
+
+    /// A checkout cut short by Ctrl-C (gix returns `Ok` for it) is reported
+    /// as interrupted and leaves the old index, so under the moved HEAD the
+    /// repo reads as modified; the forced refetch the message suggests then
+    /// finishes it — including deleting the file the new tree dropped, which
+    /// it can only find in that old index.
+    #[test]
+    fn an_interrupted_checkout_fails_and_a_forced_one_finishes_it() {
+        static NOT_INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [("a", "alpha\n", false), ("gone", "x\n", false)];
+        let (_, dir, _) = upstream_and_clone(tmp.path(), &files);
+        let repo = gix::open(&dir).unwrap();
+        // A new commit straight into the clone, moving HEAD the way align's
+        // ref edit does before it checks out: `a` changes, `gone` is dropped,
+        // `b` is new.
+        let mut tree = gix::objs::Tree::empty();
+        for (name, content) in [("a", "ALPHA\n"), ("b", "beta\n")] {
+            let oid = repo.write_blob(content.as_bytes()).unwrap().detach();
+            let mode = gix::objs::tree::EntryKind::Blob.into();
+            tree.entries.push(gix::objs::tree::Entry { mode, filename: name.into(), oid });
+        }
+        let tree_id = repo.write_object(&tree).unwrap().detach();
+        let parent = repo.head_id().unwrap().detach();
+        let tip = repo.commit("HEAD", "new tree", tree_id, [parent]).unwrap().detach();
+        let paths_of = |index: &gix::index::File| -> Vec<BString> {
+            index.entries().iter().map(|e| e.path(index).to_owned()).collect()
+        };
+        let old = repo.open_index().unwrap();
+        let old_paths = paths_of(&old);
+        let index_before = identity(&dir.join(".git/index"));
+        let mut progress = prodash::tree::Root::new().add_child("test checkout");
+
+        let err = check_out_tree(&repo, tree_id, Some(&old), &old_paths, &mut progress, &INTERRUPTED)
+            .unwrap_err();
+        assert!(err.to_string().starts_with("interrupted during checkout"), "{err}");
+        assert!(err.to_string().contains("--overwrite clone"), "{err}");
+        // Nothing checked out, nothing swept, the index untouched…
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "alpha\n");
+        assert!(dir.join("gone").exists() && !dir.join("b").exists());
+        assert_eq!(identity(&dir.join(".git/index")), index_before);
+        // …so under the new HEAD the repo reads as modified.
+        assert!(source_state(&dir).unwrap().contains("mod@"));
+
+        // The forced recovery: full checkout, sweeping by the old index.
+        let repo = gix::open(&dir).unwrap();
+        let old_paths = paths_of(&repo.open_index().unwrap());
+        check_out_tree(&repo, tree_id, None, &old_paths, &mut progress, &NOT_INTERRUPTED).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "ALPHA\n");
+        assert!(dir.join("b").exists());
+        assert!(!dir.join("gone").exists(), "the dropped file must be swept");
+        assert_eq!(source_state(&dir).unwrap(), tip.to_string());
     }
 
     /// `source_state` really skips the untracked walk: an unreadable untracked

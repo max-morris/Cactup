@@ -306,7 +306,34 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     drop(classify);
     renderer.shutdown_and_wait();
 
+    // Installing over a directory that already holds repos (a re-run after an
+    // interrupted install, say): one that is modified, or only partly checked
+    // out, would be left as it is and the tree registered anyway, missing
+    // files and all. Refuse instead, naming them.
+    if !plan.skipped.is_empty() {
+        let repos_dir = crate::installation::cactus_root_of(&install_dir, &root).join("repos");
+        let mut message = format!(
+            "{} repo(s) in {} have local changes or an incomplete checkout, so this install \
+             would not fetch them:",
+            plan.skipped.len(),
+            repos_dir.display()
+        );
+        for s in &plan.skipped {
+            message.push_str(&format!("\n  {}: {}", s.repo, s.reason.describe()));
+        }
+        message.push_str("\nDelete them (or the whole installation directory) and install again.");
+        bail!(message);
+    }
+
     let report = crate::fetch::execute(&plan, &install_dir)?;
+    // Ctrl-C: stop here, before anything registers the tree as an
+    // installation (the per-component failures are all just "interrupted").
+    if gix::interrupt::is_triggered() {
+        bail!(
+            "interrupted; the installation at {} is incomplete and was not registered",
+            install_dir.display()
+        );
+    }
     if !report.failures.is_empty() {
         for f in &report.failures {
             println!("{}", format!("  {}: {}", f.what, f.error).bright_red());

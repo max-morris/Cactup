@@ -905,6 +905,9 @@ fn prune_orphans(
 
     let mut removable: Vec<&Orphan> = Vec::new();
     for o in orphans {
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted; nothing was pruned");
+        }
         if !o.prunable {
             continue;
         }
@@ -961,7 +964,10 @@ fn prune_orphans(
         }
     }
 
-    for o in &removable {
+    for (pruned, o) in removable.iter().enumerate() {
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted after pruning {pruned} of {} repo(s)", removable.len());
+        }
         // -f on a dirty orphan: whole-repo backup before deletion (the same
         // guarantee as --overwrite-modified, scaled to "everything").
         let state = fetch::FetchState::read(&inst.root)?;
@@ -1107,6 +1113,11 @@ fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Opt
 
     let root = backup_dir(&inst.alias)?;
     for (s, rel) in files {
+        // An unfinished backup must stop the forced fetch that would
+        // overwrite what it has not copied yet.
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted while backing up modified files to {}; nothing was overwritten", root.display());
+        }
         let from = s.dir.join(rel);
         let to = root.join(&s.repo).join(rel);
         if let Some(parent) = to.parent() {
@@ -1127,6 +1138,10 @@ fn backup_dir(alias: &str) -> Res<PathBuf> {
 fn copy_tree(from: &Path, to: &Path) -> Res<()> {
     fs::create_dir_all(to).with_context(|| format!("Failed to create {}", to.display()))?;
     for entry in fs::read_dir(from).with_context(|| format!("Failed to list {}", from.display()))? {
+        // A backup cut short must not be followed by the delete it guards.
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted while backing up {}", from.display());
+        }
         let entry = entry?;
         let src = entry.path();
         let dst = to.join(entry.file_name());

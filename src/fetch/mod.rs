@@ -508,7 +508,16 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
     links.sort_by_key(|c| c.target.contains("..") || c.checkout.contains(".."));
     let link_span = crate::timing::span("link pass");
     let pass = link::LinkPass::new(install_root, &plan.root);
-    for c in links {
+    for (i, c) in links.iter().enumerate() {
+        // Ctrl-C: the links not yet made are failures, like the components
+        // never fetched above, and nothing further runs (no settle pass).
+        if gix::interrupt::is_triggered() {
+            for c in &links[i..] {
+                let error = "interrupted before this link was made".to_owned();
+                report.failures.push(Failure { what: c.checkout.clone(), error });
+            }
+            return Ok(report);
+        }
         match pass.link(c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
             Err(e) => {
