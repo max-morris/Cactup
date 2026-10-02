@@ -236,6 +236,7 @@ impl Installation {
     /// The installation a command targets: `--installation <alias>` or the
     /// active installation; fail fast otherwise (§3).
     pub fn resolve(ctx: &Ctx) -> Res<Installation> {
+        let _span = crate::timing::span("installation resolve");
         let db = ctx.db.read()?;
         let alias = match &ctx.globals.installation {
             Some(alias) => alias.clone(),

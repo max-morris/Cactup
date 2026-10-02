@@ -103,10 +103,11 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let checking = progress.add_child("probe thorn links");
     checking.init(Some(linked.len()), Some(prodash::unit::label("thorns")));
     let checking = std::sync::Mutex::new(checking);
+    let pass = fetch::link::LinkPass::new(&inst.root, &root);
     let states: Res<Vec<Res<LinkState>>> = crate::par::parallel_map(&linked, |c| {
         let current =
             checking.lock().expect("delta progress poisoned").add_child(c.checkout.clone());
-        let state = fetch::link::inspect_link(&inst.root, &root, c);
+        let state = pass.inspect(c);
         drop(current);
         checking.lock().expect("delta progress poisoned").inc();
         state

@@ -202,8 +202,8 @@ multi-writer story.
 
 Required model (D11):
 
-1. The global DB lock is acquired, the DB is read (and possibly mutated +
-   persisted), and the lock is **released before** any long-running work begins.
+1. A mutation acquires the global DB lock, re-reads the DB, mutates and
+   persists it, and **releases the lock before** any long-running work begins.
    A command that needs to write a result at the end **re-acquires the lock,
    re-reads the on-disk DB, and applies a field-scoped write** (mutating only the
    specific keys it owns — e.g. one `installations` entry or one `knobs` entry —
@@ -213,6 +213,30 @@ Required model (D11):
    the reason the persist path must re-read first: the whole-file
    `serde_json::to_string_pretty(self)` in `src/database.rs` is replaced by
    read-modify-write under the held lock.
+
+   **Reads take no lock.** A plain read (`Db::read`, a snapshot nothing will
+   persist) opens `database.json` directly. That is safe because the only
+   writer is the locked read-modify-write above, which renames a complete,
+   fsynced temp file into place: the path always names one whole version, so
+   a reader sees either it or its successor, never a torn mix, and the lock
+   would only have serialized readers against writers that rename already
+   keeps apart. Locking each read cost every command several synchronous
+   round trips on NFS (create, link, fstat, unlink, read back, remove) and
+   made a read that raced an update fail outright. Fallbacks keep the worst
+   case at the locked behavior: a missing file goes straight to the locked
+   read (before the first write ever, every read takes it — the old cost); a
+   stale NFS file handle (`ESTALE`, the file renamed over mid-read) or an
+   unparsable file is retried a few times first; the schema guard's verdict
+   is final. Freshness: a read returns a complete version, normally the
+   current one — NFSv4 opens by name, and on a default (close-to-open)
+   NFSv3 mount a renamed-over file's handle goes stale and the kernel looks
+   the name up again. It can be a *previous* version only on a `nocto` mount
+   (cached attributes and pages, up to `acregmax`), or on NFSv3 when a
+   process on the writing host still had the old file open during the rename
+   (that client keeps the old inode alive by silly-renaming it), until the reader's
+   cached lookup revalidates (about `acdirmax`). That is harmless here,
+   since a snapshot is never persisted and every mutation re-reads under the
+   lock.
 2. **`cactup sim run --restart-id N` (the compute-node path) does not depend on
    the global DB at all.** Everything it needs — the Cactus root, the
    executable, the config, the parfile, topology — is read from

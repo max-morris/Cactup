@@ -358,13 +358,29 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                 git::clone(&item.url, branch, &item.dir, &mut line)
                                     .and_then(|()| git::head_of(&item.dir).map(|(_, id)| id))
                             }
-                            (_, Some(branch)) => git::align(&item.dir, branch, &mut line),
+                            (_, Some(branch)) => {
+                                // Forced (backed-up local edits) or repointed:
+                                // only a full overwrite is right there.
+                                let force = item.forced.is_some() || item.retarget.is_some();
+                                git::align(&item.dir, branch, force, &mut line)
+                            }
                             (_, None) => {
                                 // plan() always fills in the probed head
                                 // branch for existing repos; this is a bug
                                 // guard, not a reachable path.
                                 Err(anyhow::anyhow!("no branch resolved for existing repo"))
                             }
+                        };
+                        // Assert the repo actually landed on its expected
+                        // branch: an independent read of HEAD on disk, taken
+                        // here (outside the report lock) so it runs in
+                        // parallel with the other workers.
+                        let wrong_branch = match (&outcome, &item.branch) {
+                            (Ok(_), Some(expected)) => match git::head_of(&item.dir) {
+                                Ok((actual, _)) if &actual != expected => Some(actual),
+                                _ => None,
+                            },
+                            _ => None,
                         };
                         let mut report = report.lock().expect("fetch report poisoned");
                         match outcome {
@@ -379,7 +395,11 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
                                     changed,
                                     forced: item.forced.clone(),
                                     retargeted: item.retarget.clone(),
-                                })
+                                });
+                                if let (Some(actual), Some(expected)) = (wrong_branch, &item.branch) {
+                                    let error = format!("post-fetch HEAD is on {actual}, expected {expected}");
+                                    report.failures.push(Failure { what: item.repo.clone(), error });
+                                }
                             }
                             Err(e) => {
                                 line.failed(format!("{e:#}"));
@@ -480,34 +500,68 @@ pub fn execute(plan: &Plan, install_root: &Path) -> Res<ExecReport> {
         }
     }
 
-    // Symlink pass, after every fetch: repoint-or-create per checkout, and
-    // assert each fetched repo actually landed on its expected branch.
+    // Symlink pass, after every fetch: repoint-or-create per checkout.
     // Plain targets first: a target containing `..` may deliberately route
     // *through* an arrangement symlink another component creates (the ET
     // list's Fuka section does exactly this), so those resolve last.
     let mut links: Vec<&Component> = plan.links.iter().collect();
     links.sort_by_key(|c| c.target.contains("..") || c.checkout.contains(".."));
-    for c in links {
-        match link::link_component(install_root, &plan.root, c) {
+    let link_span = crate::timing::span("link pass");
+    let pass = link::LinkPass::new(install_root, &plan.root);
+    for (i, c) in links.iter().enumerate() {
+        // Ctrl-C: the links not yet made are failures, like the components
+        // never fetched above, and nothing further runs (no settle pass).
+        if gix::interrupt::is_triggered() {
+            for c in &links[i..] {
+                let error = "interrupted before this link was made".to_owned();
+                report.failures.push(Failure { what: c.checkout.clone(), error });
+            }
+            return Ok(report);
+        }
+        match pass.link(c) {
             Ok(outcome) => report.links.push((c.checkout.clone(), outcome)),
             Err(e) => {
                 report.failures.push(Failure { what: c.checkout.clone(), error: format!("{e:#}") })
             }
         }
     }
-    for r in &report.repos {
-        if let Some(expected) = &r.branch
-            && let Ok((actual, _)) = git::head_of(&install_root.join(&plan.root).join("repos").join(&r.repo))
-            && &actual != expected
-        {
-            report.failures.push(Failure {
-                what: r.repo.clone(),
-                error: format!("post-fetch HEAD is on {actual}, expected {expected}"),
-            });
-        }
-    }
+    drop(link_span);
+
+    // Last, after all git work: settle the index of every repo that was
+    // cloned or aligned (or found already at its tip), so later status walks
+    // match by stat instead of re-hashing files written in the index's own
+    // second. Best effort and optional for correctness, so its outcome —
+    // even an interrupt — never changes the report.
+    let repos: Vec<(String, std::path::PathBuf)> = report
+        .repos
+        .iter()
+        .map(|r| (r.repo.clone(), install_root.join(&plan.root).join("repos").join(&r.repo)))
+        .collect();
+    settle_indexes(&repos);
 
     Ok(report)
+}
+
+/// [`git::settle_index`] over `repos` (name, directory), in parallel, behind a
+/// phase-scoped bar.
+fn settle_indexes(repos: &[(String, std::path::PathBuf)]) {
+    let _span = crate::timing::span("settle indexes");
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let settling = progress.add_child("settle indexes");
+    settling.init(Some(repos.len()), Some(prodash::unit::label("repos")));
+    let settling = std::sync::Mutex::new(settling);
+    let _ = crate::par::parallel_map(repos, |(repo, dir)| {
+        let current = settling.lock().expect("settle progress poisoned").add_child(repo.clone());
+        if let Ok(git::Settled::Rewritten) = git::settle_index(dir) {
+            crate::timing::count("settle: indexes rewritten", 1);
+        }
+        drop(current);
+        settling.lock().expect("settle progress poisoned").inc();
+    });
+    drop(settling);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
 }
 
 /// `<install_root>/.cactup/fetch-state.toml` — the per-repo record of what

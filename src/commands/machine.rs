@@ -49,6 +49,7 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
 /// matches are cached; the zero-match fallback is not, so a later `machine
 /// create` is picked up.
 pub fn resolve(ctx: &Ctx) -> Res<Machine> {
+    let _span = crate::timing::span("machine resolve");
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
     resolve_with(
         &ctx.db,
@@ -671,7 +672,12 @@ fn create_machine(
     if !answers.is_empty() {
         db.update(|db| {
             for (knob, value) in answers {
-                db.set_knob(knob, value);
+                // A silent run's derived default is re-checked under the
+                // lock, so it never overwrites a value set since the
+                // snapshot; an answer the user just typed always wins.
+                if !silent || db.knob(knob).is_none() {
+                    db.set_knob(knob, value);
+                }
             }
             Ok(())
         })?;
