@@ -219,7 +219,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-3";
+pub const KEY_LABEL: &str = "key-4";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -887,7 +887,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "7f1eebe69ce8ef6f011af95fa7e1a3c1ef13437ceec5a9744b8c02cbd31be409");
+        assert_eq!(parts.key(), "da66c6a2232c1c48f13dafe9c7e867c5e10e9a4b473dafa0ced2f001cb23cbc3");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "./", "./configs/@config/"]);
     }
 

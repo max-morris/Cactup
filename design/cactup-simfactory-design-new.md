@@ -4816,7 +4816,7 @@ A key is a digest that two compiles share only when they would produce the
 same object (rule 1). `objcache::key` builds it from six parts, each a
 SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
 so that two builds can be compared part by part. The six digests are
-combined under a label (`key::KEY_LABEL`, now `key-3`), and **any change
+combined under a label (`key::KEY_LABEL`, now `key-4`), and **any change
 that can make one key stand for another object changes the label**:
 something the key now covers that it did not, anything cactup adds to or
 changes in a compile it runs, a change in how a part is digested. Several

@@ -280,12 +280,17 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     if let Some((store, keyed)) = serving {
         let key = keyed.parts.key();
         event.outcome = Some("miss".to_owned());
+        // In audit mode, an entry that cannot be put beside the object
+        // cannot be checked: then the compile just runs.
         let into = match mode {
-            Mode::Audit => beside(&keyed.compile.output).ok(),
-            _ => None,
+            Mode::Audit => beside(&keyed.compile.output).map(Some).map_err(|e| e.to_string()),
+            _ => Ok(None),
         };
-        let target = into.as_deref().map_or(keyed.compile.output.as_path(), |temp| temp);
-        let (restored, serve_ms) = timed(|| store.restore(&key, target));
+        let (restored, serve_ms) = timed(|| match &into {
+            Ok(into) => store.restore(&key, into.as_deref().unwrap_or(&keyed.compile.output)),
+            Err(why) => Err(Miss::CannotWrite(why.clone())),
+        });
+        let into = into.ok().flatten();
         event.serve_ms = serve_ms;
         match restored {
             Ok(messages) if mode == Mode::Audit => {
