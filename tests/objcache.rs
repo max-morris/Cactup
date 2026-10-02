@@ -43,9 +43,10 @@ impl Build {
             cc.join("config.toml"),
             format!(
                 "mode = \"{mode}\"\ncactup = \"{CACTUP}\"\nconfig-dir = \"{}\"\ncactus-root = \"{}\"\n\
-                 machine = \"test\"\nbuild-env-digest = \"\"\n",
+                 machine = \"test\"\nbuild-env-digest = \"\"\nstore = \"{}\"\n",
                 config.display(),
-                root.display()
+                root.display(),
+                root.parent().unwrap().join("store").display()
             ),
         )
         .unwrap();

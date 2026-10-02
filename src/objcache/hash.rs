@@ -51,6 +51,26 @@ impl Hasher {
     }
 }
 
+/// A plain SHA-256 of a stream of bytes, unframed: the checksum of a store
+/// entry (`store`), which is whatever bytes the entry holds.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Checksum(digest::Context);
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Checksum {
+    pub fn new() -> Self {
+        Self(digest::Context::new(&digest::SHA256))
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    pub fn hex(self) -> String {
+        hex(self.0.finish().as_ref())
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -32,6 +32,9 @@ pub mod identity;
 pub mod key;
 pub mod platform;
 pub mod probe;
+// Nothing serves or publishes yet: the wrapper takes it up with serving.
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod store;
 pub mod wrapper;
 
 use crate::build::sh_quote;
@@ -99,6 +102,30 @@ pub fn validate_mode(value: &str) -> Res<String> {
     Ok(Mode::parse(value.trim())?.name().to_owned())
 }
 
+/// Knob validator (§5): `build-cache-dir`, the store's root, is an absolute
+/// path. Every build of the instance writes there, from whatever directory
+/// it runs in, so a relative one would mean something else to each.
+pub fn validate_store_root(value: &str) -> Res<String> {
+    let value = value.trim();
+    if !Path::new(value).is_absolute() || value.contains(['\n', '\0']) {
+        bail!("invalid build-cache-dir \"{value}\": it must be an absolute path");
+    }
+    Ok(value.to_owned())
+}
+
+/// Where the store is when the `build-cache-dir` knob is not set.
+pub fn default_store_root() -> PathBuf {
+    crate::CACTUP_ROOT.join("cache")
+}
+
+/// The effective `build-cache-dir`, read leniently like [`Mode::from_db`]: a
+/// stored value that is not an absolute path means the default. Resolved on
+/// the login node only (D11): [`stage`] freezes it.
+pub fn store_root(db: &Database) -> PathBuf {
+    let knob = db.knob("build-cache-dir").filter(|value| Path::new(value).is_absolute());
+    knob.map_or_else(default_store_root, PathBuf::from)
+}
+
 /// One build's cache settings (§18.2), frozen by [`stage`] as
 /// `<attempt>/cc/config.toml` and read back by the probe and by every
 /// wrapper invocation of that build.
@@ -119,6 +146,8 @@ pub struct BuildConf {
     /// SHA-256 of the build-phase environment setup the build script runs:
     /// an edit to a machine's modules keys every object differently.
     pub build_env_digest: String,
+    /// The store's root (§18.7), from the `build-cache-dir` knob.
+    pub store: PathBuf,
 }
 
 impl BuildConf {
@@ -160,6 +189,7 @@ pub struct StageInputs<'a> {
     pub machine: &'a str,
     pub universe: Option<&'a str>,
     pub build_env: &'a str,
+    pub store: &'a Path,
 }
 
 /// A build with the cache staged: the shell text `prepare` splices into the
@@ -186,6 +216,7 @@ pub fn stage(cc_dir: &Path, mode: Mode, inputs: &StageInputs) -> Res<Option<Stag
         machine: inputs.machine.to_owned(),
         universe: inputs.universe.map(str::to_owned),
         build_env_digest: hash::bytes_digest(inputs.build_env.as_bytes()),
+        store: inputs.store.to_owned(),
     };
     fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create {}", cc_dir.display()))?;
     let path = conf_path(cc_dir);
@@ -285,6 +316,7 @@ mod tests {
             machine: "mel5",
             universe: Some("host"),
             build_env: "module load gcc\n",
+            store: Path::new("/work/cache"),
         }
     }
 
@@ -294,6 +326,15 @@ mod tests {
         assert_eq!(validate_mode("off").unwrap(), "off");
         let err = validate_mode("on").unwrap_err().to_string();
         assert!(err.contains("valid: off, record"), "{err}");
+    }
+
+    #[test]
+    fn store_root_knob_accepts_absolute_paths_only() {
+        assert_eq!(validate_store_root(" /scratch/me/cache ").unwrap(), "/scratch/me/cache");
+        for bad in ["cache", "~/cache", "", "/a\nb"] {
+            let err = validate_store_root(bad).unwrap_err().to_string();
+            assert!(err.contains("must be an absolute path"), "{bad:?}: {err}");
+        }
     }
 
     #[test]
@@ -323,6 +364,7 @@ mod tests {
                 machine: "mel5".to_owned(),
                 universe: Some("host".to_owned()),
                 build_env_digest: hash::bytes_digest(b"module load gcc\n"),
+                store: PathBuf::from("/work/cache"),
             }
         );
         assert!(BuildConf::load(&cc.join("missing.toml")).is_err());

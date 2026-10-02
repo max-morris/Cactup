@@ -1787,6 +1787,7 @@ fn prepare_with_cache(
         Some((mode, _)) => mode,
         None => db.as_ref().map(crate::objcache::Mode::from_db).unwrap_or_default(),
     };
+    let cache_store = db.as_ref().map_or_else(|_| crate::objcache::default_store_root(), crate::objcache::store_root);
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
     // optionlist, make command and a build submit script — frozen into
     // `build.toml` with the vars, so `execute` never opens the DB (§5, D11).
@@ -1917,6 +1918,7 @@ fn prepare_with_cache(
                 machine: &machine.name,
                 universe: attempt.meta.config_meta.universe.as_deref(),
                 build_env: &build_env,
+                store: &cache_store,
             },
         );
         let cache = staged.unwrap_or_else(|e| {

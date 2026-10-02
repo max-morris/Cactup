@@ -237,6 +237,7 @@ mod tests {
             machine: machine.to_owned(),
             universe: universe.map(str::to_owned),
             build_env_digest: build_env_digest.to_owned(),
+            store: PathBuf::from("/nonexistent/cache"),
         }
     }
 

@@ -436,6 +436,16 @@ mod tests {
         assert!(identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string().contains("is a script"));
     }
 
+    /// What a driver says of itself goes into its identity, so it is asked
+    /// in English whatever the session's language: the variables that pick
+    /// a message catalog are set or cleared on the way in.
+    #[test]
+    fn a_driver_is_asked_in_english() {
+        let tmp = tempfile::tempdir().unwrap();
+        let driver = script(tmp.path(), "cc", r#"echo "LC_MESSAGES=$LC_MESSAGES LANGUAGE=${LANGUAGE-unset} $1""#);
+        assert_eq!(ask(&driver, &["--version"]).unwrap(), "LC_MESSAGES=C LANGUAGE=unset --version\n");
+    }
+
     /// The real GCC of this host, if it has one.
     fn gcc() -> Option<PathBuf> {
         let gcc = find_program(OsStr::new("gcc")).ok()?;

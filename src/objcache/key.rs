@@ -143,6 +143,7 @@ const MAPPED_VALUES: &[&str] = &["-isystem", "-iquote", "-idirafter", "-include"
 /// builds can be compared part by part: which part differed is why a
 /// compile would have missed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Parts {
     pub platform: String,
     pub compiler: String,
@@ -419,7 +420,6 @@ pub fn in_english(command: &mut Command) {
         };
     }
 }
-
 
 /// Run the preprocessor for `compile` and digest what it prints and what it
 /// read: the compiler that was identified, under the name the recipe ran it
@@ -818,6 +818,7 @@ mod tests {
                 machine: "test".into(),
                 universe: None,
                 build_env_digest: String::new(),
+                store: PathBuf::from("/nonexistent/cache"),
             };
             let tree = Self { _tmp: tmp, conf, cc };
             std::fs::write(tree.header(), HEADER).unwrap();
