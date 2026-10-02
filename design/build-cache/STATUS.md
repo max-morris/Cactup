@@ -271,6 +271,22 @@ put into M1a. Spec §18 was written first, the code after.
   specs files), the knob lists in `meta-toml.md` and
   `running-simulations.md`, `cactup build --help`, `CLAUDE-contract.md`.
 
+Real builds (2026-10-02, `plato`, debug build of `659f434`, `smoke`, `-f
+-j 8`; logs and object hash lists in `~/tmp/build-cache-m1a/`):
+
+- Record against plain: 357 recorded, 307 keyed, all 307 relocatable,
+  every object byte for byte the plain build's (as at M0).
+- With `BASH_ENV` naming a file that defines nothing: bash started 2708
+  times in the build and cactup asked it 3 times (gcc, g++, gfortran);
+  307 keyed; objects identical.
+- With `BASH_ENV` defining a function `gcc`: the 280 C compiles were
+  left to the shell and ran through the function; objects identical.
+  (Before M1a the wrapper would have bypassed the function for them.)
+- The flesh at the speed side's `build-speedup` `2500bc4` (put back on
+  master after): `smoke`, and `dep` with `-MD -MP`, objects and `.d` files
+  identical with and without the cache (714 files each); `dep` against
+  `smoke`, 307 of 307 would be served.
+
 Not verified: NFS or Lustre (`plato` has neither; the cross-process test
 ran on ext4), a real Spack or site GCC (the specs tests use a copy of
 this host's GCC 14 driver with a specs file beside it).

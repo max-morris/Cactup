@@ -98,15 +98,18 @@ the planned keying and serving will rely on.
   `configs/<name>/build/`, (c) is given `SRCDIR=<the thorn's source
   directory>`, and (d) is started by a make that itself read `MAKEFILES`
   (so the variable is still in its environment). The fragment acts only
-  when (a) and (b) hold, and reads `$(SRCDIR)/make.code.defn` and
-  `$(SRCDIR)/make.code.deps` to stand down for a thorn that mentions
-  `COMPILE_` in them.
+  when (a) and (b) hold, and runs `grep -E` over `$(SRCDIR)/make.code.defn`
+  and `$(SRCDIR)/make.code.deps` to stand down for a thorn that mentions
+  `COMPILE_` in them or has an `include` (`-include`, `sinclude`), a
+  `define` or a `$(eval` directive in them (since M1a). `grep` must be
+  on the build's `PATH`.
 - **A3 (M0a). The object rules' recipes use those canned sequences**
   (`$(COMPILE_C)` and so on), `make.config.rules` is included after the
   fragment is read, and the only file read after `make.config.rules` that
   may redefine a `COMPILE_*` sequence is the thorn's own `make.code.deps`
-  (directly: a redefinition in a file it includes, or under a computed
-  name, is not noticed and loses to the fragment's `override`).
+  (a thorn whose fragments include other makefiles, `define` or `$(eval`
+  is left to plain make since M1a; a redefinition under a computed name
+  is not noticed and loses to the fragment's `override`).
 - **A4 (M0a). `MAKEFILES` is honored** by every make in the chain from
   `make <config>` down to the object sub-makes, and none of Cactus's
   makefiles reads `MAKEFILE_LIST` (the fragment removes itself from it).
@@ -192,15 +195,17 @@ With `build-cache = record` (M0a, on `feature/build-cache` only):
   rule for itself and reassigns `MAKEFILE_LIST` to drop its own name. In
   Cactus's object sub-makes it also defines the `COMPILE_*` overrides and
   one helper variable (`cactup_cc_run`), removes itself from the
-  `MAKEFILES` handed on to child processes, and runs one `cat` of the
-  thorn's two make fragments while parsing.
+  `MAKEFILES` handed on to child processes, and runs one `grep -E` over
+  the thorn's two make fragments while parsing (a `cat` before M1a).
 - **C3.** Each object compile runs as a child of a short-lived cactup
   process which appends one line to `<attempt>/cc/events.jsonl`.
   Compilers, flags and objects are unchanged. **Since M0b a recording
   build is slower**: for every C and C++ compile, cactup also runs the
   compiler's preprocessor twice (`-E`, before and after the compile) and
   reads every file that run names, twice, to key it; once per build and
-  compiler it also compiles two tiny trial files. On the 25-thorn test
+  compiler it also compiles two tiny trial files and (since M1a) asks
+  `$(SHELL) -c 'command -v <name>'` once, to see that bash's `BASH_ENV`
+  does not give the compiler's name another meaning. On the 25-thorn test
   configuration that summed to about a third of the compile time again;
   proper numbers come with M0c. Do not take speed measurements with
   `build-cache = record` on and compare them with ones taken with it off.
@@ -239,6 +244,15 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   directive, a `define` or `$(eval` are left out of the cache. Timings
   taken with the cache serving are not comparable with ones taken
   without it.
+
+- 2026-10-02: **M1a in review** on `feature/build-cache` (the store,
+  not yet used by builds; see A2, A3, C2, C3 for what changed in the
+  injection). Nothing yet changes a compile or its object. Still planned
+  for M1b (serving): real compiles gain `-ffile-prefix-map=...` flags (GCC
+  and Clang family); on a hit no compiler runs, and a dependency file the
+  recipe asked for (A6) is written by the cache's preprocessor run.
+  Timings taken with the cache serving are not comparable with ones
+  taken without it.
 
 ## Cache-side landed changes
 
@@ -340,3 +354,15 @@ every milestone.
   section updated: M1 waits for Max.
 - 2026-10-02  cache side  M1 has Max's go-ahead; the planned section says
   what serving will change. Nothing has changed yet.
+- 2026-10-02  cache side  M1a (store, stand-down for thorns that
+  include/define/eval, asking the shell about the compiler's name, GCC
+  specs files that only change the link) in review: A2, A3, C2, C3
+  updated. Your `build-speedup` `de1158a6` (parallel ccl parsing) noted;
+  tested at this gate (result in the next entry).
+- 2026-10-02  cache side  Tested M1a against `build-speedup` `2500bc4`
+  (your newest; `de1158a` and the linker option included), in the cache
+  side's own installation, flesh put back on master after: 25 thorns,
+  plain and with `build-cache = record`, objects and `.d` files byte for
+  byte the same (714 files); with `C_DEPEND_COMPILE_FLAGS =
+  CXX_DEPEND_COMPILE_FLAGS = -MD -MP` the same again, and the same 307
+  keys as without the option.
