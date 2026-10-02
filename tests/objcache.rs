@@ -225,6 +225,62 @@ fn a_compiler_the_shell_resolves_differently_is_left_to_the_shell() {
     assert!(build.events()[2].contains("\"exit\":0"));
 }
 
+/// What bash sets up for itself at startup, from the file `BASH_ENV` names
+/// (module systems set it), is invisible from outside: the wrapper asks the
+/// shell, and a compiler name it gives another meaning runs as the shell
+/// runs it. The answer is remembered for the attempt until what it depends
+/// on changes.
+#[test]
+fn a_compiler_name_the_shell_redefines_at_startup_is_left_to_the_shell() {
+    let bash = Path::new("/bin/bash");
+    if !bash.exists() {
+        eprintln!("skipped: no /bin/bash on this host");
+        return;
+    }
+    let build = Build::new("record");
+    let bin = build.root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("mycc"), "#!/bin/sh\necho \"the program on PATH: $*\"\n");
+    executable(&bin.join("othercc"), "#!/bin/sh\necho \"another program: $*\"\n");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let startup = build.root.join("bash_env");
+    let asked = build.root.join("asked");
+    // Counts how often a bash started (each one reads the file).
+    let counting = format!("echo x >> '{}'\n", asked.display());
+    let run = || build.wrap_under(bash, "mycc", &["-c", "a.c"]).env("PATH", &path).env("BASH_ENV", &startup).output().unwrap();
+
+    for (what, defines, runs) in [
+        ("a function", "mycc() { echo \"the function: $*\"; }\n", "the function: -c a.c\n"),
+        ("an alias", "shopt -s expand_aliases\nalias mycc='echo the alias:'\n", "the alias: -c a.c\n"),
+        ("a remembered path", &format!("hash -p '{}' mycc\n", bin.join("othercc").display()), "another program: -c a.c\n"),
+    ] {
+        fs::write(&startup, defines).unwrap();
+        assert_ran(&run(), runs, "", 0);
+        let events = build.events();
+        let last = events.last().unwrap();
+        assert!(last.contains("the recipe's shell runs something else for mycc"), "{what}: {last}");
+    }
+
+    // A startup file that leaves the name alone: the program on PATH,
+    // started here and keyed as usual, and the shell asked only once.
+    let _ = fs::remove_file(&asked);
+    fs::write(&startup, &counting).unwrap();
+    let before = build.events().len();
+    for _ in 0..3 {
+        assert_ran(&run(), "the program on PATH: -c a.c\n", "", 0);
+    }
+    let events = build.events();
+    assert_eq!(events.len(), before + 3);
+    assert!(events[before..].iter().all(|e| e.contains("\"exit\":0")), "{events:?}");
+    assert_eq!(fs::read_to_string(&asked).unwrap().lines().count(), 1, "the answer was not remembered");
+
+    // Until the startup file changes: then the shell is asked again.
+    fs::write(&startup, format!("{counting}mycc() {{ echo \"the function: $*\"; }}\n")).unwrap();
+    let out = run();
+    assert!(text(&out.stdout).ends_with("the function: -c a.c\n"), "{}", text(&out.stdout));
+    assert!(build.events().last().unwrap().contains("something else for mycc"));
+}
+
 /// What the recipe's shell can start and this process cannot, the shell
 /// starts: the build must not fail where it works without cactup.
 #[test]

@@ -30,6 +30,7 @@ pub mod event;
 pub mod hash;
 pub mod identity;
 pub mod key;
+pub mod lookup;
 pub mod platform;
 pub mod probe;
 // Nothing serves or publishes yet: the wrapper takes it up with serving.

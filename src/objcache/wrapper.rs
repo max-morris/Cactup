@@ -208,6 +208,14 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
     let Some(argv) = job.argv() else {
         leave_to(job, &conf, cc_dir, "the compiler is not a plain command naming a program, so the recipe's shell runs it")
     };
+    // A bare name is what the recipe's shell makes of it, and that shell
+    // may have defined it for itself at startup: it is asked (§18.4).
+    if conf.mode != Mode::Off
+        && !argv[0].as_bytes().contains(&b'/')
+        && let Err(why) = super::lookup::shell_runs_program(cc_dir, &job.shell, &argv[0])
+    {
+        leave_to_shell(job, &conf, cc_dir, &format!("{why}, so the recipe's shell runs it"))
+    }
     let program = Path::new(&argv[0]).file_name().and_then(OsStr::to_str);
     if program.is_some_and(|p| OTHER_WRAPPERS.contains(&p)) {
         leave_to(job, &conf, cc_dir, "the compiler already runs through another wrapper")
@@ -297,6 +305,19 @@ fn direct(argv: &[OsString], identified: Option<&Path>) -> Command {
 /// could tell why. What happens to the compile is not known here (this
 /// process becomes it), so the line has a reason and nothing else.
 fn leave_to(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) -> ! {
+    log_left(job, conf, cc_dir, why);
+    pass_through(job)
+}
+
+/// [`leave_to`], for a compile whose compiler only the recipe's shell can
+/// say: it goes to a shell even though the words look plain.
+fn leave_to_shell(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) -> ! {
+    log_left(job, conf, cc_dir, why);
+    hand_to_shell(job)
+}
+
+/// The log's line for a compile the cache stays out of.
+fn log_left(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) {
     debug(why);
     if conf.mode == Mode::Record {
         let event = Event {
@@ -318,7 +339,6 @@ fn leave_to(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) -> ! {
         };
         event.append(&events_path(cc_dir));
     }
-    pass_through(job)
 }
 
 /// What `work` returns, and the wall-clock milliseconds it took.

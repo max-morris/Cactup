@@ -73,7 +73,7 @@ pub struct Compiler {
 
 /// One file an identity was computed from, as it looked then.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct Seen {
+pub(super) struct Seen {
     path: PathBuf,
     size: u64,
     ctime: i64,
@@ -83,7 +83,7 @@ struct Seen {
 }
 
 impl Seen {
-    fn of(path: &Path) -> Res<Self> {
+    pub(super) fn of(path: &Path) -> Res<Self> {
         let meta = fs::metadata(path).with_context(|| format!("Failed to look at {}", path.display()))?;
         Ok(Self {
             path: path.to_owned(),
