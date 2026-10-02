@@ -1,6 +1,7 @@
 # Build cache: status
 
-Read this first when picking the work up. The plan is `PLAN.md` in this
+Read `DECISIONS.md` (what Max has decided) and `HANDOFF-M1.md` (where to
+start M1) first when picking the work up; this file is the record. The plan is `PLAN.md` in this
 directory (as approved; this file and the spec say where the work has moved
 since); the spec is §18 of `design/cactup-simfactory-design-new.md`.
 
@@ -34,8 +35,8 @@ the last milestone, for when that host is not at hand.
 - Re-read the contract file at every milestone, keep the cache-side
   sections current, and refresh the snapshot.
 - Test the make-facing parts against more than one GNU make:
-  `CACTUP_TEST_MAKES=/path/to/make-4.2.1:/path/to/make-4.3 cargo test
-  --test objcache` (build them from ftp.gnu.org; 3.82 does not run on a
+  `CACTUP_TEST_MAKES=$HOME/tmp/build-cache-tools/make-4.2.1/make:$HOME/tmp/build-cache-tools/make-4.3/make
+  cargo test` (built from GNU sources during M0; 3.82 does not run on a
   current glibc).
 - `CLAUDE.md` is untracked and shared by every session in the repository:
   do not edit it from this branch. Its text waits in `CLAUDE-contract.md`.
@@ -47,10 +48,11 @@ the last milestone, for when that host is not at hand.
 |---|---|---|
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
-| M0c | Measurements in `~/cacti/build-cache`, written results | measured; results in `RESULTS-M0c.md`, **waiting for Max**; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
-| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob | not started |
-| M1b | Serving, double check, audit mode, two-installation audit build | not started |
+| M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
+| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to | **go-ahead given**; not started (`HANDOFF-M1.md`) |
+| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
+| after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
 
@@ -290,6 +292,9 @@ compiler but GCC, any machine but `plato`.
 - 2026-10-01: M0c review round 3: both reviewers SIGN-OFF on `129ecf7`.
   Everything on the branch up to that commit has passed review. Waiting
   for Max.
+- 2026-10-02: Max answered the open questions and gave the go-ahead for
+  M1. Recorded in `DECISIONS.md`; `HANDOFF-M1.md` written for the start
+  of M1.
 
 ## Review verdicts
 
@@ -679,56 +684,12 @@ Non-blocking points left open, for the start of the next code milestone:
 `PLAN.md` still lists `-MD` as not cached: it is the plan as approved,
 and its first lines say where the work has moved since.
 
-## Decisions waiting for Max
+## Decisions
 
-The first two are about what the cache may do in a setup nobody is known
-to have: the two known ways it could change what gets compiled. The others
-decide how much the cache is worth; `RESULTS-M0c.md` has the numbers for
-them.
-
-1. **A thorn's compile recipe defined indirectly** (in a file its
-   `make.code.deps` includes, or under a computed name) is not seen by the
-   stand-down scan, and Cactus's stock recipe would run in its place. No
-   Einstein Toolkit thorn defines a compile recipe. Accept as a stated
-   limit, or have the probe do more (for example, decline for the whole
-   build if any thorn make fragment has an `include`)?
-2. **Functions or aliases a shell defines for itself at startup**
-   (`BASH_ENV`) are invisible to the wrapper; one named like the compiler
-   would be bypassed. Closing it means sending every compile to the shell
-   wherever `BASH_ENV` is set, which module systems do, so the cache would
-   be off on most clusters. Accept as a stated limit?
-
-3. **Keying every byte costs hits when generated headers change.** Adding
-   a thorn changes headers that nearly every source includes, and all of
-   those sources miss, though their tokens are the same (55% served where
-   the text alone gave 90%). The bytes matter to the object only through
-   debug information (columns; Clang's per-file checksums) and
-   `__builtin_COLUMN`. Options, for after M0c has numbers on a full
-   thornlist: accept it; or have a serving cache compile with
-   `-gno-column-info` and key the text plus line numbers (changes what
-   `gdb` knows about columns, as the path map changes the paths it sees);
-   or key bytes only for files that contribute text. The last two need the
-   same kind of proof as the path map.
-4. **`-march=native` on a machine with mixed cores** (`plato` is one) is
-   not cached, because the compiler itself is not deterministic there. A
-   cache could pin compiles to one kind of core instead, at the cost of
-   using fewer cores. Clusters are not affected.
-
-5. **The locale is in the key**, so a session without `LANG` shares
-   nothing with one that has it (measured: 0 of 307). Keep it, narrow it
-   to `LC_CTYPE`/`LC_ALL`, or take it out and store the compiler's
-   messages as they came?
-6. **A GCC with a `specs` file is not cached**, which is every Spack-built
-   GCC. Build the refinement (accept a specs file that differs from the
-   built-in specs in link sections only) before measuring on a cluster?
-7. **Fortran is 31% of the compile time** on the 275-thorn build. The plan
-   has it after C and C++ are served; say if it should move up.
-8. **Go-ahead for M1** (the store, then serving with audit mode): nothing
-   is stored or served until Max has read the results.
+All of them, answered, are in `DECISIONS.md`. One thing is still with Max:
+the check for `specs` files on his clusters (decision 3), before any
+refinement for Spack-built GCCs is built.
 
 ## Next step
 
-Everything up to `129ecf7` is reviewed. **Wait for Max** on
-`RESULTS-M0c.md` and the decisions above: nothing is stored or served
-before he has answered. Then M1a (the store), starting with the open
-non-blocking points listed under "M0c, round 3".
+M1a, as `HANDOFF-M1.md` lays it out.

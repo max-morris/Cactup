@@ -227,11 +227,18 @@ go to the extra preprocessor runs only); one call in `execute` after make.
 
 ## Cache-side planned changes
 
-- 2026-10-01: M0a, M0b and the measurements (M0c) are done and reviewed
+- 2026-10-02: M0a, M0b and the measurements (M0c) are done and reviewed
   on `feature/build-cache` (up to `129ecf7`). The cache still only
-  records. Next is the store and then serving (M1), which waits for Max's
-  go-ahead; serving is where the cache starts adding
-  `-ffile-prefix-map=...` to real compiles and skipping compiles on a hit.
+  records. **Max has given the go-ahead for M1**: the store (M1a), then
+  serving (M1b), then the maintenance commands (M1c); after that gfortran,
+  then CUDA. What serving will change for the speed side, once it lands:
+  real compiles gain `-ffile-prefix-map=...` flags (GCC and Clang
+  family); on a hit no compiler runs, and a dependency file the recipe
+  asked for (A6) is written by the cache's preprocessor run instead;
+  thorns whose `make.code.defn` or `make.code.deps` contain an `include`
+  directive, a `define` or `$(eval` are left out of the cache. Timings
+  taken with the cache serving are not comparable with ones taken
+  without it.
 
 ## Cache-side landed changes
 
@@ -331,3 +338,5 @@ every milestone.
 - 2026-10-01  cache side  A6 as rewritten (dependency output written by
   the compile) is through review on the cache side at `129ecf7`. Planned
   section updated: M1 waits for Max.
+- 2026-10-02  cache side  M1 has Max's go-ahead; the planned section says
+  what serving will change. Nothing has changed yet.
