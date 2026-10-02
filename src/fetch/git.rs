@@ -1366,6 +1366,13 @@ mod align_tests {
         let clone_dir = tmp.join("clone");
         let mut progress = prodash::tree::Root::new().add_child("test clone");
         clone(&upstream.to_string_lossy(), Some(&branch), &clone_dir, &mut progress).unwrap();
+        // Tests that commit inside the clone need an identity of its own, as
+        // `testrepo::init` gives the upstream: the ambient user config must
+        // not leak in (and CI runners have none).
+        let config = clone_dir.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("\n[user]\n\tname = cactup-test\n\temail = test@invalid\n");
+        std::fs::write(&config, text).unwrap();
         (upstream, clone_dir, branch)
     }
 
@@ -1567,8 +1574,7 @@ mod align_tests {
         let files = [("a", "alpha\n", false), ("b", "beta\n", false)];
         let (upstream, dir, branch) = upstream_and_clone(tmp.path(), &files);
         let url = upstream.to_string_lossy().into_owned();
-        let mut repo = gix::open(&dir).unwrap();
-        let _ = repo.committer_or_set_generic_fallback();
+        let repo = gix::open(&dir).unwrap();
         // The new tip: `a` and `b` both change.
         let mut tree = gix::objs::Tree::empty();
         for (name, content) in [("a", "ALPHA\n"), ("b", "BETA\n")] {
