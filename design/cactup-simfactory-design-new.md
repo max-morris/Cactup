@@ -1763,11 +1763,12 @@ since what it serves is installed unasked; trailing `/` stripped; default
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
-And one maintenance knob for the build cache (D15, §18): `build-cache`
-(`off`, the default, or `record`; read leniently — garbage means `off`). It
-is not in the snapshot either, but a build does depend on it, on a compute
-node included: `prepare` resolves it and freezes the result into the build
-attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
+And two maintenance knobs for the build cache (D15, §18): `build-cache`
+(`off`, the default, or `record`; read leniently — garbage means `off`) and
+`build-cache-dir` (the store's root, an absolute path; default
+`$CACTUP_HOME/cache`). They are not in the snapshot either, but a build does
+depend on them, on a compute node included: `prepare` resolves them and
+freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
 that configures cactup rather than a value a job's templates read.
 
 **Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
@@ -4498,8 +4499,9 @@ of this instance has compiled before.
 `design/build-cache/`. What exists now is the interposition (§18.2–§18.4)
 and the keys (§18.5): with `build-cache = record`, cactup stands in front of
 every object compile, works out the key it would be cached under, and logs
-it; `cactup cache report` (§18.6) reads the logs. The store and serving
-objects are not written yet, and this section will grow with them.
+it; `cactup cache report` (§18.6) reads the logs. The store (§18.7) exists
+and is tested on its own; no build writes to it or reads from it yet.
+Serving objects comes next, and this section will grow with it.
 
 ### 18.1 Rules
 
@@ -4532,11 +4534,12 @@ them.
    one must stay ignored, and the wrapper must end the way the compiler
    ended.
 6. **Hermetic on the compute node (D11).** The wrapper and the probe read
-   the attempt's frozen settings and the configuration directory named in
-   them (and `/proc/self/status`). Never the global DB, the registry, the
-   MDB, or knobs.
+   the attempt's frozen settings, the configuration directory named in
+   them (and `/proc/self/status`), and the store whose root is named in
+   them (§18.7). Never the global DB, the registry, the MDB, or knobs:
+   `prepare` resolves the store's root from its knob and freezes it.
 7. **No eviction without being asked.** Old entries are what make reverting
-   a thorn cheap. (Nothing is stored yet.)
+   a thorn cheap.
 
 ### 18.2 What `prepare` freezes
 
@@ -4544,10 +4547,11 @@ With `build-cache` off, a build attempt and its build script are exactly
 what they are without this section. Otherwise `prepare` writes
 `<attempt>/cc/config.toml` (`objcache::BuildConf`): the mode, the versioned
 cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
-directory and the Cactus root, and what keys objects to their platform
+directory and the Cactus root, what keys objects to their platform
 (§18.5): the machine, the build universe, and a SHA-256 of the build-phase
-environment setup. If that cannot be written, the build goes on without the
-cache and says so.
+environment setup; and the store's root (§18.7), from the knob
+`build-cache-dir` (an absolute path; default `$CACTUP_HOME/cache`). If that
+cannot be written, the build goes on without the cache and says so.
 
 The build script gains one step and changes one (`objcache::Staged`):
 
@@ -4587,7 +4591,7 @@ replaced:
 ifdef CCTK_TARGET
 ifneq ($(findstring |<config>/build/,|$(CURDIR)/),)
 MAKEFILES := $(filter-out <attempt>/cc/inject.mk,$(MAKEFILES))
-ifeq ($(findstring COMPILE_,$(shell cat '$(SRCDIR)/make.code.defn' '$(SRCDIR)/make.code.deps' 2>/dev/null)),)
+ifeq ($(shell grep -Eq -e '<stand-down pattern>' /dev/null $(wildcard $(SRCDIR)/make.code.defn $(SRCDIR)/make.code.deps); echo $$?),1)
 define cactup_cc_run
 '<cactup>' __cc '<config.toml>' '$(subst ','\'',$1)' '$(subst ','\'',$(SHELL))'
 endef
@@ -4633,12 +4637,23 @@ Why this shape (rule 3):
   `make.code.deps` (the one place a plain redefinition takes effect, since
   it is read after the rules). The fragment stands down for a source
   directory whose `make.code.defn` or `make.code.deps` mentions the compile
-  recipes at all. It reads those two files as text and nothing else: a
-  recipe a thorn defines in a file it includes from them, or under a
-  computed name, is not seen, and the stock recipe would then run in its
-  place. No thorn in the Einstein Toolkit defines a compile recipe; this is
-  the known limit of the mechanism, and it is listed in the contract with
-  the Cactus build work.
+  recipes at all (`COMPILE_` anywhere), or could define one where the
+  fragment cannot see it: an `include` directive (`include`, `-include`,
+  `sinclude` at the start of a line), a `define` directive (also behind
+  `override`, `export` or `private`), or `$(eval` (`${eval` too). It
+  matches directives, not words: `INCLUDE_DIRS` or a comment saying
+  "include" does not count, while a line that only continues the one
+  before and begins with `include` does (that costs the thorn the cache,
+  never a wrong recipe). `grep -E` does the reading, once per object
+  sub-make, and the fragment wraps only on its "no match" (exit 1): no
+  file, an unreadable one or no `grep` at all leaves the thorn to plain
+  make, and the self-test's wrapped run, which needs the "no match", turns
+  the cache off for a build where `grep` cannot run. None of the 348
+  thorns of the Einstein Toolkit has any of these (counted 2026-10-02), so
+  this costs nothing there. What is left: a thorn that redefines a compile
+  recipe under a computed name (`$(RECIPE_NAME) = …`, with `COMPILE_`
+  nowhere in its text) is not seen. That needs a makefile written to hide
+  the name; it is listed in the contract with the Cactus build work.
 - **`config-data` stays pristine**: a `make <name>` run by hand later builds
   with the real compilers, with no cactup involved.
 
@@ -4714,14 +4729,31 @@ cannot start itself goes to a shell of the same kind:
 - **A compiler already behind another wrapper** (ccache, sccache, distcc,
   …) is started as it is and left alone: cactup does not stack.
 
+**The shell is asked what a bare name means.** Whatever the shell sets up
+for itself at startup that changes how it looks a name up — a function or
+alias, or a `hash -p` — cannot be seen from outside it. Cactus runs its
+recipes with `SHELL = /bin/bash`, and bash reads the file `BASH_ENV` names
+before every recipe line (module systems set it). So before a compile whose
+compiler is a bare name (no `/`; a path is a path to every shell) the
+wrapper runs `<shell> -c 'command -v <name>'` in the recipe's environment
+and working directory, and starts the compiler itself only when the last
+line of the answer is a path to the very file a `PATH` search finds (both
+resolved to their physical paths). Any other answer — a bare name (a
+function or builtin), `alias …`, another path, nothing, a failure — leaves
+the compile to the shell, with the answer in the log. The answer is
+remembered per build attempt (`<attempt>/cc/compilers/`), for that shell
+and name, as long as these are what they were: the shell's file (size,
+change time, inode), `PATH`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `HOME`, the files
+`BASH_ENV` and `ENV` name, and the working directory when `PATH` has a
+relative entry.
+
 Two differences from the recipe's own shell remain, and both are stated
 limits. It is a *new* shell, so a compiler text that uses the recipe's
-shell variables (`$$current_wd`) does not find them. And whatever the shell
-sets up for itself at startup that changes how it looks a name up — a
-function or alias, or a `hash -p` (bash reads the file `BASH_ENV` names;
-module systems set it) — is invisible to the wrapper: something there named
-like the compiler would be run by the recipe and bypassed by the wrapper.
-No makefile or site setup cactup knows of does either.
+shell variables (`$$current_wd`) does not find them. And the answer is
+remembered: a file that the one `BASH_ENV` names reads in turn, edited
+during a build attempt to define a function named like the compiler, takes
+effect in the recipes and not in the wrapper until the next attempt. No
+makefile or site setup cactup knows of does that.
 
 A started compiler's environment is the recipe's, with one adjustment: a
 shell that sets `_` for each command it starts (bash) set it to cactup, and
@@ -4819,12 +4851,30 @@ so that two builds can be compared part by part:
   that takes flags from a file of its own — a GCC with a `specs` file on
   disk, a Clang that says it reads a configuration file: what such a file
   adds never passes the reader of the command line, so nothing that reader
-  declines would be declined. Which file a driver reads depends on the
+  declines would be declined. **One kind of specs file is accepted**: one
+  that changes only how GCC links. Site-built GCCs have such a file to add
+  an `-rpath` to their own libraries (seen on qbd: `*link_libgcc:` gains
+  `%(link_libgcc_rpath)`, a new section with the `-rpath`), and a `-c`
+  compile never links. The file is read against the driver's built-in
+  specs (`-dumpspecs`, which ignores the file) and accepted only if every
+  section it defines is a built-in one with the same text, a built-in one
+  only the link command uses (`link_command`, `linker`, `link`, `lib`,
+  `libgcc`, `link_libgcc`, `link_gcc_c_sequence`, `link_ssp`, `link_gomp`,
+  `startfile`, `endfile`, `post_link`, `linker_plugin_file`,
+  `lto_wrapper`, `lto_gcc`), or a new one that no section outside that
+  list refers to (`%(name)`, `%[name]`) except other new ones; and if it
+  has nothing else: no `%include`, `%include_noerr` or `%rename`, no
+  compiler for a suffix (`.ext:`, `@language:`), no section twice, nothing
+  unparsed. GCC's own compile steps, which `-dumpspecs` does not show,
+  refer to built-in sections only, and to none on that list. The file's
+  bytes join the compiler's identity. Which file a driver reads depends on the
   compile (Clang picks a configuration file by target, so `-m32` can bring
   one in), so **every compile is asked**: the preprocessor run is given
   `-v`, and the driver says on stderr whether it read a configuration file
-  (Clang) or its built-in specs (GCC). Each must say a line it always says
-  (`InstalledDir:`, `Using built-in specs.`): an answer without it is no
+  (Clang) or its built-in specs (GCC); a GCC whose specs file was accepted
+  must say it read that file (`Reading specs from`, the same file by its
+  physical path) and no other. Each must say a line it always says
+  (`InstalledDir:`, `Using built-in specs.` or the accepted file's line): an answer without it is no
   answer, and no key (Clang names a configuration file between
   `InstalledDir:` and the command line of the compiler proper, so it has
   to have printed both). That run is given English messages
@@ -4962,8 +5012,11 @@ nobody has to find out:
   two excepted.
 - *Flags from behind the command line.* The reader sees the command line.
   Known other sources are ruled out: a response file, a GCC `specs` file
-  and a Clang configuration file (by what the driver says of each
-  compile), the override variables. Flags a distribution
+  that does more than change the link, and a Clang configuration file (by
+  what the driver says of each compile), the override variables. The
+  link-only judgment rests on the list of link sections above being
+  right for every GCC: a GCC whose compile steps refer to one of them
+  would be keyed without what that section adds. Flags a distribution
   built into its compiler are part of the compiler, and of its identity;
   one that built in a flag the reader would decline is not noticed.
 - *The compiler's identity.* Files a compiler reads by rules of its own
@@ -5026,3 +5079,121 @@ them one by one. Both builds are found before anything is printed.
 Nothing is read from or written to a cache: both builds only recorded, and
 "would be served" stands on §18.5's path mapping, which the per-compiler
 trial supports and audit mode has yet to try on real compiles.
+
+### 18.7 The store
+
+One directory tree per instance, shared by every installation,
+configuration and host of it, and written by builds running at the same
+time on several hosts over NFS or Lustre, where `flock` cannot be trusted
+(§2.3). So: no lock, no index, no file written by two processes. Every
+write is a new file under a name of its own, and the one shared step is
+`link(2)`, atomic on all three (`objcache::store`).
+
+**Where.** `<root>/v1/<machine>/<first two hex digits of the key>/<key>`.
+The root is the knob `build-cache-dir` (an absolute path; default
+`$CACTUP_HOME/cache`), resolved by `prepare` and frozen into
+`<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
+from there (§18.1 rule 6). `v1` is the entry format. A cactup with another
+format writes beside it and never reads it — no backward compatibility
+(§2.4); the old tree is left for `cache gc`. `<machine>` is the cactup
+machine the build was prepared for, which the key also covers: the
+directory keeps machines apart for `cache stats` and `cache gc`, not for
+soundness. A machine name that is not a plain file name keeps the build out
+of the store.
+
+**An entry** is one file, written whole once and never changed:
+
+```
+cactup build cache entry\n             magic line
+<length of the header, decimal>\n
+<header, TOML>
+<the object>
+<what the compiler wrote to stdout>
+<what the compiler wrote to stderr>
+<SHA-256 of every byte above, 64 hex digits>\n
+```
+
+The header has the format (`1`), the key and its six parts (§18.5), and the
+length of each of the three blobs; and, for people only, the object's name
+below `build/`, the compiler as the recipe named it, whether the key is
+relocatable, the cactup version and the host that compiled it. An entry is
+*valid* when the magic line is there, the header parses (unknown fields
+are an error), its key is the file's name and the digest of its parts, the
+lengths add up to the file's size, and the checksum is right. A dependency
+file is not stored (§18.5: a hit has the key's own preprocessor run write
+it).
+
+**Publishing** an object (what a serving cache does after a compile that
+succeeded and whose key still held, §18.5):
+
+1. If `<key>` exists, nothing is written: an entry is the object of its key,
+   whoever compiled it first.
+2. The two directories above it are created if missing.
+3. A temporary file is created beside it, `.tmp-<key>-<random>`, and the
+   entry is written into it, the object read once from the compile's output
+   and the checksum computed over exactly the bytes written. It is made
+   read-only (`0444`) and synced to disk (`sync_all`).
+4. It is hard-linked to `<key>`. The entry is published if the link
+   succeeds, or if it fails and the temporary file's link count is 2 (NFS
+   can lose the reply to a link that happened; `lock::LinkLock` does the
+   same). If `<key>` exists by now, another build published it first: the
+   same object, so nothing is lost. Any other failure (no space, no
+   permission, no hard links on that filesystem) leaves the object
+   unpublished; the build goes on.
+5. The temporary file is removed.
+
+What an interruption at each step leaves: before step 4, a `.tmp-` file no
+restore ever opens; between 4 and 5, the same beside a whole entry. `cache
+gc` removes `.tmp-` files a day old (by the fileserver's clock). The data
+is synced before the link, so a name that exists names a whole entry, also
+after a crash. A stop signal during publishing ends the wrapper on the spot,
+as during the check after the compile (§18.5), and leaves such a `.tmp-`
+file.
+
+**Restoring** an object:
+
+1. `<key>` is opened. Not there: a miss.
+2. The magic line and the header are read and checked against the key and
+   the file's size.
+3. A temporary file is created beside the object the compile would write
+   (`.<object name>.cactup-<random>`), and the object's bytes are copied
+   into it while the whole entry is digested; the compiler's output is read
+   into memory; the checksum is compared.
+4. If the entry is valid, the temporary file gets the mode the compiler
+   would have given the object (`0666` less the umask, from
+   `/proc/self/status`) and is renamed onto the object's name: `make` sees
+   the old object or none, or the whole new one, never part of one. Its
+   modification time is the restore's.
+5. If it is not valid, the temporary file is removed, the entry is
+   invalidated, and it is a miss. An error reading the entry that says
+   nothing about its content (an I/O error, a stale NFS handle) is a miss
+   that leaves the entry alone: a passing fault must not delete a good one.
+
+An entry is never linked to the object: the object is the build's, and a
+later compile writes into it in place.
+
+**Invalidating** an entry removes it, so that the next compile of its key
+can publish a good one. It is removed by name only if that name still
+leads to the file that was read (same device and inode): another build may
+have removed it already and published anew. The check and the removal are
+two steps; a good entry that slips in between is removed, which costs one
+miss.
+
+**Two builds at once.** Two publishers of one key: one link wins, the
+other finds the name taken, and both entries were the same object. A
+reader and a publisher: the reader finds no entry or a whole one. A reader
+and an invalidator: the reader keeps reading the file it opened, and
+checks it anyway. On NFS the data is on the server before the link, and a
+reader on another host revalidates at open (close-to-open consistency); a
+host that has not seen a new entry yet misses.
+
+**Trust.** The checksum shows that an entry is what its writer wrote, not
+that its writer was honest: whoever can write in the store can put any
+object under any key. The store is as trustworthy as its directories'
+permissions. Entries are read-only for everyone, directories are created
+under the user's umask, and the default root is inside `$CACTUP_HOME`. A
+root shared with a group trusts every member with every build that reads
+it.
+
+**Last use** is not recorded yet; it comes with `cache gc`. Whatever form it
+takes, an entry is never changed after its link.
