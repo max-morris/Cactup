@@ -31,6 +31,10 @@ pub enum RepoState {
 pub enum DirtyReason {
     /// Tracked files modified, staged, or deleted (repo-relative paths).
     WorktreeModified(Vec<String>),
+    /// A checkout cactup itself started and Ctrl-C cut short: tracked files
+    /// differ from HEAD, but every one holds either HEAD's version or the one
+    /// from before cactup's align moved HEAD — nothing of the user's.
+    UnfinishedCheckout(Vec<String>),
     /// Commits on HEAD that origin/<head-branch> does not have.
     LocalCommits(usize),
     DetachedHead(ObjectId),
@@ -56,6 +60,9 @@ impl DirtyReason {
                 [one] => format!("local modifications ({one})"),
                 many => format!("local modifications ({} files)", many.len()),
             },
+            DirtyReason::UnfinishedCheckout(paths) => {
+                format!("an interrupted checkout ({} file(s) behind, no local edits)", paths.len())
+            }
             DirtyReason::LocalCommits(n) => format!("{n} local commit(s) not on origin"),
             DirtyReason::DetachedHead(id) => {
                 format!("detached HEAD at {}", &id.to_string()[..12.min(id.to_string().len())])
@@ -165,7 +172,12 @@ fn probe_inner(repo_dir: &Path, wanted_url: &str, wanted_branch: &str) -> Res<Pr
     // and index↔worktree (unstaged + untracked) changes.
     let (modified, untracked) = status_paths(&repo, Untracked::List)?;
     if !modified.is_empty() {
-        return Ok(dirty(DirtyReason::WorktreeModified(modified), untracked));
+        let reason = if interrupted_align(&repo).is_some() && local_edits(repo_dir, &modified).is_empty() {
+            DirtyReason::UnfinishedCheckout(modified)
+        } else {
+            DirtyReason::WorktreeModified(modified)
+        };
+        return Ok(dirty(reason, untracked));
     }
 
     // Branch placement. An empty wanted branch means "no !REPO_BRANCH":
@@ -372,7 +384,7 @@ pub fn clone(
     if gix::interrupt::is_triggered() {
         let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
         bail!(
-            "interrupted during checkout: {} is incomplete; delete it, then fetch {name} again",
+            "interrupted during the clone's checkout: {} is incomplete; delete it, then fetch {name} again",
             dest.display()
         );
     }
@@ -442,6 +454,7 @@ pub fn align(
         && repo.head_name().ok().flatten().as_ref() == Some(&branch_ref)
         && repo.head_id().ok().map(|id| id.detach()) == Some(target_id)
     {
+        clear_align_marker(&repo);
         return Ok(target_id);
     }
 
@@ -461,10 +474,15 @@ pub fn align(
         force_create_reflog: false,
         message: msg.into(),
     };
+    // From here until its index is written, an interruption leaves the repo
+    // between two trees; the marker is how a later probe tells that apart
+    // from a user's edits (see `interrupted_align`).
+    let before = repo.head_id().ok().map(|id| id.detach());
+    write_align_marker(&repo, before, target_id)?;
     repo.edit_references([
         RefEdit {
             change: Change::Update {
-                log: log("cactup refetch: align"),
+                log: log(ALIGN_REFLOG_MESSAGE),
                 expected: PreviousValue::Any,
                 new: Target::Object(target_id),
             },
@@ -473,7 +491,7 @@ pub fn align(
         },
         RefEdit {
             change: Change::Update {
-                log: log("cactup refetch: align"),
+                log: log(ALIGN_REFLOG_MESSAGE),
                 expected: PreviousValue::Any,
                 new: Target::Symbolic(branch_ref),
             },
@@ -492,8 +510,95 @@ pub fn align(
         .id;
     let old = if force_overwrite { None } else { old_index.as_ref() };
     check_out_tree(&repo, tree_id, old, &old_paths, progress, &gix::interrupt::IS_INTERRUPTED)?;
+    clear_align_marker(&repo);
     Ok(target_id)
 }
+
+/// The reflog message [`align`] writes when it moves a branch and HEAD.
+const ALIGN_REFLOG_MESSAGE: &str = "cactup refetch: align";
+
+/// `<git_dir>/cactup-align`: present only while an [`align`] that moves HEAD
+/// has not yet written its index — so, left behind, it means that align was
+/// cut short. It holds `<commit moved from> <commit moved to>`.
+fn align_marker(repo: &gix::Repository) -> std::path::PathBuf {
+    repo.git_dir().join("cactup-align")
+}
+
+fn write_align_marker(repo: &gix::Repository, from: Option<ObjectId>, to: ObjectId) -> Res<()> {
+    let from = from.unwrap_or_else(|| ObjectId::null(to.kind()));
+    let path = align_marker(repo);
+    std::fs::write(&path, format!("{from} {to}\n")).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+fn clear_align_marker(repo: &gix::Repository) {
+    let _ = std::fs::remove_file(align_marker(repo));
+}
+
+/// When an [`align`] was cut short on its way to the current HEAD, the commit
+/// it moved from — whose tree the interrupted checkout left in the index and
+/// partly on disk. `None` when no align was interrupted here (the marker is
+/// absent, or names a different HEAD), or when it moved from nothing.
+fn interrupted_align(repo: &gix::Repository) -> Option<ObjectId> {
+    let marker = std::fs::read_to_string(align_marker(repo)).ok()?;
+    let (from, to) = marker.trim().split_once(' ')?;
+    let (from, to) = (ObjectId::from_hex(from.as_bytes()).ok()?, ObjectId::from_hex(to.as_bytes()).ok()?);
+    (Some(to) == repo.head_id().ok().map(|id| id.detach()) && !from.is_null()).then_some(from)
+}
+
+/// The paths among `paths` that hold something of the user's: a file (or
+/// symlink) whose content and kind (file, executable, symlink) match neither
+/// HEAD's entry nor — only when an align was cut short here — the entry from
+/// before that align. Those are the only files a forced refetch can lose; a
+/// deleted file has nothing to lose. When a path cannot be checked it counts
+/// as an edit, so the answer only ever errs toward backing up too much.
+pub fn local_edits(repo_dir: &Path, paths: &[String]) -> Vec<String> {
+    let Ok(repo) = gix::open(repo_dir) else { return paths.to_vec() };
+    let tree_of = |commit: ObjectId| repo.find_object(commit).ok()?.peel_to_tree().ok();
+    let head_tree = repo.head_id().ok().and_then(|id| tree_of(id.detach()));
+    let before_tree = interrupted_align(&repo).and_then(tree_of);
+    let entry_at = |tree: &Option<gix::Tree<'_>>, rel: &str| {
+        let entry = tree.as_ref()?.lookup_entry_by_path(rel).ok()??;
+        Some((entry.object_id(), entry.mode().kind()))
+    };
+    use gix::objs::tree::EntryKind;
+    let hash_kind = repo.object_hash();
+    paths
+        .iter()
+        .filter(|rel| {
+            let path = repo_dir.join(rel);
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { return false }; // deleted
+            let kind = if meta.file_type().is_symlink() {
+                EntryKind::Link
+            } else if std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0 {
+                EntryKind::BlobExecutable
+            } else {
+                EntryKind::Blob
+            };
+            let id = if meta.file_type().is_symlink() {
+                use std::os::unix::ffi::OsStrExt;
+                let Ok(target) = std::fs::read_link(&path) else { return true };
+                gix::objs::compute_hash(hash_kind, gix::objs::Kind::Blob, target.as_os_str().as_bytes()).ok()
+            } else if meta.is_file() {
+                let Ok(mut file) = std::fs::File::open(&path) else { return true };
+                let discard = &mut gix::progress::Discard;
+                let blob = gix::objs::Kind::Blob;
+                let interrupt = &gix::interrupt::IS_INTERRUPTED;
+                gix::objs::compute_stream_hash(hash_kind, blob, &mut file, meta.len(), discard, interrupt).ok()
+            } else {
+                return true; // a directory where a file was: not ours to judge
+            };
+            let Some(id) = id else { return true };
+            let on_disk = Some((id, kind));
+            on_disk != entry_at(&head_tree, rel) && on_disk != entry_at(&before_tree, rel)
+        })
+        .cloned()
+        .collect()
+}
+
+/// How an [`align`] cut short by Ctrl-C mid-checkout begins its error, for
+/// callers that want to add advice about such repos (a forced refetch finishes
+/// it). An interrupted [`clone`] says something else: it is to be deleted.
+pub const INTERRUPTED_CHECKOUT: &str = "interrupted during checkout";
 
 /// Check `tree_id` out over `repo`'s worktree and write its index, keeping the
 /// entries of `old` that are already right on disk (`None`: rewrite all), and
@@ -545,13 +650,11 @@ fn check_out_tree(
         opts,
     )
     .with_context(|| "worktree checkout failed")?;
+    // The way to finish it depends on the command (a refetch can force it; an
+    // install that was never registered cannot be refetched), so the callers
+    // say how: see `INTERRUPTED_CHECKOUT`.
     if should_interrupt.load(std::sync::atomic::Ordering::Relaxed) {
-        let name = workdir.file_name().unwrap_or(workdir.as_os_str()).to_string_lossy();
-        bail!(
-            "interrupted during checkout: {} is only partly updated \
-             (`cactup inst refetch --overwrite {name}` finishes it)",
-            workdir.display()
-        );
+        bail!("{INTERRUPTED_CHECKOUT}: {} is only partly updated", workdir.display());
     }
 
     reconcile_exec_bits(&mut index, &workdir);
@@ -1435,8 +1538,7 @@ mod align_tests {
 
         let err = check_out_tree(&repo, tree_id, Some(&old), &old_paths, &mut progress, &INTERRUPTED)
             .unwrap_err();
-        assert!(err.to_string().starts_with("interrupted during checkout"), "{err}");
-        assert!(err.to_string().contains("--overwrite clone"), "{err}");
+        assert!(err.to_string().starts_with(INTERRUPTED_CHECKOUT), "{err}");
         // Nothing checked out, nothing swept, the index untouched…
         assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "alpha\n");
         assert!(dir.join("gone").exists() && !dir.join("b").exists());
@@ -1452,6 +1554,74 @@ mod align_tests {
         assert!(dir.join("b").exists());
         assert!(!dir.join("gone").exists(), "the dropped file must be swept");
         assert_eq!(source_state(&dir).unwrap(), tip.to_string());
+    }
+
+    /// What an align cut short by Ctrl-C leaves behind — the branch moved
+    /// with align's reflog message, the checkout only partly done, the old
+    /// index — probes as an unfinished checkout with nothing to back up. A
+    /// real edit on top makes it ordinary local modifications again, and only
+    /// that edit needs backing up.
+    #[test]
+    fn an_interrupted_align_probes_as_an_unfinished_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [("a", "alpha\n", false), ("b", "beta\n", false)];
+        let (upstream, dir, branch) = upstream_and_clone(tmp.path(), &files);
+        let url = upstream.to_string_lossy().into_owned();
+        let mut repo = gix::open(&dir).unwrap();
+        let _ = repo.committer_or_set_generic_fallback();
+        // The new tip: `a` and `b` both change.
+        let mut tree = gix::objs::Tree::empty();
+        for (name, content) in [("a", "ALPHA\n"), ("b", "BETA\n")] {
+            let oid = repo.write_blob(content.as_bytes()).unwrap().detach();
+            let mode = gix::objs::tree::EntryKind::Blob.into();
+            tree.entries.push(gix::objs::tree::Entry { mode, filename: name.into(), oid });
+        }
+        let tree_id = repo.write_object(&tree).unwrap().detach();
+        let parent = repo.head_id().unwrap().detach();
+        let tip = repo.new_commit("tip", tree_id, [parent]).unwrap().id;
+        // What align does before its checkout: the marker, then the ref move.
+        write_align_marker(&repo, Some(parent), tip).unwrap();
+        let branch_ref = format!("refs/heads/{branch}");
+        let any = gix::refs::transaction::PreviousValue::Any;
+        repo.reference(branch_ref.as_str(), tip, any, ALIGN_REFLOG_MESSAGE).unwrap();
+        // The checkout got as far as `a`, then Ctrl-C.
+        std::fs::write(dir.join("a"), "ALPHA\n").unwrap();
+
+        let probe = probe(&dir, &url, &branch);
+        let RepoState::Dirty(DirtyReason::UnfinishedCheckout(paths)) = &probe.state else {
+            panic!("expected an unfinished checkout, got {:?}", probe.state);
+        };
+        assert!(local_edits(&dir, paths).is_empty(), "nothing of the user's is there");
+
+        // A real edit on top: ordinary modifications, and just that file.
+        std::fs::write(dir.join("b"), "my edit\n").unwrap();
+        let probe = super::probe(&dir, &url, &branch);
+        let RepoState::Dirty(DirtyReason::WorktreeModified(paths)) = &probe.state else {
+            panic!("expected local modifications, got {:?}", probe.state);
+        };
+        assert_eq!(local_edits(&dir, paths), ["b"]);
+    }
+
+    /// After an align that finished, nothing is "interrupted": a user who
+    /// restores a file's pre-update version, or only changes its mode, has
+    /// made a local edit that a forced refetch must back up first.
+    #[test]
+    fn after_a_completed_align_old_content_and_mode_changes_are_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [("a", "alpha\n", false), ("b", "beta\n", false)];
+        let (upstream, dir, branch) = upstream_and_clone(tmp.path(), &files);
+        let url = upstream.to_string_lossy().into_owned();
+        testrepo::commit_tree(&upstream, &[("a", "ALPHA\n", false), ("b", "beta\n", false)]);
+        align_now(&dir, &branch, false);
+        assert!(!dir.join(".git/cactup-align").exists(), "a finished align leaves no marker");
+
+        std::fs::write(dir.join("a"), "alpha\n").unwrap(); // back to the old version
+        std::fs::set_permissions(dir.join("b"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = probe(&dir, &url, &branch);
+        let RepoState::Dirty(DirtyReason::WorktreeModified(paths)) = &probe.state else {
+            panic!("expected local modifications, got {:?}", probe.state);
+        };
+        assert_eq!(local_edits(&dir, paths), ["a", "b"]);
     }
 
     /// `source_state` really skips the untracked walk: an unreadable untracked

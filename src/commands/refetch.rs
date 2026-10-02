@@ -24,6 +24,7 @@ use indexmap::IndexMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where the thornlist being fetched came from; decides which files are
 /// rewritten and what the DB records (§3.2).
@@ -253,9 +254,26 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // else (the summary, thornlist adoption, config reports) belongs to a
     // finished refetch, not an aborted one.
     if gix::interrupt::is_triggered() {
+        // A repo cut short mid-checkout now reads as modified, with nothing of
+        // the user's in it; name the forced refetch that finishes it.
+        let unfinished: Vec<&str> = report
+            .failures
+            .iter()
+            .filter(|f| f.error.starts_with(fetch::git::INTERRUPTED_CHECKOUT))
+            .map(|f| f.what.as_str())
+            .collect();
+        let finish = if unfinished.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} stopped mid-checkout (`cactup inst refetch --overwrite {}` finishes it)",
+                unfinished.join(", "),
+                unfinished.join(" ")
+            )
+        };
         bail!(
             "interrupted after fetching {} repo(s) and {} download(s); the remaining \
-             component(s) were not fetched",
+             component(s) were not fetched{finish}",
             report.repos.len(),
             report.downloads.len()
         );
@@ -310,6 +328,9 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // Orphan handling: always reported; removed only under --prune.
     report_orphans(&orphans);
+    if args.prune {
+        finish_interrupted_prunes(&inst)?;
+    }
     if args.prune && !orphans.is_empty() {
         prune_orphans(&inst, &orphans, &configs, &args)?;
     }
@@ -987,7 +1008,7 @@ fn prune_orphans(
         for link in &o.symlinks {
             fs::remove_file(link).with_context(|| format!("Failed to remove {}", link.display()))?;
         }
-        fs::remove_dir_all(&o.dir).with_context(|| format!("Failed to remove {}", o.dir.display()))?;
+        remove_pruned_repo(inst, &o.repo, &o.dir)?;
         println!("Pruned {}.", o.repo.bold());
     }
     Ok(())
@@ -1096,15 +1117,18 @@ fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Opt
     // Local commits / detached HEADs stay recoverable through the repo's own
     // reflog (align force-moves refs with a reflog entry); only
     // WorktreeModified and RemoteUrlChanged have file contents worth copying
-    // out.
-    let files: Vec<(&fetch::SkippedRepo, &String)> = skipped
+    // out (an UnfinishedCheckout holds nothing of the user's by definition).
+    // And of those files, only the ones that hold a local edit: a file that is
+    // just HEAD's version, or the pre-align one an interrupted checkout left,
+    // is no loss.
+    let files: Vec<(&fetch::SkippedRepo, String)> = skipped
         .iter()
         .filter_map(|s| match &s.reason {
             fetch::git::DirtyReason::WorktreeModified(paths) => Some((*s, paths)),
             fetch::git::DirtyReason::RemoteUrlChanged { modified, .. } => Some((*s, modified)),
             _ => None,
         })
-        .flat_map(|(s, paths)| paths.iter().map(move |rel| (s, rel)))
+        .flat_map(|(s, paths)| fetch::git::local_edits(&s.dir, paths).into_iter().map(move |rel| (s, rel)))
         .filter(|(s, rel)| s.dir.join(rel).is_file())
         .collect();
     if files.is_empty() {
@@ -1118,14 +1142,81 @@ fn backup_dirty(inst: &Installation, skipped: &[&fetch::SkippedRepo]) -> Res<Opt
         if gix::interrupt::is_triggered() {
             bail!("interrupted while backing up modified files to {}; nothing was overwritten", root.display());
         }
-        let from = s.dir.join(rel);
-        let to = root.join(&s.repo).join(rel);
+        let from = s.dir.join(&rel);
+        let to = root.join(&s.repo).join(&rel);
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
         }
         fs::copy(&from, &to).with_context(|| format!("Failed to back up {}", from.display()))?;
     }
     Ok(Some(root))
+}
+
+/// Where a pruned repo waits to be deleted: `<installation>/.cactup/pruning/`.
+fn pruning_dir(inst: &Installation) -> PathBuf {
+    inst.cactup_dir().join("pruning")
+}
+
+/// Delete a pruned repo so that Ctrl-C can stop it at any point. Deleting a
+/// whole repo is one unlink per file, seconds on NFS, so it is first renamed
+/// out of `repos/` into [`pruning_dir`] (one atomic step: from then on the repo
+/// is gone from the tree), then deleted there, checking for Ctrl-C per entry.
+/// An interrupted deletion leaves the remainder in the pruning directory for
+/// the next `--prune` to finish ([`finish_interrupted_prunes`]). When the
+/// rename cannot be done (another filesystem), the repo is deleted in place.
+fn remove_pruned_repo(inst: &Installation, repo: &str, dir: &Path) -> Res<()> {
+    remove_pruned_repo_until(inst, repo, dir, &gix::interrupt::IS_INTERRUPTED)
+}
+
+fn remove_pruned_repo_until(inst: &Installation, repo: &str, dir: &Path, stop: &AtomicBool) -> Res<()> {
+    let pruning = pruning_dir(inst);
+    let aside = pruning.join(format!("{repo}.{}", std::process::id()));
+    let target = match fs::create_dir_all(&pruning).and_then(|()| fs::rename(dir, &aside)) {
+        Ok(()) => aside,
+        Err(_) => dir.to_owned(),
+    };
+    remove_tree_until(&target, stop).map_err(|e| match stop.load(Ordering::Relaxed) {
+        true if target != dir => anyhow!(
+            "interrupted while deleting the pruned repo {repo}; it is already out of the \
+             tree, and the next `cactup inst refetch --prune` finishes deleting it"
+        ),
+        // Deleted in place (it could not be moved aside): what is left may no
+        // longer read as a repo at all, so say where it is.
+        true => anyhow!(
+            "interrupted while deleting the pruned repo {repo}; {} is partly deleted — \
+             delete the rest by hand",
+            dir.display()
+        ),
+        false => e,
+    })
+}
+
+/// Finish deleting what an interrupted `--prune` left in [`pruning_dir`].
+fn finish_interrupted_prunes(inst: &Installation) -> Res<()> {
+    let pruning = pruning_dir(inst);
+    let Ok(entries) = fs::read_dir(&pruning) else { return Ok(()) };
+    for entry in entries {
+        let path = entry?.path();
+        remove_tree_until(&path, &gix::interrupt::IS_INTERRUPTED)?;
+        println!("Finished deleting {}, left by an interrupted prune.", path.display());
+    }
+    Ok(())
+}
+
+/// `remove_dir_all`, but checking `stop` (Ctrl-C) before every entry, failing
+/// with "interrupted" when it is set. Symlinks are removed, never followed.
+fn remove_tree_until(path: &Path, stop: &AtomicBool) -> Res<()> {
+    if stop.load(Ordering::Relaxed) {
+        bail!("interrupted while deleting {}", path.display());
+    }
+    let meta = fs::symlink_metadata(path).with_context(|| format!("Failed to stat {}", path.display()))?;
+    if !meta.is_dir() {
+        return fs::remove_file(path).with_context(|| format!("Failed to remove {}", path.display()));
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("Failed to list {}", path.display()))? {
+        remove_tree_until(&entry?.path(), stop)?;
+    }
+    fs::remove_dir(path).with_context(|| format!("Failed to remove {}", path.display()))
 }
 
 fn backup_dir(alias: &str) -> Res<PathBuf> {
@@ -1368,6 +1459,36 @@ fn report_configs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prune moves the repo out of `repos/` in one step, then deletes it;
+    /// cut short, the remainder waits in the pruning directory for the next
+    /// `--prune`, which finishes it.
+    #[test]
+    fn an_interrupted_prune_is_out_of_the_tree_and_finished_next_time() {
+        static STOP: AtomicBool = AtomicBool::new(true);
+        static GO: AtomicBool = AtomicBool::new(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Installation::new("t", tmp.path());
+        let repo = tmp.path().join("Cactus/repos/Orphan");
+        fs::create_dir_all(repo.join("src/deep")).unwrap();
+        fs::write(repo.join("src/deep/f.c"), "x").unwrap();
+        std::os::unix::fs::symlink("/nonexistent", repo.join("link")).unwrap();
+
+        let err = remove_pruned_repo_until(&inst, "Orphan", &repo, &STOP).unwrap_err();
+        assert!(err.to_string().contains("finishes deleting it"), "{err}");
+        assert!(!repo.exists(), "the repo leaves the tree at once");
+        assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 1);
+
+        finish_interrupted_prunes(&inst).unwrap();
+        assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 0);
+
+        // Uninterrupted: gone, nothing left behind.
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/g.c"), "y").unwrap();
+        remove_pruned_repo_until(&inst, "Orphan", &repo, &GO).unwrap();
+        assert!(!repo.exists());
+        assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 0);
+    }
 
     #[test]
     fn overwrite_selection_splits_on_whitespace_and_commas_and_dedupes() {

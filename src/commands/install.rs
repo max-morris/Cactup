@@ -329,8 +329,11 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // Ctrl-C: stop here, before anything registers the tree as an
     // installation (the per-component failures are all just "interrupted").
     if gix::interrupt::is_triggered() {
+        // Running the same install again picks up where this one stopped; a
+        // repo cut short mid-checkout is then named, for deleting first.
         bail!(
-            "interrupted; the installation at {} is incomplete and was not registered",
+            "interrupted; the installation at {} is incomplete and was not registered \
+             (run the same install again to finish it)",
             install_dir.display()
         );
     }
