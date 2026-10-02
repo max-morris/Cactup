@@ -50,7 +50,7 @@ the last milestone, for when that host is not at hand.
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
-| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | not started |
+| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **implemented**; Einstein Toolkit audit running; review next |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -292,6 +292,56 @@ Real builds (2026-10-02, `plato`, debug build of `659f434`, `smoke`, `-f
 Not verified: NFS or Lustre (`plato` has neither; the cross-process test
 ran on ext4), a real Spack or site GCC (the specs tests use a copy of
 this host's GCC 14 driver with a specs file beside it).
+
+## What M1b is
+
+Spec §18.8, written before the code; §18.1 rules 2 and 4 now name the one
+change a serving cache makes to a compile.
+
+- `build-cache = serve | audit` (`Mode::serves`). `src/objcache/wrapper.rs`
+  `cached`: key; on a hit restore the object (`store::Store::restore`),
+  put the dependency file in place, write the stored messages, exit 0; on
+  a miss compile with the path map's flags (`Keyed::compile_flags`), the
+  compiler's stdout and stderr passed on as they come and kept (4 MiB
+  cap), check the key again, publish (`store::Store::publish`). Audit
+  mode restores beside the object, compiles anyway, compares, and on a
+  difference compiles once more: `same`, `wrong hit`, `not
+  deterministic`, `compile failed`. The signal handlers are registered
+  once per process (audit runs a second compile).
+- Dependency files on a hit (`key::depend_flags`): the key's preprocessor
+  run is given the compile's `-MD` flags with `-MF` pointing at a
+  temporary file beside the real one, plus `-MQ <object>` when the compile
+  names no target (what the GCC and Clang drivers do with `-o`; checked on
+  both, also with spaces, `$` and `#` in the name).
+- Messages of a relocatable entry are stored with the configuration
+  directory and the Cactus root as `@CACTUP_CONFIG@/` and `@CACTUP_ROOT@/`
+  (`PathMap::messages_for_the_store`) and written back as this build's
+  directories (`key::messages_for_this_build`).
+- Decision 5: `identity::locale_neutral`, a trial compile of non-ASCII
+  source in the session's locale and in C; a compiler that passes is keyed
+  without `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`
+  (`environment::digest(locale)`); the remembered identity depends on the
+  locale. GCC 14 and Clang 19 pass here.
+- Knob `build-cache-relocate` (`yes`/`no`), frozen as `BuildConf.relocate`.
+- The build step's closing line counts served, published, and in audit
+  mode checked, wrong and not deterministic, from the event log; `cache
+  report` has a serving section.
+- Not cache code, but in this milestone's diff: `sim::start::script_command`
+  runs a `#!` script through its interpreter (the "Text file busy" fix,
+  commit `7fd1a38`, kept separate for master).
+
+Real builds so far (2026-10-02, debug build of `9a92835`, store in
+`~/tmp/build-cache-m1b/store`, logs there):
+
+- `smoke`, serve, from scratch: 307 published (19 s); again: 307 served
+  (12 s; Fortran, configure and the link remain); the served objects are
+  byte for byte the compiled ones.
+- `smoke2` (another configuration name) and `smoke` in `build-cache-b`:
+  307 of 307 served; every C and C++ object identical to `smoke`'s (only
+  the 50 Fortran objects, compiled with absolute paths, differ).
+- `smoke`, audit: 307 checked, 307 the same.
+- Clang (`clang.toml`: `et.toml` with `clang`/`clang++`, config
+  `clsmoke`): 307 published, 307 served, 307 audited the same.
 
 ## Verification done for M0a (2026-10-01)
 
