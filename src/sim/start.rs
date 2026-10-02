@@ -686,9 +686,15 @@ pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build the command that executes a stored script (with shebang → exec the
-/// file; without → via `/bin/sh`), optionally wrapped in a universe (§4.8),
-/// with `cwd` as the working directory.
+/// Build the command that executes a stored script, optionally wrapped in a
+/// universe (§4.8), with `cwd` as the working directory.
+///
+/// The script is run by its interpreter, as the kernel would run it, never
+/// exec'd itself ([`interpreter_command`]): cactup writes a script and runs
+/// it moments later, and a thread of this process that forks in between
+/// hands its child an open write handle on the file, until that child execs.
+/// The kernel refuses to exec a file open for writing ("Text file busy");
+/// an interpreter only reads it.
 pub(crate) fn script_command(
     script: &Path,
     universe: Option<&Universe>,
@@ -696,11 +702,7 @@ pub(crate) fn script_command(
     cwd: &Path,
 ) -> Res<Command> {
     let script_text = fs::read_to_string(script).unwrap_or_default();
-    let inner = if script_text.starts_with("#!") {
-        shell_quote(&script.display().to_string())
-    } else {
-        format!("/bin/sh {}", shell_quote(&script.display().to_string()))
-    };
+    let inner = interpreter_command(&script_text, &shell_quote(&script.display().to_string()));
     let mut cmd = match universe {
         None => {
             let mut c = Command::new("/bin/sh");
@@ -722,6 +724,21 @@ pub(crate) fn script_command(
     };
     cmd.current_dir(cwd);
     Ok(cmd)
+}
+
+/// The shell text that runs the script `quoted` (already quoted) whose text
+/// is `text`: its `#!` line's interpreter, and the one argument the kernel
+/// would give it (whatever follows the interpreter on that line, as one
+/// word), before the script; `/bin/sh` for a script without one.
+fn interpreter_command(text: &str, quoted: &str) -> String {
+    let line = text.strip_prefix("#!").map(|rest| rest.lines().next().unwrap_or_default().trim());
+    match line.filter(|line| !line.is_empty()) {
+        Some(line) => match line.split_once([' ', '\t']) {
+            Some((interpreter, arg)) => format!("{} {} {quoted}", shell_quote(interpreter), shell_quote(arg.trim())),
+            None => format!("{} {quoted}", shell_quote(line)),
+        },
+        None => format!("/bin/sh {quoted}"),
+    }
 }
 
 /// Execute a prepared restart: resolve the parfile, create the working dir
@@ -1484,5 +1501,30 @@ mod tests {
     fn shell_quoting() {
         assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn a_script_runs_by_the_interpreter_its_first_line_names() {
+        let q = "'/w/run-script'";
+        assert_eq!(interpreter_command("#!/bin/bash\necho\n", q), "'/bin/bash' '/w/run-script'");
+        assert_eq!(interpreter_command("#! /bin/sh -e \n", q), "'/bin/sh' '-e' '/w/run-script'");
+        // The rest of the line is one argument, as the kernel gives it.
+        assert_eq!(interpreter_command("#!/usr/bin/env bash -x\n", q), "'/usr/bin/env' 'bash -x' '/w/run-script'");
+        assert_eq!(interpreter_command("echo\n", q), "/bin/sh '/w/run-script'");
+        assert_eq!(interpreter_command("#!\n", q), "/bin/sh '/w/run-script'");
+    }
+
+    /// A script this process still holds open for writing — as a child that
+    /// another thread forked a moment ago may — runs all the same: it is
+    /// read by its interpreter, not exec'd ("Text file busy").
+    #[test]
+    fn a_script_open_for_writing_still_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("run-script");
+        write_executable(&script, "#!/bin/sh\necho ran \"$0\"\n").unwrap();
+        let _held = fs::OpenOptions::new().append(true).open(&script).unwrap();
+        let out = script_command(&script, None, &VarSet::default(), tmp.path()).unwrap().output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("ran {}\n", script.display()));
     }
 }
