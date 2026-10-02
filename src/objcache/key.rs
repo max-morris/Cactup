@@ -462,7 +462,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     if !status.success() {
         bail!("the preprocessor failed ({status})");
     }
-    flags_from_elsewhere(compiler.family, &said).map_err(anyhow::Error::msg)?;
+    flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &said).map_err(anyhow::Error::msg)?;
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
@@ -498,7 +498,10 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// can bring one in; an environment variable can turn them off), which is
 /// why this is asked of every compile, and of the compiler as a whole only
 /// to save the asking (`identity::examine`).
-fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
+///
+/// A GCC whose specs file was accepted for changing only the link
+/// (`specs`) must say it read that one file, `specs`, and nothing else.
+fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &[u8]) -> Result<(), String> {
     let said = String::from_utf8_lossy(said);
     // Silence is not a "no": each family has lines it always prints, and
     // an answer without them (lost, cut short, in another version's or
@@ -511,11 +514,19 @@ fn flags_from_elsewhere(family: Family, said: &[u8]) -> Result<(), String> {
             None if said.lines().any(|line| line.starts_with("InstalledDir: ")) && said.lines().any(runs_cc1) => Ok(()),
             None => Err("the compiler does not say whether it reads a configuration file".to_owned()),
         },
-        Family::Gcc => match said.lines().find_map(|line| line.strip_prefix("Reading specs from ")) {
-            Some(file) => Err(format!("the compiler reads a specs file ({file}), which can add flags the cache does not see")),
-            None if said.lines().any(|line| line == "Using built-in specs.") => Ok(()),
-            None => Err("the compiler does not say whether it reads a specs file".to_owned()),
-        },
+        Family::Gcc => {
+            let read: Vec<&str> = said.lines().filter_map(|line| line.strip_prefix("Reading specs from ")).collect();
+            let accepted = |file: &str| specs.is_some_and(|specs| std::fs::canonicalize(file).is_ok_and(|file| file == specs));
+            match (read.as_slice(), specs) {
+                ([], None) if said.lines().any(|line| line == "Using built-in specs.") => Ok(()),
+                ([file], Some(_)) if accepted(file) => Ok(()),
+                ([], _) => Err("the compiler does not say whether it reads a specs file".to_owned()),
+                (files, _) => match files.iter().find(|file| !accepted(file)) {
+                    Some(file) => Err(format!("the compiler reads a specs file ({file}), which can add flags the cache does not see")),
+                    None => Err("the compiler reads its specs file more than once".to_owned()),
+                },
+            }
+        }
     }
 }
 
@@ -711,7 +722,7 @@ mod tests {
         let compile = compile::parse(&args).unwrap();
         assert_eq!(compile.depend, os(&depend));
         for family in [Family::Gcc, Family::Clang] {
-            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, id: String::new() };
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, id: String::new(), specs: None };
             let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None);
             let given: Vec<&OsStr> = command.get_args().collect();
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");
@@ -721,7 +732,7 @@ mod tests {
 
     #[test]
     fn hears_a_driver_say_where_else_it_takes_flags_from() {
-        let gcc = |said: &str| flags_from_elsewhere(Family::Gcc, said.as_bytes());
+        let gcc = |said: &str| flags_from_elsewhere(Family::Gcc, None, said.as_bytes());
         assert_eq!(gcc("Using built-in specs.\nCOLLECT_GCC=gcc\nTarget: x86_64-linux-gnu\n"), Ok(()));
         assert!(gcc("Reading specs from /opt/gcc/lib/gcc/x86_64-linux-gnu/14/specs\nCOLLECT_GCC=gcc\n").unwrap_err().contains("/14/specs"));
         // Both, as with `-specs=`: one file read is one too many.
@@ -729,6 +740,24 @@ mod tests {
         // Silence, or another language, is not "built-in".
         assert!(gcc("").unwrap_err().contains("does not say"));
         assert!(gcc("Es werden eingebaute Spezifikationen verwendet.\n").is_err());
+
+        // A GCC whose specs file was accepted reads that file, by whatever
+        // path, and no other.
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib");
+        for dir in [&lib, &tmp.path().join("bin")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(lib.join("specs"), "").unwrap();
+        std::fs::write(tmp.path().join("other.specs"), "").unwrap();
+        let accepted = std::fs::canonicalize(lib.join("specs")).unwrap();
+        let with = |said: String| flags_from_elsewhere(Family::Gcc, Some(&accepted), said.as_bytes());
+        let reading = |file: &Path| format!("Reading specs from {}\nCOLLECT_GCC=gcc\n", file.display());
+        assert_eq!(with(reading(&tmp.path().join("bin/../lib/specs"))), Ok(()));
+        assert!(with(reading(&tmp.path().join("other.specs"))).unwrap_err().contains("other.specs"));
+        assert!(with(reading(&accepted) + &reading(&tmp.path().join("other.specs"))).unwrap_err().contains("other.specs"));
+        assert!(with("Using built-in specs.\n".to_owned()).unwrap_err().contains("does not say"));
+        assert!(gcc(&reading(&accepted)).unwrap_err().contains("reads a specs file"));
 
         // A translated GCC is asked in English, with the rest of the
         // locale left alone.
@@ -739,7 +768,7 @@ mod tests {
         // An empty `LC_ALL` overrides nothing, and nothing is put in its place.
         assert_eq!(english_messages(Some("".into())), english_messages(None));
 
-        let clang = |said: &str| flags_from_elsewhere(Family::Clang, said.as_bytes());
+        let clang = |said: &str| flags_from_elsewhere(Family::Clang, None, said.as_bytes());
         assert!(clang("").unwrap_err().contains("does not say"));
         assert!(clang("clang version 19.1.7\nTarget: x86_64-pc-linux-gnu\n").is_err());
         for cc1 in [" \"/usr/lib/llvm-19/bin/clang\" -cc1 -triple x86_64-pc-linux-gnu -E\n", " \"/usr/bin/clang\" \"-cc1\" \"-triple\" \"x86_64\"\n"] {

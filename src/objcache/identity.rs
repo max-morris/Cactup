@@ -20,7 +20,8 @@
 //! configuration file. What such a file adds never passes the reader of
 //! the command line (`compile`), so nothing the cache declines there — a
 //! flag that records the command line, one that puts unmapped paths into
-//! the object — would be declined.
+//! the object — would be declined. The one exception is a specs file that
+//! changes only how GCC links (`specs`).
 //!
 //! What this cannot see: files a compiler reads by rules of its own that
 //! are named nowhere here — a plugin directory, lists in Clang's resource
@@ -69,6 +70,11 @@ pub struct Compiler {
     pub relocates: bool,
     /// The digest that stands for this compiler in a key.
     pub id: String,
+    /// The `specs` file a GCC reads, by its physical path, when it was
+    /// accepted for changing only how GCC links (`specs::link_only`).
+    /// Every compile must say it read this file and no other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specs: Option<PathBuf>,
 }
 
 /// One file an identity was computed from, as it looked then.
@@ -326,6 +332,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
     };
 
     let mut hasher = Hasher::new("compiler");
+    let mut specs = None;
     hasher.feed(name.as_bytes());
     hasher.feed(bytes_digest(&bytes).as_bytes());
     // The programs that do the work, each with the libraries it loads.
@@ -377,16 +384,29 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
                 }
             }
             // The rules by which the driver builds their command lines: the
-            // built-in ones. A `specs` file on disk overrides them (an
-            // absolute path back means there is one), and rules it out.
-            for question in ["-dumpspecs", "-dumpmachine"] {
-                hasher.feed(ask(path, &[question])?.as_bytes());
-            }
-            let specs = ask(path, &["-print-file-name=specs"])?;
-            let specs = Path::new(specs.trim());
-            if specs.is_absolute() {
-                files.extend(Seen::of(specs));
-                bail!("{} reads a specs file ({}), which can add flags the cache does not see", path.display(), specs.display());
+            // built-in ones (`-dumpspecs` ignores a specs file).
+            let builtin = ask(path, &["-dumpspecs"])?;
+            hasher.feed(builtin.as_bytes());
+            hasher.feed(ask(path, &["-dumpmachine"])?.as_bytes());
+            // A `specs` file on disk (an absolute path back means there is
+            // one) overrides them, and rules the compiler out unless all it
+            // changes is how GCC links. Then its bytes are part of what the
+            // compiler is.
+            let file = ask(path, &["-print-file-name=specs"])?;
+            let file = Path::new(file.trim());
+            if file.is_absolute() {
+                files.extend(Seen::of(file));
+                let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;
+                if let Err(why) = super::specs::link_only(&builtin, &text, &bytes) {
+                    bail!(
+                        "{} reads a specs file ({}) that {why}, which can add flags the cache does not see",
+                        path.display(),
+                        file.display()
+                    );
+                }
+                hasher.feed(b"specs file");
+                hasher.feed(&text);
+                specs = Some(fs::canonicalize(file).with_context(|| format!("Failed to resolve {}", file.display()))?);
             }
         }
     }
@@ -398,7 +418,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
         hasher.feed(file_digest(&library)?.as_bytes());
         files.push(Seen::of(&library)?);
     }
-    Ok(Compiler { path: path.to_owned(), family, relocates: relocates(path, name, trial_dir), id: hasher.hex() })
+    Ok(Compiler { path: path.to_owned(), family, relocates: relocates(path, name, trial_dir), id: hasher.hex(), specs })
 }
 
 #[cfg(test)]
@@ -486,6 +506,58 @@ mod tests {
         let alias = tmp.path().join("cc-by-another-name");
         std::os::unix::fs::symlink(&gcc, &alias).unwrap();
         assert_ne!(identify(tmp.path(), alias.as_os_str()).unwrap().id, first.id);
+    }
+
+    /// A copy of this host's GCC driver installed under `prefix` (its back
+    /// ends linked in where it looks for them), with `specs`, if given, as
+    /// the specs file it finds. GCC looks for both relative to where its
+    /// driver is, as a site-built GCC does.
+    fn gcc_under(gcc: &Path, prefix: &Path, specs: Option<&str>) -> PathBuf {
+        let cc1 = PathBuf::from(ask(gcc, &["-print-prog-name=cc1"]).unwrap().trim());
+        let version = cc1.parent().unwrap();
+        let triple = ask(gcc, &["-dumpmachine"]).unwrap().trim().to_owned();
+        let version_name = version.file_name().unwrap();
+        let libexec = prefix.join("libexec/gcc").join(&triple);
+        let lib = prefix.join("lib/gcc").join(&triple).join(version_name);
+        for dir in [&prefix.join("bin"), &libexec, &lib] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(version, libexec.join(version_name)).unwrap();
+        let driver = prefix.join("bin/gcc");
+        fs::copy(fs::canonicalize(gcc).unwrap(), &driver).unwrap();
+        if let Some(specs) = specs {
+            fs::write(lib.join("specs"), specs).unwrap();
+        }
+        driver
+    }
+
+    #[test]
+    fn a_gcc_whose_specs_file_only_changes_the_link_is_one_the_cache_works_with() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let builtin = ask(&gcc, &["-dumpspecs"]).unwrap();
+        // qbd's specs file, made the way its administrators made it.
+        let sneaky = builtin.replacen("*cc1:\n", "*cc1:\n-DSNEAKY ", 1);
+        let qbd = builtin.replacen("*link_libgcc:\n%D\n", "*link_libgcc:\n%(link_libgcc_rpath) %D\n", 1)
+            + "*link_libgcc_rpath:\n-rpath /opt/gcc/lib64\n\n";
+        assert!(qbd.contains("%(link_libgcc_rpath) %D") && sneaky.contains("-DSNEAKY"), "not the sections expected");
+
+        let plain = gcc_under(&gcc, &tmp.path().join("plain"), None);
+        let plain = identify(tmp.path(), plain.as_os_str()).unwrap();
+        assert_eq!(plain.specs, None);
+
+        let linking = gcc_under(&gcc, &tmp.path().join("linking"), Some(&qbd));
+        let linking = identify(tmp.path(), linking.as_os_str()).unwrap();
+        let file = tmp.path().join("linking/lib/gcc").join(ask(&gcc, &["-dumpmachine"]).unwrap().trim());
+        assert!(linking.specs.as_ref().is_some_and(|specs| specs.starts_with(fs::canonicalize(file).unwrap())), "{linking:?}");
+        assert_ne!(linking.id, plain.id, "the specs file is part of what the compiler is");
+
+        let compiling = gcc_under(&gcc, &tmp.path().join("compiling"), Some(&sneaky));
+        let err = identify(tmp.path(), compiling.as_os_str()).unwrap_err().to_string();
+        assert!(err.contains("reads a specs file") && err.contains("changes cc1"), "{err}");
     }
 
     #[test]

@@ -829,6 +829,60 @@ impl<'a> Unit<'a> {
     }
 }
 
+/// This host's GCC driver, copied to `<prefix>/bin/gcc` with its back ends
+/// linked in where it looks for them, and `specs` as the specs file it
+/// finds there: a site-built GCC, as on qbd.
+fn site_gcc(prefix: &Path, specs: &str) -> PathBuf {
+    let ask = |arg: &str| text(&Command::new("gcc").arg(arg).output().unwrap().stdout).trim().to_owned();
+    let cc1 = PathBuf::from(ask("-print-prog-name=cc1"));
+    let (version, triple) = (cc1.parent().unwrap(), ask("-dumpmachine"));
+    let libexec = prefix.join("libexec/gcc").join(&triple);
+    let lib = prefix.join("lib/gcc").join(&triple).join(version.file_name().unwrap());
+    for dir in [&prefix.join("bin"), &libexec, &lib] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    std::os::unix::fs::symlink(version, libexec.join(version.file_name().unwrap())).unwrap();
+    let driver = prefix.join("bin/gcc");
+    let gcc = text(&Command::new("sh").args(["-c", "command -v gcc"]).output().unwrap().stdout).trim().to_owned();
+    fs::copy(fs::canonicalize(gcc).unwrap(), &driver).unwrap();
+    fs::write(lib.join("specs"), specs).unwrap();
+    driver
+}
+
+/// A GCC whose specs file only adds an rpath to the link is keyed, and
+/// compiles as the same GCC without the file does. One whose specs file
+/// adds to a compile is not keyed.
+#[test]
+fn a_gcc_with_a_specs_file_that_only_changes_the_link_is_keyed() {
+    if !have("gcc") {
+        eprintln!("skipped: no GCC on this host");
+        return;
+    }
+    let lib = tempfile::tempdir().unwrap();
+    let lib = fs::canonicalize(lib.path()).unwrap();
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
+    let build = Build::new("record");
+    let unit = Unit::new(&build, "c", &lib);
+    let builtin = text(&Command::new("gcc").arg("-dumpspecs").output().unwrap().stdout);
+    let qbd = builtin.replacen("*link_libgcc:\n%D\n", "*link_libgcc:\n%(link_libgcc_rpath) %D\n", 1)
+        + "*link_libgcc_rpath:\n-rpath /opt/gcc/lib64\n\n";
+    assert!(qbd.contains("%(link_libgcc_rpath) %D"));
+
+    let site = site_gcc(&build.root.join("site"), &qbd);
+    let site = site.to_str().unwrap();
+    assert!(unit.keyed(site, &["-O2", "-g"], &lib).is_some(), "{:?}", build.events().last());
+    let with_specs = fs::read(&unit.object).unwrap();
+    let args = unit.args(&["-O2", "-g"], &lib);
+    let cwd = build.config.join("scratch");
+    let out = Command::new("gcc").args(&args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(fs::read(&unit.object).unwrap(), with_specs, "the specs file changed the object");
+
+    let sneaky = site_gcc(&build.root.join("sneaky"), &builtin.replacen("*cc1:\n", "*cc1:\n-DSNEAKY ", 1));
+    let why = unit.why_not(sneaky.to_str().unwrap(), &["-O2", "-g"], &lib);
+    assert!(why.contains("reads a specs file") && why.contains("changes cc1"), "{why}");
+}
+
 /// The claim a cache stands on, tried for real: where two compiles in two
 /// trees — elsewhere on disk, under another configuration name — share a
 /// key, compiling them as a serving cache would gives one object, byte for

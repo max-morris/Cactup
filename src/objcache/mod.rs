@@ -33,6 +33,7 @@ pub mod key;
 pub mod lookup;
 pub mod platform;
 pub mod probe;
+pub mod specs;
 // Nothing serves or publishes yet: the wrapper takes it up with serving.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod store;
