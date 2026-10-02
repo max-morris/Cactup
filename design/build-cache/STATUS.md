@@ -49,7 +49,7 @@ the last milestone, for when that host is not at hand.
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
-| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | in review (round 2: B signed off, A blocked on flaky tests; fixed) |
+| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
@@ -378,6 +378,10 @@ compiler but GCC, any machine but `plato`.
   M1a. Spec §18 written for M1a (`37c2fbb`), then the code: the store
   and knob (`b16ebb3`), the stand-down (`d2413f8`), asking the shell
   (`787f0a1`), link-only specs files (`1a8de98`).
+- 2026-10-02: M1a review round 1: both BLOCKED (6 findings between
+  them); fixed in `916b0cb`. Round 2: B SIGN-OFF, A BLOCKED on flaky
+  tests; fixed in `9d8f62b`. Round 3: both SIGN-OFF on `9d8f62b`. M1a has
+  passed its gate.
 
 ## Review verdicts
 
@@ -856,6 +860,31 @@ refused, since GCC reads such text otherwise than `-dumpspecs` prints it;
 (A) the decline message for a specs file reads in one sentence; (A) the
 background-job test kills its `sleep`.
 
+### M1a, round 3 (on `9d8f62b`): SIGN-OFF by both
+
+A ran the unit-test binary 120 times at 32 threads: no failure in any
+cache test (6 in 40 before the fix). B confirmed the label, the specs-text
+rule and the stated limit by running them in an export. Both read §18.5
+and §18.7 against the code: they match. M1a has passed its gate.
+
+Non-blocking points left open, for the start of M1b:
+
+- (A, B) No test pins the label case of `Miss::Foreign` (B tried it in an
+  export: `key-2` and `key-9` both left alone). Add it to
+  `a_whole_entry_with_a_header_of_another_cactup_is_left_alone`.
+- (B) Adding `label` to the header did not bump `store::FORMAT`. Harmless
+  while nothing publishes; from M1b on the rule binds, so the first entry
+  published by a release is format 1 as it stands at `9d8f62b`.
+- (B) `it_dies_of_the_signal_that_stopped_the_compiler` assumes the test
+  runner does not ignore `SIGQUIT` (a background job of a non-interactive
+  shell does): clear the disposition or skip.
+- (A, outside the cache) `build::tests::source_tree_changes_are_a_rebuild_input`
+  failed once in 120 runs with exit 126: inferred to be the same "Text
+  file busy" race in product code, `sim::start::write_executable` writing
+  the build script and running it at once. Predates M1a; it is master's,
+  and worth a fix of its own (retry on `ETXTBSY`, or run a `#!` script
+  through its interpreter). Reported to Max, not fixed on this branch.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. Decision 3's check came
@@ -866,4 +895,5 @@ unchecked.
 
 ## Next step
 
-M1a, as `HANDOFF-M1.md` lays it out.
+M1b (serving), as `HANDOFF-M1.md` lays it out, starting with the
+non-blocking points left open by M1a's round 3.

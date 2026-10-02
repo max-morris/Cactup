@@ -245,7 +245,7 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   taken with the cache serving are not comparable with ones taken
   without it.
 
-- 2026-10-02: **M1a in review** on `feature/build-cache` (the store,
+- 2026-10-02: **M1a passed review** (at `9d8f62b`) on `feature/build-cache` (the store,
   not yet used by builds; see A2, A3, C2, C3 for what changed in the
   injection). Nothing yet changes a compile or its object. Still planned
   for M1b (serving): real compiles gain `-ffile-prefix-map=...` flags (GCC
@@ -366,3 +366,8 @@ every milestone.
   byte the same (714 files); with `C_DEPEND_COMPILE_FLAGS =
   CXX_DEPEND_COMPILE_FLAGS = -MD -MP` the same again, and the same 307
   keys as without the option.
+- 2026-10-02  cache side  M1a passed its review gate at `9d8f62b`. Since
+  the entry above: a `\`-continued `include`/`define`/`$(eval` in a
+  thorn's make fragments, and `load`/`$(guile`, also stand the fragment
+  down (A2). Next: M1b, serving, which changes real compiles (see the
+  planned section).
