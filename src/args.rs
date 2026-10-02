@@ -216,12 +216,15 @@ pub(crate) enum Commands {
     Config(ConfigCommand),
     /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
     ///
-    /// One machine-global knob controls the build cache. It is being brought
+    /// Two machine-global knobs control the build cache. It is being brought
     /// up, and so far it only measures:
     ///
-    ///   build-cache  off (the default), or record: run every object compile
-    ///                through cactup and log it in the build attempt's
-    ///                cc/events.jsonl. Nothing is cached yet.
+    ///   build-cache      off (the default), or record: run every object
+    ///                    compile through cactup and log it in the build
+    ///                    attempt's cc/events.jsonl. Nothing is cached yet.
+    ///   build-cache-dir  where cached objects will be kept, as an absolute
+    ///                    path (default: the cache directory in cactup's
+    ///                    home). Nothing is written there yet.
     ///
     /// Set it with `cactup knob`, or for one build with -K:
     ///

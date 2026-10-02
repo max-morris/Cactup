@@ -592,11 +592,25 @@ object a compile would have produced. Some compiles get no key at all,
 because no key could say what comes out of them: a source that pulls in a
 file through the assembler (`.incbin`), a compile that would use a
 precompiled header, a compiler that takes flags from a file of its own (a
-GCC `specs` file, a Clang configuration file), and `-march=native` on a
+Clang configuration file, or a GCC `specs` file that does more than add
+to how GCC links: the common kind, which only adds an `-rpath` to the
+compiler's own libraries, is fine), and `-march=native` on a
 machine whose processor cores are not all of one kind (a laptop or
 workstation with performance and efficiency cores: there the compiler
 targets whichever core it happens to run on, and the same compile gives
 different objects from one run to the next).
+
+Two kinds of compile go through cactup without a key, run exactly as
+`make` asked:
+
+- every compile of a thorn whose `make.code.defn` or `make.code.deps`
+  includes other makefiles, uses `define`, or uses `$(eval …)`: such a
+  thorn could define its own compile rule where cactup cannot see it, so
+  cactup leaves the whole thorn alone;
+- a compiler name your shell gives a meaning of its own at startup (a
+  function or alias defined in the file `BASH_ENV` names, as module
+  systems set it up): cactup asks the shell what the name means once per
+  build, and if it is not the program on your `PATH`, the shell runs it.
 
 The log is for the cactup that wrote it: after an update, `cactup cache
 report` may tell you to record the build again.
@@ -610,8 +624,17 @@ unusual characters) the build goes ahead without it and says so in one line:
 cactup: build cache off for this build: <reason>
 ```
 
-Like the knobs that control updating, `build-cache` describes your cactup
-installation rather than a job.
+Cached objects will be kept under `~/.cactup/cache` (or
+`$CACTUP_HOME/cache`), or wherever the `build-cache-dir` knob says, as an
+absolute path. Nothing is written there yet. Anyone who can write in that
+directory can put objects into your builds, so keep it your own.
+
+```sh
+cactup knob build-cache-dir /scratch/me/cactup-cache
+```
+
+Like the knobs that control updating, `build-cache` and `build-cache-dir`
+describe your cactup installation rather than a job.
 
 ## Full build command reference
 

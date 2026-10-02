@@ -45,12 +45,15 @@ are spec §18.1; hold them when touching it:
   compiler, leave ignored ones ignored (`nohup`), and end the way the
   compiler ended. `rustix` is there for `kill(2)`/`waitpid(2)` only.
 - **Hermetic (D11).** The wrapper and the probe read the attempt's frozen
-  `cc/config.toml` and the configuration directory named in it — never the
-  global DB, the registry, the MDB, or knobs. Cache knobs are resolved in
+  `cc/config.toml`, the configuration directory named in it, and the store
+  whose root is named in it — never the global DB, the registry, the MDB,
+  or knobs. Cache knobs (`build-cache`, `build-cache-dir`) are resolved in
   `prepare` and frozen.
 - **No eviction on its own**, and no flock: the store is lock-free
-  (immutable entries, link-based publication), like everything else under
-  `$CACTUP_HOME`.
+  (`objcache::store`: an entry is written whole under a temporary name,
+  synced, and published by `link(2)`; it is never changed after; every
+  restore checks its checksum and copies, never links). Keep it that way:
+  nothing in the store may be written by two processes.
 
 The interface this relies on in Cactus's make system, and the agreement
 with the separate build-speed work, is `design/build-cache/` and the

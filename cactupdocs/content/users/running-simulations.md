@@ -250,7 +250,8 @@ Three more standard knobs configure how cactup updates itself —
 `autoupdate` (`auto`, the default, `notify` or `off`), `update-url` and
 `mdb-url`. They are described in [Updating cactup](updating.html) and, unlike
 the others, are not frozen into the simulations you submit. The same goes for
-`build-cache`, described in [Building Configs](building-configs.html).
+`build-cache` and `build-cache-dir`, described in
+[Building Configs](building-configs.html).
 
 ```sh
 cactup knob                        # show every knob

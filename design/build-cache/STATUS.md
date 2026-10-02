@@ -49,7 +49,7 @@ the last milestone, for when that host is not at hand.
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
-| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to | **go-ahead given**; not started (`HANDOFF-M1.md`) |
+| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **implemented**, in review |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
@@ -215,6 +215,66 @@ builds on it):
   (`LC_MESSAGES=C`, other locale categories untouched), and Clang's answer
   must carry `InstalledDir:` or it is no answer.
 
+## What M1a is
+
+The store exists and is tested on its own; no build writes to it or
+reads from it yet (that is M1b). Around it, the points `HANDOFF-M1.md`
+put into M1a. Spec §18 was written first, the code after.
+
+- `src/objcache/store.rs` (spec §18.7): one immutable file per key under
+  `<root>/v1/<machine>/<ab>/<key>`; magic line, TOML header (format, key,
+  the six parts, blob lengths, and an `about` table for people), object,
+  compiler stdout and stderr, SHA-256 of all of it. Publish: temporary
+  file in the entry's directory, `sync_all`, mode `0444`, `hard_link` with
+  the `nlink == 2` check. Restore: checks header against key and file
+  size, copies the object into a temporary file beside the target while
+  digesting, compares the checksum, then gives it the compiler's mode
+  (`0666` less the umask from `/proc/self/status`) and renames it into
+  place. An invalid entry is removed if its name still leads to the file
+  read (device and inode); an I/O error leaves it alone. Tested with
+  threads and with separate processes publishing and restoring one key
+  at once, every kind of damage, strict headers, a publish cut short.
+- The knob `build-cache-dir` (absolute path, default
+  `$CACTUP_HOME/cache`), resolved in `prepare`, frozen as `store` in
+  `BuildConf`. Spec §18.1 rule 6 (D11) now names the store.
+- Decision 7a (spec §18.3): the fragment stands down for a thorn whose
+  `make.code.defn` or `make.code.deps` matches `probe::STAND_DOWN` (any
+  `COMPILE_`, an `include`/`-include`/`sinclude` directive, a `define`
+  directive with or without `override`/`export`/`private`/`unexport`,
+  `$(eval`/`${eval`), read by `grep -E` once per object sub-make; it wraps
+  only on exit status 1. The shell picks the files that exist, because
+  `$(wildcard …)` crashes GNU make 4.2.1 built against a current glibc
+  (found by the test under 4.2.1). A missing `grep` fails the self-test.
+- Decision 7b (spec §18.4): `src/objcache/lookup.rs`. Before a compile
+  whose compiler is a bare name, in record mode, the wrapper runs
+  `<shell> -c 'command -v "$1"'` and starts the compiler itself only if
+  the last line of the answer is the file `find_program` finds (physical
+  paths compared); otherwise the compile goes to the shell, with the
+  answer in the log. Remembered per attempt in
+  `<attempt>/cc/compilers/shell-*.toml`, tied to the found program,
+  `PATH`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `HOME`, the shell's file and the
+  files `BASH_ENV`/`ENV` name, and the working directory when `PATH` has
+  a relative entry. Cactus's `SHELL` is `/bin/bash`, so this is live.
+- Decision 3's refinement (spec §18.5): `src/objcache/specs.rs`. A GCC
+  specs file is accepted when every section it defines is unchanged from
+  `-dumpspecs`, is on the `LINK_ONLY` list, or is new and referred to only
+  from that list (and not as `%(name)`/`%[name]` anywhere in the driver's
+  bytes, which hold GCC's compile steps); no directives, suffix entries,
+  duplicates or comments. The file's bytes join the compiler's identity,
+  `Compiler::specs` records it, and every compile must say it read
+  exactly that file. The list was checked against the GCC 14 driver's
+  strings: every reference to those sections is inside the link command,
+  which is guarded by `%{!c:…}`.
+- The two small points from M0c's review: the doubled blank line, and
+  `identity::tests::a_driver_is_asked_in_english`.
+- Docs: `building-configs.md` (the knob, the stand-down, the shell, the
+  specs files), the knob lists in `meta-toml.md` and
+  `running-simulations.md`, `cactup build --help`, `CLAUDE-contract.md`.
+
+Not verified: NFS or Lustre (`plato` has neither; the cross-process test
+ran on ext4), a real Spack or site GCC (the specs tests use a copy of
+this host's GCC 14 driver with a specs file beside it).
+
 ## Verification done for M0a (2026-10-01)
 
 All in `~/cacti/build-cache`, machine `plato`, GCC 14.2, GNU make 4.4.1,
@@ -295,6 +355,11 @@ compiler but GCC, any machine but `plato`.
 - 2026-10-02: Max answered the open questions and gave the go-ahead for
   M1. Recorded in `DECISIONS.md`; `HANDOFF-M1.md` written for the start
   of M1.
+- 2026-10-02: Max ran decision 3's check on qbd: a site-built GCC 13.2
+  whose specs file only adds an rpath to the link. The refinement joined
+  M1a. Spec §18 written for M1a (`37c2fbb`), then the code: the store
+  and knob (`b16ebb3`), the stand-down (`d2413f8`), asking the shell
+  (`787f0a1`), link-only specs files (`1a8de98`).
 
 ## Review verdicts
 
