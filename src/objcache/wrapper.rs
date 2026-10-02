@@ -21,6 +21,7 @@
 //! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
 use super::event::Event;
+use super::store::{About, Miss, NewEntry, Published, Store};
 use super::probe::SELFTEST_COMPILER;
 use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
 use crate::Res;
@@ -30,7 +31,8 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::io::{Read, Write};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -224,50 +226,217 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
         // `stage` writes no configuration for an off build; this is one
         // edited by hand.
         Mode::Off => pass_through(job),
-        Mode::Record => {
-            // What a serving cache does around a compile it has to run: key
-            // it, run it, and check that the key still describes what was
-            // compiled. Here only the compile has any effect.
-            let (keyed, key_ms) = timed(|| key::key(&conf, cc_dir, &argv));
-            // The file that was identified is the file that runs.
-            let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.as_path());
-            let (ran, compile_ms) = timed(|| run(job, &argv, identified));
-            let Some(status) = ran else {
-                leave_to(job, &conf, cc_dir, "the compiler cannot be started directly, so the recipe's shell runs it")
-            };
-            // A stop signal from here on ends this process on the spot
-            // (see `run`): nothing below is worth making `make` wait for.
-            let (stable, recheck_ms) = timed(|| match &keyed {
-                Ok(keyed) if status.success() => Some(keyed.still_holds()),
-                _ => None,
-            });
-            let output = match &keyed {
-                Ok(keyed) => Some(keyed.compile.output.clone()),
-                Err(_) => output_of(&argv[1..]),
-            };
-            let event = Event {
-                compiler: argv[0].to_string_lossy().into_owned(),
-                unit: output.as_deref().and_then(|output| unit(&conf, output)),
-                exit: status.code(),
-                signal: status.signal(),
-                key: keyed.as_ref().ok().map(|keyed| keyed.parts.key()),
-                parts: keyed.as_ref().ok().map(|keyed| keyed.parts.clone()),
-                not_cached: keyed.as_ref().err().cloned(),
-                relocatable: keyed.as_ref().ok().map(key::Keyed::relocatable),
-                stable,
-                text_bytes: keyed.as_ref().ok().map(|keyed| keyed.text_bytes),
-                files: keyed.as_ref().ok().map(|keyed| keyed.files as u64),
-                object_bytes: output.and_then(|output| output.metadata().ok()).map(|meta| meta.len()),
-                key_ms,
-                compile_ms,
-                recheck_ms,
-            };
-            event.append(&events_path(cc_dir));
-            #[cfg(debug_assertions)]
-            test_panic("after");
-            leave_as(status)
+        mode => cached(job, &conf, cc_dir, &argv, mode),
+    }
+}
+
+/// The most of a compiler's stdout, and of its stderr, a serving cache
+/// keeps to store with the object (§18.8). A compile that says more is
+/// passed on whole and not published.
+const MESSAGES_CAP: usize = 4 << 20;
+
+/// One compile through the cache: key it; in a serving build, serve it from
+/// the store if it can (§18.8); else run it, check that the key still
+/// describes what was compiled, and in a serving build publish the result.
+/// Record mode does all of it but the serving and the publishing, and adds
+/// nothing to the compile.
+fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: Mode) -> ! {
+    let store = match mode.serves() {
+        true => Store::new(&conf.store, &conf.machine).map_err(|e| format!("{e:#}")),
+        false => Err(String::new()),
+    };
+    let (keyed, key_ms) = timed(|| key::key(conf, cc_dir, argv, store.is_ok()));
+    let mut keyed = keyed;
+    let output = match &keyed {
+        Ok(keyed) => Some(keyed.compile.output.clone()),
+        Err(_) => output_of(&argv[1..]),
+    };
+    let mut event = Event {
+        compiler: argv[0].to_string_lossy().into_owned(),
+        unit: output.as_deref().and_then(|output| unit(conf, output)),
+        key: keyed.as_ref().ok().map(|keyed| keyed.parts.key()),
+        parts: keyed.as_ref().ok().map(|keyed| keyed.parts.clone()),
+        not_cached: keyed.as_ref().err().cloned(),
+        relocatable: keyed.as_ref().ok().map(key::Keyed::relocatable),
+        text_bytes: keyed.as_ref().ok().map(|keyed| keyed.text_bytes),
+        files: keyed.as_ref().ok().map(|keyed| keyed.files as u64),
+        key_ms,
+        ..Default::default()
+    };
+    if let Err(why) = &store
+        && mode.serves()
+    {
+        event.store = Some(why.clone());
+    }
+    // The store, for a compile it can take part in.
+    let serving = match (&store, &mut keyed) {
+        (Ok(store), Ok(keyed)) => Some((store, keyed)),
+        _ => None,
+    };
+
+    // A hit (§18.8). In audit mode, the stored object goes beside the
+    // object, to be compared with the one the compile is about to write.
+    let mut audited: Option<tempfile::TempPath> = None;
+    if let Some((store, keyed)) = serving {
+        let key = keyed.parts.key();
+        event.outcome = Some("miss".to_owned());
+        let into = match mode {
+            Mode::Audit => beside(&keyed.compile.output).ok(),
+            _ => None,
+        };
+        let target = into.as_deref().map_or(keyed.compile.output.as_path(), |temp| temp);
+        let (restored, serve_ms) = timed(|| store.restore(&key, target));
+        event.serve_ms = serve_ms;
+        match restored {
+            Ok(messages) if mode == Mode::Audit => {
+                event.outcome = Some("hit".to_owned());
+                audited = into;
+                drop(messages);
+            }
+            // The object is in place; with the dependency file, the compile
+            // is done. Without it, it runs after all, and writes both.
+            Ok(messages) => match keyed.keep_depend() {
+                Ok(()) => {
+                    event.outcome = Some("hit".to_owned());
+                    event.exit = Some(0);
+                    event.object_bytes = std::fs::metadata(&keyed.compile.output).ok().map(|meta| meta.len());
+                    event.append(&events_path(cc_dir));
+                    let shown = |text: &[u8]| match keyed.map() {
+                        Some(_) => key::messages_for_this_build(conf, text),
+                        None => text.to_vec(),
+                    };
+                    let _ = std::io::stdout().lock().write_all(&shown(&messages.stdout));
+                    let _ = std::io::stderr().lock().write_all(&shown(&messages.stderr));
+                    std::process::exit(0)
+                }
+                Err(e) => event.store = Some(format!("the dependency file could not be put in place: {e}")),
+            },
+            Err(Miss::Absent) => {}
+            Err(miss) => event.store = Some(miss.to_string()),
         }
     }
+    // Not served: the compile writes its own dependency file.
+    if let Ok(keyed) = &mut keyed {
+        keyed.drop_depend();
+    }
+
+    // The compile, given the path map's flags when its result is to be
+    // stored: the stored object must be the one the key describes.
+    let publishing = store.is_ok() && keyed.is_ok();
+    let extra = match (&keyed, publishing) {
+        (Ok(keyed), true) => keyed.compile_flags(),
+        _ => Vec::new(),
+    };
+    // The file that was identified is the file that runs.
+    let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.clone());
+    let (ran, compile_ms) = timed(|| run(job, argv, identified.as_deref(), &extra, publishing));
+    let Some((status, captured)) = ran else {
+        drop(audited);
+        leave_to(job, conf, cc_dir, "the compiler cannot be started directly, so the recipe's shell runs it")
+    };
+    event.compile_ms = compile_ms;
+    event.exit = status.code();
+    event.signal = status.signal();
+    // A stop signal from here on ends this process on the spot (see `run`):
+    // nothing below is worth making `make` wait for.
+    let (stable, recheck_ms) = timed(|| match &keyed {
+        Ok(keyed) if status.success() => Some(keyed.still_holds()),
+        _ => None,
+    });
+    event.stable = stable;
+    event.recheck_ms = recheck_ms;
+    event.object_bytes = output.as_ref().and_then(|output| output.metadata().ok()).map(|meta| meta.len());
+
+    if let (Some(stored), Ok(keyed)) = (&audited, &keyed) {
+        event.audit = Some(audit(job, argv, identified.as_deref(), &extra, status, stored, &keyed.compile.output).to_owned());
+    }
+    drop(audited);
+
+    if let (Ok(store), Ok(keyed), Some(captured)) = (&store, &keyed, &captured)
+        && status.success()
+        && stable == Some(true)
+        && event.outcome.as_deref() != Some("hit")
+    {
+        let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event));
+        event.publish_ms = publish_ms;
+        match published {
+            Ok(published) => event.published = Some(published == Published::Stored),
+            Err(why) => {
+                event.published = Some(false);
+                event.store = Some(why);
+            }
+        }
+    }
+    event.append(&events_path(cc_dir));
+    #[cfg(debug_assertions)]
+    test_panic("after");
+    leave_as(status)
+}
+
+/// A temporary file beside `object`, for the stored object in audit mode.
+fn beside(object: &Path) -> std::io::Result<tempfile::TempPath> {
+    let dir = object.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = object.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(tempfile::Builder::new().prefix(&format!(".{name}.cactup-")).tempfile_in(dir)?.into_temp_path())
+}
+
+/// Check a hit in audit mode (§18.8): the compile has run and written
+/// `object`, with `status`; `stored` holds the store's object. The same
+/// bytes: `same`. Otherwise the fresh object is moved aside and the compile
+/// runs once more: the same object twice means the store's was wrong (`wrong
+/// hit`), two objects that the compiler is not deterministic. The build
+/// keeps the fresh object either way.
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], status: ExitStatus, stored: &Path, object: &Path) -> &'static str {
+    if !status.success() {
+        return "compile failed";
+    }
+    let read = |path: &Path| std::fs::read(path).ok();
+    let fresh = read(object);
+    if fresh.is_some() && fresh == read(stored) {
+        return "same";
+    }
+    let Ok(first) = beside(object) else { return "not deterministic" };
+    if std::fs::rename(object, &first).is_err() {
+        return "not deterministic";
+    }
+    match run(job, argv, identified, extra, true) {
+        Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => "wrong hit",
+        Some((again, _)) if again.success() => "not deterministic",
+        // The second compile failed or could not run: the first object is
+        // the build's.
+        _ => {
+            let _ = std::fs::rename(&first, object);
+            "not deterministic"
+        }
+    }
+}
+
+/// Publish the object of a compile that succeeded and whose key held, with
+/// the messages it wrote (§18.7, §18.8).
+fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event) -> Result<Published, String> {
+    if captured.overflow {
+        return Err("the compiler said too much to store".to_owned());
+    }
+    let stored = |text: &[u8]| match keyed.map() {
+        Some(map) => map.messages_for_the_store(text),
+        None => text.to_vec(),
+    };
+    let (stdout, stderr) = (stored(&captured.stdout), stored(&captured.stderr));
+    let entry = NewEntry {
+        key: event.key.as_deref().unwrap_or_default(),
+        parts: &keyed.parts,
+        object: &keyed.compile.output,
+        stdout: &stdout,
+        stderr: &stderr,
+        about: About {
+            unit: event.unit.clone(),
+            compiler: event.compiler.clone(),
+            relocatable: keyed.relocatable(),
+            cactup: crate::build_info::LONG_VERSION.lines().next().unwrap_or_default().to_owned(),
+            host: gethostname::gethostname().to_string_lossy().into_owned(),
+        },
+    };
+    store.publish(&entry).map_err(|e| format!("not published: {e:#}"))
 }
 
 /// The compiler, started directly: the file `identified` if the key was
@@ -319,23 +488,12 @@ fn leave_to_shell(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) -> ! {
 /// The log's line for a compile the cache stays out of.
 fn log_left(job: &Job, conf: &BuildConf, cc_dir: &Path, why: &str) {
     debug(why);
-    if conf.mode == Mode::Record {
+    if conf.mode != Mode::Off {
         let event = Event {
             compiler: job.compiler.to_string_lossy().into_owned(),
             unit: output_of(&job.args).and_then(|output| unit(conf, &output)),
-            exit: None,
-            signal: None,
-            key: None,
-            parts: None,
             not_cached: Some(why.to_owned()),
-            relocatable: None,
-            stable: None,
-            text_bytes: None,
-            files: None,
-            object_bytes: None,
-            key_ms: 0,
-            compile_ms: 0,
-            recheck_ms: 0,
+            ..Default::default()
         };
         event.append(&events_path(cc_dir));
     }
@@ -428,8 +586,45 @@ fn pass_on(signal: i32) {
     }
 }
 
+/// What a compile wrote to its stdout and stderr, kept while it was passed
+/// on (§18.8).
+#[derive(Debug, Default)]
+struct Captured {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    /// More than [`MESSAGES_CAP`] of one of them: not all of it was kept.
+    overflow: bool,
+}
+
+/// Pass what `from` says on to `to` as it comes, and keep a copy of up to
+/// [`MESSAGES_CAP`] bytes of it.
+fn pass_on_and_keep(mut from: impl Read + Send + 'static, mut to: impl Write + Send + 'static) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+    std::thread::spawn(move || {
+        let (mut kept, mut overflow) = (Vec::new(), false);
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = match from.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let _ = to.write_all(&buf[..n]).and_then(|()| to.flush());
+            match kept.len() + n <= MESSAGES_CAP {
+                true => kept.extend_from_slice(&buf[..n]),
+                false => overflow = true,
+            }
+        }
+        (kept, overflow)
+    })
+}
+
+/// Have the stop signals passed on to the compiler (see [`run`]): once per
+/// process, however many compiles it runs (audit mode may run two).
+static HANDLERS: OnceLock<bool> = OnceLock::new();
+
 /// Run the compiler as a child and wait for it, passing on every signal
-/// that asks this process to stop.
+/// that asks this process to stop. `extra` goes after the recipe's
+/// arguments; with `capture`, the compiler's stdout and stderr come through
+/// this process, which passes them on and keeps them (§18.8).
 ///
 /// `make` signals the recipe it started, not that recipe's children, so a
 /// wrapper that just died would leave the compiler running — and writing
@@ -449,45 +644,52 @@ fn pass_on(signal: i32) {
 /// `None`: the compiler could not be started this way, and nothing has
 /// run. The recipe's shell may still know how (a keyword such as `time`, a
 /// function, a script without an interpreter line).
-fn run(job: &Job, argv: &[OsString], identified: Option<&Path>) -> Option<ExitStatus> {
+fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], capture: bool) -> Option<(ExitStatus, Option<Captured>)> {
     // The build script's self-test has checked that this can be read here.
     let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
         pass_through(job)
     };
-    for signal in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
-        if ignored & (1 << (signal - 1)) != 0 {
-            continue;
-        }
-        let on_signal = move || {
-            if PHASE.load(Ordering::SeqCst) == AFTER_COMPILE {
-                // The compiler has finished; what still runs is this
-                // process's own check of the key. End it and go, the way a
-                // compiler still running would have gone: by the signal, so
-                // that `make` discards the object as unfinished. (The
-                // preprocessor's driver is ended; a back end it started
-                // finds its output closed.)
-                pass_on(signal);
-                if signal != SIGQUIT {
-                    let _ = signal_hook::low_level::emulate_default_handler(signal);
+    let watched = *HANDLERS.get_or_init(|| {
+        [SIGHUP, SIGINT, SIGQUIT, SIGTERM].into_iter().filter(|signal| ignored & (1 << (signal - 1)) == 0).all(|signal| {
+            let on_signal = move || {
+                if PHASE.load(Ordering::SeqCst) == AFTER_COMPILE {
+                    // The compiler has finished; what still runs is this
+                    // process's own check of the key, or the publishing.
+                    // End it and go, the way a compiler still running would
+                    // have gone: by the signal, so that `make` discards the
+                    // object as unfinished. (The preprocessor's driver is
+                    // ended; a back end it started finds its output closed.)
+                    pass_on(signal);
+                    if signal != SIGQUIT {
+                        let _ = signal_hook::low_level::emulate_default_handler(signal);
+                    }
+                    signal_hook::low_level::exit(128 + signal);
                 }
-                signal_hook::low_level::exit(128 + signal);
-            }
-            PENDING.store(signal, Ordering::SeqCst);
-            pass_on(signal);
-        };
-        // SAFETY: the handler touches atomics, makes raw `kill` system calls
-        // (rustix makes them without libc), and ends the process by the
-        // signal's default action or `_exit`: all async-signal-safe.
-        if unsafe { signal_hook::low_level::register(signal, on_signal) }.is_err() {
-            debug("cannot watch for signals");
-            pass_through(job)
-        }
+                PENDING.store(signal, Ordering::SeqCst);
+                pass_on(signal);
+            };
+            // SAFETY: the handler touches atomics, makes raw `kill` system
+            // calls (rustix makes them without libc), and ends the process
+            // by the signal's default action or `_exit`: all
+            // async-signal-safe.
+            unsafe { signal_hook::low_level::register(signal, on_signal) }.is_ok()
+        })
+    });
+    if !watched {
+        debug("cannot watch for signals");
+        pass_through(job)
     }
 
     // The handlers above do not survive becoming the shell that runs what
     // cannot be started here.
-    let Ok(mut child) = direct(argv, identified).spawn() else {
+    let full: Vec<OsString> = argv.iter().chain(extra).cloned().collect();
+    let mut command = direct(&full, identified);
+    if capture {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
+    let Ok(mut child) = command.spawn() else {
         // Asked to stop before there was a compile to stop: becoming the
         // shell now would lose that signal and run the compile after all.
         if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
@@ -505,6 +707,10 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>) -> Option<ExitSt
         0 => {}
         signal => pass_on(signal),
     }
+    let passing = match (child.stdout.take(), child.stderr.take()) {
+        (Some(stdout), Some(stderr)) => Some((pass_on_and_keep(stdout, std::io::stdout()), pass_on_and_keep(stderr, std::io::stderr()))),
+        _ => None,
+    };
 
     match child.wait() {
         Ok(status) => {
@@ -512,7 +718,24 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>) -> Option<ExitSt
             // The pid is free to be someone else's from here on.
             CHILD.store(0, Ordering::SeqCst);
             PHASE.store(AFTER_COMPILE, Ordering::SeqCst);
-            Some(status)
+            // What the compiler said, once its streams close: they do when
+            // it ends, unless something it started keeps them open, which
+            // is not waited out.
+            let captured = passing.map(|(stdout, stderr)| {
+                let deadline = Instant::now() + std::time::Duration::from_secs(2);
+                let joined = |handle: std::thread::JoinHandle<(Vec<u8>, bool)>| {
+                    while !handle.is_finished() && Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    match handle.is_finished() {
+                        true => handle.join().unwrap_or_default(),
+                        false => (Vec::new(), true),
+                    }
+                };
+                let ((stdout, over_out), (stderr, over_err)) = (joined(stdout), joined(stderr));
+                Captured { stdout, stderr, overflow: over_out || over_err }
+            });
+            Some((status, captured))
         }
         Err(e) => {
             eprintln!("cactup: lost track of the compiler it was wrapping ({}): {e}", argv[0].to_string_lossy());
@@ -671,6 +894,7 @@ mod tests {
             universe: None,
             build_env_digest: String::new(),
             store: PathBuf::from("/nonexistent/cache"),
+            relocate: true,
         };
         let name = |output: &str| unit(&conf, Path::new(output));
         assert_eq!(name("/w/Cactus/configs/sim/build/Boundary/a.c.o").as_deref(), Some("Boundary/a.c.o"));

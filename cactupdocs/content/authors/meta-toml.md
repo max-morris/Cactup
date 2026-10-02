@@ -368,11 +368,12 @@ cactup knob queue default
 
 The standard knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, `email`,
 `wisdom-frequency` and `wisdom-kind` (`mail-type`, `user`, and `email` fall back to
-derived defaults when unset), plus five that configure cactup itself rather
+derived defaults when unset), plus six that configure cactup itself rather
 than a job — `autoupdate`, `update-url` and `mdb-url` (see
-[Updating cactup](../users/updating.html)), and `build-cache` and
-`build-cache-dir` (see [Building Configs](../users/building-configs.html));
-those five are never recorded with a simulation. Users can also create
+[Updating cactup](../users/updating.html)), and `build-cache`,
+`build-cache-dir` and `build-cache-relocate` (see
+[Building Configs](../users/building-configs.html)); those six are never
+recorded with a simulation. Users can also create
 **custom knobs**
 (`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and
 override any knob for one command with `-K name=value`.

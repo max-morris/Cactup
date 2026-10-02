@@ -216,20 +216,26 @@ pub(crate) enum Commands {
     Config(ConfigCommand),
     /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
     ///
-    /// Two machine-global knobs control the build cache. It is being brought
-    /// up, and so far it only measures:
+    /// Three machine-global knobs control the build cache, which reuses the
+    /// objects earlier builds compiled:
     ///
-    ///   build-cache      off (the default), or record: run every object
-    ///                    compile through cactup and log it in the build
-    ///                    attempt's cc/events.jsonl. Nothing is cached yet.
-    ///   build-cache-dir  where cached objects will be kept, as an absolute
-    ///                    path (default: the cache directory in cactup's
-    ///                    home). Nothing is written there yet.
+    ///   build-cache          off (the default); serve: compile only what no
+    ///                        build compiled before, and keep what is
+    ///                        compiled; audit: serve, but compile anyway
+    ///                        and check that every served object is the
+    ///                        same; record: only measure, changing nothing.
+    ///   build-cache-dir      where cached objects are kept, as an absolute
+    ///                        path (default: the cache directory in
+    ///                        cactup's home).
+    ///   build-cache-relocate yes (the default): objects record their
+    ///                        sources as ./arrangements/..., so every
+    ///                        installation can share them; no: they keep
+    ///                        this installation's paths.
     ///
-    /// Set it with `cactup knob`, or for one build with -K:
+    /// Set them with `cactup knob`, or for one build with -K:
     ///
-    ///   cactup knob build-cache record
-    ///   cactup -K build-cache=record build
+    ///   cactup knob build-cache serve
+    ///   cactup -K build-cache=audit build
     #[command(args_conflicts_with_subcommands = true)]
     #[clap(verbatim_doc_comment)]
     Build {

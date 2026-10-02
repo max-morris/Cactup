@@ -68,6 +68,10 @@ pub struct Compiler {
     /// object of the same sources in two different places? Found by trying
     /// ([`relocates`]): the map stands on it.
     pub relocates: bool,
+    /// Does this compiler make the same object of a source with non-ASCII
+    /// bytes in the session's locale as in the C locale? Found by trying
+    /// ([`locale_neutral`]): if so, the locale is not keyed (§18.8).
+    pub locale_neutral: bool,
     /// The digest that stands for this compiler in a key.
     pub id: String,
     /// The `specs` file a GCC reads, by its physical path, when it was
@@ -131,6 +135,15 @@ fn helper_env() -> String {
     for name in HELPER_ENV {
         hasher.feed(name.as_bytes());
         hasher.feed(std::env::var_os(name).unwrap_or_default().as_bytes());
+    }
+    // And the locale, which the locale trial's answer is for.
+    let mut locale: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| name.as_bytes().starts_with(b"LC_") || name == "LANG" || name == "LANGUAGE")
+        .collect();
+    locale.sort();
+    for (name, value) in locale {
+        hasher.feed(name.as_bytes());
+        hasher.feed(value.as_bytes());
     }
     hasher.hex()
 }
@@ -300,6 +313,45 @@ fn relocates(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
     one.is_some() && one == other
 }
 
+/// The source of [`locale_neutral`]'s trial: bytes outside ASCII in a
+/// comment, a string, a character constant's string and a wide string —
+/// what a compiler that reads its source by the locale would read
+/// otherwise. (Not in an identifier: GCC before 10 rejects those.)
+const LOCALE_TRIAL: &[u8] = b"#include <stddef.h>\n/* d\xc3\xa9j\xc3\xa0 vu, stra\xc3\x9fe */\n\
+    const char *cactup_trial_s = \"caf\xc3\xa9 \xc3\xbc \xe2\x82\xac\";\n\
+    const wchar_t *cactup_trial_w = L\"caf\xc3\xa9 \xc3\xbc \xe2\x82\xac\";\n\
+    int cactup_trial(void) { return sizeof(\"\xc3\xa9\") + (int)cactup_trial_w[3]; }\n";
+
+/// Does `compiler`, run as `name`, make one object of [`LOCALE_TRIAL`] in
+/// this process's locale and in the C locale (§18.8)? Each session is
+/// compared with the same reference, so two sessions whose compilers pass
+/// are interchangeable for it. A compiler that fails to compile it either
+/// way fails the trial and keeps the locale in its keys.
+fn locale_neutral(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
+    let Ok(trial) = tempfile::tempdir_in(dir) else { return false };
+    let source = trial.path().join("locale.c");
+    let object = trial.path().join("locale.o");
+    if fs::write(&source, LOCALE_TRIAL).is_err() {
+        return false;
+    }
+    let compile = |c_locale: bool| {
+        let mut command = Command::new(compiler);
+        command.arg0(name).args(["-g", "-c", "-o"]).arg(&object).arg(&source).current_dir(trial.path());
+        if c_locale {
+            for (variable, _) in std::env::vars_os() {
+                if variable.as_bytes().starts_with(b"LC_") || variable == "LANG" || variable == "LANGUAGE" {
+                    command.env_remove(variable);
+                }
+            }
+            command.env("LC_ALL", "C");
+        }
+        let status = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?;
+        status.success().then(|| fs::read(&object).ok()).flatten()
+    };
+    let session = compile(false);
+    session.is_some() && session == compile(true)
+}
+
 /// Look at the compiler at `path`, run as `name`, from scratch: what it is.
 /// Every file the answer was computed from goes into `files`, also when the
 /// answer is "not one the cache works with". `trial_dir` is a directory for
@@ -418,7 +470,14 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
         hasher.feed(file_digest(&library)?.as_bytes());
         files.push(Seen::of(&library)?);
     }
-    Ok(Compiler { path: path.to_owned(), family, relocates: relocates(path, name, trial_dir), id: hasher.hex(), specs })
+    Ok(Compiler {
+        path: path.to_owned(),
+        family,
+        relocates: relocates(path, name, trial_dir),
+        locale_neutral: locale_neutral(path, name, trial_dir),
+        id: hasher.hex(),
+        specs,
+    })
 }
 
 #[cfg(test)]
@@ -483,6 +542,8 @@ mod tests {
         assert_eq!(first.family, Family::Gcc);
         assert_eq!(first.path, gcc);
         assert!(first.relocates && first.id.len() == 64);
+        // GCC reads its source as UTF-8 whatever the locale (§18.8).
+        assert!(first.locale_neutral);
 
         // Remembered: one file, and the same answer from it.
         let memos: Vec<_> = fs::read_dir(tmp.path().join("compilers")).unwrap().collect();
@@ -559,6 +620,38 @@ mod tests {
         let compiling = gcc_under(&gcc, &tmp.path().join("compiling"), Some(&sneaky));
         let err = identify(tmp.path(), compiling.as_os_str()).unwrap_err().to_string();
         assert!(err.contains("reads a specs file") && err.contains("changes cc1"), "{err}");
+    }
+
+    /// A compiler whose objects follow the locale fails the trial: here a
+    /// stand-in that writes its "object" by the locale it was run in.
+    #[test]
+    fn a_compiler_that_reads_the_locale_keeps_it_in_its_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let by_locale = script(tmp.path(), "by-locale", "while [ $# -gt 1 ]; do [ \"$1\" = -o ] && out=$2; shift; done; echo \"${LC_ALL-}${LANG-}\" > \"$out\"");
+        let fixed = script(tmp.path(), "fixed", "while [ $# -gt 1 ]; do [ \"$1\" = -o ] && out=$2; shift; done; echo same > \"$out\"");
+        // Run from a child, so that the session's locale is one this test
+        // sets, and not C already.
+        let outcome = |compiler: &Path| {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "objcache::identity::tests::child_tries_the_locale", "--nocapture", "--ignored"])
+                .env("CACTUP_LOCALE_TRIAL", compiler)
+                .env("LANG", "de_DE.UTF-8")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert!(outcome(&by_locale).contains("neutral: false"), "{}", outcome(&by_locale));
+        assert!(outcome(&fixed).contains("neutral: true"), "{}", outcome(&fixed));
+    }
+
+    /// Run only by `a_compiler_that_reads_the_locale_keeps_it_in_its_keys`.
+    #[test]
+    #[ignore]
+    fn child_tries_the_locale() {
+        let Some(compiler) = std::env::var_os("CACTUP_LOCALE_TRIAL") else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        let compiler = PathBuf::from(compiler);
+        println!("neutral: {}", locale_neutral(&compiler, compiler.file_name().unwrap(), tmp.path()));
     }
 
     #[test]

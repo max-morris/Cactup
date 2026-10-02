@@ -534,21 +534,45 @@ cactup build native-build --no-universe
 
 ## The build cache (in development)
 
-cactup is growing a build cache shared by all the installations of one
+cactup has a build cache shared by all the installations of one
 `~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
-objects an earlier build already compiled. It does not cache anything yet.
-What exists is the groundwork, behind the `build-cache` knob:
+objects an earlier build already compiled. It caches C and C++ for now
+(Fortran and CUDA come later), and it is off unless you turn it on with the
+`build-cache` knob:
 
 | Value | What a build does |
 |-------|-------------------|
 | `off` (the default) | Nothing: the build is exactly what it is without the cache |
-| `record` | Runs every object compile through cactup, works out the key it would be cached under, and logs it, to measure what a cache would save. Nothing is stored or reused |
+| `serve` | Each C and C++ compile that some build of this `~/.cactup` already made is taken from the cache instead of compiled; each one compiled is kept for the next build |
+| `audit` | As `serve`, but every object the cache has is compiled anyway and compared, to check the cache: slower than a plain build, and the way to trust it |
+| `record` | Only measures: works out what each compile would be cached under and logs it. Nothing is stored or reused, and the build is exactly what it is without the cache |
 
 ```sh
-cactup -K build-cache=record build myconfig   # for this one build
-cactup knob build-cache record                # for every build from now on
+cactup -K build-cache=serve build myconfig    # for this one build
+cactup knob build-cache serve                 # for every build from now on
 cactup knob delete build-cache                # back to the default, off
 ```
+
+With `serve`, the compile step ends with what the cache did:
+
+```
+cactup: build cache: 357 compiles, 307 served from the cache, 0 published
+```
+
+**Your objects name their sources differently.** So that installations can
+share objects, a compile run through the cache records its source files as
+`./arrangements/<Arrangement>/<Thorn>/src/...` and the configuration's
+files as `./configs/@config/...`, not by their full paths. Warnings and
+errors still name the real files. To debug such an object, tell the
+debugger where `./` is, for instance in gdb:
+
+```
+set substitute-path ./ /path/to/Cactus/
+```
+
+or turn this off with `cactup knob build-cache-relocate no`: objects then
+keep the full paths, and are shared only between builds of the same
+configuration.
 
 With `record`, each compile of a Cactus source file adds one line to
 `cc/events.jsonl` in the build attempt's directory (see "Where build output
@@ -624,17 +648,19 @@ unusual characters) the build goes ahead without it and says so in one line:
 cactup: build cache off for this build: <reason>
 ```
 
-Cached objects will be kept under `~/.cactup/cache` (or
-`$CACTUP_HOME/cache`), or wherever the `build-cache-dir` knob says, as an
-absolute path. Nothing is written there yet. Anyone who can write in that
+Cached objects are kept under `~/.cactup/cache` (or `$CACTUP_HOME/cache`),
+or wherever the `build-cache-dir` knob says, as an absolute path. Nothing
+is ever deleted from it on its own: an old object is what makes going back
+to an older version of a thorn cheap. Anyone who can write in that
 directory can put objects into your builds, so keep it your own.
 
 ```sh
 cactup knob build-cache-dir /scratch/me/cactup-cache
 ```
 
-Like the knobs that control updating, `build-cache` and `build-cache-dir`
-describe your cactup installation rather than a job.
+Like the knobs that control updating, `build-cache`, `build-cache-dir` and
+`build-cache-relocate` describe your cactup installation rather than a
+job.
 
 ## Full build command reference
 

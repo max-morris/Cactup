@@ -15,10 +15,13 @@ use super::hash::Hasher;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 
+/// The locale: diagnostics, and character handling in the source. Keyed
+/// only for a compiler whose objects its trial showed to depend on it
+/// (`identity`, §18.8).
+pub const LOCALE: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES"];
+
 /// Variables that change what a compiler does or writes.
 const KEYED: &[&str] = &[
-    // Locale: diagnostics, and character handling in the source.
-    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
     // Reproducible-build inputs to `__DATE__` and friends.
     "SOURCE_DATE_EPOCH", "TZ",
     // What the dynamic loader gives the compiler itself.
@@ -48,7 +51,7 @@ const MORE_FLAGS: &[&str] = &["CCC_OVERRIDE_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS"
 
 /// The digest of the keyed part of `vars`, or the variable that rules
 /// caching out.
-fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>) -> Result<String, String> {
+fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>, locale: bool) -> Result<String, String> {
     let mut keyed = Vec::new();
     for (name, value) in vars {
         let Some(name) = name.to_str() else { continue };
@@ -58,7 +61,7 @@ fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>) -> Result<String,
         if MORE_FLAGS.contains(&name) {
             return Err(format!("{name} is set, which changes the compiler's flags behind its command line"));
         }
-        if KEYED.contains(&name) || KEYED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+        if KEYED.contains(&name) || (locale && LOCALE.contains(&name)) || KEYED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
             keyed.push((name.to_owned(), value));
         }
     }
@@ -72,9 +75,10 @@ fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>) -> Result<String,
     Ok(hasher.hex())
 }
 
-/// The environment digest of this process, which is the compiler's.
-pub fn digest() -> Result<String, String> {
-    digest_of(std::env::vars_os())
+/// The environment digest of this process, which is the compiler's; with
+/// the locale, or without it.
+pub fn digest(locale: bool) -> Result<String, String> {
+    digest_of(std::env::vars_os(), locale)
 }
 
 #[cfg(test)]
@@ -82,7 +86,7 @@ mod tests {
     use super::*;
 
     fn of(vars: &[(&str, &str)]) -> Result<String, String> {
-        digest_of(vars.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))))
+        digest_of(vars.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))), true)
     }
 
     #[test]
@@ -99,6 +103,19 @@ mod tests {
         assert_ne!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("PE_ENV", "GNU")]).unwrap());
         // Empty is not unset.
         assert_ne!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("TZ", "")]).unwrap());
+    }
+
+    /// For a compiler whose trial showed the locale does not matter, it is
+    /// not keyed; anything else still is.
+    #[test]
+    fn the_locale_is_keyed_only_where_asked() {
+        let without = |vars: &[(&str, &str)]| {
+            digest_of(vars.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))), false).unwrap()
+        };
+        let base = without(&[("CPATH", "/opt/include")]);
+        assert_eq!(base, without(&[("CPATH", "/opt/include"), ("LANG", "de_DE.UTF-8"), ("LC_ALL", "C"), ("LANGUAGE", "de")]));
+        assert_ne!(base, without(&[("CPATH", "/opt/include"), ("TZ", "UTC")]));
+        assert_ne!(of(&[("LANG", "C")]).unwrap(), of(&[]).unwrap());
     }
 
     #[test]

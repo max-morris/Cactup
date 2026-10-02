@@ -90,6 +90,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("mdb-url", crate::update::validate_mdb_url),
     KnobSpec::maintenance("build-cache", crate::objcache::validate_mode),
     KnobSpec::maintenance("build-cache-dir", crate::objcache::validate_store_root),
+    KnobSpec::maintenance("build-cache-relocate", crate::objcache::validate_relocate),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
@@ -330,6 +331,7 @@ impl Database {
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
             "build-cache" => Some(crate::objcache::Mode::Off.name().to_owned()),
             "build-cache-dir" => Some(crate::objcache::default_store_root().display().to_string()),
+            "build-cache-relocate" => Some("yes".to_owned()),
             _ => None,
         }
     }

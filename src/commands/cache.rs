@@ -220,6 +220,44 @@ fn summary(events: &[Event]) -> String {
     let text: u64 = events.iter().filter_map(|e| e.text_bytes).sum();
     let objects: u64 = events.iter().filter_map(|e| e.object_bytes).sum();
     out.push_str(&format!("  preprocessed text keyed: {}; objects written: {}\n", megabytes(text), megabytes(objects)));
+    out.push_str(&serving(events));
+    out
+}
+
+/// What a serving or auditing build did with the store (spec §18.8):
+/// nothing for a build that only recorded.
+fn serving(events: &[Event]) -> String {
+    let tried: Vec<&Event> = events.iter().filter(|e| e.outcome.is_some()).collect();
+    if tried.is_empty() {
+        return String::new();
+    }
+    let hits = tried.iter().filter(|e| e.outcome.as_deref() == Some("hit")).count();
+    let serve_ms: u64 = tried.iter().map(|e| e.serve_ms).sum();
+    let mut out = format!(
+        "  served from the cache: {hits} of {} keyed ({}); looking in the store took {}\n",
+        tried.len(),
+        percent(hits as u64, tried.len() as u64),
+        seconds(serve_ms)
+    );
+    let published = tried.iter().filter(|e| e.published == Some(true)).count();
+    let publish_ms: u64 = tried.iter().map(|e| e.publish_ms).sum();
+    out.push_str(&format!("  published: {published}, which took {}\n", seconds(publish_ms)));
+    let mut notes = BTreeMap::new();
+    for note in tried.iter().filter_map(|e| e.store.as_deref()) {
+        *notes.entry(note.to_owned()).or_default() += 1;
+    }
+    if !notes.is_empty() {
+        out.push_str("  what the store said:\n");
+        out.push_str(&tally(notes, "  "));
+    }
+    let mut audits = BTreeMap::new();
+    for audit in tried.iter().filter_map(|e| e.audit.as_deref()) {
+        *audits.entry(audit.to_owned()).or_default() += 1;
+    }
+    if !audits.is_empty() {
+        out.push_str("  hits checked by compiling anyway:\n");
+        out.push_str(&tally(audits, "  "));
+    }
     out
 }
 
@@ -340,6 +378,7 @@ mod tests {
             key_ms: 10,
             compile_ms,
             recheck_ms: 10,
+            ..Default::default()
         }
     }
 
@@ -380,6 +419,18 @@ mod tests {
         assert!(text.contains("compiling 5.0 s; keying 0.0 s (1%)"), "{text}");
         assert!(text.contains("preprocessed text keyed: 2.0 MB; objects written: 2.0 MB"), "{text}");
         assert!(!text.contains("no longer held") && !text.contains("failed"), "{text}");
+        assert!(!text.contains("served"), "a recording build serves nothing: {text}");
+
+        // A serving build, and an auditing one.
+        let mut events = events.to_vec();
+        events[0].outcome = Some("hit".into());
+        events[0].audit = Some("same".into());
+        events[1].outcome = Some("miss".into());
+        events[1].published = Some(true);
+        let text = summary(&events);
+        assert!(text.contains("served from the cache: 1 of 2 keyed (50%)"), "{text}");
+        assert!(text.contains("published: 1,"), "{text}");
+        assert!(text.contains("hits checked by compiling anyway:\n       1  same\n"), "{text}");
     }
 
     #[test]

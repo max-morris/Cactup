@@ -71,23 +71,34 @@ pub enum Mode {
     /// Wrap the compilers, work out the key each compile would be cached
     /// under, and log it; but serve nothing and store nothing.
     Record,
+    /// Serve what the store has, and publish what is compiled (§18.8).
+    Serve,
+    /// Serve, but check every hit by compiling anyway (§18.8).
+    Audit,
 }
 
 impl Mode {
-    const ALL: [Self; 2] = [Self::Off, Self::Record];
+    const ALL: [Self; 4] = [Self::Off, Self::Record, Self::Serve, Self::Audit];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Record => "record",
+            Self::Serve => "serve",
+            Self::Audit => "audit",
         }
     }
 
     pub fn parse(s: &str) -> Res<Self> {
         match Self::ALL.into_iter().find(|mode| mode.name() == s) {
             Some(mode) => Ok(mode),
-            None => bail!("invalid build-cache value \"{s}\" (valid: off, record)"),
+            None => bail!("invalid build-cache value \"{s}\" (valid: off, record, serve, audit)"),
         }
+    }
+
+    /// Does this mode use the store?
+    pub fn serves(self) -> bool {
+        matches!(self, Self::Serve | Self::Audit)
     }
 
     /// The effective `build-cache` setting, read leniently like
@@ -113,6 +124,21 @@ pub fn validate_store_root(value: &str) -> Res<String> {
         bail!("invalid build-cache-dir \"{value}\": it must be an absolute path");
     }
     Ok(value.to_owned())
+}
+
+/// Knob validator (§5): `build-cache-relocate` is `yes` or `no`.
+pub fn validate_relocate(value: &str) -> Res<String> {
+    match value.trim() {
+        "yes" => Ok("yes".to_owned()),
+        "no" => Ok("no".to_owned()),
+        other => bail!("invalid build-cache-relocate value \"{other}\" (valid: yes, no)"),
+    }
+}
+
+/// The effective `build-cache-relocate`, read leniently: anything but `no`
+/// is the default, `yes`. Resolved on the login node only (D11).
+pub fn relocate_from_db(db: &Database) -> bool {
+    db.knob("build-cache-relocate") != Some("no")
 }
 
 /// Where the store is when the `build-cache-dir` knob is not set.
@@ -150,6 +176,9 @@ pub struct BuildConf {
     pub build_env_digest: String,
     /// The store's root (§18.7), from the `build-cache-dir` knob.
     pub store: PathBuf,
+    /// Are keys made with the path map where it holds (§18.8, knob
+    /// `build-cache-relocate`)?
+    pub relocate: bool,
 }
 
 impl BuildConf {
@@ -192,12 +221,14 @@ pub struct StageInputs<'a> {
     pub universe: Option<&'a str>,
     pub build_env: &'a str,
     pub store: &'a Path,
+    pub relocate: bool,
 }
 
 /// A build with the cache staged: the shell text `prepare` splices into the
 /// build script.
 #[derive(Debug)]
 pub struct Staged {
+    mode: Mode,
     cactup: PathBuf,
     cc_dir: PathBuf,
     config_dir: PathBuf,
@@ -219,12 +250,13 @@ pub fn stage(cc_dir: &Path, mode: Mode, inputs: &StageInputs) -> Res<Option<Stag
         universe: inputs.universe.map(str::to_owned),
         build_env_digest: hash::bytes_digest(inputs.build_env.as_bytes()),
         store: inputs.store.to_owned(),
+        relocate: inputs.relocate,
     };
     fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create {}", cc_dir.display()))?;
     let path = conf_path(cc_dir);
     let text = toml::to_string(&conf).context("Failed to serialize the build-cache configuration")?;
     fs::write(&path, text).with_context(|| format!("Failed to write {}", path.display()))?;
-    Ok(Some(Staged { cactup: conf.cactup, cc_dir: cc_dir.to_owned(), config_dir: conf.config_dir }))
+    Ok(Some(Staged { mode, cactup: conf.cactup, cc_dir: cc_dir.to_owned(), config_dir: conf.config_dir }))
 }
 
 impl Staged {
@@ -288,12 +320,30 @@ impl Staged {
     /// worked.
     pub fn build_step(&self, make: &str, target: &str) -> String {
         let events = sh_quote(&events_path(&self.cc_dir));
+        // Counted from the event log, one line per compile; a field is
+        // counted by its spelling in the log's compact JSON.
+        let count = |field: &str| format!("$(grep -c '{field}' {events} 2>/dev/null)");
+        let summary = match self.mode {
+            Mode::Serve => format!(
+                "\"cactup: build cache: $cactup_cc_count compiles, {} served from the cache, {} published\"",
+                count("\"outcome\":\"hit\""),
+                count("\"published\":true")
+            ),
+            Mode::Audit => format!(
+                "\"cactup: build cache: $cactup_cc_count compiles, {} checked against the cache ({} wrong hits, {} not deterministic), {} published\"",
+                count("\"outcome\":\"hit\""),
+                count("\"audit\":\"wrong hit\""),
+                count("\"audit\":\"not deterministic\""),
+                count("\"published\":true")
+            ),
+            _ => "\"cactup: build cache: compiles recorded: $cactup_cc_count\"".to_owned(),
+        };
         format!(
             "if [ -n \"$CACTUP_CC_MAKEFILES\" ]; then\n\
              \x20 ( MAKEFILES=\"${{MAKEFILES:+$MAKEFILES }}$CACTUP_CC_MAKEFILES\"; export MAKEFILES; {make} {target} )\n\
              \x20 cactup_cc_count=$(( $(cat {events} 2>/dev/null | wc -l) ))\n\
              \x20 if [ $cactup_cc_count -gt 0 ]; then\n\
-             \x20   echo \"cactup: build cache: compiles recorded: $cactup_cc_count\"\n\
+             \x20   echo {summary}\n\
              \x20 else\n\
              \x20   echo 'cactup: build cache: no compile recorded (nothing needed compiling, or the cache did not apply to this build)'\n\
              \x20 fi\n\
@@ -333,6 +383,7 @@ mod tests {
             universe: Some("host"),
             build_env: "module load gcc\n",
             store: Path::new("/work/cache"),
+            relocate: true,
         }
     }
 
@@ -341,7 +392,10 @@ mod tests {
         assert_eq!(validate_mode(" record ").unwrap(), "record");
         assert_eq!(validate_mode("off").unwrap(), "off");
         let err = validate_mode("on").unwrap_err().to_string();
-        assert!(err.contains("valid: off, record"), "{err}");
+        assert!(err.contains("valid: off, record, serve, audit"), "{err}");
+        assert_eq!(validate_mode("serve").unwrap(), "serve");
+        assert_eq!(validate_relocate(" no ").unwrap(), "no");
+        assert!(validate_relocate("off").is_err());
     }
 
     #[test]
@@ -381,6 +435,7 @@ mod tests {
                 universe: Some("host".to_owned()),
                 build_env_digest: hash::bytes_digest(b"module load gcc\n"),
                 store: PathBuf::from("/work/cache"),
+                relocate: true,
             }
         );
         assert!(BuildConf::load(&cc.join("missing.toml")).is_err());
@@ -389,6 +444,7 @@ mod tests {
     #[test]
     fn the_script_steps_quote_their_paths() {
         let staged = Staged {
+            mode: Mode::Record,
             cactup: PathBuf::from("/opt/it's here/cactup-abc"),
             cc_dir: PathBuf::from("/work/cfg/.cactup-builds/0003/cc"),
             config_dir: PathBuf::from("/work/cfg"),
@@ -436,7 +492,7 @@ mod tests {
         fs::create_dir_all(selftest_dir(&cc_dir)).unwrap();
         fs::create_dir_all(config_dir.join("build")).unwrap();
         let inject = inject_path(&cc_dir).display().to_string();
-        let staged = Staged { cactup, cc_dir, config_dir };
+        let staged = Staged { mode: Mode::Record, cactup, cc_dir, config_dir };
         let script = format!(
             "set -e\n{}\n{}\necho after the build\n",
             staged.probe_step(selftest_make),
@@ -481,6 +537,27 @@ mod tests {
         let log_two = r#"sh -c 'printf "{}\n{}\n" >> "$(dirname "$MAKEFILES")/events.jsonl"' --"#;
         let ran = run_steps(Some("exit 0"), PASSES, log_two, None);
         assert_eq!(ran.stdout, "cactup: build cache: compiles recorded: 2\nafter the build\n");
+    }
+
+    /// A serving build ends its compile step with what the cache did, counted
+    /// from the event log.
+    #[test]
+    fn a_serving_build_says_what_was_served_and_published() {
+        let log = r#"sh -c 'events="$(dirname "$MAKEFILES")/events.jsonl"; printf "%s\n" "{\"outcome\":\"hit\"}" "{\"outcome\":\"miss\",\"published\":true}" "{\"outcome\":\"hit\"}" "{}" >> "$events"' --"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("cfg");
+        let cc_dir = config_dir.join(".cactup-builds/0000/cc");
+        fs::create_dir_all(&cc_dir).unwrap();
+        for (mode, line) in [
+            (Mode::Serve, "cactup: build cache: 4 compiles, 2 served from the cache, 1 published"),
+            (Mode::Audit, "cactup: build cache: 4 compiles, 2 checked against the cache (0 wrong hits, 0 not deterministic), 1 published"),
+        ] {
+            let _ = fs::remove_file(events_path(&cc_dir));
+            let staged = Staged { mode, cactup: PathBuf::from("/bin/true"), cc_dir: cc_dir.clone(), config_dir: config_dir.clone() };
+            let script = format!("CACTUP_CC_MAKEFILES={}\n{}\n", sh_quote(&inject_path(&cc_dir)), staged.build_step(log, "sim"));
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env_remove("MAKEFILES").output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{line}\n"), "{}", String::from_utf8_lossy(&out.stderr));
+        }
     }
 
     #[test]

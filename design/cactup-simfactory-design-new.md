@@ -1763,10 +1763,11 @@ since what it serves is installed unasked; trailing `/` stripped; default
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
-And two maintenance knobs for the build cache (D15, §18): `build-cache`
-(`off`, the default, or `record`; read leniently — garbage means `off`) and
-`build-cache-dir` (the store's root, an absolute path; default
-`$CACTUP_HOME/cache`). They are not in the snapshot either, but a build does
+And three maintenance knobs for the build cache (D15, §18): `build-cache`
+(`off`, the default, `record`, `serve` or `audit`; read leniently — garbage
+means `off`), `build-cache-dir` (the store's root, an absolute path;
+default `$CACTUP_HOME/cache`) and `build-cache-relocate` (`yes`, the
+default, or `no`: §18.8). They are not in the snapshot either, but a build does
 depend on them, on a compute node included: `prepare` resolves them and
 freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
 that configures cactup rather than a value a job's templates read.
@@ -4499,9 +4500,10 @@ of this instance has compiled before.
 `design/build-cache/`. What exists now is the interposition (§18.2–§18.4)
 and the keys (§18.5): with `build-cache = record`, cactup stands in front of
 every object compile, works out the key it would be cached under, and logs
-it; `cactup cache report` (§18.6) reads the logs. The store (§18.7) exists
-and is tested on its own; no build writes to it or reads from it yet.
-Serving objects comes next, and this section will grow with it.
+it; `cactup cache report` (§18.6) reads the logs. With `build-cache =
+serve` it also serves objects from the store (§18.7) and publishes the ones
+it compiles (§18.8); `audit` checks every hit by compiling anyway. Fortran,
+CUDA and the maintenance commands are still to come.
 
 ### 18.1 Rules
 
@@ -4512,7 +4514,9 @@ them.
    would produce here and now. A false miss is acceptable; a false hit is
    not. Anything the cache does not fully understand is not cached.
 2. **Fail open.** The cache must never fail a build, and never change what
-   gets compiled. The cache sits strictly below `make`: `make` and cactup
+   gets compiled, with one exception: a serving cache adds the path map's
+   flags to a compile it runs (§18.8), which changes the paths an object
+   records and nothing else. The cache sits strictly below `make`: `make` and cactup
    (§7.8) still decide *whether* to compile and *with what*; the cache only
    answers *what the compile would produce*. Every failure inside the
    wrapper or the probe ends in the compile running as `make` asked.
@@ -4524,7 +4528,8 @@ them.
    rewrite; §18.3 is what is left. (The makes *above* the object sub-makes
    do read the fragment, and it does nothing there: see §18.3.)
 4. **Quiet.** A wrapped compile's stdout and stderr are the compiler's own;
-   the wrapper adds nothing. (With `SILENT=no` Cactus echoes its recipes,
+   the wrapper adds nothing. (A serving cache passes them on as they come,
+   and a hit writes the stored ones, §18.8.) (With `SILENT=no` Cactus echoes its recipes,
    and the echoed compile line then shows the wrapper in front of the
    compiler — that is make's output, and the truth.) The build output says
    in one line that the cache stayed out of a build, or how many compiles
@@ -4549,8 +4554,9 @@ what they are without this section. Otherwise `prepare` writes
 cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
 directory and the Cactus root, what keys objects to their platform
 (§18.5): the machine, the build universe, and a SHA-256 of the build-phase
-environment setup; and the store's root (§18.7), from the knob
-`build-cache-dir` (an absolute path; default `$CACTUP_HOME/cache`). If that
+environment setup; the store's root (§18.7), from the knob
+`build-cache-dir` (an absolute path; default `$CACTUP_HOME/cache`); and
+whether keys use the path map (§18.8, knob `build-cache-relocate`). If that
 cannot be written, the build goes on without the cache and says so.
 
 The build script gains one step and changes one (`objcache::Staged`):
@@ -5253,3 +5259,85 @@ it.
 
 **Last use** is not recorded yet; it comes with `cache gc`. Whatever form it
 takes, an entry is never changed after its link.
+
+### 18.8 Serving
+
+With `build-cache = serve`, the wrapper keys every compile it can, as in
+record mode, and then either serves it from the store (§18.7) or compiles
+it and publishes the result. `build-cache = audit` serves too, but checks
+every hit by compiling anyway. `record` stays what it is: a measurement
+that changes nothing.
+
+**A hit**: the key's preprocessor run (§18.5) has the store's entry for the
+key restored onto the object's name, the compiler's stored messages written
+to the wrapper's stdout and stderr, and the wrapper exits 0. No compiler
+runs. If the recipe asked for a dependency file (§18.5's `-MD` form), that
+same preprocessor run writes it: it is given the compile's dependency flags
+with `-MF` pointing at a temporary file beside the real one, and
+`-MQ <object>` when the compile names no target (which is the target GCC
+and Clang give a compile with `-o` and no `-MT`/`-MQ`; tried with both,
+spaces, `$` and `#` in the name included). On a hit the file is renamed
+onto the real name, on a miss it is removed: the compile writes its own.
+Tried: the file is byte for byte the compile's, with and without the path
+map.
+
+**A miss**: the compile runs, given the path map's flags when the key was
+made with the map (§18.5): the stored object must be the object the key
+describes. **This is where the cache changes a real compile**, and where a
+build with the cache serving stops being byte for byte one without it: the
+objects name their sources `./arrangements/…`, and a debugger needs to be
+told where `./` is (`set substitute-path` in gdb, or the knob below). The
+compiler's stdout and stderr go through the wrapper, which passes each on
+as it comes and keeps a copy (up to 4 MiB of each; beyond that the result
+is not published). If the compile succeeded and the key still holds
+afterward (§18.5), the object and the messages are published (§18.7); then
+the wrapper ends as the compiler ended.
+
+**Messages are stored as the map would have them.** A compiler's
+diagnostics name files by the paths the compile used, which the path map
+does not change. In a relocatable entry, every occurrence of the
+configuration directory and the Cactus root (each spelling, with its `/`)
+is stored as `@CACTUP_CONFIG@/` and `@CACTUP_ROOT@/`, and a hit writes them
+back as this build's directories: a warning served from another
+installation points into this one. The messages are those of the build that
+compiled the object — in its language, when the locale is not keyed (below)
+— and in the order each stream had, not interleaved as they were.
+
+**The path map can be turned off**: `build-cache-relocate = no` (default
+`yes`, frozen with the rest) keys every compile without the map, so the
+compiles keep the installation's absolute paths and are shared only with
+builds of the same configuration in the same installation.
+
+**The locale leaves the key behind a trial** (decision 5 in
+`design/build-cache/DECISIONS.md`). Once per build attempt and compiler,
+with the compiler's identity, a source with non-ASCII bytes in a comment, a
+string, a wide string and an identifier is compiled with debug information
+twice: in the session's locale, and in the C locale (`LC_ALL=C`, `LANG`,
+`LANGUAGE` and the other `LC_*` removed). A compiler that makes one object
+of both is keyed without `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE` and
+`LC_MESSAGES`; one that does not keeps them. Each session is compared with
+the same reference, so two sessions whose compilers pass are interchangeable
+for that source. The remembered identity depends on those variables, so a
+session in another locale tries again.
+
+**Audit mode** checks a hit instead of trusting it. The entry is restored
+to a temporary file beside the object, and the compile runs anyway, exactly
+as on a miss. If the two objects are the same bytes, the hit was right. If
+not, the fresh object is moved aside and the compile runs a second time: if
+its object equals the first, the stored entry is wrong (**a wrong hit**:
+the key failed to describe the compile); if not, the compiler is not
+deterministic for this compile. Either way the build keeps the fresh
+object, the event log records it, and the build's closing line counts it.
+Audit mode is the acceptance gate for serving: a full build in two
+installations with no wrong hit.
+
+**What a build says.** The build step ends with one line, as in record
+mode: `cactup: build cache: N compiles, H served from the cache, P
+published` (and in audit mode, `A checked, W wrong hits, D not
+deterministic`).
+
+**Signals.** A hit runs no compiler: a stop signal during it ends the
+wrapper by that signal, which leaves at most the temporary files the store
+leaves when a restore is cut short (§18.7). A miss forwards signals to the
+compiler as record mode does; a signal during the check and the publishing
+after it ends the wrapper on the spot (§18.5, §18.7).

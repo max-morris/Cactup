@@ -43,7 +43,7 @@ impl Build {
             cc.join("config.toml"),
             format!(
                 "mode = \"{mode}\"\ncactup = \"{CACTUP}\"\nconfig-dir = \"{}\"\ncactus-root = \"{}\"\n\
-                 machine = \"test\"\nbuild-env-digest = \"\"\nstore = \"{}\"\n",
+                 machine = \"test\"\nbuild-env-digest = \"\"\nstore = \"{}\"\nrelocate = true\n",
                 config.display(),
                 root.display(),
                 root.parent().unwrap().join("store").display()
@@ -1334,4 +1334,195 @@ fn a_compiler_given_flags_behind_its_command_line_is_not_keyed() {
         let event = compile(&later, "gcc", &[("GCC_EXEC_PREFIX", &prefix)]);
         assert!(event.contains("reads a specs file") && !event.contains("\"key\""), "{event}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Serving (spec §18.8).
+
+impl Build {
+    /// This build with `mode`, keeping its store at `store`.
+    fn serving(self, mode: &str, store: &Path) -> Self {
+        self.set_mode(mode, store);
+        self
+    }
+
+    /// Change this build's mode and store.
+    fn set_mode(&self, mode: &str, store: &Path) {
+        let conf = fs::read_to_string(self.conf()).unwrap();
+        let conf: String = conf
+            .lines()
+            .map(|line| match line.split_once(" = ").map(|(name, _)| name) {
+                Some("mode") => format!("mode = \"{mode}\"\n"),
+                Some("store") => format!("store = \"{}\"\n", store.display()),
+                _ => format!("{line}\n"),
+            })
+            .collect();
+        fs::write(self.conf(), conf).unwrap();
+    }
+
+    /// The last compile the log has, as JSON.
+    fn last_event(&self) -> serde_json::Value {
+        serde_json::from_str(self.events().last().expect("a compile was logged")).unwrap()
+    }
+}
+
+impl Unit<'_> {
+    /// Compile through the wrapper from the configuration's `scratch`, as
+    /// Cactus does, and return what it printed.
+    fn wrapped(&self, compiler: &str, flags: &[&str], lib: &Path) -> Output {
+        let args = self.args(flags, lib);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let cwd = self.build.config.join("scratch");
+        let out = self.build.wrap(compiler, &args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+        assert!(out.status.success(), "{compiler} {flags:?}: {}", text(&out.stderr));
+        out
+    }
+}
+
+/// A source that draws a warning naming its file, to see the messages a hit
+/// replays.
+const WARNED: &str = "static int never_used;\n";
+
+/// A serving build publishes what it compiles, and serves it — to itself
+/// and to another tree elsewhere under another configuration name — as the
+/// object that tree's own compile, given the path map, would write. The
+/// warning comes back naming the tree that is served, not the one that
+/// compiled.
+#[test]
+fn a_serving_build_publishes_its_compiles_and_serves_them_elsewhere() {
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let lib = shared.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    for compiler in ["gcc", "clang"] {
+        if !have(compiler) {
+            continue;
+        }
+        let store = shared.join(format!("store-{compiler}"));
+        let one = Build::named("one", "sim", "record").serving("serve", &store);
+        let other = Build::named("an/other/deeper", "renamed", "record").serving("serve", &store);
+        let (here, there) = (Unit::new(&one, "c", &lib), Unit::new(&other, "c", &lib));
+        for unit in [&here, &there] {
+            let source = fs::read_to_string(&unit.source).unwrap();
+            fs::write(&unit.source, format!("{source}{WARNED}")).unwrap();
+        }
+        let flags = ["-O2", "-g", "-Wall"];
+
+        // A miss: compiled, given the map, and published.
+        let first = here.wrapped(compiler, &flags, &lib);
+        let event = one.last_event();
+        assert_eq!((event["outcome"].as_str(), event["published"].as_bool()), (Some("miss"), Some(true)), "{compiler}: {event}");
+        let compiled = fs::read(&here.object).unwrap();
+        let warning = text(&first.stderr);
+        assert!(warning.contains("never_used") && warning.contains(&one.root.display().to_string()), "{compiler}: {warning}");
+        assert_eq!(here.mapped_object(compiler, &flags, &lib), compiled, "{compiler}: the miss was not compiled as the key says");
+
+        // A hit: the same object, the same words, no compiler.
+        fs::remove_file(&here.object).unwrap();
+        let again = here.wrapped(compiler, &flags, &lib);
+        let event = one.last_event();
+        assert_eq!((event["outcome"].as_str(), event["compile_ms"].as_u64()), (Some("hit"), Some(0)), "{compiler}: {event}");
+        assert_eq!(fs::read(&here.object).unwrap(), compiled, "{compiler}");
+        assert_eq!((text(&again.stdout), text(&again.stderr)), (text(&first.stdout), warning.clone()), "{compiler}");
+
+        // Elsewhere: served, as the object that tree would compile, with
+        // the warning naming that tree.
+        let elsewhere = there.wrapped(compiler, &flags, &lib);
+        assert_eq!(other.last_event()["outcome"].as_str(), Some("hit"), "{compiler}: {}", other.last_event());
+        let served = fs::read(&there.object).unwrap();
+        assert_eq!(there.mapped_object(compiler, &flags, &lib), served, "{compiler}: served elsewhere, not that tree's object");
+        let warning = text(&elsewhere.stderr);
+        assert!(warning.contains(&other.root.display().to_string()), "{compiler}: {warning}");
+        assert!(!warning.contains(&one.root.display().to_string()), "{compiler}: {warning}");
+        assert!(!warning.contains("@CACTUP_"), "{compiler}: {warning}");
+    }
+}
+
+/// A hit writes the dependency file the compile would have written, byte
+/// for byte, with the target named or not; and leaves nothing else behind.
+#[test]
+fn a_hit_writes_the_dependency_file_the_compile_would_have() {
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let lib = shared.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    for compiler in ["gcc", "clang"] {
+        if !have(compiler) {
+            continue;
+        }
+        let build = Build::new("record").serving("serve", &shared.join(format!("store-{compiler}")));
+        let unit = Unit::new(&build, "c", &lib);
+        let depfile = unit.object.with_extension("d");
+        let depfile = depfile.to_str().unwrap();
+        let object = unit.object.display().to_string();
+        for target in [vec![], vec!["-MT", object.as_str()]] {
+            let mut flags = vec!["-O2", "-MD", "-MP", "-MF", depfile];
+            flags.extend(&target);
+            let _ = fs::remove_file(&unit.object);
+            unit.wrapped(compiler, &flags, &lib);
+            let compiled = fs::read(depfile).unwrap();
+            fs::remove_file(&unit.object).unwrap();
+            fs::remove_file(depfile).unwrap();
+            unit.wrapped(compiler, &flags, &lib);
+            assert_eq!(build.last_event()["outcome"].as_str(), Some("hit"), "{compiler} {target:?}");
+            assert_eq!(text(&fs::read(depfile).unwrap()), text(&compiled), "{compiler} {target:?}");
+            let dir = unit.object.parent().unwrap();
+            let strays: Vec<_> =
+                fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().contains("cactup")).collect();
+            assert!(strays.is_empty(), "{compiler}: {strays:?}");
+            // The next round's compile is a miss again.
+            let source = fs::read_to_string(&unit.source).unwrap();
+            fs::write(&unit.source, format!("{source}/* round */\n")).unwrap();
+        }
+    }
+}
+
+/// Audit mode compiles a hit anyway: the same object is "same"; an entry
+/// whose object is not what the compile makes (here made so by hand, with
+/// a checksum to match) is "a wrong hit", and the build keeps the fresh
+/// object.
+#[test]
+fn audit_mode_tells_a_wrong_hit() {
+    if !have("gcc") {
+        eprintln!("skipped: no GCC on this host");
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let (lib, store) = (shared.join("lib"), shared.join("store"));
+    fs::create_dir_all(&lib).unwrap();
+    let build = Build::new("record").serving("serve", &store);
+    let unit = Unit::new(&build, "c", &lib);
+    unit.wrapped("gcc", &["-O2"], &lib);
+    let compiled = fs::read(&unit.object).unwrap();
+    let key = build.last_event()["key"].as_str().unwrap().to_owned();
+    build.set_mode("audit", &store);
+
+    unit.wrapped("gcc", &["-O2"], &lib);
+    let event = build.last_event();
+    assert_eq!((event["outcome"].as_str(), event["audit"].as_str()), (Some("hit"), Some("same")), "{event}");
+
+    // The entry's object, one byte changed, its checksum made to match.
+    let entry = store.join("v1/test").join(&key[..2]).join(&key);
+    let bytes = fs::read(&entry).unwrap();
+    let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+    let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;
+    let lengths: Vec<usize> = text(&bytes[line_end..lengths_end - 1]).split(' ').map(|n| n.parse().unwrap()).collect();
+    let mut body = bytes[..bytes.len() - 65].to_vec();
+    body[lengths_end + lengths[0] + lengths[1] / 2] ^= 0x55;
+    let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    body.extend(format!("{sum}\n").bytes());
+    fs::remove_file(&entry).unwrap();
+    fs::write(&entry, body).unwrap();
+
+    unit.wrapped("gcc", &["-O2"], &lib);
+    let event = build.last_event();
+    assert_eq!(event["audit"].as_str(), Some("wrong hit"), "{event}");
+    assert_eq!(fs::read(&unit.object).unwrap(), compiled, "the build keeps the fresh object");
+    let strays: Vec<_> = fs::read_dir(unit.object.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().contains("cactup"))
+        .collect();
+    assert!(strays.is_empty(), "{strays:?}");
 }

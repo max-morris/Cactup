@@ -50,6 +50,33 @@ const ROOT_NAME: &str = "./";
 /// What the configuration directory is called, whatever its name.
 const CONFIG_NAME: &str = "./configs/@config/";
 
+/// What stands for the configuration directory and the Cactus root (each
+/// with its `/`) in the compiler messages a relocatable entry keeps.
+const CONFIG_TOKEN: &[u8] = b"@CACTUP_CONFIG@/";
+const ROOT_TOKEN: &[u8] = b"@CACTUP_ROOT@/";
+
+/// Stored compiler messages as this build shows them: the tokens of
+/// [`PathMap::messages_for_the_store`] as this build's directories.
+pub fn messages_for_this_build(conf: &BuildConf, text: &[u8]) -> Vec<u8> {
+    let dir = |path: &Path| [path.as_os_str().as_bytes(), b"/"].concat();
+    let (config, root) = (dir(&conf.config_dir), dir(&conf.cactus_root));
+    let mut out = Vec::with_capacity(text.len());
+    let mut at = 0;
+    while at < text.len() {
+        if text[at..].starts_with(CONFIG_TOKEN) {
+            out.extend_from_slice(&config);
+            at += CONFIG_TOKEN.len();
+        } else if text[at..].starts_with(ROOT_TOKEN) {
+            out.extend_from_slice(&root);
+            at += ROOT_TOKEN.len();
+        } else {
+            out.push(text[at]);
+            at += 1;
+        }
+    }
+    out
+}
+
 /// The pid of a preprocessor run in progress (0: none), for the wrapper's
 /// signal handler: a stop signal that arrives while the key is checked
 /// again after the compile must end that run too, not wait for it.
@@ -80,7 +107,7 @@ impl PathMap {
     /// other.
     pub fn new(conf: &BuildConf, compiler: &Compiler, compile: &Compile) -> Option<Self> {
         let unmapped_paths = compiler.family == Family::Clang && compile.openmp;
-        if !compiler.relocates || unmapped_paths {
+        if !conf.relocate || !compiler.relocates || unmapped_paths {
             return None;
         }
         let mut from_to = Vec::new();
@@ -109,6 +136,27 @@ impl PathMap {
     /// with the map, so that a cactup that maps another way keys apart.
     pub fn description() -> [&'static str; 3] {
         ["-ffile-prefix-map", ROOT_NAME, CONFIG_NAME]
+    }
+
+    /// A compiler's messages as an entry keeps them (§18.8): each directory
+    /// the map knows, wherever it stands, as a token that
+    /// [`messages_for_this_build`] turns back into this build's directory.
+    pub fn messages_for_the_store(&self, text: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len());
+        let mut at = 0;
+        while at < text.len() {
+            match self.from_to.iter().find(|(from, _)| text[at..].starts_with(from)) {
+                Some((from, to)) => {
+                    out.extend_from_slice(if *to == CONFIG_NAME { CONFIG_TOKEN } else { ROOT_TOKEN });
+                    at += from.len();
+                }
+                None => {
+                    out.push(text[at]);
+                    at += 1;
+                }
+            }
+        }
+        out
     }
 
     /// The file name `name` as a mapped compile records it.
@@ -194,18 +242,29 @@ pub struct Keyed {
     pub files: usize,
     name: OsString,
     map: Option<PathMap>,
+    /// The dependency file the key's preprocessor run wrote, under a
+    /// temporary name, and the name the compile would give it (§18.8).
+    depend: Option<(tempfile::TempPath, PathBuf)>,
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
 /// arguments). `Err` says why it is not one the cache keys; the compile
 /// itself is none of this function's business.
-pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString]) -> Result<Keyed, String> {
+///
+/// With `depend`, a dependency file the compile asks for is written by the
+/// key's preprocessor run, under a temporary name ([`Keyed::keep_depend`]
+/// gives it the compile's): what a hit needs, since no compile runs.
+pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> Result<Keyed, String> {
     let whole = |e: anyhow::Error| format!("{e:#}");
-    let environment = environment::digest()?;
+    // Before anything else: a variable that rules the compile out says so
+    // whatever the compiler.
+    environment::digest(true)?;
     // The compiler before its arguments: for a compiler the cache has no
     // reader for, "which compiler" is the reason worth giving, not whichever
     // of its flags the GCC reader trips over first.
     let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
+    // The locale only where the compiler's trial says it can matter (§18.8).
+    let environment = environment::digest(!compiler.locale_neutral)?;
     let compile = compile::parse(&argv[1..])?;
     if compiler.family == Family::Clang && compile.forced_include {
         // Clang takes `<file>.pch` or `<file>.gch` in place of a file given
@@ -250,7 +309,13 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString]) -> Result<Keyed, 
     }
 
     let name = argv[0].clone();
-    let read = preprocess(&compiler, &name, &compile, map.as_ref()).map_err(whole)?;
+    let depend = match depend {
+        true => depend_flags(&compile).map_err(whole)?,
+        false => None,
+    };
+    let read = preprocess(&compiler, &name, &compile, map.as_ref(), depend.as_ref().map(|(_, flags)| flags.as_slice()))
+        .map_err(whole)?;
+    let depend = depend.map(|(files, _)| files);
     let parts = Parts {
         platform: platform.digest,
         compiler: compiler.id.clone(),
@@ -259,7 +324,35 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString]) -> Result<Keyed, 
         text: read.text,
         files: read.files,
     };
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map })
+    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, depend })
+}
+
+/// The dependency flags of `compile` for the key's preprocessor run, if it
+/// has any: `-MF` naming a temporary file beside the compile's, and the
+/// target the compile would name when it is given none (`-MQ <object>`, as
+/// the GCC and Clang drivers do for a compile with `-o`). With the
+/// temporary file and the compile's name for it.
+fn depend_flags(compile: &Compile) -> Res<Option<((tempfile::TempPath, PathBuf), Vec<OsString>)>> {
+    if compile.depend.is_empty() {
+        return Ok(None);
+    }
+    let named = |flag: &str| compile.depend.iter().any(|arg| arg == flag);
+    let at = compile.depend.iter().position(|arg| arg == "-MF").context("a dependency file without -MF")?;
+    let real = PathBuf::from(&compile.depend[at + 1]);
+    let dir = real.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = real.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = tempfile::Builder::new()
+        .prefix(&format!(".{name}.cactup-"))
+        .tempfile_in(dir)
+        .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?
+        .into_temp_path();
+    let mut flags = compile.depend.clone();
+    flags[at + 1] = temp.as_os_str().to_owned();
+    if !named("-MT") && !named("-MQ") {
+        flags.push(OsString::from("-MQ"));
+        flags.push(compile.output.clone().into_os_string());
+    }
+    Ok(Some(((temp, real), flags)))
 }
 
 impl Keyed {
@@ -273,8 +366,35 @@ impl Keyed {
     /// keyed? Run after the compile: a header edited while the compile ran
     /// makes an object of the new text under the key of the old.
     pub fn still_holds(&self) -> bool {
-        preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref())
+        preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files)
+    }
+
+    /// The flags that make the compile record its paths as the key does:
+    /// the path map's, if the key was made with it.
+    pub fn compile_flags(&self) -> Vec<OsString> {
+        self.map.as_ref().map(PathMap::flags).unwrap_or_default()
+    }
+
+    /// The map the key was made with.
+    pub fn map(&self) -> Option<&PathMap> {
+        self.map.as_ref()
+    }
+
+    /// Remove the dependency file the key's preprocessor run wrote: the
+    /// compile writes its own. (The process ends by `exit`, which runs no
+    /// destructor: this has to be asked for.)
+    pub fn drop_depend(&mut self) {
+        drop(self.depend.take());
+    }
+
+    /// Give the dependency file the key's preprocessor run wrote the name
+    /// the compile would have given it. Nothing, if none was asked for.
+    pub fn keep_depend(&mut self) -> std::io::Result<()> {
+        match self.depend.take() {
+            Some((temp, real)) => temp.persist(&real).map_err(|e| e.error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -413,11 +533,14 @@ fn assembler_include(line: &[u8]) -> bool {
 /// `-E` in place of `-c -o <object>` — and without the flags that would
 /// have it write a dependency file (`Compile::depend`), which is the
 /// compile's to write.
-fn preprocessor(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>) -> Command {
+fn preprocessor(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>, depend: Option<&[OsString]>) -> Command {
     let mut command = Command::new(&compiler.path);
     // `-v`: the driver then says, on stderr, where it takes flags from
     // besides its command line (see `flags_from_elsewhere`).
     command.arg0(name).args(&compile.preprocess).args(["-E", "-v"]);
+    if let Some(depend) = depend {
+        command.args(depend);
+    }
     if compile.macros_in_debug {
         command.arg("-dD");
     }
@@ -456,8 +579,8 @@ pub fn in_english(command: &mut Command) {
 /// map's flags). It does not map the file names in its line markers, so
 /// those are mapped here, the way the compiler maps names; and each named
 /// file's bytes are digested under its mapped name.
-fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
-    let mut command = preprocessor(compiler, name, compile, map);
+fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>, depend: Option<&[OsString]>) -> Res<Read> {
+    let mut command = preprocessor(compiler, name, compile, map, depend);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -743,8 +866,8 @@ mod tests {
         let compile = compile::parse(&args).unwrap();
         assert_eq!(compile.depend, os(&depend));
         for family in [Family::Gcc, Family::Clang] {
-            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, id: String::new(), specs: None };
-            let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None);
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), specs: None };
+            let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None, None);
             let given: Vec<&OsStr> = command.get_args().collect();
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");
             assert!(!given.iter().any(|arg| arg.as_bytes().starts_with(b"-M") || depend.contains(&arg.to_str().unwrap())), "{given:?}");
@@ -886,6 +1009,7 @@ mod tests {
                 universe: None,
                 build_env_digest: String::new(),
                 store: PathBuf::from("/nonexistent/cache"),
+            relocate: true,
             };
             let tree = Self { _tmp: tmp, conf, cc };
             std::fs::write(tree.header(), HEADER).unwrap();
@@ -910,11 +1034,11 @@ mod tests {
         }
 
         fn key(&self, flags: &[&str]) -> Keyed {
-            key(&self.conf, &self.cc, &self.argv("gcc", flags)).unwrap()
+            key(&self.conf, &self.cc, &self.argv("gcc", flags), false).unwrap()
         }
 
         fn why_not(&self, flags: &[&str]) -> String {
-            key(&self.conf, &self.cc, &self.argv("gcc", flags)).unwrap_err()
+            key(&self.conf, &self.cc, &self.argv("gcc", flags), false).unwrap_err()
         }
     }
 
@@ -981,7 +1105,7 @@ mod tests {
 
         // Another machine keys differently, with nothing else changed.
         let elsewhere = BuildConf { machine: "saturn".into(), ..tree.conf.clone() };
-        let there = key(&elsewhere, &tree.cc, &tree.argv("gcc", &["-O2"])).unwrap();
+        let there = key(&elsewhere, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap();
         assert_ne!(there.parts.platform, base.parts.platform);
         assert_eq!(there.parts.text, base.parts.text);
     }
@@ -1035,11 +1159,11 @@ mod tests {
         assert!(built.success());
         assert!(tree.why_not(&["-O2"]).contains("a precompiled header would be used"), "{}", tree.why_not(&["-O2"]));
         std::fs::remove_file(&gch).unwrap();
-        assert!(key(&tree.conf, &tree.cc, &tree.argv("gcc", &["-O2"])).is_ok());
+        assert!(key(&tree.conf, &tree.cc, &tree.argv("gcc", &["-O2"]), false).is_ok());
 
         std::fs::remove_file(tree.source()).unwrap();
         assert!(tree.why_not(&[]).contains("the preprocessor failed"));
-        assert!(key(&tree.conf, &tree.cc, &tree.argv("cat", &[])).unwrap_err().contains("is not a compiler cactup knows"));
+        assert!(key(&tree.conf, &tree.cc, &tree.argv("cat", &[]), false).unwrap_err().contains("is not a compiler cactup knows"));
     }
 
     #[test]
@@ -1048,11 +1172,11 @@ mod tests {
             return;
         }
         let (here, there) = (Tree::new(), Tree::new());
-        let clang = |tree: &Tree, flags: &[&str]| key(&tree.conf, &tree.cc, &tree.argv("clang", flags));
+        let clang = |tree: &Tree, flags: &[&str]| key(&tree.conf, &tree.cc, &tree.argv("clang", flags), false);
         let (a, b) = (clang(&here, &["-g", "-O2"]).unwrap(), clang(&there, &["-g", "-O2"]).unwrap());
         assert_eq!(a.parts, b.parts);
         // The same file run as C++ is another compiler.
-        assert_ne!(key(&here.conf, &here.cc, &here.argv("clang++", &["-g", "-O2"])).unwrap().parts.compiler, a.parts.compiler);
+        assert_ne!(key(&here.conf, &here.cc, &here.argv("clang++", &["-g", "-O2"]), false).unwrap().parts.compiler, a.parts.compiler);
         // With OpenMP, Clang records source paths no map reaches: the key
         // then knows where the tree is.
         let (a, b) = (clang(&here, &["-g", "-fopenmp"]).unwrap(), clang(&there, &["-g", "-fopenmp"]).unwrap());

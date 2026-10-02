@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 
 /// One wrapped compile.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// The compiler as the recipe named it.
     pub compiler: String,
@@ -55,6 +55,30 @@ pub struct Event {
     pub key_ms: u64,
     pub compile_ms: u64,
     pub recheck_ms: u64,
+    /// In a serving build (§18.8): `hit` (served, or in audit mode
+    /// checked) or `miss`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// What the store said besides "no entry": why an entry was not used,
+    /// or why the object was not published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    /// Did this compile add an entry to the store?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<bool>,
+    /// In audit mode, what checking a hit found: `same`, `wrong hit`, `not
+    /// deterministic`, or `compile failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<String>,
+    /// Milliseconds restoring from the store, and publishing to it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub serve_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub publish_ms: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Event {
@@ -106,6 +130,7 @@ mod tests {
             key_ms: 1,
             compile_ms: 250,
             recheck_ms: 0,
+            ..Default::default()
         };
         plain.append(&log);
         plain.append(&log);
