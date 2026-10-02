@@ -4770,8 +4770,9 @@ differently by the working directory or by a variable not listed above, a
 file it reads in turn that is edited during the build attempt, or a
 `BASH_ENV` value the shell expands (`$HOME/.env`, watched as the literal
 name) can make a later compile of the attempt run differently in the
-recipe than in the wrapper. No makefile or site setup cactup knows of does
-any of that.
+recipe than in the wrapper. A startup file that defines a function named
+`type` or `printf` can make the answer say anything. No makefile or site
+setup cactup knows of does any of that.
 
 A started compiler's environment is the recipe's, with one adjustment: a
 shell that sets `_` for each command it starts (bash) set it to cactup, and
@@ -4894,9 +4895,11 @@ fixed parts, so that the key does not change by accident:
   list refers to (`%(name)`, `%[name]`) except other new ones; and if it
   has nothing else: no `%include`, `%include_noerr` or `%rename`, no
   compiler for a suffix (`.ext:`, `@language:`), no section twice, nothing
-  unparsed, and no empty section followed by a single blank line (GCC
+  unparsed, no empty section followed by a single blank line (GCC
   skips blank lines after a section's name, so it would read the next
-  section's name as this one's text; `-dumpspecs` writes two). GCC's own compile steps, which `-dumpspecs` does not show,
+  section's name as this one's text; `-dumpspecs` writes two), and no `#`
+  or line-final `\` anywhere (GCC takes a comment, and a backslash with
+  its line end, out of the text; `-dumpspecs` prints the text as it is). GCC's own compile steps, which `-dumpspecs` does not show,
   refer to built-in sections only, and to none on that list. The file's
   bytes join the compiler's identity. Which file a driver reads depends on the
   compile (Clang picks a configuration file by target, so `-m32` can bring
@@ -5146,7 +5149,8 @@ cactup build cache entry\n                       magic line
 <SHA-256 of every byte above, 64 hex digits>\n
 ```
 
-The header has the format (`1`), the key and its six parts (§18.5); and,
+The header has the format (`1`), the label the key was made under, the
+key and its six parts (§18.5); and,
 for people only, the object's name below `build/`, the compiler as the
 recipe named it, whether the key is relocatable, the cactup version and
 the host that compiled it. An entry is *whole* when the magic line is
@@ -5158,8 +5162,9 @@ run write it).
 
 **Several cactup builds share the store** (a queued job runs the build it
 was submitted with), so the lengths are outside the header and the header
-is read last: a whole entry whose header this cactup cannot read was
-written by another cactup, and is left alone, a miss. Any change to what
+is read last: a whole entry whose header this cactup cannot read, or whose
+key was made under another label, was written by another cactup, and is
+left alone, a miss. Any change to what
 an entry holds or how it is read changes the format, which puts the new
 entries in a directory of their own; any change to what a key stands for
 changes the key's label (§18.5).

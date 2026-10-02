@@ -97,6 +97,12 @@ pub fn link_only(builtin: &str, file: &[u8], driver: &[u8]) -> Result<(), String
     let builtin: BTreeMap<&str, String> =
         sections(builtin).map_err(|why| format!("built-in specs that cannot be read: {why}"))?.into_iter().collect();
     let file = std::str::from_utf8(file).map_err(|_| "is not text".to_owned())?;
+    // GCC takes `#` to the end of a line, and a line-final `\\` with its
+    // line end, out of a specs file's text; `-dumpspecs` prints the text as
+    // it is. With neither in the file, its text is GCC's.
+    if let Some(line) = file.lines().find(|line| line.contains('#') || line.ends_with('\\')) {
+        return Err(format!("has text GCC reads otherwise than it is written ({line})"));
+    }
     let file = sections(file)?;
     let mut seen = BTreeSet::new();
     for (name, _) in &file {
@@ -180,7 +186,9 @@ mod tests {
             ("%include <other.specs>\n".to_owned(), "has a directive"),
             ("%rename cc1 old_cc1\n*cc1:\n%(old_cc1) -DX\n".to_owned(), "has a directive"),
             (".f90:\n@f95\n".to_owned(), "defines a compiler"),
-            ("# a comment\n".to_owned(), "does not follow"),
+            ("# a comment\n".to_owned(), "reads otherwise"),
+            (BUILTIN.replace("%{profile:-p}", "%{profile:-p} # gone"), "reads otherwise"),
+            (BUILTIN.replace("--64", "--64 \\"), "reads otherwise"),
             ("*link:\n-x\n\n*link:\n-y\n".to_owned(), "defines link twice"),
             // Only some of the sections, or none: GCC then lacks the rest.
             ("*cc1:\n%{profile:-p}\n".to_owned(), "leaves out asm"),

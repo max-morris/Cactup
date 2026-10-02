@@ -399,7 +399,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
                 let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;
                 if let Err(why) = super::specs::link_only(&builtin, &text, &bytes) {
                     bail!(
-                        "{} reads a specs file ({}) that {why}, which can add flags the cache does not see",
+                        "{} reads a specs file ({}) the cache does not accept, since it can add flags the cache does not see: it {why}",
                         path.display(),
                         file.display()
                     );
@@ -438,7 +438,7 @@ mod tests {
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::objcache::make_executable(&path);
         path
     }
 
@@ -525,6 +525,7 @@ mod tests {
         std::os::unix::fs::symlink(version, libexec.join(version_name)).unwrap();
         let driver = prefix.join("bin/gcc");
         fs::copy(fs::canonicalize(gcc).unwrap(), &driver).unwrap();
+        crate::objcache::make_executable(&driver);
         if let Some(specs) = specs {
             fs::write(lib.join("specs"), specs).unwrap();
         }

@@ -171,7 +171,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-const KEY_LABEL: &str = "key-3";
+pub const KEY_LABEL: &str = "key-3";
 
 impl Parts {
     pub fn key(&self) -> String {

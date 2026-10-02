@@ -207,7 +207,7 @@ mod tests {
         let shell = |body: &str| {
             let path = tmp.path().join("shell");
             fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            crate::objcache::make_executable(&path);
             path
         };
         let says = |answer: &str| format!("printf '\\n{MARKER}{answer}\\n'");
@@ -241,10 +241,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let program = fs::canonicalize(find_program(OsStr::new("sh")).unwrap()).unwrap();
         let shell = tmp.path().join("shell");
-        fs::write(&shell, "#!/bin/sh\nsleep 30 &\nexec /bin/sh \"$@\"\n").unwrap();
-        fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let job = tmp.path().join("job");
+        fs::write(&shell, format!("#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexec /bin/sh \"$@\"\n", job.display())).unwrap();
+        crate::objcache::make_executable(&shell);
         let started = std::time::Instant::now();
         assert_eq!(ask(&shell, OsStr::new("sh"), &program), Ok(()));
         assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+        let job = fs::read_to_string(&job).unwrap();
+        let _ = Command::new("kill").arg(job.trim()).status();
     }
 }

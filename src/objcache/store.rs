@@ -24,7 +24,7 @@
 //! puts the new entries in a directory of their own.
 
 use super::hash::Checksum;
-use super::key::Parts;
+use super::key::{Parts, KEY_LABEL};
 use crate::Res;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,10 @@ const BUFFER: usize = 1 << 20;
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct Header {
     format: u32,
+    /// The label the key was made under (`key::KEY_LABEL`): a whole entry
+    /// whose parts digest to another key under this cactup's label may
+    /// simply be another cactup's.
+    label: String,
     key: String,
     parts: Parts,
     about: About,
@@ -186,7 +190,13 @@ impl Store {
         if !before.is_file() {
             bail!("{} is not a regular file", entry.object.display());
         }
-        let header = Header { format: FORMAT, key: entry.key.to_owned(), parts: entry.parts.clone(), about: entry.about.clone() };
+        let header = Header {
+            format: FORMAT,
+            label: KEY_LABEL.to_owned(),
+            key: entry.key.to_owned(),
+            parts: entry.parts.clone(),
+            about: entry.about.clone(),
+        };
         let header = toml::to_string(&header).context("Failed to write an entry's header")?;
         let lengths = format!("{} {} {} {}\n", header.len(), before.len(), entry.stdout.len(), entry.stderr.len());
 
@@ -391,6 +401,9 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Me
         .ok_or_else(|| Fault::Foreign("its header is not one this cactup writes".to_owned()))?;
     if header.format != FORMAT {
         return Err(Fault::Foreign(format!("it says it is of format {}", header.format)));
+    }
+    if header.label != KEY_LABEL {
+        return Err(Fault::Foreign(format!("its key was made under the label {}", header.label)));
     }
     if header.key != key || header.parts.key() != key {
         return Err(invalid("it is the entry of another key"));

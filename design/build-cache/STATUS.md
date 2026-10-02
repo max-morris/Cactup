@@ -49,7 +49,7 @@ the last milestone, for when that host is not at hand.
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
-| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | in review (round 1: blocked by both; fixed) |
+| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | in review (round 2: B signed off, A blocked on flaky tests; fixed) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
@@ -831,6 +831,30 @@ hands a compile to); the remembered answer does not depend on the working
 directory (unless `PATH` is relative), on variables other than those
 listed, or on what a `BASH_ENV` value expands to. Spec §18.7 now says
 that an interrupted restore leaves a `.cactup-` file in `build/`.
+
+### M1a, round 2 (on `916b0cb`): B SIGN-OFF, A BLOCKED
+
+Both re-ran their round-1 reproductions: every blocking finding resolved
+(the continued directives on three makes; 8 ms against 20 s with a
+background job in `BASH_ENV`; partial and empty specs files refused; the
+key's label and description in place). Both found no new defect in the
+code and accepted the stated limits.
+
+1. (A, blocking) Tests failed now and then with "Text file busy" (3, 2 and
+   1 of 40 runs at 32 threads, two of the tests new in M1a): a test wrote
+   an executable and ran it while another thread's fork held the write
+   handle. *Fixed: `objcache::make_executable` (and its twin in
+   `tests/objcache.rs`) has `install` write the file that runs, so no
+   write handle to it is ever in the test process; every test executable
+   in the cache's tests and in `src/build/mod.rs` goes through it.*
+
+Non-blocking points taken: (B) the key's label is recorded in an entry's
+header, and a whole entry under another label is foreign (for `cache
+verify` and `gc` later); (B) a specs file with `#` or a line-final `\` is
+refused, since GCC reads such text otherwise than `-dumpspecs` prints it;
+(B) the limit of a startup file defining `type` or `printf` is stated;
+(A) the decline message for a specs file reads in one sentence; (A) the
+background-job test kills its `sleep`.
 
 ## Decisions
 

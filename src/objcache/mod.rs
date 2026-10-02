@@ -305,6 +305,20 @@ impl Staged {
 }
 
 #[cfg(test)]
+/// Make the file at `path` executable, as a fresh file that a child
+/// process (`install`) wrote. A test that writes an executable and runs it
+/// at once fails now and then with "Text file busy": another test thread
+/// that forks in between hands its child this process's open handle on the
+/// file, and the kernel will not run a file open for writing. A file only
+/// a child process ever had open for writing has no such handle here.
+pub(crate) fn make_executable(path: &Path) {
+    let fresh = path.with_extension("cactup-fresh");
+    let installed = std::process::Command::new("install").arg("-m").arg("755").arg(path).arg(&fresh).status().unwrap();
+    assert!(installed.success(), "install {}", path.display());
+    fs::rename(&fresh, path).unwrap();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -411,12 +425,11 @@ mod tests {
     /// there), `selftest_make` is the self-test's make, and the build's
     /// "make" is `build_make`.
     fn run_steps(probe: Option<&str>, selftest_make: &str, build_make: &str, makefiles: Option<&str>) -> Ran {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let cactup = tmp.path().join("cactup-abc");
         if let Some(body) = probe {
             fs::write(&cactup, format!("#!/bin/sh\n{body}\n")).unwrap();
-            fs::set_permissions(&cactup, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::objcache::make_executable(&cactup);
         }
         let config_dir = tmp.path().join("cfg");
         let cc_dir = config_dir.join(".cactup-builds/0000/cc");
@@ -528,7 +541,6 @@ mod tests {
     }
 
     fn selftest_judges_fragments(make: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(tmp.path()).unwrap();
         let config_dir = root.join("Cactus/configs/sim");
@@ -544,7 +556,7 @@ mod tests {
         let cactup = root.join("cactup-abc");
         fs::write(&cactup, "#!/bin/sh\ncase \"$1 $3\" in '__cc-probe '|'__cc cactup:selftest') exit 0;; esac\nexit 1\n")
             .unwrap();
-        fs::set_permissions(&cactup, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::objcache::make_executable(&cactup);
         let cc_dir = config_dir.join(".cactup-builds/0000/cc");
         let staged = stage(&cc_dir, Mode::Record, &inputs(cactup.to_str().unwrap(), &config_dir)).unwrap().unwrap();
         let inject = inject_path(&cc_dir);

@@ -3005,8 +3005,7 @@ mod tests {
         .unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::objcache::make_executable(&fake_make);
         }
 
         // A machine whose make points at the stub and which disables C/D.
@@ -3485,8 +3484,7 @@ mod tests {
         .unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::objcache::make_executable(&fake_make);
         }
 
         let machine_dir = root.join("mdb/fake");
@@ -3643,13 +3641,12 @@ mod tests {
     /// `tests/objcache.rs`.)
     #[test]
     fn a_build_whose_probe_declines_still_builds() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let (_mdb, machine, inst, opts, _repos) = source_tracking_tree(root);
         let cactup = root.join("cactup-abc1234");
         fs::write(&cactup, "#!/bin/sh\necho 'cactup: build cache off for this build: a reason' >&2\nexit 3\n").unwrap();
-        fs::set_permissions(&cactup, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::objcache::make_executable(&cactup);
 
         let cache = Some((crate::objcache::Mode::Record, cactup.to_str().unwrap()));
         let mut attempt = match prepare_with_cache(&inst, &machine, "sim", &opts, None, cache).unwrap() {
@@ -3676,8 +3673,7 @@ mod tests {
         fs::write(&fake_make, format!("#!/bin/sh\ncase \"$2\" in\n{make_body}\nesac\n")).unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&fake_make, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::objcache::make_executable(&fake_make);
         }
 
         let machine_dir = root.join("mdb/fake");

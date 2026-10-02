@@ -91,9 +91,22 @@ fn assert_ran(out: &Output, stdout: &str, stderr: &str, code: i32) {
     );
 }
 
+/// Make the file at `path` executable, as a fresh file that a child
+/// process (`install`) wrote. A test that writes an executable and runs it
+/// at once fails now and then with "Text file busy": another test thread
+/// that forks in between hands its child this process's open handle on the
+/// file, and the kernel will not run a file open for writing. A file only
+/// a child process ever had open for writing has no such handle here.
+fn make_executable(path: &Path) {
+    let fresh = path.with_extension("cactup-fresh");
+    let installed = Command::new("install").arg("-m").arg("755").arg(path).arg(&fresh).status().unwrap();
+    assert!(installed.success(), "install {}", path.display());
+    fs::rename(&fresh, path).unwrap();
+}
+
 fn executable(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(path);
 }
 
 const COMPILE: &str = "echo out; echo err >&2; exit 3";
@@ -856,6 +869,7 @@ fn site_gcc(prefix: &Path, specs: &str) -> PathBuf {
     let driver = prefix.join("bin/gcc");
     let gcc = text(&Command::new("sh").args(["-c", "command -v gcc"]).output().unwrap().stdout).trim().to_owned();
     fs::copy(fs::canonicalize(gcc).unwrap(), &driver).unwrap();
+    make_executable(&driver);
     fs::write(lib.join("specs"), specs).unwrap();
     driver
 }
