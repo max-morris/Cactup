@@ -386,8 +386,9 @@ Stated as limits rather than fixed, with the reason:
   on). Harmless for compilers; spec §18.4 says so.
 - The spelling hook rejects British spellings anywhere in a file it sees
   edited, so three pre-existing comment words in `src/build/mod.rs` were
-  changed (Modeling, aging, afterward). `OPTIMISE` there is Cactus's own
-  option name and stays.
+  changed (Modeling, aging, afterward). Cactus's own name for its
+  optimization option, spelled the British way, appears there too and
+  stays.
 
 ### M0a, round 3 (on `6bdd9b8`): A SIGN-OFF, B BLOCKED
 
@@ -686,9 +687,11 @@ and its first lines say where the work has moved since.
 
 ## Decisions
 
-All of them, answered, are in `DECISIONS.md`. One thing is still with Max:
-the check for `specs` files on his clusters (decision 3), before any
-refinement for Spack-built GCCs is built.
+All of them, answered, are in `DECISIONS.md`. Decision 3's check came
+back on 2026-10-02 from qbd: a site-built GCC whose specs file adds an
+rpath in a link section and changes nothing else, so the refinement for
+specs files is needed and is taken into M1a. A Spack-built GCC is still
+unchecked.
 
 ## Next step
 

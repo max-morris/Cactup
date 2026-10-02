@@ -75,6 +75,12 @@ Three parts, each ending at the review gate.
   be made sound, say so to Max: the fallback he chose is to accept the
   limit as spec §18.4 states it, never to turn the cache off where
   `BASH_ENV` is set.
+- Decision 3's refinement (added 2026-10-02, after qbd's check showed a
+  link-only specs file): accept a GCC `specs` file whose differences
+  from `gcc -dumpspecs` are confined to sections only the link step
+  reads, and new sections only those reference, with no `%include`,
+  `%rename` or language entries; the file's bytes join the compiler's
+  identity. Anything else stays declined.
 - Two small points left by the last review: a doubled blank line after
   `in_english` in `src/objcache/key.rs`; no test pins that
   `identity::ask` runs the driver in English.
@@ -283,5 +289,6 @@ timing measurements must not be taken with the cache serving.
 
 ## Waiting on Max
 
-- The cluster check for `specs` files (decision 3).
+- The cluster check for `specs` files (decision 3) on a Spack-built GCC.
+  qbd's site-built GCC is checked (2026-10-02): link-only.
 - Nothing else. M1 has his go-ahead.

@@ -77,6 +77,16 @@ Asked as seven questions with options; the answers, in Max's numbering.
    no other file). **Waiting on that check**: Max runs it, or gives a way
    to run it.
 
+   *Checked on qbd, 2026-10-02* (module `gcc/13.2.0`, a site-built GCC
+   at `/usr/local/packages/compilers/gcc/13.2.0`): it has a specs file,
+   so today the cache declines every C and C++ compile there. Against
+   `gcc -dumpspecs` the file changes one built-in section,
+   `*link_libgcc:` (`%D` becomes `%(link_libgcc_rpath) %D`), and adds
+   one, `*link_libgcc_rpath:` (`-rpath
+   /usr/local/packages/compilers/gcc/13.2.0/lib64`). Link step only: the
+   refinement would accept it. That settles that the refinement is
+   needed. A Spack-built GCC has not been checked yet.
+
 4. **Thornlist changes costing hits: accepted for M1.** The key keeps
    covering the bytes of every file a compile reads. To be revisited once
    audit mode exists, "since that is the tool that can prove a narrower
@@ -112,7 +122,8 @@ Asked as seven questions with options; the answers, in Max's numbering.
 
 ## Still open
 
-- The cluster check of decision 3.
+- The cluster check of decision 3 on a Spack-built GCC (qbd's site-built
+  GCC is checked: a link-only specs file).
 - Whether the contract text in `CLAUDE-contract.md` goes into the
   repository's `CLAUDE.md` (untracked, shared by every session): asked
   when M1c lands, not before.
