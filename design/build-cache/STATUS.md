@@ -883,7 +883,14 @@ Non-blocking points left open, for the start of M1b:
   file busy" race in product code, `sim::start::write_executable` writing
   the build script and running it at once. Predates M1a; it is master's,
   and worth a fix of its own (retry on `ETXTBSY`, or run a `#!` script
-  through its interpreter). Reported to Max, not fixed on this branch.
+  through its interpreter). Reported to Max, who asked for the fix:
+  `script_command` now runs a `#!` script through its interpreter, as
+  the kernel would (`<interpreter> [<one argument>] <script>`), so the
+  script is only read, never exec'd. Its own commit on this branch, made
+  to be cherry-picked to master (`git log --grep 'run a stored script'`).
+  Confirmed: `sh -c '<script>'` with a write handle open is exit 126,
+  "Text file busy"; the new command runs it; 60 runs of the unit tests at
+  32 threads, no failure.
 
 ## Decisions
 
