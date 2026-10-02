@@ -8,8 +8,10 @@
 //! GCC 13.2 changes `*link_libgcc:` to `%(link_libgcc_rpath) %D` and adds
 //! that section), and a `-c` compile never links. Such a file is read
 //! against the driver's built-in specs (`gcc -dumpspecs`, which the file
-//! does not affect) and accepted only when every difference is in a section
-//! only the link command uses, or in a new one only those refer to.
+//! does not affect) and accepted only when it defines every built-in
+//! section (a GCC that reads a specs file does not set up its built-in ones
+//! first) and every difference is in a section only the link command uses,
+//! or in a new one only those refer to.
 //!
 //! GCC's own compile steps (`default_compilers` in its driver) are not in
 //! `-dumpspecs`. They refer to built-in sections by name, and to none of
@@ -61,6 +63,13 @@ fn sections(text: &str) -> Result<Vec<(&str, String)>, String> {
                 _ => format!("has a line this reader does not follow ({line})"),
             });
         };
+        // GCC skips blank lines after the name: an empty section is
+        // written with two of them (`-dumpspecs` does), and after only one
+        // GCC takes what follows for the section's text.
+        let mut ahead = lines.clone();
+        if ahead.next() == Some("") && ahead.next().is_some_and(|after| !after.is_empty()) {
+            return Err(format!("has a section GCC would read differently ({line} followed by one blank line)"));
+        }
         let mut body = Vec::new();
         while let Some(line) = lines.next_if(|line| !line.is_empty()) {
             body.push(line);
@@ -95,6 +104,11 @@ pub fn link_only(builtin: &str, file: &[u8], driver: &[u8]) -> Result<(), String
             return Err(format!("defines {name} twice"));
         }
     }
+    // A GCC that finds its specs file does not set up its built-in
+    // sections first: one the file leaves out is not there at all.
+    if let Some(left_out) = builtin.keys().find(|name| !seen.contains(*name)) {
+        return Err(format!("leaves out {left_out}, which GCC then does not have"));
+    }
     let new: BTreeSet<&str> = file.iter().map(|(name, _)| *name).filter(|name| !builtin.contains_key(name)).collect();
     for (name, body) in &file {
         let changed = builtin.get(name).is_some_and(|built_in| built_in != body);
@@ -128,7 +142,7 @@ mod tests {
 
     /// A few built-in sections, as `-dumpspecs` prints them.
     const BUILTIN: &str = "*asm:\n--64\n\n*cpp:\n%{posix:-D_POSIX_SOURCE}\n\n*cc1:\n%{profile:-p}\n\n\
-        *link_libgcc:\n%D\n\n*empty:\n\n*self_spec:\n\n*link_command:\n%{!c:%(linker) %(link_libgcc) %L}\n\n";
+        *link_libgcc:\n%D\n\n*empty:\n\n\n*self_spec:\n\n\n*link_command:\n%{!c:%(linker) %(link_libgcc) %L}\n\n";
 
     /// qbd's GCC 13.2 specs file, in miniature: the built-in specs with an
     /// rpath added to the link.
@@ -142,7 +156,7 @@ mod tests {
         let read = sections(BUILTIN).unwrap();
         let names: Vec<&str> = read.iter().map(|(name, _)| *name).collect();
         assert_eq!(names, ["asm", "cpp", "cc1", "link_libgcc", "empty", "self_spec", "link_command"]);
-        assert_eq!(read[4].1, "");
+        assert_eq!((read[4].1.as_str(), read[5].1.as_str()), ("", ""));
         assert_eq!(sections("*a:\nline one\nline two\n\n*b:\nx").unwrap()[0].1, "line one\nline two");
         assert_eq!(references("%(a) %[b] %(c %d %(e_1)").collect::<Vec<_>>(), ["a", "e_1", "b"]);
     }
@@ -150,32 +164,38 @@ mod tests {
     #[test]
     fn a_file_that_changes_only_the_link_is_accepted() {
         assert_eq!(link_only(BUILTIN, qbd().as_bytes(), b"driver"), Ok(()));
-        // Or that repeats the built-in specs, or some of them.
+        // Or that repeats the built-in specs.
         assert_eq!(link_only(BUILTIN, BUILTIN.as_bytes(), b""), Ok(()));
-        assert_eq!(link_only(BUILTIN, b"*link_command:\n%{!c:%(linker) -rpath /x %L}\n", b""), Ok(()));
-        assert_eq!(link_only(BUILTIN, b"*cc1:\n%{profile:-p}\n", b""), Ok(()));
-        assert_eq!(link_only(BUILTIN, b"", b""), Ok(()));
+        let link = BUILTIN.replace("%{!c:%(linker) %(link_libgcc) %L}", "%{!c:%(linker) -rpath /x %(link_libgcc) %L}");
+        assert_eq!(link_only(BUILTIN, link.as_bytes(), b""), Ok(()));
     }
 
     #[test]
     fn anything_else_is_refused() {
         for (file, why) in [
             (BUILTIN.replace("%{profile:-p}", "%{profile:-p} -DSNEAKY"), "changes cc1"),
-            ("*asm:\n--32\n".to_owned(), "changes asm"),
-            ("*self_spec:\n-O2\n".to_owned(), "changes self_spec"),
+            (BUILTIN.replace("--64", "--32"), "changes asm"),
+            (BUILTIN.replace("*self_spec:\n\n\n", "*self_spec:\n-O2\n\n"), "changes self_spec"),
             (qbd().replace("%{profile:-p}", "%{profile:-p} %(link_libgcc_rpath)"), "changes cc1"),
             ("%include <other.specs>\n".to_owned(), "has a directive"),
             ("%rename cc1 old_cc1\n*cc1:\n%(old_cc1) -DX\n".to_owned(), "has a directive"),
             (".f90:\n@f95\n".to_owned(), "defines a compiler"),
             ("# a comment\n".to_owned(), "does not follow"),
             ("*link:\n-x\n\n*link:\n-y\n".to_owned(), "defines link twice"),
+            // Only some of the sections, or none: GCC then lacks the rest.
+            ("*cc1:\n%{profile:-p}\n".to_owned(), "leaves out asm"),
+            (String::new(), "leaves out asm"),
+            // An empty section with one blank line after it: GCC reads the
+            // next section's name as its text.
+            (BUILTIN.replace("*empty:\n\n\n", "*empty:\n\n"), "read differently"),
         ] {
             let err = link_only(BUILTIN, file.as_bytes(), b"").unwrap_err();
             assert!(err.contains(why), "{file:?}: {err}");
         }
         // A new section the driver's compile steps name.
         let driver = b"...%{!E:%(cc1_extra) %(cc1_options)}...";
-        let file = "*cc1_extra:\n-DX\n";
+        let file = format!("{BUILTIN}*cc1_extra:\n-DX\n");
+        let file = file.as_str();
         assert!(link_only(BUILTIN, file.as_bytes(), driver).unwrap_err().contains("own compile steps"));
         assert_eq!(link_only(BUILTIN, file.as_bytes(), b"..."), Ok(()), "named by nothing, it does nothing");
         assert_eq!(link_only(BUILTIN, &[0xff, 0xfe], b"").unwrap_err(), "is not text");

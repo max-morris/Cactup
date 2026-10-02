@@ -329,18 +329,21 @@ fn wrap_recipe(body: &str, var: &str) -> Option<String> {
 /// mention of the compile recipes, and the directives by which a recipe
 /// could be defined where a reading of these two files does not see it —
 /// an `include` (`-include`, `sinclude`), a `define` (behind `override`,
-/// `export`, `private` or `unexport` too) and `$(eval` (or `${eval`).
-/// Directives, not words: `INCLUDE_DIRS`, or a comment that says "include",
-/// is no reason. A line that merely continues the one before and begins with
-/// `include` is matched all the same; that costs the thorn the cache, never
-/// its recipe.
+/// `export`, `private` or `unexport` too), a `load` (`-load`) of a make
+/// plugin, and `$(eval` and `$(guile` (or with braces). Directives, not
+/// words: `INCLUDE_DIRS`, or a comment that says "include", is no reason.
+/// make joins a line ending in `\` to the next with a space before it reads
+/// a directive, so a `\` counts as the space after the keyword. A line that
+/// merely continues the one before and begins with `include` is matched all
+/// the same; that costs the thorn the cache, never its recipe.
 ///
 /// It goes into the fragment inside `$(shell …)` and single quotes, so it
 /// has no `'`, no `#` (make's comment) and no unbalanced parenthesis.
 const STAND_DOWN: &str = "COMPILE_\
-    |^[[:space:]]*(-|s)?include([[:space:]]|$)\
-    |^[[:space:]]*((override|export|private|unexport)[[:space:]]+)*define([[:space:]]|$)\
-    |[$].eval[[:space:]]";
+    |^[[:space:]]*(-|s)?include([[:space:]]|\\\\|$)\
+    |^[[:space:]]*((override|export|private|unexport)([[:space:]]|\\\\)+)*define([[:space:]]|\\\\|$)\
+    |^[[:space:]]*-?load([[:space:]]|\\\\|$)\
+    |[$].(eval|guile)([[:space:]]|\\\\|$)";
 
 fn inject_mk(cactup: &Path, conf_file: &Path, inject: &Path, build_dir: &Path, wrapped: &[Wrapped]) -> String {
     let (cactup, conf_file, inject, build_dir) =
@@ -351,7 +354,7 @@ fn inject_mk(cactup: &Path, conf_file: &Path, inject: &Path, build_dir: &Path, w
     // `$` is `$$`.
     let scan = format!(
         "for f in '$(SRCDIR)/make.code.defn' '$(SRCDIR)/make.code.deps'; do [ -e \"$$f\" ] && set -- \"$$@\" \"$$f\"; done; \
-         grep -Eq -e '{}' /dev/null \"$$@\"",
+         grep -Eq -e '{}' /dev/null \"$$@\" 2>/dev/null",
         STAND_DOWN.replace('$', "$$")
     );
     let mut out = format!(
@@ -529,6 +532,16 @@ endef
             "$(eval X := 1)\n",
             "${eval X := 1}\n",
             "FOO := $(foreach t,a b,$(eval $(t)_y := 1))\n",
+            // What make reads as a directive once it has joined the line
+            // to the next.
+            "include\\\nextra.mk\n",
+            "-include\\\n  extra.mk\n",
+            "define\\\nRECIPE\nendef\n",
+            "override\\\ndefine RECIPE\nendef\n",
+            "X := $(eval\\\n$(file <extra.mk))\n",
+            "load plugin.so\n",
+            "-load\\\nplugin.so\n",
+            "$(guile (gmk-eval \"X = 1\"))\n",
         ] {
             assert!(matches(found), "{found:?}");
         }
@@ -541,6 +554,7 @@ endef
             "redefine = no\n",
             "defines := -DX\n",
             "X = $(evaluate)\n",
+            "loaded = yes\n",
             "\n",
         ] {
             assert!(!matches(ignored), "{ignored:?}");

@@ -1,4 +1,4 @@
-//! What the recipe's shell runs for a compiler's bare name (§18.4).
+//! What the recipe's shell runs for a compiler's name (§18.4).
 //!
 //! The wrapper starts a plain compiler itself, as the file a `PATH` search
 //! finds. The recipe's shell might have run something else under that
@@ -20,7 +20,7 @@ use super::identity::{find_program, Seen};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -83,12 +83,14 @@ fn lookup_env() -> String {
 }
 
 /// Does `shell`, the recipe's shell, run the program a `PATH` search finds
-/// for the bare name `name`? `Err` says what it runs instead, or why that
-/// cannot be told; the compile is then the shell's to run.
+/// (or, for a name with a `/`, the file it names) for the command name
+/// `name`? `Err` says what it runs instead, or why that cannot be told; the
+/// compile is then the shell's to run.
 pub fn shell_runs_program(cc_dir: &Path, shell: &Path, name: &OsStr) -> Result<(), String> {
+    let shown = name.to_string_lossy();
     let program = find_program(name)
         .and_then(|found| fs::canonicalize(&found).map_err(Into::into))
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|_| format!("there is no {shown} to start"))?;
     let memo_dir = cc_dir.join("compilers");
     let mut memo_name = Hasher::new("lookup-memo");
     memo_name.feed(shell.as_os_str().as_bytes());
@@ -111,6 +113,13 @@ pub fn shell_runs_program(cc_dir: &Path, shell: &Path, name: &OsStr) -> Result<(
             files.push(Watched::of(Path::new(&file)));
         }
     }
+    // zsh reads its `.zshenv` files at every start, interactive or not.
+    if shell.file_name().is_some_and(|name| name.as_bytes().starts_with(b"zsh")) {
+        let home = std::env::var_os("ZDOTDIR").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+        for file in [Path::new("/etc/zshenv"), Path::new("/etc/zsh/zshenv"), &Path::new(&home).join(".zshenv")] {
+            files.push(Watched::of(file));
+        }
+    }
     let differs = ask(shell, name, &program).err();
     let remembered = Remembered { program, differs, env, files };
     // Best-effort, like the compilers' identities: without it the next
@@ -125,29 +134,51 @@ pub fn shell_runs_program(cc_dir: &Path, shell: &Path, name: &OsStr) -> Result<(
     remembered.differs.map_or(Ok(()), Err)
 }
 
+/// What the shell's answer begins after: a startup file may have printed
+/// first, with or without a line end.
+const MARKER: &str = "cactup-lookup:";
+
 /// Ask `shell` what it runs for `name`, and compare with `program`.
+///
+/// `type` is asked, not `command -v`: for a function named by a path (bash
+/// and zsh allow `function /usr/bin/gcc { … }`), `command -v` prints the
+/// path, `type` says it is a function. Its answer for a program is
+/// `<name> is <path>` (bash adds `hashed (<path>)` for one it remembers),
+/// asked in English; anything else is something else.
+///
+/// The shell's output goes to a file, not a pipe: a startup file may start
+/// something in the background that keeps its output open, and the recipe
+/// does not wait for that, so neither may this. Only the shell itself is
+/// waited for.
 fn ask(shell: &Path, name: &OsStr, program: &Path) -> Result<(), String> {
     let shown = name.to_string_lossy();
-    let out = Command::new(shell)
-        .args(["-c", "command -v \"$1\"", "cactup"])
-        .arg(name)
+    let cannot = |e: std::io::Error| format!("{} could not be asked what {shown} is: {e}", shell.display());
+    let mut said = tempfile::tempfile().map_err(cannot)?;
+    let mut command = Command::new(shell);
+    command.args(["-c", &format!("printf '\\n{MARKER}'; type \"$1\""), "cactup"]).arg(name);
+    super::key::in_english(&mut command);
+    let status = command
         .stdin(Stdio::null())
+        .stdout(said.try_clone().map_err(cannot)?)
         .stderr(Stdio::null())
-        .output()
-        .map_err(|e| format!("the recipe's shell ({}) could not be asked what {shown} is: {e}", shell.display()))?;
-    // The answer is the last line: a startup file may have printed first.
-    let said = String::from_utf8_lossy(&out.stdout);
-    let answer = said.lines().rev().find(|line| !line.is_empty()).unwrap_or_default();
-    if !out.status.success() || answer.is_empty() {
-        return Err(format!("the recipe's shell finds no {shown}"));
+        .status()
+        .map_err(cannot)?;
+    let mut text = Vec::new();
+    said.seek(SeekFrom::Start(0)).and_then(|_| said.read_to_end(&mut text)).map_err(cannot)?;
+    let text = String::from_utf8_lossy(&text);
+    let answer = text.rsplit_once(MARKER).map(|(_, answer)| answer.lines().next().unwrap_or_default()).unwrap_or_default();
+    if !status.success() || answer.is_empty() {
+        return Err(format!("the shell finds no {shown}"));
     }
-    let differs = || Err(format!("the recipe's shell runs something else for {shown} ({answer})"));
+    let differs = || Err(format!("{shown} is something else to the shell ({answer})"));
+    let Some(found) = answer.strip_prefix(&format!("{shown} is ")) else { return differs() };
+    let found = found.strip_prefix("hashed (").and_then(|found| found.strip_suffix(')')).unwrap_or(found);
     // A path, absolute or (from a relative `PATH` entry) from here; anything
-    // else is a function, an alias or a builtin.
-    if !answer.contains('/') {
+    // else is a function, an alias, a builtin or a keyword.
+    if !found.contains('/') {
         return differs();
     }
-    match fs::canonicalize(answer) {
+    match fs::canonicalize(found) {
         Ok(found) if found == program => Ok(()),
         _ => differs(),
     }
@@ -166,7 +197,7 @@ mod tests {
         assert_eq!(shell_runs_program(tmp.path(), Path::new("/bin/sh"), OsStr::new("sh")), Ok(()));
         // A name nothing has is no compiler to start.
         let err = shell_runs_program(tmp.path(), Path::new("/bin/sh"), OsStr::new("cactup-no-such-cc")).unwrap_err();
-        assert!(err.contains("not on PATH"), "{err}");
+        assert_eq!(err, "there is no cactup-no-such-cc to start");
     }
 
     #[test]
@@ -179,19 +210,41 @@ mod tests {
             fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
             path
         };
+        let says = |answer: &str| format!("printf '\\n{MARKER}{answer}\\n'");
+        let path = program.display();
         for (body, expected) in [
-            ("echo sh", Err("something else for sh (sh)")),
-            ("echo \"alias sh='echo hi'\"", Err("something else for sh (alias sh='echo hi')")),
-            ("echo /bin/true", Err("something else for sh (/bin/true)")),
-            ("exit 1", Err("finds no sh")),
-            ("true", Err("finds no sh")),
-            (&format!("echo startup chatter; echo {}", program.display()), Ok(())),
+            (says("sh is a function"), Err("is something else to the shell (sh is a function)")),
+            (says("sh is aliased to `echo hi`"), Err("is something else to the shell (sh is aliased to `echo hi`)")),
+            (says("sh is /bin/true"), Err("is something else to the shell (sh is /bin/true)")),
+            (says("sh is a shell builtin"), Err("is something else to the shell")),
+            (format!("{}; exit 1", says("")), Err("finds no sh")),
+            ("true".to_owned(), Err("finds no sh")),
+            (says(&format!("sh is {path}")), Ok(())),
+            (says(&format!("sh is hashed ({path})")), Ok(())),
+            // A startup file's chatter, with or without a line end.
+            (format!("printf 'chatter'; {}", says(&format!("sh is {path}"))), Ok(())),
+            (format!("printf 'chatter\\n{MARKER}sh is /bin/true\\n'; {}", says(&format!("sh is {path}"))), Ok(())),
         ] {
-            let result = ask(&shell(body), OsStr::new("sh"), &program);
+            let result = ask(&shell(&body), OsStr::new("sh"), &program);
             match expected {
                 Ok(()) => assert_eq!(result, Ok(()), "{body}"),
                 Err(part) => assert!(result.as_ref().is_err_and(|e| e.contains(part)), "{body}: {result:?}"),
             }
         }
+    }
+
+    /// Something a startup file starts in the background and leaves running
+    /// with the shell's output: the recipe does not wait for it, so neither
+    /// does the asking.
+    #[test]
+    fn a_background_job_of_the_shell_is_not_waited_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = fs::canonicalize(find_program(OsStr::new("sh")).unwrap()).unwrap();
+        let shell = tmp.path().join("shell");
+        fs::write(&shell, "#!/bin/sh\nsleep 30 &\nexec /bin/sh \"$@\"\n").unwrap();
+        fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(ask(&shell, OsStr::new("sh"), &program), Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     }
 }

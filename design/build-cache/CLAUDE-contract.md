@@ -54,6 +54,13 @@ are spec §18.1; hold them when touching it:
   synced, and published by `link(2)`; it is never changed after; every
   restore checks its checksum and copies, never links). Keep it that way:
   nothing in the store may be written by two processes.
+- **Several cactup builds share one store** (a queued job runs its frozen
+  build for months). Any change to what an entry holds or how it is read
+  bumps `store::FORMAT`; any change that can make one key stand for
+  another object — something newly keyed, anything cactup adds to or
+  changes in a compile it runs, a change in how a part is digested —
+  bumps `key::KEY_LABEL`. `key::tests::the_key_of_fixed_parts_is_pinned`
+  fails when the key changes; it is a reminder, not the rule.
 
 The interface this relies on in Cactus's make system, and the agreement
 with the separate build-speed work, is `design/build-cache/` and the

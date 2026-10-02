@@ -49,7 +49,7 @@ the last milestone, for when that host is not at hand.
 | M0a | Wrapper dispatch, fail-open paths, panic hook, probe and `inject.mk`, per-build config, knob | **passed the gate** at `300fd0b` (four review rounds) |
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
-| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **implemented**, in review |
+| M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | in review (round 1: blocked by both; fixed) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | not started |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
@@ -222,16 +222,17 @@ reads from it yet (that is M1b). Around it, the points `HANDOFF-M1.md`
 put into M1a. Spec §18 was written first, the code after.
 
 - `src/objcache/store.rs` (spec §18.7): one immutable file per key under
-  `<root>/v1/<machine>/<ab>/<key>`; magic line, TOML header (format, key,
-  the six parts, blob lengths, and an `about` table for people), object,
-  compiler stdout and stderr, SHA-256 of all of it. Publish: temporary
-  file in the entry's directory, `sync_all`, mode `0444`, `hard_link` with
-  the `nlink == 2` check. Restore: checks header against key and file
-  size, copies the object into a temporary file beside the target while
-  digesting, compares the checksum, then gives it the compiler's mode
-  (`0666` less the umask from `/proc/self/status`) and renames it into
-  place. An invalid entry is removed if its name still leads to the file
-  read (device and inode); an I/O error leaves it alone. Tested with
+  `<root>/v1/<machine>/<ab>/<key>`; magic line, a line of the four
+  lengths, TOML header (format, key, the six parts, and an `about` table
+  for people), object, compiler stdout and stderr, SHA-256 of all of it.
+  Publish: temporary file in the entry's directory, `sync_all`, mode
+  `0444`, `hard_link` with the `nlink == 2` check. Restore: checks the
+  lengths against the file size, copies the object into a temporary file
+  (created `0666`, left to the umask) beside the target while digesting,
+  compares the checksum, only then reads the header, and renames the
+  object into place. An invalid entry is removed if its name still leads
+  to the file read (device and inode); an I/O error, or a whole entry
+  with another cactup's header, leaves it alone. (As after round 1.) Tested with
   threads and with separate processes publishing and restoring one key
   at once, every kind of damage, strict headers, a publish cut short.
 - The knob `build-cache-dir` (absolute path, default
@@ -246,11 +247,12 @@ put into M1a. Spec §18 was written first, the code after.
   `$(wildcard …)` crashes GNU make 4.2.1 built against a current glibc
   (found by the test under 4.2.1). A missing `grep` fails the self-test.
 - Decision 7b (spec §18.4): `src/objcache/lookup.rs`. Before a compile
-  whose compiler is a bare name, in record mode, the wrapper runs
-  `<shell> -c 'command -v "$1"'` and starts the compiler itself only if
-  the last line of the answer is the file `find_program` finds (physical
-  paths compared); otherwise the compile goes to the shell, with the
-  answer in the log. Remembered per attempt in
+  in record mode, the wrapper asks `<shell> -c 'printf "\n<marker>";
+  type "$1"'` (output to a file, in English) and starts the compiler
+  itself only if the answer is `<name> is <path>` (or `hashed (<path>)`)
+  for the file `find_program` finds (physical paths compared); otherwise
+  the compile goes to the shell, with the answer in the log. (`type` and
+  the file since round 1.) Remembered per attempt in
   `<attempt>/cc/compilers/shell-*.toml`, tied to the found program,
   `PATH`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `HOME`, the shell's file and the
   files `BASH_ENV`/`ENV` name, and the working directory when `PATH` has
@@ -765,6 +767,70 @@ Non-blocking points left open, for the start of the next code milestone:
 
 `PLAN.md` still lists `-MD` as not cached: it is the plan as approved,
 and its first lines say where the work has moved since.
+
+### M1a, round 1 (on `7099249`): BLOCKED by both
+
+Both reviewers ran the suites (green on glibc with three makes and on
+musl), checked the pattern against every `make.code.*` file in two real
+trees (no false stand-downs), and the `LINK_ONLY` list against GCC 14's
+driver strings (right). Blocking:
+
+1. (both) The stand-down pattern wanted a space after `include`,
+   `define` and `eval`; make joins `\`-newline into a space first, so
+   `include\` + newline + file, and `$(eval\` + newline + …, are real
+   directives the pattern missed: a thorn's own recipe silently replaced,
+   reproduced on make 4.2.1, 4.3 and 4.4.1. *Fixed: a `\` counts as the
+   space; the cases are in the unit test and the under-make test.*
+2. (both) Asking the shell read its output from a pipe to the end, so
+   something a `BASH_ENV` file started in the background (`sleep 20 &`)
+   held up the compile (20 s against 2 ms; forever for a daemon).
+   *Fixed: the shell's output goes to a file and only the shell is waited
+   for; a test with `sleep 30 &`.*
+3. (A) A specs file that leaves sections out was accepted, but GCC does
+   not set up built-in sections when it reads a specs file: one with only
+   `*link_libgcc:` lost `cc1_cpu` (`-march=native` failed), an empty one
+   made GCC write no object, and both were keyed. *Fixed: the file must
+   define every section `-dumpspecs` prints.*
+4. (A) Nothing tied a key to what cactup does to the compile: the path
+   map's flags were not keyed (only "mapped"), and no rule said when the
+   key's label changes, though several cactup builds share one store.
+   *Fixed: the option and the names are keyed (`PathMap::description`),
+   `KEY_LABEL` (now `key-3`) carries the rule, a test pins the key of
+   fixed parts; spec §18.5 and `CLAUDE-contract.md` state it.*
+
+Non-blocking points taken:
+
+- (both) An entry whose header failed to parse was removed, so two cactup
+  builds could delete each other's good entries. *The blob lengths moved
+  to a line of their own; size and checksum are checked before the
+  header is read; a whole entry with a header this cactup cannot read is
+  `Miss::Foreign` and left alone; a `FORMAT` rule is stated.*
+- (both) The specs reader split sections after an empty one differently
+  from GCC (which skips blank lines after a name): refused now unless two
+  blank lines follow.
+- (A) bash and zsh run a function named by a path; `command -v` prints
+  the path for it. *The shell is now asked `type` behind a marker line, in
+  English, for path names too; a test with a path-named function.*
+- (A) A startup file's output without a line end could corrupt the
+  answer: the marker. (B) zsh's `.zshenv` files are watched for zsh.
+- (B) `load` and `$(guile` stand the fragment down too. (A) `grep`'s own
+  messages are discarded.
+- Store details: the restore's temporary file is created with `0666` and
+  left to the umask and default ACLs (no more reading `Umask:`); sync
+  before `chmod 0444`; a non-file at an entry's name is invalid (no
+  blocking on a FIFO) and fails a publish; an object that changed while
+  it was copied is not published; `Miss::Invalid` says whether it removed
+  anything; 1 MiB buffers; a concurrent test with invalidation and
+  republication.
+- Wording: the log line no longer says "the recipe's shell" twice; the
+  docs say "source directory".
+
+Stated as limits rather than fixed (spec §18.4): the ask is a new shell
+run with `-c` (`.SHELLFLAGS` is not passed, as for the shell the wrapper
+hands a compile to); the remembered answer does not depend on the working
+directory (unless `PATH` is relative), on variables other than those
+listed, or on what a `BASH_ENV` value expands to. Spec §18.7 now says
+that an interrupted restore leaves a `.cactup-` file in `build/`.
 
 ## Decisions
 

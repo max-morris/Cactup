@@ -603,10 +603,10 @@ different objects from one run to the next).
 Two kinds of compile go through cactup without a key, run exactly as
 `make` asked:
 
-- every compile of a thorn whose `make.code.defn` or `make.code.deps`
-  includes other makefiles, uses `define`, or uses `$(eval …)`: such a
-  thorn could define its own compile rule where cactup cannot see it, so
-  cactup leaves the whole thorn alone;
+- every compile in a thorn source directory whose `make.code.defn` or
+  `make.code.deps` includes other makefiles, uses `define`, `load`,
+  `$(eval …)` or `$(guile …)`: such a thorn could define its own compile
+  rule where cactup cannot see it, so cactup leaves it alone;
 - a compiler name your shell gives a meaning of its own at startup (a
   function or alias defined in the file `BASH_ENV` names, as module
   systems set it up): cactup asks the shell what the name means once per

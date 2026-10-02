@@ -104,6 +104,13 @@ impl PathMap {
         self.from_to.iter().rev().map(|(from, to)| map_flag(from, to)).collect()
     }
 
+    /// What the map does to a compile, without where it is: the option
+    /// and the names directories are mapped to. Part of every key made
+    /// with the map, so that a cactup that maps another way keys apart.
+    pub fn description() -> [&'static str; 3] {
+        ["-ffile-prefix-map", ROOT_NAME, CONFIG_NAME]
+    }
+
     /// The file name `name` as a mapped compile records it.
     pub fn apply(&self, name: &[u8]) -> Vec<u8> {
         match self.from_to.iter().find_map(|(from, to)| Some((to, name.strip_prefix(from.as_slice())?))) {
@@ -155,9 +162,20 @@ pub struct Parts {
     pub files: String,
 }
 
+/// The label a key is made under. Objects keyed under one label are
+/// served to every cactup build that uses it, and several builds share a
+/// store at once (a queued job runs the build it was submitted with). So
+/// **any change that makes one key stand for another object bumps it**:
+/// something the key now covers that it did not (an input, a flag, a part
+/// of the environment), anything cactup adds to or changes in a compile
+/// it runs (the path map's flags are keyed by [`PathMap::description`],
+/// but not every such change will be), or a change in how a part is
+/// digested. A change that only narrows what is cached needs no bump.
+const KEY_LABEL: &str = "key-3";
+
 impl Parts {
     pub fn key(&self) -> String {
-        let mut hasher = Hasher::new("key-2");
+        let mut hasher = Hasher::new(KEY_LABEL);
         for part in [&self.platform, &self.compiler, &self.arguments, &self.environment, &self.text, &self.files] {
             hasher.feed(part.as_bytes());
         }
@@ -206,7 +224,10 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString]) -> Result<Keyed, 
     // `g++` compiles a `.c` file as C++: the driver's name decides with the
     // suffix, and it is in the compiler part; this is the suffix.
     arguments.feed(compile.language.name().as_bytes());
-    arguments.feed(if map.is_some() { b"mapped" } else { b"unmapped" });
+    match map {
+        Some(_) => PathMap::description().iter().for_each(|word| arguments.feed(word.as_bytes())),
+        None => arguments.feed(b"unmapped"),
+    }
     let mut value_of_a_path_flag = false;
     for argument in &compile.keyed {
         match value_of_a_path_flag {
@@ -728,6 +749,23 @@ mod tests {
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");
             assert!(!given.iter().any(|arg| arg.as_bytes().starts_with(b"-M") || depend.contains(&arg.to_str().unwrap())), "{given:?}");
         }
+    }
+
+    /// A key changes only on purpose: this pins the digest of fixed parts.
+    /// If it fails, the way a key is made has changed; see [`KEY_LABEL`] for
+    /// when that needs a new label, and then update the digest here.
+    #[test]
+    fn the_key_of_fixed_parts_is_pinned() {
+        let parts = Parts {
+            platform: "p".into(),
+            compiler: "c".into(),
+            arguments: "a".into(),
+            environment: "e".into(),
+            text: "t".into(),
+            files: "f".into(),
+        };
+        assert_eq!(parts.key(), "7f1eebe69ce8ef6f011af95fa7e1a3c1ef13437ceec5a9744b8c02cbd31be409");
+        assert_eq!(PathMap::description(), ["-ffile-prefix-map", "./", "./configs/@config/"]);
     }
 
     #[test]

@@ -258,7 +258,7 @@ fn a_compiler_name_the_shell_redefines_at_startup_is_left_to_the_shell() {
         assert_ran(&run(), runs, "", 0);
         let events = build.events();
         let last = events.last().unwrap();
-        assert!(last.contains("the recipe's shell runs something else for mycc"), "{what}: {last}");
+        assert!(last.contains("mycc is something else to the shell"), "{what}: {last}");
     }
 
     // A startup file that leaves the name alone: the program on PATH,
@@ -274,11 +274,19 @@ fn a_compiler_name_the_shell_redefines_at_startup_is_left_to_the_shell() {
     assert!(events[before..].iter().all(|e| e.contains("\"exit\":0")), "{events:?}");
     assert_eq!(fs::read_to_string(&asked).unwrap().lines().count(), 1, "the answer was not remembered");
 
+    // bash runs a function named by a path, too, where the recipe names the
+    // compiler by that path.
+    let by_path = bin.join("mycc").display().to_string();
+    fs::write(&startup, format!("function {by_path} {{ echo \"the function by its path: $*\"; }}\n")).unwrap();
+    let out = build.wrap_under(bash, &by_path, &["-c", "a.c"]).env("PATH", &path).env("BASH_ENV", &startup).output().unwrap();
+    assert_ran(&out, "the function by its path: -c a.c\n", "", 0);
+    assert!(build.events().last().unwrap().contains("is something else to the shell"));
+
     // Until the startup file changes: then the shell is asked again.
     fs::write(&startup, format!("{counting}mycc() {{ echo \"the function: $*\"; }}\n")).unwrap();
     let out = run();
     assert!(text(&out.stdout).ends_with("the function: -c a.c\n"), "{}", text(&out.stdout));
-    assert!(build.events().last().unwrap().contains("something else for mycc"));
+    assert!(build.events().last().unwrap().contains("mycc is something else to the shell"));
 }
 
 /// What the recipe's shell can start and this process cannot, the shell
@@ -670,6 +678,9 @@ fn under_make_only_cactus_object_compiles_go_through_the_wrapper() {
             ("make.code.deps", "-include $(SRCDIR)/missing.mk\n"),
             ("make.code.defn", "define UNUSED\nx\nendef\n"),
             ("make.code.deps", "$(eval UNUSED := 1)\n"),
+            // make joins a line ending in a backslash to the next first.
+            ("make.code.deps", "include\\\n$(SRCDIR)/extra.mk\n"),
+            ("make.code.defn", "UNUSED := $(eval\\\n$(file <$(SRCDIR)/extra.mk))\n"),
         ]
         .into_iter()
         .enumerate()

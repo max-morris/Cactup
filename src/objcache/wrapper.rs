@@ -208,10 +208,10 @@ fn wrap(mut args: impl Iterator<Item = OsString>) -> ! {
     let Some(argv) = job.argv() else {
         leave_to(job, &conf, cc_dir, "the compiler is not a plain command naming a program, so the recipe's shell runs it")
     };
-    // A bare name is what the recipe's shell makes of it, and that shell
-    // may have defined it for itself at startup: it is asked (§18.4).
+    // The compiler is what the recipe's shell makes of its name, and that
+    // shell may have defined the name for itself at startup: it is asked
+    // (§18.4).
     if conf.mode != Mode::Off
-        && !argv[0].as_bytes().contains(&b'/')
         && let Err(why) = super::lookup::shell_runs_program(cc_dir, &job.shell, &argv[0])
     {
         leave_to_shell(job, &conf, cc_dir, &format!("{why}, so the recipe's shell runs it"))

@@ -10,10 +10,18 @@
 //! second has the same object and loses nothing.
 //!
 //! Reading trusts nothing: every restore checks the whole entry against its
-//! checksum while copying it, and an entry that does not hold up is a miss
-//! (and removed). The object is copied, never linked: a later compile
-//! writes into the build's object in place, and must not write into the
-//! store.
+//! size and checksum while copying it, and an entry that does not hold up
+//! is a miss (and removed). The object is copied, never linked: a later
+//! compile writes into the build's object in place, and must not write into
+//! the store.
+//!
+//! Several cactup builds share one store at once (a queued job runs the
+//! build it was submitted with, for months). So the lengths an entry is
+//! cut by are outside its header, and the header is read only once size
+//! and checksum have shown the entry whole: an entry this cactup cannot
+//! read the header of was written by another, and is left alone. Any
+//! change to what an entry holds or how it is read bumps [`FORMAT`], which
+//! puts the new entries in a directory of their own.
 
 use super::hash::Checksum;
 use super::key::Parts;
@@ -37,16 +45,20 @@ const MAGIC: &[u8] = b"cactup build cache entry\n";
 /// a length beyond this is a damaged entry, not a reason to allocate.
 const MAX_HEADER: u64 = 64 * 1024;
 
-/// What an entry says about itself, between the magic line and the blobs.
+/// The longest lengths line: four 20-digit numbers, three spaces, a newline.
+const MAX_LENGTHS_LINE: u64 = 4 * 20 + 3 + 1;
+
+/// Reads and writes of entries go in large pieces: on NFS every small one
+/// is a round trip.
+const BUFFER: usize = 1 << 20;
+
+/// What an entry says about itself, between the lengths line and the blobs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct Header {
     format: u32,
     key: String,
     parts: Parts,
-    object_bytes: u64,
-    stdout_bytes: u64,
-    stderr_bytes: u64,
     about: About,
 }
 
@@ -101,8 +113,13 @@ pub struct Messages {
 pub enum Miss {
     /// No entry under the key.
     Absent,
-    /// An entry that does not hold up; it has been removed.
-    Invalid(String),
+    /// An entry that does not hold up, and whether it was removed (it is
+    /// not when its name leads elsewhere by now, or cannot be removed).
+    Invalid { why: String, removed: bool },
+    /// A whole entry whose header this cactup cannot read: another
+    /// cactup's, written in the same format by a different build. Left
+    /// alone.
+    Foreign(String),
     /// An entry that could not be read, for a reason that says nothing
     /// about it (an I/O error, a stale NFS handle): left alone.
     Unreadable(String),
@@ -114,7 +131,9 @@ impl std::fmt::Display for Miss {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Absent => write!(f, "no entry"),
-            Self::Invalid(why) => write!(f, "an invalid entry, removed: {why}"),
+            Self::Invalid { why, removed: true } => write!(f, "an invalid entry, removed: {why}"),
+            Self::Invalid { why, removed: false } => write!(f, "an invalid entry: {why}"),
+            Self::Foreign(why) => write!(f, "an entry this cactup cannot read: {why}"),
             Self::Unreadable(why) => write!(f, "the entry could not be read: {why}"),
             Self::CannotWrite(why) => write!(f, "the object could not be written: {why}"),
         }
@@ -154,54 +173,56 @@ impl Store {
     /// process is stopped half way; the build goes on either way.
     pub fn publish(&self, entry: &NewEntry) -> Res<Published> {
         let path = self.entry_path(entry.key).with_context(|| format!("\"{}\" is not a key", entry.key))?;
-        if path.symlink_metadata().is_ok() {
-            return Ok(Published::AlreadyThere);
+        match path.symlink_metadata() {
+            Ok(meta) if meta.is_file() => return Ok(Published::AlreadyThere),
+            Ok(_) => bail!("{} is there and is not an entry", path.display()),
+            Err(_) => {}
         }
         let dir = path.parent().expect("an entry is inside its directory");
         fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
         let mut object = File::open(entry.object).with_context(|| format!("Failed to open {}", entry.object.display()))?;
-        let object_meta = object.metadata().with_context(|| format!("Failed to look at {}", entry.object.display()))?;
-        if !object_meta.is_file() {
+        let before = object.metadata().with_context(|| format!("Failed to look at {}", entry.object.display()))?;
+        if !before.is_file() {
             bail!("{} is not a regular file", entry.object.display());
         }
-        let header = Header {
-            format: FORMAT,
-            key: entry.key.to_owned(),
-            parts: entry.parts.clone(),
-            object_bytes: object_meta.len(),
-            stdout_bytes: entry.stdout.len() as u64,
-            stderr_bytes: entry.stderr.len() as u64,
-            about: entry.about.clone(),
-        };
+        let header = Header { format: FORMAT, key: entry.key.to_owned(), parts: entry.parts.clone(), about: entry.about.clone() };
         let header = toml::to_string(&header).context("Failed to write an entry's header")?;
+        let lengths = format!("{} {} {} {}\n", header.len(), before.len(), entry.stdout.len(), entry.stderr.len());
 
         let temp = tempfile::Builder::new()
             .prefix(&format!(".tmp-{}-", entry.key))
             .tempfile_in(dir)
             .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?;
-        let mut out = Summed { inner: BufWriter::new(temp.as_file()), sum: Checksum::new() };
+        let mut out = Summed { inner: BufWriter::with_capacity(BUFFER, temp.as_file()), sum: Checksum::new() };
         let mut write = |out: &mut Summed<BufWriter<&File>>| -> io::Result<()> {
             out.write_all(MAGIC)?;
-            out.write_all(format!("{}\n", header.len()).as_bytes())?;
+            out.write_all(lengths.as_bytes())?;
             out.write_all(header.as_bytes())?;
-            // Exactly as many bytes as the header says: an object that
-            // changes while it is copied is not this compile's object.
-            let copied = io::copy(&mut (&mut object).take(object_meta.len()), out)?;
-            if copied != object_meta.len() {
+            // Exactly as many bytes as the lengths say.
+            let copied = io::copy(&mut (&mut object).take(before.len()), out)?;
+            if copied != before.len() {
                 return Err(io::Error::new(ErrorKind::UnexpectedEof, "the object got shorter while it was copied"));
             }
             out.write_all(entry.stdout)?;
             out.write_all(entry.stderr)
         };
         write(&mut out).with_context(|| format!("Failed to write {}", temp.path().display()))?;
+        // An object that changed while it was copied (grown, rewritten) is
+        // not the one the compile wrote.
+        let after = object.metadata().with_context(|| format!("Failed to look at {}", entry.object.display()))?;
+        if (after.len(), after.mtime(), after.mtime_nsec()) != (before.len(), before.mtime(), before.mtime_nsec()) {
+            bail!("{} changed while it was copied", entry.object.display());
+        }
         let Summed { inner, sum } = out;
         let mut file = inner.into_inner().map_err(|e| e.into_error()).context("Failed to write an entry")?;
         file.write_all(format!("{}\n", sum.hex()).as_bytes()).context("Failed to write an entry")?;
-        file.set_permissions(fs::Permissions::from_mode(0o444)).context("Failed to make an entry read-only")?;
         // On disk before it has a name: a name that exists names a whole
-        // entry, also after a crash.
+        // entry, also after a crash. Synced before it is made read-only, so
+        // that a server checking permissions when the data reaches it has
+        // nothing left to refuse.
         file.sync_all().context("Failed to sync an entry to disk")?;
+        file.set_permissions(fs::Permissions::from_mode(0o444)).context("Failed to make an entry read-only")?;
 
         let linked = fs::hard_link(temp.path(), &path);
         // NFS can lose the reply to a link that happened; the temporary
@@ -221,20 +242,32 @@ impl Store {
     /// "Restoring"). On a miss nothing is left at `object` that was not
     /// there before.
     pub fn restore(&self, key: &str, object: &Path) -> Result<Messages, Miss> {
-        let path = self.entry_path(key).ok_or_else(|| Miss::Invalid(format!("\"{key}\" is not a key")))?;
+        let path = self.entry_path(key).ok_or_else(|| Miss::Invalid { why: format!("\"{key}\" is not a key"), removed: false })?;
+        let unreadable = |e: io::Error| Miss::Unreadable(format!("{}: {e}", path.display()));
+        // Looked at before it is opened: a FIFO there would block the open.
+        let meta = match path.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => return Err(Miss::Absent),
+            Err(e) => return Err(unreadable(e)),
+        };
+        if !meta.is_file() {
+            let removed = invalidate(&path, &meta);
+            return Err(Miss::Invalid { why: "it is not a regular file".to_owned(), removed });
+        }
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => return Err(Miss::Absent),
-            Err(e) => return Err(Miss::Unreadable(format!("{}: {e}", path.display()))),
+            Err(e) => return Err(unreadable(e)),
         };
-        let meta = file.metadata().map_err(|e| Miss::Unreadable(format!("{}: {e}", path.display())))?;
+        let meta = file.metadata().map_err(unreadable)?;
         match read_into(file, &meta, key, object) {
             Ok(messages) => Ok(messages),
             Err(Fault::Invalid(why)) => {
-                invalidate(&path, &meta);
-                Err(Miss::Invalid(why))
+                let removed = invalidate(&path, &meta);
+                Err(Miss::Invalid { why, removed })
             }
-            Err(Fault::Io(e)) => Err(Miss::Unreadable(format!("{}: {e}", path.display()))),
+            Err(Fault::Foreign(why)) => Err(Miss::Foreign(why)),
+            Err(Fault::Io(e)) => Err(unreadable(e)),
             Err(Fault::Output(why)) => Err(Miss::CannotWrite(why)),
         }
     }
@@ -260,8 +293,10 @@ impl<W: Write> Write for Summed<W> {
 
 /// What can go wrong reading an entry, by what it says about the entry.
 enum Fault {
-    /// The entry's bytes are not a valid entry for its key.
+    /// The entry's bytes are not a whole entry, or not one for its key.
     Invalid(String),
+    /// A whole entry, with a header this cactup does not read.
+    Foreign(String),
     /// Reading failed for a reason of its own; the entry may be fine.
     Io(io::Error),
     /// The entry may be fine; the object could not be put in place.
@@ -277,58 +312,60 @@ impl From<io::Error> for Fault {
 /// Read the entry `file` (whose metadata is `meta`) for `key`, copying its
 /// object to a temporary file beside `object`, and move that onto `object`
 /// once the whole entry has been checked.
+///
+/// The order is the point: the size against the lengths line, then the
+/// checksum over every byte, and only then the header. So an entry whose
+/// header this cactup cannot read, but which is whole, is another cactup's
+/// and not damage.
 fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Messages, Fault> {
     let invalid = |why: &str| Fault::Invalid(why.to_owned());
-    let mut reader = Digesting { inner: BufReader::new(file), sum: Checksum::new() };
-
+    let mut reader = Digesting { inner: BufReader::with_capacity(BUFFER, file), sum: Checksum::new() };
     // Until the size has been checked, an entry that ends early is short.
     let early = |e: io::Error| match e.kind() {
         ErrorKind::UnexpectedEof => Fault::Invalid("it ends early".to_owned()),
         _ => Fault::Io(e),
     };
+
     let mut magic = vec![0; MAGIC.len()];
     reader.read_exact(&mut magic).map_err(early)?;
     if magic != MAGIC {
         return Err(invalid("it does not begin as an entry does"));
     }
-    let mut length = Vec::new();
-    (&mut reader).take(21).read_until(b'\n', &mut length)?;
-    let header_len = std::str::from_utf8(&length)
+    let mut line = Vec::new();
+    (&mut reader).take(MAX_LENGTHS_LINE).read_until(b'\n', &mut line)?;
+    let lengths: Vec<u64> = std::str::from_utf8(&line)
         .ok()
         .and_then(|line| line.strip_suffix('\n'))
-        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|digits| digits.parse::<u64>().ok())
-        .filter(|len| *len <= MAX_HEADER)
-        .ok_or_else(|| invalid("its header length cannot be read"))?;
-    let mut header = vec![0; header_len as usize];
-    reader.read_exact(&mut header).map_err(early)?;
-    let header: Header = std::str::from_utf8(&header)
-        .ok()
-        .and_then(|text| toml::from_str(text).ok())
-        .ok_or_else(|| invalid("its header cannot be read"))?;
-    if header.format != FORMAT {
-        return Err(invalid("its header has another format"));
-    }
-    if header.key != key || header.parts.key() != key {
-        return Err(invalid("it is the entry of another key"));
-    }
-    let expected = [MAGIC.len() as u64, length.len() as u64, header_len, header.object_bytes, header.stdout_bytes, header.stderr_bytes, 65]
+        .map(|line| line.split(' ').map(|n| n.bytes().all(|b| b.is_ascii_digit()).then(|| n.parse().ok()).flatten()).collect())
+        .and_then(|lengths: Vec<Option<u64>>| lengths.into_iter().collect::<Option<Vec<u64>>>())
+        .filter(|lengths| lengths.len() == 4 && lengths[0] <= MAX_HEADER)
+        .ok_or_else(|| invalid("its lengths cannot be read"))?;
+    let [header_len, object_len, stdout_len, stderr_len] = lengths[..] else { unreachable!() };
+    let expected = [MAGIC.len() as u64, line.len() as u64, header_len, object_len, stdout_len, stderr_len, 65]
         .iter()
         .try_fold(0u64, |sum, part| sum.checked_add(*part));
     if expected != Some(meta.len()) {
-        return Err(invalid("its size is not what its header says"));
+        return Err(invalid("its size is not what its lengths say"));
     }
+    let mut header = vec![0; header_len as usize];
+    read_exact(&mut reader, &mut header)?;
 
-    // The object, into a temporary file beside where it goes.
+    // The object, into a temporary file beside where it goes, created as a
+    // compiler creates its output (`0666` less the umask, and whatever a
+    // default ACL of the directory adds).
     let dir = object.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = object.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let output = |e: io::Error| Fault::Output(format!("{}: {e}", object.display()));
-    let temp = tempfile::Builder::new().prefix(&format!(".{name}.cactup-")).tempfile_in(dir).map_err(output)?;
+    let temp = tempfile::Builder::new()
+        .prefix(&format!(".{name}.cactup-"))
+        .permissions(fs::Permissions::from_mode(0o666))
+        .tempfile_in(dir)
+        .map_err(output)?;
     {
-        let mut writer = BufWriter::new(temp.as_file());
-        let copied = io::copy(&mut (&mut reader).take(header.object_bytes), &mut writer);
+        let mut writer = BufWriter::with_capacity(BUFFER, temp.as_file());
+        let copied = io::copy(&mut (&mut reader).take(object_len), &mut writer);
         match copied {
-            Ok(n) if n == header.object_bytes => {}
+            Ok(n) if n == object_len => {}
             Ok(_) => return Err(Fault::Io(ErrorKind::UnexpectedEof.into())),
             // Reading the entry and writing the object fail alike here;
             // which it was, the entry's own read below would not tell.
@@ -336,9 +373,9 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Me
         }
         writer.flush().map_err(output)?;
     }
-    let mut stdout = vec![0; header.stdout_bytes as usize];
+    let mut stdout = vec![0; stdout_len as usize];
     read_exact(&mut reader, &mut stdout)?;
-    let mut stderr = vec![0; header.stderr_bytes as usize];
+    let mut stderr = vec![0; stderr_len as usize];
     read_exact(&mut reader, &mut stderr)?;
     let Digesting { inner: mut rest, sum } = reader;
     let mut written = [0; 65];
@@ -347,15 +384,23 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Me
         return Err(invalid("its checksum does not match its content"));
     }
 
-    // The mode the compiler would have given the object.
-    let mode = 0o666 & !umask();
-    temp.as_file().set_permissions(fs::Permissions::from_mode(mode)).map_err(output)?;
+    // Whole. Now whose, and for which key.
+    let header: Header = std::str::from_utf8(&header)
+        .ok()
+        .and_then(|text| toml::from_str(text).ok())
+        .ok_or_else(|| Fault::Foreign("its header is not one this cactup writes".to_owned()))?;
+    if header.format != FORMAT {
+        return Err(Fault::Foreign(format!("it says it is of format {}", header.format)));
+    }
+    if header.key != key || header.parts.key() != key {
+        return Err(invalid("it is the entry of another key"));
+    }
     temp.persist(object).map_err(|e| output(e.error))?;
     Ok(Messages { stdout, stderr })
 }
 
 /// `read_exact`, where running out of bytes early is an I/O fault, not a
-/// damaged entry: the size was checked against the header before, so an
+/// damaged entry: the size was checked against the lengths before, so an
 /// entry that ends early is one that changed while it was read, which an
 /// entry never does.
 fn read_exact(reader: &mut impl Read, buf: &mut [u8]) -> Result<(), Fault> {
@@ -393,25 +438,24 @@ impl<R: BufRead> BufRead for Digesting<R> {
 /// so that the next compile of its key can publish a good one — but only if
 /// the name still leads to that file: another build may have removed it and
 /// published anew. A good entry that slips in between the look and the
-/// removal is removed too, which costs one miss and nothing else.
-fn invalidate(path: &Path, read: &Metadata) {
+/// removal is removed too, which costs one miss and nothing else. Whether
+/// it was removed.
+fn invalidate(path: &Path, read: &Metadata) -> bool {
     let same = path.symlink_metadata().is_ok_and(|now| now.dev() == read.dev() && now.ino() == read.ino());
-    if same {
-        let _ = fs::remove_file(path);
-    }
-}
-
-/// This process's file-creation mask, from `/proc/self/status` (`umask(2)`
-/// can only read it by changing it). The usual `022` if it cannot be read.
-fn umask() -> u32 {
-    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let mask = status.lines().find_map(|line| line.strip_prefix("Umask:"));
-    mask.and_then(|mask| u32::from_str_radix(mask.trim(), 8).ok()).unwrap_or(0o022)
+    same && fs::remove_file(path).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This process's file-creation mask (`umask(2)` can only read it by
+    /// changing it).
+    fn umask() -> u32 {
+        let status = fs::read_to_string("/proc/self/status").unwrap();
+        let mask = status.lines().find_map(|line| line.strip_prefix("Umask:")).unwrap();
+        u32::from_str_radix(mask.trim(), 8).unwrap()
+    }
 
     fn parts(seed: &str) -> Parts {
         Parts {
@@ -568,8 +612,8 @@ mod tests {
                 b[at] = if b[at] == b'0' { b'1' } else { b'0' };
             })),
             ("the magic line", Box::new(|b: &mut Vec<u8>| b[0] = b'C')),
-            ("the header length", Box::new(|b: &mut Vec<u8>| b[MAGIC.len()] = b'x')),
-            ("a header length beyond reason", Box::new(|b: &mut Vec<u8>| {
+            ("the lengths", Box::new(|b: &mut Vec<u8>| b[MAGIC.len()] = b'x')),
+            ("lengths beyond reason", Box::new(|b: &mut Vec<u8>| {
                 let line_end = MAGIC.len() + b[MAGIC.len()..].iter().position(|c| *c == b'\n').unwrap();
                 b.splice(MAGIC.len()..line_end, b"99999999999999999999".iter().copied());
             })),
@@ -582,8 +626,7 @@ mod tests {
             let restored = fx.tmp.path().join("build/r.o");
             fs::write(&restored, b"what was there").unwrap();
             let miss = fx.store.restore(&fx.key, &restored).unwrap_err();
-            assert!(matches!(miss, Miss::Invalid(_) | Miss::Unreadable(_)), "{what}: {miss}");
-            assert!(matches!(miss, Miss::Invalid(_)), "{what}: {miss}");
+            assert!(matches!(miss, Miss::Invalid { removed: true, .. }), "{what}: {miss}");
             assert!(!fx.entry().exists(), "{what}: the entry was left in place");
             assert_eq!(fs::read(&restored).unwrap(), b"what was there", "{what}");
             assert_eq!(fx.leftovers(&fx.tmp.path().join("build"), &[&object, &restored]), Vec::<PathBuf>::new(), "{what}");
@@ -602,7 +645,7 @@ mod tests {
         fs::create_dir_all(misplaced.parent().unwrap()).unwrap();
         fs::copy(fx.entry(), &misplaced).unwrap();
         let miss = fx.store.restore(&other, &fx.tmp.path().join("build/r.o")).unwrap_err();
-        assert!(matches!(&miss, Miss::Invalid(why) if why.contains("another key")), "{miss}");
+        assert!(matches!(&miss, Miss::Invalid { why, .. } if why.contains("another key")), "{miss}");
         assert!(!misplaced.exists());
         assert!(fx.entry().exists(), "the entry under its own name stays");
 
@@ -617,42 +660,73 @@ mod tests {
         forged.extend(format!("{}\n", sum.hex()).bytes());
         fs::write(&misplaced, forged).unwrap();
         let miss = fx.store.restore(&other, &fx.tmp.path().join("build/r.o")).unwrap_err();
-        assert!(matches!(&miss, Miss::Invalid(why) if why.contains("another key")), "{miss}");
+        assert!(matches!(&miss, Miss::Invalid { why, .. } if why.contains("another key")), "{miss}");
     }
 
-    /// A header with anything it does not know is not one this cactup
-    /// wrote; neither is one that lacks something.
+    /// A whole entry (size and checksum right) whose header this cactup
+    /// cannot read was written by another cactup in the same format: a
+    /// miss, and left alone. One with anything less is damage.
     #[test]
-    fn a_header_is_read_strictly() {
+    fn a_whole_entry_with_a_header_of_another_cactup_is_left_alone() {
         let fx = Fixture::new();
         let object = fx.object("a.c.o", b"bytes");
-        for (what, edit) in [
-            ("a field more", "format = 1\nextra = 2\n"),
-            ("a field more in the parts", "[parts]\nextra = \"x\"\n"),
-            ("a field more about it", "[about]\nextra = \"x\"\n"),
-            ("a field less", ""),
-        ] {
-            let _ = fs::remove_file(fx.entry());
-            fx.publish(&object, b"").unwrap();
+        // Rebuild the entry with the header edited, its length and checksum
+        // made to match.
+        let rewrite = |edit: &dyn Fn(String) -> String| {
             let text = fs::read(fx.entry()).unwrap();
-            let length_end = MAGIC.len() + text[MAGIC.len()..].iter().position(|b| *b == b'\n').unwrap() + 1;
-            let header_len: usize = std::str::from_utf8(&text[MAGIC.len()..length_end - 1]).unwrap().parse().unwrap();
-            let header = String::from_utf8(text[length_end..length_end + header_len].to_vec()).unwrap();
-            let header = match edit {
-                "" => header.replace("stdout-bytes = 0\n", ""),
-                _ => header.replacen(edit.lines().next().unwrap(), edit.trim_end(), 1),
-            };
-            assert_ne!(header.len(), header_len, "{what}: the edit did nothing");
-            let mut body = [MAGIC, format!("{}\n", header.len()).as_bytes(), header.as_bytes()].concat();
-            body.extend_from_slice(&text[length_end + header_len..text.len() - 65]);
+            let line_end = MAGIC.len() + text[MAGIC.len()..].iter().position(|b| *b == b'\n').unwrap() + 1;
+            let lengths: Vec<usize> = std::str::from_utf8(&text[MAGIC.len()..line_end - 1]).unwrap().split(' ').map(|n| n.parse().unwrap()).collect();
+            let header = String::from_utf8(text[line_end..line_end + lengths[0]].to_vec()).unwrap();
+            let edited = edit(header.clone());
+            assert_ne!(edited, header, "the edit did nothing");
+            let line = format!("{} {} {} {}\n", edited.len(), lengths[1], lengths[2], lengths[3]);
+            let mut body = [MAGIC, line.as_bytes(), edited.as_bytes()].concat();
+            body.extend_from_slice(&text[line_end + lengths[0]..text.len() - 65]);
             let mut sum = Checksum::new();
             sum.update(&body);
             body.extend(format!("{}\n", sum.hex()).bytes());
             fs::remove_file(fx.entry()).unwrap();
             fs::write(fx.entry(), body).unwrap();
-            let miss = fx.store.restore(&fx.key, &fx.tmp.path().join("build/r.o")).unwrap_err();
-            assert!(matches!(&miss, Miss::Invalid(why) if why.contains("header cannot be read")), "{what}: {miss}");
+        };
+        let edits: [(&str, &dyn Fn(String) -> String); 4] = [
+            ("a field more", &|h| h.replacen("format = 1\n", "format = 1\nextra = 2\n", 1)),
+            ("a field more in the parts", &|h| h.replacen("[parts]\n", "[parts]\nextra = \"x\"\n", 1)),
+            ("a field more about it", &|h| h.replacen("[about]\n", "[about]\nextra = \"x\"\n", 1)),
+            ("a field less", &|h| h.replacen("relocatable = true\n", "", 1)),
+        ];
+        for (what, edit) in edits {
+            let _ = fs::remove_file(fx.entry());
+            fx.publish(&object, b"").unwrap();
+            rewrite(edit);
+            let restored = fx.tmp.path().join("build/r.o");
+            let miss = fx.store.restore(&fx.key, &restored).unwrap_err();
+            assert!(matches!(&miss, Miss::Foreign(_)), "{what}: {miss}");
+            assert!(fx.entry().exists(), "{what}: another cactup's entry was removed");
+            assert!(!restored.exists(), "{what}");
         }
+        // Another format, likewise.
+        let _ = fs::remove_file(fx.entry());
+        fx.publish(&object, b"").unwrap();
+        rewrite(&|h| h.replacen("format = 1\n", "format = 7\n", 1));
+        assert!(matches!(fx.store.restore(&fx.key, &fx.tmp.path().join("build/r.o")), Err(Miss::Foreign(_))));
+    }
+
+    /// Something other than a file where an entry should be: no restore
+    /// blocks on it, and no publish takes it for an entry.
+    #[test]
+    fn what_is_not_a_file_is_not_an_entry() {
+        let fx = Fixture::new();
+        let object = fx.object("a.c.o", b"bytes");
+        fs::create_dir_all(fx.entry().parent().unwrap()).unwrap();
+        let fifo = std::process::Command::new("mkfifo").arg(fx.entry()).status().unwrap();
+        assert!(fifo.success());
+        let miss = fx.store.restore(&fx.key, &fx.tmp.path().join("build/r.o")).unwrap_err();
+        assert!(matches!(&miss, Miss::Invalid { removed: true, .. }), "{miss}");
+        fs::create_dir(fx.entry()).unwrap();
+        let err = fx.publish(&object, b"").unwrap_err().to_string();
+        assert!(err.contains("is not an entry"), "{err}");
+        let miss = fx.store.restore(&fx.key, &fx.tmp.path().join("build/r.o")).unwrap_err();
+        assert!(matches!(&miss, Miss::Invalid { removed: false, .. }), "{miss}");
     }
 
     #[test]
@@ -765,6 +839,46 @@ mod tests {
             assert_eq!(messages, Messages { stdout: b"out".to_vec(), stderr: b"err".to_vec() });
         }
         println!("child done");
+    }
+
+    /// Publishers, readers and invalidators of one key at once: entries come
+    /// and go, and every restore is still a miss or the whole object.
+    #[test]
+    fn restores_hold_while_entries_are_removed_and_republished() {
+        let fx = Fixture::new();
+        let bytes: Vec<u8> = (0..400_000u32).map(|i| (i * 11 % 256) as u8).collect();
+        let object = fx.object("big.o", &bytes);
+        std::thread::scope(|scope| {
+            for i in 0..12 {
+                let (fx, object, bytes) = (&fx, &object, &bytes);
+                scope.spawn(move || {
+                    let restored = fx.tmp.path().join(format!("build/r{i}.o"));
+                    for round in 0..30 {
+                        match (i + round) % 3 {
+                            0 => {
+                                fx.publish(object, b"w").unwrap();
+                            }
+                            1 => {
+                                if let Ok(meta) = fs::symlink_metadata(fx.entry()) {
+                                    invalidate(&fx.entry(), &meta);
+                                }
+                            }
+                            _ => match fx.store.restore(&fx.key, &restored) {
+                                Ok(messages) => {
+                                    assert_eq!(fs::read(&restored).unwrap(), *bytes);
+                                    assert_eq!(messages.stderr, b"w");
+                                }
+                                Err(Miss::Absent) => {}
+                                Err(miss) => panic!("{miss}"),
+                            },
+                        }
+                    }
+                });
+            }
+        });
+        let build = fx.tmp.path().join("build");
+        let temps: Vec<PathBuf> = fx.leftovers(&build, &[]).into_iter().filter(|p| p.to_string_lossy().contains(".cactup-")).collect();
+        assert_eq!(temps, Vec::<PathBuf>::new());
     }
 
     /// Many publishers and readers of one key at once, as threads: every
