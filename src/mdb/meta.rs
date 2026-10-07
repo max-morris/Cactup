@@ -1134,7 +1134,6 @@ impl Meta {
             ("simulation-home", &mut paths.simulation_home),
             ("test-home", &mut paths.test_home),
             ("scratch-home", &mut paths.scratch_home),
-            ("build-cache-home", &mut paths.build_cache_home),
         ] {
             if let Some(value) = path {
                 *value = vars
@@ -1142,7 +1141,24 @@ impl Meta {
                     .with_context(|| format!("in [paths].{key}"))?;
             }
         }
+        // Not the build cache's place: resolved apart, so that it can never
+        // fail what does not use it (`resolved_build_cache_home`).
+        paths.build_cache_home = None;
         Ok(paths)
+    }
+
+    /// `[paths] build-cache-home`, resolved as the other paths are (`@USER@`,
+    /// `@ENV(NAME)@`) but alone: a value that cannot be resolved here is the
+    /// build cache's to deal with (it falls back, §18.7), never a reason to
+    /// fail a build, a simulation or an install.
+    pub fn resolved_build_cache_home(&self) -> Res<Option<String>> {
+        let mut vars = VarSet::new();
+        vars.set("USER", super::whoami());
+        self.paths
+            .build_cache_home
+            .as_deref()
+            .map(|value| vars.substitute(value, Syntax::Plain).context("in [paths].build-cache-home"))
+            .transpose()
     }
 }
 
@@ -1646,9 +1662,19 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            with_cache.resolved_paths().unwrap().build_cache_home.as_deref(),
+            with_cache.resolved_build_cache_home().unwrap().as_deref(),
             Some(format!("/work/{user}/cactup-cache").as_str())
         );
+        // One that cannot be resolved here fails the cache's question, and
+        // nothing else.
+        let unresolvable: Meta = toml::from_str(&MIKE.replacen(
+            "simulation-home",
+            "build-cache-home = \"@ENV(CACTUP_SURELY_UNSET_VARIABLE)@/cactup-cache\"\nsimulation-home",
+            1,
+        ))
+        .unwrap();
+        assert!(unresolvable.resolved_paths().is_ok());
+        assert!(unresolvable.resolved_build_cache_home().is_err());
         // …and scheduler templates keep theirs for use-time substitution.
         assert_eq!(meta.scheduler.submit.as_deref(), Some("sbatch @SCRIPTFILE@ 2>&1"));
     }

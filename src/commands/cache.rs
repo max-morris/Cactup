@@ -61,29 +61,46 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             }
             Ok(())
         }
-        CacheCommand::Stats => stats(&store_root(ctx)?),
+        CacheCommand::Stats => {
+            let (root, from) = store_root(ctx)?;
+            stats(&root, &from)
+        }
         CacheCommand::Gc { unused_for, to_size, dry_run } => {
             if unused_for.is_none() && to_size.is_none() {
                 bail!("say what to remove: --unused-for <age>, --to-size <size>, or both");
             }
             let unused_for = unused_for.as_deref().map(upkeep::parse_age).transpose()?;
             let to_size = to_size.as_deref().map(upkeep::parse_size).transpose()?;
-            gc(&store_root(ctx)?, unused_for, to_size, dry_run)
+            let (root, from) = store_root(ctx)?;
+            println!("The build cache in {} ({from}).", root.display());
+            gc(&root, unused_for, to_size, dry_run)
         }
-        CacheCommand::Verify => verify(&store_root(ctx)?),
+        CacheCommand::Verify => {
+            let (root, from) = store_root(ctx)?;
+            println!("The build cache in {} ({from}).", root.display());
+            verify(&root)
+        }
     }
 }
 
-/// The store's root, as a build on this machine would have it: the
-/// `build-cache-dir` knob's, else the machine's `build-cache-home`, else the
-/// default.
-fn store_root(ctx: &Ctx) -> Res<PathBuf> {
+/// The store's root, as a build on this machine would have it, and where
+/// that came from: the `build-cache-dir` knob, else the machine's
+/// `build-cache-home`, else the default.
+fn store_root(ctx: &Ctx) -> Res<(PathBuf, String)> {
     let db = ctx.db.read()?;
+    if db.knob("build-cache-dir").is_some_and(|dir| Path::new(dir).is_absolute()) {
+        return Ok((crate::objcache::store_root(&db, None), "the build-cache-dir knob".to_owned()));
+    }
     // The machine is only asked for its place for the cache: a host it
-    // cannot resolve uses the default, as its builds would.
+    // cannot resolve, or a place it cannot resolve here, is the default.
     let machine = crate::commands::machine::resolve(ctx).ok();
-    let home = machine.and_then(|machine| machine.meta.resolved_paths().ok()).and_then(|paths| paths.build_cache_home);
-    Ok(crate::objcache::store_root(&db, home.as_deref()))
+    let home = machine.as_ref().and_then(|machine| Some((machine.name.clone(), machine.meta.resolved_build_cache_home().ok()??)));
+    Ok(match home {
+        Some((name, home)) if Path::new(&home).is_absolute() => {
+            (PathBuf::from(home), format!("machine {name}'s build-cache-home"))
+        }
+        _ => (crate::objcache::default_store_root(), "the default".to_owned()),
+    })
 }
 
 /// When, as people read it: so many days ago.
@@ -97,7 +114,7 @@ fn ago(now: SystemTime, then: SystemTime) -> String {
 }
 
 /// `cactup cache stats` (§18.9).
-fn stats(root: &Path) -> Res<()> {
+fn stats(root: &Path, from: &str) -> Res<()> {
     if !root.is_dir() {
         println!("The build cache in {} is empty: nothing has been stored there yet.", root.display());
         return Ok(());
@@ -106,7 +123,14 @@ fn stats(root: &Path) -> Res<()> {
     // The fileserver's clock where this user can write in the store; ages
     // shown in days need nothing finer than this host's, where not.
     let now = crate::lock::fileserver_now(root).unwrap_or_else(|_| SystemTime::now());
-    println!("{}", format!("build cache in {}", root.display()).bold());
+    println!("{}", format!("build cache in {} ({from})", root.display()).bold());
+    for (log, why) in &scan.unreadable_logs {
+        println!(
+            "  {} use log {} cannot be read ({why}): `cactup cache gc` will not run until it can",
+            "warning:".yellow().bold(),
+            log.display()
+        );
+    }
     if scan.machines.is_empty() {
         println!("  nothing stored yet");
     }
@@ -157,6 +181,15 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     // One at a time per store, across hosts.
     let _lock = crate::lock::LinkLock::acquire(&root.join("gc.lock"))?.with_heartbeat();
     let scan = upkeep::scan(root)?;
+    // What a log that cannot be read records as in use is not known: no
+    // entry can be judged unused.
+    if let Some((log, why)) = scan.unreadable_logs.first() {
+        bail!(
+            "the use log {} cannot be read ({why}), so what it records as in use is not known; \
+             nothing was removed (make it readable, or remove it if that is right, and run gc again)",
+            log.display()
+        );
+    }
     let now = crate::lock::fileserver_now(root)?;
     let plan = upkeep::plan(&scan, now, unused_for, to_size);
     let bytes: u64 = plan.entries.iter().map(|(e, _)| e.bytes).sum();

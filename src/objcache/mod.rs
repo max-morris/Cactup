@@ -256,7 +256,13 @@ pub fn after_build(cc_dir: &Path) {
         // plus what this build added.
         let published: u64 = events.iter().filter(|e| e.published == Some(true)).filter_map(|e| e.object_bytes).sum();
         match upkeep::add_to_size(&conf.store, published) {
-            Ok(bytes) if bytes > limit => println!(
+            Ok(None) => println!(
+                "{} build-cache-size is set, but the size of the build cache in {} is not known yet; \
+                 `cactup cache stats` measures it",
+                "note:".bold(),
+                conf.store.display(),
+            ),
+            Ok(Some(bytes)) if bytes > limit => println!(
                 "{} the build cache in {} holds about {}, more than build-cache-size ({}); \
                  `cactup cache gc --unused-for 30d` removes what no build has used in 30 days",
                 "note:".bold(),
@@ -476,7 +482,9 @@ mod tests {
         let logs: Vec<_> = fs::read_dir(&used).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(logs.len(), 1);
         assert_eq!(fs::read_to_string(&logs[0]).unwrap(), format!("{hit}\n"));
-        assert_eq!(fs::read_to_string(store.join("v1/size")).unwrap(), "4096\n");
+        // Never measured: the build says so, and writes nothing that would
+        // pass for a measurement.
+        assert!(!store.join("v1/size").exists());
 
         // A recording build: nothing.
         let record = tmp.path().join("record");

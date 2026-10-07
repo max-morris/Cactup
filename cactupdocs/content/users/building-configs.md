@@ -663,7 +663,11 @@ Cached objects are kept where your machine's entry in the machine
 database puts them (`build-cache-home`: on clusters, scratch or work
 storage beside your simulations), else under `~/.cactup/cache` (or
 `$CACTUP_HOME/cache`), or wherever the `build-cache-dir` knob says, as an
-absolute path, which wins over both. `cactup cache stats` says where it is.
+absolute path, which wins over both. `cactup cache stats` says where it is,
+and why there. Where that is scratch storage the site purges, the purge
+removes objects no build has used for a while, as `cactup cache gc` would:
+those compiles run again, nothing worse. Point `build-cache-dir` at storage
+that is not purged to keep old objects longer.
 Anyone who can write in that directory can put objects into your builds, so
 keep it your own.
 

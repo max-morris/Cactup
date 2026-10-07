@@ -1791,8 +1791,8 @@ fn prepare_with_cache(
     // `@ENV(…)@` unset) costs the machine's default, not the build.
     let cache_home = match cache_mode {
         crate::objcache::Mode::Off => None,
-        _ => match machine.meta.resolved_paths() {
-            Ok(paths) => paths.build_cache_home,
+        _ => match machine.meta.resolved_build_cache_home() {
+            Ok(home) => home,
             Err(e) => {
                 println!("{} build cache: {e:#}; using the default place for it", "warning:".yellow().bold());
                 None

@@ -331,7 +331,9 @@ impl Database {
             "update-url" => Some(crate::update::DEFAULT_UPDATE_URL.to_owned()),
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
             "build-cache" => Some(crate::objcache::Mode::Off.name().to_owned()),
-            "build-cache-dir" => Some(crate::objcache::default_store_root().display().to_string()),
+            // None of its own: a machine's build-cache-home, else
+            // `$CACTUP_HOME/cache` (`objcache::store_root`).
+            "build-cache-dir" => None,
             "build-cache-relocate" => Some("yes".to_owned()),
             _ => None,
         }

@@ -883,7 +883,12 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   beside `simulation-home` on scratch or work storage (`build-cache-home =
   "/scratch/@USER@/cactup-cache"`). `@USER@` and `@ENV(NAME)@` work as in
   `simulation-home`; a per-user directory, since anyone who can write in a
-  store can put objects into every build that reads it.
+  store can put objects into every build that reads it. Unlike the other
+  paths it is resolved alone and leniently (`Meta::resolved_build_cache_home`):
+  a value that cannot be resolved (an `@ENV(…)@` unset) costs the cache its
+  machine's place, with one line, never a build, a simulation or an install.
+  A site that purges its scratch storage removes cold objects with its
+  purge: misses later, never a wrong object.
 - Thorn-toggle keys kept (D8, §7.5): `enabled-thorns`, `disabled-thorns`, and
   their `-default`/`-local` variants collapse to plain `enabled-thorns` /
   `disabled-thorns` arrays in TOML (the `-default`/`-local` split existed only
@@ -5462,8 +5467,10 @@ no build has used or published for `<age>` (`30d`, `12w`, `6m` …),
 measured in the fileserver's clock; with `--to-size`, further entries,
 least recently used first, until the store is no larger than `<size>`
 (`200G`). Every directory and every use log of the store must be read
-whole, or `gc` stops before removing anything: a log it could not read
-would leave the entries it records as in use looking unused. It also removes the
+whole, or `gc` stops before removing anything, naming the log: a log it
+could not look at or read would leave the entries it records as in use
+looking unused. (`stats` says so and goes on; `verify` does not read
+logs.) It also removes the
 temporary files of publishes cut short (`.tmp-…`) older than a day, and
 folds the use logs. Only one `gc` runs at a time per store: it holds
 `<root>/gc.lock`, a heartbeat `lock::LinkLock` (§2.3). It never touches
@@ -5494,4 +5501,6 @@ size of the whole store (every machine's entries of this format) is kept
 in `<root>/v1/size`, measured by `cache stats` and `cache gc`, and each
 serving build adds the bytes it published and keeps the sum. Builds that
 add at the same moment can lose each other's additions, so between
-measurements it is an estimate, low if anything. Nothing is removed.
+measurements it is an estimate, low if anything. Before the first
+measurement the size is not known, and the build says that instead, naming
+`cache stats`. Nothing is removed.

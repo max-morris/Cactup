@@ -125,6 +125,9 @@ pub struct Scan {
     /// Directories of other entry formats (another version of cactup's),
     /// by path. Not walked: nothing here reads or removes them.
     pub other_formats: Vec<PathBuf>,
+    /// Use logs that could not be looked at or read, and why. What they
+    /// record as in use is not known: `gc` must not run.
+    pub unreadable_logs: Vec<(PathBuf, String)>,
 }
 
 impl Scan {
@@ -147,6 +150,7 @@ struct Found {
     entries: Vec<Entry>,
     temps: Vec<Other>,
     logs: Vec<Log>,
+    unreadable_logs: Vec<(PathBuf, String)>,
 }
 
 /// Is `name` a key (64 lowercase hex digits)?
@@ -170,7 +174,16 @@ fn read_piece(piece: &Piece) -> Res<Found> {
         let item = item.with_context(|| format!("Failed to read {}", piece.dir.display()))?;
         let name = item.file_name().to_string_lossy().into_owned();
         let path = item.path();
-        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            // A use log that cannot be looked at is not known to say
+            // nothing; an entry that cannot is no entry to remove.
+            Err(e) if piece.used && !name.starts_with(".tmp-") => {
+                found.unreadable_logs.push((path, e.to_string()));
+                continue;
+            }
+            Err(_) => continue,
+        };
         if !meta.is_file() {
             continue;
         }
@@ -181,11 +194,16 @@ fn read_piece(piece: &Piece) -> Res<Found> {
             if !matches!(kind, Some("keys" | "times")) {
                 continue;
             }
-            // A log that cannot be read stops the walk: what it says is in
-            // use is not known, and must not be taken for nothing.
-            let text = fs::read_to_string(&path).with_context(|| {
-                format!("Failed to read the use log {}, so what it records as in use is not known", path.display())
-            })?;
+            // A log that cannot be read is kept apart: what it says is in use
+            // is not known, and must not be taken for nothing (`gc` will not
+            // run while there is one).
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    found.unreadable_logs.push((path, e.to_string()));
+                    continue;
+                }
+            };
             let uses = match kind {
                 // Every key in it, at the time it was written.
                 Some("keys") => text
@@ -278,6 +296,7 @@ pub fn scan(root: &Path) -> Res<Scan> {
         machine.entries.extend(found.entries);
         machine.temps.extend(found.temps);
         machine.logs.extend(found.logs);
+        scan.unreadable_logs.extend(found.unreadable_logs);
     }
     Ok(scan)
 }
@@ -489,14 +508,19 @@ pub fn stamp_size(root: &Path, bytes: u64) -> Res<()> {
 /// published since, each adding its own and keeping the sum. Builds that
 /// add at the same moment can lose each other's additions, so it is an
 /// estimate, low if anything; the next `stats` or `gc` measures again.
-pub fn add_to_size(root: &Path, published: u64) -> Res<u64> {
+///
+/// `None` when no size has been measured yet: counting from nothing would
+/// make a large store look small.
+pub fn add_to_size(root: &Path, published: u64) -> Res<Option<u64>> {
     let stamp = size_stamp(root);
-    let known: u64 = fs::read_to_string(&stamp).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+    let Some(known) = fs::read_to_string(&stamp).ok().and_then(|text| text.trim().parse::<u64>().ok()) else {
+        return Ok(None);
+    };
     let bytes = known + published;
     if published > 0 {
         stamp_size(root, bytes)?;
     }
-    Ok(bytes)
+    Ok(Some(bytes))
 }
 
 #[cfg(test)]
@@ -530,6 +554,7 @@ mod tests {
                 logs: vec![Log { path: PathBuf::from("/s/v1/m/used/x.keys"), uses }],
             }],
             other_formats: Vec::new(),
+            unreadable_logs: Vec::new(),
         }
     }
 
@@ -662,19 +687,22 @@ mod tests {
         if fs::read(&log).is_ok() {
             return; // run as root: nothing is unreadable
         }
-        let err = scan(&root).unwrap_err().to_string();
-        assert!(err.contains("use log") && err.contains("not known"), "{err}");
+        let scan = scan(&root).unwrap();
+        assert_eq!(scan.unreadable_logs.len(), 1, "{:?}", scan.unreadable_logs);
+        assert_eq!(scan.unreadable_logs[0].0, log);
     }
 
     #[test]
     fn a_build_adds_to_the_size_and_never_walks() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("cache");
-        assert_eq!(add_to_size(&root, 0).unwrap(), 0);
-        assert!(!size_stamp(&root).exists(), "nothing added, nothing written");
-        assert_eq!(add_to_size(&root, 100).unwrap(), 100);
-        assert_eq!(add_to_size(&root, 50).unwrap(), 150);
+        // Never measured: not known, and nothing written that would pass for
+        // a measurement.
+        assert_eq!(add_to_size(&root, 100).unwrap(), None);
+        assert!(!size_stamp(&root).exists());
         stamp_size(&root, 1000).unwrap();
-        assert_eq!(add_to_size(&root, 1).unwrap(), 1001);
+        assert_eq!(add_to_size(&root, 0).unwrap(), Some(1000));
+        assert_eq!(add_to_size(&root, 100).unwrap(), Some(1100));
+        assert_eq!(add_to_size(&root, 50).unwrap(), Some(1150));
     }
 }
