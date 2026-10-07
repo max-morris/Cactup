@@ -247,6 +247,16 @@ impl Store {
         // The temporary file's own name goes when `temp` is dropped.
     }
 
+    /// Remove the entry of `key`, which audit mode has shown to be wrong
+    /// (§18.8): the next publish of the key can put the right one there.
+    pub fn remove(&self, key: &str) -> Res<()> {
+        let path = self.entry_path(key).with_context(|| format!("\"{key}\" is not a key"))?;
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e).with_context(|| format!("Failed to remove {}", path.display())),
+            _ => Ok(()),
+        }
+    }
+
     /// Restore the object of `key` to `object`, where the compile would
     /// have written it, if the store has a valid entry for it (§18.7,
     /// "Restoring"). On a miss nothing is left at `object` that was not
@@ -704,7 +714,7 @@ mod tests {
         let edits: [(&str, &dyn Fn(String) -> String); 5] = [
             // Another cactup's key label: its parts digest to another key
             // under this one's, which is not damage.
-            ("another label", &|h| h.replacen("label = \"key-4\"\n", "label = \"key-2\"\n", 1)),
+            ("another label", &|h| h.replacen("label = \"key-5\"\n", "label = \"key-2\"\n", 1)),
             ("a field more", &|h| h.replacen("format = 1\n", "format = 1\nextra = 2\n", 1)),
             ("a field more in the parts", &|h| h.replacen("[parts]\n", "[parts]\nextra = \"x\"\n", 1)),
             ("a field more about it", &|h| h.replacen("[about]\n", "[about]\nextra = \"x\"\n", 1)),

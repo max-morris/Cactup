@@ -942,9 +942,65 @@ Non-blocking points left open, for the start of M1b:
   "Text file busy"; the new command runs it; 60 runs of the unit tests at
   32 threads, no failure.
 
+### M1b, round 1 (on `58fba3e`): B BLOCKED; A did not report
+
+Reviewer A was cut off by the account's usage limit before reporting;
+a fresh reviewer A takes round 2 with the full brief. Reviewer B checked
+the dependency file on a hit (byte for byte, gcc, g++, clang, clang++, six
+flag spellings), audit mode's wrong hit, decision 5 across a UTF-8 and a
+C session, `-Werror` through the preprocessor run, a stop signal during a
+miss; all sound. The tests were green. Blocking:
+
+1. (B) A wrong hit across locales: `-fexec-charset=ASCII//TRANSLIT`
+   follows the locale (`cafe` in UTF-8, `caf?` in C), the locale trial
+   compiles without charset flags, so the locale left the key; a C session
+   was served a UTF-8 session's object, and audit mode called it a wrong
+   hit. *Fixed: a compile with `-finput-charset=`/`-fexec-charset=` keeps
+   the locale in its key (`Compile::charset`); key label `key-5`; a
+   two-session test, which fails on `58fba3e`.*
+2. (B) A miss could lose the compiler's messages: the threads passing them
+   on were given two seconds after the compiler ended, also while they
+   were still writing to a slow terminal (175 KB said, 128 KB arrived).
+   *Fixed: reading and writing are separate threads; only the reading
+   waits for the streams to close (two seconds, for a process the
+   compiler started that keeps one open, which now has its own reason);
+   the writing is waited for to the end. A slow-reader test, which loses
+   bytes on `58fba3e`.*
+3. (B) The dependency file of a hit was mode `0600` (`tempfile`'s), where
+   the compiler's is `0666` less the umask; make silently skips a `.d` it
+   cannot read, so in a group-shared configuration another user's build
+   would lose that object's header dependencies. *Fixed: the temporary
+   file is created `0666` and left to the umask and default ACL; the test
+   compares modes, and fails on `58fba3e`.*
+
+Non-blocking points taken: the last `-MF` is used, `-MF -` is declined;
+audit's second compile is not shown again; a wrong entry is removed and
+the fresh object published in its place; the closing line counts audited
+hits whose compile now fails; messages are rewritten only where a path
+begins (a unit test); spec §18.8 names the temporary files a signal can
+leave; tests for a failing compile through the pass-through and for
+`relocate = false`; `interpreter_command` reads a `#!` line as the kernel
+does (a carriage return stays, a relative interpreter is a path from the
+working directory, the first line is read as bytes).
+
+Not taken, for Max (below): the advice for debuggers. A relocated object
+records its compile directory as `./configs/@config/scratch` and its
+source directories relative to it, so a debugger resolves its sources to
+`./configs/@config/scratch/./arrangements/...`; the one-line gdb
+`substitute-path` the docs gave probably does not work, and this host has
+no debugger to find one that does. The docs now point at
+`build-cache-relocate no` for a build meant for debugging.
+
 ## Decisions
 
-All of them, answered, are in `DECISIONS.md`. Decision 3's check came
+All of them, answered, are in `DECISIONS.md`. **Open, for Max (M1b):**
+should the path map name the tree with absolute placeholders (say
+`/cactup-root/` and `/cactup-root/configs/@config/`) instead of `./`?
+Then objects would record absolute, if fictitious, paths, and one
+`set substitute-path /cactup-root /path/to/Cactus` would let gdb find every
+source; with `./`, the paths are relative to a recorded compile directory
+and no simple recipe is known. It changes the design choice of 2026-10-01
+("objects then name files as `./arrangements/...`"), hence the question. Decision 3's check came
 back on 2026-10-02 from qbd: a site-built GCC whose specs file adds an
 rpath in a link section and changes nothing else, so the refinement for
 specs files is needed and is taken into M1a. A Spack-built GCC is still

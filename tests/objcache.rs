@@ -1461,11 +1461,15 @@ fn a_hit_writes_the_dependency_file_the_compile_would_have() {
             let _ = fs::remove_file(&unit.object);
             unit.wrapped(compiler, &flags, &lib);
             let compiled = fs::read(depfile).unwrap();
+            let mode = fs::metadata(depfile).unwrap().permissions().mode();
             fs::remove_file(&unit.object).unwrap();
             fs::remove_file(depfile).unwrap();
             unit.wrapped(compiler, &flags, &lib);
             assert_eq!(build.last_event()["outcome"].as_str(), Some("hit"), "{compiler} {target:?}");
             assert_eq!(text(&fs::read(depfile).unwrap()), text(&compiled), "{compiler} {target:?}");
+            // Readable as the compiler leaves it: make skips a `.d` it cannot
+            // read, and says nothing.
+            assert_eq!(fs::metadata(depfile).unwrap().permissions().mode(), mode, "{compiler} {target:?}");
             let dir = unit.object.parent().unwrap();
             let strays: Vec<_> =
                 fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().contains("cactup")).collect();
@@ -1525,4 +1529,107 @@ fn audit_mode_tells_a_wrong_hit() {
         .filter(|n| n.to_string_lossy().contains("cactup"))
         .collect();
     assert!(strays.is_empty(), "{strays:?}");
+}
+
+/// A compile that converts character sets keeps the locale in its key
+/// whatever the compiler's locale trial said: GCC's `ASCII//TRANSLIT`
+/// follows the locale (`cafe` in a UTF-8 one, `caf?` in C), and the trial
+/// compiles without such flags.
+#[test]
+fn a_charset_conversion_keeps_the_locale_in_the_key() {
+    if !have("gcc") {
+        eprintln!("skipped: no GCC on this host");
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let build = Build::new("record").serving("serve", &shared.join("store"));
+    let source = build.config.join("build/Thorn/translit.c");
+    fs::write(&source, "const char *word = \"caf\u{e9}\";\n").unwrap();
+    let object = build.config.join("build/Thorn/translit.c.o");
+    let compile = |locale: &str| {
+        let cwd = build.config.join("scratch");
+        let args = ["-O2", "-fexec-charset=ASCII//TRANSLIT", "-c", "-o", object.to_str().unwrap(), source.to_str().unwrap()];
+        let out = build.wrap("gcc", &args).current_dir(&cwd).env("PWD", &cwd).env("LC_ALL", locale).output().unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        (build.last_event(), fs::read(&object).unwrap())
+    };
+    let (first, utf8) = compile("C.UTF-8");
+    assert_eq!(first["published"].as_bool(), Some(true), "{first}");
+    let (second, c) = compile("C");
+    assert_eq!(second["outcome"].as_str(), Some("miss"), "the C session was served the UTF-8 session's object: {second}");
+    assert_ne!(utf8, c, "the two locales were meant to compile differently here");
+}
+
+/// A compile whose output comes through the wrapper (a serving build's
+/// miss) delivers every byte of it, also to a reader slower than the
+/// compiler, and a failing one fails as it does without the cache.
+#[test]
+fn a_serving_compile_delivers_all_it_says_and_fails_as_it_would() {
+    if !have("gcc") {
+        eprintln!("skipped: no GCC on this host");
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let build = Build::new("record").serving("serve", &shared.join("store"));
+    let source = build.config.join("build/Thorn/noisy.c");
+    let noisy: String = (0..1500).map(|i| format!("static int unused_{i};\n")).collect();
+    fs::write(&source, noisy).unwrap();
+    let object = build.config.join("build/Thorn/noisy.c.o");
+    let cwd = build.config.join("scratch");
+    let args = ["-Wall", "-c", "-o", object.to_str().unwrap(), source.to_str().unwrap()];
+    let plain = Command::new("gcc").args(args).current_dir(&cwd).output().unwrap();
+    assert!(plain.stderr.len() > 100_000, "{}", plain.stderr.len());
+    let mut child = build.wrap("gcc", &args).current_dir(&cwd).env("PWD", &cwd).stderr(Stdio::piped()).spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut said = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        // A reader slower than the compiler: well past the wait for the
+        // compiler's streams to close.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        match std::io::Read::read(&mut stderr, &mut buf).unwrap() {
+            0 => break,
+            n => said.extend_from_slice(&buf[..n]),
+        }
+    }
+    assert!(child.wait().unwrap().success());
+    assert_eq!(said.len(), plain.stderr.len(), "the wrapper lost some of what the compiler said");
+
+    // A compile that fails: its status and its words, and nothing stored.
+    fs::write(&source, "int broken(void) { return undeclared; }\n").unwrap();
+    let failed = build.wrap("gcc", &args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+    let reference = Command::new("gcc").args(args).current_dir(&cwd).output().unwrap();
+    assert_eq!(failed.status.code(), reference.status.code());
+    assert_eq!(text(&failed.stderr), text(&reference.stderr));
+    let event = build.last_event();
+    assert_eq!((event["outcome"].as_str(), event["published"].as_bool()), (Some("miss"), None), "{event}");
+}
+
+/// With `relocate = false` (knob `build-cache-relocate no`), keys and
+/// compiles keep the installation's paths: nothing is added to the compile,
+/// and the object is a plain compile's.
+#[test]
+fn a_build_that_does_not_relocate_compiles_as_written() {
+    if !have("gcc") {
+        eprintln!("skipped: no GCC on this host");
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let lib = shared.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let build = Build::new("record").serving("serve", &shared.join("store"));
+    let conf = fs::read_to_string(build.conf()).unwrap().replace("relocate = true", "relocate = false");
+    fs::write(build.conf(), conf).unwrap();
+    let unit = Unit::new(&build, "c", &lib);
+    unit.wrapped("gcc", &["-O2", "-g"], &lib);
+    let event = build.last_event();
+    assert_eq!((event["relocatable"].as_bool(), event["published"].as_bool()), (Some(false), Some(true)), "{event}");
+    let served = fs::read(&unit.object).unwrap();
+    let args = unit.args(&["-O2", "-g"], &lib);
+    let cwd = build.config.join("scratch");
+    assert!(Command::new("gcc").args(&args).current_dir(&cwd).env("PWD", &cwd).status().unwrap().success());
+    assert_eq!(fs::read(&unit.object).unwrap(), served, "the compile was changed");
 }

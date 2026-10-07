@@ -701,8 +701,11 @@ pub(crate) fn script_command(
     vars: &VarSet,
     cwd: &Path,
 ) -> Res<Command> {
-    let script_text = fs::read_to_string(script).unwrap_or_default();
-    let inner = interpreter_command(&script_text, &shell_quote(&script.display().to_string()));
+    // The first line is all that is read, as bytes: the rest of a script
+    // need not be text.
+    let head = fs::read(script).unwrap_or_default();
+    let first = head.split(|b| *b == b'\n').next().unwrap_or_default();
+    let inner = interpreter_command(&String::from_utf8_lossy(first), &shell_quote(&script.display().to_string()));
     let mut cmd = match universe {
         None => {
             let mut c = Command::new("/bin/sh");
@@ -731,11 +734,20 @@ pub(crate) fn script_command(
 /// would give it (whatever follows the interpreter on that line, as one
 /// word), before the script; `/bin/sh` for a script without one.
 fn interpreter_command(text: &str, quoted: &str) -> String {
-    let line = text.strip_prefix("#!").map(|rest| rest.lines().next().unwrap_or_default().trim());
+    // The kernel's reading: spaces and tabs around the line, and between the
+    // interpreter and its one argument, are dropped; nothing else is (a
+    // carriage return stays, and fails as it always did). A relative
+    // interpreter is found from the working directory, not by `PATH`.
+    let blank = [' ', '\t'];
+    let line = text.strip_prefix("#!").map(|rest| rest.split('\n').next().unwrap_or_default().trim_matches(blank));
+    let interpreter = |name: &str| match name.contains('/') {
+        true => shell_quote(name),
+        false => shell_quote(&format!("./{name}")),
+    };
     match line.filter(|line| !line.is_empty()) {
-        Some(line) => match line.split_once([' ', '\t']) {
-            Some((interpreter, arg)) => format!("{} {} {quoted}", shell_quote(interpreter), shell_quote(arg.trim())),
-            None => format!("{} {quoted}", shell_quote(line)),
+        Some(line) => match line.split_once(blank) {
+            Some((name, arg)) => format!("{} {} {quoted}", interpreter(name), shell_quote(arg.trim_matches(blank))),
+            None => format!("{} {quoted}", interpreter(line)),
         },
         None => format!("/bin/sh {quoted}"),
     }
@@ -1512,6 +1524,10 @@ mod tests {
         assert_eq!(interpreter_command("#!/usr/bin/env bash -x\n", q), "'/usr/bin/env' 'bash -x' '/w/run-script'");
         assert_eq!(interpreter_command("echo\n", q), "/bin/sh '/w/run-script'");
         assert_eq!(interpreter_command("#!\n", q), "/bin/sh '/w/run-script'");
+        // As the kernel has it: a carriage return is part of the name, and a
+        // relative interpreter is a path from here.
+        assert_eq!(interpreter_command("#!/bin/sh\r\n", q), "'/bin/sh\r' '/w/run-script'");
+        assert_eq!(interpreter_command("#!bash\n", q), "'./bash' '/w/run-script'");
     }
 
     /// A script this process still holds open for writing — as a child that

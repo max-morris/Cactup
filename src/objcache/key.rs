@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, ErrorKind, Read as _};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -142,10 +143,13 @@ impl PathMap {
     /// the map knows, wherever it stands, as a token that
     /// [`messages_for_this_build`] turns back into this build's directory.
     pub fn messages_for_the_store(&self, text: &[u8]) -> Vec<u8> {
+        // Only where a path begins: `/x/w/Cactus/` is not `/w/Cactus/`.
+        let in_a_path = |byte: u8| byte.is_ascii_alphanumeric() || b"._-+~@/".contains(&byte);
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         while at < text.len() {
-            match self.from_to.iter().find(|(from, _)| text[at..].starts_with(from)) {
+            let begins = at == 0 || !in_a_path(text[at - 1]);
+            match self.from_to.iter().find(|(from, _)| begins && text[at..].starts_with(from)) {
                 Some((from, to)) => {
                     out.extend_from_slice(if *to == CONFIG_NAME { CONFIG_TOKEN } else { ROOT_TOKEN });
                     at += from.len();
@@ -219,7 +223,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-4";
+pub const KEY_LABEL: &str = "key-5";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -263,9 +267,11 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     // reader for, "which compiler" is the reason worth giving, not whichever
     // of its flags the GCC reader trips over first.
     let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
-    // The locale only where the compiler's trial says it can matter (§18.8).
-    let environment = environment::digest(!compiler.locale_neutral)?;
     let compile = compile::parse(&argv[1..])?;
+    // The locale only where the compiler's trial says it can matter, and
+    // wherever the compile converts character sets: the trial does not, and
+    // a conversion such as `ASCII//TRANSLIT` follows the locale (§18.8).
+    let environment = environment::digest(!compiler.locale_neutral || compile.charset)?;
     if compiler.family == Family::Clang && compile.forced_include {
         // Clang takes `<file>.pch` or `<file>.gch` in place of a file given
         // with `-include`, and its `-E` does not say so.
@@ -337,12 +343,16 @@ fn depend_flags(compile: &Compile) -> Res<Option<((tempfile::TempPath, PathBuf),
         return Ok(None);
     }
     let named = |flag: &str| compile.depend.iter().any(|arg| arg == flag);
-    let at = compile.depend.iter().position(|arg| arg == "-MF").context("a dependency file without -MF")?;
+    // The last `-MF` is the one the compiler writes.
+    let at = compile.depend.iter().rposition(|arg| arg == "-MF").context("a dependency file without -MF")?;
     let real = PathBuf::from(&compile.depend[at + 1]);
     let dir = real.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = real.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    // Created as the compiler creates the file (`0666`, less the umask, and
+    // what a default ACL adds): the preprocessor writes into it in place.
     let temp = tempfile::Builder::new()
         .prefix(&format!(".{name}.cactup-"))
+        .permissions(std::fs::Permissions::from_mode(0o666))
         .tempfile_in(dir)
         .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?
         .into_temp_path();
@@ -887,8 +897,36 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "da66c6a2232c1c48f13dafe9c7e867c5e10e9a4b473dafa0ced2f001cb23cbc3");
+        assert_eq!(parts.key(), "f8ac93a68a8d8e316472e78ee11e6d694384a157e89aac8d14e2465bacdc781c");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "./", "./configs/@config/"]);
+    }
+
+    /// Messages keep the map's directories as tokens where a path begins,
+    /// and only there, and come back as this build's.
+    #[test]
+    fn messages_travel_with_the_tree_they_name() {
+        let map = map(&[("/w/Cactus/configs/sim/", CONFIG_NAME), ("/w/Cactus/", ROOT_NAME)]);
+        let said = b"/w/Cactus/arrangements/A/T/src/a.c:3: warning: x\nIn file included from /w/Cactus/configs/sim/bindings/h.h,\n/x/w/Cactus/y and '/w/Cactus/z'\n";
+        let stored = map.messages_for_the_store(said);
+        assert_eq!(
+            String::from_utf8_lossy(&stored),
+            "@CACTUP_ROOT@/arrangements/A/T/src/a.c:3: warning: x\nIn file included from @CACTUP_CONFIG@/bindings/h.h,\n/x/w/Cactus/y and '@CACTUP_ROOT@/z'\n"
+        );
+        let conf = BuildConf {
+            mode: Mode::Serve,
+            cactup: PathBuf::from("/c"),
+            config_dir: PathBuf::from("/v/Cactus/configs/other"),
+            cactus_root: PathBuf::from("/v/Cactus"),
+            machine: "m".into(),
+            universe: None,
+            build_env_digest: String::new(),
+            store: PathBuf::from("/s"),
+            relocate: true,
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&messages_for_this_build(&conf, &stored)),
+            "/v/Cactus/arrangements/A/T/src/a.c:3: warning: x\nIn file included from /v/Cactus/configs/other/bindings/h.h,\n/x/w/Cactus/y and '/v/Cactus/z'\n"
+        );
     }
 
     #[test]

@@ -334,7 +334,8 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     };
     // The file that was identified is the file that runs.
     let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.clone());
-    let (ran, compile_ms) = timed(|| run(job, argv, identified.as_deref(), &extra, publishing));
+    let streams = if publishing { Output::PassOn } else { Output::Inherit };
+    let (ran, compile_ms) = timed(|| run(job, argv, identified.as_deref(), &extra, streams));
     let Some((status, captured)) = ran else {
         drop(audited);
         leave_to(job, conf, cc_dir, "the compiler cannot be started directly, so the recipe's shell runs it")
@@ -357,10 +358,19 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     }
     drop(audited);
 
+    // An entry audit mode has shown to be wrong goes, and the fresh object
+    // takes its place.
+    let wrong = event.audit.as_deref() == Some("wrong hit");
+    if wrong
+        && let (Ok(store), Some(key)) = (&store, &event.key)
+        && let Err(e) = store.remove(key)
+    {
+        event.store = Some(format!("the wrong entry could not be removed: {e:#}"));
+    }
     if let (Ok(store), Ok(keyed), Some(captured)) = (&store, &keyed, &captured)
         && status.success()
         && stable == Some(true)
-        && event.outcome.as_deref() != Some("hit")
+        && (event.outcome.as_deref() != Some("hit") || wrong)
     {
         let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event));
         event.publish_ms = publish_ms;
@@ -404,7 +414,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
     if std::fs::rename(object, &first).is_err() {
         return "not deterministic";
     }
-    match run(job, argv, identified, extra, true) {
+    match run(job, argv, identified, extra, Output::Swallow) {
         Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => "wrong hit",
         Some((again, _)) if again.success() => "not deterministic",
         // The second compile failed or could not run: the first object is
@@ -419,6 +429,9 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
 /// Publish the object of a compile that succeeded and whose key held, with
 /// the messages it wrote (§18.7, §18.8).
 fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event) -> Result<Published, String> {
+    if captured.kept_open {
+        return Err("a process the compiler started kept its output open, so not all of it could be stored".to_owned());
+    }
     if captured.overflow {
         return Err("the compiler said too much to store".to_owned());
     }
@@ -599,11 +612,33 @@ struct Captured {
     stderr: Vec<u8>,
     /// More than [`MESSAGES_CAP`] of one of them: not all of it was kept.
     overflow: bool,
+    /// A process the compiler started still held one of them open when the
+    /// compiler had ended: what it says later is not in here.
+    kept_open: bool,
 }
 
-/// Pass what `from` says on to `to` as it comes, and keep a copy of up to
-/// [`MESSAGES_CAP`] bytes of it.
-fn pass_on_and_keep(mut from: impl Read + Send + 'static, mut to: impl Write + Send + 'static) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+/// What becomes of a compile's stdout and stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// The recipe's own, inherited: nothing passes through this process.
+    Inherit,
+    /// Through this process, passed on as it comes and kept (§18.8).
+    PassOn,
+    /// Through this process and kept, not passed on: a compile audit mode
+    /// runs a second time, whose messages were shown the first time.
+    Swallow,
+}
+
+/// A piece of a stream for [`write_out`], or the word to stop.
+enum Piece {
+    Bytes(Vec<u8>),
+    Stop,
+}
+
+/// Read `from` to its end, handing each piece to `to` as it comes and
+/// keeping a copy of up to [`MESSAGES_CAP`] bytes. Reading never waits for
+/// writing: a slow terminal holds up [`write_out`], not this.
+fn read_and_keep(mut from: impl Read + Send + 'static, to: std::sync::mpsc::Sender<Piece>) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
     std::thread::spawn(move || {
         let (mut kept, mut overflow) = (Vec::new(), false);
         let mut buf = vec![0u8; 64 * 1024];
@@ -612,7 +647,7 @@ fn pass_on_and_keep(mut from: impl Read + Send + 'static, mut to: impl Write + S
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
-            let _ = to.write_all(&buf[..n]).and_then(|()| to.flush());
+            let _ = to.send(Piece::Bytes(buf[..n].to_vec()));
             match kept.len() + n <= MESSAGES_CAP {
                 true => kept.extend_from_slice(&buf[..n]),
                 false => overflow = true,
@@ -622,14 +657,60 @@ fn pass_on_and_keep(mut from: impl Read + Send + 'static, mut to: impl Write + S
     })
 }
 
+/// Write every piece that comes to `to`, until told to stop or until no
+/// more can come.
+fn write_out(mut to: impl Write + Send + 'static, pieces: std::sync::mpsc::Receiver<Piece>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(Piece::Bytes(bytes)) = pieces.recv() {
+            let _ = to.write_all(&bytes).and_then(|()| to.flush());
+        }
+    })
+}
+
+/// One of the compiler's streams on its way through this process.
+struct Passing {
+    reader: std::thread::JoinHandle<(Vec<u8>, bool)>,
+    writer: Option<std::thread::JoinHandle<()>>,
+    stop: std::sync::mpsc::Sender<Piece>,
+}
+
+impl Passing {
+    fn new(from: impl Read + Send + 'static, to: impl Write + Send + 'static, pass_on: bool) -> Self {
+        let (stop, pieces) = std::sync::mpsc::channel();
+        let reader = read_and_keep(from, stop.clone());
+        let writer = pass_on.then(|| write_out(to, pieces));
+        Self { reader, writer, stop }
+    }
+
+    /// Once the compiler has ended: what was read by `deadline` (the stream
+    /// closes when the compiler ends, unless something it started keeps it
+    /// open, which is not waited out), all of it written out first, however
+    /// long that takes, as the compiler's own writes would have. `None`:
+    /// the stream was still open at the deadline.
+    fn finish(self, deadline: Instant) -> Option<(Vec<u8>, bool)> {
+        while !self.reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let read = match self.reader.is_finished() {
+            true => self.reader.join().ok(),
+            false => None,
+        };
+        let _ = self.stop.send(Piece::Stop);
+        if let Some(writer) = self.writer {
+            let _ = writer.join();
+        }
+        read
+    }
+}
+
 /// Have the stop signals passed on to the compiler (see [`run`]): once per
 /// process, however many compiles it runs (audit mode may run two).
 static HANDLERS: OnceLock<bool> = OnceLock::new();
 
 /// Run the compiler as a child and wait for it, passing on every signal
 /// that asks this process to stop. `extra` goes after the recipe's
-/// arguments; with `capture`, the compiler's stdout and stderr come through
-/// this process, which passes them on and keeps them (§18.8).
+/// arguments; `output` says whether the compiler's stdout and stderr come
+/// through this process, to be kept (§18.8).
 ///
 /// `make` signals the recipe it started, not that recipe's children, so a
 /// wrapper that just died would leave the compiler running — and writing
@@ -649,7 +730,7 @@ static HANDLERS: OnceLock<bool> = OnceLock::new();
 /// `None`: the compiler could not be started this way, and nothing has
 /// run. The recipe's shell may still know how (a keyword such as `time`, a
 /// function, a script without an interpreter line).
-fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], capture: bool) -> Option<(ExitStatus, Option<Captured>)> {
+fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], output: Output) -> Option<(ExitStatus, Option<Captured>)> {
     // The build script's self-test has checked that this can be read here.
     let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
@@ -690,7 +771,7 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStrin
     // cannot be started here.
     let full: Vec<OsString> = argv.iter().chain(extra).cloned().collect();
     let mut command = direct(&full, identified);
-    if capture {
+    if output != Output::Inherit {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
     PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
@@ -712,8 +793,11 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStrin
         0 => {}
         signal => pass_on(signal),
     }
+    let pass_on = output == Output::PassOn;
     let passing = match (child.stdout.take(), child.stderr.take()) {
-        (Some(stdout), Some(stderr)) => Some((pass_on_and_keep(stdout, std::io::stdout()), pass_on_and_keep(stderr, std::io::stderr()))),
+        (Some(stdout), Some(stderr)) => {
+            Some((Passing::new(stdout, std::io::stdout(), pass_on), Passing::new(stderr, std::io::stderr(), pass_on)))
+        }
         _ => None,
     };
 
@@ -723,22 +807,12 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStrin
             // The pid is free to be someone else's from here on.
             CHILD.store(0, Ordering::SeqCst);
             PHASE.store(AFTER_COMPILE, Ordering::SeqCst);
-            // What the compiler said, once its streams close: they do when
-            // it ends, unless something it started keeps them open, which
-            // is not waited out.
             let captured = passing.map(|(stdout, stderr)| {
                 let deadline = Instant::now() + std::time::Duration::from_secs(2);
-                let joined = |handle: std::thread::JoinHandle<(Vec<u8>, bool)>| {
-                    while !handle.is_finished() && Instant::now() < deadline {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                    match handle.is_finished() {
-                        true => handle.join().unwrap_or_default(),
-                        false => (Vec::new(), true),
-                    }
-                };
-                let ((stdout, over_out), (stderr, over_err)) = (joined(stdout), joined(stderr));
-                Captured { stdout, stderr, overflow: over_out || over_err }
+                let (stdout, stderr) = (stdout.finish(deadline), stderr.finish(deadline));
+                let kept_open = stdout.is_none() || stderr.is_none();
+                let ((stdout, over_out), (stderr, over_err)) = (stdout.unwrap_or_default(), stderr.unwrap_or_default());
+                Captured { stdout, stderr, overflow: over_out || over_err, kept_open }
             });
             Some((status, captured))
         }

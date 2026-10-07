@@ -4816,7 +4816,7 @@ A key is a digest that two compiles share only when they would produce the
 same object (rule 1). `objcache::key` builds it from six parts, each a
 SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
 so that two builds can be compared part by part. The six digests are
-combined under a label (`key::KEY_LABEL`, now `key-4`), and **any change
+combined under a label (`key::KEY_LABEL`, now `key-5`), and **any change
 that can make one key stand for another object changes the label**:
 something the key now covers that it did not, anything cactup adds to or
 changes in a compile it runs, a change in how a part is digested. Several
@@ -5273,8 +5273,11 @@ key restored onto the object's name, the compiler's stored messages written
 to the wrapper's stdout and stderr, and the wrapper exits 0. No compiler
 runs. If the recipe asked for a dependency file (§18.5's `-MD` form), that
 same preprocessor run writes it: it is given the compile's dependency flags
-with `-MF` pointing at a temporary file beside the real one, and
-`-MQ <object>` when the compile names no target (which is the target GCC
+with the last `-MF` (the one the compiler writes) pointing at a temporary
+file beside the real one, created as the compiler creates its output (`0666`
+less the umask, plus a directory's default ACL: make skips a `.d` file it
+cannot read, and says nothing), and `-MQ <object>` when the compile names
+no target (which is the target GCC
 and Clang give a compile with `-o` and no `-MT`/`-MQ`; tried with both,
 spaces, `$` and `#` in the name included). On a hit the file is renamed
 onto the real name, on a miss it is removed: the compile writes its own.
@@ -5285,13 +5288,20 @@ map.
 made with the map (§18.5): the stored object must be the object the key
 describes. **This is where the cache changes a real compile**, and where a
 build with the cache serving stops being byte for byte one without it: the
-objects name their sources `./arrangements/…`, and a debugger needs to be
-told where `./` is (`set substitute-path` in gdb, or the knob below). The
-compiler's stdout and stderr go through the wrapper, which passes each on
-as it comes and keeps a copy (up to 4 MiB of each; beyond that the result
-is not published). If the compile succeeded and the key still holds
-afterward (§18.5), the object and the messages are published (§18.7); then
-the wrapper ends as the compiler ended.
+objects name their sources `./arrangements/…`, relative to a compile
+directory recorded as `./configs/@config/scratch`, and a debugger does not
+find them on its own (the knob below turns the map off for a build meant
+for debugging; how to point a debugger at a relocated object is still
+open). The compiler's stdout and stderr go through the wrapper: one thread
+per stream reads it and keeps a copy (up to 4 MiB of each; beyond that the
+result is not published), another passes it on as it comes. When the
+compiler has ended, the reading waits up to two seconds for the streams to
+close (a process the compiler started may keep one open; then the result
+is not published either), and the passing on is waited for to the end,
+however slow the terminal is, as the compiler's own writes would have
+been. If the compile succeeded and the key still holds afterward (§18.5),
+the object and the messages are published (§18.7); then the wrapper ends
+as the compiler ended.
 
 **Messages are stored as the map would have them.** A compiler's
 diagnostics name files by the paths the compile used, which the path map
@@ -5315,7 +5325,11 @@ string, a wide string and an identifier is compiled with debug information
 twice: in the session's locale, and in the C locale (`LC_ALL=C`, `LANG`,
 `LANGUAGE` and the other `LC_*` removed). A compiler that makes one object
 of both is keyed without `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE` and
-`LC_MESSAGES`; one that does not keeps them. Each session is compared with
+`LC_MESSAGES`; one that does not keeps them. A compile that converts
+character sets (`-finput-charset=`, `-fexec-charset=`) keeps them whatever
+the trial said: the trial compiles without such flags, and a conversion can
+follow the locale (GCC's `ASCII//TRANSLIT` gives `cafe` in a UTF-8 locale
+and `caf?` in C, from the same text). Each session is compared with
 the same reference, so two sessions whose compilers pass are interchangeable
 for that source. The remembered identity depends on those variables, so a
 session in another locale tries again.
@@ -5325,19 +5339,25 @@ to a temporary file beside the object, and the compile runs anyway, exactly
 as on a miss. If the two objects are the same bytes, the hit was right. If
 not, the fresh object is moved aside and the compile runs a second time: if
 its object equals the first, the stored entry is wrong (**a wrong hit**:
-the key failed to describe the compile); if not, the compiler is not
-deterministic for this compile. Either way the build keeps the fresh
-object, the event log records it, and the build's closing line counts it.
+the key failed to describe the compile), and it is removed and the fresh
+object published in its place; if not, the compiler is not deterministic
+for this compile. A hit whose compile now fails is counted as well. Either
+way the build keeps the fresh object, the second compile's messages are not
+shown again, the event log records it, and the build's closing line counts
+it.
 Audit mode is the acceptance gate for serving: a full build in two
 installations with no wrong hit.
 
 **What a build says.** The build step ends with one line, as in record
 mode: `cactup: build cache: N compiles, H served from the cache, P
-published` (and in audit mode, `A checked, W wrong hits, D not
-deterministic`).
+published` (and in audit mode, `A checked against the cache (W wrong hits,
+F failing to compile, D not deterministic)`).
 
 **Signals.** A hit runs no compiler: a stop signal during it ends the
 wrapper by that signal, which leaves at most the temporary files the store
-leaves when a restore is cut short (§18.7). A miss forwards signals to the
+leaves when a restore is cut short (§18.7), and the key's temporary
+dependency file (`.<name>.cactup-…` beside the real one). A signal after
+an audited compile can leave the temporary copies audit mode keeps beside
+the object, under the same kind of name. `make` reads neither. A miss forwards signals to the
 compiler as record mode does; a signal during the check and the publishing
 after it ends the wrapper on the spot (§18.5, §18.7).

@@ -73,6 +73,10 @@ pub struct Compile {
     /// `-march=native` or one of its like: the compiler targets the
     /// processor it finds itself running on.
     pub native: bool,
+    /// `-finput-charset=` or `-fexec-charset=`: character set conversion,
+    /// which can follow the locale (`ASCII//TRANSLIT` does), so the locale
+    /// stays in the key whatever the compiler's locale trial said.
+    pub charset: bool,
     /// The flags that have the compiler write a dependency file while it
     /// compiles (`-MD -MP -MF <file> -MT <target>`), as given. They change
     /// neither the object nor the preprocessed text, so they are not in the
@@ -194,7 +198,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     let mut compile_only = false;
     let (mut source, mut output) = (None, None);
     let (mut preprocess, mut keyed, mut depend) = (Vec::new(), Vec::new(), Vec::new());
-    let (mut level, mut openmp, mut forced_include, mut native) = (0, false, false, false);
+    let (mut level, mut openmp, mut forced_include, mut native, mut charset) = (0, false, false, false, false);
     let mut depend_file = false;
 
     while let Some(arg) = args.next() {
@@ -223,9 +227,15 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             // A dependency file written while compiling.
             depend.push(arg.clone());
         } else if let Some((name, value)) = ["-MF", "-MT", "-MQ"].iter().find_map(|name| Some((name, value_of(name).transpose()?))) {
+            let value = value?;
+            // Dependencies on standard output would be in the preprocessed
+            // text the key reads.
+            if *name == "-MF" && value == "-" {
+                return Err("the dependency file is standard output".to_owned());
+            }
             depend_file |= *name == "-MF";
             depend.push(OsString::from(name));
-            depend.push(value?);
+            depend.push(value);
         } else if NOT_CACHED.iter().any(|prefix| flag.starts_with(prefix)) {
             return Err(format!("{flag} is a flag the cache does not follow"));
         } else if let Some(value) = ["-I", "-D", "-U"].iter().find_map(|name| value_of(name).transpose()) {
@@ -259,6 +269,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             // be the host's, and which flag wins is the compiler's to say.
             // (`-mcpu=native+nosve`: with extensions it is still the host.)
             native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| flag.starts_with(native));
+            charset |= ["-finput-charset=", "-fexec-charset="].iter().any(|charset| flag.starts_with(charset));
             preprocess.push(arg.clone());
             keyed.push(arg.clone());
         } else {
@@ -286,7 +297,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     if !depend.is_empty() && !depend_file {
         return Err("a dependency file is asked for without -MF to say where".to_owned());
     }
-    Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, depend })
+    Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend })
 }
 
 #[cfg(test)]

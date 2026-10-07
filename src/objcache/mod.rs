@@ -330,9 +330,10 @@ impl Staged {
                 count("\"published\":true")
             ),
             Mode::Audit => format!(
-                "\"cactup: build cache: $cactup_cc_count compiles, {} checked against the cache ({} wrong hits, {} not deterministic), {} published\"",
+                "\"cactup: build cache: $cactup_cc_count compiles, {} checked against the cache ({} wrong hits, {} failing to compile, {} not deterministic), {} published\"",
                 count("\"outcome\":\"hit\""),
                 count("\"audit\":\"wrong hit\""),
+                count("\"audit\":\"compile failed\""),
                 count("\"audit\":\"not deterministic\""),
                 count("\"published\":true")
             ),
@@ -550,7 +551,7 @@ mod tests {
         fs::create_dir_all(&cc_dir).unwrap();
         for (mode, line) in [
             (Mode::Serve, "cactup: build cache: 4 compiles, 2 served from the cache, 1 published"),
-            (Mode::Audit, "cactup: build cache: 4 compiles, 2 checked against the cache (0 wrong hits, 0 not deterministic), 1 published"),
+            (Mode::Audit, "cactup: build cache: 4 compiles, 2 checked against the cache (0 wrong hits, 0 failing to compile, 0 not deterministic), 1 published"),
         ] {
             let _ = fs::remove_file(events_path(&cc_dir));
             let staged = Staged { mode, cactup: PathBuf::from("/bin/true"), cc_dir: cc_dir.clone(), config_dir: config_dir.clone() };

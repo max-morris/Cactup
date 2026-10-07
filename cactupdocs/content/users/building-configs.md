@@ -563,16 +563,16 @@ cactup: build cache: 357 compiles, 307 served from the cache, 0 published
 share objects, a compile run through the cache records its source files as
 `./arrangements/<Arrangement>/<Thorn>/src/...` and the configuration's
 files as `./configs/@config/...`, not by their full paths. Warnings and
-errors still name the real files. To debug such an object, tell the
-debugger where `./` is, for instance in gdb:
+errors still name the real files, but a debugger cannot find the sources
+of such an object on its own. For a build you mean to debug, turn this off
+for that build:
 
-```
-set substitute-path ./ /path/to/Cactus/
+```sh
+cactup -K build-cache=serve -K build-cache-relocate=no build myconfig
 ```
 
-or turn this off with `cactup knob build-cache-relocate no`: objects then
-keep the full paths, and are shared only between builds of the same
-configuration.
+Its objects then keep the full paths, and are shared only between builds of
+the same configuration.
 
 With `record`, each compile of a Cactus source file adds one line to
 `cc/events.jsonl` in the build attempt's directory (see "Where build output
