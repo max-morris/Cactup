@@ -27,6 +27,7 @@ hostname    = "skx.supermuc.lrz.de"
 # basedir.
 install-home    = "@ENV(HOME)@"
 simulation-home = "@ENV(SCRATCH)@/simulations"
+build-cache-home = "@ENV(SCRATCH)@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "@ENV(SCRATCH)@/tests"
 

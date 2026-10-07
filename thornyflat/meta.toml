@@ -17,6 +17,7 @@ hostname    = "tf.hpc.wvu.edu"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/users/@USER@/scratch"
 simulation-home = "/users/@USER@/scratch/simulations"
+build-cache-home = "/users/@USER@/scratch/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/users/@USER@/scratch/tests"
 

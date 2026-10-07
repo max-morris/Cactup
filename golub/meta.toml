@@ -20,6 +20,7 @@ hostname    = "cc-login.campuscluster.illinois.edu"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/home/@USER@"
 simulation-home = "/scratch/users/@USER@/simulations"
+build-cache-home = "/scratch/users/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/scratch/users/@USER@/tests"
 

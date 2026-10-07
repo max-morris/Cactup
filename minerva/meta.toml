@@ -19,6 +19,7 @@ hostname    = "minerva01.aei.mpg.de"
 # scratchbasedir.
 install-home    = "/home/@USER@"
 simulation-home = "/scratch/@USER@/simulations"
+build-cache-home = "/scratch/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/scratch/@USER@/tests"
 scratch-home    = "/tmp"

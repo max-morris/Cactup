@@ -31,3 +31,20 @@ generation below says what to change to bring it forward.
 
 The first published generation. Overlays add `mdb-generation = 1` under
 `[cactup]`.
+
+## Generation 2
+
+What changed: `[paths]` has a new key, `build-cache-home`: where cactup's
+build cache keeps its objects when the user's `build-cache-dir` knob does
+not say. Several machines set it, to a directory beside their
+`simulation-home` on scratch or work storage (a cache written from compute
+nodes does not belong in a home quota). A binary of generation 1 does not
+know the key, so the MDB that uses it is generation 2.
+
+Bringing an overlay forward (`~/.cactup/machines/<name>/meta.toml`):
+
+1. Under `[cactup]`, change `mdb-generation = 1` to `mdb-generation = 2`.
+2. Nothing else is required. Optionally, add `build-cache-home` under
+   `[paths]` (an absolute path; `@USER@` and `@ENV(NAME)@` work as in
+   `simulation-home`) if this machine's build cache should live somewhere
+   other than `$CACTUP_HOME/cache`.
