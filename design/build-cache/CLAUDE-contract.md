@@ -47,7 +47,8 @@ are spec §18.1; hold them when touching it:
 - **Hermetic (D11).** The wrapper and the probe read the attempt's frozen
   `cc/config.toml`, the configuration directory named in it, and the store
   whose root is named in it — never the global DB, the registry, the MDB,
-  or knobs. Cache knobs (`build-cache`, `build-cache-dir`) are resolved in
+  or knobs. Cache knobs (`build-cache`, `build-cache-home`, and `install-home` under
+  it) are resolved in
   `prepare` and frozen.
 - **No eviction on its own**, and no flock: the store is lock-free
   (`objcache::store`: an entry is written whole under a temporary name,

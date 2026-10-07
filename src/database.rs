@@ -89,9 +89,15 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("update-url", crate::update::validate_update_url),
     KnobSpec::maintenance("mdb-url", crate::update::validate_mdb_url),
     KnobSpec::maintenance("build-cache", crate::objcache::validate_mode),
-    KnobSpec::maintenance("build-cache-dir", crate::objcache::validate_store_root),
     KnobSpec::maintenance("build-cache-relocate", crate::objcache::validate_relocate),
     KnobSpec::maintenance("build-cache-size", crate::objcache::validate_size),
+    // One knob per `[paths]` key (`mdb::meta::path_fields`), over the
+    // machine's value (§4.2, §5).
+    KnobSpec::maintenance("install-home", |v| crate::mdb::meta::validate_path_knob("install-home", v)),
+    KnobSpec::maintenance("simulation-home", |v| crate::mdb::meta::validate_path_knob("simulation-home", v)),
+    KnobSpec::maintenance("test-home", |v| crate::mdb::meta::validate_path_knob("test-home", v)),
+    KnobSpec::maintenance("scratch-home", |v| crate::mdb::meta::validate_path_knob("scratch-home", v)),
+    KnobSpec::maintenance("build-cache-home", |v| crate::mdb::meta::validate_path_knob("build-cache-home", v)),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.
@@ -331,9 +337,6 @@ impl Database {
             "update-url" => Some(crate::update::DEFAULT_UPDATE_URL.to_owned()),
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
             "build-cache" => Some(crate::objcache::Mode::Off.name().to_owned()),
-            // None of its own: a machine's build-cache-home, else
-            // `$CACTUP_HOME/cache` (`objcache::store_root`).
-            "build-cache-dir" => None,
             "build-cache-relocate" => Some("yes".to_owned()),
             _ => None,
         }

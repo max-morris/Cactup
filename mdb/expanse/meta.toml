@@ -17,7 +17,6 @@ hostname    = "login.expanse.sdsc.edu"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/home/@USER@"
 simulation-home = "/expanse/lustre/scratch/@USER@/temp_project/simulations"
-build-cache-home = "/expanse/lustre/scratch/@USER@/temp_project/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/expanse/lustre/scratch/@USER@/temp_project/tests"
 

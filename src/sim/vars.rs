@@ -368,6 +368,9 @@ pub struct RestartVarsInput<'a> {
     pub run_universe: Option<&'a str>,
     /// `sim run --debug` (§8.4): `@RUNDEBUG@` = 1.
     pub debug: bool,
+    /// `@SCRATCH_HOME@`: the `scratch-home` knob over the machine's,
+    /// resolved (`Meta::paths_for`); empty when neither is set.
+    pub scratch_home: &'a str,
 }
 
 /// The §8.5 topology block — one variable per flag. Shared by sim restarts
@@ -463,10 +466,7 @@ pub fn assemble(input: &RestartVarsInput) -> Res<VarSet> {
     v.set("CONFIGURATION", sim.meta.configuration.as_str());
     v.set("SIM_HOME", input.sim_home.display().to_string());
     v.set("SIMULATION_DIR", sim.dir.display().to_string());
-    v.set(
-        "SCRATCH_HOME",
-        machine.meta.resolved_paths()?.scratch_home.unwrap_or_default(),
-    );
+    v.set("SCRATCH_HOME", input.scratch_home);
     v.set("ALIAS", sim.meta.alias.as_str());
     // A distribution build names its versioned binary, so the job keeps the
     // exact build it was submitted with across a self-update.
@@ -1028,6 +1028,7 @@ mod tests {
             email: "a@example.org",
             run_universe: None,
             debug: false,
+            scratch_home: "/scratch/alice",
         })
         .unwrap();
 

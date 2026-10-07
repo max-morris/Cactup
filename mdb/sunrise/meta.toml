@@ -18,7 +18,6 @@ hostname    = "sol-login.fysik.su.se"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/cfs/home/@USER@/ET-Release-06-24"
 simulation-home = "/cfs/data/@USER@/simulations"
-build-cache-home = "/cfs/data/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/cfs/data/@USER@/tests"
 

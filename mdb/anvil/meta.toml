@@ -17,7 +17,6 @@ hostname    = "anvil.rcac.purdue.edu"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/home/@USER@"
 simulation-home = "/anvil/scratch/@USER@"
-build-cache-home = "/anvil/scratch/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/anvil/scratch/@USER@/tests"
 

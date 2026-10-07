@@ -125,9 +125,9 @@ pub struct Paths {
     /// Exposed to scripts as @SCRATCH_HOME@ (empty when unset); otherwise
     /// unused by cactup itself.
     pub scratch_home: Option<String>,
-    /// Where the build cache keeps its objects (§18.7), unless the user's
-    /// `build-cache-dir` knob says otherwise; fallback `$CACTUP_HOME/cache`.
-    /// Large and written from compute nodes: scratch or work, not home.
+    /// Where the build cache keeps its objects (§18.7); fallback
+    /// `<install-home>/.build-cache`, beside the installations whose builds
+    /// fill it. For a site whose builds belong somewhere else.
     pub build_cache_home: Option<String>,
 }
 
@@ -1125,41 +1125,78 @@ impl Meta {
     /// an entry must load and validate on hosts that lack the machine's
     /// environment (the dev-MDB sweep, `machine show`) — so an unset or
     /// empty env var errors here, at the moment a path is actually needed.
+    /// The machine's values only, every key: what one user's knobs make of
+    /// them is [`Meta::paths_for`].
     pub fn resolved_paths(&self) -> Res<Paths> {
-        let mut vars = VarSet::new();
-        vars.set("USER", super::whoami());
         let mut paths = self.paths.clone();
-        for (key, path) in [
-            ("install-home", &mut paths.install_home),
-            ("simulation-home", &mut paths.simulation_home),
-            ("test-home", &mut paths.test_home),
-            ("scratch-home", &mut paths.scratch_home),
-        ] {
-            if let Some(value) = path {
-                *value = vars
-                    .substitute(value, Syntax::Plain)
-                    .with_context(|| format!("in [paths].{key}"))?;
+        for (key, field) in path_fields(&mut paths) {
+            if let Some(value) = field {
+                *value = resolve_path(key, value)?;
             }
         }
-        // Not the build cache's place: resolved apart, so that it can never
-        // fail what does not use it (`resolved_build_cache_home`).
-        paths.build_cache_home = None;
         Ok(paths)
     }
 
-    /// `[paths] build-cache-home`, resolved as the other paths are (`@USER@`,
-    /// `@ENV(NAME)@`) but alone: a value that cannot be resolved here is the
-    /// build cache's to deal with (it falls back, §18.7), never a reason to
-    /// fail a build, a simulation or an install.
-    pub fn resolved_build_cache_home(&self) -> Res<Option<String>> {
-        let mut vars = VarSet::new();
-        vars.set("USER", super::whoami());
-        self.paths
-            .build_cache_home
-            .as_deref()
-            .map(|value| vars.substitute(value, Syntax::Plain).context("in [paths].build-cache-home"))
-            .transpose()
+    /// One `[paths]` key as it applies to the user whose knobs `db` holds
+    /// (§4.2, §5): the knob of the same name (read leniently,
+    /// a value that is not an absolute path is no value), else the
+    /// machine's value, resolved. A machine value a knob overrides is not
+    /// resolved at all, so an `@ENV(…)@` unset here costs nothing. Login node
+    /// only (D11): what a compute-node run needs is frozen before it.
+    pub fn path_for(&self, db: &crate::database::Database, key: &str) -> Res<Option<String>> {
+        if let Some(value) = db.knob(key).filter(|value| std::path::Path::new(value).is_absolute()) {
+            return Ok(Some(value.to_owned()));
+        }
+        let mut paths = self.paths.clone();
+        let field = path_fields(&mut paths)
+            .into_iter()
+            .find_map(|(name, field)| (name == key).then(|| field.take()))
+            .with_context(|| format!("no [paths] key \"{key}\""))?;
+        field.map(|value| resolve_path(key, &value)).transpose()
     }
+
+    /// Every `[paths]` key by [`Meta::path_for`], but the build cache's
+    /// place, which is left `None`: that one is the cache's to resolve and
+    /// fall back from (`objcache::store_root`), never a reason to fail a
+    /// build, a simulation or an install.
+    pub fn paths_for(&self, db: &crate::database::Database) -> Res<Paths> {
+        let mut paths = Paths::default();
+        for (key, field) in path_fields(&mut paths) {
+            if key != "build-cache-home" {
+                *field = self.path_for(db, key)?;
+            }
+        }
+        Ok(paths)
+    }
+}
+
+/// Each `[paths]` key with its field, by the name of the knob that
+/// overrides it for one user (§4.2, §5).
+fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 5] {
+    [
+        ("install-home", &mut paths.install_home),
+        ("simulation-home", &mut paths.simulation_home),
+        ("test-home", &mut paths.test_home),
+        ("scratch-home", &mut paths.scratch_home),
+        ("build-cache-home", &mut paths.build_cache_home),
+    ]
+}
+
+/// `@USER@` and `@ENV(NAME)@` in one `[paths]` value.
+fn resolve_path(key: &str, value: &str) -> Res<String> {
+    let mut vars = VarSet::new();
+    vars.set("USER", super::whoami());
+    vars.substitute(value, Syntax::Plain).with_context(|| format!("in [paths].{key}"))
+}
+
+/// Knob validator (§5) for the path knobs, one per `[paths]` key: an absolute
+/// path, since every command reads it from whatever directory it runs in.
+pub fn validate_path_knob(key: &str, value: &str) -> Res<String> {
+    let value = value.trim();
+    if !std::path::Path::new(value).is_absolute() || value.contains(['\n', '\0']) {
+        bail!("invalid {key} \"{value}\": it must be an absolute path");
+    }
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]
@@ -1644,6 +1681,39 @@ mod tests {
     }
 
     #[test]
+    fn a_path_knob_overrides_the_machine() {
+        let user = super::super::whoami();
+        let meta: Meta = toml::from_str(&MIKE.replacen(
+            "simulation-home",
+            "scratch-home = \"@ENV(CACTUP_SURELY_UNSET_VARIABLE)@/scratch\"\nsimulation-home",
+            1,
+        ))
+        .unwrap();
+        let mut db = crate::database::Database::new();
+        // Without knobs, the machine's values, and its unresolvable one
+        // fails the lot.
+        assert!(meta.paths_for(&db).is_err());
+        assert_eq!(meta.path_for(&db, "install-home").unwrap(), None);
+        // A knob stands in for the machine's value, which is then never
+        // resolved; the other keys keep the machine's.
+        db.set_knob("scratch-home", "/fast/mine".to_owned());
+        db.set_knob("install-home", "/work/mine/cacti".to_owned());
+        let paths = meta.paths_for(&db).unwrap();
+        assert_eq!(paths.scratch_home.as_deref(), Some("/fast/mine"));
+        assert_eq!(paths.install_home.as_deref(), Some("/work/mine/cacti"));
+        assert_eq!(paths.simulation_home, Some(format!("/work/{user}/simulations")));
+        // A value that is no absolute path is no value.
+        db.set_knob("simulation-home", "relative/sims".to_owned());
+        assert_eq!(meta.paths_for(&db).unwrap().simulation_home, Some(format!("/work/{user}/simulations")));
+        // Every path knob is a standard knob, and only takes absolute paths.
+        for (key, _) in path_fields(&mut Paths::default()) {
+            assert!(crate::database::knob_spec(key).is_some(), "{key} is a standard knob");
+            assert!(crate::database::knob_stored_form(key, "relative").is_err());
+            assert_eq!(crate::database::knob_stored_form(key, " /abs/x ").unwrap(), "/abs/x");
+        }
+    }
+
+    #[test]
     fn paths_resolution_only_touches_paths() {
         let meta = mike();
         let user = super::super::whoami();
@@ -1661,8 +1731,9 @@ mod tests {
             1,
         ))
         .unwrap();
+        let db = crate::database::Database::new();
         assert_eq!(
-            with_cache.resolved_build_cache_home().unwrap().as_deref(),
+            with_cache.path_for(&db, "build-cache-home").unwrap().as_deref(),
             Some(format!("/work/{user}/cactup-cache").as_str())
         );
         // One that cannot be resolved here fails the cache's question, and
@@ -1673,8 +1744,8 @@ mod tests {
             1,
         ))
         .unwrap();
-        assert!(unresolvable.resolved_paths().is_ok());
-        assert!(unresolvable.resolved_build_cache_home().is_err());
+        assert!(unresolvable.paths_for(&db).is_ok());
+        assert!(unresolvable.path_for(&db, "build-cache-home").is_err());
         // …and scheduler templates keep theirs for use-time substitution.
         assert_eq!(meta.scheduler.submit.as_deref(), Some("sbatch @SCRIPTFILE@ 2>&1"));
     }

@@ -51,7 +51,7 @@ the last milestone, for when that host is not at hand.
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | review **passed** at `6b8efb1` (four rounds); the full audit build on that commit is running |
-| M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | **implemented**; review next |
+| M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | review round 3 next (two rounds blocked) |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1180,6 +1180,26 @@ and `$CACTUP_HOME/cache`; set on 19 machines beside their per-user
 `GENERATIONS.md` with the overlay recipe), all in one commit as
 `CLAUDE.md` asks.
 
+### M1c, round 2 (on `feffae1`): BLOCKED by both, on the same one
+
+1. (both) `build-cache-home` was resolved with the other `[paths]`, all
+   or nothing, so a machine whose value named an `@ENV(…)@` unset on the
+   host failed every build, simulation and install there, cache off or
+   not. *Fixed in `4e51d03`: resolved alone and leniently, a warning and
+   the next place.*
+2. (B) A use log whose `stat` failed after it was listed was skipped, not
+   counted as unreadable. *Fixed in `4e51d03`: it stops the walk too.*
+
+Non-blocking points taken: `stats` and `verify` do not fail on
+unreadable logs (only `gc` must).
+
+Then, before round 3, Max moved the cache (decision 12): its default is
+`.cactup-build-cache` in the install home, beside the installations, and
+every `[paths]` key has a knob of the same name (`build-cache-home`
+replaces `build-cache-dir`). The 19 machines' `build-cache-home` and MDB
+generation 2 are gone again (`mdb/` is as it was before `feffae1`); the
+schema keeps the optional key, which no machine uses.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1198,5 +1218,6 @@ unchecked.
 
 ## Next step
 
-M1b (serving), as `HANDOFF-M1.md` lays it out, starting with the
-non-blocking points left open by M1a's round 3.
+M1c's review round 3, on the commit that moves the cache beside the
+installations (decision 12). Then record M1b's full audit build on
+`6b8efb1` (running), and after M1, gfortran.

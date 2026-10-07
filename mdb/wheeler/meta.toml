@@ -23,7 +23,6 @@ hostname    = "wheeler.caltech.edu"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/home/@USER@"
 simulation-home = "/panfs/ds09/sxs/@USER@/simulations"
-build-cache-home = "/panfs/ds09/sxs/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/panfs/ds09/sxs/@USER@/tests"
 

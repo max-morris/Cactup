@@ -224,9 +224,9 @@ pub(crate) enum Commands {
     ///                        compiled; audit: serve, but compile anyway
     ///                        and check that every served object is the
     ///                        same; record: only measure, changing nothing.
-    ///   build-cache-dir      where cached objects are kept, as an absolute
-    ///                        path (default: the cache directory in
-    ///                        cactup's home).
+    ///   build-cache-home     where cached objects are kept, as an absolute
+    ///                        path (default: .cactup-build-cache beside
+    ///                        your installations, in the install-home).
     ///   build-cache-relocate yes (the default): objects record their
     ///                        sources as /cactup-root/arrangements/...,
     ///                        so every installation can share them; no:
@@ -707,8 +707,8 @@ pub(crate) enum CacheCommand {
     },
     /// Say what the build cache holds: objects, sizes, and how recently they were used
     ///
-    /// Walks the cache directory (the build-cache-dir knob; by default the
-    /// cache directory in cactup's home) and reports, for each machine, how
+    /// Walks the cache directory (the build-cache-home knob; by default
+    /// .cactup-build-cache beside your installations) and reports, for each machine, how
     /// many objects it keeps and their size, how many of them builds used
     /// lately, and anything left over from an interrupted build.
     #[clap(verbatim_doc_comment)]

@@ -71,4 +71,5 @@ knobs with `@KNOB(name)@`; see [Running Simulations](../users/running-simulation
 - `<installation root>/Cactus/configs/<name>/cactup-config.toml` — a config's
   build metadata, including the per-repo source state it was built from, which
   is what lets a later `cactup build` notice edited or refetched sources.
-- `simulation-home` / `test-home` — simulation and test-suite output roots, set per machine (fallbacks `~/.cactup/simulations/` and `~/.cactup/tests/`).
+- `simulation-home` / `test-home` — simulation and test-suite output roots, set per machine or by the knobs of the same names (fallbacks `~/.cactup/simulations/` and `~/.cactup/tests/`).
+- `<install-home>/.cactup-build-cache/` — the build cache's objects, beside the installations (the `build-cache-home` knob moves it; `cactup cache stats` says where it is).

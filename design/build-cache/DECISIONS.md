@@ -162,7 +162,26 @@ Asked as seven questions with options; the answers, in Max's numbering.
     over it, `$CACTUP_HOME/cache` is the fallback. Set per machine beside a
     per-user `simulation-home` on scratch or work (not on machines whose
     `simulation-home` is a home tree or another person's directory). MDB
-    generation 2.
+    generation 2. *Superseded the same day by decision 12.*
+
+12. **The cache lives beside the installations; every path has a knob**
+    (2026-10-07, replacing decision 11's placement). Max: "the build cache
+    should be a sibling of wherever the build objects are already placed
+    anyway, since some level of build i/o is already expected there. Would
+    that be the installation directory? That should be more robust than a
+    scratch dir. The build-cache directory in these existing MDBs should be
+    migrated to somewhere akin to what the installation directory is
+    already set to. Furthermore, I think these default directories should
+    all have knob overrides, not just the build cache dir." So: the store's
+    default is `<install-home>/.cactup-build-cache` (the `install-home`
+    fallback included, `~/.cactup/cacti`); no machine in the MDB sets
+    `build-cache-home`, which stays an optional `[paths]` key for a site
+    whose builds belong elsewhere, so MDB generation 2 is dropped (no
+    machine uses the key; the schema gaining it is not breaking). Each
+    `[paths]` key has a maintenance knob of the same name, an absolute path
+    that wins over the machine's value (`install-home`, `simulation-home`,
+    `test-home`, `scratch-home`, `build-cache-home`); `build-cache-dir` is
+    gone, `build-cache-home` replaces it.
 
 ## Still open
 

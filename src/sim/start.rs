@@ -382,6 +382,7 @@ fn submit_impl(
     }
 
     let identity = Identity::resolve(db, hostname_override);
+    let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
     let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
 
     for seg in 0..segments {
@@ -405,6 +406,7 @@ fn submit_impl(
             email: &identity.email,
             run_universe: run_uni_name,
             debug: false,
+            scratch_home: &scratch_home,
         })?;
         // The effective knobs, `-K` overlay included, frozen with the vars so the
         // compute node resolves @KNOB(…)@ without the DB (§5, D11).
@@ -588,6 +590,7 @@ fn run_interactive(
         .unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
 
     let identity = Identity::resolve(db, hostname_override);
+    let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
     // A fresh interactive run always gets a new id; reaping (above) cleared any
     // stale active restart.
     let id = restart::next_id(&sim.dir)?;
@@ -607,6 +610,7 @@ fn run_interactive(
         email: &identity.email,
         run_universe: run_uni_name,
         debug: args.debug,
+        scratch_home: &scratch_home,
     })?;
     vset.set_knobs(db.knob_snapshot());
     // As in submit: a parfile that cannot substitute fails before any

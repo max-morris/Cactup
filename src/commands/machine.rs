@@ -398,6 +398,7 @@ fn print_summary(machine: &Machine) -> Res<()> {
         ("simulation-home", &paths.simulation_home),
         ("test-home", &paths.test_home),
         ("scratch-home", &paths.scratch_home),
+        ("build-cache-home", &paths.build_cache_home),
     ] {
         if let Some(value) = value {
             println!("  {label}: {value}");

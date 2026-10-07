@@ -114,17 +114,6 @@ pub fn validate_mode(value: &str) -> Res<String> {
     Ok(Mode::parse(value.trim())?.name().to_owned())
 }
 
-/// Knob validator (§5): `build-cache-dir`, the store's root, is an absolute
-/// path. Every build of the instance writes there, from whatever directory
-/// it runs in, so a relative one would mean something else to each.
-pub fn validate_store_root(value: &str) -> Res<String> {
-    let value = value.trim();
-    if !Path::new(value).is_absolute() || value.contains(['\n', '\0']) {
-        bail!("invalid build-cache-dir \"{value}\": it must be an absolute path");
-    }
-    Ok(value.to_owned())
-}
-
 /// Knob validator (§5): `build-cache-size`, a size (`200G`): above it, a
 /// serving build says so (§18.9).
 pub fn validate_size(value: &str) -> Res<String> {
@@ -154,20 +143,57 @@ pub fn relocate_from_db(db: &Database) -> bool {
     db.knob("build-cache-relocate") != Some("no")
 }
 
-/// Where the store is when the `build-cache-dir` knob is not set.
-pub fn default_store_root() -> PathBuf {
-    crate::CACTUP_ROOT.join("cache")
+/// The store's directory in an install home: beside the installations,
+/// whose builds already do their I/O there, and hidden, as no alias is.
+const STORE_NAME: &str = ".cactup-build-cache";
+
+/// Where the store is (§18.7), and what said so, for people to read.
+pub struct StoreRoot {
+    pub path: PathBuf,
+    pub from: String,
+    /// A place that could not be resolved on the way (an `@ENV(…)@` unset
+    /// here): passed over for the next, and said.
+    pub warnings: Vec<String>,
 }
 
-/// The store's root (§18.7): the user's `build-cache-dir` knob (read
-/// leniently like [`Mode::from_db`]: a value that is not an absolute path
-/// is no value), else the machine's `[paths] build-cache-home` (`machine_home`,
-/// already resolved), else `$CACTUP_HOME/cache`. Resolved on the login node
-/// only (D11): [`stage`] freezes it.
-pub fn store_root(db: &Database, machine_home: Option<&str>) -> PathBuf {
-    let knob = db.knob("build-cache-dir").filter(|value| Path::new(value).is_absolute());
-    let home = machine_home.filter(|home| Path::new(home).is_absolute());
-    knob.or(home).map_or_else(default_store_root, PathBuf::from)
+/// The store's root (§18.7): the `build-cache-home` knob, else the
+/// machine's `[paths] build-cache-home`, else `.cactup-build-cache` in the
+/// install home (the `install-home` knob, else the machine's, else
+/// `$CACTUP_HOME/cacti`). Knobs are read leniently like [`Mode::from_db`] (a
+/// value that is not an absolute path is no value), and a machine's place
+/// that cannot be resolved here is passed over with a warning, never a
+/// reason to fail the build. Resolved on the login node only (D11):
+/// [`stage`] freezes it.
+pub fn store_root(db: &Database, machine: Option<&crate::mdb::Machine>) -> StoreRoot {
+    let mut warnings = Vec::new();
+    for key in ["build-cache-home", "install-home"] {
+        let knob = db.knob(key).filter(|value| Path::new(value).is_absolute());
+        let (place, from) = match (knob, machine) {
+            (Some(knob), _) => (Ok(Some(knob.to_owned())), format!("the {key} knob")),
+            (None, Some(machine)) => (machine.meta.path_for(db, key), format!("machine {}'s {key}", machine.name)),
+            (None, None) => continue,
+        };
+        match place {
+            Ok(Some(place)) if Path::new(&place).is_absolute() => {
+                return match key {
+                    "install-home" => StoreRoot {
+                        path: Path::new(&place).join(STORE_NAME),
+                        from: format!("beside the installations, {from}"),
+                        warnings,
+                    },
+                    _ => StoreRoot { path: PathBuf::from(place), from, warnings },
+                };
+            }
+            Ok(Some(place)) => warnings.push(format!("{from} \"{place}\" is not an absolute path")),
+            Ok(None) => {}
+            Err(e) => warnings.push(format!("{e:#}")),
+        }
+    }
+    StoreRoot {
+        path: crate::CACTUP_ROOT.join("cacti").join(STORE_NAME),
+        from: "beside the installations, by default".to_owned(),
+        warnings,
+    }
 }
 
 /// One build's cache settings (§18.2), frozen by [`stage`] as
@@ -190,7 +216,7 @@ pub struct BuildConf {
     /// SHA-256 of the build-phase environment setup the build script runs:
     /// an edit to a machine's modules keys every object differently.
     pub build_env_digest: String,
-    /// The store's root (§18.7), from the `build-cache-dir` knob.
+    /// The store's root (§18.7, [`store_root`]).
     pub store: PathBuf,
     /// Are keys made with the path map where it holds (§18.8, knob
     /// `build-cache-relocate`)?
@@ -505,25 +531,52 @@ mod tests {
         assert!(validate_relocate("off").is_err());
     }
 
-    /// The user's knob, then the machine's place, then the default.
+    /// The knob, then the machine's place, then beside the installations.
     #[test]
-    fn the_store_root_is_the_knobs_then_the_machines_then_the_default() {
+    fn the_store_root_is_the_knobs_then_the_machines_then_the_install_homes() {
+        let mdb = crate::mdb::Mdb::with_roots(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"),
+            PathBuf::from("/nonexistent"),
+        );
+        let machine = |paths: &str| {
+            let mut machine = mdb.load("generic").unwrap();
+            machine.name = "m".to_owned();
+            machine.meta.paths = toml::from_str(paths).unwrap();
+            machine
+        };
         let mut db = Database::new();
-        assert_eq!(store_root(&db, None), default_store_root());
-        assert_eq!(store_root(&db, Some("/scratch/me/cactup-cache")), PathBuf::from("/scratch/me/cactup-cache"));
-        // A relative place is no place.
-        assert_eq!(store_root(&db, Some("scratch")), default_store_root());
-        db.set_knob("build-cache-dir", "/mine".to_owned());
-        assert_eq!(store_root(&db, Some("/scratch/me/cactup-cache")), PathBuf::from("/mine"));
-    }
-
-    #[test]
-    fn store_root_knob_accepts_absolute_paths_only() {
-        assert_eq!(validate_store_root(" /scratch/me/cache ").unwrap(), "/scratch/me/cache");
-        for bad in ["cache", "~/cache", "", "/a\nb"] {
-            let err = validate_store_root(bad).unwrap_err().to_string();
-            assert!(err.contains("must be an absolute path"), "{bad:?}: {err}");
-        }
+        let default = crate::CACTUP_ROOT.join("cacti").join(STORE_NAME);
+        let root = store_root(&db, None);
+        assert_eq!((root.path, root.warnings.len()), (default.clone(), 0));
+        assert_eq!(store_root(&db, Some(&machine(""))).path, default);
+        let installs = machine("install-home = \"/work/u\"");
+        let root = store_root(&db, Some(&installs));
+        assert_eq!(root.path, PathBuf::from("/work/u").join(STORE_NAME));
+        assert_eq!(root.from, "beside the installations, machine m's install-home");
+        let both = machine("install-home = \"/work/u\"\nbuild-cache-home = \"/project/u/cache\"");
+        assert_eq!(store_root(&db, Some(&both)).path, PathBuf::from("/project/u/cache"));
+        // A machine's place that cannot be resolved here is passed over,
+        // and said; so is one that is not an absolute path.
+        let unset = machine(
+            "install-home = \"/work/u\"\nbuild-cache-home = \"@ENV(CACTUP_SURELY_UNSET_VARIABLE)@/cache\"",
+        );
+        let root = store_root(&db, Some(&unset));
+        assert_eq!(root.path, PathBuf::from("/work/u").join(STORE_NAME));
+        assert!(root.warnings[0].contains("build-cache-home"), "{:?}", root.warnings);
+        let relative = machine("build-cache-home = \"cache\"");
+        let root = store_root(&db, Some(&relative));
+        assert_eq!(root.path, default);
+        assert!(root.warnings[0].contains("not an absolute path"), "{:?}", root.warnings);
+        // The install-home knob moves the default, the build-cache-home
+        // knob wins over everything; a relative knob is no knob.
+        db.set_knob("install-home", "/fast/u".to_owned());
+        assert_eq!(store_root(&db, Some(&installs)).path, PathBuf::from("/fast/u").join(STORE_NAME));
+        assert_eq!(store_root(&db, None).path, PathBuf::from("/fast/u").join(STORE_NAME));
+        db.set_knob("build-cache-home", "relative".to_owned());
+        assert_eq!(store_root(&db, Some(&both)).path, PathBuf::from("/project/u/cache"));
+        db.set_knob("build-cache-home", "/mine".to_owned());
+        let root = store_root(&db, Some(&both));
+        assert_eq!((root.path, root.from.as_str()), (PathBuf::from("/mine"), "the build-cache-home knob"));
     }
 
     #[test]

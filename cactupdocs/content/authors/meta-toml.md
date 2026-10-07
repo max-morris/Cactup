@@ -24,7 +24,6 @@ hostname = "example.hpc.edu"
 install-home = "/home/@USER@"
 simulation-home = "/scratch/@USER@/simulations"
 test-home = "/scratch/@USER@/tests"
-build-cache-home = "/scratch/@USER@/cactup-cache"   # where the build cache keeps objects
 
 [hardware]
 max-cpus-per-node = 128
@@ -72,6 +71,11 @@ mdb-generation = 1
 
 See [MDB Generations](mdb-generations.html) for what `mdb-generation` means
 and how to update a machine written for an older generation.
+
+A `[paths]` key may also be `build-cache-home`, where the build cache keeps
+its objects; no machine needs it, since the cache's default is beside the
+installations in `install-home`. Every `[paths]` key is a default for each
+user: a knob of the same name, an absolute path, wins over it.
 
 ## Detailed field reference
 
@@ -369,12 +373,15 @@ cactup knob queue default
 
 The standard knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, `email`,
 `wisdom-frequency` and `wisdom-kind` (`mail-type`, `user`, and `email` fall back to
-derived defaults when unset), plus seven that configure cactup itself
+derived defaults when unset), plus twelve that configure cactup itself
 rather than a job — `autoupdate`, `update-url` and `mdb-url` (see
-[Updating cactup](../users/updating.html)), and `build-cache`,
-`build-cache-dir`, `build-cache-relocate` and `build-cache-size` (see
-[Building Configs](../users/building-configs.html)); those seven are never
-recorded with a simulation. Users can also create
+[Updating cactup](../users/updating.html)), `build-cache`,
+`build-cache-relocate` and `build-cache-size` (see
+[Building Configs](../users/building-configs.html)), and one per `[paths]`
+key, `install-home`, `simulation-home`, `test-home`, `scratch-home` and
+`build-cache-home`, an absolute path that wins over the machine's value;
+those twelve are never recorded with a simulation as knobs (the paths a job
+needs are recorded as the paths they are). Users can also create
 **custom knobs**
 (`cactup knob -c my-name value`, removed with `cactup knob delete my-name`) and
 override any knob for one command with `-K name=value`.

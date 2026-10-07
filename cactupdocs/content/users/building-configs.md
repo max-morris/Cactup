@@ -659,20 +659,19 @@ unusual characters) the build goes ahead without it and says so in one line:
 cactup: build cache off for this build: <reason>
 ```
 
-Cached objects are kept where your machine's entry in the machine
-database puts them (`build-cache-home`: on clusters, scratch or work
-storage beside your simulations), else under `~/.cactup/cache` (or
-`$CACTUP_HOME/cache`), or wherever the `build-cache-dir` knob says, as an
-absolute path, which wins over both. `cactup cache stats` says where it is,
-and why there. Where that is scratch storage the site purges, the purge
-removes objects no build has used for a while, as `cactup cache gc` would:
-those compiles run again, nothing worse. Point `build-cache-dir` at storage
-that is not purged to keep old objects longer.
-Anyone who can write in that directory can put objects into your builds, so
-keep it your own.
+Cached objects are kept beside your installations, in
+`.cactup-build-cache` in the install home (your machine's `install-home`,
+else `~/.cactup/cacti`), where your builds already do their I/O. The
+`build-cache-home` knob, an absolute path, puts them somewhere else; so
+does a machine's `build-cache-home`, for a site whose builds belong
+elsewhere. `cactup cache stats` says where it is, and why there. Where that
+is storage the site purges, the purge removes objects no build has used for
+a while, as `cactup cache gc` would: those compiles run again, nothing
+worse. Anyone who can write in that directory can put objects into your
+builds, so keep it your own.
 
 ```sh
-cactup knob build-cache-dir /scratch/me/cactup-cache
+cactup knob build-cache-home /work/me/cactup-cache
 ```
 
 ### Looking after the cache
@@ -698,7 +697,7 @@ line, and removes nothing:
 cactup knob build-cache-size 200G
 ```
 
-Like the knobs that control updating, `build-cache`, `build-cache-dir`,
+Like the knobs that control updating, `build-cache`, `build-cache-home`,
 `build-cache-relocate` and `build-cache-size` describe your cactup
 installation rather than a job.
 

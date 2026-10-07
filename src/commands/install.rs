@@ -184,15 +184,15 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // can honor this machine's [paths].install-home.
     let machine = machine::ensure_local_machine(ctx)?;
 
-    // The install-location default honors the machine's [paths].install-home
-    // (§4.2) — @USER@/@ENV()@ resolved for this host — falling back to
-    // ~/.cactup/cacti when the machine omits it. Installs land under
-    // <install-home>/<alias>.
+    // The install-location default honors the install-home knob, else the
+    // machine's [paths].install-home (§4.2) — @USER@/@ENV()@ resolved for
+    // this host — falling back to ~/.cactup/cacti when neither says.
+    // Installs land under <install-home>/<alias>.
     let install_home_base = machine
         .meta
-        .resolved_paths()
+        .path_for(&database, "install-home")
         .ok()
-        .and_then(|paths| paths.install_home)
+        .flatten()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| cactup_root.join("cacti"));
     let install_prefix_default = |alias: &str| p2s(install_home_base.join(alias));
@@ -357,7 +357,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
     // Fix sim-home/test-home into installation.toml now, from the machine's
     // [paths] (§8.1, §11.5) — every later sim/test command resolves against
     // these, and they are set exactly once, at install time.
-    crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine, Some(&root))?;
+    crate::installation::Installation::new(&alias, &install_dir).ensure_meta(&machine, &database, Some(&root))?;
 
     let release_name = match &source {
         InstallSource::Release(release) => Some(release.name.clone()),

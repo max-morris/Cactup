@@ -78,6 +78,7 @@ fn assemble_test_vars(
     identity: &Identity,
     alias: &str,
     run_universe: Option<&str>,
+    scratch_home: &str,
 ) -> Res<VarSet> {
     let mut v = VarSet::new();
     set_topology_vars(&mut v, topo, name);
@@ -105,9 +106,10 @@ fn assemble_test_vars(
     v.set("EXECUTABLE", build::executable_path(cactus_root, &cfg.name).display().to_string());
     v.set("CONFIGURATION", cfg.name.as_str());
     v.set("SCRIPTFILE", run_dir.join("submit-script").display().to_string());
-    // Resolve @USER@/@ENV()@ (§4.2); the raw template would leak `@USER@`
-    // literally (single-pass substitution). Matches the sim path.
-    v.set("SCRATCH_HOME", machine.meta.resolved_paths()?.scratch_home.unwrap_or_default());
+    // Resolved by the caller (§4.2: the `scratch-home` knob over the
+    // machine's, `@USER@`/`@ENV()@` substituted); the raw template would leak
+    // `@USER@` literally (single-pass substitution). Matches the sim path.
+    v.set("SCRATCH_HOME", scratch_home);
     v.set("ALIAS", alias);
     v.set("CACTUP", crate::freeze::frozen_cactup());
 
@@ -358,6 +360,7 @@ fn start_impl(
         &identity,
         &inst.alias,
         run_uni_name,
+        &machine.meta.path_for(db, "scratch-home")?.unwrap_or_default(),
     )?;
     // Effective knobs, `-K` overlay included, frozen for the compute node (§5, D11).
     vset.set_knobs(db.knob_snapshot());

@@ -84,23 +84,17 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
 }
 
 /// The store's root, as a build on this machine would have it, and where
-/// that came from: the `build-cache-dir` knob, else the machine's
-/// `build-cache-home`, else the default.
+/// that came from (`objcache::store_root`).
 fn store_root(ctx: &Ctx) -> Res<(PathBuf, String)> {
     let db = ctx.db.read()?;
-    if db.knob("build-cache-dir").is_some_and(|dir| Path::new(dir).is_absolute()) {
-        return Ok((crate::objcache::store_root(&db, None), "the build-cache-dir knob".to_owned()));
-    }
-    // The machine is only asked for its place for the cache: a host it
-    // cannot resolve, or a place it cannot resolve here, is the default.
+    // The machine is only asked for its places: a host it cannot resolve
+    // leaves the knobs and the default.
     let machine = crate::commands::machine::resolve(ctx).ok();
-    let home = machine.as_ref().and_then(|machine| Some((machine.name.clone(), machine.meta.resolved_build_cache_home().ok()??)));
-    Ok(match home {
-        Some((name, home)) if Path::new(&home).is_absolute() => {
-            (PathBuf::from(home), format!("machine {name}'s build-cache-home"))
-        }
-        _ => (crate::objcache::default_store_root(), "the default".to_owned()),
-    })
+    let root = crate::objcache::store_root(&db, machine.as_ref());
+    for warning in &root.warnings {
+        println!("{} {warning}; looking further for the build cache", "warning:".yellow().bold());
+    }
+    Ok((root.path, root.from))
 }
 
 /// When, as people read it: so many days ago.
@@ -116,7 +110,7 @@ fn ago(now: SystemTime, then: SystemTime) -> String {
 /// `cactup cache stats` (§18.9).
 fn stats(root: &Path, from: &str) -> Res<()> {
     if !root.is_dir() {
-        println!("The build cache in {} is empty: nothing has been stored there yet.", root.display());
+        println!("The build cache in {} ({from}) is empty: nothing has been stored there yet.", root.display());
         return Ok(());
     }
     let scan = upkeep::scan(root)?;

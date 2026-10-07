@@ -875,20 +875,32 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   (with `@USER@` substituted) for run scripts that stage to fast scratch; it is
   otherwise unused by cactup itself. A machine that does not set it leaves
   `@SCRATCH_HOME@` empty.
-- **`build-cache-home`** (new, MDB generation 2) is where the build cache
-  keeps its objects (§18.7), unless the user's `build-cache-dir` knob says
-  otherwise; omitted → `$CACTUP_HOME/cache`. A serving build writes a
-  cold Einstein Toolkit's worth of objects (about half a gigabyte in some
-  three thousand files) there, from compute nodes too, so clusters set it
-  beside `simulation-home` on scratch or work storage (`build-cache-home =
-  "/scratch/@USER@/cactup-cache"`). `@USER@` and `@ENV(NAME)@` work as in
-  `simulation-home`; a per-user directory, since anyone who can write in a
-  store can put objects into every build that reads it. Unlike the other
-  paths it is resolved alone and leniently (`Meta::resolved_build_cache_home`):
-  a value that cannot be resolved (an `@ENV(…)@` unset) costs the cache its
-  machine's place, with one line, never a build, a simulation or an install.
-  A site that purges its scratch storage removes cold objects with its
-  purge: misses later, never a wrong object.
+- **`build-cache-home`** (optional) is where the build cache keeps its
+  objects (§18.7); omitted → `<install-home>/.cactup-build-cache`, beside the
+  installations (the `install-home` fallback applies, so
+  `~/.cactup/cacti/.cactup-build-cache`). A serving build writes a cold
+  Einstein Toolkit's worth of objects (about half a gigabyte in some three
+  thousand files) there, from compute nodes too; next to the installations is
+  where builds already do their I/O, and storage a site gave them is purged
+  less than scratch. No machine in the MDB sets it: the default follows
+  `install-home`. It is for a site whose builds belong somewhere else.
+  `@USER@` and `@ENV(NAME)@` work as in `simulation-home`; a per-user
+  directory, since anyone who can write in a store can put objects into
+  every build that reads it. Unlike the other paths it is resolved leniently
+  (`objcache::store_root`): a value that cannot be resolved (an `@ENV(…)@`
+  unset) is passed over for the next place with one line, never failing a
+  build, a simulation or an install. A purge of the store's storage costs
+  misses later, never a wrong object.
+- **Every `[paths]` key has a knob of the same name** (§5): `install-home`,
+  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`, an
+  absolute path that wins over the machine's value for the user who sets it
+  (`Meta::path_for`/`Meta::paths_for`; a machine value a knob overrides is
+  not resolved at all). They are read where the machine's are, on the login
+  node: `simulation-home` and `test-home` when an installation's homes are
+  fixed (install time, or `cactup use` backfilling them), `install-home` for
+  the install-prefix default and the build cache's place, `scratch-home`
+  when a restart's, a test's or a build's variables are assembled — so a
+  compute-node run sees the value frozen into its metadata (D11).
 - Thorn-toggle keys kept (D8, §7.5): `enabled-thorns`, `disabled-thorns`, and
   their `-default`/`-local` variants collapse to plain `enabled-thorns` /
   `disabled-thorns` arrays in TOML (the `-default`/`-local` split existed only
@@ -1777,11 +1789,17 @@ since what it serves is installed unasked; trailing `/` stripped; default
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
-And three maintenance knobs for the build cache (D15, §18): `build-cache`
+The path knobs, one per `[paths]` key (`install-home`, `simulation-home`,
+`test-home`, `scratch-home`, `build-cache-home`; §4.2), are maintenance knobs
+too: an absolute path each (validated; read leniently, so a value that is not
+one is no value), winning over the machine's value of that key for the user
+who sets it. Where a job needs one, it is frozen like the machine's would be.
+
+And maintenance knobs for the build cache (D15, §18): `build-cache`
 (`off`, the default, `record`, `serve` or `audit`; read leniently — garbage
-means `off`), `build-cache-dir` (the store's root, an absolute path;
-default `$CACTUP_HOME/cache`) and `build-cache-relocate` (`yes`, the
-default, or `no`: §18.8). They are not in the snapshot either, but a build does
+means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8) and
+`build-cache-size` (§18.9); the store's root is the path knob
+`build-cache-home` (below, §18.7). They are not in the snapshot either, but a build does
 depend on them, on a compute node included: `prepare` resolves them and
 freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
 that configures cactup rather than a value a job's templates read.
@@ -4569,8 +4587,7 @@ what they are without this section. Otherwise `prepare` writes
 cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
 directory and the Cactus root, what keys objects to their platform
 (§18.5): the machine, the build universe, and a SHA-256 of the build-phase
-environment setup; the store's root (§18.7), from the knob
-`build-cache-dir` (an absolute path; default `$CACTUP_HOME/cache`); and
+environment setup; the store's root (§18.7); and
 whether keys use the path map (§18.8, knob `build-cache-relocate`). If that
 cannot be written, the build goes on without the cache and says so.
 
@@ -5173,9 +5190,13 @@ write is a new file under a name of its own, and the one shared step is
 `link(2)`, atomic on all three (`objcache::store`).
 
 **Where.** `<root>/v1/<machine>/<first two hex digits of the key>/<key>`.
-The root is the user's knob `build-cache-dir` (an absolute path), else the
-machine's `[paths] build-cache-home` (§4.2: scratch or work storage, not a
-home quota), else `$CACTUP_HOME/cache`, resolved by `prepare` and frozen into
+The root is the user's knob `build-cache-home` (an absolute path), else the
+machine's `[paths] build-cache-home` (§4.2), else `.cactup-build-cache` in the
+install home (the `install-home` knob, else the machine's, else
+`~/.cactup/cacti`): beside the installations, whose builds already do their
+I/O there. A machine's place that cannot be resolved here is passed over for
+the next with a warning (`objcache::store_root`). It is resolved by `prepare`
+and frozen into
 `<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
 from there (§18.1 rule 6). `v1` is the entry format. A cactup with another
 format writes beside it and never reads it — no backward compatibility
@@ -5452,8 +5473,8 @@ reads into one, `<random>.times`, with a time on each line (`<key>
 <seconds>`), and removes the logs it folded, so the information outlives
 them and the directory stays small.
 
-**`cactup cache stats`** walks the store under the root
-`build-cache-dir` names and says, per machine: how many entries and how
+**`cactup cache stats`** walks the store under the root a build on this
+machine would use (and says which setting named it) and says, per machine: how many entries and how
 many bytes, the oldest and the newest publish, how many were used in the
 last 7 and 30 days, temporary files; and which directories hold another
 entry format (another version of cactup's: not walked, and to be removed

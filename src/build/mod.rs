@@ -1764,18 +1764,18 @@ fn prepare_with_cache(
     vars.set("USER", std::env::var("USER").unwrap_or_default());
     vars.set("SOURCEDIR", cactus_root.display().to_string());
     vars.set("CONFIGURATION", name);
-    // Resolve @USER@/@ENV()@ in scratch-home (§4.2) — the raw template would
-    // otherwise leak `@USER@` literally, since substitution is single-pass and
-    // never re-scans a spliced value. Matches the sim path (sim/vars.rs).
-    vars.set(
-        "SCRATCH_HOME",
-        machine.meta.resolved_paths()?.scratch_home.unwrap_or_default(),
-    );
     // Several machines' make commands / build universes reference
     // @ALLOCATION@ (e.g. mike's and Deep Bayou's `srun … singularity exec`
     // build wrappers); bind it from the allocation knob the way the sim path
     // does, empty when unset.
     let db = crate::database::Db::open().and_then(|db| db.read());
+    // Resolve @USER@/@ENV()@ in scratch-home (§4.2), the user's knob over
+    // the machine's — the raw template would otherwise leak `@USER@`
+    // literally, since substitution is single-pass and never re-scans a
+    // spliced value. Matches the sim path (sim/vars.rs).
+    let no_knobs = crate::database::Database::new();
+    let knobs = db.as_ref().unwrap_or(&no_knobs);
+    vars.set("SCRATCH_HOME", machine.meta.path_for(knobs, "scratch-home")?.unwrap_or_default());
     let allocation = db
         .as_ref()
         .map(|db| db.knob("allocation").unwrap_or("").to_owned())
@@ -1787,21 +1787,15 @@ fn prepare_with_cache(
         Some((mode, _)) => mode,
         None => db.as_ref().map(crate::objcache::Mode::from_db).unwrap_or_default(),
     };
-    // The machine's place for it; a path that cannot be resolved here (an
-    // `@ENV(…)@` unset) costs the machine's default, not the build.
-    let cache_home = match cache_mode {
-        crate::objcache::Mode::Off => None,
-        _ => match machine.meta.resolved_build_cache_home() {
-            Ok(home) => home,
-            Err(e) => {
-                println!("{} build cache: {e:#}; using the default place for it", "warning:".yellow().bold());
-                None
+    let cache_store = match cache_mode {
+        crate::objcache::Mode::Off => PathBuf::new(),
+        _ => {
+            let root = crate::objcache::store_root(knobs, Some(machine));
+            for warning in &root.warnings {
+                println!("{} build cache: {warning}; looking further for its place", "warning:".yellow().bold());
             }
-        },
-    };
-    let cache_store = match db.as_ref() {
-        Ok(db) => crate::objcache::store_root(db, cache_home.as_deref()),
-        Err(_) => cache_home.map_or_else(crate::objcache::default_store_root, PathBuf::from),
+            root.path
+        }
     };
     let cache_relocate = db.as_ref().map_or(true, crate::objcache::relocate_from_db);
     let cache_size_limit = db.as_ref().ok().and_then(crate::objcache::size_limit_from_db);
