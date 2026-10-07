@@ -4978,10 +4978,11 @@ compile ran with the Cactus root mapped to `/cactup-root/` and the
 configuration directory to `/cactup-root/configs/@config/`
 (`key::PathMap`), which is how a serving cache runs it (§18.8). The names
 are absolute (decision 8 in `design/build-cache/DECISIONS.md`): debug
-information then names every file by an absolute path, which one
-`set substitute-path /cactup-root /path/to/Cactus` in gdb turns into the
-real one, where a relative name would be taken as relative to the recorded
-compile directory.
+information then names every file by an absolute path, which gdb's
+`set substitute-path` turns into the real one (a rule for
+`/cactup-root/configs/@config` first, then one for `/cactup-root`), where a
+relative name would be taken as relative to the recorded compile
+directory.
 
 - The compiler is given `-ffile-prefix-map=<root>/=/cactup-root/` and then
   `-ffile-prefix-map=<config>/=/cactup-root/configs/@config/` for the preprocessor
@@ -5053,13 +5054,25 @@ nobody has to find out:
   by accident.
 - *A file changed and changed back* between the key and the check after the
   compile, with the compile reading the changed bytes in between, has its
-  keyed bytes again. The check also compares what each file looked like
-  when it was read (device, inode, size, modification and change time, of
-  the name and of what it leads to; not part of the key): user space cannot
-  set a change time back, so such a file fails the check. Left: a
-  filesystem whose change times are coarser than the edits, where a change
-  and a change back within one tick, to a file of the same size, would
-  pass.
+  keyed bytes again. The check also compares, for each file (not part of
+  the key): every entry its name resolves through, directories and
+  symlinks (followed as the kernel follows them), by device, inode and
+  birth time (where the filesystem keeps one; it tells a new entry from an
+  old one when ext4 hands the new one the old inode number at once, and
+  does not move when files are created inside a directory), a symlink also
+  by its change time and its target; and the file itself as the opened file is
+  (device, inode, size, modification and change time; taken after the
+  open, which on NFS revalidates what the client knows of it). User space
+  cannot set a change time back, and a symlink swapped and swapped back is
+  a new symlink, so a file rewritten or reached another way in between
+  fails the check. Left: a filesystem whose change times are coarser than
+  the edits (a change and a change back within one tick, to a file of the
+  same size); and the very same directory renamed away and renamed back
+  while the compile reads through it (decision 9 in
+  `design/build-cache/DECISIONS.md`: a directory's change time, the only
+  trace, also moves whenever anything is created in it, and watching it
+  would stop honest compiles from being published). Audit mode would catch
+  an object either produced.
 - *The flag families.* A `-W…` or `-m…` flag that names a file or records
   something outside the key would be admitted. None is known besides the
   two excepted.
@@ -5301,11 +5314,14 @@ describes. **This is where the cache changes a real compile**, and where a
 build with the cache serving stops being byte for byte one without it: the
 objects name their sources `/cactup-root/arrangements/…` and the
 configuration's files `/cactup-root/configs/@config/…` (in debug
-information and in `__FILE__`, so a `CCTK_WARN` shows them too), and a
-debugger is pointed at the tree with `set substitute-path /cactup-root
-/path/to/Cactus` (the configuration's own files need a second rule, for
-`/cactup-root/configs/@config`), or the knob below turns the map off for a
-build meant for debugging. The compiler's stdout and stderr go through the wrapper: one thread
+information and in `__FILE__`, so a `CCTK_WARN` shows them too). A
+debugger is pointed at them with two gdb rules, the configuration's first
+(`set substitute-path /cactup-root/configs/@config
+/path/to/Cactus/configs/<name>`, then `set substitute-path /cactup-root
+/path/to/Cactus`; gdb uses the first rule that matches, and without line
+directives Cactus compiles the copies in the configuration's `build`), or
+the knob below turns the map off for a build meant for debugging. (Not
+tried with a debugger: the host this was written on has none.) The compiler's stdout and stderr go through the wrapper: one thread
 per stream reads it and keeps a copy (up to 4 MiB of each; beyond that the
 result is not published), another passes it on as it comes. When the
 compiler has ended, the reading waits up to two seconds for the streams to
@@ -5364,8 +5380,11 @@ messages not shown again: if its object equals the first and the inputs
 still held, the stored entry is wrong (**a wrong hit**: the key failed to
 describe the compile), and it is removed and the fresh object published in
 its place; if not, the compiler is not deterministic for this compile. A
-stop signal during the second compile ends the wrapper by that signal, as
-it would the compile, with no verdict. A hit whose compile now fails is
+stop signal that reaches the wrapper during the second compile ends it by
+that signal, as it would the compile, with no verdict; a second compile
+that ends any other way (killed by the kernel, crashed, failed) leaves the
+first compile's object the build's, and the verdict that the second
+compile failed. A hit whose compile now fails is
 counted as well. Either way the build keeps the fresh object, the event log
 records the verdict (`event::Audit`), and the build's closing line counts
 it.

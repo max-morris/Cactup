@@ -29,13 +29,13 @@
 //! while the cache only records.
 
 use super::compile::{self, Compile};
-use super::hash::{file_digest, Hasher};
+use super::hash::{bytes_digest, Hasher};
 use super::identity::{self, Compiler, Family};
 use super::{environment, platform, BuildConf};
 use crate::Res;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, ErrorKind, Read as _};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -545,9 +545,8 @@ fn naming<'a>(line: &'a [u8], opening: &[u8]) -> Result<Option<Naming<'a>>, Stri
 /// name; so under a map the name is fed as mapped. Only in a first line:
 /// further down, what looks like a directive may be the inside of a comment
 /// or of a string.
-fn content_digest(path: &Path, map: Option<&PathMap>) -> Res<String> {
-    let Some(map) = map else { return file_digest(path) };
-    let bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+fn content_digest(bytes: &[u8], map: Option<&PathMap>) -> String {
+    let Some(map) = map else { return bytes_digest(bytes) };
     let first = bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |at| at + 1);
     let mut hasher = Hasher::new("file");
     // A first line that is no such directive, or one whose name cannot be
@@ -560,9 +559,101 @@ fn content_digest(path: &Path, map: Option<&PathMap>) -> Res<String> {
             hasher.feed(tail);
             hasher.feed(&bytes[first..]);
         }
-        None => hasher.feed(&bytes),
+        None => hasher.feed(bytes),
     }
-    Ok(hasher.hex())
+    hasher.hex()
+}
+
+/// One step of resolving a name: what the entry was (device, inode, and
+/// what tells a new entry from an old one under a reused inode number:
+/// its birth time, and a symlink's change time), and where a symlink led.
+#[derive(Clone)]
+enum Step {
+    Entry(Vec<u8>, Option<PathBuf>),
+    Absent,
+}
+
+/// Feed `seen` with every entry the name `path` resolves through — each
+/// directory and each symlink, by device and inode, and each symlink's
+/// target — from the root (or from the working directory, itself resolved
+/// so), following symlinks as the kernel does. A symlink swapped and
+/// swapped back is a new symlink, and a directory replaced is another
+/// directory: either shows, also where the filesystem gives the new one the
+/// old one's inode number (ext4 does at once), by its birth time (where
+/// the filesystem keeps one) and, for a symlink, its change time. Neither
+/// moves when files are created inside a directory. (A directory renamed away and the same one renamed
+/// back does not: decision 9, spec §18.5.) `steps` remembers each entry
+/// looked at, for the many names that share their directories.
+fn trail(path: &Path, seen: &mut Hasher, steps: &mut HashMap<PathBuf, Step>) {
+    let mut pending: std::collections::VecDeque<std::ffi::OsString> = std::collections::VecDeque::new();
+    let start = match path.is_absolute() {
+        true => path.to_owned(),
+        false => std::env::current_dir().unwrap_or_default().join(path),
+    };
+    let push_front = |pending: &mut std::collections::VecDeque<OsString>, path: &Path| {
+        for component in path.components().rev() {
+            pending.push_front(component.as_os_str().to_owned());
+        }
+    };
+    push_front(&mut pending, &start);
+    let mut at = PathBuf::from("/");
+    let mut links = 0;
+    while let Some(component) = pending.pop_front() {
+        match component.as_bytes() {
+            b"/" => at = PathBuf::from("/"),
+            b"." => {}
+            b".." => {
+                at.pop();
+            }
+            _ => {
+                let next = at.join(&component);
+                let step = steps
+                    .entry(next.clone())
+                    .or_insert_with(|| match std::fs::symlink_metadata(&next) {
+                        Ok(meta) => {
+                            let symlink = meta.file_type().is_symlink();
+                            let mut what = Vec::new();
+                            what.extend(meta.dev().to_le_bytes());
+                            what.extend(meta.ino().to_le_bytes());
+                            match meta.created().ok().and_then(|born| born.duration_since(std::time::UNIX_EPOCH).ok()) {
+                                Some(born) => what.extend(born.as_nanos().to_le_bytes()),
+                                None => what.extend(b"no birth time"),
+                            }
+                            if symlink {
+                                what.extend(meta.ctime().to_le_bytes());
+                                what.extend(meta.ctime_nsec().to_le_bytes());
+                            }
+                            let target = symlink.then(|| std::fs::read_link(&next).unwrap_or_default());
+                            Step::Entry(what, target)
+                        }
+                        Err(_) => Step::Absent,
+                    })
+                    .clone();
+                match step {
+                    Step::Entry(what, target) => {
+                        seen.feed(&what);
+                        match target {
+                            // A symlink: resolve its target in its place.
+                            Some(target) => {
+                                seen.feed(target.as_os_str().as_bytes());
+                                links += 1;
+                                if links > 40 {
+                                    seen.feed(b"too many links");
+                                    return;
+                                }
+                                push_front(&mut pending, &target);
+                            }
+                            None => at = next,
+                        }
+                    }
+                    Step::Absent => {
+                        seen.feed(b"absent");
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Does `line` of preprocessed text make the assembler read another file
@@ -668,30 +759,39 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // was entered.
     let mut files = Hasher::new("files");
     let mut seen = Hasher::new("seen");
+    let mut steps = HashMap::new();
     for ((mapped, path), entered) in &named {
         files.feed(mapped);
-        // Looked at before it is read: a change after this shows next time.
+        // What the name resolves through, and the file it leads to as the
+        // open file is (after the open, which on NFS revalidates what the
+        // client knows of it), before its bytes are read: a change after
+        // this shows in the check after the compile.
         seen.feed(path.as_os_str().as_bytes());
-        for looked in [std::fs::symlink_metadata(path), std::fs::metadata(path)] {
-            match looked {
-                Ok(meta) => {
-                    for number in [meta.dev(), meta.ino(), meta.len()] {
-                        seen.feed(&number.to_le_bytes());
-                    }
-                    for time in [meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()] {
-                        seen.feed(&time.to_le_bytes());
-                    }
+        trail(path, &mut seen, &mut steps);
+        let read = std::fs::File::open(path).and_then(|mut file| {
+            let meta = file.metadata()?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok((meta, bytes))
+        });
+        match &read {
+            Ok((meta, _)) => {
+                for number in [meta.dev(), meta.ino(), meta.len()] {
+                    seen.feed(&number.to_le_bytes());
                 }
-                Err(_) => seen.feed(b"absent"),
+                for time in [meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()] {
+                    seen.feed(&time.to_le_bytes());
+                }
             }
+            Err(_) => seen.feed(b"absent"),
         }
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
-        match content_digest(path, map) {
-            Ok(digest) => files.feed(digest.as_bytes()),
+        match read {
+            Ok((_, bytes)) => files.feed(content_digest(&bytes, map).as_bytes()),
             Err(_) if !entered && absent() => files.feed(b"no such file"),
-            Err(e) => bail!("a file the compile reads cannot be read to key it ({e:#})"),
+            Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         }
     }
     Ok(Read { text, text_bytes, files: files.hex(), count: named.len(), seen: seen.hex() })
@@ -893,7 +993,7 @@ mod tests {
         let digest = |content: &str, map: Option<&PathMap>| {
             let file = tmp.path().join("copy.c");
             std::fs::write(&file, content).unwrap();
-            content_digest(&file, map).unwrap()
+            content_digest(&std::fs::read(&file).unwrap(), map)
         };
         let here = "#line 1 \"/w/Cactus/arrangements/A/T/src/a.c\"\nint a;\n";
         let there = "#line 1 \"/v/elsewhere/Cactus/arrangements/A/T/src/a.c\"\nint a;\n";
@@ -1197,6 +1297,34 @@ mod tests {
         assert_eq!(std::fs::read(tree.header()).unwrap(), header);
         assert!(!keyed.still_holds(), "a header written over in between passed the check");
         // Keyed again, it holds again.
+        assert!(tree.key(&["-O2"]).still_holds());
+    }
+
+    /// The same for a directory on the way to a header: an include
+    /// directory that is a symlink, switched to another tree and back as a
+    /// package manager's view switches (a new link renamed over the old).
+    #[test]
+    fn a_symlinked_directory_switched_and_switched_back_does_not_pass_the_check() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        let src = tree.header().parent().unwrap().to_owned();
+        let (a, b) = (src.with_file_name("src-a"), src.with_file_name("src-b"));
+        std::fs::rename(&src, &a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(b.join("t.h"), "#define ANSWER 43\n").unwrap();
+        let switch = |to: &Path| {
+            let new = src.with_file_name("src.new");
+            std::os::unix::fs::symlink(to.file_name().unwrap(), &new).unwrap();
+            std::fs::rename(&new, &src).unwrap();
+        };
+        switch(&a);
+        let keyed = tree.key(&["-O2"]);
+        assert!(keyed.still_holds());
+        switch(&b);
+        switch(&a);
+        assert!(!keyed.still_holds(), "an include directory switched away and back passed the check");
         assert!(tree.key(&["-O2"]).still_holds());
     }
 

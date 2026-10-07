@@ -1042,6 +1042,41 @@ Not taken, as acceptable to both: messages buffered without limit for a
 stalled terminal (compiler messages are small); a path glued to a flag in
 a message is not mapped.
 
+### M1b, round 3 (on `efd6994`): BLOCKED by both, one finding each
+
+Both re-ran every earlier reproduction (A: `changeback2.sh` now unstable
+and unpublished, a file moved aside and back too; 150 audited compiles
+under a flipping header, no false verdict; B: the TRANSLIT sessions, the
+slow reader, the `.d` modes, a header flipped while cc1 ran) and found
+them resolved. Blocking:
+
+1. (A) The check watched each file's own name only: an include directory
+   that is a symlink, switched to another tree and back during the
+   compile (as Spack views and `current` links switch), passed it, and the
+   wrong object was served to another installation. *Fixed: every entry a
+   keyed name resolves through, directories and symlinks, followed as the
+   kernel follows them (`key::trail`, memoized per run), by device, inode
+   and birth time, a symlink also by change time and target; the file
+   itself by `fstat` after the open (B's NFS point). A unit test switches a
+   symlinked include directory and back. The test first passed on tmpfs and
+   failed on ext4, which gives the new symlink the old inode number at
+   once: hence the birth and change times; 30 of 30 on each since.* What
+   is left, a directory renamed away and the same one renamed back, is
+   Max's decision 9: a stated limit (spec §18.5).
+2. (B) Audit mode failed the build and deleted the good object when its
+   second compile died by any signal (`kill -9`, an OOM kill, a crash).
+   *Fixed: only a stop signal that reached the wrapper (`PENDING`) ends it
+   by that signal; otherwise the first object is put back and the verdict
+   is `second-compile-failed`. Tested with a second compile that kills
+   itself (a debug-only hook, `CACTUP_CC_TEST_SECOND_COMPILER`).*
+
+Non-blocking points taken: (A, B) an entry another build published first
+is no longer counted as "could not be published"; (A) the gdb recipe gives
+the configuration's rule first (Cactus compiles the copies in the
+configuration's `build`), here and in decision 8's wording; (A) the
+dependency file of an audited hit whose compiler cannot be started is
+removed; (A) the comment on reading a script's first line.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

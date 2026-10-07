@@ -565,11 +565,16 @@ share objects, a compile run through the cache records its source files as
 configuration's files as `/cactup-root/configs/@config/...`, not by their
 full paths. Warnings and errors still name the real files, but what a
 thorn prints with `CCTK_WARN` shows these names, and a debugger has to be
-told where `/cactup-root` is. In gdb:
+told where they are. In gdb, the configuration's rule first (gdb uses the
+first rule that matches), then the tree's:
 
 ```
+set substitute-path /cactup-root/configs/@config /path/to/Cactus/configs/myconfig
 set substitute-path /cactup-root /path/to/Cactus
 ```
+
+(Cactus compiles a copy of each source made in the configuration's
+`build` directory, so it is the first rule that finds most of them.)
 
 Or turn this off for a build you mean to debug:
 

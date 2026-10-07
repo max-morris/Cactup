@@ -341,6 +341,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     let (ran, compile_ms) = timed(|| run(job, argv, identified.as_deref(), &extra, streams));
     let Some((status, captured)) = ran else {
         drop(audited);
+        if let Ok(keyed) = &mut keyed {
+            keyed.drop_depend();
+        }
         leave_to(job, conf, cc_dir, "the compiler cannot be started directly, so the recipe's shell runs it")
     };
     event.compile_ms = compile_ms;
@@ -380,7 +383,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event));
         event.publish_ms = publish_ms;
         match published {
-            Ok(published) => event.published = Some(published == Published::Stored),
+            Ok(Published::Stored) => event.published = Some(true),
+            // Another build compiled the same thing and published it first.
+            Ok(Published::AlreadyThere) => event.store = Some("another build published it first".to_owned()),
             Err(why) => {
                 event.published = Some(false);
                 event.store = Some(why);
@@ -415,8 +420,10 @@ struct Checked<'a> {
 /// fresh one is moved aside and the compile runs once more; the same object
 /// twice (its inputs still unchanged) means the entry was wrong, two
 /// objects that the compiler is not deterministic. The build keeps the
-/// fresh object either way, and a stop signal during the second compile
-/// ends this process by that signal, as it would have the compile.
+/// fresh object either way. A stop signal that reaches this process during
+/// the second compile ends it by that signal, as it would have the compile;
+/// a second compile that ends any other way (killed by the kernel, crashed,
+/// failed) leaves the first compile's object the build's, and no verdict.
 fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], checked: &Checked, keyed: &key::Keyed) -> Audit {
     if !checked.status.success() {
         return Audit::CompileFailed;
@@ -437,19 +444,25 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
     if std::fs::rename(object, &first).is_err() {
         return Audit::NotDeterministic;
     }
+    // A test can have the second compile be a program that kills itself.
+    #[cfg(debug_assertions)]
+    let again_as = std::env::var_os("CACTUP_CC_TEST_SECOND_COMPILER").map(PathBuf::from);
+    #[cfg(debug_assertions)]
+    let identified = again_as.as_deref().or(identified);
     match run(job, argv, identified, extra, Output::Swallow) {
-        Some((again, _)) if again.signal().is_some() => {
+        // Asked to stop: the compile would have been.
+        Some((again, _)) if again.signal().is_some() && PENDING.load(Ordering::SeqCst) != 0 => {
             drop(first);
             leave_as(again)
         }
         Some((again, _)) if again.success() && !keyed.still_holds() => Audit::InputsChanged,
         Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => Audit::WrongHit,
         Some((again, _)) if again.success() => Audit::NotDeterministic,
-        // The second compile failed or could not run: the first object is
-        // the build's.
+        // The second compile failed, was killed, or could not run: the
+        // first object is the build's.
         _ => {
             let _ = std::fs::rename(&first, object);
-            Audit::NotDeterministic
+            Audit::SecondCompileFailed
         }
     }
 }

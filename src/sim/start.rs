@@ -701,8 +701,8 @@ pub(crate) fn script_command(
     vars: &VarSet,
     cwd: &Path,
 ) -> Res<Command> {
-    // The first line is all that is read (no more than the kernel reads of
-    // it), as bytes: the rest of a script need not be text.
+    // The first line is all that is read (a bounded piece of it; the
+    // kernel reads less), as bytes: the rest of a script need not be text.
     let mut head = Vec::new();
     if let Ok(file) = fs::File::open(script) {
         use std::io::BufRead;

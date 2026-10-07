@@ -1547,23 +1547,31 @@ fn audit_mode_tells_a_wrong_hit() {
         .collect();
     assert!(strays.is_empty(), "{strays:?}");
 
-    // The entry's object, one byte changed, its checksum made to match.
-    let entry = store.join("v1/test").join(&key[..2]).join(&key);
-    let bytes = fs::read(&entry).unwrap();
-    let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
-    let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;
-    let lengths: Vec<usize> = text(&bytes[line_end..lengths_end - 1]).split(' ').map(|n| n.parse().unwrap()).collect();
-    let mut body = bytes[..bytes.len() - 65].to_vec();
-    body[lengths_end + lengths[0] + lengths[1] / 2] ^= 0x55;
-    let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    body.extend(format!("{sum}\n").bytes());
-    fs::remove_file(&entry).unwrap();
-    fs::write(&entry, body).unwrap();
-
+    corrupt_entry(&store, &key);
     unit.wrapped("gcc", &["-O2"], &lib);
     let event = build.last_event();
     assert_eq!(event["audit"].as_str(), Some("wrong-hit"), "{event}");
     assert_eq!(fs::read(&unit.object).unwrap(), compiled, "the build keeps the fresh object");
+
+    // A second compile that does not end well (here it kills itself, as the
+    // kernel kills a process out of memory) says nothing about the entry,
+    // and costs the build nothing: the first compile's object stands.
+    corrupt_entry(&store, &key);
+    let killer = build.root.join("killed-compiler");
+    executable(&killer, "#!/bin/sh\nkill -KILL $$\n");
+    let args = unit.args(&["-O2"], &lib);
+    let cwd = build.config.join("scratch");
+    let out = build
+        .wrap("gcc", &args.iter().map(String::as_str).collect::<Vec<_>>())
+        .current_dir(&cwd)
+        .env("PWD", &cwd)
+        .env("CACTUP_CC_TEST_SECOND_COMPILER", &killer)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?} {}", out.status, text(&out.stderr));
+    let event = build.last_event();
+    assert_eq!(event["audit"].as_str(), Some("second-compile-failed"), "{event}");
+    assert_eq!(fs::read(&unit.object).unwrap(), compiled, "the first compile's object is the build's");
     let strays: Vec<_> = fs::read_dir(unit.object.parent().unwrap())
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -1686,4 +1694,20 @@ fn a_build_that_does_not_relocate_compiles_as_written() {
     let cwd = build.config.join("scratch");
     assert!(Command::new("gcc").args(&args).current_dir(&cwd).env("PWD", &cwd).status().unwrap().success());
     assert_eq!(fs::read(&unit.object).unwrap(), served, "the compile was changed");
+}
+
+/// Change one byte of the object in the store's entry for `key`, with the
+/// entry's checksum made to match: a wrong entry that looks whole.
+fn corrupt_entry(store: &Path, key: &str) {
+    let entry = store.join("v1/test").join(&key[..2]).join(key);
+    let bytes = fs::read(&entry).unwrap();
+    let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+    let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;
+    let lengths: Vec<usize> = text(&bytes[line_end..lengths_end - 1]).split(' ').map(|n| n.parse().unwrap()).collect();
+    let mut body = bytes[..bytes.len() - 65].to_vec();
+    body[lengths_end + lengths[0] + lengths[1] / 2] ^= 0x55;
+    let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    body.extend(format!("{sum}\n").bytes());
+    fs::remove_file(&entry).unwrap();
+    fs::write(&entry, body).unwrap();
 }

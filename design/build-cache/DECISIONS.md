@@ -128,9 +128,25 @@ Asked as seven questions with options; the answers, in Max's numbering.
    resolve. Answer: "Absolute placeholders". The Cactus root maps to
    `/cactup-root/` and the configuration directory to
    `/cactup-root/configs/@config/`; objects record those (also in
-   `__FILE__`), and `set substitute-path /cactup-root /path/to/Cactus` in
-   gdb points at the tree. This replaces the 2026-10-01 design choice's
+   `__FILE__`), and gdb is pointed at them with two `set substitute-path`
+   rules, the configuration's first (a reviewer showed that with Cactus's
+   default, no line directives, the sources are the copies in the
+   configuration's `build`, which the root rule alone does not reach). This replaces the 2026-10-01 design choice's
    `./arrangements/...` names.
+
+9. **A directory renamed away and back during a compile: a stated
+   limit.** Asked after a reviewer published a wrong object by swapping a
+   symlinked include directory during a compile and swapping it back.
+   Answer: "Stated limit". Every entry a keyed file's name resolves
+   through (directories and symlinks) is watched by device and inode, so a
+   symlink swapped and swapped back (it is a new symlink each time), or a
+   directory replaced by another, fails the check after the compile. What
+   is not watched is a directory's change time, which moves whenever
+   anything is created inside it (the build tree, `$HOME`) and would stop
+   honest compiles from being published; so the very same directory
+   renamed away and renamed back while a compile reads through it is
+   written into spec §18.5's limits. Audit mode would still catch an object
+   it produced.
 
 ## Still open
 

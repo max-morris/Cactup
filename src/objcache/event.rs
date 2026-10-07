@@ -101,6 +101,10 @@ pub enum Audit {
     NotDeterministic,
     /// The compile failed, where the entry says it succeeded.
     CompileFailed,
+    /// The objects differed, and the second compile, which would have told
+    /// a wrong hit from a compiler that is not deterministic, did not end
+    /// well (killed, crashed, failed): nothing can be said.
+    SecondCompileFailed,
     /// The files the compile read changed while it ran: nothing can be
     /// said about the hit.
     InputsChanged,
@@ -114,6 +118,7 @@ impl Audit {
             Self::WrongDependencyFile => "wrong dependency file",
             Self::NotDeterministic => "not deterministic",
             Self::CompileFailed => "the compile failed",
+            Self::SecondCompileFailed => "the second compile failed",
             Self::InputsChanged => "its inputs changed meanwhile",
         }
     }
