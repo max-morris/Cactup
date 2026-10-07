@@ -1098,6 +1098,7 @@ mod tests {
             build_env_digest: String::new(),
             store: PathBuf::from("/s"),
             relocate: true,
+            size_limit: None,
         };
         assert_eq!(
             String::from_utf8_lossy(&messages_for_this_build(&conf, &stored)),
@@ -1223,7 +1224,8 @@ mod tests {
                 universe: None,
                 build_env_digest: String::new(),
                 store: PathBuf::from("/nonexistent/cache"),
-            relocate: true,
+                relocate: true,
+                size_limit: None,
             };
             let tree = Self { _tmp: tmp, conf, cc };
             std::fs::write(tree.header(), HEADER).unwrap();

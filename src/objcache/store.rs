@@ -165,6 +165,11 @@ impl Store {
         Ok(Self { dir: root.join(format!("v{FORMAT}")).join(machine) })
     }
 
+    /// This machine's part of the store: `<root>/v<FORMAT>/<machine>`.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Where the entry for `key` is. `None` for anything but a key (64
     /// lowercase hex digits), which could name a path anywhere.
     pub fn entry_path(&self, key: &str) -> Option<PathBuf> {
@@ -262,6 +267,17 @@ impl Store {
     /// "Restoring"). On a miss nothing is left at `object` that was not
     /// there before.
     pub fn restore(&self, key: &str, object: &Path) -> Result<Messages, Miss> {
+        self.read(key, Some(object))
+    }
+
+    /// Read the entry of `key` as a restore does, writing nothing: what
+    /// `cache verify` does (§18.9). An invalid entry is removed, as a
+    /// restore would remove it.
+    pub fn check(&self, key: &str) -> Result<(), Miss> {
+        self.read(key, None).map(drop)
+    }
+
+    fn read(&self, key: &str, object: Option<&Path>) -> Result<Messages, Miss> {
         let path = self.entry_path(key).ok_or_else(|| Miss::Invalid { why: format!("\"{key}\" is not a key"), removed: false })?;
         let unreadable = |e: io::Error| Miss::Unreadable(format!("{}: {e}", path.display()));
         // Looked at before it is opened: a FIFO there would block the open.
@@ -337,7 +353,7 @@ impl From<io::Error> for Fault {
 /// checksum over every byte, and only then the header. So an entry whose
 /// header this cactup cannot read, but which is whole, is another cactup's
 /// and not damage.
-fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Messages, Fault> {
+fn read_into(file: File, meta: &Metadata, key: &str, object: Option<&Path>) -> Result<Messages, Fault> {
     let invalid = |why: &str| Fault::Invalid(why.to_owned());
     let mut reader = Digesting { inner: BufReader::with_capacity(BUFFER, file), sum: Checksum::new() };
     // Until the size has been checked, an entry that ends early is short.
@@ -372,24 +388,34 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Me
 
     // The object, into a temporary file beside where it goes, created as a
     // compiler creates its output (`0666` less the umask, and whatever a
-    // default ACL of the directory adds).
-    let dir = object.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = object.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let output = |e: io::Error| Fault::Output(format!("{}: {e}", object.display()));
-    let temp = tempfile::Builder::new()
-        .prefix(&format!(".{name}.cactup-"))
-        .permissions(fs::Permissions::from_mode(0o666))
-        .tempfile_in(dir)
-        .map_err(output)?;
+    // default ACL of the directory adds); or, only checking, nowhere.
+    let shown = object.map_or_else(|| "the object".to_owned(), |object| object.display().to_string());
+    let output = |e: io::Error| Fault::Output(format!("{shown}: {e}"));
+    let temp = match object {
+        Some(object) => {
+            let dir = object.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let name = object.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            let temp = tempfile::Builder::new()
+                .prefix(&format!(".{name}.cactup-"))
+                .permissions(fs::Permissions::from_mode(0o666))
+                .tempfile_in(dir)
+                .map_err(output)?;
+            Some(temp)
+        }
+        None => None,
+    };
     {
-        let mut writer = BufWriter::with_capacity(BUFFER, temp.as_file());
+        let mut writer: Box<dyn Write> = match &temp {
+            Some(temp) => Box::new(BufWriter::with_capacity(BUFFER, temp.as_file())),
+            None => Box::new(io::sink()),
+        };
         let copied = io::copy(&mut (&mut reader).take(object_len), &mut writer);
         match copied {
             Ok(n) if n == object_len => {}
             Ok(_) => return Err(Fault::Io(ErrorKind::UnexpectedEof.into())),
             // Reading the entry and writing the object fail alike here;
             // which it was, the entry's own read below would not tell.
-            Err(e) => return Err(Fault::Output(format!("{}: {e}", object.display()))),
+            Err(e) => return Err(Fault::Output(format!("{shown}: {e}"))),
         }
         writer.flush().map_err(output)?;
     }
@@ -418,7 +444,9 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: &Path) -> Result<Me
     if header.key != key || header.parts.key() != key {
         return Err(invalid("it is the entry of another key"));
     }
-    temp.persist(object).map_err(|e| output(e.error))?;
+    if let (Some(temp), Some(object)) = (temp, object) {
+        temp.persist(object).map_err(|e| output(e.error))?;
+    }
     Ok(Messages { stdout, stderr })
 }
 

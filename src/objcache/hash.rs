@@ -53,10 +53,8 @@ impl Hasher {
 
 /// A plain SHA-256 of a stream of bytes, unframed: the checksum of a store
 /// entry (`store`), which is whatever bytes the entry holds.
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct Checksum(digest::Context);
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl Checksum {
     pub fn new() -> Self {
         Self(digest::Context::new(&digest::SHA256))

@@ -239,6 +239,7 @@ mod tests {
             build_env_digest: build_env_digest.to_owned(),
             store: PathBuf::from("/nonexistent/cache"),
             relocate: true,
+            size_limit: None,
         }
     }
 

@@ -532,7 +532,7 @@ cactup build container-build --universe et-sif
 cactup build native-build --no-universe
 ```
 
-## The build cache (in development)
+## The build cache
 
 cactup has a build cache shared by all the installations of one
 `~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
@@ -660,18 +660,40 @@ cactup: build cache off for this build: <reason>
 ```
 
 Cached objects are kept under `~/.cactup/cache` (or `$CACTUP_HOME/cache`),
-or wherever the `build-cache-dir` knob says, as an absolute path. Nothing
-is ever deleted from it on its own: an old object is what makes going back
-to an older version of a thorn cheap. Anyone who can write in that
-directory can put objects into your builds, so keep it your own.
+or wherever the `build-cache-dir` knob says, as an absolute path. Anyone who
+can write in that directory can put objects into your builds, so keep it
+your own.
 
 ```sh
 cactup knob build-cache-dir /scratch/me/cactup-cache
 ```
 
-Like the knobs that control updating, `build-cache`, `build-cache-dir` and
-`build-cache-relocate` describe your cactup installation rather than a
-job.
+### Looking after the cache
+
+Nothing is ever removed from the cache on its own: an old object is what
+makes going back to an older version of a thorn cheap. Three commands look
+after it:
+
+```sh
+cactup cache stats                                  # what it holds, and how recently it was used
+cactup cache gc --unused-for 60d                    # remove what no build has used in 60 days
+cactup cache gc --unused-for 30d --to-size 200G     # ... then the least recently used, down to 200 GB
+cactup cache gc --unused-for 30d --dry-run          # say what would go, remove nothing
+cactup cache verify                                 # read every object, remove damaged ones
+```
+
+Each build that is served from the cache notes which objects it used, so
+`cactup cache gc` removes what is really unused. To be told when the cache
+grows past a size, set `build-cache-size`; a build then says so in one
+line, and removes nothing:
+
+```sh
+cactup knob build-cache-size 200G
+```
+
+Like the knobs that control updating, `build-cache`, `build-cache-dir`,
+`build-cache-relocate` and `build-cache-size` describe your cactup
+installation rather than a job.
 
 ## Full build command reference
 

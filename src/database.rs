@@ -91,6 +91,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("build-cache", crate::objcache::validate_mode),
     KnobSpec::maintenance("build-cache-dir", crate::objcache::validate_store_root),
     KnobSpec::maintenance("build-cache-relocate", crate::objcache::validate_relocate),
+    KnobSpec::maintenance("build-cache-size", crate::objcache::validate_size),
 ];
 
 /// The spec for a knob name, if cactup recognizes it.

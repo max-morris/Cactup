@@ -51,7 +51,7 @@ the last milestone, for when that host is not at hand.
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | review **passed** at `6b8efb1` (four rounds); the full audit build on that commit is running |
-| M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
+| M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | **implemented**; review next |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -292,6 +292,42 @@ Real builds (2026-10-02, `plato`, debug build of `659f434`, `smoke`, `-f
 Not verified: NFS or Lustre (`plato` has neither; the cross-process test
 ran on ext4), a real Spack or site GCC (the specs tests use a copy of
 this host's GCC 14 driver with a specs file beside it).
+
+## What M1c is
+
+Spec §18.9, written before the code.
+
+- Last use: after the build step of a serving or auditing build,
+  `objcache::after_build` (called from `execute`, whatever became of the
+  build) writes one new file `<root>/v1/<machine>/used/<random>.keys`
+  listing the keys the build found; its modification time is when. `gc`
+  folds the logs it read into `<random>.times` (`<key> <seconds>` per
+  line) and removes them. Nothing shared is written by two processes.
+- `src/objcache/upkeep.rs`: the walk (`scan`, over the entry directories
+  with `par::parallel_map` and a progress line), `plan` (a pure function of
+  the walk and the fileserver's "now": unused for the age, then least
+  recently used down to `--to-size`, temporary files a day old, the folded
+  logs), `carry_out` (removes by name only what is still the file walked,
+  stops on Ctrl-C saying what it removed), the use log, sizes and ages,
+  the size stamp `<root>/v1/size`.
+- `cactup cache stats`, `cache gc --unused-for <age> [--to-size <size>]
+  [--dry-run]` (under a heartbeat `LinkLock` `<root>/gc.lock`), `cache
+  verify` (`Store::check`: a restore that writes nothing; removes the
+  invalid, leaves another cactup's).
+- Knob `build-cache-size`, frozen as `BuildConf.size_limit`; the size
+  notice after a serving build, the store measured at most once a day.
+- The three points M1b's round 4 left (the closing line counts
+  `second-compile-failed`; a stop signal is kept however audit's second
+  compile ends; the no-birth-time limit in §18.5).
+- Docs: the user docs' cache section is no longer "in development", and
+  covers the commands and the knob; `cactup build --help`.
+
+Tried on the stores of the M1b gate runs: `stats` reads 2783 entries;
+`verify` finds those of an earlier key label to be another cactup's and
+leaves them; `gc --to-size 300M` on a copy removed the 2150 least recently
+used.
+
+Still with Max: whether `CLAUDE-contract.md` goes into `CLAUDE.md`.
 
 ## What M1b is
 

@@ -34,9 +34,8 @@ pub mod lookup;
 pub mod platform;
 pub mod probe;
 pub mod specs;
-// Nothing serves or publishes yet: the wrapper takes it up with serving.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod store;
+pub mod upkeep;
 pub mod wrapper;
 
 use crate::build::sh_quote;
@@ -126,6 +125,20 @@ pub fn validate_store_root(value: &str) -> Res<String> {
     Ok(value.to_owned())
 }
 
+/// Knob validator (§5): `build-cache-size`, a size (`200G`): above it, a
+/// serving build says so (§18.9).
+pub fn validate_size(value: &str) -> Res<String> {
+    let value = value.trim();
+    upkeep::parse_size(value).map_err(|e| anyhow::anyhow!("invalid build-cache-size: {e:#}"))?;
+    Ok(value.to_owned())
+}
+
+/// The effective `build-cache-size`, read leniently: anything that is not a
+/// size means none. Resolved on the login node only (D11).
+pub fn size_limit_from_db(db: &Database) -> Option<u64> {
+    db.knob("build-cache-size").and_then(|value| upkeep::parse_size(value).ok())
+}
+
 /// Knob validator (§5): `build-cache-relocate` is `yes` or `no`.
 pub fn validate_relocate(value: &str) -> Res<String> {
     match value.trim() {
@@ -179,6 +192,10 @@ pub struct BuildConf {
     /// Are keys made with the path map where it holds (§18.8, knob
     /// `build-cache-relocate`)?
     pub relocate: bool,
+    /// Above this many bytes, the store is said to be large (§18.9, knob
+    /// `build-cache-size`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_limit: Option<u64>,
 }
 
 impl BuildConf {
@@ -212,6 +229,41 @@ pub fn events_path(cc_dir: &Path) -> PathBuf {
     cc_dir.join("events.jsonl")
 }
 
+/// What a serving or auditing build does after its build step, whether it
+/// succeeded or not (§18.9): record the keys it found in the store, so that
+/// `cache gc` knows they are in use, and say in one line if the store is
+/// larger than `build-cache-size`. Best-effort: a failure costs a line, never
+/// the build. Reads the attempt's own frozen settings and the store, nothing
+/// else (D11).
+pub fn after_build(cc_dir: &Path) {
+    use colored::Colorize;
+    let Ok(conf) = BuildConf::load(&conf_path(cc_dir)) else { return };
+    if !conf.mode.serves() {
+        return;
+    }
+    let Ok(store) = store::Store::new(&conf.store, &conf.machine) else { return };
+    let events = event::read(&events_path(cc_dir)).map(|(events, _)| events).unwrap_or_default();
+    let keys: Vec<String> =
+        events.into_iter().filter(|e| e.outcome == Some(event::Outcome::Hit)).filter_map(|e| e.key).collect();
+    if let Err(e) = upkeep::log_use(&store, &keys) {
+        eprintln!("{} build cache: could not record which entries this build used: {e:#}", "warning:".yellow().bold());
+    }
+    if let Some(limit) = conf.size_limit {
+        match upkeep::store_size(&conf.store) {
+            Ok(bytes) if bytes > limit => println!(
+                "{} the build cache in {} holds {}, more than build-cache-size ({}); \
+                 `cactup cache gc --unused-for 30d` removes what no build has used in 30 days",
+                "note:".bold(),
+                conf.store.display(),
+                upkeep::human(bytes),
+                upkeep::human(limit),
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("{} build cache: could not measure {}: {e:#}", "warning:".yellow().bold(), conf.store.display()),
+        }
+    }
+}
+
 /// What `prepare` knows about the build it is staging.
 pub struct StageInputs<'a> {
     pub cactup: &'a str,
@@ -222,6 +274,7 @@ pub struct StageInputs<'a> {
     pub build_env: &'a str,
     pub store: &'a Path,
     pub relocate: bool,
+    pub size_limit: Option<u64>,
 }
 
 /// A build with the cache staged: the shell text `prepare` splices into the
@@ -251,6 +304,7 @@ pub fn stage(cc_dir: &Path, mode: Mode, inputs: &StageInputs) -> Res<Option<Stag
         build_env_digest: hash::bytes_digest(inputs.build_env.as_bytes()),
         store: inputs.store.to_owned(),
         relocate: inputs.relocate,
+        size_limit: inputs.size_limit,
     };
     fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create {}", cc_dir.display()))?;
     let path = conf_path(cc_dir);
@@ -389,6 +443,7 @@ mod tests {
             build_env: "module load gcc\n",
             store: Path::new("/work/cache"),
             relocate: true,
+            size_limit: None,
         }
     }
 
@@ -441,6 +496,7 @@ mod tests {
                 build_env_digest: hash::bytes_digest(b"module load gcc\n"),
                 store: PathBuf::from("/work/cache"),
                 relocate: true,
+                size_limit: None,
             }
         );
         assert!(BuildConf::load(&cc.join("missing.toml")).is_err());

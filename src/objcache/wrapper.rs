@@ -1038,6 +1038,7 @@ mod tests {
             build_env_digest: String::new(),
             store: PathBuf::from("/nonexistent/cache"),
             relocate: true,
+            size_limit: None,
         };
         let name = |output: &str| unit(&conf, Path::new(output));
         assert_eq!(name("/w/Cactus/configs/sim/build/Boundary/a.c.o").as_deref(), Some("Boundary/a.c.o"));

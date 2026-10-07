@@ -4502,8 +4502,9 @@ and the keys (§18.5): with `build-cache = record`, cactup stands in front of
 every object compile, works out the key it would be cached under, and logs
 it; `cactup cache report` (§18.6) reads the logs. With `build-cache =
 serve` it also serves objects from the store (§18.7) and publishes the ones
-it compiles (§18.8); `audit` checks every hit by compiling anyway. Fortran,
-CUDA and the maintenance commands are still to come.
+it compiles (§18.8); `audit` checks every hit by compiling anyway. `cactup
+cache stats`, `gc` and `verify` look after the store (§18.9). Fortran and
+CUDA are still to come.
 
 ### 18.1 Rules
 
@@ -5409,3 +5410,66 @@ an audited compile can leave the temporary copies audit mode keeps beside
 the object, under the same kind of name. `make` reads neither. A miss forwards signals to the
 compiler as record mode does; a signal during the check and the publishing
 after it ends the wrapper on the spot (§18.5, §18.7).
+
+### 18.9 Living with the store
+
+Nothing is ever removed from the store on its own (§18.1 rule 7): an old
+entry is what makes going back to an older version of a thorn cheap. The
+store is looked after by three commands, a size notice, and a record of
+when each entry was last used.
+
+**Last use.** An entry is never changed after its link (§18.7), so when it
+was last used is kept beside it, not in it. After the build step of a
+serving or auditing build, `execute` writes one new file into the store,
+`<root>/v1/<machine>/used/<random>.keys`, listing the keys that build found
+there, one per line, through a temporary file renamed into place. Its
+modification time, set by the write, is the fileserver's clock at the end
+of that build (§2.3), and is when every key in it was last used. No two
+builds write the same file, and none changes one: nothing is shared but
+the directory. A build that finds nothing writes nothing; one that cannot
+write says so in one line and is otherwise unaffected. An entry's own
+modification time is when it was published. `cache gc` folds the logs it
+reads into one, `<random>.times`, with a time on each line (`<key>
+<seconds>`), and removes the logs it folded, so the information outlives
+them and the directory stays small.
+
+**`cactup cache stats`** walks the store under the root
+`build-cache-dir` names and says, per machine: how many entries and how
+many bytes, the oldest and the newest publish, how many were used in the
+last 7 and 30 days, temporary files, and directories of other entry
+formats (with their size: another cactup's, or an older one's); and the
+size knob, if set, against the total.
+
+**`cactup cache gc --unused-for <age> [--to-size <size>] [--dry-run]`**
+removes the entries of this cactup's format that no build has used or
+published for `<age>` (`30d`, `12w`, `6m` …), measured in the fileserver's
+clock; with `--to-size`, further entries, least recently used first, until
+the store is no larger than `<size>` (`200G`). It also removes the
+temporary files of publishes cut short (`.tmp-…`) older than a day, and
+folds the use logs. Only one `gc` runs at a time per store: it holds
+`<root>/gc.lock`, a heartbeat `lock::LinkLock` (§2.3). It never touches
+another format's directory. `--dry-run` says what it would remove, and
+removes nothing. An entry is removed by name after checking that the name
+still leads to the file looked at (as invalidating does, §18.7). What `gc`
+cannot know and need not: a use being logged while it runs (that entry may
+go, which costs one miss), a restore of an entry it removes (the reader
+keeps the file it opened).
+
+**`cactup cache verify`** reads every entry as a restore does (§18.7): it
+removes the invalid ones, as a restore would, leaves another cactup's
+alone, and says how many of each it found.
+
+All three walk thousands of files on a network filesystem: they fan out
+over the entry directories (`par::parallel_map`), show progress, and stop
+on the first Ctrl-C with an "interrupted" error, having removed what they
+say they removed.
+
+**The size notice.** The knob `build-cache-size` (a size, `200G`; not set
+by default) is frozen with the rest (§18.2). At the end of a serving or
+auditing build, if it is set and the store is larger, the build says so in
+one line and names `cactup cache gc`. Measuring the store means walking it,
+so the measurement of the whole store (every machine's entries of this
+format) is kept in `<root>/v1/size` (written by
+`cache stats`, `cache gc` and any build that finds it more than a day old,
+by the fileserver's clock) and a build reads it from there. Nothing is
+removed.

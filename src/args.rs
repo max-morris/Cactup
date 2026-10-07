@@ -216,7 +216,7 @@ pub(crate) enum Commands {
     Config(ConfigCommand),
     /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
     ///
-    /// Three machine-global knobs control the build cache, which reuses the
+    /// Four machine-global knobs control the build cache, which reuses the
     /// objects earlier builds compiled:
     ///
     ///   build-cache          off (the default); serve: compile only what no
@@ -231,6 +231,9 @@ pub(crate) enum Commands {
     ///                        sources as /cactup-root/arrangements/...,
     ///                        so every installation can share them; no:
     ///                        they keep this installation's paths.
+    ///   build-cache-size     a size (200G): a build says when the cache
+    ///                        has grown past it. Nothing is removed but by
+    ///                        `cactup cache gc`.
     ///
     /// Set them with `cactup knob`, or for one build with -K:
     ///
@@ -300,7 +303,7 @@ pub(crate) enum Commands {
     #[clap(verbatim_doc_comment)]
     Wisdom,
     // §18.5
-    /// Inspect the build cache (so far: what a recording build measured)
+    /// Inspect and look after the build cache
     #[clap(subcommand)]
     Cache(CacheCommand),
     // §17, §5
@@ -702,6 +705,42 @@ pub(crate) enum CacheCommand {
         #[clap(long)]
         long: bool,
     },
+    /// Say what the build cache holds: entries, sizes, and how recently they were used
+    ///
+    /// Walks the cache directory (the build-cache-dir knob; by default the
+    /// cache directory in cactup's home) and reports, for each machine, how
+    /// many objects it keeps and their size, how many builds used lately,
+    /// and anything left over from an interrupted build.
+    #[clap(verbatim_doc_comment)]
+    Stats,
+    /// Remove from the build cache what no build has used for a while
+    ///
+    /// Nothing is ever removed from the cache on its own: an old object is
+    /// what makes going back to an older version of a thorn cheap. This
+    /// removes the objects no build has used or stored for the given time,
+    /// and with --to-size, further ones, least recently used first, until
+    /// the cache is no larger than the given size.
+    ///
+    ///   cactup cache gc --unused-for 60d
+    ///   cactup cache gc --unused-for 30d --to-size 200G --dry-run
+    #[clap(verbatim_doc_comment)]
+    Gc {
+        /// Remove what no build has used for this long: a number with h, d, w, m (30 days) or y.
+        #[clap(long, value_name = "AGE")]
+        unused_for: String,
+        /// Then remove the least recently used until the cache is no larger than this (200G, 500M).
+        #[clap(long, value_name = "SIZE")]
+        to_size: Option<String>,
+        /// Say what would be removed, and remove nothing.
+        #[clap(long)]
+        dry_run: bool,
+    },
+    /// Read every object in the build cache and remove the damaged ones
+    ///
+    /// A build already checks each object it takes from the cache and
+    /// removes a damaged one; this does the same for all of them at once.
+    #[clap(verbatim_doc_comment)]
+    Verify,
 }
 
 #[derive(Subcommand, Debug)]

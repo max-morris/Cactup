@@ -12,11 +12,13 @@ use crate::build::attempt::BuildAttempt;
 use crate::commands::Ctx;
 use crate::installation::Installation;
 use crate::objcache::event::{self, Event, Outcome};
-use crate::objcache::events_path;
+use crate::objcache::{events_path, upkeep};
 use crate::Res;
 use anyhow::{anyhow, bail};
 use colored::Colorize;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
     match command {
@@ -59,7 +61,157 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             }
             Ok(())
         }
+        CacheCommand::Stats => stats(&store_root(ctx)?),
+        CacheCommand::Gc { unused_for, to_size, dry_run } => {
+            let unused_for = upkeep::parse_age(&unused_for)?;
+            let to_size = to_size.as_deref().map(upkeep::parse_size).transpose()?;
+            gc(&store_root(ctx)?, unused_for, to_size, dry_run)
+        }
+        CacheCommand::Verify => verify(&store_root(ctx)?),
     }
+}
+
+/// The store's root: the `build-cache-dir` knob's, or the default.
+fn store_root(ctx: &Ctx) -> Res<PathBuf> {
+    Ok(crate::objcache::store_root(&ctx.db.read()?))
+}
+
+/// When, as people read it: so many days ago.
+fn ago(now: SystemTime, then: SystemTime) -> String {
+    let days = now.duration_since(then).unwrap_or_default().as_secs() / (24 * 3600);
+    match days {
+        0 => "today".to_owned(),
+        1 => "1 day ago".to_owned(),
+        n => format!("{n} days ago"),
+    }
+}
+
+/// `cactup cache stats` (§18.9).
+fn stats(root: &Path) -> Res<()> {
+    if !root.is_dir() {
+        println!("The build cache in {} is empty: nothing has been stored there yet.", root.display());
+        return Ok(());
+    }
+    let scan = upkeep::scan(root)?;
+    let now = crate::lock::fileserver_now(root)?;
+    println!("{}", format!("build cache in {}", root.display()).bold());
+    if scan.machines.is_empty() {
+        println!("  nothing stored yet");
+    }
+    let day = Duration::from_secs(24 * 3600);
+    for machine in &scan.machines {
+        let bytes: u64 = machine.entries.iter().map(|e| e.bytes).sum();
+        println!("  {}: {} objects, {}", machine.name.bold(), machine.entries.len(), upkeep::human(bytes));
+        let last_uses = machine.last_uses();
+        let last = |e: &upkeep::Entry| last_uses.get(e.key.as_str()).map_or(e.published, |used| (*used).max(e.published));
+        if let (Some(oldest), Some(newest)) =
+            (machine.entries.iter().map(|e| e.published).min(), machine.entries.iter().map(|e| e.published).max())
+        {
+            println!("    stored between {} and {}", ago(now, oldest), ago(now, newest));
+        }
+        for days in [7, 30] {
+            let since = now.checked_sub(day * days).unwrap_or(UNIX_EPOCH);
+            let used = machine.entries.iter().filter(|e| last(e) >= since).count();
+            println!("    used or stored in the last {days} days: {used}");
+        }
+        if !machine.temps.is_empty() {
+            println!("    left over from interrupted builds: {} files (cactup cache gc removes those a day old)", machine.temps.len());
+        }
+    }
+    for (name, files, bytes) in &scan.other_formats {
+        println!(
+            "  in another format ({name}: another version of cactup's): {files} files, {}; this cactup neither reads nor removes them",
+            upkeep::human(*bytes)
+        );
+    }
+    let total = scan.bytes();
+    println!("  in all: {}", upkeep::human(total));
+    upkeep::stamp_size(root, total)?;
+    Ok(())
+}
+
+/// `cactup cache gc` (§18.9).
+fn gc(root: &Path, unused_for: Duration, to_size: Option<u64>, dry_run: bool) -> Res<()> {
+    if !root.is_dir() {
+        println!("The build cache in {} is empty: nothing to remove.", root.display());
+        return Ok(());
+    }
+    // One at a time per store, across hosts.
+    let _lock = crate::lock::LinkLock::acquire(&root.join("gc.lock"))?.with_heartbeat();
+    let scan = upkeep::scan(root)?;
+    let now = crate::lock::fileserver_now(root)?;
+    let plan = upkeep::plan(&scan, now, unused_for, to_size);
+    let bytes: u64 = plan.entries.iter().map(|(e, _)| e.bytes).sum();
+    if dry_run {
+        for (entry, last) in &plan.entries {
+            println!("  would remove {} ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
+        }
+        println!(
+            "Would remove {} of {} objects ({}), leaving {}, and {} files left over from interrupted builds.",
+            plan.entries.len(),
+            scan.machines.iter().map(|m| m.entries.len()).sum::<usize>(),
+            upkeep::human(bytes),
+            upkeep::human(plan.bytes_after),
+            plan.temps.len()
+        );
+        return Ok(());
+    }
+    let done = upkeep::carry_out(&plan)?;
+    upkeep::stamp_size(root, plan.bytes_after)?;
+    println!(
+        "Removed {} objects ({}) and {} files left over from interrupted builds; the build cache holds {}.",
+        done.entries,
+        upkeep::human(done.bytes),
+        done.temps,
+        upkeep::human(plan.bytes_after)
+    );
+    Ok(())
+}
+
+/// `cactup cache verify` (§18.9).
+fn verify(root: &Path) -> Res<()> {
+    use crate::objcache::store::{Miss, Store};
+    if !root.is_dir() {
+        println!("The build cache in {} is empty: nothing to verify.", root.display());
+        return Ok(());
+    }
+    let scan = upkeep::scan(root)?;
+    let mut checks = Vec::new();
+    for machine in &scan.machines {
+        let store = Store::new(root, &machine.name)?;
+        checks.extend(machine.entries.iter().map(|entry| (store.clone(), entry.key.clone())));
+    }
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let checking = progress.add_child("check the build cache");
+    checking.init(Some(checks.len()), Some(prodash::unit::label("objects")));
+    let checking = std::sync::Mutex::new(checking);
+    let results = crate::par::parallel_map(&checks, |(store, key)| {
+        let result = store.check(key);
+        checking.lock().expect("progress poisoned").inc();
+        result
+    });
+    drop(checking);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    let (mut good, mut removed, mut foreign, mut unreadable) = (0, 0, 0, 0);
+    for result in results? {
+        match result {
+            Ok(()) => good += 1,
+            Err(Miss::Invalid { .. }) => removed += 1,
+            Err(Miss::Foreign(_)) => foreign += 1,
+            Err(Miss::Absent) => {}
+            Err(_) => unreadable += 1,
+        }
+    }
+    println!("{good} objects are whole; {removed} were damaged and are removed.");
+    if foreign > 0 {
+        println!("{foreign} were stored by another version of cactup, and are left as they are.");
+    }
+    if unreadable > 0 {
+        println!("{unreadable} could not be read just now (left as they are: try again).");
+    }
+    Ok(())
 }
 
 /// The installation registered under `alias`.

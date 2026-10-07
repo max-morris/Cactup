@@ -1789,6 +1789,7 @@ fn prepare_with_cache(
     };
     let cache_store = db.as_ref().map_or_else(|_| crate::objcache::default_store_root(), crate::objcache::store_root);
     let cache_relocate = db.as_ref().map_or(true, crate::objcache::relocate_from_db);
+    let cache_size_limit = db.as_ref().ok().and_then(crate::objcache::size_limit_from_db);
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
     // optionlist, make command and a build submit script — frozen into
     // `build.toml` with the vars, so `execute` never opens the DB (§5, D11).
@@ -1921,6 +1922,7 @@ fn prepare_with_cache(
                 build_env: &build_env,
                 store: &cache_store,
                 relocate: cache_relocate,
+                size_limit: cache_size_limit,
             },
         );
         let cache = staged.unwrap_or_else(|e| {
@@ -2289,6 +2291,11 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     };
 
     drop(running);
+    // The build cache's record of what this build used, and its size
+    // notice (§18.9): whatever became of the build.
+    if status.is_some() {
+        crate::objcache::after_build(&attempt.cc_dir());
+    }
     attempt.meta.timestamps.finished = Some(Utc::now());
     attempt.meta.status = Some("U".to_owned());
 
