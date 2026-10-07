@@ -10,11 +10,14 @@ about how they were made, and what the tutorial relies on, is here.
 | `carpetx.th` | the CarpetX-only install (notebook 4a) | Max's private `carpetx-mp.th`, with stock repositories |
 | `carpetx-mp-forks.th` | notebook 3's repoint to the forks | Max's `carpetx-mp-forks.th`, headers rewritten |
 | `tutorial-gpu.th` | the `et-gpu` install and its GPU config (notebook 4b, bake B3) | `tutorial.th` with CarpetX on a fix branch, below |
+| `tutorial-ckpt.th` | the `tutorial-ckpt` config in the stock install (notebook 7, bake B6) | `tutorial.th` plus three thorns, below |
 
-All four are parsed by cactup's own parser (a scratch dump test over
+The first four are parsed by cactup's own parser (a scratch dump test over
 `thornlist::parse_with_base`) with no warnings, and `mirrors/mirror.py`'s
 port of that parser gives identical components for them and for the
-release and `master` lists.
+release and `master` lists. `tutorial-ckpt.th` is parsed by cactup whenever
+B6 is baked, and mirror.py finds in it exactly `tutorial.th`'s components
+plus the three below.
 
 ## Rules every list follows
 
@@ -193,3 +196,24 @@ over the template parameters. Found by building (Stage 6):
 With the commit, the GPU config builds with CUDA 13.4 and gcc 14; the
 executable links the CUDA runtime statically (every shared library it needs
 is in `/lib/x86_64-linux-gnu`). The mirrors lock the branch.
+
+## `tutorial-ckpt.th`
+
+`tutorial.th` plus `ExternalLibraries/HDF5`, `ExternalLibraries/Silo` and
+`CactusUtils/TerminationTrigger` (Stage 9). Found by running notebook 7's
+parameter file on the stock config: CarpetX checkpoints only through openPMD
+or Silo (`CarpetX::checkpoint_method`/`recover_method`, default `"error"`),
+each compiled in only when the thornlist has the matching library
+(`OPTIONAL openPMD_api`, `OPTIONAL Silo` in CarpetX's configuration.ccl), so
+with `tutorial.th` a checkpoint aborts the run: `CarpetX::checkpoint_method
+is set to "silo", but Silo is not enabled`. Silo is the smaller of the two:
+Debian packages Silo and HDF5 (`libsilo-dev`, `libhdf5-openmpi-dev`, already
+in the image), and the optionlist's `SILO_DIR`/`HDF5_*` point at them, so
+nothing is built from source for them. TerminationTrigger is what `cactup sim
+stop` writes to for a graceful stop (it writes `1` into the restart's
+`TERMINATE` file when one exists, else cancels the job).
+
+Adding these to `tutorial.th` itself would have changed B1's fingerprint and
+every bake built from it, and the outputs of notebooks 2 to 6b; a config of
+its own costs one partial bake (B6, about five and a half minutes) and is a
+lesson of its own: what a build can do depends on its thornlist.

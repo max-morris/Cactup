@@ -385,5 +385,5 @@ cactup machine show | sed -n '1,2p'
 - [Running simulations](https://max-morris.github.io/Cactup/users/running-simulations.html)
   (knobs, `-K`)
 
-Next: **notebook 7**, watching simulations: logs, the follow view, chained
-jobs, checkpoints and restarts.
+Next: **notebook 7**, long runs: chained jobs, following a run, checkpoints
+and restarts.

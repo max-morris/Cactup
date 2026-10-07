@@ -42,6 +42,9 @@ NOTEBOOKS = {
     # Notebook 6a makes the machine entry mylab; 6b goes on with it.
     "6a": {"cactup": True, "install": True, "tutorial": True, "mylab": "fresh"},
     "6b": {"cactup": True, "install": True, "tutorial": True, "mylab": "finished"},
+    "7": {"cactup": True, "install": True, "tutorial": True},
+    "8": {"cactup": True, "install": True, "tutorial": True},
+    "9": {"cactup": True, "install": True, "tutorial": True},
 }
 THORNLIST = "/opt/cactup-tutorial/thornlists/tutorial.th"
 
@@ -54,6 +57,7 @@ EDITED = {
     "arrangements/CarpetX/WaveToyX/src/wavetoyx.cxx": "5",
     "arrangements/CarpetX/WaveToyX/param.ccl": "5",
     "src/main/Banner.c": "5",
+    "arrangements/CarpetX/TestNorms/src/test.cc": "9",
 }
 
 

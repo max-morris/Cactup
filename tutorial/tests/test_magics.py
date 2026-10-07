@@ -57,6 +57,20 @@ def test_status_line_and_strict_mode(tmp_path):
         execute(tmp_path, "%%shell --expect-fail\ntrue", strict=True)
 
 
+def test_a_timeout_ends_a_follow_cell_without_failing_it(tmp_path):
+    # Like `cactup sim log -o`: runs until Ctrl-C, then exits 0.
+    follow = "import time\ntry:\n    while True: time.sleep(0.1)\nexcept KeyboardInterrupt:\n    pass\n"
+    (tmp_path / "follow.py").write_text(follow)
+    execute(tmp_path, "%%shell --timeout 1\npython3 follow.py", strict=True)
+    # A command the interrupt kills still fails the cell.
+    with pytest.raises(CellExecutionError):
+        execute(tmp_path, "%%shell --timeout 1\nsleep 30", strict=True)
+    # And a cell that is there to show an interrupt expects one, however the
+    # command then exits.
+    execute(tmp_path, "%%shell --timeout 1 --expect-fail\npython3 follow.py", strict=True)
+    execute(tmp_path, "%%shell --timeout 1 --expect-fail\nsleep 30", strict=True)
+
+
 def test_line_form(tmp_path):
     cells = execute(tmp_path, "%shell echo one-liner")
     assert plain(cells[0]).strip() == "one-liner"

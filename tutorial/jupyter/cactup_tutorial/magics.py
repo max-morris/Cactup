@@ -176,10 +176,17 @@ class TutorialMagics(Magics):
     def _check(self, result: Result, expect_fail: bool) -> None:
         if os.environ.get("CACTUP_TUTORIAL_STRICT") != "1":
             return
-        ok = result.status == 0 and not result.interrupted
-        if expect_fail and ok:
-            raise CellFailed("the cell was expected to fail, but it succeeded")
-        if not expect_fail and not ok:
+        if expect_fail:
+            # Failing includes being interrupted, by the cell's own --timeout
+            # too (a cell that shows Ctrl-C stopping a command), whatever
+            # status the command then exits with.
+            if result.status == 0 and not result.interrupted:
+                raise CellFailed("the cell was expected to fail, but it succeeded")
+            return
+        # A cell's own --timeout ends a command that runs until interrupted
+        # (a follow mode): that is how such a cell finishes, if the command
+        # then exits cleanly.
+        if result.status != 0 or (result.interrupted and not result.timed_out):
             raise CellFailed(f"the command exited with status {result.status}")
 
     # -- %%file --------------------------------------------------------
@@ -292,7 +299,9 @@ def _bundle(term: Terminal, result: Result | None, hint: str | None = None) -> d
     if result is not None:
         status = _status_line(result)
         if status:
-            fail = result.status != 0 or result.interrupted
+            # A cell's own --timeout ending a command that then exits cleanly is
+            # how a follow cell finishes, not a failure (as _check agrees).
+            fail = result.status != 0 or (result.interrupted and not result.timed_out)
             cls = "cactup-status cactup-fail" if fail else "cactup-status"
             html += f'<div class="{cls}">{_html(status)}</div>'
             text += f"\n[{status}]"

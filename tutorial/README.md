@@ -222,15 +222,41 @@ Constraints the notebooks must respect (each found by reading the code):
   in the middle of 6b keeps 6b's additions. Catch-up's check for user
   entries that claim this host runs a `discover.py` (as cactup does, a
   failing one claiming nothing) rather than assuming it claims.
-- **7:** walltime chaining runs on the `short` partition (3 minutes), in two
-  segments; the parfile's checkpoint and recovery path is validated before the
-  notebook is written. Every `short` submit passes `--checkpt-buffer
-  00:01:00`: cactup's default buffer (at least ten minutes) is longer than a
-  whole segment, and cactup doesn't warn about it. The notebook also presents
-  what happens to a run when the container stops (the idle culler over lunch):
-  its job is requeued and runs its segment again from the start (a
-  checkpointing run loses at most that segment), `sim show` shows it queued
-  on the same restart, and its log keeps the interrupted attempt; the
+- **7:** walltime chaining runs on the `short` partition (3 minutes); the
+  parfile's checkpoint and recovery path is validated before the notebook is
+  written. CarpetX checkpoints only through Silo or openPMD, and `tutorial.th`
+  has neither, so notebook 7 builds a config of its own, `tutorial-ckpt` from
+  `thornlists/tutorial-ckpt.th` (`tutorial.th` plus HDF5, Silo and
+  TerminationTrigger; bake B6), behind the same
+  `cactup-tutorial-sources-clean` guard as notebook 5's `tutorial-pinned`. Its
+  parfile (a WaveToyX standing wave, 64³ cells, 9600 iterations) stops on
+  `Cactus::max_runtime = @CHECKPOINT_WALLTIME_SECONDS@ / 60.0`, checkpoints on
+  termination into `@SIMULATION_DIR@/checkpoints`, recovers with `autoprobe`,
+  and has TerminationTrigger watch `@RUNDIR@/TERMINATE`, which is the file
+  `sim stop` writes to for a graceful stop. The chain is `-T 4 -c 1 -w
+  00:24:00 --checkpt-buffer 00:02:00`. One thread per process:
+  TerminationTrigger's `CreateFile` runs in local mode (no `OPTIONS:`), which
+  CarpetX calls once per box on concurrent OpenMP threads, and it formats its
+  path into a static buffer, so with two threads it now and then hands `fopen`
+  an empty string and aborts the run (at `-c 2`, about one start in 70 on a
+  quiet host and 17 in 256 on a loaded one; at `-c 1`, none in 256). A fix is
+  being prepared for upstream; the tutorial keeps the release's thorn, and
+  single-threaded processes are faster here anyway. The chain is eight
+  pre-submitted jobs, each computing for one minute. With two threads per
+  process, measured rates were 37-80 iterations per second on a quiet host and
+  22-31 on a loaded one; four single-threaded processes ran 1.6-2 times faster
+  side by side (57-63 against 29-39 on the same moderately loaded host). So
+  the run takes two or three jobs quiet, and the eight jobs leave room for a
+  host far slower than any measured; later jobs recover at 9600 and end at
+  once. `sim stop` is shown on a single job, not the chain: it stops only the
+  running job of a chain (a quick second stop finds no active restart), and
+  the prose says to `scancel` the queued jobs first. The chain passes
+  `--checkpt-buffer`: cactup's default buffer (at least ten minutes) is longer
+  than a whole `short` job, and cactup doesn't warn about it. The notebook
+  also presents what happens to a run when the container stops (the idle
+  culler over lunch): its job is requeued and runs its segment again from the
+  start (a checkpointing run loses at most that segment), `sim show` shows it
+  queued on the same restart, and its log keeps the interrupted attempt; the
   simulation's `log.txt` records the second "compute-node run". Its prose
   keeps the two meanings of "restart" apart: cactup's restarts are
   `output-NNNN` (what `sim list` counts), a requeue reruns the same one (the
@@ -250,7 +276,13 @@ Constraints the notebooks must respect (each found by reading the code):
 - **9:** tests run with `test submit`: a foreground `test run` is refused
   outside an allocation because the machine sets `allocation-env`. The run
   is a small subset (a few CarpetX tests on 1 process), with a target of
-  5 minutes, not the full CarpetX and Cottonmouth suites. If the attendee skipped the
+  5 minutes, not the full CarpetX and Cottonmouth suites: `WaveToyX TestNorms
+  TestOutput` (TestOutput's three openPMD tests fail, as the config has no
+  openPMD, which the notebook has the attendee find out). Only a bare thorn
+  name or `Thorn/test` selects tests (the flesh's `RunTestUtils.pl`);
+  anything else silently selects none, which the notebook says. The broken
+  file is `arrangements/CarpetX/TestNorms/src/test.cc` (a semicolon removed;
+  catch-up's `EDITED`). If the attendee skipped the
   fix cell, the closing revert is "up to date" with no make (the failed build
   recorded nothing), so the notebook's text doesn't promise a recompile.
   `build log -e` follows the log until interrupted, so its cell uses
@@ -315,7 +347,7 @@ configs, simulations). So:
 
 - Every notebook's first code cell runs `cactup-tutorial-catch-up N`
   (`image/rootfs/usr/local/bin/`; each notebook's stage adds that
-  notebook's steps, so far those of notebooks 1 to 6b), which
+  notebook's steps, so far those of notebooks 1 to 9), which
   brings the container to the state notebook N assumes (installing from the
   mirrors and building from the bakes if needed, selecting the right
   installation and config). It is idempotent and prints one line per thing it
@@ -352,7 +384,7 @@ configs, simulations). So:
   the mirrors (within 10 minutes under load, see Sizing) and one restore.
 - Notebooks 5 and 9 edit a fixed list of files in the stock install
   (catch-up's `EDITED`: WaveToyX's source and `param.ccl`, the flesh's
-  `Banner.c`, notebook 9's broken file). For every N ≥ 2, catch-up puts any of them that are modified back to
+  `Banner.c`, notebook 9's `TestNorms/src/test.cc`). For every N ≥ 2, catch-up puts any of them that are modified back to
   their committed state: the partial-tree configs in the stock install
   (4b's `tutorial-debug`, `tutorial-pinned`) have no objects, so building one
   on an edited tree would be a from-scratch real build, and the bakes all
@@ -401,8 +433,9 @@ out-of-order cases: notebook 3 run twice, with its "start over" cell
 between; notebook 5 run again from the top after stopping at the end of its
 hacking section (all three files edited and built); and notebook 4b after
 stopping there, asserting that cactup's "source tree has moved" note never
-appears. Two more come with later stages: notebook 9 before notebook 5, and
-going on from 4b through notebook 7 after stopping in notebook 5. Every
+appears; notebook 7 after stopping there too; and notebook 9 then notebook 5
+in a fresh container. Notebooks 6a and 6b are each run again after stopping
+partway. Every
 notebook's cells must be safe to run again: the `tutorial-pinned` cell in
 notebook 5, for instance, runs `cactup-tutorial-sources-clean` (above) and,
 if the sources aren't as fetched, lists what differs and says to run the
@@ -640,7 +673,7 @@ objects), and nothing leaks into a later attempt.
   and its siblings, `cactup-config.toml`, and the `cactup-optionlist.*` and
   `cactup-thornlist*.th` snapshots. `cactup build list` shows only real
   attempts.
-- A partial bake (B2–B5) keeps no objects: its `build/` and `lib/` are empty
+- A partial bake (B2–B6) keeps no objects: its `build/` and `lib/` are empty
   and its `scratch/` holds only `scratch/external`. Restoring it also empties
   the config's `build/` and `lib/`, so no objects from
   a real build survive beside the restored `config-data`. Otherwise a
@@ -705,7 +738,9 @@ submits to `mylab` use `--ignore-machine` on the stock `tutorial`).
 | 5 | `build tutorial` after a `.ccl` edit in WaveToyX | incremental, thorn shape changed | miss: real, that thorn from scratch |
 | 5 | `build tutorial` after a flesh `.c` edit (`Banner.c`) | incremental | miss: real |
 | 5 | `build tutorial` after reverting the edits | incremental | hit B1, built on: real, the reverted files (all of the `.ccl`'s thorn) |
+| 7 | `build tutorial-ckpt --thornlist tutorial-ckpt.th` | new config | hit B6: restore + replay |
 | 9 | `build tutorial` after a deliberate syntax error | incremental | miss: real, fails after CST and configure |
+| 9 | `--trace build tutorial`, still broken | incremental | miss: real, fails the same way |
 | 9 | `build tutorial` after the fix (not the original text) | incremental | miss: real, one file |
 | 9 | `build tutorial` after reverting to the committed file | incremental | hit B1, built on: real, one file |
 
@@ -755,13 +790,14 @@ restored config is complete to cactup and Cactus alike).
 | B3 | install `et-gpu` (from `tutorial-gpu.th`), config `tutorial-gpu` (`gpu` optionlist variant) | all but the objects |
 | B4 | `tutorial-debug` (`--debug`) | all but the objects |
 | B5 | `tutorial-pinned` (`--universe pinned`) | all but the objects |
+| B6 | `tutorial-ckpt` (`tutorial-ckpt.th`) | all but the objects |
 
 Every bake also keeps the `NAME-utils` programs under `exe/NAME/`, since the
 replayed output says they were built, and records, after harvesting the
 tree, what a real `NAME-clean` of it prints (which is what a replayed
 `--clean` step prints) and what make prints when interrupted in each step.
 
-B1 to B5 exist, in `bake/bake.py`'s table of bakes. B5's build runs in the
+B1 to B6 exist, in `bake/bake.py`'s table of bakes. B5's build runs in the
 `pinned` universe, so its `taskset` needs `CACTUP_TUTORIAL_CPUS`, which the
 entrypoint exports; a bake container doesn't run the entrypoint, so
 `bake.py` sets it the same way when it isn't set. A bake can first do to its installation what the notebook does

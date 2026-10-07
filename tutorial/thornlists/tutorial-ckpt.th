@@ -1,0 +1,125 @@
+# tutorial-ckpt.th -- tutorial.th plus what checkpointing needs.
+#
+# CarpetX writes and reads checkpoints through openPMD or Silo, and builds
+# that support only when the thornlist has the matching external library:
+# so this list adds ExternalLibraries/Silo (and HDF5, which Silo stores its
+# files in; Debian's packages provide both, as the optionlist says). It also
+# adds CactusUtils/TerminationTrigger, through which `cactup sim stop` asks
+# a run to stop at the next iteration, write a checkpoint and end.
+#
+# Notebook 7 builds the config tutorial-ckpt from it. Everything else is
+# tutorial.th's, so the two lists differ in exactly these three thorns.
+#
+# Every repository and branch is the ET_2026_05 release's.
+
+!CRL_VERSION = 1.0
+
+!DEFINE ROOT = Cactus
+!DEFINE ARR  = $ROOT/arrangements
+!DEFINE COMPONENTLIST_TARGET = $ROOT/thornlists/
+
+!DEFINE ET_RELEASE = ET_2026_05
+
+
+# Cactus Flesh
+!TARGET   = $ROOT
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactus.git
+!REPO_BRANCH = $ET_RELEASE
+!NAME     = flesh
+!CHECKOUT = .clang-format CONTRIBUTORS COPYRIGHT doc lib Makefile README.md src
+
+
+# CactusBase thorns
+# IOUtil implements "IO", which CarpetX's param.ccl SHARES.
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactusbase.git
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+CactusBase/IOUtil
+
+
+# CactusUtils: TerminationTrigger, for a graceful stop
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://bitbucket.org/cactuscode/cactusutils.git
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+CactusUtils/TerminationTrigger
+
+
+# CarpetX thorns: exactly the ones the release enables
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/CarpetX
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+CarpetX/ADMBaseX
+CarpetX/Arith
+CarpetX/BoxInBox
+CarpetX/CarpetX
+CarpetX/CarpetXRegrid
+CarpetX/CoordinatesX
+CarpetX/Derivs
+CarpetX/ErrorEstimator
+CarpetX/FluxWaveToyX
+CarpetX/HydroBaseX
+CarpetX/Loop
+CarpetX/ODESolvers
+CarpetX/SIMDWaveToyX
+CarpetX/SpacetimeWaveToyX
+CarpetX/StaggeredWaveToyX
+CarpetX/TestArrayGroup
+CarpetX/TestBoundaries
+CarpetX/TestBoxInBox
+CarpetX/TestDerivs
+CarpetX/TestInterpolate
+CarpetX/TestNorms
+CarpetX/TestODESolvers
+CarpetX/TestODESolvers2
+CarpetX/TestOutput
+CarpetX/TestProlongate
+CarpetX/TestSymmetries
+CarpetX/TmunuBaseX
+CarpetX/WaveToyX
+
+
+# External libraries: exactly the ones the thorns above need
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/$1-$2
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH = ../$1-$2
+!CHECKOUT =
+ExternalLibraries/AMReX
+ExternalLibraries/HDF5
+ExternalLibraries/MPI
+ExternalLibraries/NSIMD
+ExternalLibraries/Silo
+ExternalLibraries/yaml_cpp
+ExternalLibraries/zlib
+
+
+# Cottonmouth: Z4c and linear-wave initial data
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/Cottonmouth
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+Cottonmouth/CottonmouthLinearWaveID
+Cottonmouth/CottonmouthZ4c4m
+
+
+# SpacetimeX: the radiative boundary condition Cottonmouth requires
+!TARGET   = $ARR
+!TYPE     = git
+!URL      = https://github.com/EinsteinToolkit/SpacetimeX
+!REPO_BRANCH = $ET_RELEASE
+!REPO_PATH= $2
+!CHECKOUT =
+SpacetimeX/NewRadX

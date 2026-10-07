@@ -103,7 +103,7 @@ bake() {
         -v "$here/../bake:/bake:ro" -v "$bakes:/bakes" \
         "$@"
 }
-bake --entrypoint python3 "$tag:lab" /bake/bake.py B1 B2a B2b B4 B5 --wanted wanted-cpu
+bake --entrypoint python3 "$tag:lab" /bake/bake.py B1 B2a B2b B4 B5 B6 --wanted wanted-cpu
 
 # The GPU bake: the same lab image, with the CUDA toolkit mounted from a
 # container of the cuda image (kept between builds while the image is the

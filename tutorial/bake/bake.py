@@ -31,6 +31,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -107,6 +108,16 @@ BAKES = {
                   str(THORNLISTS / "tutorial.th"), "-I", "ET_2026_05_v0"],
         "root": "Cactus",
         "config": "tutorial-pinned",
+        "kind": "partial",
+    },
+    # Notebook 7: the tutorial thornlist plus Silo, HDF5 and
+    # TerminationTrigger, for checkpoints and a graceful stop.
+    "B6": {
+        "install": [["cactup", "install", "ET_2026_05_v0", "--silent"]],
+        "build": ["cactup", "build", "tutorial-ckpt", "--thornlist", str(THORNLISTS / "tutorial-ckpt.th"),
+                  "-I", "ET_2026_05_v0"],
+        "root": "Cactus",
+        "config": "tutorial-ckpt",
         "kind": "partial",
     },
 }
@@ -316,15 +327,18 @@ def harvest(spec: dict, rec: Path, out: Path, cuda: str | None = None) -> None:
         the same way: a real make, interrupted a moment in. Some steps are over
         in a fraction of a second, so it tries again sooner and sooner until
         the interrupt lands while make still runs."""
-        tmp = Path(f"/tmp/bake-interrupt-{step}.txt")
-        for delay in (after, after / 5, after / 30, after / 100, after / 300, *[after / 1000] * 6):
+        tmp = Path(tempfile.gettempdir()) / f"bake-interrupt-{step}.txt"
+        try:
+            for delay in (after, after / 5, after / 30, after / 100, after / 300, *[after / 1000] * 6):
+                tmp.unlink(missing_ok=True)
+                as_user([sys.executable, "-I", __file__, "--interrupt", str(root), str(tmp), str(delay), "-j4",
+                         *goal], check=False)
+                if tmp.is_file() and tmp.read_text():
+                    shutil.copyfile(tmp, out / f"interrupt-{step}.txt")
+                    return
+            log(f"no interrupt message recorded for {step} (it always finished first)")
+        finally:
             tmp.unlink(missing_ok=True)
-            as_user([sys.executable, "-I", __file__, "--interrupt", str(root), str(tmp), str(delay), "-j4",
-                     *goal], check=False)
-            if tmp.is_file() and tmp.read_text():
-                shutil.copyfile(tmp, out / f"interrupt-{step}.txt")
-                return
-        log(f"no interrupt message recorded for {step} (it always finished first)")
 
     # The baked tree is harvested already, so nothing here can lose anything.
     # The utils step first, on the finished tree (on a cleaned one it has

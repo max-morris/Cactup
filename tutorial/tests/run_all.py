@@ -150,6 +150,66 @@ EXPECT = {
         r"Deleted user-MDB machine mylab",
         r"cactup-tutorial \(System MDB",
     ],
+    "07": [
+        r"> CactusUtils/TerminationTrigger",
+        r"> ExternalLibraries/HDF5",
+        r"> ExternalLibraries/Silo",
+        r"Built config tutorial-ckpt",
+        r"(Over)?[Ww]rote ~/wave_ckpt.par",
+        r"pre-submitting 8 chained jobs",
+        r"Submitted chain restart output-0001 as job \d+ \(chained after job \d+\)",
+        r"\(Dependency\)",
+        r"output-0001: PRESUBMITTED",
+        r"OutputGH: iteration",
+        r"cactup: interrupted, stopping",
+        r"output-0007 \(active\): FINISHED",
+        r"run::compute-node run of output-0000",
+        r"run::output-0000 finished",
+        r"run::compute-node run of output-0001",
+        # output-0000's checkpoint, and output-0001 recovering from that iteration.
+        r"output-0000/chain\.out:INFO \(CarpetX\): Checkpointing before terminating at iteration (\d+),(?:[^\n]*\n){1,2}?output-0001/chain\.out:INFO \(CarpetX\): RecoverGH: iteration \1,",
+        r"Checkpointing before terminating at iteration 9600",
+        r"checkpoint\.chkpt\.it\d+\.silo",
+        r"Requested graceful termination of output-0000 \(wrote 1 into TERMINATE\)",
+        r"output-0000 stopped",
+        r"Found termination signal in termination file",
+        r"Checkpointing before terminating at iteration",
+        r"CHECKPOINT_WALLTIME_SECONDS = 60",
+        r"CACTUP = \"/home/cactus/\.cactup/bin/cactup-\w+\"",
+        r"Moved simulation stopme to",
+    ],
+    "08": [
+        r"(Over)?[Ww]rote ~/standing.par",
+        r"@KNOB\(cells\)@: knob cells is unset or empty",
+        r"Cactus::cctk_run_title = \"standing-16: 16 cells, restart 0\"\nCarpetX::ncells_x = 16",
+        r"# Generated for computed, restart 0, on 1 process\(es\)\.",
+        r"Cactus::cctk_final_time = 1\.154701",
+        r"CarpetX::ncells_x = 24",
+        r"standing-64\s+FINISHED",
+        r" 16³ cells: L2 error 9\.5\d\de-03 at t = 1\.000\n 32³ cells: L2 error 2\.3\d\de-03 at t = 1\.000\n 64³ cells: L2 error 5\.7\d\de-04 at t = 1\.000",
+        r"ratios: 4\.\d\d, 4\.\d\d",
+        r"Moved simulation computed to",
+    ],
+    "09": [
+        r"Run `cactup test submit` to execute the suite on a compute node",
+        r"state:\s+DONE \(12 passed, 3 failed\)",
+        r"openPMD is not enabled",
+        r"test\.cc:52:3: err\s*or: expected",
+        r"the build failed \(exit status: 2\)",
+        r"state:\s+FAILED",
+        r"\(latest\): FAILED",
+        r"cactup: interrupted, stopping",
+        r"build-script",
+        r"make -j4 tutorial-utils",
+        r"\+  constexpr int order = 3;",
+        r"Built config tutorial \(",
+        r"state:\s+DONE \(1 passed, 0 failed\)",
+        r"local edits reverted: CarpetX",
+        r"the source tree matches what this config was built from",
+        r"Parameter \'WaveToyX::initial_conditon\' not found",
+        r"run::output-0000 failed \(exit status: 1\)",
+        r"Moved simulation typo to",
+    ],
     "02": [
         r"Built config tutorial",
         r"status: complete",
@@ -253,6 +313,66 @@ RERUN = {
         r"Deleted user-MDB machine mylab",
         r"cactup-tutorial \(System MDB",
     ],
+    "07": [
+        r"> CactusUtils/TerminationTrigger",
+        r"> ExternalLibraries/HDF5",
+        r"> ExternalLibraries/Silo",
+        r"Config tutorial-ckpt is up to date",
+        r"(Over)?[Ww]rote ~/wave_ckpt.par",
+        r"pre-submitting 8 chained jobs",
+        r"Submitted chain restart output-0001 as job \d+ \(chained after job \d+\)",
+        r"\(Dependency\)",
+        r"output-0001: PRESUBMITTED",
+        r"OutputGH: iteration",
+        r"cactup: interrupted, stopping",
+        r"output-0007 \(active\): FINISHED",
+        r"run::compute-node run of output-0000",
+        r"run::output-0000 finished",
+        r"run::compute-node run of output-0001",
+        # output-0000's checkpoint, and output-0001 recovering from that iteration.
+        r"output-0000/chain\.out:INFO \(CarpetX\): Checkpointing before terminating at iteration (\d+),(?:[^\n]*\n){1,2}?output-0001/chain\.out:INFO \(CarpetX\): RecoverGH: iteration \1,",
+        r"Checkpointing before terminating at iteration 9600",
+        r"checkpoint\.chkpt\.it\d+\.silo",
+        r"Requested graceful termination of output-0000 \(wrote 1 into TERMINATE\)",
+        r"output-0000 stopped",
+        r"Found termination signal in termination file",
+        r"Checkpointing before terminating at iteration",
+        r"CHECKPOINT_WALLTIME_SECONDS = 60",
+        r"CACTUP = \"/home/cactus/\.cactup/bin/cactup-\w+\"",
+        r"Moved simulation stopme to",
+    ],
+    "08": [
+        r"(Over)?[Ww]rote ~/standing.par",
+        r"@KNOB\(cells\)@: knob cells is unset or empty",
+        r"Cactus::cctk_run_title = \"standing-16: 16 cells, restart 0\"\nCarpetX::ncells_x = 16",
+        r"# Generated for computed, restart 0, on 1 process\(es\)\.",
+        r"Cactus::cctk_final_time = 1\.154701",
+        r"CarpetX::ncells_x = 24",
+        r"standing-64\s+FINISHED",
+        r" 16³ cells: L2 error 9\.5\d\de-03 at t = 1\.000\n 32³ cells: L2 error 2\.3\d\de-03 at t = 1\.000\n 64³ cells: L2 error 5\.7\d\de-04 at t = 1\.000",
+        r"ratios: 4\.\d\d, 4\.\d\d",
+        r"Moved simulation computed to",
+    ],
+    "09": [
+        r"Run `cactup test submit` to execute the suite on a compute node",
+        r"state:\s+DONE \(12 passed, 3 failed\)",
+        r"openPMD is not enabled",
+        r"test\.cc:52:3: err\s*or: expected",
+        r"the build failed \(exit status: 2\)",
+        r"state:\s+FAILED",
+        r"\(latest\): FAILED",
+        r"cactup: interrupted, stopping",
+        r"build-script",
+        r"make -j4 tutorial-utils",
+        r"\+  constexpr int order = 3;",
+        r"Built config tutorial \(",
+        r"state:\s+DONE \(1 passed, 0 failed\)",
+        r"local edits reverted: CarpetX",
+        r"the source tree matches what this config was built from",
+        r"Parameter \'WaveToyX::initial_conditon\' not found",
+        r"run::output-0000 failed \(exit status: 1\)",
+        r"Moved simulation typo to",
+    ],
 }
 
 # What no notebook may ever show: the build replay missing its bake or
@@ -263,6 +383,13 @@ NEVER = [
     r"Traceback \(most recent call last\)",
     r"make_shim",
 ]
+
+# What a notebook may not print anywhere, beyond NEVER: notebook 7's chain
+# must not lose a job (later jobs would still finish the run and match
+# every expectation).
+NEVER_IN = {
+    "07": [r"run::output-\d+ failed"],
+}
 
 # What a cell not marked --expect-fail may not print, even if its last
 # command succeeded: an error from cactup (or anything else) on the way.
@@ -383,7 +510,7 @@ def check(label: str, notebook: str, result: dict, expect: dict, quiet_catch_up:
         else:
             position = m.end()
     for cell in result["cells"]:
-        patterns = NEVER + ([] if "--expect-fail" in cell["source"] else ERRORS)
+        patterns = NEVER + NEVER_IN.get(number(notebook), []) + ([] if "--expect-fail" in cell["source"] else ERRORS)
         for pattern in patterns:
             if re.search(pattern, cell["text"]):
                 problems.append(f"{label} {notebook}: forbidden output {pattern!r} in cell:\n{cell['source']}")
@@ -598,7 +725,7 @@ def main() -> int:
             print(f"{'ok  ' if not found else 'FAIL'} notebook 3 again, after its start-over cell", flush=True)
         for nb5 in (nb for nb in notebooks if nb.startswith("05")):
             (out / "stopped").mkdir(exist_ok=True)
-            for then in [nb for nb in notebooks if nb.startswith("04b")] + [nb5]:
+            for then in [nb for nb in notebooks if nb.startswith(("04b", "07"))] + [nb5]:
                 found = stop_in_hacking(box, nb5, out / "stopped", then)
                 problems += found
                 print(f"{'ok  ' if not found else 'FAIL'} {then} after stopping in notebook 5's hacking",
@@ -625,10 +752,31 @@ def main() -> int:
             finally:
                 box.close()
 
+        def nine_before_five() -> list[str]:
+            """Notebook 9 in a fresh container, then notebook 5: 9 leaves the
+            source tree as fetched, and 5 starts from it."""
+            box = Container(args.image, "nine-five")
+            (out / "nine-five").mkdir(exist_ok=True)
+            try:
+                found = []
+                for nb in [nb for nb in notebooks if nb.startswith("09")] + \
+                          [nb for nb in notebooks if nb.startswith("05")]:
+                    found += check("9 before 5:", nb, box.run(nb, out / "nine-five"), EXPECT, False)
+                return found
+            finally:
+                box.close()
+
         with ThreadPoolExecutor(max_workers=4) as pool:
+            pair = (pool.submit(nine_before_five)
+                    if any(nb.startswith("09") for nb in notebooks) and any(nb.startswith("05") for nb in notebooks)
+                    else None)
             for nb, found, took in pool.map(alone, notebooks):
                 problems += found
                 print(f"{'ok  ' if not found else 'FAIL'} alone: {nb} ({took:.0f} s)", flush=True)
+            if pair is not None:
+                found = pair.result()
+                problems += found
+                print(f"{'ok  ' if not found else 'FAIL'} notebook 9 before notebook 5, in a fresh container", flush=True)
 
     print(f"executed notebooks: {out}")
     for p in problems:
