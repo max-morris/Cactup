@@ -50,7 +50,7 @@ the last milestone, for when that host is not at hand.
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
-| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **implemented**; Einstein Toolkit audit running; review next |
+| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | review **passed** at `6b8efb1` (four rounds); the full audit build on that commit is running |
 | M1c | `cache stats/gc/verify`, size notice, contract into `CLAUDE.md` | not started |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1076,6 +1076,36 @@ the configuration's rule first (Cactus compiles the copies in the
 configuration's `build`), here and in decision 8's wording; (A) the
 dependency file of an audited hit whose compiler cannot be started is
 removed; (A) the comment on reading a script's first line.
+
+### M1b, round 4 (on `6b8efb1`): SIGN-OFF by both
+
+A re-ran the switched include directory four ways (a new link renamed
+over the old, `ln -sfn` in place, `rm` and `ln -s` with the inode number
+reused on ext4, a path through `..`): every one fails the check and
+publishes nothing, while the unchanged tree's compile still publishes. B
+re-ran a second compile killed by `kill -9` (wrapper exits 0, the good
+object kept, `second-compile-failed`) and a stop signal to the wrapper
+during it (dies by the signal). Both reviewed `trail` (symlink targets,
+`..` on the physical path, the 40-link cap, relative names from the
+working directory, a memo per run) and found it sound; B counted its
+cost: 342 entries looked at for a compile reading 295 files, against 590
+stats before, so about even (to be measured on NFS).
+
+The review half of the M1b gate is passed. Non-blocking points left open,
+for the start of M1c:
+
+- (A) The audit closing line does not count `second-compile-failed`
+  (`cache report` lists it).
+- (A) A stop signal that reached the wrapper while audit's second compile
+  ended by a status, not by the signal, is lost (GCC's and Clang's drivers
+  re-raise it, so this is a corner): check `PENDING` however the second
+  compile ended.
+- (A, B) On a filesystem with no birth times (NFS, typically), a directory
+  replaced by one that reuses its inode number is not seen: add it to spec
+  §18.5's limits beside decision 9.
+
+The other half of the gate is Max's: the full audit build in two
+installations, Clang included, on `6b8efb1`.
 
 ## Decisions
 
