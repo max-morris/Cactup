@@ -4505,7 +4505,8 @@ fail to load or behave differently in the oldest binary of the current
 generation, or (b) an overlay written for the current generation would fail
 or behave differently in the new binary. Adding optional `meta.toml` keys
 counts (the schema is closed). The `mdb-compat` CI job loads every machine in
-both directions against the commit that last touched `mdb/GENERATION`; the
+both directions against the last commit that raised `mdb/GENERATION` to the
+current number (a bump reverted later does not move it); the
 rest (template variables, `.py` protocol, ignored optionlist header keys)
 needs review. A unit test requires a `GENERATIONS.md` entry for every
 generation up to N.
