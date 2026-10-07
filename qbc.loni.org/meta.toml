@@ -26,7 +26,6 @@ hostname    = "qbc.loni.org"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/project/sbrandt/carpetx/@USER@"
 simulation-home = "/work/@USER@/simulations"
-build-cache-home = "/work/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/work/@USER@/tests"
 
