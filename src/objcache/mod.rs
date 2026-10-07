@@ -323,19 +323,22 @@ impl Staged {
         // Counted from the event log, one line per compile; a field is
         // counted by its spelling in the log's compact JSON.
         let count = |field: &str| format!("$(grep -c '{field}' {events} 2>/dev/null)");
+        // The spellings are `event::Outcome`'s and `event::Audit`'s.
         let summary = match self.mode {
             Mode::Serve => format!(
-                "\"cactup: build cache: $cactup_cc_count compiles, {} served from the cache, {} published\"",
+                "\"cactup: build cache: $cactup_cc_count compiles, {} served from the cache, {} published, {} could not be (see cactup cache report)\"",
                 count("\"outcome\":\"hit\""),
-                count("\"published\":true")
+                count("\"published\":true"),
+                count("\"published\":false"),
             ),
             Mode::Audit => format!(
-                "\"cactup: build cache: $cactup_cc_count compiles, {} checked against the cache ({} wrong hits, {} failing to compile, {} not deterministic), {} published\"",
+                "\"cactup: build cache: $cactup_cc_count compiles, {} checked against the cache ({} wrong, {} failing to compile, {} not deterministic, {} with inputs that changed), {} published\"",
                 count("\"outcome\":\"hit\""),
-                count("\"audit\":\"wrong hit\""),
-                count("\"audit\":\"compile failed\""),
-                count("\"audit\":\"not deterministic\""),
-                count("\"published\":true")
+                count("\"audit\":\"wrong-"),
+                count("\"audit\":\"compile-failed\""),
+                count("\"audit\":\"not-deterministic\""),
+                count("\"audit\":\"inputs-changed\""),
+                count("\"published\":true"),
             ),
             _ => "\"cactup: build cache: compiles recorded: $cactup_cc_count\"".to_owned(),
         };
@@ -550,8 +553,8 @@ mod tests {
         let cc_dir = config_dir.join(".cactup-builds/0000/cc");
         fs::create_dir_all(&cc_dir).unwrap();
         for (mode, line) in [
-            (Mode::Serve, "cactup: build cache: 4 compiles, 2 served from the cache, 1 published"),
-            (Mode::Audit, "cactup: build cache: 4 compiles, 2 checked against the cache (0 wrong hits, 0 failing to compile, 0 not deterministic), 1 published"),
+            (Mode::Serve, "cactup: build cache: 4 compiles, 2 served from the cache, 1 published, 0 could not be (see cactup cache report)"),
+            (Mode::Audit, "cactup: build cache: 4 compiles, 2 checked against the cache (0 wrong, 0 failing to compile, 0 not deterministic, 0 with inputs that changed), 1 published"),
         ] {
             let _ = fs::remove_file(events_path(&cc_dir));
             let staged = Staged { mode, cactup: PathBuf::from("/bin/true"), cc_dir: cc_dir.clone(), config_dir: config_dir.clone() };

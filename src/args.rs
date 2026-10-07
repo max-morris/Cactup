@@ -228,9 +228,9 @@ pub(crate) enum Commands {
     ///                        path (default: the cache directory in
     ///                        cactup's home).
     ///   build-cache-relocate yes (the default): objects record their
-    ///                        sources as ./arrangements/..., so every
-    ///                        installation can share them; no: they keep
-    ///                        this installation's paths.
+    ///                        sources as /cactup-root/arrangements/...,
+    ///                        so every installation can share them; no:
+    ///                        they keep this installation's paths.
     ///
     /// Set them with `cactup knob`, or for one build with -K:
     ///

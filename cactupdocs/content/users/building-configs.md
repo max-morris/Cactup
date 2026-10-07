@@ -561,11 +561,17 @@ cactup: build cache: 357 compiles, 307 served from the cache, 0 published
 
 **Your objects name their sources differently.** So that installations can
 share objects, a compile run through the cache records its source files as
-`./arrangements/<Arrangement>/<Thorn>/src/...` and the configuration's
-files as `./configs/@config/...`, not by their full paths. Warnings and
-errors still name the real files, but a debugger cannot find the sources
-of such an object on its own. For a build you mean to debug, turn this off
-for that build:
+`/cactup-root/arrangements/<Arrangement>/<Thorn>/src/...` and the
+configuration's files as `/cactup-root/configs/@config/...`, not by their
+full paths. Warnings and errors still name the real files, but what a
+thorn prints with `CCTK_WARN` shows these names, and a debugger has to be
+told where `/cactup-root` is. In gdb:
+
+```
+set substitute-path /cactup-root /path/to/Cactus
+```
+
+Or turn this off for a build you mean to debug:
 
 ```sh
 cactup -K build-cache=serve -K build-cache-relocate=no build myconfig

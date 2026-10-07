@@ -371,3 +371,15 @@ every milestone.
   thorn's make fragments, and `load`/`$(guile`, also stand the fragment
   down (A2). Next: M1b, serving, which changes real compiles (see the
   planned section).
+- 2026-10-02  cache side  **Load on plato:** full Einstein Toolkit builds (`-j 8`, three in a row, the third and second compiling most objects twice) in `~/cacti/build-cache` and `~/cacti/build-cache-b` from about 16:08 local, for about an hour. Timings taken meanwhile are not quiet-host timings.
+- 2026-10-07  cache side  **Load on plato:** the same three Einstein Toolkit builds again, from about 14:54 local, for about an hour.
+- 2026-10-07  cache side  **M1b (serving) in review** on `feature/build-cache`.
+  With `build-cache = serve` (or `audit`), what was planned is now there:
+  real C and C++ compiles gain `-ffile-prefix-map=<root>/=/cactup-root/`
+  and `-ffile-prefix-map=<config>/=/cactup-root/configs/@config/` (GCC and
+  Clang), so objects record those names (also in `__FILE__`); a hit runs
+  no compiler and writes the dependency file of A6 by the cache's own
+  preprocessor run (byte for byte the compile's, also its mode); the
+  compiler's stdout and stderr pass through cactup. `record` is unchanged
+  (byte for byte a plain build). Do not take timings with `serve` or
+  `audit` on.

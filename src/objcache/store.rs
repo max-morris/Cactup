@@ -714,7 +714,7 @@ mod tests {
         let edits: [(&str, &dyn Fn(String) -> String); 5] = [
             // Another cactup's key label: its parts digest to another key
             // under this one's, which is not damage.
-            ("another label", &|h| h.replacen("label = \"key-5\"\n", "label = \"key-2\"\n", 1)),
+            ("another label", &|h| h.replacen(&format!("label = \"{KEY_LABEL}\"\n"), "label = \"key-2\"\n", 1)),
             ("a field more", &|h| h.replacen("format = 1\n", "format = 1\nextra = 2\n", 1)),
             ("a field more in the parts", &|h| h.replacen("[parts]\n", "[parts]\nextra = \"x\"\n", 1)),
             ("a field more about it", &|h| h.replacen("[about]\n", "[about]\nextra = \"x\"\n", 1)),
@@ -761,7 +761,10 @@ mod tests {
         let object = fx.object("a.c.o", b"bytes");
         fx.publish(&object, b"").unwrap();
         let read = fs::metadata(fx.entry()).unwrap();
-        // Another build removed it and published anew.
+        // Another build removed it and published anew. (The file read is
+        // kept alive under another name, so that the new one cannot be
+        // given its inode, as ext4 does with a freed one.)
+        fs::hard_link(fx.entry(), fx.tmp.path().join("kept")).unwrap();
         fs::remove_file(fx.entry()).unwrap();
         fx.publish(&object, b"").unwrap();
         invalidate(&fx.entry(), &read);

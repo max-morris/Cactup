@@ -55,10 +55,10 @@ pub struct Event {
     pub key_ms: u64,
     pub compile_ms: u64,
     pub recheck_ms: u64,
-    /// In a serving build (§18.8): `hit` (served, or in audit mode
-    /// checked) or `miss`.
+    /// In a serving build (§18.8): found in the store (served, or in audit
+    /// mode checked), or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<String>,
+    pub outcome: Option<Outcome>,
     /// What the store said besides "no entry": why an entry was not used,
     /// or why the object was not published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,15 +66,57 @@ pub struct Event {
     /// Did this compile add an entry to the store?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published: Option<bool>,
-    /// In audit mode, what checking a hit found: `same`, `wrong hit`, `not
-    /// deterministic`, or `compile failed`.
+    /// In audit mode, what checking a hit found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit: Option<String>,
+    pub audit: Option<Audit>,
     /// Milliseconds restoring from the store, and publishing to it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub serve_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub publish_ms: u64,
+}
+
+/// Whether the store had the compile's object (§18.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Outcome {
+    Hit,
+    Miss,
+}
+
+/// What audit mode found when it compiled a hit anyway (§18.8). The log
+/// spells these in kebab case, and the build script counts them by that
+/// spelling (`Staged::build_step`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Audit {
+    /// The compile made the stored object, and the dependency file the hit
+    /// would have written.
+    Same,
+    /// The compile made another object, twice over: the entry was wrong.
+    WrongHit,
+    /// The object was right, the dependency file a hit writes was not.
+    WrongDependencyFile,
+    /// The compile made another object, and another the second time.
+    NotDeterministic,
+    /// The compile failed, where the entry says it succeeded.
+    CompileFailed,
+    /// The files the compile read changed while it ran: nothing can be
+    /// said about the hit.
+    InputsChanged,
+}
+
+impl Audit {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Same => "same",
+            Self::WrongHit => "wrong hit",
+            Self::WrongDependencyFile => "wrong dependency file",
+            Self::NotDeterministic => "not deterministic",
+            Self::CompileFailed => "the compile failed",
+            Self::InputsChanged => "its inputs changed meanwhile",
+        }
+    }
 }
 
 fn is_zero(n: &u64) -> bool {

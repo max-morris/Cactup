@@ -48,7 +48,7 @@ on the branch disagree, this file is right and the other is stale.
 | Question | Decision |
 |---|---|
 | Existing tool or our own | **Our own, built into cactup** (no existing cache handles Fortran modules or a store shared between hosts over NFS without POSIX locks) |
-| Absolute paths in objects | **Relocatable by default**: compile with the Cactus root and the configuration directory mapped to fixed names, so installations can share objects. Objects then name files as `./arrangements/...`; a debugger needs a path substitution |
+| Absolute paths in objects | **Relocatable by default**: compile with the Cactus root and the configuration directory mapped to fixed names, so installations can share objects. Objects then name files as `./arrangements/...`; a debugger needs a path substitution (names changed to `/cactup-root/...` by decision 8) |
 | First deliverable | **A measurement pass** before anything is stored or served (done: `RESULTS-M0c.md`) |
 | Eviction | **Explicit only, with a size notice.** Nothing is deleted automatically |
 
@@ -119,6 +119,18 @@ Asked as seven questions with options; the answers, in Max's numbering.
       If it turns out not to work, the limit is accepted as stated. What
       is ruled out is turning the cache off wherever `BASH_ENV` is set:
       "Module systems are common so we want them to work."
+
+## During M1b (2026-10-07)
+
+8. **The path map names the tree with absolute placeholders.** Asked
+   because a relocated object recorded `./arrangements/...` relative to a
+   compile directory `./configs/@config/scratch`, which a debugger cannot
+   resolve. Answer: "Absolute placeholders". The Cactus root maps to
+   `/cactup-root/` and the configuration directory to
+   `/cactup-root/configs/@config/`; objects record those (also in
+   `__FILE__`), and `set substitute-path /cactup-root /path/to/Cactus` in
+   gdb points at the tree. This replaces the 2026-10-01 design choice's
+   `./arrangements/...` names.
 
 ## Still open
 

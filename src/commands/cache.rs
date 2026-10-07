@@ -11,7 +11,7 @@ use crate::args::CacheCommand;
 use crate::build::attempt::BuildAttempt;
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::objcache::event::{self, Event};
+use crate::objcache::event::{self, Event, Outcome};
 use crate::objcache::events_path;
 use crate::Res;
 use anyhow::{anyhow, bail};
@@ -231,10 +231,11 @@ fn serving(events: &[Event]) -> String {
     if tried.is_empty() {
         return String::new();
     }
-    let hits = tried.iter().filter(|e| e.outcome.as_deref() == Some("hit")).count();
+    let hits = tried.iter().filter(|e| e.outcome == Some(Outcome::Hit)).count();
     let serve_ms: u64 = tried.iter().map(|e| e.serve_ms).sum();
+    // In audit mode a hit is checked, not served: "found" covers both.
     let mut out = format!(
-        "  served from the cache: {hits} of {} keyed ({}); looking in the store took {}\n",
+        "  found in the cache: {hits} of {} keyed ({}); looking in the store took {}\n",
         tried.len(),
         percent(hits as u64, tried.len() as u64),
         seconds(serve_ms)
@@ -251,8 +252,8 @@ fn serving(events: &[Event]) -> String {
         out.push_str(&tally(notes, "  "));
     }
     let mut audits = BTreeMap::new();
-    for audit in tried.iter().filter_map(|e| e.audit.as_deref()) {
-        *audits.entry(audit.to_owned()).or_default() += 1;
+    for audit in tried.iter().filter_map(|e| e.audit) {
+        *audits.entry(audit.name().to_owned()).or_default() += 1;
     }
     if !audits.is_empty() {
         out.push_str("  hits checked by compiling anyway:\n");
@@ -348,6 +349,7 @@ fn log_path(config_dir: &std::path::Path, attempt: u32) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::objcache::event::Audit;
     use crate::objcache::key::Parts;
 
     fn parts(text: &str, arguments: &str) -> Parts {
@@ -419,16 +421,16 @@ mod tests {
         assert!(text.contains("compiling 5.0 s; keying 0.0 s (1%)"), "{text}");
         assert!(text.contains("preprocessed text keyed: 2.0 MB; objects written: 2.0 MB"), "{text}");
         assert!(!text.contains("no longer held") && !text.contains("failed"), "{text}");
-        assert!(!text.contains("served"), "a recording build serves nothing: {text}");
+        assert!(!text.contains("found in the cache"), "a recording build serves nothing: {text}");
 
         // A serving build, and an auditing one.
         let mut events = events.to_vec();
-        events[0].outcome = Some("hit".into());
-        events[0].audit = Some("same".into());
-        events[1].outcome = Some("miss".into());
+        events[0].outcome = Some(Outcome::Hit);
+        events[0].audit = Some(Audit::Same);
+        events[1].outcome = Some(Outcome::Miss);
         events[1].published = Some(true);
         let text = summary(&events);
-        assert!(text.contains("served from the cache: 1 of 2 keyed (50%)"), "{text}");
+        assert!(text.contains("found in the cache: 1 of 2 keyed (50%)"), "{text}");
         assert!(text.contains("published: 1,"), "{text}");
         assert!(text.contains("hits checked by compiling anyway:\n       1  same\n"), "{text}");
     }

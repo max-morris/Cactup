@@ -991,9 +991,61 @@ source directories relative to it, so a debugger resolves its sources to
 no debugger to find one that does. The docs now point at
 `build-cache-relocate no` for a build meant for debugging.
 
+### M1b, round 2 (on `6a283ef`): BLOCKED by both, one finding each
+
+Both confirmed every round-1 finding resolved (B re-ran its three: the
+TRANSLIT sessions now miss, 176774 of 176774 bytes reach a 20 KB/s
+reader, the `.d` modes match under umask 002, 022, 077 and a default
+ACL). Reviewer A (fresh this round) also checked a symlinked root, the
+`.d` file under every flag the key run adds, signals on a serving miss,
+and `interpreter_command` against the kernel. Blocking:
+
+1. (A) **A file changed and changed back during a serving miss published
+   a wrong object**, which another installation was then served (`v = 2`
+   where its own compile gives `v = 1`). Spec §18.5 listed this as a
+   limit, which in record mode cost nothing; with a shared store and no
+   eviction it is a lasting wrong object. *Fixed: the key also records,
+   for each file it read, device, inode, size, modification and change
+   time (of the name and of what it leads to; `Read::seen`, not in the
+   key), and the check after the compile requires them unchanged. User
+   space cannot set a change time back. A unit test rewrites a header and
+   puts its bytes back: the check fails.* Left as a stated limit: a
+   filesystem with change times coarser than the edits.
+2. (B) `an_invalid_entry_replaced_meanwhile_is_not_removed` failed on ext4
+   (91 of 100 runs with `TMPDIR` there): ext4 gave the republished entry
+   the freed inode. *Fixed: the test keeps the old file alive under
+   another name; 30 of 30 on ext4.*
+
+Non-blocking points taken (A): audit verdicts only for compiles whose
+inputs held still (`inputs changed` otherwise), a second check after the
+second compile, a stop signal during it ends the wrapper by that signal;
+audit compares the dependency file a hit would have written
+(`wrong dependency file`); paths after a terminal color sequence are
+mapped in messages; `-MT -MF` and the like are read as flag and value;
+pipes and their threads are made before the compiler starts, and a thread
+that cannot be made leaves the streams inherited instead of costing the
+compile; outcomes and verdicts are enums (`event::Outcome`,
+`event::Audit`); the closing line counts what could not be published and
+inputs that changed; `cache report` says "found in the cache"; the
+charset test skips on a host without `C.UTF-8`; the signal test runs in
+serve mode too and checks nothing was published; `script_command` reads
+only the first line; spec and docs wording (identifier, `CCTK_WARN`
+names).
+
+Decision 8 (Max, 2026-10-07): absolute placeholders. The root maps to
+`/cactup-root/`, the configuration to `/cactup-root/configs/@config/`; key
+label `key-6`; spec §18.5, §18.8 and the user docs give `set
+substitute-path /cactup-root /path/to/Cactus` (not tried: no debugger on
+`plato`).
+
+Not taken, as acceptable to both: messages buffered without limit for a
+stalled terminal (compiler messages are small); a path glued to a flag in
+a message is not mapped.
+
 ## Decisions
 
-All of them, answered, are in `DECISIONS.md`. **Open, for Max (M1b):**
+All of them, answered, are in `DECISIONS.md`. **Answered by Max on
+2026-10-07 (decision 8), kept here for the record:**
 should the path map name the tree with absolute placeholders (say
 `/cactup-root/` and `/cactup-root/configs/@config/`) instead of `./`?
 Then objects would record absolute, if fictitious, paths, and one

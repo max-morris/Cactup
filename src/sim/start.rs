@@ -701,9 +701,13 @@ pub(crate) fn script_command(
     vars: &VarSet,
     cwd: &Path,
 ) -> Res<Command> {
-    // The first line is all that is read, as bytes: the rest of a script
-    // need not be text.
-    let head = fs::read(script).unwrap_or_default();
+    // The first line is all that is read (no more than the kernel reads of
+    // it), as bytes: the rest of a script need not be text.
+    let mut head = Vec::new();
+    if let Ok(file) = fs::File::open(script) {
+        use std::io::BufRead;
+        let _ = std::io::BufReader::new(std::io::Read::take(file, 4096)).read_until(b'\n', &mut head);
+    }
     let first = head.split(|b| *b == b'\n').next().unwrap_or_default();
     let inner = interpreter_command(&String::from_utf8_lossy(first), &shell_quote(&script.display().to_string()));
     let mut cmd = match universe {

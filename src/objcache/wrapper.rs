@@ -20,7 +20,7 @@
 //! interpreter line — it hands to that same kind of shell
 //! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
-use super::event::Event;
+use super::event::{Audit, Event, Outcome};
 use super::store::{About, Miss, NewEntry, Published, Store};
 use super::probe::SELFTEST_COMPILER;
 use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
@@ -279,7 +279,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     let mut audited: Option<tempfile::TempPath> = None;
     if let Some((store, keyed)) = serving {
         let key = keyed.parts.key();
-        event.outcome = Some("miss".to_owned());
+        event.outcome = Some(Outcome::Miss);
         // In audit mode, an entry that cannot be put beside the object
         // cannot be checked: then the compile just runs.
         let into = match mode {
@@ -294,7 +294,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         event.serve_ms = serve_ms;
         match restored {
             Ok(messages) if mode == Mode::Audit => {
-                event.outcome = Some("hit".to_owned());
+                event.outcome = Some(Outcome::Hit);
                 audited = into;
                 drop(messages);
             }
@@ -302,7 +302,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             // is done. Without it, it runs after all, and writes both.
             Ok(messages) => match keyed.keep_depend() {
                 Ok(()) => {
-                    event.outcome = Some("hit".to_owned());
+                    event.outcome = Some(Outcome::Hit);
                     event.exit = Some(0);
                     event.object_bytes = std::fs::metadata(&keyed.compile.output).ok().map(|meta| meta.len());
                     event.append(&events_path(cc_dir));
@@ -320,8 +320,11 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             Err(miss) => event.store = Some(miss.to_string()),
         }
     }
-    // Not served: the compile writes its own dependency file.
-    if let Ok(keyed) = &mut keyed {
+    // Not served: the compile writes its own dependency file. (Audit mode
+    // keeps the key's, to compare.)
+    if let Ok(keyed) = &mut keyed
+        && audited.is_none()
+    {
         keyed.drop_depend();
     }
 
@@ -353,14 +356,16 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     event.recheck_ms = recheck_ms;
     event.object_bytes = output.as_ref().and_then(|output| output.metadata().ok()).map(|meta| meta.len());
 
-    if let (Some(stored), Ok(keyed)) = (&audited, &keyed) {
-        event.audit = Some(audit(job, argv, identified.as_deref(), &extra, status, stored, &keyed.compile.output).to_owned());
+    if let (Some(stored), Ok(keyed)) = (&audited, &mut keyed) {
+        let checked = Checked { status, stable, stored };
+        event.audit = Some(audit(job, argv, identified.as_deref(), &extra, &checked, keyed));
+        keyed.drop_depend();
     }
     drop(audited);
 
     // An entry audit mode has shown to be wrong goes, and the fresh object
     // takes its place.
-    let wrong = event.audit.as_deref() == Some("wrong hit");
+    let wrong = event.audit == Some(Audit::WrongHit);
     if wrong
         && let (Ok(store), Some(key)) = (&store, &event.key)
         && let Err(e) = store.remove(key)
@@ -370,7 +375,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     if let (Ok(store), Ok(keyed), Some(captured)) = (&store, &keyed, &captured)
         && status.success()
         && stable == Some(true)
-        && (event.outcome.as_deref() != Some("hit") || wrong)
+        && (event.outcome != Some(Outcome::Hit) || wrong)
     {
         let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event));
         event.publish_ms = publish_ms;
@@ -395,33 +400,56 @@ fn beside(object: &Path) -> std::io::Result<tempfile::TempPath> {
     Ok(tempfile::Builder::new().prefix(&format!(".{name}.cactup-")).tempfile_in(dir)?.into_temp_path())
 }
 
-/// Check a hit in audit mode (§18.8): the compile has run and written
-/// `object`, with `status`; `stored` holds the store's object. The same
-/// bytes: `same`. Otherwise the fresh object is moved aside and the compile
-/// runs once more: the same object twice means the store's was wrong (`wrong
-/// hit`), two objects that the compiler is not deterministic. The build
-/// keeps the fresh object either way.
-fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], status: ExitStatus, stored: &Path, object: &Path) -> &'static str {
-    if !status.success() {
-        return "compile failed";
+/// The first compile of an audited hit, as it ended: its status, whether
+/// its inputs held still, and where the stored object was put.
+struct Checked<'a> {
+    status: ExitStatus,
+    stable: Option<bool>,
+    stored: &'a Path,
+}
+
+/// Check a hit in audit mode (§18.8): the compile has run as `checked`
+/// says. Only a compile whose inputs held still can say anything about the
+/// entry. The same bytes, and the dependency file the hit would have
+/// written the same as the compile's: `Same`. A different object: the
+/// fresh one is moved aside and the compile runs once more; the same object
+/// twice (its inputs still unchanged) means the entry was wrong, two
+/// objects that the compiler is not deterministic. The build keeps the
+/// fresh object either way, and a stop signal during the second compile
+/// ends this process by that signal, as it would have the compile.
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], checked: &Checked, keyed: &key::Keyed) -> Audit {
+    if !checked.status.success() {
+        return Audit::CompileFailed;
     }
+    if checked.stable != Some(true) {
+        return Audit::InputsChanged;
+    }
+    let object = &keyed.compile.output;
     let read = |path: &Path| std::fs::read(path).ok();
     let fresh = read(object);
-    if fresh.is_some() && fresh == read(stored) {
-        return "same";
+    if fresh.is_some() && fresh == read(checked.stored) {
+        return match keyed.depend_files() {
+            Some((ours, compiles)) if read(ours).is_none() || read(ours) != read(compiles) => Audit::WrongDependencyFile,
+            _ => Audit::Same,
+        };
     }
-    let Ok(first) = beside(object) else { return "not deterministic" };
+    let Ok(first) = beside(object) else { return Audit::NotDeterministic };
     if std::fs::rename(object, &first).is_err() {
-        return "not deterministic";
+        return Audit::NotDeterministic;
     }
     match run(job, argv, identified, extra, Output::Swallow) {
-        Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => "wrong hit",
-        Some((again, _)) if again.success() => "not deterministic",
+        Some((again, _)) if again.signal().is_some() => {
+            drop(first);
+            leave_as(again)
+        }
+        Some((again, _)) if again.success() && !keyed.still_holds() => Audit::InputsChanged,
+        Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => Audit::WrongHit,
+        Some((again, _)) if again.success() => Audit::NotDeterministic,
         // The second compile failed or could not run: the first object is
         // the build's.
         _ => {
             let _ = std::fs::rename(&first, object);
-            "not deterministic"
+            Audit::NotDeterministic
         }
     }
 }
@@ -638,8 +666,8 @@ enum Piece {
 /// Read `from` to its end, handing each piece to `to` as it comes and
 /// keeping a copy of up to [`MESSAGES_CAP`] bytes. Reading never waits for
 /// writing: a slow terminal holds up [`write_out`], not this.
-fn read_and_keep(mut from: impl Read + Send + 'static, to: std::sync::mpsc::Sender<Piece>) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
-    std::thread::spawn(move || {
+fn read_and_keep(mut from: impl Read + Send + 'static, to: std::sync::mpsc::Sender<Piece>) -> std::io::Result<std::thread::JoinHandle<(Vec<u8>, bool)>> {
+    std::thread::Builder::new().spawn(move || {
         let (mut kept, mut overflow) = (Vec::new(), false);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -659,8 +687,8 @@ fn read_and_keep(mut from: impl Read + Send + 'static, to: std::sync::mpsc::Send
 
 /// Write every piece that comes to `to`, until told to stop or until no
 /// more can come.
-fn write_out(mut to: impl Write + Send + 'static, pieces: std::sync::mpsc::Receiver<Piece>) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+fn write_out(mut to: impl Write + Send + 'static, pieces: std::sync::mpsc::Receiver<Piece>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().spawn(move || {
         while let Ok(Piece::Bytes(bytes)) = pieces.recv() {
             let _ = to.write_all(&bytes).and_then(|()| to.flush());
         }
@@ -675,11 +703,16 @@ struct Passing {
 }
 
 impl Passing {
-    fn new(from: impl Read + Send + 'static, to: impl Write + Send + 'static, pass_on: bool) -> Self {
+    /// `Err` if a thread cannot be made; whatever was made then ends by
+    /// itself once `from`'s other end is gone.
+    fn new(from: impl Read + Send + 'static, to: impl Write + Send + 'static, pass_on: bool) -> std::io::Result<Self> {
         let (stop, pieces) = std::sync::mpsc::channel();
-        let reader = read_and_keep(from, stop.clone());
-        let writer = pass_on.then(|| write_out(to, pieces));
-        Self { reader, writer, stop }
+        let writer = match pass_on {
+            true => Some(write_out(to, pieces)?),
+            false => None,
+        };
+        let reader = read_and_keep(from, stop.clone())?;
+        Ok(Self { reader, writer, stop })
     }
 
     /// Once the compiler has ended: what was read by `deadline` (the stream
@@ -771,11 +804,27 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStrin
     // cannot be started here.
     let full: Vec<OsString> = argv.iter().chain(extra).cloned().collect();
     let mut command = direct(&full, identified);
-    if output != Output::Inherit {
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Through this process: the pipes, and the threads that read them, are
+    // made before the compiler starts, so that what cannot be made costs
+    // the keeping (the streams are then the recipe's), never the compile.
+    let mut passing = None;
+    if output != Output::Inherit
+        && let (Ok((out_from, out_to)), Ok((err_from, err_to))) = (std::io::pipe(), std::io::pipe())
+    {
+        let pass_on = output == Output::PassOn;
+        if let (Ok(stdout), Ok(stderr)) =
+            (Passing::new(out_from, std::io::stdout(), pass_on), Passing::new(err_from, std::io::stderr(), pass_on))
+        {
+            command.stdout(Stdio::from(out_to)).stderr(Stdio::from(err_to));
+            passing = Some((stdout, stderr));
+        }
     }
     PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
-    let Ok(mut child) = command.spawn() else {
+    let spawned = command.spawn();
+    // This process's copies of the pipes' writing ends: the compiler has
+    // its own, and the readers see the end of each stream when it ends.
+    drop(command);
+    let Ok(mut child) = spawned else {
         // Asked to stop before there was a compile to stop: becoming the
         // shell now would lose that signal and run the compile after all.
         if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
@@ -793,13 +842,6 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStrin
         0 => {}
         signal => pass_on(signal),
     }
-    let pass_on = output == Output::PassOn;
-    let passing = match (child.stdout.take(), child.stderr.take()) {
-        (Some(stdout), Some(stderr)) => {
-            Some((Passing::new(stdout, std::io::stdout(), pass_on), Passing::new(stderr, std::io::stderr(), pass_on)))
-        }
-        _ => None,
-    };
 
     match child.wait() {
         Ok(status) => {

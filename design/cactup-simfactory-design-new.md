@@ -4974,12 +4974,17 @@ nothing it could key would say what comes out:
 `__FILE__` in every `CCTK_WARN`, file names and the compile directory in
 debug information. As it stands an object belongs to one configuration of
 one installation. Where it is known to hold, the key is computed as if the
-compile ran with the Cactus root mapped to `./` and the configuration
-directory to `./configs/@config/` (`key::PathMap`), which is how a serving
-cache will run it:
+compile ran with the Cactus root mapped to `/cactup-root/` and the
+configuration directory to `/cactup-root/configs/@config/`
+(`key::PathMap`), which is how a serving cache runs it (§18.8). The names
+are absolute (decision 8 in `design/build-cache/DECISIONS.md`): debug
+information then names every file by an absolute path, which one
+`set substitute-path /cactup-root /path/to/Cactus` in gdb turns into the
+real one, where a relative name would be taken as relative to the recorded
+compile directory.
 
-- The compiler is given `-ffile-prefix-map=<root>/=./` and then
-  `-ffile-prefix-map=<config>/=./configs/@config/` for the preprocessor
+- The compiler is given `-ffile-prefix-map=<root>/=/cactup-root/` and then
+  `-ffile-prefix-map=<config>/=/cactup-root/configs/@config/` for the preprocessor
   run, and maps `__FILE__` where the text uses it. The option and the two
   names (not the directories) are in the arguments part of the key, so a
   cactup that maps another way keys apart. Each directory is given
@@ -5047,8 +5052,14 @@ nobody has to find out:
   noticed, and the file it pulls in is not in the key. Nobody writes that
   by accident.
 - *A file changed and changed back* between the key and the check after the
-  compile, with the compile reading the changed bytes in between, passes
-  the check.
+  compile, with the compile reading the changed bytes in between, has its
+  keyed bytes again. The check also compares what each file looked like
+  when it was read (device, inode, size, modification and change time, of
+  the name and of what it leads to; not part of the key): user space cannot
+  set a change time back, so such a file fails the check. Left: a
+  filesystem whose change times are coarser than the edits, where a change
+  and a change back within one tick, to a file of the same size, would
+  pass.
 - *The flag families.* A `-W…` or `-m…` flag that names a file or records
   something outside the key would be admitted. None is known besides the
   two excepted.
@@ -5288,11 +5299,13 @@ map.
 made with the map (§18.5): the stored object must be the object the key
 describes. **This is where the cache changes a real compile**, and where a
 build with the cache serving stops being byte for byte one without it: the
-objects name their sources `./arrangements/…`, relative to a compile
-directory recorded as `./configs/@config/scratch`, and a debugger does not
-find them on its own (the knob below turns the map off for a build meant
-for debugging; how to point a debugger at a relocated object is still
-open). The compiler's stdout and stderr go through the wrapper: one thread
+objects name their sources `/cactup-root/arrangements/…` and the
+configuration's files `/cactup-root/configs/@config/…` (in debug
+information and in `__FILE__`, so a `CCTK_WARN` shows them too), and a
+debugger is pointed at the tree with `set substitute-path /cactup-root
+/path/to/Cactus` (the configuration's own files need a second rule, for
+`/cactup-root/configs/@config`), or the knob below turns the map off for a
+build meant for debugging. The compiler's stdout and stderr go through the wrapper: one thread
 per stream reads it and keeps a copy (up to 4 MiB of each; beyond that the
 result is not published), another passes it on as it comes. When the
 compiler has ended, the reading waits up to two seconds for the streams to
@@ -5305,11 +5318,14 @@ as the compiler ended.
 
 **Messages are stored as the map would have them.** A compiler's
 diagnostics name files by the paths the compile used, which the path map
-does not change. In a relocatable entry, every occurrence of the
-configuration directory and the Cactus root (each spelling, with its `/`)
-is stored as `@CACTUP_CONFIG@/` and `@CACTUP_ROOT@/`, and a hit writes them
-back as this build's directories: a warning served from another
-installation points into this one. The messages are those of the build that
+does not change. In a relocatable entry, the configuration directory and
+the Cactus root (each spelling, with its `/`) are stored as
+`@CACTUP_CONFIG@/` and `@CACTUP_ROOT@/` wherever a path begins with them
+(at the start of the text, after a character that cannot be part of a
+path, or after a terminal color sequence), and a hit writes them back as
+this build's directories: a warning served from another installation
+points into this one. (A path glued to something that can be part of a
+path, such as `-I/path/...`, is stored as it is.) The messages are those of the build that
 compiled the object — in its language, when the locale is not keyed (below)
 — and in the order each stream had, not interleaved as they were.
 
@@ -5321,7 +5337,8 @@ builds of the same configuration in the same installation.
 **The locale leaves the key behind a trial** (decision 5 in
 `design/build-cache/DECISIONS.md`). Once per build attempt and compiler,
 with the compiler's identity, a source with non-ASCII bytes in a comment, a
-string, a wide string and an identifier is compiled with debug information
+string and a wide string (not an identifier: GCC before 10 rejects those)
+is compiled with debug information
 twice: in the session's locale, and in the C locale (`LC_ALL=C`, `LANG`,
 `LANGUAGE` and the other `LC_*` removed). A compiler that makes one object
 of both is keyed without `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE` and
@@ -5335,23 +5352,33 @@ for that source. The remembered identity depends on those variables, so a
 session in another locale tries again.
 
 **Audit mode** checks a hit instead of trusting it. The entry is restored
-to a temporary file beside the object, and the compile runs anyway, exactly
-as on a miss. If the two objects are the same bytes, the hit was right. If
-not, the fresh object is moved aside and the compile runs a second time: if
-its object equals the first, the stored entry is wrong (**a wrong hit**:
-the key failed to describe the compile), and it is removed and the fresh
-object published in its place; if not, the compiler is not deterministic
-for this compile. A hit whose compile now fails is counted as well. Either
-way the build keeps the fresh object, the second compile's messages are not
-shown again, the event log records it, and the build's closing line counts
+to a temporary file beside the object, the dependency file the hit would
+have written is kept aside too, and the compile runs anyway, exactly as on
+a miss. Only a compile whose inputs held still (the check after it passed,
+§18.5) says anything about the entry; otherwise the verdict is that the
+inputs changed. If the two objects are the same bytes and so are the two
+dependency files, the hit was right; the same object with another
+dependency file is a wrong dependency file. If the objects differ, the
+fresh object is moved aside and the compile runs a second time, its
+messages not shown again: if its object equals the first and the inputs
+still held, the stored entry is wrong (**a wrong hit**: the key failed to
+describe the compile), and it is removed and the fresh object published in
+its place; if not, the compiler is not deterministic for this compile. A
+stop signal during the second compile ends the wrapper by that signal, as
+it would the compile, with no verdict. A hit whose compile now fails is
+counted as well. Either way the build keeps the fresh object, the event log
+records the verdict (`event::Audit`), and the build's closing line counts
 it.
 Audit mode is the acceptance gate for serving: a full build in two
 installations with no wrong hit.
 
 **What a build says.** The build step ends with one line, as in record
 mode: `cactup: build cache: N compiles, H served from the cache, P
-published` (and in audit mode, `A checked against the cache (W wrong hits,
-F failing to compile, D not deterministic)`).
+published, U could not be (see cactup cache report)`; in audit mode, `A
+checked against the cache (W wrong, F failing to compile, D not
+deterministic, C with inputs that changed), P published`. They are counted
+from the event log, by the spellings `event::Outcome` and `event::Audit`
+give the log.
 
 **Signals.** A hit runs no compiler: a stop signal during it ends the
 wrapper by that signal, which leaves at most the temporary files the store

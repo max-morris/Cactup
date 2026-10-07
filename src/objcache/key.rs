@@ -39,17 +39,21 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, ErrorKind, Read as _};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// What the Cactus root is called in a key, and in a mapped compile's
-/// `__FILE__`: sources then read `./arrangements/<Arrangement>/<Thorn>/src/…`.
-const ROOT_NAME: &str = "./";
+/// `__FILE__`: sources then read `/cactup-root/arrangements/<Arrangement>/<Thorn>/src/…`.
+/// Absolute (decision 8): debug information then names every file by an
+/// absolute path, which one `set substitute-path /cactup-root <tree>` in gdb
+/// turns into the real one; a relative name would be taken as relative to
+/// the recorded compile directory.
+const ROOT_NAME: &str = "/cactup-root/";
 /// What the configuration directory is called, whatever its name.
-const CONFIG_NAME: &str = "./configs/@config/";
+const CONFIG_NAME: &str = "/cactup-root/configs/@config/";
 
 /// What stands for the configuration directory and the Cactus root (each
 /// with its `/`) in the compiler messages a relocatable entry keeps.
@@ -143,12 +147,20 @@ impl PathMap {
     /// the map knows, wherever it stands, as a token that
     /// [`messages_for_this_build`] turns back into this build's directory.
     pub fn messages_for_the_store(&self, text: &[u8]) -> Vec<u8> {
-        // Only where a path begins: `/x/w/Cactus/` is not `/w/Cactus/`.
+        // Only where a path begins: `/x/w/Cactus/` is not `/w/Cactus/`. A
+        // colored diagnostic puts an escape sequence (`ESC[01mESC[K`) right
+        // before a path, and that ends in a letter.
         let in_a_path = |byte: u8| byte.is_ascii_alphanumeric() || b"._-+~@/".contains(&byte);
+        let after_escape = |at: usize| {
+            let before = &text[..at];
+            let Some((_, rest)) = before.split_last().filter(|(last, _)| last.is_ascii_alphabetic()) else { return false };
+            let digits = rest.iter().rev().take_while(|b| b.is_ascii_digit() || **b == b';').count();
+            rest[..rest.len() - digits].ends_with(b"\x1b[")
+        };
         let mut out = Vec::with_capacity(text.len());
         let mut at = 0;
         while at < text.len() {
-            let begins = at == 0 || !in_a_path(text[at - 1]);
+            let begins = at == 0 || !in_a_path(text[at - 1]) || after_escape(at);
             match self.from_to.iter().find(|(from, _)| begins && text[at..].starts_with(from)) {
                 Some((from, to)) => {
                     out.extend_from_slice(if *to == CONFIG_NAME { CONFIG_TOKEN } else { ROOT_TOKEN });
@@ -223,7 +235,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-5";
+pub const KEY_LABEL: &str = "key-6";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -246,6 +258,8 @@ pub struct Keyed {
     pub files: usize,
     name: OsString,
     map: Option<PathMap>,
+    /// What the files looked like when they were read for the key.
+    seen: String,
     /// The dependency file the key's preprocessor run wrote, under a
     /// temporary name, and the name the compile would give it (§18.8).
     depend: Option<(tempfile::TempPath, PathBuf)>,
@@ -330,7 +344,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
         text: read.text,
         files: read.files,
     };
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, depend })
+    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, seen: read.seen, depend })
 }
 
 /// The dependency flags of `compile` for the key's preprocessor run, if it
@@ -342,9 +356,18 @@ fn depend_flags(compile: &Compile) -> Res<Option<((tempfile::TempPath, PathBuf),
     if compile.depend.is_empty() {
         return Ok(None);
     }
-    let named = |flag: &str| compile.depend.iter().any(|arg| arg == flag);
+    // Flags and their values, as `compile::parse` lists them: `-MF`, `-MT`
+    // and `-MQ` with the value after (which may itself look like a flag),
+    // the others alone.
+    let mut flags_at = Vec::new();
+    let mut at = 0;
+    while at < compile.depend.len() {
+        flags_at.push(at);
+        at += if ["-MF", "-MT", "-MQ"].iter().any(|flag| compile.depend[at] == *flag) { 2 } else { 1 };
+    }
+    let named = |flag: &str| flags_at.iter().any(|at| compile.depend[*at] == flag);
     // The last `-MF` is the one the compiler writes.
-    let at = compile.depend.iter().rposition(|arg| arg == "-MF").context("a dependency file without -MF")?;
+    let at = *flags_at.iter().rev().find(|at| compile.depend[**at] == "-MF").context("a dependency file without -MF")?;
     let real = PathBuf::from(&compile.depend[at + 1]);
     let dir = real.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = real.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -375,9 +398,13 @@ impl Keyed {
     /// Are the preprocessed text and the files behind it still what was
     /// keyed? Run after the compile: a header edited while the compile ran
     /// makes an object of the new text under the key of the old.
+    ///
+    /// Each file must also look as it did when it was keyed: a file changed
+    /// and changed back during the compile has its old bytes, and the
+    /// object may still have the new ones (§18.5).
     pub fn still_holds(&self) -> bool {
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
-            .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files)
+            .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
     }
 
     /// The flags that make the compile record its paths as the key does:
@@ -389,6 +416,12 @@ impl Keyed {
     /// The map the key was made with.
     pub fn map(&self) -> Option<&PathMap> {
         self.map.as_ref()
+    }
+
+    /// The dependency file the key's preprocessor run wrote, and the name
+    /// the compile gives its own: what audit mode compares.
+    pub fn depend_files(&self) -> Option<(&Path, &Path)> {
+        self.depend.as_ref().map(|(temp, real)| (temp.as_ref(), real.as_path()))
     }
 
     /// Remove the dependency file the key's preprocessor run wrote: the
@@ -416,6 +449,12 @@ struct Read {
     /// Digest of the contents of the files it named.
     files: String,
     count: usize,
+    /// Digest of what each of those files looked like when it was read
+    /// (device, inode, size, modification and change time, of the name and
+    /// of what it leads to): not part of the key, but of the check after the
+    /// compile. A file changed and changed back in between has its old
+    /// bytes again, but not its old change time, which nothing can set back.
+    seen: String,
 }
 
 /// A line that names a file: a line marker of preprocessor output
@@ -628,8 +667,24 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // bytes compiled are those of the file the directive stands in, which
     // was entered.
     let mut files = Hasher::new("files");
+    let mut seen = Hasher::new("seen");
     for ((mapped, path), entered) in &named {
         files.feed(mapped);
+        // Looked at before it is read: a change after this shows next time.
+        seen.feed(path.as_os_str().as_bytes());
+        for looked in [std::fs::symlink_metadata(path), std::fs::metadata(path)] {
+            match looked {
+                Ok(meta) => {
+                    for number in [meta.dev(), meta.ino(), meta.len()] {
+                        seen.feed(&number.to_le_bytes());
+                    }
+                    for time in [meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()] {
+                        seen.feed(&time.to_le_bytes());
+                    }
+                }
+                Err(_) => seen.feed(b"absent"),
+            }
+        }
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
@@ -639,7 +694,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
             Err(e) => bail!("a file the compile reads cannot be read to key it ({e:#})"),
         }
     }
-    Ok(Read { text, text_bytes, files: files.hex(), count: named.len() })
+    Ok(Read { text, text_bytes, files: files.hex(), count: named.len(), seen: seen.hex() })
 }
 
 /// Does the driver take flags for this compile from a file of its own? It
@@ -787,10 +842,10 @@ mod tests {
     #[test]
     fn maps_names_as_the_compiler_does() {
         let map = map(&[("/w/Cactus/", ROOT_NAME), ("/w/Cactus/configs/sim/", CONFIG_NAME)]);
-        assert_eq!(applied(&map, "/w/Cactus/arrangements/A/T/src/a.c"), "./arrangements/A/T/src/a.c");
-        assert_eq!(applied(&map, "/w/Cactus/configs/sim/build/T/a.c"), "./configs/@config/build/T/a.c");
+        assert_eq!(applied(&map, "/w/Cactus/arrangements/A/T/src/a.c"), "/cactup-root/arrangements/A/T/src/a.c");
+        assert_eq!(applied(&map, "/w/Cactus/configs/sim/build/T/a.c"), "/cactup-root/configs/@config/build/T/a.c");
         // Another configuration is under the root, not this configuration.
-        assert_eq!(applied(&map, "/w/Cactus/configs/simple/x"), "./configs/simple/x");
+        assert_eq!(applied(&map, "/w/Cactus/configs/simple/x"), "/cactup-root/configs/simple/x");
         // A prefix of the name, and only at its start; a directory that
         // merely begins alike is another directory.
         for untouched in ["/w/Cactus-libs/include/x.h", "/w/Cactus", "/opt/w/Cactus/x.h", "x/w/Cactus/y", "relative.h"] {
@@ -798,7 +853,7 @@ mod tests {
         }
         // The flags name the less specific directory first.
         let flags: Vec<String> = map.flags().into_iter().map(|f| f.into_string().unwrap()).collect();
-        assert_eq!(flags, ["-ffile-prefix-map=/w/Cactus/=./", "-ffile-prefix-map=/w/Cactus/configs/sim/=./configs/@config/"]);
+        assert_eq!(flags, ["-ffile-prefix-map=/w/Cactus/=/cactup-root/", "-ffile-prefix-map=/w/Cactus/configs/sim/=/cactup-root/configs/@config/"]);
         // The trial's flags are spelled by the same code.
         assert_eq!(trial_flags(Path::new("/w/Cactus"), Path::new("/w/Cactus/configs/sim")), map.flags());
     }
@@ -884,6 +939,27 @@ mod tests {
         }
     }
 
+    /// The key's run writes the dependency file the compile names last, to
+    /// a temporary name, and names the target the compile would name; a
+    /// value that looks like a flag is a value.
+    #[test]
+    fn the_dependency_flags_of_the_key_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().display();
+        let flags = |args: &str| {
+            let args: Vec<OsString> = args.split(' ').map(|arg| OsString::from(arg.replace("DIR", &dir.to_string()))).collect();
+            let compile = compile::parse(&args).unwrap();
+            let ((temp, real), flags) = depend_flags(&compile).unwrap().unwrap();
+            let shown: Vec<String> = flags.iter().map(|f| f.to_string_lossy().replace(&temp.display().to_string(), "TEMP").replace(&dir.to_string(), "DIR")).collect();
+            (shown.join(" "), real.display().to_string().replace(&dir.to_string(), "DIR"))
+        };
+        assert_eq!(flags("-c -o o.o a.c -MD -MF DIR/a.d"), ("-MD -MF TEMP -MQ o.o".to_owned(), "DIR/a.d".to_owned()));
+        assert_eq!(flags("-c -o o.o a.c -MD -MF DIR/x.d -MF DIR/a.d -MP"), ("-MD -MF DIR/x.d -MF TEMP -MP -MQ o.o".to_owned(), "DIR/a.d".to_owned()));
+        // `-MT -MF`: the target is called "-MF".
+        assert_eq!(flags("-c -o o.o a.c -MD -MF DIR/a.d -MT -MF"), ("-MD -MF TEMP -MT -MF".to_owned(), "DIR/a.d".to_owned()));
+        assert_eq!(flags("-c -o o.o a.c -MD -MT -MF -MF DIR/a.d -MQ x"), ("-MD -MT -MF -MF TEMP -MQ x".to_owned(), "DIR/a.d".to_owned()));
+    }
+
     /// A key changes only on purpose: this pins the digest of fixed parts.
     /// If it fails, the way a key is made has changed; see [`KEY_LABEL`] for
     /// when that needs a new label, and then update the digest here.
@@ -897,8 +973,8 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "f8ac93a68a8d8e316472e78ee11e6d694384a157e89aac8d14e2465bacdc781c");
-        assert_eq!(PathMap::description(), ["-ffile-prefix-map", "./", "./configs/@config/"]);
+        assert_eq!(parts.key(), "ae136801392e82c501174d2989ef3d8c5a4a2829c1b61855aaa7f3b81445f6d6");
+        assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
     /// Messages keep the map's directories as tokens where a path begins,
@@ -906,11 +982,11 @@ mod tests {
     #[test]
     fn messages_travel_with_the_tree_they_name() {
         let map = map(&[("/w/Cactus/configs/sim/", CONFIG_NAME), ("/w/Cactus/", ROOT_NAME)]);
-        let said = b"/w/Cactus/arrangements/A/T/src/a.c:3: warning: x\nIn file included from /w/Cactus/configs/sim/bindings/h.h,\n/x/w/Cactus/y and '/w/Cactus/z'\n";
+        let said = b"/w/Cactus/arrangements/A/T/src/a.c:3: warning: x\nIn file included from /w/Cactus/configs/sim/bindings/h.h,\n/x/w/Cactus/y and '/w/Cactus/z'\n\x1b[01m\x1b[K/w/Cactus/c.c:\x1b[m\x1b[K\n";
         let stored = map.messages_for_the_store(said);
         assert_eq!(
             String::from_utf8_lossy(&stored),
-            "@CACTUP_ROOT@/arrangements/A/T/src/a.c:3: warning: x\nIn file included from @CACTUP_CONFIG@/bindings/h.h,\n/x/w/Cactus/y and '@CACTUP_ROOT@/z'\n"
+            "@CACTUP_ROOT@/arrangements/A/T/src/a.c:3: warning: x\nIn file included from @CACTUP_CONFIG@/bindings/h.h,\n/x/w/Cactus/y and '@CACTUP_ROOT@/z'\n\x1b[01m\x1b[K@CACTUP_ROOT@/c.c:\x1b[m\x1b[K\n"
         );
         let conf = BuildConf {
             mode: Mode::Serve,
@@ -925,7 +1001,7 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8_lossy(&messages_for_this_build(&conf, &stored)),
-            "/v/Cactus/arrangements/A/T/src/a.c:3: warning: x\nIn file included from /v/Cactus/configs/other/bindings/h.h,\n/x/w/Cactus/y and '/v/Cactus/z'\n"
+            "/v/Cactus/arrangements/A/T/src/a.c:3: warning: x\nIn file included from /v/Cactus/configs/other/bindings/h.h,\n/x/w/Cactus/y and '/v/Cactus/z'\n\x1b[01m\x1b[K/v/Cactus/c.c:\x1b[m\x1b[K\n"
         );
     }
 
@@ -1101,6 +1177,27 @@ mod tests {
         assert_eq!(there.key(&["-O2", "-g"]).parts, a.parts, "nothing in the key may know where the tree is");
         assert_eq!(renamed.key(&["-O2", "-g"]).parts, a.parts, "nor what the configuration is called");
         assert!(a.still_holds());
+    }
+
+    /// The check after the compile holds for files that were left alone,
+    /// and not for one that was changed and changed back meanwhile: its
+    /// bytes are the keyed ones again, but the compile may have read the
+    /// others.
+    #[test]
+    fn a_file_changed_and_changed_back_does_not_pass_the_check() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        let keyed = tree.key(&["-O2"]);
+        assert!(keyed.still_holds());
+        let header = std::fs::read(tree.header()).unwrap();
+        std::fs::write(tree.header(), b"#define CHANGED 1\n").unwrap();
+        std::fs::write(tree.header(), &header).unwrap();
+        assert_eq!(std::fs::read(tree.header()).unwrap(), header);
+        assert!(!keyed.still_holds(), "a header written over in between passed the check");
+        // Keyed again, it holds again.
+        assert!(tree.key(&["-O2"]).still_holds());
     }
 
     #[test]

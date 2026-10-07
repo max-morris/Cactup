@@ -855,8 +855,8 @@ impl<'a> Unit<'a> {
     /// cactup's own spelling to the same strings.)
     fn mapped_object(&self, compiler: &str, flags: &[&str], lib: &Path) -> Vec<u8> {
         let mut args = self.args(flags, lib);
-        args.push(format!("-ffile-prefix-map={}/=./", self.build.root.display()));
-        args.push(format!("-ffile-prefix-map={}/=./configs/@config/", self.build.config.display()));
+        args.push(format!("-ffile-prefix-map={}/=/cactup-root/", self.build.root.display()));
+        args.push(format!("-ffile-prefix-map={}/=/cactup-root/configs/@config/", self.build.config.display()));
         let cwd = self.build.config.join("scratch");
         let out = Command::new(compiler).args(&args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
         assert!(out.status.success(), "{compiler} {args:?}: {}", text(&out.stderr));
@@ -1200,10 +1200,19 @@ fn a_signal_during_the_check_after_the_compile_is_not_waited_out() {
     if !have("gcc") {
         return;
     }
+    // In a serving build too, where the check stands between the compile
+    // and publishing it: nothing may be published.
+    for mode in ["record", "serve"] {
+        signal_during_the_check(mode);
+    }
+}
+
+fn signal_during_the_check(mode: &str) {
     // A check that never finishes: real GCC (only a compiler the cache
     // identifies gets a check), and a header that is a pipe with nobody
     // writing to it once the compile is through.
-    let build = Build::new("record");
+    let store = tempfile::tempdir().unwrap();
+    let build = Build::new("record").serving(mode, store.path());
     let lib = tempfile::tempdir().unwrap();
     let lib = fs::canonicalize(lib.path()).unwrap();
     let unit = Unit::new(&build, "c", &lib);
@@ -1243,6 +1252,21 @@ fn a_signal_during_the_check_after_the_compile_is_not_waited_out() {
     // nothing is waiting, neither is there anything to let go of).
     feed(1);
     std::thread::sleep(std::time::Duration::from_millis(100));
+    let published: Vec<_> = walk(store.path()).into_iter().filter(|path| path.is_file()).collect();
+    assert!(published.is_empty(), "{mode}: {published:?}");
+}
+
+/// Every path below `dir`.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walk(&path));
+        }
+        found.push(path);
+    }
+    found
 }
 
 /// Flags that reach a compiler from somewhere other than its command line
@@ -1506,6 +1530,23 @@ fn audit_mode_tells_a_wrong_hit() {
     let event = build.last_event();
     assert_eq!((event["outcome"].as_str(), event["audit"].as_str()), (Some("hit"), Some("same")), "{event}");
 
+    // With a dependency file: the one the hit would have written is
+    // compared with the compile's, and is the same.
+    let depfile = unit.object.with_extension("d");
+    let with_deps = ["-O2", "-MD", "-MP", "-MF", depfile.to_str().unwrap()];
+    build.set_mode("serve", &store);
+    unit.wrapped("gcc", &with_deps, &lib);
+    build.set_mode("audit", &store);
+    unit.wrapped("gcc", &with_deps, &lib);
+    let event = build.last_event();
+    assert_eq!((event["outcome"].as_str(), event["audit"].as_str()), (Some("hit"), Some("same")), "{event}");
+    let strays: Vec<_> = fs::read_dir(unit.object.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().contains("cactup"))
+        .collect();
+    assert!(strays.is_empty(), "{strays:?}");
+
     // The entry's object, one byte changed, its checksum made to match.
     let entry = store.join("v1/test").join(&key[..2]).join(&key);
     let bytes = fs::read(&entry).unwrap();
@@ -1521,7 +1562,7 @@ fn audit_mode_tells_a_wrong_hit() {
 
     unit.wrapped("gcc", &["-O2"], &lib);
     let event = build.last_event();
-    assert_eq!(event["audit"].as_str(), Some("wrong hit"), "{event}");
+    assert_eq!(event["audit"].as_str(), Some("wrong-hit"), "{event}");
     assert_eq!(fs::read(&unit.object).unwrap(), compiled, "the build keeps the fresh object");
     let strays: Vec<_> = fs::read_dir(unit.object.parent().unwrap())
         .unwrap()
@@ -1554,6 +1595,19 @@ fn a_charset_conversion_keeps_the_locale_in_the_key() {
         assert!(out.status.success(), "{}", text(&out.stderr));
         (build.last_event(), fs::read(&object).unwrap())
     };
+    // A host without the C.UTF-8 locale compiles both alike: nothing to show.
+    let plain = |locale: &str| {
+        let out = Command::new("gcc")
+            .args(["-O2", "-fexec-charset=ASCII//TRANSLIT", "-c", "-o", "-", source.to_str().unwrap()])
+            .env("LC_ALL", locale)
+            .output()
+            .unwrap();
+        out.stdout
+    };
+    if plain("C.UTF-8") == plain("C") {
+        eprintln!("skipped: the two locales compile alike on this host");
+        return;
+    }
     let (first, utf8) = compile("C.UTF-8");
     assert_eq!(first["published"].as_bool(), Some(true), "{first}");
     let (second, c) = compile("C");
