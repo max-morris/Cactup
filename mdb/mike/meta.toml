@@ -17,6 +17,7 @@ hostname    = "mike2.hpc.lsu.edu"
 # @USER@ is substituted at use time. Old keys: sourcebasedir / basedir.
 install-home    = "/home/@USER@"
 simulation-home = "/scratch/@USER@/simulations"
+build-cache-home = "/scratch/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/scratch/@USER@/tests"
 

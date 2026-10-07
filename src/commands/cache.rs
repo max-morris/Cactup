@@ -63,7 +63,10 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
         }
         CacheCommand::Stats => stats(&store_root(ctx)?),
         CacheCommand::Gc { unused_for, to_size, dry_run } => {
-            let unused_for = upkeep::parse_age(&unused_for)?;
+            if unused_for.is_none() && to_size.is_none() {
+                bail!("say what to remove: --unused-for <age>, --to-size <size>, or both");
+            }
+            let unused_for = unused_for.as_deref().map(upkeep::parse_age).transpose()?;
             let to_size = to_size.as_deref().map(upkeep::parse_size).transpose()?;
             gc(&store_root(ctx)?, unused_for, to_size, dry_run)
         }
@@ -71,9 +74,16 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
     }
 }
 
-/// The store's root: the `build-cache-dir` knob's, or the default.
+/// The store's root, as a build on this machine would have it: the
+/// `build-cache-dir` knob's, else the machine's `build-cache-home`, else the
+/// default.
 fn store_root(ctx: &Ctx) -> Res<PathBuf> {
-    Ok(crate::objcache::store_root(&ctx.db.read()?))
+    let db = ctx.db.read()?;
+    // The machine is only asked for its place for the cache: a host it
+    // cannot resolve uses the default, as its builds would.
+    let machine = crate::commands::machine::resolve(ctx).ok();
+    let home = machine.and_then(|machine| machine.meta.resolved_paths().ok()).and_then(|paths| paths.build_cache_home);
+    Ok(crate::objcache::store_root(&db, home.as_deref()))
 }
 
 /// When, as people read it: so many days ago.
@@ -93,7 +103,9 @@ fn stats(root: &Path) -> Res<()> {
         return Ok(());
     }
     let scan = upkeep::scan(root)?;
-    let now = crate::lock::fileserver_now(root)?;
+    // The fileserver's clock where this user can write in the store; ages
+    // shown in days need nothing finer than this host's, where not.
+    let now = crate::lock::fileserver_now(root).unwrap_or_else(|_| SystemTime::now());
     println!("{}", format!("build cache in {}", root.display()).bold());
     if scan.machines.is_empty() {
         println!("  nothing stored yet");
@@ -107,7 +119,10 @@ fn stats(root: &Path) -> Res<()> {
         if let (Some(oldest), Some(newest)) =
             (machine.entries.iter().map(|e| e.published).min(), machine.entries.iter().map(|e| e.published).max())
         {
-            println!("    stored between {} and {}", ago(now, oldest), ago(now, newest));
+            match (ago(now, oldest), ago(now, newest)) {
+                (oldest, newest) if oldest == newest => println!("    all stored {oldest}"),
+                (oldest, newest) => println!("    stored between {oldest} and {newest}"),
+            }
         }
         for days in [7, 30] {
             let since = now.checked_sub(day * days).unwrap_or(UNIX_EPOCH);
@@ -118,20 +133,23 @@ fn stats(root: &Path) -> Res<()> {
             println!("    left over from interrupted builds: {} files (cactup cache gc removes those a day old)", machine.temps.len());
         }
     }
-    for (name, files, bytes) in &scan.other_formats {
+    for dir in &scan.other_formats {
         println!(
-            "  in another format ({name}: another version of cactup's): {files} files, {}; this cactup neither reads nor removes them",
-            upkeep::human(*bytes)
+            "  {} holds objects in another version of cactup's format, which this cactup neither reads nor removes; \
+             once no older cactup builds with this cache, remove it with: rm -r {}",
+            dir.display(),
+            dir.display()
         );
     }
     let total = scan.bytes();
     println!("  in all: {}", upkeep::human(total));
-    upkeep::stamp_size(root, total)?;
+    // Best-effort: a store this user cannot write in can still be looked at.
+    let _ = upkeep::stamp_size(root, total);
     Ok(())
 }
 
 /// `cactup cache gc` (§18.9).
-fn gc(root: &Path, unused_for: Duration, to_size: Option<u64>, dry_run: bool) -> Res<()> {
+fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: bool) -> Res<()> {
     if !root.is_dir() {
         println!("The build cache in {} is empty: nothing to remove.", root.display());
         return Ok(());
@@ -181,33 +199,43 @@ fn verify(root: &Path) -> Res<()> {
         let store = Store::new(root, &machine.name)?;
         checks.extend(machine.entries.iter().map(|entry| (store.clone(), entry.key.clone())));
     }
+    // Counted as it goes, so that an interrupted run can say what it did.
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let (good, removed, damaged, foreign, unreadable) = (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let checking = progress.add_child("check the build cache");
     checking.init(Some(checks.len()), Some(prodash::unit::label("objects")));
     let checking = std::sync::Mutex::new(checking);
-    let results = crate::par::parallel_map(&checks, |(store, key)| {
-        let result = store.check(key);
+    let ran = crate::par::parallel_map(&checks, |(store, key)| {
+        let counter = match store.check(key) {
+            Ok(()) => &good,
+            Err(Miss::Invalid { removed: true, .. }) => &removed,
+            Err(Miss::Invalid { removed: false, .. }) => &damaged,
+            Err(Miss::Foreign(_)) => &foreign,
+            Err(Miss::Absent) => return,
+            Err(_) => &unreadable,
+        };
+        counter.fetch_add(1, Relaxed);
         checking.lock().expect("progress poisoned").inc();
-        result
     });
     drop(checking);
     if let Some(renderer) = renderer {
         renderer.shutdown_and_wait();
     }
-    let (mut good, mut removed, mut foreign, mut unreadable) = (0, 0, 0, 0);
-    for result in results? {
-        match result {
-            Ok(()) => good += 1,
-            Err(Miss::Invalid { .. }) => removed += 1,
-            Err(Miss::Foreign(_)) => foreign += 1,
-            Err(Miss::Absent) => {}
-            Err(_) => unreadable += 1,
-        }
+    let removed = removed.load(Relaxed);
+    if let Err(e) = ran {
+        bail!("{e:#}, having removed {removed} damaged objects");
     }
-    println!("{good} objects are whole; {removed} were damaged and are removed.");
+    println!("{} objects are whole; {removed} were damaged and are removed.", good.load(Relaxed));
+    let damaged = damaged.load(Relaxed);
+    if damaged > 0 {
+        println!("{damaged} are damaged and could not be removed (no permission, or replaced meanwhile).");
+    }
+    let foreign = foreign.load(Relaxed);
     if foreign > 0 {
         println!("{foreign} were stored by another version of cactup, and are left as they are.");
     }
+    let unreadable = unreadable.load(Relaxed);
     if unreadable > 0 {
         println!("{unreadable} could not be read just now (left as they are: try again).");
     }

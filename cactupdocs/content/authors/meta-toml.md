@@ -24,6 +24,7 @@ hostname = "example.hpc.edu"
 install-home = "/home/@USER@"
 simulation-home = "/scratch/@USER@/simulations"
 test-home = "/scratch/@USER@/tests"
+build-cache-home = "/scratch/@USER@/cactup-cache"   # where the build cache keeps objects
 
 [hardware]
 max-cpus-per-node = 128

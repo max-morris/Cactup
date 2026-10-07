@@ -875,6 +875,15 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   (with `@USER@` substituted) for run scripts that stage to fast scratch; it is
   otherwise unused by cactup itself. A machine that does not set it leaves
   `@SCRATCH_HOME@` empty.
+- **`build-cache-home`** (new, MDB generation 2) is where the build cache
+  keeps its objects (§18.7), unless the user's `build-cache-dir` knob says
+  otherwise; omitted → `$CACTUP_HOME/cache`. A serving build writes a
+  cold Einstein Toolkit's worth of objects (about half a gigabyte in some
+  three thousand files) there, from compute nodes too, so clusters set it
+  beside `simulation-home` on scratch or work storage (`build-cache-home =
+  "/scratch/@USER@/cactup-cache"`). `@USER@` and `@ENV(NAME)@` work as in
+  `simulation-home`; a per-user directory, since anyone who can write in a
+  store can put objects into every build that reads it.
 - Thorn-toggle keys kept (D8, §7.5): `enabled-thorns`, `disabled-thorns`, and
   their `-default`/`-local` variants collapse to plain `enabled-thorns` /
   `disabled-thorns` arrays in TOML (the `-default`/`-local` split existed only
@@ -924,7 +933,7 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 **meta.toml table structure.** Scalar keys are grouped into tables for clarity
 (TOML requires top-level keys before any table, so grouping avoids ordering
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
-(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`max-cpus-per-node`,
+(`install-home`, `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`), `[hardware]` (`max-cpus-per-node`,
 `default-cpus-per-task`, `threads-per-cpu`, `memory` — machine-wide defaults, each overridable per-queue; see below), `[build]` (`make`, `make-jobs`,
 `enabled-thorns`, `disabled-thorns`, and the queued-build keys `default-action`,
 `queue`, `walltime`, `nodes`, `tasks`, `cpus-per-task`, `gpus-per-task` — §7.9),
@@ -5159,12 +5168,14 @@ write is a new file under a name of its own, and the one shared step is
 `link(2)`, atomic on all three (`objcache::store`).
 
 **Where.** `<root>/v1/<machine>/<first two hex digits of the key>/<key>`.
-The root is the knob `build-cache-dir` (an absolute path; default
-`$CACTUP_HOME/cache`), resolved by `prepare` and frozen into
+The root is the user's knob `build-cache-dir` (an absolute path), else the
+machine's `[paths] build-cache-home` (§4.2: scratch or work storage, not a
+home quota), else `$CACTUP_HOME/cache`, resolved by `prepare` and frozen into
 `<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
 from there (§18.1 rule 6). `v1` is the entry format. A cactup with another
 format writes beside it and never reads it — no backward compatibility
-(§2.4); the old tree is left for `cache gc`. `<machine>` is the cactup
+(§2.4); the old tree is left as it is (`cache stats` names it, and says to
+remove it by hand once no older cactup builds with the store). `<machine>` is the cactup
 machine the build was prepared for, which the key also covers: the
 directory keeps machines apart for `cache stats` and `cache gc`, not for
 soundness. A machine name that is not a plain file name keeps the build out
@@ -5426,8 +5437,11 @@ there, one per line, through a temporary file renamed into place. Its
 modification time, set by the write, is the fileserver's clock at the end
 of that build (§2.3), and is when every key in it was last used. No two
 builds write the same file, and none changes one: nothing is shared but
-the directory. A build that finds nothing writes nothing; one that cannot
-write says so in one line and is otherwise unaffected. An entry's own
+the directory. The logs, like entries, are readable by everyone who can
+read the store (`0666` less the umask): `gc` must be able to read every
+log, and a log it cannot read stops it (below). A build that finds nothing
+writes nothing; one that cannot write says so in one line and is otherwise
+unaffected. An entry's own
 modification time is when it was published. `cache gc` folds the logs it
 reads into one, `<random>.times`, with a time on each line (`<key>
 <seconds>`), and removes the logs it folded, so the information outlives
@@ -5436,28 +5450,36 @@ them and the directory stays small.
 **`cactup cache stats`** walks the store under the root
 `build-cache-dir` names and says, per machine: how many entries and how
 many bytes, the oldest and the newest publish, how many were used in the
-last 7 and 30 days, temporary files, and directories of other entry
-formats (with their size: another cactup's, or an older one's); and the
-size knob, if set, against the total.
+last 7 and 30 days, temporary files; and which directories hold another
+entry format (another version of cactup's: not walked, and to be removed
+by hand once no older cactup builds with the store). It works on a store
+it can only read (ages then by this host's clock, which days do not
+mind).
 
-**`cactup cache gc --unused-for <age> [--to-size <size>] [--dry-run]`**
-removes the entries of this cactup's format that no build has used or
-published for `<age>` (`30d`, `12w`, `6m` …), measured in the fileserver's
-clock; with `--to-size`, further entries, least recently used first, until
-the store is no larger than `<size>` (`200G`). It also removes the
+**`cactup cache gc [--unused-for <age>] [--to-size <size>] [--dry-run]`**
+(at least one of the two) removes the entries of this cactup's format that
+no build has used or published for `<age>` (`30d`, `12w`, `6m` …),
+measured in the fileserver's clock; with `--to-size`, further entries,
+least recently used first, until the store is no larger than `<size>`
+(`200G`). Every directory and every use log of the store must be read
+whole, or `gc` stops before removing anything: a log it could not read
+would leave the entries it records as in use looking unused. It also removes the
 temporary files of publishes cut short (`.tmp-…`) older than a day, and
 folds the use logs. Only one `gc` runs at a time per store: it holds
 `<root>/gc.lock`, a heartbeat `lock::LinkLock` (§2.3). It never touches
 another format's directory. `--dry-run` says what it would remove, and
 removes nothing. An entry is removed by name after checking that the name
-still leads to the file looked at (as invalidating does, §18.7). What `gc`
+still leads to the file looked at: the same device, inode, size and
+modification time (an entry republished meanwhile can have the old inode
+number on ext4, never the old modification time). What `gc`
 cannot know and need not: a use being logged while it runs (that entry may
 go, which costs one miss), a restore of an entry it removes (the reader
 keeps the file it opened).
 
 **`cactup cache verify`** reads every entry as a restore does (§18.7): it
 removes the invalid ones, as a restore would, leaves another cactup's
-alone, and says how many of each it found.
+alone, and says how many of each it found (interrupted, how many it had
+removed).
 
 All three walk thousands of files on a network filesystem: they fan out
 over the entry directories (`par::parallel_map`), show progress, and stop
@@ -5467,9 +5489,9 @@ say they removed.
 **The size notice.** The knob `build-cache-size` (a size, `200G`; not set
 by default) is frozen with the rest (§18.2). At the end of a serving or
 auditing build, if it is set and the store is larger, the build says so in
-one line and names `cactup cache gc`. Measuring the store means walking it,
-so the measurement of the whole store (every machine's entries of this
-format) is kept in `<root>/v1/size` (written by
-`cache stats`, `cache gc` and any build that finds it more than a day old,
-by the fileserver's clock) and a build reads it from there. Nothing is
-removed.
+one line and names `cactup cache gc`. A build never walks the store: the
+size of the whole store (every machine's entries of this format) is kept
+in `<root>/v1/size`, measured by `cache stats` and `cache gc`, and each
+serving build adds the bytes it published and keeps the sum. Builds that
+add at the same moment can lose each other's additions, so between
+measurements it is an estimate, low if anything. Nothing is removed.

@@ -21,6 +21,7 @@ hostname    = "smic.hpc.lsu.edu"
 # scratchbasedir.
 install-home    = "/home/@USER@"
 simulation-home = "/work/@USER@/simulations"
+build-cache-home = "/work/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/work/@USER@/tests"
 scratch-home    = "/var/scratch/@USER@"

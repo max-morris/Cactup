@@ -148,10 +148,25 @@ Asked as seven questions with options; the answers, in Max's numbering.
    written into spec §18.5's limits. Audit mode would still catch an object
    it produced.
 
+10. **The contract goes into `CLAUDE.md` when the cache lands on master**
+    (2026-10-07: "When it lands on master"). `CLAUDE-contract.md` stays on
+    the branch; it is added to `CLAUDE.md`, before the "On-disk formats"
+    section, in the same step that merges `feature/build-cache`, so no
+    session reads rules for code its tree lacks.
+
+11. **The machine database says where the cache lives** (2026-10-07: "New
+    MDB key"). Asked after a side question found the store defaulting to
+    `$HOME`, where a cold Einstein Toolkit build writes about half a
+    gigabyte from compute nodes. `[paths] build-cache-home`, resolved and
+    frozen like `simulation-home`; the user's `build-cache-dir` knob wins
+    over it, `$CACTUP_HOME/cache` is the fallback. Set per machine beside a
+    per-user `simulation-home` on scratch or work (not on machines whose
+    `simulation-home` is a home tree or another person's directory). MDB
+    generation 2.
+
 ## Still open
 
 - The cluster check of decision 3 on a Spack-built GCC (qbd's site-built
   GCC is checked: a link-only specs file).
-- Whether the contract text in `CLAUDE-contract.md` goes into the
-  repository's `CLAUDE.md` (untracked, shared by every session): asked
-  when M1c lands, not before.
+- (Answered: the contract goes into `CLAUDE.md` with the merge, decision
+  10.)

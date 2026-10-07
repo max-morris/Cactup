@@ -705,12 +705,12 @@ pub(crate) enum CacheCommand {
         #[clap(long)]
         long: bool,
     },
-    /// Say what the build cache holds: entries, sizes, and how recently they were used
+    /// Say what the build cache holds: objects, sizes, and how recently they were used
     ///
     /// Walks the cache directory (the build-cache-dir knob; by default the
     /// cache directory in cactup's home) and reports, for each machine, how
-    /// many objects it keeps and their size, how many builds used lately,
-    /// and anything left over from an interrupted build.
+    /// many objects it keeps and their size, how many of them builds used
+    /// lately, and anything left over from an interrupted build.
     #[clap(verbatim_doc_comment)]
     Stats,
     /// Remove from the build cache what no build has used for a while
@@ -719,15 +719,17 @@ pub(crate) enum CacheCommand {
     /// what makes going back to an older version of a thorn cheap. This
     /// removes the objects no build has used or stored for the given time,
     /// and with --to-size, further ones, least recently used first, until
-    /// the cache is no larger than the given size.
+    /// the cache is no larger than the given size. Either may be given
+    /// alone.
     ///
     ///   cactup cache gc --unused-for 60d
+    ///   cactup cache gc --to-size 200G
     ///   cactup cache gc --unused-for 30d --to-size 200G --dry-run
     #[clap(verbatim_doc_comment)]
     Gc {
         /// Remove what no build has used for this long: a number with h, d, w, m (30 days) or y.
         #[clap(long, value_name = "AGE")]
-        unused_for: String,
+        unused_for: Option<String>,
         /// Then remove the least recently used until the cache is no larger than this (200G, 500M).
         #[clap(long, value_name = "SIZE")]
         to_size: Option<String>,

@@ -125,6 +125,10 @@ pub struct Paths {
     /// Exposed to scripts as @SCRATCH_HOME@ (empty when unset); otherwise
     /// unused by cactup itself.
     pub scratch_home: Option<String>,
+    /// Where the build cache keeps its objects (§18.7), unless the user's
+    /// `build-cache-dir` knob says otherwise; fallback `$CACTUP_HOME/cache`.
+    /// Large and written from compute nodes: scratch or work, not home.
+    pub build_cache_home: Option<String>,
 }
 
 /// §4.2 carries only the hardware keys cactup actually feeds to submit/run
@@ -1130,6 +1134,7 @@ impl Meta {
             ("simulation-home", &mut paths.simulation_home),
             ("test-home", &mut paths.test_home),
             ("scratch-home", &mut paths.scratch_home),
+            ("build-cache-home", &mut paths.build_cache_home),
         ] {
             if let Some(value) = path {
                 *value = vars
@@ -1633,6 +1638,17 @@ mod tests {
         );
         // The stored meta keeps its tokens (resolution is on-demand)…
         assert_eq!(meta.paths.simulation_home.as_deref(), Some("/work/@USER@/simulations"));
+        // … the build cache's place among them.
+        let with_cache: Meta = toml::from_str(&MIKE.replacen(
+            "simulation-home",
+            "build-cache-home = \"/work/@USER@/cactup-cache\"\nsimulation-home",
+            1,
+        ))
+        .unwrap();
+        assert_eq!(
+            with_cache.resolved_paths().unwrap().build_cache_home.as_deref(),
+            Some(format!("/work/{user}/cactup-cache").as_str())
+        );
         // …and scheduler templates keep theirs for use-time substitution.
         assert_eq!(meta.scheduler.submit.as_deref(), Some("sbatch @SCRIPTFILE@ 2>&1"));
     }

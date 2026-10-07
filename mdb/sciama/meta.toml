@@ -19,6 +19,7 @@ hostname    = "login1.sciama.icg.port.ac.uk"
 # scratchbasedir.
 install-home    = "/users/@USER@"
 simulation-home = "/mnt/lustre/@USER@/runs"
+build-cache-home = "/mnt/lustre/@USER@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "/mnt/lustre/@USER@/tests"
 scratch-home    = "/tmp"

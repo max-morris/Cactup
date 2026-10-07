@@ -24,6 +24,7 @@ hostname    = "frontera.tacc.utexas.edu"
 # component, so no @USER@ segment. Old keys: sourcebasedir / basedir.
 install-home    = "@ENV(HOME)@/frontera"
 simulation-home = "@ENV(SCRATCH)@/simulations"
+build-cache-home = "@ENV(SCRATCH)@/cactup-cache"
 # NEW (design §11.5): testsuite-output root, sibling of simulation-home.
 test-home       = "@ENV(SCRATCH)@/tests"
 

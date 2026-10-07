@@ -159,12 +159,15 @@ pub fn default_store_root() -> PathBuf {
     crate::CACTUP_ROOT.join("cache")
 }
 
-/// The effective `build-cache-dir`, read leniently like [`Mode::from_db`]: a
-/// stored value that is not an absolute path means the default. Resolved on
-/// the login node only (D11): [`stage`] freezes it.
-pub fn store_root(db: &Database) -> PathBuf {
+/// The store's root (§18.7): the user's `build-cache-dir` knob (read
+/// leniently like [`Mode::from_db`]: a value that is not an absolute path
+/// is no value), else the machine's `[paths] build-cache-home` (`machine_home`,
+/// already resolved), else `$CACTUP_HOME/cache`. Resolved on the login node
+/// only (D11): [`stage`] freezes it.
+pub fn store_root(db: &Database, machine_home: Option<&str>) -> PathBuf {
     let knob = db.knob("build-cache-dir").filter(|value| Path::new(value).is_absolute());
-    knob.map_or_else(default_store_root, PathBuf::from)
+    let home = machine_home.filter(|home| Path::new(home).is_absolute());
+    knob.or(home).map_or_else(default_store_root, PathBuf::from)
 }
 
 /// One build's cache settings (§18.2), frozen by [`stage`] as
@@ -244,14 +247,17 @@ pub fn after_build(cc_dir: &Path) {
     let Ok(store) = store::Store::new(&conf.store, &conf.machine) else { return };
     let events = event::read(&events_path(cc_dir)).map(|(events, _)| events).unwrap_or_default();
     let keys: Vec<String> =
-        events.into_iter().filter(|e| e.outcome == Some(event::Outcome::Hit)).filter_map(|e| e.key).collect();
+        events.iter().filter(|e| e.outcome == Some(event::Outcome::Hit)).filter_map(|e| e.key.clone()).collect();
     if let Err(e) = upkeep::log_use(&store, &keys) {
         eprintln!("{} build cache: could not record which entries this build used: {e:#}", "warning:".yellow().bold());
     }
     if let Some(limit) = conf.size_limit {
-        match upkeep::store_size(&conf.store) {
+        // Never a walk of the store inside a build: the size last measured,
+        // plus what this build added.
+        let published: u64 = events.iter().filter(|e| e.published == Some(true)).filter_map(|e| e.object_bytes).sum();
+        match upkeep::add_to_size(&conf.store, published) {
             Ok(bytes) if bytes > limit => println!(
-                "{} the build cache in {} holds {}, more than build-cache-size ({}); \
+                "{} the build cache in {} holds about {}, more than build-cache-size ({}); \
                  `cactup cache gc --unused-for 30d` removes what no build has used in 30 days",
                 "note:".bold(),
                 conf.store.display(),
@@ -259,7 +265,7 @@ pub fn after_build(cc_dir: &Path) {
                 upkeep::human(limit),
             ),
             Ok(_) => {}
-            Err(e) => eprintln!("{} build cache: could not measure {}: {e:#}", "warning:".yellow().bold(), conf.store.display()),
+            Err(e) => eprintln!("{} build cache: could not keep the size of {}: {e:#}", "warning:".yellow().bold(), conf.store.display()),
         }
     }
 }
@@ -447,6 +453,39 @@ mod tests {
         }
     }
 
+    /// After a serving build: the keys it found are logged, the size it
+    /// added is kept; a recording build does neither.
+    #[test]
+    fn after_a_serving_build_its_uses_and_size_are_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cc = tmp.path().join("cc");
+        let store = tmp.path().join("store");
+        let mut stage_inputs = inputs("/opt/cactup/bin/cactup-abc1234", tmp.path());
+        stage_inputs.store = &store;
+        stage_inputs.size_limit = Some(1);
+        stage(&cc, Mode::Serve, &stage_inputs).unwrap();
+        let (hit, miss) = ("a".repeat(64), "b".repeat(64));
+        for event in [
+            event::Event { key: Some(hit.clone()), outcome: Some(event::Outcome::Hit), ..Default::default() },
+            event::Event { key: Some(miss), outcome: Some(event::Outcome::Miss), published: Some(true), object_bytes: Some(4096), ..Default::default() },
+        ] {
+            event.append(&events_path(&cc));
+        }
+        after_build(&cc);
+        let used = store.join("v1/mel5/used");
+        let logs: Vec<_> = fs::read_dir(&used).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(fs::read_to_string(&logs[0]).unwrap(), format!("{hit}\n"));
+        assert_eq!(fs::read_to_string(store.join("v1/size")).unwrap(), "4096\n");
+
+        // A recording build: nothing.
+        let record = tmp.path().join("record");
+        stage(&record, Mode::Record, &stage_inputs).unwrap();
+        event::Event { key: Some("c".repeat(64)), outcome: Some(event::Outcome::Hit), ..Default::default() }.append(&events_path(&record));
+        after_build(&record);
+        assert_eq!(fs::read_dir(&used).unwrap().count(), 1);
+    }
+
     #[test]
     fn mode_knob_accepts_exactly_its_names() {
         assert_eq!(validate_mode(" record ").unwrap(), "record");
@@ -456,6 +495,18 @@ mod tests {
         assert_eq!(validate_mode("serve").unwrap(), "serve");
         assert_eq!(validate_relocate(" no ").unwrap(), "no");
         assert!(validate_relocate("off").is_err());
+    }
+
+    /// The user's knob, then the machine's place, then the default.
+    #[test]
+    fn the_store_root_is_the_knobs_then_the_machines_then_the_default() {
+        let mut db = Database::new();
+        assert_eq!(store_root(&db, None), default_store_root());
+        assert_eq!(store_root(&db, Some("/scratch/me/cactup-cache")), PathBuf::from("/scratch/me/cactup-cache"));
+        // A relative place is no place.
+        assert_eq!(store_root(&db, Some("scratch")), default_store_root());
+        db.set_knob("build-cache-dir", "/mine".to_owned());
+        assert_eq!(store_root(&db, Some("/scratch/me/cactup-cache")), PathBuf::from("/mine"));
     }
 
     #[test]

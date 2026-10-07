@@ -1787,7 +1787,22 @@ fn prepare_with_cache(
         Some((mode, _)) => mode,
         None => db.as_ref().map(crate::objcache::Mode::from_db).unwrap_or_default(),
     };
-    let cache_store = db.as_ref().map_or_else(|_| crate::objcache::default_store_root(), crate::objcache::store_root);
+    // The machine's place for it; a path that cannot be resolved here (an
+    // `@ENV(…)@` unset) costs the machine's default, not the build.
+    let cache_home = match cache_mode {
+        crate::objcache::Mode::Off => None,
+        _ => match machine.meta.resolved_paths() {
+            Ok(paths) => paths.build_cache_home,
+            Err(e) => {
+                println!("{} build cache: {e:#}; using the default place for it", "warning:".yellow().bold());
+                None
+            }
+        },
+    };
+    let cache_store = match db.as_ref() {
+        Ok(db) => crate::objcache::store_root(db, cache_home.as_deref()),
+        Err(_) => cache_home.map_or_else(crate::objcache::default_store_root, PathBuf::from),
+    };
     let cache_relocate = db.as_ref().map_or(true, crate::objcache::relocate_from_db);
     let cache_size_limit = db.as_ref().ok().and_then(crate::objcache::size_limit_from_db);
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the

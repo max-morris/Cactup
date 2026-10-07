@@ -659,10 +659,13 @@ unusual characters) the build goes ahead without it and says so in one line:
 cactup: build cache off for this build: <reason>
 ```
 
-Cached objects are kept under `~/.cactup/cache` (or `$CACTUP_HOME/cache`),
-or wherever the `build-cache-dir` knob says, as an absolute path. Anyone who
-can write in that directory can put objects into your builds, so keep it
-your own.
+Cached objects are kept where your machine's entry in the machine
+database puts them (`build-cache-home`: on clusters, scratch or work
+storage beside your simulations), else under `~/.cactup/cache` (or
+`$CACTUP_HOME/cache`), or wherever the `build-cache-dir` knob says, as an
+absolute path, which wins over both. `cactup cache stats` says where it is.
+Anyone who can write in that directory can put objects into your builds, so
+keep it your own.
 
 ```sh
 cactup knob build-cache-dir /scratch/me/cactup-cache

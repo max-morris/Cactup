@@ -327,7 +327,8 @@ Tried on the stores of the M1b gate runs: `stats` reads 2783 entries;
 leaves them; `gc --to-size 300M` on a copy removed the 2150 least recently
 used.
 
-Still with Max: whether `CLAUDE-contract.md` goes into `CLAUDE.md`.
+`CLAUDE-contract.md` goes into `CLAUDE.md` in the step that merges the
+branch to master (decision 10).
 
 ## What M1b is
 
@@ -1142,6 +1143,42 @@ for the start of M1c:
 
 The other half of the gate is Max's: the full audit build in two
 installations, Clang included, on `6b8efb1`.
+
+### M1c, round 1 (on `3011fff`): BLOCKED by both, on the same two
+
+(The author edited `DECISIONS.md` and `STATUS.md` while the reviewers
+worked, against the rule above; documents only, but not again.)
+
+1. (both) `gc` read a use log it could not read as empty, removed the
+   entries that log recorded as used, and deleted the log; and the logs
+   were written `0600`, so in a store shared with a group every member's
+   `gc` would do so with the others' logs (both ran it: a copied store,
+   400 entries in a log, `chmod 000`, all 2783 removed). Listing errors
+   were swallowed too. *Fixed: logs, the folded log and the size stamp
+   are written `0666` less the umask; every directory and every log must
+   be read whole, or the walk fails and `gc` removes nothing (a unit test,
+   and run on a copy).*
+2. (both) The directories of other formats were walked file by file, with
+   no progress and no Ctrl-C (A: 400k files, the Ctrl-C seen only at the
+   end), by `stats`, `gc`, `verify` and builds. *Fixed: they are named,
+   never walked, and `stats` says to remove them by hand; spec §18.7's
+   "left for `cache gc`" corrected.*
+
+Non-blocking points taken: a build never walks the store (the size stamp
+plus what the build published, an estimate; `stats` and `gc` measure);
+`gc` removes an entry only if device, inode, size and modification time
+are still what it walked; `verify` counts as it goes and says what it
+removed when interrupted, and an entry it could not remove is counted
+apart; `stats` works on a store it can only read; `parse_age` cannot
+overflow; `--to-size` alone; wording ("objects", "all stored today",
+human sizes when interrupted); a unit test of `after_build`.
+
+New in the same commit, by Max's choice (decision 11): the machine's
+place for the cache, `[paths] build-cache-home`, between the user's knob
+and `$CACTUP_HOME/cache`; set on 19 machines beside their per-user
+`simulation-home` on scratch or work; MDB generation 2 (`mdb/GENERATION`,
+`GENERATIONS.md` with the overlay recipe), all in one commit as
+`CLAUDE.md` asks.
 
 ## Decisions
 

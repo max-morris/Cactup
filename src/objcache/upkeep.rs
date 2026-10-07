@@ -33,16 +33,27 @@ pub fn log_use(store: &Store, keys: &[String]) -> Res<()> {
     }
     let dir = used_dir(store.dir());
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".tmp-use-")
-        .tempfile_in(&dir)
-        .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?;
+    let mut temp = readable_temp(&dir)?;
     let mut text = keys.join("\n");
     text.push('\n');
     temp.write_all(text.as_bytes()).context("Failed to write a use log")?;
     let name = dir.join(format!("{:016x}{:016x}.keys", fastrand::u64(..), fastrand::u64(..)));
     temp.persist_noclobber(&name).map_err(|e| e.error).with_context(|| format!("Failed to write {}", name.display()))?;
     Ok(())
+}
+
+/// A temporary file in `dir` for a file of the store that everyone who
+/// can read the store must be able to read (a use log, the size stamp):
+/// `0666` less the umask, as entries and objects are, not `tempfile`'s
+/// `0600`. Another user's `gc` that could not read a use log would not know
+/// what it says is in use.
+fn readable_temp(dir: &Path) -> Res<tempfile::NamedTempFile> {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .prefix(".tmp-use-")
+        .permissions(fs::Permissions::from_mode(0o666))
+        .tempfile_in(dir)
+        .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))
 }
 
 /// One entry, as the walk found it.
@@ -55,6 +66,18 @@ pub struct Entry {
     pub published: SystemTime,
     dev: u64,
     ino: u64,
+}
+
+impl Entry {
+    /// Is the file at this entry's name still the one the walk found? Not
+    /// by inode alone: ext4 gives a new file a freed inode number at once,
+    /// and an entry republished meanwhile is new. An entry is never changed
+    /// after its link, so its size and modification time tell.
+    fn still_there(&self) -> bool {
+        fs::symlink_metadata(&self.path).is_ok_and(|now| {
+            (now.dev(), now.ino(), now.len(), modified(&now)) == (self.dev, self.ino, self.bytes, self.published)
+        })
+    }
 }
 
 /// A file the walk found that is not an entry: a temporary file a publish
@@ -99,8 +122,9 @@ impl Machine {
 #[derive(Debug, Default)]
 pub struct Scan {
     pub machines: Vec<Machine>,
-    /// Directories of other entry formats: their name, files and bytes.
-    pub other_formats: Vec<(String, u64, u64)>,
+    /// Directories of other entry formats (another version of cactup's),
+    /// by path. Not walked: nothing here reads or removes them.
+    pub other_formats: Vec<PathBuf>,
 }
 
 impl Scan {
@@ -153,17 +177,24 @@ fn read_piece(piece: &Piece) -> Res<Found> {
         if name.starts_with(".tmp-") {
             found.temps.push(Other { path, modified: modified(&meta) });
         } else if piece.used {
-            let uses = match name.rsplit_once('.').map(|(_, kind)| kind) {
+            let kind = name.rsplit_once('.').map(|(_, kind)| kind);
+            if !matches!(kind, Some("keys" | "times")) {
+                continue;
+            }
+            // A log that cannot be read stops the walk: what it says is in
+            // use is not known, and must not be taken for nothing.
+            let text = fs::read_to_string(&path).with_context(|| {
+                format!("Failed to read the use log {}, so what it records as in use is not known", path.display())
+            })?;
+            let uses = match kind {
                 // Every key in it, at the time it was written.
-                Some("keys") => fs::read_to_string(&path)
-                    .unwrap_or_default()
+                Some("keys") => text
                     .lines()
                     .filter(|key| is_key(key))
                     .map(|key| (key.to_owned(), modified(&meta)))
                     .collect(),
                 // `<key> <seconds>` on each line, as `gc` folded them.
-                Some("times") => fs::read_to_string(&path)
-                    .unwrap_or_default()
+                _ => text
                     .lines()
                     .filter_map(|line| {
                         let (key, seconds) = line.split_once(' ')?;
@@ -171,7 +202,6 @@ fn read_piece(piece: &Piece) -> Res<Found> {
                         is_key(key).then(|| (key.to_owned(), UNIX_EPOCH + Duration::from_secs(seconds)))
                     })
                     .collect(),
-                _ => continue,
             };
             found.logs.push(Log { path, uses });
         } else if is_key(&name) {
@@ -188,47 +218,38 @@ fn read_piece(piece: &Piece) -> Res<Found> {
     Ok(found)
 }
 
-/// The bytes and files under `dir`, all of it.
-fn size_of(dir: &Path) -> (u64, u64) {
-    let (mut bytes, mut files) = (0, 0);
-    for item in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let Ok(meta) = item.metadata() else { continue };
-        if meta.is_dir() {
-            let (b, f) = size_of(&item.path());
-            bytes += b;
-            files += f;
-        } else {
-            bytes += meta.len();
-            files += 1;
-        }
-    }
-    (bytes, files)
-}
-
 /// Walk the store under `root`: every machine's entries, temporary files and
 /// use logs, and what directories of other formats there are. The entry
 /// directories are read in parallel (`par::parallel_map`, which stops on
 /// Ctrl-C), with a progress line counting them.
 pub fn scan(root: &Path) -> Res<Scan> {
     let format_dir = root.join(format!("v{FORMAT}"));
+    // Every listing is complete or an error: a directory that drops out of
+    // the walk would look empty, and its entries unused.
+    let list = |dir: &Path| -> Res<Vec<fs::DirEntry>> {
+        match fs::read_dir(dir) {
+            Ok(listing) => listing.collect::<Result<Vec<_>, _>>().with_context(|| format!("Failed to read {}", dir.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e).with_context(|| format!("Failed to read {}", dir.display())),
+        }
+    };
     let mut scan = Scan::default();
-    for item in fs::read_dir(root).into_iter().flatten().flatten() {
+    for item in list(root)? {
         let name = item.file_name().to_string_lossy().into_owned();
         let is_format = name.strip_prefix('v').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
         if is_format && name != format!("v{FORMAT}") && item.path().is_dir() {
-            let (bytes, files) = size_of(&item.path());
-            scan.other_formats.push((name, files, bytes));
+            scan.other_formats.push(item.path());
         }
     }
     let mut pieces = Vec::new();
-    for item in fs::read_dir(&format_dir).into_iter().flatten().flatten() {
+    for item in list(&format_dir)? {
         let name = item.file_name().to_string_lossy().into_owned();
         let dir = item.path();
         if !dir.is_dir() || name.starts_with('.') {
             continue;
         }
         let machine = scan.machines.len();
-        for sub in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        for sub in list(&dir)? {
             let sub_name = sub.file_name().to_string_lossy().into_owned();
             let prefix = sub_name.len() == 2 && sub_name.bytes().all(|b| b.is_ascii_hexdigit());
             if prefix || sub_name == "used" {
@@ -277,10 +298,11 @@ pub struct Plan {
 }
 
 /// Work out what to remove: the entries not used or published since `now -
-/// unused_for`; then, with `to_size`, the least recently used of the rest
-/// until no more than `to_size` bytes remain.
-pub fn plan(scan: &Scan, now: SystemTime, unused_for: Duration, to_size: Option<u64>) -> Plan {
-    let cutoff = now.checked_sub(unused_for).unwrap_or(UNIX_EPOCH);
+/// unused_for` (with an age); then, with `to_size`, the least recently used
+/// of the rest until no more than `to_size` bytes remain.
+pub fn plan(scan: &Scan, now: SystemTime, unused_for: Option<Duration>, to_size: Option<u64>) -> Plan {
+    // Without an age, nothing is old: only the size decides.
+    let cutoff = unused_for.map_or(UNIX_EPOCH, |unused_for| now.checked_sub(unused_for).unwrap_or(UNIX_EPOCH));
     let mut plan = Plan::default();
     let mut kept: Vec<(&Entry, SystemTime, usize)> = Vec::new();
     for (index, machine) in scan.machines.iter().enumerate() {
@@ -348,10 +370,9 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
     let result = (|| -> Res<()> {
         for (entry, _) in &plan.entries {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} entries ({} bytes)", done.entries, done.bytes);
+                bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
             }
-            let same = fs::symlink_metadata(&entry.path).is_ok_and(|now| now.dev() == entry.dev && now.ino() == entry.ino);
-            if same && fs::remove_file(&entry.path).is_ok() {
+            if entry.still_there() && fs::remove_file(&entry.path).is_ok() {
                 done.entries += 1;
                 done.bytes += entry.bytes;
             }
@@ -359,7 +380,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
         }
         for temp in &plan.temps {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} entries ({} bytes)", done.entries, done.bytes);
+                bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
             }
             if fs::remove_file(&temp.path).is_ok() {
                 done.temps += 1;
@@ -374,10 +395,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
                 text.push_str(&format!("{key} {seconds}\n"));
             }
             if !text.is_empty() {
-                let mut temp = tempfile::Builder::new()
-                    .prefix(".tmp-use-")
-                    .tempfile_in(dir)
-                    .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?;
+                let mut temp = readable_temp(dir)?;
                 temp.write_all(text.as_bytes()).context("Failed to write the folded use log")?;
                 let name = dir.join(format!("{:016x}{:016x}.times", fastrand::u64(..), fastrand::u64(..)));
                 temp.persist_noclobber(&name).map_err(|e| e.error).with_context(|| format!("Failed to write {}", name.display()))?;
@@ -422,7 +440,7 @@ pub fn parse_age(text: &str) -> Res<Duration> {
     let bad = || anyhow::anyhow!("\"{text}\" is not an age (a number with h, d, w, m or y, as 30d)");
     let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?);
     let number: u64 = number.parse().map_err(|_| bad())?;
-    let hours = match unit {
+    let hours: u64 = match unit {
         "h" => 1,
         "d" => 24,
         "w" => 24 * 7,
@@ -430,7 +448,8 @@ pub fn parse_age(text: &str) -> Res<Duration> {
         "y" => 24 * 365,
         _ => return Err(bad()),
     };
-    Ok(Duration::from_secs(number * hours * 3600))
+    let seconds = number.checked_mul(hours).and_then(|hours| hours.checked_mul(3600)).ok_or_else(bad)?;
+    Ok(Duration::from_secs(seconds))
 }
 
 /// A size as people read it: `1.5 GB` (powers of 1024).
@@ -453,25 +472,30 @@ fn size_stamp(root: &Path) -> PathBuf {
     root.join(format!("v{FORMAT}")).join("size")
 }
 
-/// Keep `bytes` as the store's measured size.
+/// Keep `bytes` as the store's size. Written whole and moved into place, so
+/// its modification time is the fileserver's clock.
 pub fn stamp_size(root: &Path, bytes: u64) -> Res<()> {
     let stamp = size_stamp(root);
-    if let Some(dir) = stamp.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    }
-    crate::lock::write_stamp(&stamp, format!("{bytes}\n").as_bytes())
+    let dir = stamp.parent().expect("the stamp is in a directory");
+    fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    let mut temp = readable_temp(dir)?;
+    temp.write_all(format!("{bytes}\n").as_bytes()).context("Failed to write the size stamp")?;
+    temp.persist(&stamp).map_err(|e| e.error).with_context(|| format!("Failed to write {}", stamp.display()))?;
+    Ok(())
 }
 
-/// The store's size, as last measured if that was less than a day ago (by
-/// the fileserver's clock), else measured now and kept.
-pub fn store_size(root: &Path) -> Res<u64> {
+/// The store's size as a build sees it (§18.9), without walking it: the
+/// size `cache stats` or `cache gc` last measured, plus what builds have
+/// published since, each adding its own and keeping the sum. Builds that
+/// add at the same moment can lose each other's additions, so it is an
+/// estimate, low if anything; the next `stats` or `gc` measures again.
+pub fn add_to_size(root: &Path, published: u64) -> Res<u64> {
     let stamp = size_stamp(root);
-    let fresh = crate::lock::mtime_age(&stamp).is_some_and(|age| age < Duration::from_secs(24 * 3600));
-    if fresh && let Some(bytes) = fs::read_to_string(&stamp).ok().and_then(|text| text.trim().parse().ok()) {
-        return Ok(bytes);
+    let known: u64 = fs::read_to_string(&stamp).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+    let bytes = known + published;
+    if published > 0 {
+        stamp_size(root, bytes)?;
     }
-    let bytes = scan(root)?.bytes();
-    stamp_size(root, bytes)?;
     Ok(bytes)
 }
 
@@ -518,7 +542,7 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(10 * DAY);
         // Unused for 5 days: `b` (day 2); `a` was used on day 9, `c`
         // published on day 8.
-        let plan = plan(&store(), now, Duration::from_secs(5 * DAY), None);
+        let plan = plan(&store(), now, Some(Duration::from_secs(5 * DAY)), None);
         assert_eq!(keys(&plan), ['b']);
         assert_eq!(plan.bytes_after, 200);
         assert_eq!(plan.temps.len(), 1, "a temporary file five days old goes");
@@ -530,16 +554,19 @@ mod tests {
     }
 
     fn plan_for(days: u64) -> Plan {
-        plan(&store(), UNIX_EPOCH + Duration::from_secs(10 * DAY), Duration::from_secs(days * DAY), None)
+        plan(&store(), UNIX_EPOCH + Duration::from_secs(10 * DAY), Some(Duration::from_secs(days * DAY)), None)
     }
 
     #[test]
     fn gc_to_a_size_removes_the_least_recently_used_first() {
         let now = UNIX_EPOCH + Duration::from_secs(10 * DAY);
-        let plan = plan(&store(), now, Duration::from_secs(365 * DAY), Some(150));
+        let plan = plan(&store(), now, Some(Duration::from_secs(365 * DAY)), Some(150));
         // Last uses: a day 9, b day 2, c day 8: b first, then c.
         assert_eq!(keys(&plan), ['b', 'c']);
         assert_eq!(plan.bytes_after, 100);
+        // The size alone, with no age, decides the same.
+        assert_eq!(keys(&super::plan(&store(), now, None, Some(150))), ['b', 'c']);
+        assert!(super::plan(&store(), now, None, None).entries.is_empty());
     }
 
     #[test]
@@ -553,6 +580,8 @@ mod tests {
         assert_eq!(parse_age("2w").unwrap(), Duration::from_secs(14 * DAY));
         assert_eq!(parse_age("6m").unwrap(), Duration::from_secs(180 * DAY));
         assert!(parse_age("30").is_err() && parse_age("d").is_err() && parse_age("3x").is_err());
+        // Too large to count is an error, not an age that wrapped round.
+        assert!(parse_age("99999999999999999y").is_err());
         assert_eq!(human(1536), "1.5 KB");
         assert_eq!(human(10), "10 bytes");
     }
@@ -590,11 +619,11 @@ mod tests {
         assert_eq!(scan.machines.len(), 1);
         assert_eq!(scan.machines[0].entries.len(), 2);
         assert_eq!(scan.machines[0].logs.len(), 1);
-        assert_eq!(scan.other_formats, vec![("v0".to_owned(), 1, 5)]);
+        assert_eq!(scan.other_formats, vec![root.join("v0")]);
         let now = crate::lock::fileserver_now(tmp.path()).unwrap();
 
         // Nothing is old enough: nothing goes, and the log is folded.
-        let plan = plan(&scan, now, Duration::from_secs(DAY), None);
+        let plan = plan(&scan, now, Some(Duration::from_secs(DAY)), None);
         assert!(plan.entries.is_empty());
         carry_out(&plan).unwrap();
         let used: Vec<String> = fs::read_dir(root.join("v1/plato/used")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
@@ -605,11 +634,47 @@ mod tests {
 
         // Everything is "old" a year from now: both go.
         let later = now + Duration::from_secs(365 * DAY);
-        let plan = super::plan(&super::scan(&root).unwrap(), later, Duration::from_secs(DAY), None);
+        let plan = super::plan(&super::scan(&root).unwrap(), later, Some(Duration::from_secs(DAY)), None);
         let done = carry_out(&plan).unwrap();
         assert_eq!(done.entries, 2);
         assert!(super::scan(&root).unwrap().machines[0].entries.is_empty());
         // The other format is not touched.
         assert!(root.join("v0/old/x").exists());
+    }
+
+    /// A use log anyone who reads the store can read; and one that cannot be
+    /// read stops the walk, rather than passing for a log of nothing.
+    #[test]
+    fn a_use_log_is_readable_and_an_unreadable_one_stops_the_walk() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let store = Store::new(&root, "plato").unwrap();
+        log_use(&store, &["a".repeat(64)]).unwrap();
+        let log = fs::read_dir(root.join("v1/plato/used")).unwrap().next().unwrap().unwrap().path();
+        let status = fs::read_to_string("/proc/self/status").unwrap();
+        let umask = u32::from_str_radix(status.lines().find_map(|l| l.strip_prefix("Umask:")).unwrap().trim(), 8).unwrap();
+        assert_eq!(fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o666 & !umask);
+        stamp_size(&root, 5).unwrap();
+        assert_eq!(fs::metadata(root.join("v1/size")).unwrap().permissions().mode() & 0o777, 0o666 & !umask);
+
+        fs::set_permissions(&log, fs::Permissions::from_mode(0)).unwrap();
+        if fs::read(&log).is_ok() {
+            return; // run as root: nothing is unreadable
+        }
+        let err = scan(&root).unwrap_err().to_string();
+        assert!(err.contains("use log") && err.contains("not known"), "{err}");
+    }
+
+    #[test]
+    fn a_build_adds_to_the_size_and_never_walks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        assert_eq!(add_to_size(&root, 0).unwrap(), 0);
+        assert!(!size_stamp(&root).exists(), "nothing added, nothing written");
+        assert_eq!(add_to_size(&root, 100).unwrap(), 100);
+        assert_eq!(add_to_size(&root, 50).unwrap(), 150);
+        stamp_size(&root, 1000).unwrap();
+        assert_eq!(add_to_size(&root, 1).unwrap(), 1001);
     }
 }
