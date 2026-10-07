@@ -449,12 +449,21 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
     let again_as = std::env::var_os("CACTUP_CC_TEST_SECOND_COMPILER").map(PathBuf::from);
     #[cfg(debug_assertions)]
     let identified = again_as.as_deref().or(identified);
-    match run(job, argv, identified, extra, Output::Swallow) {
-        // Asked to stop: the compile would have been.
-        Some((again, _)) if again.signal().is_some() && PENDING.load(Ordering::SeqCst) != 0 => {
-            drop(first);
-            leave_as(again)
+    let again = run(job, argv, identified, extra, Output::Swallow);
+    // Asked to stop, however the second compile then ended (a driver may
+    // exit with a status rather than by the signal): the compile would have
+    // been stopped.
+    if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
+        drop(first);
+        match again {
+            Some((again, _)) if again.signal().is_some() => leave_as(again),
+            _ => {
+                let _ = signal_hook::low_level::emulate_default_handler(signal);
+                std::process::exit(128 + signal)
+            }
         }
+    }
+    match again {
         Some((again, _)) if again.success() && !keyed.still_holds() => Audit::InputsChanged,
         Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => Audit::WrongHit,
         Some((again, _)) if again.success() => Audit::NotDeterministic,

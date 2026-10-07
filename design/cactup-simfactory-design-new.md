@@ -5071,8 +5071,10 @@ nobody has to find out:
   while the compile reads through it (decision 9 in
   `design/build-cache/DECISIONS.md`: a directory's change time, the only
   trace, also moves whenever anything is created in it, and watching it
-  would stop honest compiles from being published). Audit mode would catch
-  an object either produced.
+  would stop honest compiles from being published); and, on a filesystem
+  that keeps no birth times (NFS, typically), a directory removed and
+  another made in its place that gets the same inode number. Audit mode
+  would catch an object any of these produced.
 - *The flag families.* A `-W…` or `-m…` flag that names a file or records
   something outside the key would be admitted. None is known besides the
   two excepted.
