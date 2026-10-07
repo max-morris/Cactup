@@ -50,7 +50,7 @@ the last milestone, for when that host is not at hand.
 | M0b | Argument parser, platform/identity/environment digests, key, richer `events.jsonl`, `cache report` | **passed the gate** at `045eb76` (four review rounds) |
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
-| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | review **passed** at `6b8efb1` (four rounds); the full audit build on that commit is running |
+| M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1142,7 +1142,14 @@ for the start of M1c:
   §18.5's limits beside decision 9.
 
 The other half of the gate is Max's: the full audit build in two
-installations, Clang included, on `6b8efb1`.
+installations, Clang included, on `6b8efb1`. *Done (2026-10-07, binary
+`~/tmp/build-cache-m1b/cactup-6b8efb1`, store `store-et-4`, results in
+`gate-4.out`): the Einstein Toolkit, 3376 compiles each. GCC: serving into
+an empty store in `build-cache` published 2782; audit in `build-cache-b`
+and in `build-cache` itself checked 2781 each, 0 wrong, 0 failing to
+compile, 0 not deterministic, 0 with inputs that changed. Clang: 2782
+published, audit in `build-cache-b` checked 2781, 0 of each. Every build
+exited 0. M1b has passed its gate.*
 
 ### M1c, round 1 (on `3011fff`): BLOCKED by both, on the same two
 
@@ -1235,7 +1242,7 @@ unchecked.
 
 ## Next step
 
-Record M1b's full audit build on `6b8efb1` (running; the gate scripts in
-`~/tmp/build-cache-m1b` still pass `build-cache-dir`, which a binary from
-`01bd00a` on refuses: use `build-cache-home` in any re-run). Then, after
-M1: gfortran (decision 2), proved with audit mode.
+M1 is done. Next, by decision 2: gfortran, proved with audit mode, then
+the CUDA compilers. (The gate scripts in `~/tmp/build-cache-m1b` pass
+`build-cache-dir`, which a binary from `01bd00a` on refuses: use
+`build-cache-home` in any re-run.)
