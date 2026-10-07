@@ -181,7 +181,9 @@ Asked as seven questions with options; the answers, in Max's numbering.
     `[paths]` key has a maintenance knob of the same name, an absolute path
     that wins over the machine's value (`install-home`, `simulation-home`,
     `test-home`, `scratch-home`, `build-cache-home`); `build-cache-dir` is
-    gone, `build-cache-home` replaces it.
+    gone, `build-cache-home` replaces it. Asked whether to drop the
+    optional `[paths] build-cache-home` key, since the knob covers one
+    user: "I say keep it. I can see a site wanting to override it."
 
 ## Still open
 
