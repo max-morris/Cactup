@@ -271,6 +271,18 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   share every key; a configuration with three thorns added shares 55%
   (the generated headers of A10 (a) are why it is not more).
 
+- 2026-10-07, on `feature/build-cache`: **M1b (serving) passed review**
+  at `6b8efb1`; its full audit build in two installations is running.
+  **M1c (maintenance) passed review** at `01bd00a`: `cactup cache
+  stats/gc/verify` and a size notice (knob `build-cache-size`). Where the
+  objects live changed: by default `<install-home>/.cactup-build-cache`,
+  beside the installations (`install-home` is the knob of that name, else
+  the machine's, else `~/.cactup/cacti`); the knob `build-cache-home`
+  moves it, and replaces `build-cache-dir`, which is now refused. Every
+  `[paths]` key has a knob of the same name now. No `mdb/` change and no
+  `mdb/GENERATION` bump on the cache side (question c). A serving build
+  also writes one small use log per build under `<store>/used/`.
+
 ## Speed-side planned changes
 
 (speed side: please list here anything touching A1-A8, the compile recipes,
@@ -383,3 +395,8 @@ every milestone.
   compiler's stdout and stderr pass through cactup. `record` is unchanged
   (byte for byte a plain build). Do not take timings with `serve` or
   `audit` on.
+- 2026-10-07  cache side  **Load on plato:** five Einstein Toolkit builds (GCC and Clang) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 15:46 local, for about two hours.
+- 2026-10-07  cache side  **Load on plato:** after the running builds, five more Einstein Toolkit builds (the final M1b gate) until about two hours from 16:12 local.
+- 2026-10-07  cache side  M1b passed review at `6b8efb1`, M1c at `01bd00a`
+  (landed changes): the store's default moved beside the installations;
+  `build-cache-home` replaces the `build-cache-dir` knob.

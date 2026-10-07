@@ -126,7 +126,7 @@ pub struct Paths {
     /// unused by cactup itself.
     pub scratch_home: Option<String>,
     /// Where the build cache keeps its objects (§18.7); fallback
-    /// `<install-home>/.build-cache`, beside the installations whose builds
+    /// `<install-home>/.cactup-build-cache`, beside the installations whose builds
     /// fill it. For a site whose builds belong somewhere else.
     pub build_cache_home: Option<String>,
 }

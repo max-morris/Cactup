@@ -51,7 +51,7 @@ the last milestone, for when that host is not at hand.
 | M0c | Measurements in `~/cacti/build-cache`, written results | **done**: results in `RESULTS-M0c.md`, answered by Max on 2026-10-02; the code changed since M0b's gate **passed review** at `129ecf7` (three rounds) |
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | review **passed** at `6b8efb1` (four rounds); the full audit build on that commit is running |
-| M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | review round 3 next (two rounds blocked) |
+| M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1200,6 +1200,23 @@ replaces `build-cache-dir`). The 19 machines' `build-cache-home` and MDB
 generation 2 are gone again (`mdb/` is as it was before `feffae1`); the
 schema keeps the optional key, which no machine uses.
 
+### M1c, round 3 (on `01bd00a`): SIGN-OFF by both
+
+Both re-ran the round-2 blockers and found them fixed (an unresolvable
+machine `build-cache-home` warns and goes on to the install home; an
+unreadable or unlistable use log stops `gc`, with nothing removed), and
+both confirmed that `mdb/` is unchanged and no generation bump is due.
+
+Non-blocking points taken after the gate: the removed `build-cache-dir`
+knob is refused with its new name, not taken as a custom knob (both: a
+gate script still passing it would have filled the default store); the
+`Paths` doc comment names `.cactup-build-cache`; the docs say a store
+left behind by a new `install-home` or `build-cache-home` is moved or
+removed by hand. Left as they are: `@SCRATCH_HOME@` read at each submit
+(as a machine edit would be); the machine-detection notice in the cache
+commands on an unknown host. (B) noted that machines whose `install-home`
+is `$HOME` keep the store there: decision 12, Max's.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1218,6 +1235,7 @@ unchecked.
 
 ## Next step
 
-M1c's review round 3, on the commit that moves the cache beside the
-installations (decision 12). Then record M1b's full audit build on
-`6b8efb1` (running), and after M1, gfortran.
+Record M1b's full audit build on `6b8efb1` (running; the gate scripts in
+`~/tmp/build-cache-m1b` still pass `build-cache-dir`, which a binary from
+`01bd00a` on refuses: use `build-cache-home` in any re-run). Then, after
+M1: gfortran (decision 2), proved with audit mode.

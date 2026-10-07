@@ -668,7 +668,9 @@ elsewhere. `cactup cache stats` says where it is, and why there. Where that
 is storage the site purges, the purge removes objects no build has used for
 a while, as `cactup cache gc` would: those compiles run again, nothing
 worse. Anyone who can write in that directory can put objects into your
-builds, so keep it your own.
+builds, so keep it your own. Point the cache somewhere new (or change
+`install-home`) and the old directory stays where it was, out of sight of
+`cactup cache`: move it to the new place, or remove it, by hand.
 
 ```sh
 cactup knob build-cache-home /work/me/cactup-cache
