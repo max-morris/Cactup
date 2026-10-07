@@ -1,0 +1,7 @@
+# The cactup the tutorial runs: a commit of this repository. tutorial/image/
+# build.sh builds the tutorial's cactup binaries, its installer
+# (cactup-init.sh) and its machine database (mdb/) from this commit, never
+# from the checkout, so cactup can change on any branch without changing the
+# tutorial until this line moves. Moving it is a procedure of its own: see
+# tutorial/UPDATING.md.
+commit = 0ea339835f3e2e3aa55e3b4b123d771cda360d9a

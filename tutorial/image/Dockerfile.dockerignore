@@ -1,14 +1,8 @@
 # The build context is the repository root; send only what the stages COPY.
+# cactup's own sources, its installer and mdb/ come from the pinned commit
+# (build.sh's cactup-src context), so the checkout's copies are left out: a
+# stage that reached for them would fail instead of building unpinned code.
 *
-!Cargo.toml
-!Cargo.lock
-!build.rs
-!cactupdocs/Cargo.toml
-!cactupdocs/src/
-!src/
-!resources/
-!mdb/
-!cactup-init.sh
 !tutorial/
 tutorial/**/node_modules/
 tutorial/jupyter/labext/lib/

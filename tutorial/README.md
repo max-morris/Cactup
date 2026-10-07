@@ -19,12 +19,18 @@ and how to maintain, rebuild and deploy it.
 | `mirrors/` | Turns thornlists into local bare git mirrors, a lock file of mirrored commits, and per-repository `insteadOf` rules. |
 | `deploy/` | JupyterHub + DockerSpawner + Caddy compose file, the choose-your-own-login authenticator, the session-token tool. |
 | `tests/` | pytest suites and the headless notebook runner `run_all.py`. |
+| `cactup.pin` | The cactup commit the image is built from (binaries, installer, MDB); see `UPDATING.md`. |
+| `UPDATING.md` | How to move the pin to a newer cactup, and everything in the tutorial that depends on cactup's behavior. |
+| `tools/` | `check-cactup-usage.py`: checks every cactup command the tutorial runs against a cactup build. |
 
 The tutorial machine itself is a regular MDB entry, `mdb/cactup-tutorial/`
 (discovered on hostname `cactup-tutorial`), like `mdb/et-juphub/` before it.
-The image's mirror of Cactup's `mdb` branch is built from this checkout's
-`mdb/` directory, so the image works before the entry is published; the entry
-still has to pass `cargo test` and `ci/mdb-generation-guard.sh`.
+The image's mirror of Cactup's `mdb` branch is built from the `mdb/` directory
+of the pinned commit (`cactup.pin`), not from the checkout or the published
+branch, so the image works before the entry is published; the entry still
+has to pass `cargo test` and `ci/mdb-generation-guard.sh`. cactup itself and
+its installer come from the same commit: a cactup change reaches the tutorial
+only when the pin moves (`UPDATING.md`).
 
 ## Notebooks
 
@@ -858,7 +864,7 @@ prefixes) so no prompt answer can move an install away from the baked paths.
 
 ### Auto-update
 
-The image builds cactup twice from this checkout as distribution builds: a
+The image builds cactup twice from the pinned commit (`cactup.pin`) as distribution builds: a
 "previous" build and a "current" one. The updater orders builds by their
 stamped date, so "previous" carries the stamp (id and date) of the commit
 before "current"'s: distinct ids, strictly older date.
@@ -1001,7 +1007,7 @@ are, a fetch only for commits they lack), so every build serves the same
 commits. `--update-mirrors` instead moves them to upstream's current tips
 (`mirror.py sync`) and rewrites the lock in the checkout; commit it, knowing
 the bakes will be redone. The `mdb` branch in the image's mirror of Cactup is
-always built from this checkout's `mdb/`, uncommitted edits included.
+always built from the pinned commit's `mdb/`, never from the checkout.
 
 The base image is pinned by digest and the Debian archive by a
 snapshot.debian.org date, both in the Dockerfile's base stage; move them

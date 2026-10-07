@@ -22,10 +22,17 @@
 #
 # DEBIAN_SNAPSHOT overrides the Dockerfile's snapshot.debian.org date.
 #
-# The cactup build stamps come from git, the way CI computes them: "current"
-# is the last commit that touched the binary's inputs, "previous" the one
-# before it. Both binaries are built from this checkout; "previous" only
-# carries the older stamp, which is all the auto-update demo needs.
+# cactup itself comes from the commit tutorial/cactup.pin names, not from the
+# checkout: build.sh extracts that commit's cactup sources, installer
+# (cactup-init.sh) and machine database (mdb/) with `git archive` into a
+# snapshot the image and the MDB mirror are built from. Moving the pin is a
+# procedure of its own: see tutorial/UPDATING.md.
+#
+# The cactup build stamps come from git at the pinned commit, the way CI
+# computes them: "current" is the last commit that touched the binary's
+# inputs, "previous" the one before it. Both binaries are built from the
+# pinned sources; "previous" only carries the older stamp, which is all the
+# auto-update demo needs.
 set -eu
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -43,18 +50,31 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# The pinned cactup: a snapshot of its commit's files, removed on exit.
+pin=$(sed -n 's/^commit[[:space:]]*=[[:space:]]*\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' "$here/../cactup.pin")
+[ -n "$pin" ] || { echo "build.sh: tutorial/cactup.pin names no commit" >&2; exit 1; }
+git -C "$repo" cat-file -e "$pin^{commit}" 2>/dev/null \
+    || { echo "build.sh: the pinned commit $pin is not in this repository (fetch it)" >&2; exit 1; }
+snapshot=$(mktemp -d "${TMPDIR:-/tmp}/cactup-tutorial-pin.XXXXXX")
+trap 'rm -rf "$snapshot"' EXIT
+git -C "$repo" archive "$pin" -- Cargo.toml Cargo.lock build.rs cactupdocs/Cargo.toml cactupdocs/src \
+    src resources mdb cactup-init.sh | tar -x -C "$snapshot"
+echo "build.sh: cactup pinned at $(git -C "$repo" log -1 --format='%h %s' "$pin")"
+
 mirrors=${CACTUP_TUTORIAL_MIRRORS:-${XDG_CACHE_HOME:-$HOME/.cache}/cactup-tutorial/mirrors}
 lock=$here/../mirrors/mirrors.lock
 if [ "$update" = yes ]; then
-    python3 "$here/../mirrors/mirror.py" sync --root "$mirrors" --rule-root /opt/cactup-mirrors --lock "$lock"
+    python3 "$here/../mirrors/mirror.py" sync --root "$mirrors" --rule-root /opt/cactup-mirrors --lock "$lock" \
+        --mdb-dir "$snapshot/mdb"
 else
-    python3 "$here/../mirrors/mirror.py" pin --root "$mirrors" --rule-root /opt/cactup-mirrors --lock "$lock"
+    python3 "$here/../mirrors/mirror.py" pin --root "$mirrors" --rule-root /opt/cactup-mirrors --lock "$lock" \
+        --mdb-dir "$snapshot/mdb"
 fi
 
 # Keep in sync with the stamp job in .github/workflows/ci.yml.
 inputs="src build.rs Cargo.toml Cargo.lock resources mdb/GENERATION mdb/generic"
 # shellcheck disable=SC2086
-stamps=$(git -C "$repo" log -2 --format='%h %cI' --abbrev=7 -- $inputs)
+stamps=$(git -C "$repo" log -2 --format='%h %cI' --abbrev=7 "$pin" -- $inputs)
 current_id=$(printf '%s\n' "$stamps" | sed -n 1p | cut -d' ' -f1)
 current_date=$(printf '%s\n' "$stamps" | sed -n 1p | cut -d' ' -f2)
 previous_id=$(printf '%s\n' "$stamps" | sed -n 2p | cut -d' ' -f1)
@@ -80,6 +100,7 @@ build() {
         --build-arg CACTUP_CURRENT_DATE="$current_date" \
         ${DEBIAN_SNAPSHOT:+--build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT"} \
         --build-context mirrors="$mirrors" \
+        --build-context cactup-src="$snapshot" \
         --build-context bakes="$context" \
         "$@"
 }

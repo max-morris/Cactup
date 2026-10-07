@@ -43,14 +43,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends musl-tools cmak
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add "$TARGET"
 WORKDIR /src
-COPY Cargo.toml Cargo.lock build.rs ./
+# From the pinned commit's snapshot (build.sh's cactup-src context), never
+# from the checkout.
+COPY --from=cactup-src Cargo.toml Cargo.lock build.rs ./
 # The docs generator is a workspace member, so cargo needs its manifest.
-COPY cactupdocs/Cargo.toml cactupdocs/Cargo.toml
-COPY cactupdocs/src/ cactupdocs/src/
-COPY src/ src/
-COPY resources/ resources/
-COPY mdb/GENERATION mdb/GENERATION
-COPY mdb/generic/ mdb/generic/
+COPY --from=cactup-src cactupdocs/Cargo.toml cactupdocs/Cargo.toml
+COPY --from=cactup-src cactupdocs/src/ cactupdocs/src/
+COPY --from=cactup-src src/ src/
+COPY --from=cactup-src resources/ resources/
+COPY --from=cactup-src mdb/GENERATION mdb/GENERATION
+COPY --from=cactup-src mdb/generic/ mdb/generic/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,id=cactup-tutorial-target \
     set -eu; \
@@ -157,7 +159,8 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install --retries 10 --timeou
 # The local update site: one root that offers both builds. The installer reads
 # <target>/cactup.sha256, which names "previous"; cactup's update check reads
 # latest.json, which offers "current".
-COPY tutorial/image/assemble-update-root.sh cactup-init.sh mdb/GENERATION /opt/cactup-tutorial/tools/
+COPY tutorial/image/assemble-update-root.sh /opt/cactup-tutorial/tools/
+COPY --from=cactup-src cactup-init.sh mdb/GENERATION /opt/cactup-tutorial/tools/
 COPY --from=cactup /out/ /tmp/cactup-builds/
 RUN set -eu; \
     tools=/opt/cactup-tutorial/tools; \
