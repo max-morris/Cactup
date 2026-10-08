@@ -453,14 +453,14 @@ impl Installation {
             if meta.sim_home.is_none() {
                 meta.sim_home = Some(resolve_home(
                     paths.simulation_home.as_deref(),
-                    "simulations",
+                    "simulation-home",
                     &self.alias,
                 ));
             }
             if meta.test_home.is_none() {
                 meta.test_home = Some(resolve_home(
                     paths.test_home.as_deref(),
-                    "tests",
+                    "test-home",
                     &self.alias,
                 ));
             }
@@ -479,12 +479,13 @@ impl Installation {
     }
 }
 
-/// `<machine home>/<alias>`, or the `~/.cactup/<fallback>/<alias>` fallback
-/// when the machine omits the key (§8.1, §4.2).
-fn resolve_home(machine_home: Option<&str>, fallback: &str, alias: &str) -> PathBuf {
+/// `<machine home>/<alias>`, or the fallback of the `[paths]` key `key`
+/// (`~/.cactup/<dir>/<alias>`) when neither a knob nor the machine sets it
+/// (§8.1, §4.2).
+fn resolve_home(machine_home: Option<&str>, key: &str, alias: &str) -> PathBuf {
     match machine_home {
         Some(home) => PathBuf::from(home).join(alias),
-        None => crate::CACTUP_ROOT.join(fallback).join(alias),
+        None => crate::mdb::meta::fallback_home(key).expect("a home key has a fallback").join(alias),
     }
 }
 

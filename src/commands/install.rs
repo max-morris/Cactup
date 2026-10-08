@@ -194,7 +194,7 @@ pub fn dispatch(ctx: &Ctx, args: InstallArgs) -> Res<()> {
         .ok()
         .flatten()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| cactup_root.join("cacti"));
+        .unwrap_or_else(|| crate::mdb::meta::fallback_home("install-home").expect("install-home has a fallback"));
     let install_prefix_default = |alias: &str| p2s(install_home_base.join(alias));
 
     let install_prefix = match install_prefix {

@@ -216,8 +216,11 @@ Asked as seven questions with options; the answers, in Max's numbering.
     those names mapped, under the source's own file name (a module file
     records it) in `.cactup/` beside the source, named from the working
     directory too, with the source's directory first in `-I`. Runtime
-    errors then name `/cactup-root/...` files where Cactus wrote line
-    markers, and `../build/<Thorn>/x.f90` where it did not.
+    errors ("At line N of file ...") then name `/cactup-root/...` files
+    where Cactus wrote line markers, and `../build/<Thorn>/x.f90` where it
+    did not; runtime checks ("In file '...'") name the file compiled from
+    `scratch`, which with line markers is the copy,
+    `../build/<Thorn>/.cactup/x.f90`.
 
     The first way (a copy in a private directory, mapped by a prefix map)
     passed the small tests and two-tree trials, which used no runtime

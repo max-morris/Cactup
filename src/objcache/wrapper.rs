@@ -887,6 +887,7 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) 
         Output::PassOn(rewrite) => Some((true, rewrite)),
         Output::Swallow(rewrite) => Some((false, rewrite)),
     };
+    let renamed = through.as_ref().is_some_and(|(_, rewrite)| rewrite.is_some());
     if let Some((pass_on, rewrite)) = through
         && let (Ok((out_from, out_to)), Ok((err_from, err_to))) = (std::io::pipe(), std::io::pipe())
     {
@@ -897,6 +898,13 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) 
             command.stdout(Stdio::from(out_to)).stderr(Stdio::from(err_to));
             passing = Some((stdout, stderr));
         }
+    }
+    // A compile that names its files otherwise than the recipe (§18.10)
+    // must have its messages rewritten on their way: without the pipes, it
+    // is the recipe's own compile that runs.
+    if renamed && passing.is_none() {
+        debug("its messages cannot be passed on, and they would name its files otherwise");
+        pass_through(job)
     }
     PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
     let spawned = command.spawn();

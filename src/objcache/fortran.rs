@@ -49,35 +49,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 
-/// Is `text` a source the C preprocessor of the dependency run reads as
-/// gfortran reads it? It runs in traditional mode with every macro it can
-/// drop dropped (`-undef`); what is left that it would act on: a comment
-/// (`/*`, which in traditional mode swallows lines up to the next `*/`, code
-/// included), a directive other than a line marker, a line joined to the next
-/// (`\` at its end), and a name it still defines (`__FILE__`, `__GFC_INT_8__`:
-/// every one of them begins and ends with two underscores; a word that only
-/// begins so, such as the rest of a name continued on a fixed-form line,
-/// `&__lambda`, is defined by nothing). Anything of it makes the source one
-/// whose dependencies cannot be had this way, and the compile is not cached.
+/// Does `text` have only line markers where a line begins with `#`? Any
+/// other such line is a directive to the preprocessor of the dependency
+/// run, which the compile does not run; and it would leave no trace in that
+/// preprocessor's output for [`preprocessor_agrees`] to see.
 pub fn check_text(text: &[u8]) -> Result<(), String> {
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     for line in text.split(|b| *b == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.first() == Some(&b'#') && !is_marker(line)? {
-            return Err(format!("the source has a preprocessor line ({}), which the cache does not follow", String::from_utf8_lossy(line)));
-        }
-        if line.ends_with(b"\\") {
-            return Err("the source has a line ending in a backslash, which the dependency run would join to the next".to_owned());
-        }
-        if line.windows(2).any(|pair| pair == b"/*") {
-            return Err("the source has \"/*\", which the dependency run would take for the start of a comment".to_owned());
-        }
-        let defined = line.windows(2).enumerate().any(|(at, pair)| {
-            let word = &line[at..at + line[at..].iter().take_while(|b| ident(**b)).count()];
-            pair == b"__" && (at == 0 || !ident(line[at - 1])) && word.len() > 4 && word.ends_with(b"__")
-        });
-        if defined {
-            return Err("the source has a name such as the dependency run's preprocessor defines (__NAME__)".to_owned());
+            return Err(format!("the source has a preprocessor line ({}), which the cache does not follow", String::from_utf8_lossy(line).trim_end()));
         }
     }
     Ok(())
@@ -158,10 +137,10 @@ pub struct Renamed {
     /// The name the compile is given: the file compiled, by its path from
     /// the working directory.
     given: PathBuf,
-    /// The file compiled, by its physical path: the source, or the copy.
-    compiled: PathBuf,
-    /// Whether that is a copy, made to map the source's line markers.
-    copied: bool,
+    /// The copy, when the source's line markers name files: where it goes
+    /// (`.cactup/` beside the source, under the source's own name) and what
+    /// it holds (the source with those names mapped).
+    copy: Option<(PathBuf, Vec<u8>)>,
     /// The source's own directory, by its physical path.
     source_dir: PathBuf,
     /// The source as the recipe named it.
@@ -170,40 +149,49 @@ pub struct Renamed {
 
 impl Renamed {
     /// How the compile of `source` (as the recipe named it, read as `text`)
-    /// in `cwd` names it under `map`: by its path from `cwd`, and if `text`
-    /// has line markers that name files, as a copy with those mapped,
-    /// written into `.cactup/` beside the source. The copy is written whole
-    /// (a temporary file renamed into place) and left there, like the build
-    /// copy itself: another compile of the same source makes the same one.
+    /// in `cwd` (a physical path) names it under `map`: by its path from
+    /// `cwd`, and if `text` has line markers that name files, as a copy with
+    /// those mapped ([`Renamed::write_copy`]).
     pub fn new(cwd: &Path, source: &Path, text: &[u8], map: &PathMap) -> Res<Self> {
-        let cwd = std::fs::canonicalize(cwd).with_context(|| format!("Failed to resolve {}", cwd.display()))?;
         let joined = cwd.join(source);
         let name = joined.file_name().with_context(|| format!("{} names no file", source.display()))?;
         let dir = joined.parent().unwrap_or(Path::new("/"));
         let source_dir = std::fs::canonicalize(dir).with_context(|| format!("Failed to resolve {}", dir.display()))?;
-        let (compiled, copied) = match names_files(text).map_err(anyhow::Error::msg)? {
-            false => (source_dir.join(name), false),
-            true => {
-                let mapped = mapped_text(text, map).map_err(anyhow::Error::msg)?;
-                let copies = source_dir.join(".cactup");
-                std::fs::create_dir_all(&copies).with_context(|| format!("Failed to create {}", copies.display()))?;
-                let mut temp = tempfile::Builder::new()
-                    .prefix(".copy-")
-                    .tempfile_in(&copies)
-                    .with_context(|| format!("Failed to create a file in {}", copies.display()))?;
-                std::io::Write::write_all(&mut temp, &mapped).context("Failed to write a copy of the source")?;
-                let copy = copies.join(name);
-                temp.persist(&copy).with_context(|| format!("Failed to write {}", copy.display()))?;
-                (copy, true)
-            }
+        let copy = match names_files(text).map_err(anyhow::Error::msg)? {
+            false => None,
+            true => Some((source_dir.join(".cactup").join(name), mapped_text(text, map).map_err(anyhow::Error::msg)?)),
         };
-        Ok(Self { given: relative(&cwd, &compiled), compiled, copied, source_dir, original: source.as_os_str().to_owned() })
+        let compiled = copy.as_ref().map_or_else(|| source_dir.join(name), |(path, _)| path.clone());
+        Ok(Self { given: relative(cwd, &compiled), copy, source_dir, original: source.as_os_str().to_owned() })
+    }
+
+    /// Write the copy, if there is one: whole (a temporary file renamed into
+    /// place), and left there like the build copy itself; another compile of
+    /// the same source writes the same bytes. Only a compile for the store
+    /// reads it, so only a serving build writes it.
+    pub fn write_copy(&self) -> Res<()> {
+        let Some((copy, text)) = &self.copy else { return Ok(()) };
+        let dir = copy.parent().expect("a copy is inside its directory");
+        std::fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        let mut temp = tempfile::Builder::new()
+            .prefix(".copy-")
+            .tempfile_in(dir)
+            .with_context(|| format!("Failed to create a file in {}", dir.display()))?;
+        std::io::Write::write_all(&mut temp, text).context("Failed to write a copy of the source")?;
+        temp.persist(copy).with_context(|| format!("Failed to write {}", copy.display()))?;
+        Ok(())
+    }
+
+    /// The directory copies are made in.
+    fn copies(&self) -> PathBuf {
+        self.source_dir.join(".cactup")
     }
 
     /// The include flag that has gfortran look in the source's directory
-    /// first, as it would have for the source itself (only a copy needs it).
+    /// right after the copy's, as it would have for the source itself (only
+    /// a copy needs it).
     fn include_flag(&self) -> Option<OsString> {
-        self.copied.then(|| {
+        self.copy.as_ref().map(|_| {
             let mut flag = OsString::from("-I");
             flag.push(&self.source_dir);
             flag
@@ -238,6 +226,8 @@ pub struct Dependencies {
 pub struct Fortran {
     /// How the compile names its source, under the path map.
     pub renamed: Option<Renamed>,
+    /// Whether the copy was written (by a serving build, for its compile).
+    copy_written: bool,
     /// The module files the compile writes.
     pub modules: Vec<String>,
     /// The dependency runs' working directory, where they write their
@@ -245,11 +235,13 @@ pub struct Fortran {
     private: tempfile::TempDir,
     /// The arguments of the dependency run.
     args: Vec<OsString>,
-    /// The file the dependency run reads, by its absolute path.
-    compiled: PathBuf,
-    /// The source's directory, when the compile searches it only because it
-    /// reads a copy.
-    source_dir_added: Option<PathBuf>,
+    /// The source, by its absolute physical path: what the dependency run
+    /// reads.
+    source: PathBuf,
+    /// Where the compile looks for a module file, in its order: its working
+    /// directory, the directory of the file it compiles, its `-I`
+    /// directories. All physical paths.
+    module_dirs: Vec<PathBuf>,
     /// The compile's working directory, by its physical path.
     cwd: PathBuf,
 }
@@ -284,59 +276,96 @@ pub struct Keyed {
     pub seen: String,
 }
 
+/// `args` without `-D` and `-U` (each with its value): the compile does not
+/// preprocess, so they do nothing to it, and the runs that do preprocess
+/// must not have them either.
+fn without_macros(args: Vec<OsString>) -> Vec<OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_bytes() {
+            b"-D" | b"-U" => {
+                args.next();
+            }
+            flag if flag.starts_with(b"-D") || flag.starts_with(b"-U") => {}
+            _ => out.push(arg),
+        }
+    }
+    out
+}
+
 /// Key what a Fortran `compile` reads (§18.10), given by the arguments
 /// `args` (the command line without the program) and run in `cwd`. `in_dir`
-/// is a directory of the build's for the dependency runs.
-pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsString], cwd: &Path, map: Option<&PathMap>, in_dir: &Path) -> Res<Keyed> {
+/// is a directory of the build's for the dependency runs. `serving`: the
+/// compile is to be stored, and reads the copy, which is then written.
+pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsString], cwd: &Path, map: Option<&PathMap>, in_dir: &Path, serving: bool) -> Res<Keyed> {
     if compiler.family != Family::Gfortran {
         bail!("Fortran is cached for gfortran only");
     }
     // The dependency run runs elsewhere: a directory it is given by a
     // relative name would be another directory there.
+    let mut include_dirs = Vec::new();
     let mut flags = compile.preprocess.iter();
     while let Some(flag) = flags.next() {
-        if flag == "-I" && flags.next().is_some_and(|dir| Path::new(dir).is_relative()) {
-            bail!("an include directory is named by a relative path");
+        if flag == "-I" {
+            let dir = Path::new(flags.next().map(OsString::as_os_str).unwrap_or_default());
+            if dir.is_relative() {
+                bail!("an include directory is named by a relative path");
+            }
+            include_dirs.push(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned()));
         }
     }
     let cwd = std::fs::canonicalize(cwd).with_context(|| format!("Failed to resolve {}", cwd.display()))?;
     // The source, read once: what the compile reads is this, or a copy of it.
-    let source = cwd.join(&compile.source);
+    let joined = cwd.join(&compile.source);
+    let source_dir = joined.parent().and_then(|dir| std::fs::canonicalize(dir).ok()).with_context(|| format!("Failed to resolve {}", joined.display()))?;
+    let source = source_dir.join(joined.file_name().with_context(|| format!("{} names no file", joined.display()))?);
     let mut file = std::fs::File::open(&source).with_context(|| format!("Failed to open {}", source.display()))?;
     let mut text = Vec::new();
     file.read_to_end(&mut text).with_context(|| format!("Failed to read {}", source.display()))?;
     check_text(&text).map_err(anyhow::Error::msg)?;
     let renamed = map.map(|map| Renamed::new(&cwd, &compile.source, &text, map)).transpose()?;
-    let (compiled, given) = match &renamed {
-        Some(renamed) if renamed.copied => {
-            (std::fs::read(&renamed.compiled).with_context(|| format!("Failed to read {}", renamed.compiled.display()))?, renamed.given.clone())
+    let copy_written = match &renamed {
+        Some(renamed) if serving && renamed.copy.is_some() => {
+            renamed.write_copy()?;
+            true
         }
-        Some(renamed) => (text, renamed.given.clone()),
-        None => (text, compile.source.clone()),
+        _ => false,
     };
+    let (compiled, given) = match &renamed {
+        Some(Renamed { copy: Some((_, copy)), given, .. }) => (copy.clone(), given.clone()),
+        Some(renamed) => (text.clone(), renamed.given.clone()),
+        None => (text.clone(), compile.source.clone()),
+    };
+    // Where the compile looks for module files: its working directory, the
+    // directory of the file it reads, then its `-I` directories (for a copy,
+    // the source's directory first among those).
+    let mut module_dirs = vec![cwd.clone()];
+    match &renamed {
+        Some(renamed) if renamed.copy.is_some() => module_dirs.extend([renamed.copies(), source_dir.clone()]),
+        _ => module_dirs.push(source_dir.clone()),
+    }
+    module_dirs.extend(include_dirs);
     let private = tempfile::Builder::new()
         .prefix(".fortran-")
         .tempdir_in(in_dir)
         .with_context(|| format!("Failed to create a directory in {}", in_dir.display()))?;
-    let compiled_path = renamed.as_ref().map_or_else(|| source.clone(), |renamed| renamed.compiled.clone());
-    let source_dir_added = match &renamed {
-        Some(renamed) if renamed.copied && !searched_anyway(compile, &cwd, &renamed.source_dir) => Some(renamed.source_dir.clone()),
-        _ => None,
-    };
-    // The dependency run: in its own directory, finding module files in the
-    // compile's working directory after its own; the file the compile
-    // reads, by its absolute path; the compile's arguments otherwise.
+    // The runs that preprocess: in their own directory, finding module
+    // files in the compile's working directory after their own; the source
+    // itself, by its absolute path; the compile's arguments otherwise, but
+    // for what only a preprocessor reads.
     let (without_output, source_at) = compile.without_output(args);
-    let mut run_args = without_output;
-    run_args[source_at] = compiled_path.as_os_str().to_owned();
-    if let Some(flag) = renamed.as_ref().and_then(Renamed::include_flag) {
-        run_args.insert(0, flag);
-    }
+    let mut base = without_output;
+    base[source_at] = source.as_os_str().to_owned();
     let mut first = OsString::from("-I");
     first.push(&cwd);
-    run_args.insert(0, first);
+    base.insert(0, first);
+    let base = without_macros(base);
+    let agrees = preprocessor_agrees(compiler, name, &base, private.path(), &text).map_err(anyhow::Error::msg);
+    agrees?;
+    let mut run_args = base;
     run_args.extend(["-cpp", "-undef", "-M", "-fsyntax-only", "-v"].map(OsString::from));
-    let mut fortran = Fortran { renamed, modules: Vec::new(), private, args: run_args, compiled: compiled_path, source_dir_added, cwd };
+    let mut fortran = Fortran { renamed, copy_written, modules: Vec::new(), private, args: run_args, source, module_dirs, cwd };
 
     let deps = dependencies(compiler, name, &fortran)?;
     fortran.modules = deps.modules.clone();
@@ -346,8 +375,51 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     for module in &deps.modules {
         hasher.feed(module.as_bytes());
     }
+    let text_bytes = compiled.len() as u64;
     let (files, seen, count) = read_inputs(&deps, map, &fortran)?;
-    Ok(Keyed { text: hasher.hex(), text_bytes: compiled.len() as u64, files, count, seen, fortran })
+    Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, fortran })
+}
+
+/// Does the preprocessor of the dependency run, run with `args` (the source
+/// among them) in `dir`, read the source as `text`, its lines as they are?
+/// It runs in traditional mode with every macro it can drop dropped
+/// (`-undef`), and still acts on more than a Fortran source should give it:
+/// a `/*` (which swallows lines up to the next `*/`), a line ending in `\`
+/// (blanks after it too), a lone carriage return, the names it still
+/// defines (`__FILE__`, `_OPENMP`, `_REENTRANT` under `-fopenmp`), trigraphs
+/// under `-trigraphs`. Rather than list them, its output is compared with
+/// the source: every line but its line markers must be the source's, and in
+/// order (lines blank on both sides aside, as it may stand a marker for a
+/// run of them). Otherwise the dependency run would not have read what the
+/// compile reads, and the compile is not cached.
+fn preprocessor_agrees(compiler: &Compiler, name: &OsStr, args: &[OsString], dir: &Path, text: &[u8]) -> Result<(), String> {
+    let mut command = Command::new(&compiler.path);
+    command.arg0(name).args(args).args(["-cpp", "-undef", "-E"]).current_dir(dir);
+    key::in_english(&mut command);
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("the preprocessor could not be run ({e})"))?;
+    key::PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
+    let out = child.wait_with_output();
+    key::PREPROCESSOR.store(0, Ordering::SeqCst);
+    let out = out.map_err(|e| format!("the preprocessor could not be waited for ({e})"))?;
+    if !out.status.success() {
+        return Err(format!("the source does not pass the dependency run's preprocessor ({})", out.status));
+    }
+    let lines = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.starts_with(b"#") && !line.iter().all(|b| matches!(b, b' ' | b'\t')))
+            .map(<[u8]>::to_vec)
+            .collect()
+    };
+    match lines(&out.stdout) == lines(text) {
+        true => Ok(()),
+        false => Err("the source reads otherwise to the preprocessor of the dependency run".to_owned()),
+    }
 }
 
 /// Do the files `fortran`'s dependency run lists still say what they said
@@ -359,38 +431,65 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
 }
 
 /// The files the dependency run listed, digested as `key::read_files` does,
-/// with the source itself when the compile reads it and not a copy (its
-/// bytes are then checked again after the compile, like any file read).
+/// with the source itself (and the copy, when the compile reads one: below);
+/// their bytes are checked again after the compile, like any file read.
+///
+/// The dependency run searches in another order than the compile: its own
+/// directory, then the source's, then the compile's working directory (an
+/// `-I` directory for it) for both module files and included files. So
+/// every module file it read must be the first of its name in the compile's
+/// order too (`module_dirs`); no included file may be found under the
+/// working directory, which the compile does not search for them; and for a
+/// copy, none may be one that the copy's directory, searched first by the
+/// compile, has too.
 fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) -> Res<(String, String, usize)> {
     let mut named = Named::new();
     let mapped = |path: &Path| map.map_or_else(|| path.as_os_str().as_bytes().to_vec(), |map| map.apply(path.as_os_str().as_bytes()));
+    let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copy.is_some()).map(Renamed::copies);
     for input in &deps.inputs {
+        let physical = std::fs::canonicalize(input).unwrap_or_else(|_| input.clone());
+        let file_name = input.file_name().unwrap_or_default();
         let module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
-        let dir = input.parent();
-        if module && fortran.source_dir_added.as_deref().is_some_and(|added| dir == Some(added)) {
-            bail!("a module file beside the source would be read, which the compile without the cache would not find");
-        }
-        // The dependency run searches the working directory for included
-        // files too; the compile does not.
-        if !module && dir == Some(fortran.cwd.as_path()) {
-            bail!("an included file would be found in the working directory, where the compile does not look for one");
+        if module {
+            let first = fortran.module_dirs.iter().find(|dir| dir.join(file_name).exists());
+            if first.is_some_and(|dir| Some(dir.as_path()) != physical.parent()) {
+                bail!("the compile would find another module file of the name {} first", file_name.to_string_lossy());
+            }
+        } else {
+            if input.starts_with(&fortran.cwd) || physical.starts_with(&fortran.cwd) {
+                bail!("an included file would be found under the working directory, where the compile does not look for one");
+            }
+            if copies.as_ref().is_some_and(|copies| physical.parent() == copies.parent() && copies.join(file_name).exists()) {
+                bail!("an included file would be found beside the copy first");
+            }
         }
         named.insert((mapped(input), input.clone()), true);
     }
-    let copied = fortran.renamed.as_ref().is_some_and(|renamed| renamed.copied);
-    if !copied {
-        named.insert((b"source".to_vec(), fortran.compiled.clone()), true);
+    let copy = fortran.renamed.as_ref().and_then(|renamed| renamed.copy.as_ref());
+    // The source, keyed by its bytes where it is what the compile reads.
+    if copy.is_none() {
+        named.insert((b"source".to_vec(), fortran.source.clone()), true);
     }
-    let (files, seen) = key::read_files(&named, map)?;
+    let (files, mut seen) = key::read_files(&named, map)?;
+    // Where a copy is compiled, its bytes (the source's, mapped) are the
+    // key's text already; the source, whose line markers name this tree,
+    // and the copy (written only by a build that serves, so that one that
+    // records keys alike) are only looked at, for the check after the
+    // compile: the dependency runs read the source.
+    if let Some((copy_path, _)) = copy {
+        let mut looked_at = Named::new();
+        looked_at.insert((b"source".to_vec(), fortran.source.clone()), true);
+        if fortran.copy_written {
+            looked_at.insert((mapped(copy_path), copy_path.clone()), true);
+        }
+        let (bytes, also_seen) = key::read_files(&looked_at, map)?;
+        let mut hasher = Hasher::new("seen with the source and its copy");
+        for part in [&seen, &bytes, &also_seen] {
+            hasher.feed(part.as_bytes());
+        }
+        seen = hasher.hex();
+    }
     Ok((files, seen, named.len()))
-}
-
-/// Does the compile itself, run in `cwd`, look for files in `dir` (as one of
-/// its own `-I` directories)?
-fn searched_anyway(compile: &Compile, cwd: &Path, dir: &Path) -> bool {
-    let same = |other: &Path| std::fs::canonicalize(cwd.join(other)).is_ok_and(|other| other == dir);
-    let args = &compile.preprocess;
-    args.iter().zip(args.iter().skip(1)).any(|(flag, value)| flag == "-I" && same(Path::new(value)))
 }
 
 /// Run the dependency run of `fortran`, and read what it says.
@@ -417,8 +516,8 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
         bail!("the dependency run failed ({})", out.status);
     }
     key::flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &out.stderr).map_err(anyhow::Error::msg)?;
-    let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copied).map(|renamed| renamed.source_dir.join(".cactup"));
-    parse_rule(&out.stdout, &fortran.compiled, copies.as_deref()).map_err(anyhow::Error::msg)
+    let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copy.is_some()).map(Renamed::copies);
+    parse_rule(&out.stdout, &fortran.source, copies.as_deref()).map_err(anyhow::Error::msg)
 }
 
 /// Read the rule a dependency run printed: `<targets>: <the source>
@@ -505,6 +604,7 @@ fn trial(compiler: &Path, name: &OsStr, root: &Path, config: &str) -> Option<Vec
         let source = build.join(file);
         std::fs::write(&source, &text).ok()?;
         let renamed = Renamed::new(&scratch, &source, text.as_bytes(), &map).ok()?;
+        renamed.write_copy().ok()?;
         let object = build.join(format!("{file}.o"));
         let mut command = Command::new(compiler);
         command.arg0(name).args(renamed.include_flag()).args(["-g", "-fcheck=all", "-c", "-o"]).arg(&object).arg(&renamed.given);
@@ -593,22 +693,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_source_the_dependency_run_reads_otherwise_is_not_cached() {
-        let fine = "module m\n  integer :: multi_BH__m = 1 ! a name with two underscores inside\n  character(*), parameter :: s = 'p' // 'q'\nend module m\n      x = Lemaitre\n     &__lambda\n";
-        assert_eq!(check_text(fine.as_bytes()), Ok(()));
+    fn only_line_markers_begin_with_a_hash() {
         assert_eq!(check_text(b"# 1 \"/w/Cactus/arrangements/A/T/src/x.F90\"\nmodule m\n# 7\nend module m\n"), Ok(()));
-        for (text, why) in [
-            ("x = 1 ! /* not a comment to Fortran\n", "/*"),
-            ("x = 1 \\\ny = 2\n", "backslash"),
-            ("#define X 1\nx = X\n", "preprocessor line"),
-            ("#include \"a.h\"\n", "preprocessor line"),
-            ("#line 1 \"a.f90\"\n", "preprocessor line"),
-            ("print *, __FILE__\n", "__NAME__"),
-            ("__GFC_INT_8__ = 1\n", "__NAME__"),
-            ("x = (__LINE__)\n", "__NAME__"),
-        ] {
-            let err = check_text(text.as_bytes()).unwrap_err();
-            assert!(err.contains(why), "{text:?}: {err}");
+        for text in ["#define X 1\nx = X\n", "#include \"a.h\"\n", "#line 1 \"a.f90\"\n", "#if 0\n#endif\n"] {
+            assert!(check_text(text.as_bytes()).unwrap_err().contains("preprocessor line"), "{text:?}");
         }
         assert!(check_text(b"# 1 \"open\n").is_err(), "a marker whose name cannot be read");
     }
@@ -657,8 +745,10 @@ mod tests {
             let source = build.join("x.f90");
             std::fs::write(&source, text).unwrap();
             let map = PathMap::for_trial(root, &config);
+            let scratch = std::fs::canonicalize(&scratch).unwrap();
             let renamed = Renamed::new(&scratch, &source, text.as_bytes(), &map).unwrap();
-            let copy = renamed.copied.then(|| std::fs::read_to_string(&renamed.compiled).unwrap());
+            renamed.write_copy().unwrap();
+            let copy = renamed.copy.as_ref().map(|(path, _)| std::fs::read_to_string(path).unwrap());
             (renamed.given.display().to_string(), renamed.include_flag().is_some(), copy)
         };
         let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -752,7 +842,7 @@ mod tests {
             let args: Vec<OsString> = ["-g", "-c", "-o"].iter().map(OsString::from).chain([build.join(format!("{file}.o")).into(), build.join(file).into()]).collect();
             (super::super::compile::parse(&args).unwrap(), args)
         };
-        let key_of = |compile: &Compile, args: &[OsString]| key(&compiler, OsStr::new("gfortran"), compile, args, &scratch, Some(&conf_map), &cc);
+        let key_of = |compile: &Compile, args: &[OsString]| key(&compiler, OsStr::new("gfortran"), compile, args, &scratch, Some(&conf_map), &cc, true);
         // The provider writes `provider.mod` and reads the include beside it.
         let (compile, args) = compile_of("provider.f90");
         let provider = key_of(&compile, &args).unwrap();
@@ -788,5 +878,141 @@ mod tests {
         drop((keyed, again, changed));
         let left: Vec<_> = std::fs::read_dir(&cc).unwrap().map(|e| e.unwrap().file_name()).filter(|name| name.to_string_lossy().starts_with('.')).collect();
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// A tree for the real-compiler tests: `<root>/configs/sim` with its
+    /// `build/T`, `scratch` and `cc`, and a key for compiles of files in
+    /// `build/T` from `scratch`, with `extra` flags.
+    struct Real {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        build: PathBuf,
+        scratch: PathBuf,
+        cc: PathBuf,
+        compiler: Compiler,
+    }
+
+    impl Real {
+        fn new() -> Option<Self> {
+            gfortran()?;
+            let tmp = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(tmp.path()).unwrap().join("Cactus");
+            let config = root.join("configs/sim");
+            let (build, scratch, cc) = (config.join("build/T"), config.join("scratch"), config.join("cc"));
+            for dir in [&build, &scratch, &cc] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            let compiler = super::super::identity::identify(&cc, OsStr::new("gfortran")).unwrap();
+            Some(Self { _tmp: tmp, root, build, scratch, cc, compiler })
+        }
+
+        fn args(&self, file: &str, extra: &[&str]) -> Vec<OsString> {
+            let mut args: Vec<OsString> = extra.iter().map(OsString::from).collect();
+            args.extend([OsString::from("-c"), OsString::from("-o"), self.build.join(format!("{file}.o")).into(), self.build.join(file).into()]);
+            args
+        }
+
+        fn key(&self, file: &str, extra: &[&str]) -> Result<Keyed, String> {
+            let args = self.args(file, extra);
+            let compile = super::super::compile::parse(&args).unwrap();
+            let map = PathMap::for_trial(&self.root, &self.root.join("configs/sim"));
+            key(&self.compiler, OsStr::new("gfortran"), &compile, &args, &self.scratch, Some(&map), &self.cc, true).map_err(|e| format!("{e:#}"))
+        }
+
+        /// Compile `source` (module files go to scratch), plainly.
+        fn compile(&self, source: &str) {
+            let status = Command::new("gfortran").args(["-c", "-o", "/dev/null"]).arg(self.build.join(source)).current_dir(&self.scratch).status().unwrap();
+            assert!(status.success(), "{source}");
+        }
+    }
+
+    /// What the preprocessor of the dependency run reads otherwise than the
+    /// compile keeps the compile out: macros from flags, those `-fopenmp`
+    /// defines, a backslash with blanks after it, a lone carriage return.
+    #[test]
+    fn a_source_the_preprocessor_reads_otherwise_is_not_cached() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        std::fs::write(real.build.join("pm.f90"), "module pm\n  integer :: v = 1\nend module pm\n").unwrap();
+        std::fs::write(real.build.join("pm_reentrant.f90"), "module pm_reentrant\n  integer :: v = 1\nend module pm_reentrant\n").unwrap();
+        real.compile("pm.f90");
+        real.compile("pm_reentrant.f90");
+        // `-D` is no part of the compile, and none of the runs that
+        // preprocess either.
+        std::fs::write(real.build.join("other.f90"), "module other\n  integer :: v = 2\nend module other\n").unwrap();
+        real.compile("other.f90");
+        std::fs::write(real.build.join("d.f90"), "subroutine d()\n  use pm\n  print *, v\nend subroutine\n").unwrap();
+        let keyed = real.key("d.f90", &["-Dpm=other"]).unwrap();
+        assert!(keyed.fortran.args.iter().all(|arg| !arg.as_bytes().starts_with(b"-D")), "{:?}", keyed.fortran.args);
+        drop(keyed);
+        for (file, text, flags) in [
+            ("omp.f", "      subroutine o()\n      use pm _REENTRANT\n      print *, v\n      end\n", &["-fopenmp"][..]),
+            ("bs.f90", "subroutine b()\n  ! see C:\\  \n  use pm\n  print *, v\nend subroutine\n", &[][..]),
+            ("cr.f90", "subroutine c()\n  ! remark\r#define pm other\n  use pm\n  print *, v\nend subroutine\n", &[][..]),
+        ] {
+            std::fs::write(real.build.join(file), text).unwrap();
+            let err = real.key(file, flags).err().unwrap_or_default();
+            assert!(err.contains("reads otherwise"), "{file}: {err}");
+        }
+        // Without the flag that defines the macro, it is a name like any.
+        assert!(real.key("omp.f", &[]).is_ok());
+    }
+
+    /// Where the dependency run would find another file than the compile
+    /// finds, the compile is not cached: a module file in the working
+    /// directory and beside the source, which the compile finds in the
+    /// working directory first; an included file in a directory below the
+    /// working directory, which the compile does not search.
+    #[test]
+    fn a_file_found_elsewhere_than_the_compile_finds_it_is_not_cached() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        std::fs::write(real.build.join("pm.f90"), "module pm\n  integer :: v = 1\nend module pm\n").unwrap();
+        real.compile("pm.f90");
+        std::fs::write(real.build.join("u.f90"), "subroutine u()\n  use pm\n  print *, v\nend subroutine\n").unwrap();
+        assert!(real.key("u.f90", &[]).is_ok());
+        std::fs::copy(real.scratch.join("pm.mod"), real.build.join("pm.mod")).unwrap();
+        let err = real.key("u.f90", &[]).err().unwrap_or_default();
+        assert!(err.contains("another module file"), "{err}");
+        std::fs::remove_file(real.build.join("pm.mod")).unwrap();
+
+        let thorn = real.root.join("arrangements/A/T/src");
+        std::fs::create_dir_all(thorn.join("sub")).unwrap();
+        std::fs::create_dir_all(real.scratch.join("sub")).unwrap();
+        std::fs::write(thorn.join("sub/vals.inc"), "integer, parameter :: w = 2\n").unwrap();
+        std::fs::write(real.build.join("i.f90"), "subroutine i()\n  include 'sub/vals.inc'\n  print *, w\nend subroutine\n").unwrap();
+        let include = format!("-I{}", thorn.display());
+        assert!(real.key("i.f90", &[&include]).is_ok());
+        std::fs::write(real.scratch.join("sub/vals.inc"), "integer, parameter :: w = 1\n").unwrap();
+        let err = real.key("i.f90", &[&include]).err().unwrap_or_default();
+        assert!(err.contains("under the working directory"), "{err}");
+    }
+
+    /// Record mode writes no copy; a serving build's copy is checked again
+    /// after the compile like any file read.
+    #[test]
+    fn the_copy_is_written_only_to_be_compiled_and_is_checked_after() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        let original = real.root.join("arrangements/A/T/src/x.F90");
+        std::fs::write(real.build.join("x.f90"), format!("# 1 \"{}\"\nsubroutine x()\n  print *, 1\nend subroutine\n", original.display())).unwrap();
+        let args = real.args("x.f90", &[]);
+        let compile = super::super::compile::parse(&args).unwrap();
+        let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
+        let recorded = key(&real.compiler, OsStr::new("gfortran"), &compile, &args, &real.scratch, Some(&map), &real.cc, false).unwrap();
+        assert!(!real.build.join(".cactup").exists(), "record mode wrote a copy");
+        let served = real.key("x.f90", &[]).unwrap();
+        assert_eq!((&recorded.text, &recorded.files), (&served.text, &served.files), "recorded and served alike");
+        let copy = real.build.join(".cactup/x.f90");
+        assert!(copy.is_file());
+        assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &served.fortran, &served.files, &served.seen));
+        std::fs::write(&copy, "subroutine x()\n  print *, 2\nend subroutine\n").unwrap();
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &served.fortran, &served.files, &served.seen));
     }
 }

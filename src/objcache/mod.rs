@@ -191,7 +191,7 @@ pub fn store_root(db: &Database, machine: Option<&crate::mdb::Machine>) -> Store
         }
     }
     StoreRoot {
-        path: crate::CACTUP_ROOT.join("cacti").join(STORE_NAME),
+        path: crate::mdb::meta::fallback_home("install-home").unwrap_or_default().join(STORE_NAME),
         from: "beside the installations, by default".to_owned(),
         warnings,
     }

@@ -380,7 +380,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     let name = argv[0].clone();
     if compile.language.is_fortran() {
         let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
-        let read = fortran::key(&compiler, &name, &compile, &argv[1..], &cwd, map.as_ref(), cc_dir).map_err(whole)?;
+        let read = fortran::key(&compiler, &name, &compile, &argv[1..], &cwd, map.as_ref(), cc_dir, depend).map_err(whole)?;
         let parts = Parts {
             platform: platform.digest,
             compiler: compiler.id.clone(),

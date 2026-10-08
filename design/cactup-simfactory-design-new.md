@@ -5287,11 +5287,18 @@ file.
    (`.<object name>.cactup-<random>`), created as a compiler creates its
    output (`0666`, less the umask, plus what a default ACL of the
    directory adds), and the object's bytes are copied into it while the
-   whole entry is digested; the compiler's output is read into memory; the
+   whole entry is digested; the compiler's output is read into memory; each
+   module file (§18.10) is copied into a temporary file in the directory it
+   goes into (`.module.cactup-<random>`, created as the object's is); the
    checksum is compared. Then the header is read.
-4. If the entry is valid, the temporary file is renamed onto the object's
-   name: `make` sees the old object or none, or the whole new one, never
-   part of one. Its modification time is the restore's.
+4. If the entry is valid, the module files go first: each temporary file
+   is renamed onto its module file's name, unless the file there already
+   has the same bytes, when it is left alone (with its modification time,
+   as gfortran leaves it) and the temporary file removed. Then the object's
+   temporary file is renamed onto the object's name: `make` sees the old
+   object or none, or the whole new one, never part of one, and an object
+   in place stands for its module files in place too. Its modification time
+   is the restore's.
 5. If it is not whole, or whole and for another key, the temporary file is
    removed, the entry is invalidated, and it is a miss. If it is whole and
    its header is another cactup's, or reading it fails in a way that says
@@ -5451,7 +5458,10 @@ wrapper by that signal, which leaves at most the temporary files the store
 leaves when a restore is cut short (§18.7), and the key's temporary
 dependency file (`.<name>.cactup-…` beside the real one). A signal after
 an audited compile can leave the temporary copies audit mode keeps beside
-the object, under the same kind of name. `make` reads neither. A miss forwards signals to the
+the object, under the same kind of name; for Fortran, a restore cut short
+can leave `.module.cactup-…` beside the module files, and a copy cut short
+`.copy-…` in `.cactup/`. The Fortran keying's own directory in the
+attempt's `cc` (`.fortran-…`) is left too. `make` reads none of them. A miss forwards signals to the
 compiler as record mode does; a signal during the check and the publishing
 after it ends the wrapper on the spot (§18.5, §18.7).
 
@@ -5548,29 +5558,46 @@ directory of the compile's own (`-J`), more module search directories
 **What a compile reads.** Besides the source: module files (`use`, the
 intrinsic ones included), included files (`include`), and the header the
 driver pre-includes. No preprocessor output shows them, so gfortran is
-asked: run with the compile's arguments and `-cpp -undef -M -fsyntax-only`
-(the *dependency run*), it prints a rule naming every file it read, each
-by the name it was found under, and the module files it writes as targets.
-`-fsyntax-only` runs the front end alone, which reads every file the
-compile reads, and tells the driver nothing will be linked (it would read
-`libgfortran.spec` for a link). It writes module files and reads back the
-ones it wrote, as the compile does, so it runs in an empty directory of its
-own (where it writes them, and where it finds them first) with the
-compile's working directory first among its `-I` directories: it finds
-every other module file where the compile finds it. A module file it names
-in its own directory is its own output, not an input; an included file it
-finds in the compile's working directory, which the compile does not
-search for included files, keeps the compile out of the cache. That run
-needs the C preprocessor, which the compile does not run, and in
-traditional mode with every macro it can drop dropped (`-undef`) the
-preprocessor still acts on `/*` (a comment that swallows lines up to the
-next `*/`), on a directive other than a line marker, on a line ending in
-`\`, and on names it still defines (`__FILE__`, `__GFC_INT_8__`: all begin
-and end with two underscores); a source with any of them is not cached
-(none of the Einstein Toolkit's 594 Fortran build copies has one; a word
-that only begins with two underscores, the rest of a name continued on a
-fixed-form line, is defined by nothing). A name the rule had to escape is
-not read, and the compile is not cached.
+asked: run on the source with the compile's arguments and `-cpp -undef -M
+-fsyntax-only` (the *dependency run*), it prints a rule naming every file
+it read, each by the name it was found under, and the module files it
+writes as targets. `-fsyntax-only` runs the front end alone, which reads
+every file the compile reads, and tells the driver nothing will be linked
+(it would read `libgfortran.spec` for a link). A name the rule had to
+escape is not read, and the compile is not cached.
+
+That run needs the C preprocessor, which the compile does not run. `-D` and
+`-U` do nothing to the compile and are not given to it. Even so, in
+traditional mode with every macro it can drop dropped (`-undef`), the
+preprocessor still acts on more than a Fortran source should give it: a
+`/*` (which swallows lines up to the next `*/`), a line ending in `\`
+(blanks after it too), a lone carriage return, the names it still defines
+(`__FILE__`, `_OPENMP` and `_REENTRANT` under `-fopenmp`), trigraphs under
+`-trigraphs`. Rather than list them, the preprocessor is run once more with
+the same arguments and `-E`, and its output must be the source: every line
+but its line markers, in order (lines blank on both sides aside, since it
+may stand a marker for a run of them). Otherwise the compile is not
+cached. All 594 of the Einstein Toolkit's Fortran build copies come back
+from it byte for byte. A line beginning with `#` that is not a line marker
+is a directive, which leaves no line to compare, and keeps the compile out
+too.
+
+The dependency run writes module files, and reads back the ones it wrote
+as the compile does, so it runs in an empty directory of its own (where it
+writes them, and where it finds them first) with the compile's working
+directory first among its `-I` directories. Its search order is still not
+the compile's: gfortran looks in the directory of the file it reads before
+any `-I` directory, for module files as for included files, so the
+compile searches its working directory, then the source's directory, then
+its `-I` directories, and the dependency run the source's directory before
+the working directory; and the dependency run searches the working
+directory for included files, which the compile does not. So each module
+file it read must be the first of its name in the compile's order (none of
+that name in a directory the compile searches before it), and no included
+file may be found under the working directory; otherwise the compile is
+not cached. A module file it names in its own directory is its own output,
+not an input. Both checks are made again after the compile, with the
+dependency run.
 
 The key's text part (§18.5) is the digest of the text compiled and of the
 names of the module files it writes; its files part, of every file the
@@ -5602,20 +5629,25 @@ path) is compiled as a copy whose markers name their files by mapped names
 (`/cactup-root/...`, as C's `__FILE__` under decision 8): under the
 source's own file name (a module file records the name gfortran was
 given), in `.cactup/` beside the source, named from the working directory
-too (`../build/<Thorn>/.cactup/x.f90`), with the source's own directory
-first among the `-I` directories, where Fortran `include` would have
-looked first (a module file that would then be found there, and not by the
-compile without the cache, keeps the compile out of the cache). The copy is
-written whole, a temporary file renamed into place, and left there like the
-build copy itself: another compile of the same source writes the same
-bytes. Objects and module files from two trees are then byte-identical;
-the debug information names the source relative to the compile directory,
-which the path map maps. The compiler's messages name the source as it was
-given and the mapped names; as they pass through, line by line, those are
-given back their real names (`key::Rewrite`), so what the user reads, and
-what an entry keeps (§18.8), is what the compile without the cache would
-have said. `relocates`' trial for gfortran compiles a module this way in
-two trees, with and without a line marker, with runtime checks on, and
-compares both objects and both module files. In record mode, and under
+too (`../build/<Thorn>/.cactup/x.f90`, which is then what "In file"
+messages name), with the source's own directory first among the `-I`
+directories, right after the copy's own, where Fortran `include` would
+have looked first (an included file the copy's directory has too keeps
+the compile out). Only the compile for the store reads the copy, so only a
+serving or auditing build writes it, whole (a temporary file renamed into
+place); it stays there like the build copy itself, and another compile of
+the same source writes the same bytes. Its bytes are the key's text, and
+after the compile it is looked at again with the files read: one changed
+meanwhile keeps the object out of the store. Objects and module files from
+two trees are byte-identical; the debug information names the source
+relative to the compile directory, which the path map maps. The
+compiler's messages name the source as it was given and the mapped names;
+as they pass through, line by line, those are given back their real names
+(`key::Rewrite`), so what the user reads, and what an entry keeps (§18.8),
+is what the compile without the cache would have said (where the messages
+cannot be passed through the wrapper, the recipe's own compile runs).
+`relocates`' trial for gfortran compiles a module this way in two trees,
+with and without a line marker, with runtime checks on, and compares both
+objects and both module files. In record mode, and under
 `build-cache-relocate = no`, the compile reads the source as the recipe
 gave it.

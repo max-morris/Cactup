@@ -1226,6 +1226,44 @@ live."); `@SCRATCH_HOME@` read at each submit
 commands on an unknown host. (B) noted that machines whose `install-home`
 is `$HOME` keep the store there: decision 12, Max's.
 
+### M2a, round 1 (on `4fa357e`): BLOCKED by both
+
+Both reproduced wrong hits through the wrapper with legal sources and flags
+the Einstein Toolkit does not use; audit mode would have caught each.
+
+1. (both) The dependency run's preprocessor read the source otherwise than
+   the compile: `-D` given to it (`-Dmymod=othermod` named another module
+   file), `_REENTRANT` (and `_OPENMP`) defined under `-fopenmp` (B: `use
+   pm _REENTRANT` in fixed form), a line ending in `\` with blanks after
+   it (B: a comment `! see C:\  ` hid the next line's `use`), a lone
+   carriage return, trigraphs. *Fixed: `-D`/`-U` are given to no run that
+   preprocesses; the preprocessor is run once more with `-E`, and its
+   output, line markers aside, must be the source; a `#` line that is not
+   a line marker still keeps a source out (it would leave nothing to
+   compare). All 594 Einstein Toolkit Fortran build copies pass.*
+2. (both) Search order: gfortran looks in the directory of the file it
+   reads before any `-I` directory, for module files too, so the
+   dependency run found a module file beside the source before the
+   working directory's, which the compile finds first. *Fixed: every
+   module file the run read must be the first of its name in the
+   compile's order (working directory, the compiled file's directory,
+   the `-I` directories); checked again after the compile.*
+3. (both) An included file found below the working directory
+   (`sub/vals.inc`, `../x.inc`) slipped past a check of its parent only.
+   *Fixed: none may be found under the working directory, by components,
+   as named and as resolved.*
+
+Non-blocking points taken: the copy is checked again after the compile
+(and the source with it, both outside the key, so that a build that
+records keys as one that serves); record mode writes no copy; the
+dependency runs read the source itself; a copied source's included file
+that the copy's directory has too keeps it out; a renamed compile whose
+messages cannot be passed through the wrapper runs as the recipe gave
+it; the fallback homes are written once (`mdb::meta::fallback_home`); the
+spec says how module files are restored and what a signal leaves; the
+docs and decision 13 say what "In file" messages name. The wrong premise
+of the "module file beside the source" decline went with it.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

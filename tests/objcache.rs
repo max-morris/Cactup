@@ -1950,7 +1950,7 @@ fn fortran_the_cache_cannot_follow_is_passed_through() {
     let elsewhere = elsewhere.display().to_string();
     for (file, content, flags, why) in [
         ("upper.F90", "module upper\nend module upper\n", vec![], "preprocesses"),
-        ("comment.f90", "module comment\n  ! a /* in a comment\nend module comment\n", vec![], "/*"),
+        ("comment.f90", "module comment\n  ! a /* in a comment\nend module comment\n", vec![], "preprocessor"),
         ("moddir.f90", "module moddir\nend module moddir\n", vec!["-J", elsewhere.as_str()], "does not follow"),
     ] {
         fs::write(dir.join(file), content).unwrap();

@@ -568,7 +568,10 @@ thorn prints with `CCTK_WARN` shows these names, and a debugger has to be
 told where they are. A Fortran runtime error ("At line 7 of file ...")
 names the file the same way when the optionlist turns on
 `F_LINE_DIRECTIVES`, and otherwise by its path from the configuration's
-`scratch` directory, `../build/<Thorn>/<file>.f90`. In gdb, the configuration's rule first (gdb uses the
+`scratch` directory, `../build/<Thorn>/<file>.f90`. A runtime check's
+message ("In file '...', around line 7") names the file by that path
+always; with `F_LINE_DIRECTIVES` on, that is the copy the cache compiled,
+`../build/<Thorn>/.cactup/<file>.f90`, kept beside the build copy. In gdb, the configuration's rule first (gdb uses the
 first rule that matches), then the tree's:
 
 ```

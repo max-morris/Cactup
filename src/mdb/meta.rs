@@ -1185,16 +1185,25 @@ fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 5] {
 /// What a path knob left unset comes to, said for `cactup knob`; `None`
 /// for any other name.
 pub fn path_knob_unset(key: &str) -> Option<String> {
-    let root = crate::CACTUP_ROOT.display();
-    let fallback = match key {
-        "install-home" => format!("{root}/cacti"),
-        "simulation-home" => format!("{root}/simulations"),
-        "test-home" => format!("{root}/tests"),
-        "scratch-home" => "empty".to_owned(),
-        "build-cache-home" => "<install-home>/.cactup-build-cache".to_owned(),
+    let fallback = match (key, fallback_home(key)) {
+        (_, Some(home)) => home.display().to_string(),
+        ("scratch-home", None) => "empty".to_owned(),
+        ("build-cache-home", None) => "<install-home>/.cactup-build-cache".to_owned(),
         _ => return None,
     };
     Some(format!("unset: the machine's value, else {fallback}"))
+}
+
+/// Where a `[paths]` key points when neither a knob nor the machine sets it
+/// (§4.2): a directory of `~/.cactup`, for the keys that have one.
+pub fn fallback_home(key: &str) -> Option<std::path::PathBuf> {
+    let dir = match key {
+        "install-home" => "cacti",
+        "simulation-home" => "simulations",
+        "test-home" => "tests",
+        _ => return None,
+    };
+    Some(crate::CACTUP_ROOT.join(dir))
 }
 
 /// `@USER@` and `@ENV(NAME)@` in one `[paths]` value.
