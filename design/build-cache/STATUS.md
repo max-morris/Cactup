@@ -1276,8 +1276,31 @@ The Cactus runs on `85407d6` (binary `~/tmp/build-cache-fortran/cactup-85407d6`)
 (`linedir.toml`): 357 compiles each, 50 of them Fortran, 357 published and
 357 checked, 0 wrong, every build exit 0. The Fortran overhead on those
 small files: keying 559 ms and checking again 442 ms against 1039 ms of
-compiling, all fifty together. The Einstein Toolkit runs are in
-`~/tmp/build-cache-fortran/gate.sh` (results in `gate.out`).
+compiling, all fifty together.
+
+**The first Einstein Toolkit run failed** (`gate.sh`, `gate.out`, on
+`85407d6`): served, then audited in `build-cache-b` and in `build-cache`
+itself, 63 Fortran compiles were wrong hits in both audits. Each build made
+other objects of them, and each audit's two compiles the same: gfortran's
+runtime checks write "In file '<the name it was given>', around line N",
+and that was the copy in its private, randomly named directory. The small
+tests had no runtime checks. Five more compiles were never published:
+their source defines a module and uses it, and the dependency run, writing
+its module files apart, found the stale module file of that name in
+`scratch` (the compile reads the one it has just written), so the check
+after the compile failed. And 42 sources were declined for a "name
+beginning with two underscores" that was the rest of a name continued on a
+fixed-form line. (The two runs with line directives failed in the MPI
+library's configure: `linedir.toml` has no MPI settings; `et-ld.toml` is
+`et.toml` with line directives on.)
+
+Fixed in `8827465`: the source is named by its path from `scratch`
+(`../build/<Thorn>/x.f90`) and copied only when its line markers need
+mapping (decision 13, as built); the dependency run runs in an empty
+directory of its own with `scratch` first in `-I`; only `__NAME__`-shaped
+words keep a source out. `smoke.th` with `et.toml` and with `et-ld.toml`,
+served and audited across the two installations on `8827465`: 357 of 357
+checked, 0 wrong. The Einstein Toolkit again: `gate-2.sh`, `gate-2.out`.
 
 ## Next step
 
