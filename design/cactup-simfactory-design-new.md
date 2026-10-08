@@ -4536,8 +4536,8 @@ every object compile, works out the key it would be cached under, and logs
 it; `cactup cache report` (§18.6) reads the logs. With `build-cache =
 serve` it also serves objects from the store (§18.7) and publishes the ones
 it compiles (§18.8); `audit` checks every hit by compiling anyway. `cactup
-cache stats`, `gc` and `verify` look after the store (§18.9). Fortran and
-CUDA are still to come.
+cache stats`, `gc` and `verify` look after the store (§18.9). Fortran is
+cached for gfortran (§18.10); CUDA is still to come.
 
 ### 18.1 Rules
 
@@ -4958,7 +4958,9 @@ fixed parts, so that the key does not change by accident:
   The compiler as a whole is asked too, once, to spare the compiles the
   asking; and whatever a driver is asked for its identity (`--version`,
   its specs), it is asked in English the same way, so that the identity
-  does not depend on the language of the session that asked. Fortran is not cached yet. The answer — also "not one the cache
+  does not depend on the language of the session that asked. gfortran is a
+  family of its own (§18.10): its back end is `f951`, and its relocation
+  and locale trials compile Fortran. The answer — also "not one the cache
   works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)
   and reused while every file it came from still has the same size, change
   time and inode. The wrapper starts the file that was identified, under
@@ -5190,7 +5192,7 @@ time on several hosts over NFS or Lustre, where `flock` cannot be trusted
 write is a new file under a name of its own, and the one shared step is
 `link(2)`, atomic on all three (`objcache::store`).
 
-**Where.** `<root>/v1/<machine>/<first two hex digits of the key>/<key>`.
+**Where.** `<root>/v2/<machine>/<first two hex digits of the key>/<key>`.
 The root is the user's knob `build-cache-home` (an absolute path), else the
 machine's `[paths] build-cache-home` (§4.2), else `.cactup-build-cache` in the
 install home (the `install-home` knob, else the machine's, else
@@ -5199,7 +5201,7 @@ I/O there. A machine's place that cannot be resolved here is passed over for
 the next with a warning (`objcache::store_root`). It is resolved by `prepare`
 and frozen into
 `<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
-from there (§18.1 rule 6). `v1` is the entry format. A cactup with another
+from there (§18.1 rule 6). `v2` is the entry format. A cactup with another
 format writes beside it and never reads it — no backward compatibility
 (§2.4); the old tree is left as it is (`cache stats` names it, and says to
 remove it by hand once no older cactup builds with the store). `<machine>` is the cactup
@@ -5212,22 +5214,26 @@ of the store.
 
 ```
 cactup build cache entry\n                       magic line
-<header> <object> <stdout> <stderr>\n           their lengths, decimal
+<header> <object> <stdout> <stderr> [<module>…]\n their lengths, decimal
 <header, TOML>
 <the object>
 <what the compiler wrote to stdout>
 <what the compiler wrote to stderr>
+<each module file the compile wrote, §18.10>
 <SHA-256 of every byte above, 64 hex digits>\n
 ```
 
-The header has the format (`1`), the label the key was made under, the
-key and its six parts (§18.5); and,
+The header has the format (`2`), the label the key was made under, the
+key and its six parts (§18.5), the names of the module files in the order
+they follow the messages (at most 1000; none but for Fortran); and,
 for people only, the object's name below `build/`, the compiler as the
 recipe named it, whether the key is relocatable, the cactup version and
 the host that compiled it. An entry is *whole* when the magic line is
 there, the lengths add up to the file's size, and the checksum is right;
 it is *valid* when it is whole, its header parses (unknown fields are an
-error), and its key is the file's name and the digest of its parts. A
+error), its key is the file's name and the digest of its parts, and it
+names as many module files as it holds, each a plain module file name
+(`<name>.mod` or `<name>.smod`), none twice. A
 dependency file is not stored (§18.5: a hit has the key's own preprocessor
 run write it).
 
@@ -5459,7 +5465,7 @@ when each entry was last used.
 **Last use.** An entry is never changed after its link (§18.7), so when it
 was last used is kept beside it, not in it. After the build step of a
 serving or auditing build, `execute` writes one new file into the store,
-`<root>/v1/<machine>/used/<random>.keys`, listing the keys that build found
+`<root>/v2/<machine>/used/<random>.keys`, listing the keys that build found
 there, one per line, through a temporary file renamed into place. Its
 modification time, set by the write, is the fileserver's clock at the end
 of that build (§2.3), and is when every key in it was last used. No two
@@ -5520,9 +5526,82 @@ by default) is frozen with the rest (§18.2). At the end of a serving or
 auditing build, if it is set and the store is larger, the build says so in
 one line and names `cactup cache gc`. A build never walks the store: the
 size of the whole store (every machine's entries of this format) is kept
-in `<root>/v1/size`, measured by `cache stats` and `cache gc`, and each
+in `<root>/v2/size`, measured by `cache stats` and `cache gc`, and each
 serving build adds the bytes it published and keeps the sum. Builds that
 add at the same moment can lose each other's additions, so between
 measurements it is an estimate, low if anything. Before the first
 measurement the size is not known, and the build says that instead, naming
 `cache stats`. Nothing is removed.
+
+### 18.10 Fortran
+
+gfortran is cached (`objcache::fortran`); other Fortran compilers are not
+identified, and so not cached. Cactus hands gfortran a build copy it has
+preprocessed itself (`.f`, `.f90`), compiled from the configuration's
+`scratch`, which is where gfortran writes the module files of the modules a
+source defines and where, first, it looks for the ones a source uses. A
+source gfortran would preprocess itself (`.F`, `.F90`, `-cpp`), a module
+directory of the compile's own (`-J`), more module search directories
+(`-fintrinsic-modules-path`), a file read before the source
+(`-fpre-include`) and a dependency file from the compile are not cached.
+
+**What a compile reads.** Besides the source: module files (`use`, the
+intrinsic ones included), included files (`include`), and the header the
+driver pre-includes. No preprocessor output shows them, so gfortran is
+asked: run with the compile's arguments and `-cpp -undef -M -fsyntax-only`
+(the *dependency run*), it prints a rule naming every file it read, each
+by the name it was found under, and the module files it writes as targets.
+`-fsyntax-only` runs the front end alone, which reads every file the
+compile reads, and tells the driver nothing will be linked (it would read
+`libgfortran.spec` for a link); the module files it writes go into a
+directory of its own (`-J`), and one it writes and then reads is its own
+output, not an input. That run needs the C preprocessor, which the
+compile does not run, and in traditional mode with every macro it can
+drop dropped (`-undef`) the preprocessor still acts on `/*` (a comment that
+swallows lines up to the next `*/`), on a directive other than a line
+marker, on a line ending in `\`, and on names it still defines (`__FILE__`,
+`__GFC_INT_8__`: all begin with two underscores, which no Fortran name
+can); a source with any of them is not cached (none of the Einstein
+Toolkit's 594 Fortran build copies has one). A name the rule had to escape
+is not read, and the compile is not cached.
+
+The key's text part (§18.5) is the digest of the text compiled and of the
+names of the module files it writes; its files part, of every file the
+dependency run read, under its mapped name. Since module files are found
+by names relative to the working directory, the working directory is
+keyed for every Fortran compile, and so are the `-I` directories (mapped).
+The dependency run runs again after the compile, and what it lists and
+what each file looked like must not have changed (§18.5).
+
+**What a compile writes.** The object and its module files. An entry keeps
+all of them (§18.7). A hit puts back each module file whose bytes differ
+from the one in the working directory, and leaves alone one that would not
+change, as gfortran itself does (it keeps its modification time); audit
+mode (§18.8) puts the stored
+ones aside and compares them with the compile's, and a wrong module file
+is a wrong hit. gfortran's module files are deterministic (gzip without a
+time; the source named by its file name alone), so they are the same
+across installations.
+
+**Paths** (decision 13). gfortran writes a source's name into the object
+for its runtime error messages ("At line 7 of file …"): the name it was
+given, or the name in a line marker, and no `-f*-prefix-map` reaches it.
+So under the path map a compile reads a copy of the source, the *renamed
+copy*: under the source's own file name (a module file records the name
+gfortran was given), in a directory of its own in the build attempt's
+`cc`, with a first line `# 1 "<the source's mapped name>"` unless the
+source begins with a line marker, and every line marker's file named by
+its mapped name. The compile gets the source's own directory first among
+its `-I` directories, where Fortran `include` would have looked first
+(and a module file that would then be found there, and not by the compile
+without the cache, is not cached), and, after the path map's flags, the
+copy's directory mapped to the source's mapped directory: GCC takes the
+last map that matches. Objects and module files from two trees are then
+byte-identical, and nothing records the copy. The compiler's messages name
+the copy or mapped names; as they pass through, line by line, those are
+given back their real names (`key::Rewrite`), so what the user reads, and
+what an entry keeps (§18.8), is what the compile without the cache would
+have said. `relocates`' trial for gfortran compiles a module this way in
+two trees, with and without a line marker, and compares both objects and
+both module files. In record mode, and under `build-cache-relocate = no`,
+the compile reads the source as the recipe gave it.

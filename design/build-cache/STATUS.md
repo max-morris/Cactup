@@ -52,7 +52,8 @@ the last milestone, for when that host is not at hand.
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
-| after M1 | gfortran, then the CUDA compilers; the narrower key revisited with audit mode | not started |
+| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; a renamed copy under the path map (decision 13) | **implemented** at `85407d6`; the Einstein Toolkit audit builds next, then review |
+| later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
 
@@ -1241,9 +1242,44 @@ rpath in a link section and changes nothing else, so the refinement for
 specs files is needed and is taken into M1a. Spack-built GCCs were
 checked on 2026-10-07 (mike, db1; decision 3): all five accepted.
 
+## What M2a is
+
+gfortran, cached. The facts it rests on were tried on this host's gfortran
+14.2 first (2026-10-07), each with a throwaway source:
+
+- Module files are deterministic: gzip with no time, and the source named
+  by its file name alone ("created from x.f90", whatever path it was given).
+  gfortran leaves a module file alone when it would not change.
+- gfortran looks for a module in the working directory first, then in the
+  `-I` directories. `-cpp -undef -M` lists every file a compile reads,
+  module files by the name they were found under (intrinsic ones by full
+  path), include files, the pre-included header, and the module files it
+  writes as targets; it writes those module files too (hence `-J` into a
+  directory of its own), and `-E` lists no modules. Without `-c` the
+  driver reads `libgfortran.spec`, as for a link; `-fsyntax-only` does not,
+  and compiles nothing.
+- In traditional mode the preprocessor swallows code between a `/*` in a
+  Fortran comment and a later `*/`; after `-undef` it still defines names
+  that all begin with two underscores. None of the Einstein Toolkit's 594
+  Fortran build copies has `/*`, a line-final `\`, a `#` line or such a
+  name (they have names with `__` inside, which the preprocessor reads as
+  whole names).
+- The runtime-error string is the path the compiler was given or the one a
+  line marker names, and no flag remaps it (decision 13). A copy under the
+  source's own name in a directory of its own, `# 1 "<mapped name>"`
+  first, the copy's directory mapped last, the source's directory first in
+  `-I`: two trees give byte-identical objects and module files.
+
+The Cactus runs on `85407d6` (binary `~/tmp/build-cache-fortran/cactup-85407d6`):
+`smoke.th`, served into a fresh store in `build-cache`, audited in
+`build-cache-b` and in `build-cache`, then the same with line directives
+(`linedir.toml`): 357 compiles each, 50 of them Fortran, 357 published and
+357 checked, 0 wrong, every build exit 0. The Fortran overhead on those
+small files: keying 559 ms and checking again 442 ms against 1039 ms of
+compiling, all fifty together. The Einstein Toolkit runs are in
+`~/tmp/build-cache-fortran/gate.sh` (results in `gate.out`).
+
 ## Next step
 
-M1 is done. Next, by decision 2: gfortran, proved with audit mode, then
-the CUDA compilers. (The gate scripts in `~/tmp/build-cache-m1b` pass
-`build-cache-dir`, which a binary from `01bd00a` on ignores: use
-`build-cache-home` in any re-run.)
+Record the Einstein Toolkit Fortran runs, then M2a's review gate. After
+that, the CUDA compilers.

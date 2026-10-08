@@ -536,14 +536,14 @@ cactup build native-build --no-universe
 
 cactup has a build cache shared by all the installations of one
 `~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
-objects an earlier build already compiled. It caches C and C++ for now
-(Fortran and CUDA come later), and it is off unless you turn it on with the
-`build-cache` knob:
+objects an earlier build already compiled. It caches C and C++, and Fortran
+compiled with gfortran (CUDA comes later), and it is off unless you turn it
+on with the `build-cache` knob:
 
 | Value | What a build does |
 |-------|-------------------|
 | `off` (the default) | Nothing: the build is exactly what it is without the cache |
-| `serve` | Each C and C++ compile that some build of this `~/.cactup` already made is taken from the cache instead of compiled; each one compiled is kept for the next build |
+| `serve` | Each compile that some build of this `~/.cactup` already made is taken from the cache instead of compiled; each one compiled is kept for the next build |
 | `audit` | As `serve`, but every object the cache has is compiled anyway and compared, to check the cache: slower than a plain build, and the way to trust it |
 | `record` | Only measures: works out what each compile would be cached under and logs it. Nothing is stored or reused, and the build is exactly what it is without the cache |
 
@@ -564,8 +564,9 @@ share objects, a compile run through the cache records its source files as
 `/cactup-root/arrangements/<Arrangement>/<Thorn>/src/...` and the
 configuration's files as `/cactup-root/configs/@config/...`, not by their
 full paths. Warnings and errors still name the real files, but what a
-thorn prints with `CCTK_WARN` shows these names, and a debugger has to be
-told where they are. In gdb, the configuration's rule first (gdb uses the
+thorn prints with `CCTK_WARN`, and the file a Fortran runtime error names
+("At line 7 of file ..."), show these names, and a debugger has to be told
+where they are. In gdb, the configuration's rule first (gdb uses the
 first rule that matches), then the tree's:
 
 ```
@@ -613,8 +614,8 @@ cactup cache report myconfig --against-attempt 3 --long
 ```
 
 The first form counts the compiles that got a key, per language, and lists
-why the others did not (Fortran is not keyed yet; a compiler cactup does not
-recognize; a flag it does not know). The comparing forms say how many of
+why the others did not (a compiler cactup does not recognize; a flag it does
+not know; Fortran that gfortran would preprocess itself). The comparing forms say how many of
 this build's compiles a cache filled by the other build would have served,
 and for the rest, which part of the key differs — the compiler, its
 arguments, the platform, the environment, the preprocessed source, or the
