@@ -22,6 +22,7 @@ and how to maintain, rebuild and deploy it.
 | `cactup.pin` | The cactup commit the image is built from (binaries, installer, MDB); see `UPDATING.md`. |
 | `UPDATING.md` | How to move the pin to a newer cactup, and everything in the tutorial that depends on cactup's behavior. |
 | `tools/` | `check-cactup-usage.py`: checks every cactup command the tutorial runs against a cactup build. |
+| `SIZING.md` | What the machine needs per attendee, as measured, and how to check a provisioned one (`tools/sizing/`). |
 
 The tutorial machine itself is a regular MDB entry, `mdb/cactup-tutorial/`
 (discovered on hostname `cactup-tutorial`), like `mdb/et-juphub/` before it.
@@ -960,9 +961,10 @@ Per attendee, after every notebook: up to five installs' sources (stock and
 `master`, about 1.3 and 1.9 GB; `et-mp`, `et-gpu` and the `carpetx.th`
 install, much less), the restored trees (B1's whole tree, 1.8 GB; the
 partial trees: B3's 1.3 GB with its 770 MB executable, B2b's 1.1 GB, B4's
-0.8 GB, B2a's and B5's 0.7 GB each) and simulation output. Budget about 12 GB of
-disk per attendee, next to the 4 vCPU / 8 GB of memory; the deployment stage
-measures it on the VM.
+0.8 GB, B2a's and B5's 0.7 GB each) and simulation output: 9.9 GiB measured.
+`SIZING.md` has the measurements per attendee (memory, CPU, disk space and
+disk throughput) and the machine they add up to for a given number of
+attendees.
 
 Acceptance targets (`tests/platform/replay.sh` checks the first for one
 replay, and the incremental builds; the concurrent ones are checked on the
