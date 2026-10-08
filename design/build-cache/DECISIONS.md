@@ -85,7 +85,19 @@ Asked as seven questions with options; the answers, in Max's numbering.
    one, `*link_libgcc_rpath:` (`-rpath
    /usr/local/packages/compilers/gcc/13.2.0/lib64`). Link step only: the
    refinement would accept it. That settles that the refinement is
-   needed. A Spack-built GCC has not been checked yet.
+   needed.
+
+   *Spack-built GCCs checked, 2026-10-07*, on mike (GCC 10.3.0 and
+   11.2.0) and Deep Bayou, `db1` (11.2.0, 8.4.0, 9.3.0): each is a Spack
+   install (`.spack/` with its build record in the prefix) and each has a
+   specs file, in one of two shapes. The newer Spack writes qbd's
+   (`*link_libgcc:` gains `%(link_libgcc_rpath)`, a new section holds the
+   `-rpath`); the older one (db1's 8.4.0 and 9.3.0, `spec.yaml` era)
+   puts `-rpath <prefix>/lib:<prefix>/lib64` at the front of `*link:` and
+   drops the file's final blank line. `specs::link_only` accepts all five,
+   run on each compiler's own `-dumpspecs`, specs file and driver. (The
+   link-only list was read off GCC 14's driver; GCC 8 to 11 build the
+   link command the same way.)
 
 4. **Thornlist changes costing hits: accepted for M1.** The key keeps
    covering the bytes of every file a compile reads. To be revisited once
@@ -187,7 +199,7 @@ Asked as seven questions with options; the answers, in Max's numbering.
 
 ## Still open
 
-- The cluster check of decision 3 on a Spack-built GCC (qbd's site-built
-  GCC is checked: a link-only specs file).
+- (Answered: decision 3's cluster check, on qbd's site-built GCC and on
+  five Spack-built GCCs on mike and db1: all link-only.)
 - (Answered: the contract goes into `CLAUDE.md` with the merge, decision
   10.)

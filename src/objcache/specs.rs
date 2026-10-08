@@ -174,6 +174,10 @@ mod tests {
         assert_eq!(link_only(BUILTIN, BUILTIN.as_bytes(), b""), Ok(()));
         let link = BUILTIN.replace("%{!c:%(linker) %(link_libgcc) %L}", "%{!c:%(linker) -rpath /x %(link_libgcc) %L}");
         assert_eq!(link_only(BUILTIN, link.as_bytes(), b""), Ok(()));
+        // An older Spack's, in miniature (db1's GCC 8.4 and 9.3): an rpath
+        // at the front of a link section, and no blank line at the end.
+        let spack = BUILTIN.replace("%{!c:%(linker)", "-rpath /p/lib:/p/lib64 %{!c:%(linker)");
+        assert_eq!(link_only(BUILTIN, format!("{}\n", spack.trim_end()).as_bytes(), b""), Ok(()));
     }
 
     #[test]

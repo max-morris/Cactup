@@ -1238,8 +1238,8 @@ and no simple recipe is known. It changes the design choice of 2026-10-01
 ("objects then name files as `./arrangements/...`"), hence the question. Decision 3's check came
 back on 2026-10-02 from qbd: a site-built GCC whose specs file adds an
 rpath in a link section and changes nothing else, so the refinement for
-specs files is needed and is taken into M1a. A Spack-built GCC is still
-unchecked.
+specs files is needed and is taken into M1a. Spack-built GCCs were
+checked on 2026-10-07 (mike, db1; decision 3): all five accepted.
 
 ## Next step
 
