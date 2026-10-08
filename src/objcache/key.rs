@@ -361,7 +361,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     // for Fortran it goes in always (§18.10); and so do its `-I`
     // directories, which say where the rest are found.
     if compile.language.is_fortran() {
-        arguments.feed(b"renamed copy");
+        arguments.feed(b"fortran, its source named from the working directory");
         let mut flags = compile.preprocess.iter();
         while let Some(flag) = flags.next() {
             if flag == "-I" {
@@ -477,7 +477,7 @@ impl Keyed {
     /// object may still have the new ones (§18.5).
     pub fn still_holds(&self) -> bool {
         if let Some(fortran) = &self.fortran {
-            return fortran::still_holds(&self.compiler, &self.name, &self.compile, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
+            return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
         }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
@@ -486,7 +486,8 @@ impl Keyed {
     /// The command line of the compile whose result is to be stored, in
     /// place of `argv`: the recipe's, given the flags that make it record its
     /// paths as the key does (the path map's, if the key was made with it),
-    /// and for Fortran under the map, the renamed copy (§18.10).
+    /// and for Fortran under the map, the source named as the map names it
+    /// (§18.10).
     pub fn compile_argv(&self, argv: &[OsString]) -> Vec<OsString> {
         let mut out = vec![argv[0].clone()];
         match &self.fortran {
@@ -494,7 +495,6 @@ impl Keyed {
             None => out.extend(argv[1..].iter().cloned()),
         }
         out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default());
-        out.extend(self.fortran.iter().flat_map(fortran::Fortran::map_flags));
         out
     }
 

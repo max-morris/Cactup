@@ -1745,13 +1745,13 @@ impl<'a> FortranUnits<'a> {
         fs::write(
             &provider,
             format!(
-                "# 1 \"{}\"\nmodule provider\n  include 'vals.inc'\ncontains\n  subroutine say(u)\n    integer, intent(in) :: u\n    write (u, *) 'seven', seven\n  end subroutine\nend module provider\n",
+                "# 1 \"{}\"\nmodule provider\n  include 'vals.inc'\ncontains\n  subroutine say(u)\n    integer, intent(in) :: u\n    real, allocatable :: a(:)\n    allocate (a(seven))\n    write (u, *) 'seven', seven, size(a)\n  end subroutine\nend module provider\n",
                 thorn.join("provider.F90").display()
             ),
         )
         .unwrap();
         let user = dir.join("user.f90");
-        fs::write(&user, "module user\n  use provider\ncontains\n  subroutine twice(u)\n    integer, intent(in) :: u\n    integer :: unused\n    call say(u)\n    call say(u)\n  end subroutine\nend module user\n").unwrap();
+        fs::write(&user, "module user\n  use provider\ncontains\n  subroutine twice(u)\n    integer, intent(in) :: u\n    integer :: unused\n    real, allocatable :: b(:)\n    allocate (b(u))\n    call say(u)\n    call say(u)\n  end subroutine\nend module user\n").unwrap();
         Self { build, provider, user }
     }
 
@@ -1763,7 +1763,7 @@ impl<'a> FortranUnits<'a> {
     fn wrapped(&self, source: &Path) -> Output {
         let thorn = self.build.root.join("arrangements/Arr/Thorn/src");
         let object = Self::object(source);
-        let args = ["-g", "-O2", "-Wall", "-fcray-pointer", "-ffixed-line-length-none"];
+        let args = ["-g", "-O2", "-Wall", "-fcheck=all", "-fcray-pointer", "-ffixed-line-length-none"];
         let mut args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
         args.push(format!("-I{}", thorn.display()));
         args.extend(["-c".to_owned(), "-o".to_owned(), object.display().to_string(), source.display().to_string()]);
@@ -1779,14 +1779,21 @@ impl<'a> FortranUnits<'a> {
     }
 
     /// Whatever the cache left lying about in the build, the scratch and
-    /// the attempt's directories.
+    /// the attempt's directories, but for the copy of a source with line
+    /// markers, which stays beside it like the build copy itself (§18.10).
     fn strays(&self) -> Vec<PathBuf> {
         let mut found = Vec::new();
-        for dir in [self.build.config.join("build/Thorn"), self.build.config.join("scratch"), self.build.cc.clone()] {
-            for entry in fs::read_dir(&dir).unwrap() {
-                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-                if name.contains("cactup") || name.starts_with(".fortran-") || name.starts_with(".modules-") || name.starts_with(".module.") {
-                    found.push(dir.join(name));
+        let copies = self.build.config.join("build/Thorn/.cactup");
+        for dir in [self.build.config.join("build/Thorn"), self.build.config.join("scratch"), self.build.cc.clone(), copies.clone()] {
+            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if path == copies || (dir == copies && name == "provider.f90") {
+                    continue;
+                }
+                if dir == copies || name.contains("cactup") || name.starts_with(".fortran-") || name.starts_with(".module.") || name.starts_with(".copy-") {
+                    found.push(path);
                 }
             }
         }
@@ -1823,7 +1830,9 @@ fn fortran_is_served_with_its_module_files_elsewhere() {
     let objects: Vec<Vec<u8>> = [&here.provider, &here.user].iter().map(|source| fs::read(FortranUnits::object(source)).unwrap()).collect();
     for object in &objects {
         assert!(!text(object).contains(&one.root.display().to_string()), "the object names no real path of the tree");
+        assert!(!text(object).contains(".fortran-"), "the object names nothing of the cache's");
     }
+    assert!(text(&objects[1]).contains("../build/Thorn/user.f90"), "the user's runtime messages name it from scratch");
     let modules: Vec<Vec<u8>> = ["provider.mod", "user.mod"].iter().map(|name| fs::read(here.module(name)).unwrap()).collect();
     assert_eq!(here.strays(), Vec::<PathBuf>::new());
 
@@ -1911,7 +1920,7 @@ fn recording_fortran_compiles_as_written() {
     let thorn = build.root.join("arrangements/Arr/Thorn/src");
     let object = FortranUnits::object(&units.provider);
     let status = Command::new("gfortran")
-        .args(["-g", "-O2", "-Wall", "-fcray-pointer", "-ffixed-line-length-none"])
+        .args(["-g", "-O2", "-Wall", "-fcheck=all", "-fcray-pointer", "-ffixed-line-length-none"])
         .arg(format!("-I{}", thorn.display()))
         .arg("-c")
         .arg("-o")

@@ -207,14 +207,22 @@ Asked as seven questions with options; the answers, in Max's numbering.
     Fortran is shared between configurations and installations and its
     runtime errors name `/cactup-root/...` files, as C's `__FILE__` does
     under decision 8) or to key the paths and share Fortran only within one
-    configuration path. Answer: "Rename, share". Tested on gfortran 14.2:
-    a copy whose first line is `# 1 "<mapped path>"`, compiled with the
-    general prefix map first and the copy's directory mapped to the
-    original's last (GCC takes the last match), gives byte-identical objects
-    and module files from two trees, with no trace of the copy's place. The copy keeps the source's file name, in a directory
-    of its own, since a module file records the name gfortran was given
-    ("created from x.f90"); the source's own directory goes first among the
-    `-I` directories, where Fortran `include` would have looked first.
+    configuration path. Answer: "Rename, share". As built (after the
+    Einstein Toolkit audit found the first way wrong in 63 objects, below):
+    the compile names its source by its path from the working directory
+    (`../build/<Thorn>/x.f90`, the same in every tree), since gfortran's
+    runtime checks write the name it was given ("In file '...', around line
+    7"); a source whose line markers name files is compiled as a copy with
+    those names mapped, under the source's own file name (a module file
+    records it) in `.cactup/` beside the source, named from the working
+    directory too, with the source's directory first in `-I`. Runtime
+    errors then name `/cactup-root/...` files where Cactus wrote line
+    markers, and `../build/<Thorn>/x.f90` where it did not.
+
+    The first way (a copy in a private directory, mapped by a prefix map)
+    passed the small tests and two-tree trials, which used no runtime
+    checks: the "In file" string named the private directory, so every
+    build made different objects of 63 sources, and audit mode said so.
 
 ## Still open
 

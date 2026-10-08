@@ -564,9 +564,11 @@ share objects, a compile run through the cache records its source files as
 `/cactup-root/arrangements/<Arrangement>/<Thorn>/src/...` and the
 configuration's files as `/cactup-root/configs/@config/...`, not by their
 full paths. Warnings and errors still name the real files, but what a
-thorn prints with `CCTK_WARN`, and the file a Fortran runtime error names
-("At line 7 of file ..."), show these names, and a debugger has to be told
-where they are. In gdb, the configuration's rule first (gdb uses the
+thorn prints with `CCTK_WARN` shows these names, and a debugger has to be
+told where they are. A Fortran runtime error ("At line 7 of file ...")
+names the file the same way when the optionlist turns on
+`F_LINE_DIRECTIVES`, and otherwise by its path from the configuration's
+`scratch` directory, `../build/<Thorn>/<file>.f90`. In gdb, the configuration's rule first (gdb uses the
 first rule that matches), then the tree's:
 
 ```

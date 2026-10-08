@@ -5553,17 +5553,24 @@ asked: run with the compile's arguments and `-cpp -undef -M -fsyntax-only`
 by the name it was found under, and the module files it writes as targets.
 `-fsyntax-only` runs the front end alone, which reads every file the
 compile reads, and tells the driver nothing will be linked (it would read
-`libgfortran.spec` for a link); the module files it writes go into a
-directory of its own (`-J`), and one it writes and then reads is its own
-output, not an input. That run needs the C preprocessor, which the
-compile does not run, and in traditional mode with every macro it can
-drop dropped (`-undef`) the preprocessor still acts on `/*` (a comment that
-swallows lines up to the next `*/`), on a directive other than a line
-marker, on a line ending in `\`, and on names it still defines (`__FILE__`,
-`__GFC_INT_8__`: all begin with two underscores, which no Fortran name
-can); a source with any of them is not cached (none of the Einstein
-Toolkit's 594 Fortran build copies has one). A name the rule had to escape
-is not read, and the compile is not cached.
+`libgfortran.spec` for a link). It writes module files and reads back the
+ones it wrote, as the compile does, so it runs in an empty directory of its
+own (where it writes them, and where it finds them first) with the
+compile's working directory first among its `-I` directories: it finds
+every other module file where the compile finds it. A module file it names
+in its own directory is its own output, not an input; an included file it
+finds in the compile's working directory, which the compile does not
+search for included files, keeps the compile out of the cache. That run
+needs the C preprocessor, which the compile does not run, and in
+traditional mode with every macro it can drop dropped (`-undef`) the
+preprocessor still acts on `/*` (a comment that swallows lines up to the
+next `*/`), on a directive other than a line marker, on a line ending in
+`\`, and on names it still defines (`__FILE__`, `__GFC_INT_8__`: all begin
+and end with two underscores); a source with any of them is not cached
+(none of the Einstein Toolkit's 594 Fortran build copies has one; a word
+that only begins with two underscores, the rest of a name continued on a
+fixed-form line, is defined by nothing). A name the rule had to escape is
+not read, and the compile is not cached.
 
 The key's text part (§18.5) is the digest of the text compiled and of the
 names of the module files it writes; its files part, of every file the
@@ -5584,24 +5591,31 @@ time; the source named by its file name alone), so they are the same
 across installations.
 
 **Paths** (decision 13). gfortran writes a source's name into the object
-for its runtime error messages ("At line 7 of file …"): the name it was
-given, or the name in a line marker, and no `-f*-prefix-map` reaches it.
-So under the path map a compile reads a copy of the source, the *renamed
-copy*: under the source's own file name (a module file records the name
-gfortran was given), in a directory of its own in the build attempt's
-`cc`, with a first line `# 1 "<the source's mapped name>"` unless the
-source begins with a line marker, and every line marker's file named by
-its mapped name. The compile gets the source's own directory first among
-its `-I` directories, where Fortran `include` would have looked first
-(and a module file that would then be found there, and not by the compile
-without the cache, is not cached), and, after the path map's flags, the
-copy's directory mapped to the source's mapped directory: GCC takes the
-last map that matches. Objects and module files from two trees are then
-byte-identical, and nothing records the copy. The compiler's messages name
-the copy or mapped names; as they pass through, line by line, those are
+for its runtime messages, and no `-f*-prefix-map` reaches it: the name it
+was given ("In file '...', around line 7", from runtime checks), and the
+name in a line marker, or else the one it was given ("At line 7 of file
+..."). So under the path map a compile names its source by its path from
+the working directory, `../build/<Thorn>/x.f90`, the same in every tree and
+every configuration. A source whose line markers name files (Cactus writes
+them with `F_LINE_DIRECTIVES = yes`, naming the original by its absolute
+path) is compiled as a copy whose markers name their files by mapped names
+(`/cactup-root/...`, as C's `__FILE__` under decision 8): under the
+source's own file name (a module file records the name gfortran was
+given), in `.cactup/` beside the source, named from the working directory
+too (`../build/<Thorn>/.cactup/x.f90`), with the source's own directory
+first among the `-I` directories, where Fortran `include` would have
+looked first (a module file that would then be found there, and not by the
+compile without the cache, keeps the compile out of the cache). The copy is
+written whole, a temporary file renamed into place, and left there like the
+build copy itself: another compile of the same source writes the same
+bytes. Objects and module files from two trees are then byte-identical;
+the debug information names the source relative to the compile directory,
+which the path map maps. The compiler's messages name the source as it was
+given and the mapped names; as they pass through, line by line, those are
 given back their real names (`key::Rewrite`), so what the user reads, and
 what an entry keeps (§18.8), is what the compile without the cache would
 have said. `relocates`' trial for gfortran compiles a module this way in
-two trees, with and without a line marker, and compares both objects and
-both module files. In record mode, and under `build-cache-relocate = no`,
-the compile reads the source as the recipe gave it.
+two trees, with and without a line marker, with runtime checks on, and
+compares both objects and both module files. In record mode, and under
+`build-cache-relocate = no`, the compile reads the source as the recipe
+gave it.
