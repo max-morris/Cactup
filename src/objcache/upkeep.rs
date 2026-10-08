@@ -633,7 +633,7 @@ mod tests {
             };
             let key = parts.key();
             let about = About { unit: None, compiler: "gcc".into(), relocatable: true, cactup: "t".into(), host: "h".into() };
-            store.publish(&NewEntry { key: &key, parts: &parts, object: &object, stdout: b"", stderr: b"", about }).unwrap();
+            store.publish(&NewEntry { key: &key, parts: &parts, object: &object, stdout: b"", stderr: b"", modules: &[], about }).unwrap();
             published.push(key);
         }
         log_use(&store, &published[..1]).unwrap();
@@ -651,7 +651,7 @@ mod tests {
         let plan = plan(&scan, now, Some(Duration::from_secs(DAY)), None);
         assert!(plan.entries.is_empty());
         carry_out(&plan).unwrap();
-        let used: Vec<String> = fs::read_dir(root.join("v1/plato/used")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let used: Vec<String> = fs::read_dir(root.join(format!("v{FORMAT}/plato/used"))).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(used.len(), 1, "{used:?}");
         assert!(used[0].ends_with(".times"), "{used:?}");
         // The folded log still knows the use.
@@ -676,12 +676,12 @@ mod tests {
         let root = tmp.path().join("cache");
         let store = Store::new(&root, "plato").unwrap();
         log_use(&store, &["a".repeat(64)]).unwrap();
-        let log = fs::read_dir(root.join("v1/plato/used")).unwrap().next().unwrap().unwrap().path();
+        let log = fs::read_dir(root.join(format!("v{FORMAT}/plato/used"))).unwrap().next().unwrap().unwrap().path();
         let status = fs::read_to_string("/proc/self/status").unwrap();
         let umask = u32::from_str_radix(status.lines().find_map(|l| l.strip_prefix("Umask:")).unwrap().trim(), 8).unwrap();
         assert_eq!(fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o666 & !umask);
         stamp_size(&root, 5).unwrap();
-        assert_eq!(fs::metadata(root.join("v1/size")).unwrap().permissions().mode() & 0o777, 0o666 & !umask);
+        assert_eq!(fs::metadata(root.join(format!("v{FORMAT}/size"))).unwrap().permissions().mode() & 0o777, 0o666 & !umask);
 
         fs::set_permissions(&log, fs::Permissions::from_mode(0)).unwrap();
         if fs::read(&log).is_ok() {

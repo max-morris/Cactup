@@ -1699,13 +1699,274 @@ fn a_build_that_does_not_relocate_compiles_as_written() {
 /// Change one byte of the object in the store's entry for `key`, with the
 /// entry's checksum made to match: a wrong entry that looks whole.
 fn corrupt_entry(store: &Path, key: &str) {
-    let entry = store.join("v1/test").join(&key[..2]).join(key);
+    let entry = store.join("v2/test").join(&key[..2]).join(key);
     let bytes = fs::read(&entry).unwrap();
     let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
     let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;
     let lengths: Vec<usize> = text(&bytes[line_end..lengths_end - 1]).split(' ').map(|n| n.parse().unwrap()).collect();
     let mut body = bytes[..bytes.len() - 65].to_vec();
     body[lengths_end + lengths[0] + lengths[1] / 2] ^= 0x55;
+    let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    body.extend(format!("{sum}\n").bytes());
+    fs::remove_file(&entry).unwrap();
+    fs::write(&entry, body).unwrap();
+}
+
+/// Does this host have a gfortran the cache keys?
+fn have_gfortran() -> bool {
+    let build = Build::new("record");
+    fs::write(build.config.join("build/Thorn/probe.f90"), "subroutine probe()\nend subroutine\n").unwrap();
+    let ran = build.wrap("gfortran", &["-c", "-o", "probe.o", "probe.f90"]).current_dir(build.config.join("build/Thorn")).output();
+    let keyed = ran.is_ok_and(|out| out.status.success()) && build.events().first().is_some_and(|e| e.contains("\"key\""));
+    if !keyed {
+        eprintln!("skipped: no gfortran on this host that the cache keys: {:?}", build.events());
+    }
+    keyed
+}
+
+/// Two Cactus-shaped Fortran compiles (§18.10): a module that includes a
+/// file beside its source and writes something (so that its object holds
+/// the source's name for a runtime error message), its build copy beginning
+/// with a line marker naming where it came from; and a source without one
+/// that uses the module and draws a warning.
+struct FortranUnits<'a> {
+    build: &'a Build,
+    provider: PathBuf,
+    user: PathBuf,
+}
+
+impl<'a> FortranUnits<'a> {
+    fn new(build: &'a Build) -> Self {
+        let thorn = build.root.join("arrangements/Arr/Thorn/src");
+        fs::create_dir_all(&thorn).unwrap();
+        let dir = build.config.join("build/Thorn");
+        fs::write(dir.join("vals.inc"), "integer, parameter :: seven = 7\n").unwrap();
+        let provider = dir.join("provider.f90");
+        fs::write(
+            &provider,
+            format!(
+                "# 1 \"{}\"\nmodule provider\n  include 'vals.inc'\ncontains\n  subroutine say(u)\n    integer, intent(in) :: u\n    write (u, *) 'seven', seven\n  end subroutine\nend module provider\n",
+                thorn.join("provider.F90").display()
+            ),
+        )
+        .unwrap();
+        let user = dir.join("user.f90");
+        fs::write(&user, "module user\n  use provider\ncontains\n  subroutine twice(u)\n    integer, intent(in) :: u\n    integer :: unused\n    call say(u)\n    call say(u)\n  end subroutine\nend module user\n").unwrap();
+        Self { build, provider, user }
+    }
+
+    fn object(source: &Path) -> PathBuf {
+        source.with_extension("F90.o")
+    }
+
+    /// Compile `source` through the wrapper from `scratch`, as Cactus does.
+    fn wrapped(&self, source: &Path) -> Output {
+        let thorn = self.build.root.join("arrangements/Arr/Thorn/src");
+        let object = Self::object(source);
+        let args = ["-g", "-O2", "-Wall", "-fcray-pointer", "-ffixed-line-length-none"];
+        let mut args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        args.push(format!("-I{}", thorn.display()));
+        args.extend(["-c".to_owned(), "-o".to_owned(), object.display().to_string(), source.display().to_string()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let cwd = self.build.config.join("scratch");
+        let out = self.build.wrap("gfortran", &args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+        assert!(out.status.success(), "{}: {}", source.display(), text(&out.stderr));
+        out
+    }
+
+    fn module(&self, name: &str) -> PathBuf {
+        self.build.config.join("scratch").join(name)
+    }
+
+    /// Whatever the cache left lying about in the build, the scratch and
+    /// the attempt's directories.
+    fn strays(&self) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for dir in [self.build.config.join("build/Thorn"), self.build.config.join("scratch"), self.build.cc.clone()] {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                if name.contains("cactup") || name.starts_with(".fortran-") || name.starts_with(".modules-") || name.starts_with(".module.") {
+                    found.push(dir.join(name));
+                }
+            }
+        }
+        found
+    }
+}
+
+/// A serving build publishes a Fortran compile with its module files and
+/// serves it to another tree elsewhere under another configuration name, as
+/// the object and the module files that tree's own compile writes. What the
+/// compiler says names each tree's own files; a module file that would not
+/// change is left alone; nothing is left lying about.
+#[test]
+fn fortran_is_served_with_its_module_files_elsewhere() {
+    if !have_gfortran() {
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let store = shared.join("store");
+    let one = Build::named("one", "sim", "record").serving("serve", &store);
+    let other = Build::named("an/other/deeper", "renamed", "record").serving("serve", &store);
+    let (here, there) = (FortranUnits::new(&one), FortranUnits::new(&other));
+
+    // Misses: compiled, published with their module files.
+    here.wrapped(&here.provider);
+    let event = one.last_event();
+    assert_eq!((event["outcome"].as_str(), event["published"].as_bool(), event["relocatable"].as_bool()), (Some("miss"), Some(true), Some(true)), "{event}");
+    let first = here.wrapped(&here.user);
+    assert_eq!(one.last_event()["published"].as_bool(), Some(true), "{}", one.last_event());
+    let warning = text(&first.stderr);
+    assert!(warning.contains("unused") && warning.contains(&here.user.display().to_string()), "the warning names this tree's file: {warning}");
+    assert!(!warning.contains("cactup-root") && !warning.contains(".fortran-"), "{warning}");
+    let objects: Vec<Vec<u8>> = [&here.provider, &here.user].iter().map(|source| fs::read(FortranUnits::object(source)).unwrap()).collect();
+    for object in &objects {
+        assert!(!text(object).contains(&one.root.display().to_string()), "the object names no real path of the tree");
+    }
+    let modules: Vec<Vec<u8>> = ["provider.mod", "user.mod"].iter().map(|name| fs::read(here.module(name)).unwrap()).collect();
+    assert_eq!(here.strays(), Vec::<PathBuf>::new());
+
+    // Hits elsewhere: the objects and the module files, and the warning
+    // naming that tree.
+    there.wrapped(&there.provider);
+    assert_eq!(other.last_event()["outcome"].as_str(), Some("hit"), "{}", other.last_event());
+    assert!(there.module("provider.mod").is_file(), "a hit puts the module file where the compile would");
+    let served = there.wrapped(&there.user);
+    assert_eq!(other.last_event()["outcome"].as_str(), Some("hit"), "{}", other.last_event());
+    let warning = text(&served.stderr);
+    assert!(warning.contains(&there.user.display().to_string()) && !warning.contains(&one.root.display().to_string()), "{warning}");
+    assert!(!warning.contains("@CACTUP_") && !warning.contains("cactup-root"), "{warning}");
+    let served_objects: Vec<Vec<u8>> = [&there.provider, &there.user].iter().map(|source| fs::read(FortranUnits::object(source)).unwrap()).collect();
+    let served_modules: Vec<Vec<u8>> = ["provider.mod", "user.mod"].iter().map(|name| fs::read(there.module(name)).unwrap()).collect();
+    assert_eq!((&served_objects, &served_modules), (&objects, &modules));
+
+    // What that tree's own compiles write is what it was served.
+    let control = shared.join("control-store");
+    other.set_mode("serve", &control);
+    for source in [&there.provider, &there.user] {
+        fs::remove_file(FortranUnits::object(source)).unwrap();
+        there.wrapped(source);
+        assert_eq!(other.last_event()["outcome"].as_str(), Some("miss"));
+    }
+    let own: Vec<Vec<u8>> = [&there.provider, &there.user].iter().map(|source| fs::read(FortranUnits::object(source)).unwrap()).collect();
+    assert_eq!(own, served_objects, "served elsewhere, not that tree's own object");
+    let own_modules: Vec<Vec<u8>> = ["provider.mod", "user.mod"].iter().map(|name| fs::read(there.module(name)).unwrap()).collect();
+    assert_eq!(own_modules, served_modules);
+
+    // A module file that would not change is left alone, as gfortran
+    // leaves it.
+    other.set_mode("serve", &store);
+    let before = fs::metadata(there.module("provider.mod")).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    there.wrapped(&there.provider);
+    assert_eq!(other.last_event()["outcome"].as_str(), Some("hit"));
+    assert_eq!(fs::metadata(there.module("provider.mod")).unwrap().modified().unwrap(), before);
+    assert_eq!(there.strays(), Vec::<PathBuf>::new());
+}
+
+/// Audit mode compiles a Fortran hit anyway: the same object and module
+/// files are "same"; an entry whose module file is not what the compile
+/// writes is "a wrong hit", and the build keeps what it compiled.
+#[test]
+fn audit_mode_checks_fortran_module_files_too() {
+    if !have_gfortran() {
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let store = fs::canonicalize(shared.path()).unwrap().join("store");
+    let build = Build::new("record").serving("serve", &store);
+    let units = FortranUnits::new(&build);
+    units.wrapped(&units.provider);
+    let key = build.last_event()["key"].as_str().unwrap().to_owned();
+    let module = fs::read(units.module("provider.mod")).unwrap();
+    build.set_mode("audit", &store);
+    units.wrapped(&units.provider);
+    let event = build.last_event();
+    assert_eq!((event["outcome"].as_str(), event["audit"].as_str()), (Some("hit"), Some("same")), "{event}");
+
+    // The module file in the entry, made wrong with a checksum to match.
+    corrupt_entry_part(&store, &key, 4);
+    units.wrapped(&units.provider);
+    let event = build.last_event();
+    assert_eq!(event["audit"].as_str(), Some("wrong-hit"), "{event}");
+    assert_eq!(fs::read(units.module("provider.mod")).unwrap(), module, "the build keeps the module file it compiled");
+    assert_eq!(units.strays(), Vec::<PathBuf>::new());
+}
+
+/// Record mode keys a Fortran compile and changes nothing about it: the
+/// recipe's own command line runs.
+#[test]
+fn recording_fortran_compiles_as_written() {
+    if !have_gfortran() {
+        return;
+    }
+    let build = Build::new("record");
+    let units = FortranUnits::new(&build);
+    units.wrapped(&units.provider);
+    let event = build.last_event();
+    assert!(event["key"].is_string() && event["outcome"].is_null(), "{event}");
+    let recorded = fs::read(FortranUnits::object(&units.provider)).unwrap();
+    let cwd = build.config.join("scratch");
+    let thorn = build.root.join("arrangements/Arr/Thorn/src");
+    let object = FortranUnits::object(&units.provider);
+    let status = Command::new("gfortran")
+        .args(["-g", "-O2", "-Wall", "-fcray-pointer", "-ffixed-line-length-none"])
+        .arg(format!("-I{}", thorn.display()))
+        .arg("-c")
+        .arg("-o")
+        .arg(&object)
+        .arg(&units.provider)
+        .current_dir(&cwd)
+        .env("PWD", &cwd)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(fs::read(&object).unwrap(), recorded, "record mode changed the compile");
+    assert_eq!(units.strays(), Vec::<PathBuf>::new());
+}
+
+/// What the cache cannot vouch for in a Fortran compile is passed through,
+/// with its reason.
+#[test]
+fn fortran_the_cache_cannot_follow_is_passed_through() {
+    if !have_gfortran() {
+        return;
+    }
+    let build = Build::new("record");
+    let dir = build.config.join("build/Thorn");
+    let cwd = build.config.join("scratch");
+    let elsewhere = build.config.join("modules");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let elsewhere = elsewhere.display().to_string();
+    for (file, content, flags, why) in [
+        ("upper.F90", "module upper\nend module upper\n", vec![], "preprocesses"),
+        ("comment.f90", "module comment\n  ! a /* in a comment\nend module comment\n", vec![], "/*"),
+        ("moddir.f90", "module moddir\nend module moddir\n", vec!["-J", elsewhere.as_str()], "does not follow"),
+    ] {
+        fs::write(dir.join(file), content).unwrap();
+        let mut args: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
+        args.extend(["-c".to_owned(), "-o".to_owned(), dir.join(format!("{file}.o")).display().to_string(), dir.join(file).display().to_string()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = build.wrap("gfortran", &args).current_dir(&cwd).output().unwrap();
+        assert!(out.status.success(), "{file}: {}", text(&out.stderr));
+        let event = build.last_event();
+        assert!(event["not_cached"].as_str().is_some_and(|reason| reason.contains(why)), "{file}: {event}");
+    }
+}
+
+/// Change one byte of part `part` (0 the header, 1 the object, 2 stdout,
+/// 3 stderr, 4 and on the module files) of the store's entry for `key`,
+/// with the entry's checksum made to match.
+fn corrupt_entry_part(store: &Path, key: &str, part: usize) {
+    let entry = store.join("v2/test").join(&key[..2]).join(key);
+    let bytes = fs::read(&entry).unwrap();
+    let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+    let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;
+    let lengths: Vec<usize> = text(&bytes[line_end..lengths_end - 1]).split(' ').map(|n| n.parse().unwrap()).collect();
+    let start = lengths_end + lengths[..part].iter().sum::<usize>();
+    let mut body = bytes[..bytes.len() - 65].to_vec();
+    body[start + lengths[part] / 2] ^= 0x55;
     let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
     body.extend(format!("{sum}\n").bytes());
     fs::remove_file(&entry).unwrap();

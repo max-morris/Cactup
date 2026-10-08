@@ -53,6 +53,8 @@ use std::process::{Command, Stdio};
 pub enum Family {
     Gcc,
     Clang,
+    /// GCC's Fortran driver (§18.10).
+    Gfortran,
 }
 
 /// An identified compiler.
@@ -375,10 +377,10 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
     let family = if says.contains("clang version") && contains(b"clang LLVM compiler") {
         Family::Clang
     } else if says.contains("Free Software Foundation") && contains(b"COLLECT_GCC") && contains(b"GCC_EXEC_PREFIX") {
-        if says.lines().next().is_some_and(|line| line.contains("GNU Fortran")) {
-            bail!("Fortran is not cached yet");
+        match says.lines().next().is_some_and(|line| line.contains("GNU Fortran")) {
+            true => Family::Gfortran,
+            false => Family::Gcc,
         }
-        Family::Gcc
     } else {
         bail!("{} is not a compiler cactup knows (or is a wrapper around one)", path.display());
     };
@@ -412,10 +414,14 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
                 }
             }
         }
-        Family::Gcc => {
+        Family::Gcc | Family::Gfortran => {
             hasher.feed(says.as_bytes());
             // The programs the driver hands the work to.
-            for helper in ["cc1", "cc1plus", "as"] {
+            let helpers: &[&str] = match family {
+                Family::Gfortran => &["f951", "as"],
+                _ => &["cc1", "cc1plus", "as"],
+            };
+            for helper in helpers {
                 let named = ask(path, &[&format!("-print-prog-name={helper}")])?;
                 // A bare name back means "whatever PATH has": a front end
                 // that is not installed (no C++), or the system assembler.
@@ -431,7 +437,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
                         files.push(Seen::of(&file)?);
                         programs.push(file);
                     }
-                    None if helper == "cc1plus" => hasher.feed(b"absent"),
+                    None if *helper == "cc1plus" => hasher.feed(b"absent"),
                     None => bail!("{} names no {helper} cactup can find", path.display()),
                 }
             }
@@ -470,11 +476,15 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, files: &mut Vec<Seen>) -
         hasher.feed(file_digest(&library)?.as_bytes());
         files.push(Seen::of(&library)?);
     }
+    let (relocates, locale_neutral) = match family {
+        Family::Gfortran => (super::fortran::relocates(path, name, trial_dir), super::fortran::locale_neutral(path, name, trial_dir)),
+        _ => (relocates(path, name, trial_dir), locale_neutral(path, name, trial_dir)),
+    };
     Ok(Compiler {
         path: path.to_owned(),
         family,
-        relocates: relocates(path, name, trial_dir),
-        locale_neutral: locale_neutral(path, name, trial_dir),
+        relocates,
+        locale_neutral,
         id: hasher.hex(),
         specs,
     })

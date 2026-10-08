@@ -27,6 +27,7 @@
 pub mod compile;
 pub mod environment;
 pub mod event;
+pub mod fortran;
 pub mod hash;
 pub mod identity;
 pub mod key;
@@ -504,13 +505,13 @@ mod tests {
             event.append(&events_path(&cc));
         }
         after_build(&cc);
-        let used = store.join("v1/mel5/used");
+        let used = store.join(format!("v{}/mel5/used", store::FORMAT));
         let logs: Vec<_> = fs::read_dir(&used).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(logs.len(), 1);
         assert_eq!(fs::read_to_string(&logs[0]).unwrap(), format!("{hit}\n"));
         // Never measured: the build says so, and writes nothing that would
         // pass for a measurement.
-        assert!(!store.join("v1/size").exists());
+        assert!(!store.join(format!("v{}/size", store::FORMAT)).exists());
 
         // A recording build: nothing.
         let record = tmp.path().join("record");

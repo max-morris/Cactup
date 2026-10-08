@@ -197,6 +197,25 @@ Asked as seven questions with options; the answers, in Max's numbering.
     optional `[paths] build-cache-home` key, since the knob covers one
     user: "I say keep it. I can see a site wanting to override it."
 
+## Fortran (2026-10-07)
+
+13. **Fortran objects name `/cactup-root/` paths too.** gfortran writes a
+    source's path into the object for its runtime error messages ("At line
+    7 of file ..."): the main file's name as given, or the path in a line
+    marker; GCC 14 applies no `-f*-prefix-map` to it. Asked whether to
+    compile a renamed copy (line markers naming the mapped paths, so
+    Fortran is shared between configurations and installations and its
+    runtime errors name `/cactup-root/...` files, as C's `__FILE__` does
+    under decision 8) or to key the paths and share Fortran only within one
+    configuration path. Answer: "Rename, share". Tested on gfortran 14.2:
+    a copy whose first line is `# 1 "<mapped path>"`, compiled with the
+    general prefix map first and the copy's directory mapped to the
+    original's last (GCC takes the last match), gives byte-identical objects
+    and module files from two trees, with no trace of the copy's place. The copy keeps the source's file name, in a directory
+    of its own, since a module file records the name gfortran was given
+    ("created from x.f90"); the source's own directory goes first among the
+    `-I` directories, where Fortran `include` would have looked first.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

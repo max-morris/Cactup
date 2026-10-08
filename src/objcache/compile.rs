@@ -2,7 +2,8 @@
 //! know: is it a compile the cache understands *completely*, and if so,
 //! which arguments decide the object and which only feed the preprocessor.
 //!
-//! This reader is for the GCC and Clang drivers. It works from a list of
+//! This reader is for the GCC and Clang drivers, gfortran's included. It
+//! works from a list of
 //! what it knows (§18.1 rule 1): a flag that is not on it makes the whole
 //! command line "not cached", whatever the flag would have done. A miss
 //! costs a compile; a flag misread could cost a wrong object.
@@ -23,6 +24,10 @@ use std::path::{Path, PathBuf};
 pub enum Language {
     C,
     Cxx,
+    /// Fortran that the driver does not preprocess (§18.10): Cactus hands
+    /// gfortran the copies it has preprocessed itself. Fixed or free form,
+    /// by the suffix.
+    Fortran { fixed: bool },
 }
 
 impl Language {
@@ -30,7 +35,13 @@ impl Language {
         match self {
             Self::C => "c",
             Self::Cxx => "c++",
+            Self::Fortran { fixed: true } => "fortran-fixed",
+            Self::Fortran { fixed: false } => "fortran-free",
         }
+    }
+
+    pub fn is_fortran(self) -> bool {
+        matches!(self, Self::Fortran { .. })
     }
 
     /// By the source file's suffix, as the compiler driver decides it.
@@ -38,6 +49,13 @@ impl Language {
         match source.extension().and_then(OsStr::to_str) {
             Some("c") => Ok(Self::C),
             Some("cc" | "cp" | "cxx" | "cpp" | "CPP" | "c++" | "C") => Ok(Self::Cxx),
+            Some("f" | "for" | "ftn") => Ok(Self::Fortran { fixed: true }),
+            Some("f90" | "f95" | "f03" | "f08") => Ok(Self::Fortran { fixed: false }),
+            // gfortran runs the C preprocessor on these first, which this
+            // reader does not follow for Fortran.
+            Some(other @ ("F" | "FOR" | "FTN" | "FPP" | "fpp" | "F90" | "F95" | "F03" | "F08")) => {
+                Err(format!("sources ending in .{other}, which the compiler preprocesses, are not cached"))
+            }
             Some(other) => Err(format!("sources ending in .{other} are not cached")),
             None => Err("the source file has no suffix to tell its language by".to_owned()),
         }
@@ -49,6 +67,11 @@ impl Language {
 pub struct Compile {
     pub language: Language,
     pub source: PathBuf,
+    /// Where the source stands among the arguments: a Fortran compile under
+    /// the path map compiles a renamed copy in its place (§18.10).
+    pub source_at: usize,
+    /// Where `-c`, and `-o` with its file, stand among the arguments.
+    output_at: Vec<usize>,
     pub output: PathBuf,
     /// The command line of the matching preprocessor run, minus the `-E`:
     /// every argument but `-c` and `-o <file>`.
@@ -121,6 +144,9 @@ const NOT_CACHED: &[&str] = &[
     "@", "-fplugin", "-specs", "--specs", "-Xclang", "-Xpreprocessor", "-Xassembler", "-Wp,", "-Wa,", "-B",
     "-wrapper", "-fprofile-", "-fauto-profile", "-fbranch-probabilities", "-fxray-", "-fthinlto-index",
     "-flto", "-fno-lto", "-fmodule", "-fpch", "-include-pch", "-fopenmp-targets", "-foffload", "-ipo",
+    // Fortran (§18.10): a module directory of its own, more module search
+    // directories or a file read first, the preprocessor, no object at all.
+    "-J", "-fintrinsic-modules-path", "-fpre-include", "-cpp", "-fsyntax-only", "-fc-prototypes", "-fopenacc",
     // More outputs.
     "--coverage", "-ftest-coverage", "-gsplit-dwarf", "-fstack-usage", "-ftime-trace", "-ftime-report",
     "-fdump-", "-save-temps", "-frecord-gcc-switches", "-fcallgraph-info", "-fopt-info", "-aux-info",
@@ -155,6 +181,46 @@ const F_FLAGS_WITH_VALUE: &[&str] = &[
     "align-labels", "tabstop", "input-charset", "exec-charset", "openmp-version", "vect-cost-model",
     "simd-cost-model", "pack-struct", "random-seed", "zero-call-used-regs", "strict-flex-arrays", "fp-model",
 ];
+
+/// gfortran's `-f<name>` and `-fno-<name>` flags that only change the object
+/// or the diagnostics (§18.10): the source form, the meaning of types and of
+/// old extensions, runtime checks, how arrays and calls are made.
+const FORTRAN_F_FLAGS: &[&str] = &[
+    "fixed-form", "free-form", "fixed-line-length-none", "free-line-length-none", "cray-pointer", "dollar-ok",
+    "backslash", "implicit-none", "default-real-8", "default-real-10", "default-real-16", "default-double-8",
+    "default-integer-8", "integer-4-integer-8", "real-4-real-8", "real-4-real-10", "real-4-real-16",
+    "real-8-real-4", "real-8-real-10", "real-8-real-16", "range-check", "d-lines-as-code", "d-lines-as-comments",
+    "allow-argument-mismatch", "allow-invalid-boz", "allow-leading-underscore", "bounds-check",
+    "check-array-temporaries", "backtrace", "dump-core", "init-local-zero", "init-derived", "external-blas",
+    "automatic", "recursive", "stack-arrays", "realloc-lhs", "protect-parens", "aggressive-function-elimination",
+    "frontend-optimize", "sign-zero", "underscoring", "second-underscore", "align-commons", "inline-arg-packing",
+    "pad-source", "repack-arrays", "short-enums", "whole-file", "dec", "dec-structure", "dec-intrinsic-ints",
+    "dec-static", "dec-math", "dec-include", "dec-format-defaults", "dec-blank-format-item", "dec-char-conversions",
+];
+
+/// gfortran's `-f<name>=<value>` flags of the same kind.
+const FORTRAN_F_FLAGS_WITH_VALUE: &[&str] = &[
+    "init-real", "init-integer", "init-logical", "init-character", "check", "convert", "record-marker",
+    "max-subrecord-length", "max-stack-var-size", "max-array-constructor", "blas-matmul-limit",
+    "inline-matmul-limit", "coarray", "fpe-trap", "fpe-summary", "max-identifier-length",
+];
+
+/// Is `flag` one of gfortran's own plain settings?
+fn is_fortran_setting(flag: &str) -> bool {
+    if flag == "-nocpp" {
+        return true;
+    }
+    let Some(name) = flag.strip_prefix("-f") else { return false };
+    let name = name.strip_prefix("no-").unwrap_or(name);
+    // `-ffixed-line-length-132`, `-ffree-line-length-0`.
+    if let Some(columns) = ["fixed-line-length-", "free-line-length-"].iter().find_map(|prefix| name.strip_prefix(prefix)) {
+        return columns == "none" || (!columns.is_empty() && columns.bytes().all(|b| b.is_ascii_digit()));
+    }
+    match name.split_once('=') {
+        Some((name, _)) => FORTRAN_F_FLAGS_WITH_VALUE.contains(&name),
+        None => FORTRAN_F_FLAGS.contains(&name),
+    }
+}
 
 /// The debug level a `-g…` flag asks for, if it is one of the plain level
 /// flags. `-g` and `-ggdb` ask for the default level, 2. Other `-g…` flags
@@ -194,14 +260,20 @@ fn is_setting(flag: &str) -> bool {
 /// program's name). `Err` says why this command line is not cached; it
 /// still compiles exactly as given.
 pub fn parse(args: &[OsString]) -> Result<Compile, String> {
+    let total = args.len();
     let mut args = args.iter();
     let mut compile_only = false;
-    let (mut source, mut output) = (None, None);
+    let (mut source, mut output, mut source_at) = (None, None, 0);
+    let mut output_at = Vec::new();
     let (mut preprocess, mut keyed, mut depend) = (Vec::new(), Vec::new(), Vec::new());
     let (mut level, mut openmp, mut forced_include, mut native, mut charset) = (0, false, false, false, false);
     let mut depend_file = false;
+    // Flags the general list does not know: gfortran's own, if the source
+    // turns out to be Fortran (its suffix may come last).
+    let mut unknown = Vec::new();
 
     while let Some(arg) = args.next() {
+        let at = total - args.len() - 1;
         let Some(flag) = arg.to_str() else {
             return Err("an argument is not valid UTF-8".to_owned());
         };
@@ -219,9 +291,14 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
 
         if flag == "-c" {
             compile_only = true;
+            output_at.push(at);
         } else if let Some(file) = value_of("-o")? {
             if output.replace(PathBuf::from(file)).is_some() {
                 return Err("-o is given more than once".to_owned());
+            }
+            output_at.push(at);
+            if flag == "-o" {
+                output_at.push(at + 1);
             }
         } else if matches!(flag, "-MD" | "-MMD" | "-MP") {
             // A dependency file written while compiling.
@@ -255,7 +332,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             return Err("the source comes from standard input".to_owned());
         } else if flag.starts_with('-') {
             if !is_setting(flag) {
-                return Err(format!("{flag} is not a flag the cache knows"));
+                unknown.push(flag.to_owned());
             }
             // An explicit level sets the level; a bare `-g` only turns
             // debug information on, and leaves a level already asked for.
@@ -276,6 +353,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
             if source.replace(PathBuf::from(arg)).is_some() {
                 return Err("there is more than one input file".to_owned());
             }
+            source_at = at;
             preprocess.push(arg.clone());
         }
     }
@@ -286,6 +364,14 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     let source = source.ok_or("there is no input file")?;
     let output = output.ok_or("there is no -o")?;
     let language = Language::of_source(&source)?;
+    if let Some(flag) = unknown.iter().find(|flag| !(language.is_fortran() && is_fortran_setting(flag))) {
+        return Err(format!("{flag} is not a flag the cache knows"));
+    }
+    // Cactus has the dependencies of Fortran from a run of its own; a
+    // dependency file from the compile would list modules (§18.10).
+    if language.is_fortran() && !depend.is_empty() {
+        return Err("a dependency file is asked of a Fortran compile".to_owned());
+    }
     // A path with a newline in it could pass for two lines of a
     // preprocessor's output.
     if source.as_os_str().as_bytes().contains(&b'\n') {
@@ -297,7 +383,18 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     if !depend.is_empty() && !depend_file {
         return Err("a dependency file is asked for without -MF to say where".to_owned());
     }
-    Ok(Compile { language, source, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend })
+    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend })
+}
+
+impl Compile {
+    /// `args`, the arguments this was read from, without `-c` and `-o` with
+    /// its file: a run that writes no object. With where the source then
+    /// stands.
+    pub fn without_output(&self, args: &[OsString]) -> (Vec<OsString>, usize) {
+        let kept: Vec<OsString> = args.iter().enumerate().filter(|(at, _)| !self.output_at.contains(at)).map(|(_, arg)| arg.clone()).collect();
+        let source_at = self.source_at - self.output_at.iter().filter(|at| **at < self.source_at).count();
+        (kept, source_at)
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +420,13 @@ mod tests {
         let compile = parsed(CACTUS).unwrap();
         assert_eq!(compile.language, Language::C);
         assert_eq!(compile.source, Path::new("/c/build/T/a.c"));
+        assert_eq!(CACTUS[compile.source_at], "/c/build/T/a.c");
+        let (without, at) = compile.without_output(&os(CACTUS));
+        assert_eq!(without, os(&["-g", "-std=gnu99", "-O3", "/c/build/T/a.c", "-I/src/T", "-I", "/c/bindings", "-DCCODE", "-DX=1"]));
+        assert_eq!(without[at], "/c/build/T/a.c");
+        let joined = parsed(&["-ox.o", "a.f90", "-c", "-g"]).unwrap();
+        let (without, at) = joined.without_output(&os(&["-ox.o", "a.f90", "-c", "-g"]));
+        assert_eq!((without, at), (os(&["a.f90", "-g"]), 0));
         assert_eq!(compile.output, Path::new("/c/build/T/a.c.o"));
         assert_eq!(compile.keyed, os(&["-g", "-std=gnu99", "-O3"]));
         assert_eq!(
@@ -337,9 +441,13 @@ mod tests {
         for (source, language) in [("a.c", Language::C), ("a.cc", Language::Cxx), ("a.cxx", Language::Cxx), ("a.C", Language::Cxx)] {
             assert_eq!(parsed(&["-c", "-o", "a.o", source]).unwrap().language, language, "{source}");
         }
-        for source in ["a.f90", "a.F", "a.cu", "a.S", "a.m", "a"] {
+        for (source, fixed) in [("a.f", true), ("a.for", true), ("a.ftn", true), ("a.f90", false), ("a.f08", false)] {
+            assert_eq!(parsed(&["-c", "-o", "a.o", source]).unwrap().language, Language::Fortran { fixed }, "{source}");
+        }
+        for source in ["a.F", "a.F90", "a.fpp", "a.cu", "a.S", "a.m", "a"] {
             assert!(parsed(&["-c", "-o", "a.o", source]).is_err(), "{source}");
         }
+        assert!(parsed(&["-c", "-o", "a.o", "a.F90"]).unwrap_err().contains("preprocesses"));
         // `-x` means one thing before the source and another after it.
         for args in [&["-x", "c++", "-c", "-o", "a.o", "a.c"][..], &["-c", "-o", "a.o", "a.c", "-x", "c++"], &["-xc", "-c", "-o", "a.o", "a.cc"]] {
             assert!(parsed(args).unwrap_err().contains("does not follow"), "{args:?}");
@@ -438,6 +546,41 @@ mod tests {
         ] {
             let err = parsed(args).unwrap_err();
             assert!(err.contains(why), "{args:?}: {err}");
+        }
+    }
+
+    /// The shape of a Cactus Fortran compile line (`COMPILE_F90`), with the
+    /// settings the machine database's optionlists give gfortran.
+    #[test]
+    fn reads_a_cactus_fortran_compile() {
+        let compile = parsed(&[
+            "-g", "-fcray-pointer", "-ffixed-line-length-none", "-O3", "-funroll-loops", "-fopenmp", "-Wall",
+            "-finit-real=nan", "-fcheck=bounds,mem", "-fno-range-check", "-ffree-line-length-132", "-I/c/bindings",
+            "-I", "/src/T", "-c", "-o", "/c/build/T/a.F90.o", "/c/build/T/a.f90",
+        ])
+        .unwrap();
+        assert_eq!(compile.language, Language::Fortran { fixed: false });
+        assert_eq!(compile.keyed.len(), 11);
+        assert!(compile.openmp && compile.debug);
+        // gfortran's own settings are only settings of a Fortran compile.
+        assert!(parsed(&["-fcray-pointer", "-c", "-o", "a.o", "a.c"]).unwrap_err().contains("not a flag the cache knows"));
+        for (args, why) in [
+            (&["-J", "/m", "-c", "-o", "a.o", "a.f90"][..], "does not follow"),
+            (&["-J/m", "-c", "-o", "a.o", "a.f90"], "does not follow"),
+            (&["-M/m", "-c", "-o", "a.o", "a.f90"], "does not follow"),
+            (&["-cpp", "-c", "-o", "a.o", "a.f90"], "does not follow"),
+            (&["-fintrinsic-modules-path", "/x", "-c", "-o", "a.o", "a.f90"], "does not follow"),
+            (&["-fpre-include=/x.h", "-c", "-o", "a.o", "a.f90"], "does not follow"),
+            (&["-fsyntax-only", "-c", "-o", "a.o", "a.f90"], "does not follow"),
+            (&["-ffixed-line-length-wide", "-c", "-o", "a.o", "a.f"], "not a flag the cache knows"),
+            (&["-fnew-fortran-flag", "-c", "-o", "a.o", "a.f"], "not a flag the cache knows"),
+            (&["-MD", "-MF", "a.d", "-c", "-o", "a.o", "a.f90"], "dependency file"),
+        ] {
+            let err = parsed(args).unwrap_err();
+            assert!(err.contains(why), "{args:?}: {err}");
+        }
+        for flag in ["-ffixed-form", "-fno-underscoring", "-fdefault-real-8", "-fconvert=big-endian", "-fcoarray=single", "-nocpp", "-std=f2008"] {
+            assert!(parsed(&[flag, "-c", "-o", "a.o", "a.f"]).is_ok(), "{flag}");
         }
     }
 

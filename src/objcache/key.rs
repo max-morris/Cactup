@@ -29,6 +29,7 @@
 //! while the cache only records.
 
 use super::compile::{self, Compile};
+use super::fortran;
 use super::hash::{bytes_digest, Hasher};
 use super::identity::{self, Compiler, Family};
 use super::{environment, platform, BuildConf};
@@ -51,9 +52,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 /// absolute path, which one `set substitute-path /cactup-root <tree>` in gdb
 /// turns into the real one; a relative name would be taken as relative to
 /// the recorded compile directory.
-const ROOT_NAME: &str = "/cactup-root/";
+pub(super) const ROOT_NAME: &str = "/cactup-root/";
 /// What the configuration directory is called, whatever its name.
-const CONFIG_NAME: &str = "/cactup-root/configs/@config/";
+pub(super) const CONFIG_NAME: &str = "/cactup-root/configs/@config/";
 
 /// What stands for the configuration directory and the Cactus root (each
 /// with its `/`) in the compiler messages a relocatable entry keeps.
@@ -147,9 +148,46 @@ impl PathMap {
     /// the map knows, wherever it stands, as a token that
     /// [`messages_for_this_build`] turns back into this build's directory.
     pub fn messages_for_the_store(&self, text: &[u8]) -> Vec<u8> {
-        // Only where a path begins: `/x/w/Cactus/` is not `/w/Cactus/`. A
-        // colored diagnostic puts an escape sequence (`ESC[01mESC[K`) right
-        // before a path, and that ends in a letter.
+        let token = |to: &str| if to == CONFIG_NAME { CONFIG_TOKEN.to_vec() } else { ROOT_TOKEN.to_vec() };
+        Rewrite::new(self.from_to.iter().map(|(from, to)| (from.clone(), token(to))).collect()).apply(text)
+    }
+
+    /// The map for [`identity`]'s trials of a compiler, in a tree at `root`
+    /// with its configuration directory `config`: the map a key is made
+    /// with, spelled one way.
+    pub(super) fn for_trial(root: &Path, config: &Path) -> Self {
+        let dir = |path: &Path| [path.as_os_str().as_bytes(), b"/"].concat();
+        let mut from_to = vec![(dir(config), CONFIG_NAME), (dir(root), ROOT_NAME)];
+        from_to.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+        Self { from_to }
+    }
+
+    /// The file name `name` as a mapped compile records it.
+    pub fn apply(&self, name: &[u8]) -> Vec<u8> {
+        match self.from_to.iter().find_map(|(from, to)| Some((to, name.strip_prefix(from.as_slice())?))) {
+            Some((to, rest)) => [to.as_bytes(), rest].concat(),
+            None => name.to_vec(),
+        }
+    }
+
+}
+
+/// Names in compiler messages, each replaced by another where a path begins:
+/// `/x/w/Cactus/` is not `/w/Cactus/`. A colored diagnostic puts an escape
+/// sequence (`ESC[01mESC[K`) right before a path, and that ends in a letter.
+#[derive(Debug, Clone)]
+pub struct Rewrite {
+    /// Longest first, so that the most specific name is the one replaced.
+    pairs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Rewrite {
+    pub fn new(mut pairs: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        pairs.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+        Self { pairs }
+    }
+
+    pub fn apply(&self, text: &[u8]) -> Vec<u8> {
         let in_a_path = |byte: u8| byte.is_ascii_alphanumeric() || b"._-+~@/".contains(&byte);
         let after_escape = |at: usize| {
             let before = &text[..at];
@@ -161,9 +199,9 @@ impl PathMap {
         let mut at = 0;
         while at < text.len() {
             let begins = at == 0 || !in_a_path(text[at - 1]) || after_escape(at);
-            match self.from_to.iter().find(|(from, _)| begins && text[at..].starts_with(from)) {
+            match self.pairs.iter().find(|(from, _)| begins && text[at..].starts_with(from)) {
                 Some((from, to)) => {
-                    out.extend_from_slice(if *to == CONFIG_NAME { CONFIG_TOKEN } else { ROOT_TOKEN });
+                    out.extend_from_slice(to);
                     at += from.len();
                 }
                 None => {
@@ -174,15 +212,6 @@ impl PathMap {
         }
         out
     }
-
-    /// The file name `name` as a mapped compile records it.
-    pub fn apply(&self, name: &[u8]) -> Vec<u8> {
-        match self.from_to.iter().find_map(|(from, to)| Some((to, name.strip_prefix(from.as_slice())?))) {
-            Some((to, rest)) => [to.as_bytes(), rest].concat(),
-            None => name.to_vec(),
-        }
-    }
-
 }
 
 /// The compiler flag that maps the directory `from` (with its trailing `/`)
@@ -263,6 +292,8 @@ pub struct Keyed {
     /// The dependency file the key's preprocessor run wrote, under a
     /// temporary name, and the name the compile would give it (§18.8).
     depend: Option<(tempfile::TempPath, PathBuf)>,
+    /// A Fortran compile's copy, module files and dependency run (§18.10).
+    fortran: Option<fortran::Fortran>,
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
@@ -282,6 +313,12 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     // of its flags the GCC reader trips over first.
     let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
     let compile = compile::parse(&argv[1..])?;
+    if (compiler.family == Family::Gfortran) != compile.language.is_fortran() {
+        return Err(match compile.language.is_fortran() {
+            true => "Fortran is cached for gfortran only".to_owned(),
+            false => "gfortran is cached for Fortran sources only".to_owned(),
+        });
+    }
     // The locale only where the compiler's trial says it can matter, and
     // wherever the compile converts character sets: the trial does not, and
     // a conversion such as `ASCII//TRANSLIT` follows the locale (§18.8).
@@ -320,8 +357,20 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     // that names the same place. Both go in, as a mapped compile would
     // record them (a directory is mapped as a file name is: the
     // configuration directory itself, having nothing after its name, is
-    // not).
-    if compile.debug {
+    // not). Fortran finds module files from there by relative names, so
+    // for Fortran it goes in always (§18.10); and so do its `-I`
+    // directories, which say where the rest are found.
+    if compile.language.is_fortran() {
+        arguments.feed(b"renamed copy");
+        let mut flags = compile.preprocess.iter();
+        while let Some(flag) = flags.next() {
+            if flag == "-I" {
+                arguments.feed(b"-I");
+                arguments.feed(&mapped(flags.next().map(|dir| dir.as_bytes()).unwrap_or_default()));
+            }
+        }
+    }
+    if compile.debug || compile.language.is_fortran() {
         let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
         arguments.feed(b"cwd");
         arguments.feed(&mapped(cwd.as_os_str().as_bytes()));
@@ -329,6 +378,30 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     }
 
     let name = argv[0].clone();
+    if compile.language.is_fortran() {
+        let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
+        let read = fortran::key(&compiler, &name, &compile, &argv[1..], &cwd, map.as_ref(), cc_dir).map_err(whole)?;
+        let parts = Parts {
+            platform: platform.digest,
+            compiler: compiler.id.clone(),
+            arguments: arguments.hex(),
+            environment,
+            text: read.text,
+            files: read.files,
+        };
+        return Ok(Keyed {
+            compile,
+            compiler,
+            parts,
+            text_bytes: read.text_bytes,
+            files: read.count,
+            name,
+            map,
+            seen: read.seen,
+            depend: None,
+            fortran: Some(read.fortran),
+        });
+    }
     let depend = match depend {
         true => depend_flags(&compile).map_err(whole)?,
         false => None,
@@ -344,7 +417,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
         text: read.text,
         files: read.files,
     };
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, seen: read.seen, depend })
+    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, seen: read.seen, depend, fortran: None })
 }
 
 /// The dependency flags of `compile` for the key's preprocessor run, if it
@@ -403,14 +476,44 @@ impl Keyed {
     /// and changed back during the compile has its old bytes, and the
     /// object may still have the new ones (§18.5).
     pub fn still_holds(&self) -> bool {
+        if let Some(fortran) = &self.fortran {
+            return fortran::still_holds(&self.compiler, &self.name, &self.compile, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
+        }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
     }
 
-    /// The flags that make the compile record its paths as the key does:
-    /// the path map's, if the key was made with it.
-    pub fn compile_flags(&self) -> Vec<OsString> {
-        self.map.as_ref().map(PathMap::flags).unwrap_or_default()
+    /// The command line of the compile whose result is to be stored, in
+    /// place of `argv`: the recipe's, given the flags that make it record its
+    /// paths as the key does (the path map's, if the key was made with it),
+    /// and for Fortran under the map, the renamed copy (§18.10).
+    pub fn compile_argv(&self, argv: &[OsString]) -> Vec<OsString> {
+        let mut out = vec![argv[0].clone()];
+        match &self.fortran {
+            Some(fortran) => out.extend(fortran.arguments(&argv[1..], self.compile.source_at)),
+            None => out.extend(argv[1..].iter().cloned()),
+        }
+        out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default());
+        out.extend(self.fortran.iter().flat_map(fortran::Fortran::map_flags));
+        out
+    }
+
+    /// The module files the compile writes into its working directory
+    /// (§18.10): none, but for Fortran.
+    pub fn modules(&self) -> &[String] {
+        self.fortran.as_ref().map_or(&[], |fortran| fortran.modules.as_slice())
+    }
+
+    /// What the compile's messages say in place of real names, when it reads
+    /// a renamed copy (§18.10).
+    pub fn rewrite(&self, conf: &BuildConf) -> Option<Rewrite> {
+        self.fortran.as_ref()?.renamed.as_ref().map(|renamed| renamed.rewrite(conf))
+    }
+
+    /// Remove what keying made: the copy and the dependency runs' module
+    /// files. (The process ends by `exit`, which runs no destructor.)
+    pub fn clean_up(&mut self) {
+        drop(self.fortran.take());
     }
 
     /// The map the key was made with.
@@ -460,13 +563,13 @@ struct Read {
 /// A line that names a file: a line marker of preprocessor output
 /// (`# 12 "dir/file.h" 1`), or a line directive of a source (`#line 12
 /// "file.c"`).
-struct Naming<'a> {
+pub(super) struct Naming<'a> {
     /// What stands before the file name, the opening quote included.
-    head: &'a [u8],
+    pub head: &'a [u8],
     /// The name, with its escapes undone.
-    name: Vec<u8>,
+    pub name: Vec<u8>,
     /// What follows the name, from the closing quote on.
-    tail: &'a [u8],
+    pub tail: &'a [u8],
 }
 
 impl Naming<'_> {
@@ -486,7 +589,7 @@ impl Naming<'_> {
 /// Compilers write a name as a C string: GCC and Clang escape `\\` and
 /// `"`, and write bytes they take for unprintable (a tab, anything outside
 /// ASCII) as octal.
-fn naming<'a>(line: &'a [u8], opening: &[u8]) -> Result<Option<Naming<'a>>, String> {
+pub(super) fn naming<'a>(line: &'a [u8], opening: &[u8]) -> Result<Option<Naming<'a>>, String> {
     let Some(rest) = line.strip_prefix(opening) else { return Ok(None) };
     let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
     let Some(quoted) = rest[digits..].strip_prefix(b" \"").filter(|_| digits > 0) else { return Ok(None) };
@@ -751,16 +854,24 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    // The files, each under its mapped name. A file the preprocessor
-    // entered, it opened: if that cannot be read here, its name was misread
-    // or it is gone, and there is no key. A name that only a `#line` gave
-    // (generated code names its origin so) may be of no file at all; the
-    // bytes compiled are those of the file the directive stands in, which
-    // was entered.
+    let (files, seen) = read_files(&named, map)?;
+    Ok(Read { text, text_bytes, files, count: named.len(), seen })
+}
+
+/// Digest the files `named`, each under its mapped name: their bytes (the
+/// key's `files` part), and what each looked like when it was read, with
+/// every entry its name resolves through (the check after the compile).
+///
+/// A file the compiler opened (`entered`): if that cannot be read here, its
+/// name was misread or it is gone, and there is no key. A name that only a
+/// `#line` gave (generated code names its origin so) may be of no file at
+/// all; the bytes compiled are those of the file the directive stands in,
+/// which was entered.
+pub(super) fn read_files(named: &Named, map: Option<&PathMap>) -> Res<(String, String)> {
     let mut files = Hasher::new("files");
     let mut seen = Hasher::new("seen");
     let mut steps = HashMap::new();
-    for ((mapped, path), entered) in &named {
+    for ((mapped, path), entered) in named {
         files.feed(mapped);
         // What the name resolves through, and the file it leads to as the
         // open file is (after the open, which on NFS revalidates what the
@@ -794,7 +905,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         }
     }
-    Ok(Read { text, text_bytes, files: files.hex(), count: named.len(), seen: seen.hex() })
+    Ok((files.hex(), seen.hex()))
 }
 
 /// Does the driver take flags for this compile from a file of its own? It
@@ -810,7 +921,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 ///
 /// A GCC whose specs file was accepted for changing only the link
 /// (`specs`) must say it read that one file, `specs`, and nothing else.
-fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &[u8]) -> Result<(), String> {
+pub(super) fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &[u8]) -> Result<(), String> {
     let said = String::from_utf8_lossy(said);
     // Silence is not a "no": each family has lines it always prints, and
     // an answer without them (lost, cut short, in another version's or
@@ -823,7 +934,7 @@ fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &[u8]) -> Re
             None if said.lines().any(|line| line.starts_with("InstalledDir: ")) && said.lines().any(runs_cc1) => Ok(()),
             None => Err("the compiler does not say whether it reads a configuration file".to_owned()),
         },
-        Family::Gcc => {
+        Family::Gcc | Family::Gfortran => {
             let read: Vec<&str> = said.lines().filter_map(|line| line.strip_prefix("Reading specs from ")).collect();
             let accepted = |file: &str| specs.is_some_and(|specs| std::fs::canonicalize(file).is_ok_and(|file| file == specs));
             match (read.as_slice(), specs) {
@@ -875,7 +986,7 @@ const NOT_FILES: &[&[u8]] = &[b"<built-in>", b"<command-line>", b"<command line>
 /// path (two files can share a mapped name — `./x.h` in the working
 /// directory and `x.h` in the Cactus root — and both are read), with
 /// whether the preprocessor entered it.
-type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
+pub(super) type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
 
 /// Digest the preprocessor's output as it comes, and collect the files it
 /// names.

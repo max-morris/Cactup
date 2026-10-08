@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 /// The entry format, and the name of the directory its entries live in. A
 /// cactup with another format writes beside this one and never reads it
 /// (no backward compatibility, §2.4).
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// An entry's first line.
 const MAGIC: &[u8] = b"cactup build cache entry\n";
@@ -45,8 +45,13 @@ const MAGIC: &[u8] = b"cactup build cache entry\n";
 /// a length beyond this is a damaged entry, not a reason to allocate.
 const MAX_HEADER: u64 = 64 * 1024;
 
-/// The longest lengths line: four 20-digit numbers, three spaces, a newline.
-const MAX_LENGTHS_LINE: u64 = 4 * 20 + 3 + 1;
+/// The most module files one entry holds (§18.10): a source that defines
+/// more is not stored.
+pub const MAX_MODULES: usize = 1000;
+
+/// The longest lengths line: a 20-digit number and a space or newline for
+/// each of the header, the object, stdout, stderr and the module files.
+const MAX_LENGTHS_LINE: u64 = (4 + MAX_MODULES as u64) * 21;
 
 /// Reads and writes of entries go in large pieces: on NFS every small one
 /// is a round trip.
@@ -63,6 +68,10 @@ struct Header {
     label: String,
     key: String,
     parts: Parts,
+    /// The module files the entry holds after the messages, by file name, in
+    /// that order (§18.10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    modules: Vec<String>,
     about: About,
 }
 
@@ -92,6 +101,9 @@ pub struct NewEntry<'a> {
     pub object: &'a Path,
     pub stdout: &'a [u8],
     pub stderr: &'a [u8],
+    /// The module files the compile wrote, by file name and where they are
+    /// (§18.10).
+    pub modules: &'a [(String, PathBuf)],
     pub about: About,
 }
 
@@ -110,6 +122,27 @@ pub enum Published {
 pub struct Messages {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+/// Where a restore puts an entry's module files (§18.10).
+#[derive(Debug, Clone, Copy)]
+pub enum ModulesTo<'a> {
+    /// Nowhere: an entry that has some is then a miss.
+    Nowhere,
+    /// Into this directory, each under its name, where its bytes differ
+    /// from what is there (as gfortran leaves alone a module file that
+    /// would not change).
+    Into(&'a Path),
+    /// Into this directory under temporary names, to be compared (audit).
+    Aside(&'a Path),
+}
+
+/// What a restore gave besides the object.
+#[derive(Debug)]
+pub struct Restored {
+    pub messages: Messages,
+    /// The entry's module files put aside ([`ModulesTo::Aside`]), by name.
+    pub aside: Vec<(String, tempfile::TempPath)>,
 }
 
 /// Why a restore found no object to give.
@@ -195,15 +228,35 @@ impl Store {
         if !before.is_file() {
             bail!("{} is not a regular file", entry.object.display());
         }
+        if entry.modules.len() > MAX_MODULES {
+            bail!("the compile wrote more than {MAX_MODULES} module files");
+        }
+        let mut modules = Vec::new();
+        for (name, path) in entry.modules {
+            if !super::fortran::plain_module_name(name) {
+                bail!("\"{name}\" is not the name of a module file");
+            }
+            let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+            let meta = file.metadata().with_context(|| format!("Failed to look at {}", path.display()))?;
+            if !meta.is_file() {
+                bail!("{} is not a regular file", path.display());
+            }
+            modules.push((path, file, meta));
+        }
         let header = Header {
             format: FORMAT,
             label: KEY_LABEL.to_owned(),
             key: entry.key.to_owned(),
             parts: entry.parts.clone(),
+            modules: entry.modules.iter().map(|(name, _)| name.clone()).collect(),
             about: entry.about.clone(),
         };
         let header = toml::to_string(&header).context("Failed to write an entry's header")?;
-        let lengths = format!("{} {} {} {}\n", header.len(), before.len(), entry.stdout.len(), entry.stderr.len());
+        let mut lengths = format!("{} {} {} {}", header.len(), before.len(), entry.stdout.len(), entry.stderr.len());
+        for (_, _, meta) in &modules {
+            lengths.push_str(&format!(" {}", meta.len()));
+        }
+        lengths.push('\n');
 
         let temp = tempfile::Builder::new()
             .prefix(&format!(".tmp-{}-", entry.key))
@@ -220,7 +273,14 @@ impl Store {
                 return Err(io::Error::new(ErrorKind::UnexpectedEof, "the object got shorter while it was copied"));
             }
             out.write_all(entry.stdout)?;
-            out.write_all(entry.stderr)
+            out.write_all(entry.stderr)?;
+            for (_, file, meta) in &mut modules {
+                let copied = io::copy(&mut (&mut *file).take(meta.len()), out)?;
+                if copied != meta.len() {
+                    return Err(io::Error::new(ErrorKind::UnexpectedEof, "a module file got shorter while it was copied"));
+                }
+            }
+            Ok(())
         };
         write(&mut out).with_context(|| format!("Failed to write {}", temp.path().display()))?;
         // An object that changed while it was copied (grown, rewritten) is
@@ -228,6 +288,12 @@ impl Store {
         let after = object.metadata().with_context(|| format!("Failed to look at {}", entry.object.display()))?;
         if (after.len(), after.mtime(), after.mtime_nsec()) != (before.len(), before.mtime(), before.mtime_nsec()) {
             bail!("{} changed while it was copied", entry.object.display());
+        }
+        for (path, file, before) in &modules {
+            let after = file.metadata().with_context(|| format!("Failed to look at {}", path.display()))?;
+            if (after.len(), after.mtime(), after.mtime_nsec()) != (before.len(), before.mtime(), before.mtime_nsec()) {
+                bail!("{} changed while it was copied", path.display());
+            }
         }
         let Summed { inner, sum } = out;
         let mut file = inner.into_inner().map_err(|e| e.into_error()).context("Failed to write an entry")?;
@@ -266,8 +332,14 @@ impl Store {
     /// have written it, if the store has a valid entry for it (§18.7,
     /// "Restoring"). On a miss nothing is left at `object` that was not
     /// there before.
+    #[cfg(test)]
     pub fn restore(&self, key: &str, object: &Path) -> Result<Messages, Miss> {
-        self.read(key, Some(object))
+        self.restore_with(key, object, ModulesTo::Nowhere).map(|restored| restored.messages)
+    }
+
+    /// [`Store::restore`], with a place for the entry's module files.
+    pub fn restore_with(&self, key: &str, object: &Path, modules: ModulesTo) -> Result<Restored, Miss> {
+        self.read(key, Some((object, modules)))
     }
 
     /// Read the entry of `key` as a restore does, writing nothing: what
@@ -277,7 +349,7 @@ impl Store {
         self.read(key, None).map(drop)
     }
 
-    fn read(&self, key: &str, object: Option<&Path>) -> Result<Messages, Miss> {
+    fn read(&self, key: &str, object: Option<(&Path, ModulesTo)>) -> Result<Restored, Miss> {
         let path = self.entry_path(key).ok_or_else(|| Miss::Invalid { why: format!("\"{key}\" is not a key"), removed: false })?;
         let unreadable = |e: io::Error| Miss::Unreadable(format!("{}: {e}", path.display()));
         // Looked at before it is opened: a FIFO there would block the open.
@@ -297,7 +369,7 @@ impl Store {
         };
         let meta = file.metadata().map_err(unreadable)?;
         match read_into(file, &meta, key, object) {
-            Ok(messages) => Ok(messages),
+            Ok(restored) => Ok(restored),
             Err(Fault::Invalid(why)) => {
                 let removed = invalidate(&path, &meta);
                 Err(Miss::Invalid { why, removed })
@@ -353,7 +425,9 @@ impl From<io::Error> for Fault {
 /// checksum over every byte, and only then the header. So an entry whose
 /// header this cactup cannot read, but which is whole, is another cactup's
 /// and not damage.
-fn read_into(file: File, meta: &Metadata, key: &str, object: Option<&Path>) -> Result<Messages, Fault> {
+fn read_into(file: File, meta: &Metadata, key: &str, outputs: Option<(&Path, ModulesTo)>) -> Result<Restored, Fault> {
+    let object = outputs.map(|(object, _)| object);
+    let modules_to = outputs.map_or(ModulesTo::Nowhere, |(_, modules)| modules);
     let invalid = |why: &str| Fault::Invalid(why.to_owned());
     let mut reader = Digesting { inner: BufReader::with_capacity(BUFFER, file), sum: Checksum::new() };
     // Until the size has been checked, an entry that ends early is short.
@@ -374,11 +448,13 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: Option<&Path>) -> R
         .and_then(|line| line.strip_suffix('\n'))
         .map(|line| line.split(' ').map(|n| n.bytes().all(|b| b.is_ascii_digit()).then(|| n.parse().ok()).flatten()).collect())
         .and_then(|lengths: Vec<Option<u64>>| lengths.into_iter().collect::<Option<Vec<u64>>>())
-        .filter(|lengths| lengths.len() == 4 && lengths[0] <= MAX_HEADER)
+        .filter(|lengths| (4..=4 + MAX_MODULES).contains(&lengths.len()) && lengths[0] <= MAX_HEADER)
         .ok_or_else(|| invalid("its lengths cannot be read"))?;
-    let [header_len, object_len, stdout_len, stderr_len] = lengths[..] else { unreachable!() };
+    let [header_len, object_len, stdout_len, stderr_len] = lengths[..4] else { unreachable!() };
+    let module_lens = &lengths[4..];
     let expected = [MAGIC.len() as u64, line.len() as u64, header_len, object_len, stdout_len, stderr_len, 65]
         .iter()
+        .chain(module_lens)
         .try_fold(0u64, |sum, part| sum.checked_add(*part));
     if expected != Some(meta.len()) {
         return Err(invalid("its size is not what its lengths say"));
@@ -423,6 +499,38 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: Option<&Path>) -> R
     read_exact(&mut reader, &mut stdout)?;
     let mut stderr = vec![0; stderr_len as usize];
     read_exact(&mut reader, &mut stderr)?;
+    // The module files, into temporary files where they go; their names are
+    // in the header, which is read last.
+    let module_dir = match modules_to {
+        ModulesTo::Into(dir) | ModulesTo::Aside(dir) => Some(dir),
+        ModulesTo::Nowhere => None,
+    };
+    let mut module_temps = Vec::new();
+    for len in module_lens {
+        let temp = match module_dir {
+            Some(dir) => Some(
+                tempfile::Builder::new()
+                    .prefix(".module.cactup-")
+                    .permissions(fs::Permissions::from_mode(0o666))
+                    .tempfile_in(dir)
+                    .map_err(|e| Fault::Output(format!("{}: {e}", dir.display())))?,
+            ),
+            None => None,
+        };
+        {
+            let mut writer: Box<dyn Write> = match &temp {
+                Some(temp) => Box::new(BufWriter::with_capacity(BUFFER, temp.as_file())),
+                None => Box::new(io::sink()),
+            };
+            match io::copy(&mut (&mut reader).take(*len), &mut writer) {
+                Ok(n) if n == *len => {}
+                Ok(_) => return Err(Fault::Io(ErrorKind::UnexpectedEof.into())),
+                Err(e) => return Err(Fault::Output(format!("a module file: {e}"))),
+            }
+            writer.flush().map_err(|e| Fault::Output(format!("a module file: {e}")))?;
+        }
+        module_temps.push(temp);
+    }
     let Digesting { inner: mut rest, sum } = reader;
     let mut written = [0; 65];
     read_exact(&mut rest, &mut written)?;
@@ -444,10 +552,34 @@ fn read_into(file: File, meta: &Metadata, key: &str, object: Option<&Path>) -> R
     if header.key != key || header.parts.key() != key {
         return Err(invalid("it is the entry of another key"));
     }
+    let names_ok = header.modules.len() == module_lens.len()
+        && header.modules.iter().all(|name| super::fortran::plain_module_name(name))
+        && header.modules.iter().collect::<std::collections::BTreeSet<_>>().len() == header.modules.len();
+    if !names_ok {
+        return Err(invalid("its module files are not named as an entry's are"));
+    }
+    if object.is_some() && !header.modules.is_empty() && module_dir.is_none() {
+        return Err(Fault::Output("the entry has module files, and nowhere to put them".to_owned()));
+    }
+    let messages = Messages { stdout, stderr };
+    let mut aside = Vec::new();
+    // The module files first: an object in place stands for a whole compile.
+    for (name, temp) in header.modules.iter().zip(module_temps) {
+        let (Some(temp), Some(dir)) = (temp, module_dir) else { continue };
+        match modules_to {
+            ModulesTo::Aside(_) => aside.push((name.clone(), temp.into_temp_path())),
+            _ => {
+                let target = dir.join(name);
+                if !super::fortran::same_bytes(temp.path(), &target) {
+                    temp.persist(&target).map_err(|e| Fault::Output(format!("{}: {}", target.display(), e.error)))?;
+                }
+            }
+        }
+    }
     if let (Some(temp), Some(object)) = (temp, object) {
         temp.persist(object).map_err(|e| output(e.error))?;
     }
-    Ok(Messages { stdout, stderr })
+    Ok(Restored { messages, aside })
 }
 
 /// `read_exact`, where running out of bytes early is an I/O fault, not a
@@ -560,6 +692,7 @@ mod tests {
                 object,
                 stdout: b"",
                 stderr,
+                modules: &[],
                 about: about(),
             })
         }
@@ -591,7 +724,7 @@ mod tests {
         assert_eq!(fx.publish(&object, b"a.c:1: warning: something\n").unwrap(), Published::Stored);
         // Under its key, read-only, with nothing else left beside it.
         let entry = fx.entry();
-        assert_eq!(entry, fx.tmp.path().join(format!("cache/v1/plato/{}/{}", &fx.key[..2], fx.key)));
+        assert_eq!(entry, fx.tmp.path().join(format!("cache/v{FORMAT}/plato/{}/{}", &fx.key[..2], fx.key)));
         assert_eq!(fs::metadata(&entry).unwrap().permissions().mode() & 0o777, 0o444);
         assert_eq!(fx.leftovers(entry.parent().unwrap(), &[&entry]), Vec::<PathBuf>::new());
         // Never again: the first publisher's entry stands.
@@ -743,7 +876,7 @@ mod tests {
             // Another cactup's key label: its parts digest to another key
             // under this one's, which is not damage.
             ("another label", &|h| h.replacen(&format!("label = \"{KEY_LABEL}\"\n"), "label = \"key-2\"\n", 1)),
-            ("a field more", &|h| h.replacen("format = 1\n", "format = 1\nextra = 2\n", 1)),
+            ("a field more", &|h| h.replacen("format = 2\n", "format = 2\nextra = 2\n", 1)),
             ("a field more in the parts", &|h| h.replacen("[parts]\n", "[parts]\nextra = \"x\"\n", 1)),
             ("a field more about it", &|h| h.replacen("[about]\n", "[about]\nextra = \"x\"\n", 1)),
             ("a field less", &|h| h.replacen("relocatable = true\n", "", 1)),
@@ -761,7 +894,7 @@ mod tests {
         // Another format, likewise.
         let _ = fs::remove_file(fx.entry());
         fx.publish(&object, b"").unwrap();
-        rewrite(&|h| h.replacen("format = 1\n", "format = 7\n", 1));
+        rewrite(&|h| h.replacen("format = 2\n", "format = 7\n", 1));
         assert!(matches!(fx.store.restore(&fx.key, &fx.tmp.path().join("build/r.o")), Err(Miss::Foreign(_))));
     }
 
@@ -889,7 +1022,7 @@ mod tests {
         let bytes = fs::read(&object).unwrap();
         let restored = dir.join(format!("r{}.o", std::process::id()));
         for _ in 0..40 {
-            let entry = NewEntry { key: &key, parts: &parts, object: &object, stdout: b"out", stderr: b"err", about: about() };
+            let entry = NewEntry { key: &key, parts: &parts, object: &object, stdout: b"out", stderr: b"err", modules: &[], about: about() };
             store.publish(&entry).unwrap();
             let messages = store.restore(&key, &restored).unwrap();
             assert_eq!(fs::read(&restored).unwrap(), bytes);

@@ -21,7 +21,7 @@
 //! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
 use super::event::{Audit, Event, Outcome};
-use super::store::{About, Miss, NewEntry, Published, Store};
+use super::store::{About, Miss, ModulesTo, NewEntry, Published, Store};
 use super::probe::SELFTEST_COMPILER;
 use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
 use crate::Res;
@@ -275,8 +275,12 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     };
 
     // A hit (§18.8). In audit mode, the stored object goes beside the
-    // object, to be compared with the one the compile is about to write.
-    let mut audited: Option<tempfile::TempPath> = None;
+    // object, and its module files beside theirs, to be compared with the
+    // ones the compile is about to write.
+    let mut audited: Option<(tempfile::TempPath, Vec<(String, tempfile::TempPath)>)> = None;
+    // Module files go where the compile writes them: its working directory
+    // (§18.10).
+    let cwd = std::env::current_dir().unwrap_or_default();
     if let Some((store, keyed)) = serving {
         let key = keyed.parts.key();
         event.outcome = Some(Outcome::Miss);
@@ -286,22 +290,27 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             Mode::Audit => beside(&keyed.compile.output).map(Some).map_err(|e| e.to_string()),
             _ => Ok(None),
         };
+        let modules_to = match (keyed.compile.language.is_fortran(), mode) {
+            (false, _) => ModulesTo::Nowhere,
+            (true, Mode::Audit) => ModulesTo::Aside(&cwd),
+            (true, _) => ModulesTo::Into(&cwd),
+        };
         let (restored, serve_ms) = timed(|| match &into {
-            Ok(into) => store.restore(&key, into.as_deref().unwrap_or(&keyed.compile.output)),
+            Ok(into) => store.restore_with(&key, into.as_deref().unwrap_or(&keyed.compile.output), modules_to),
             Err(why) => Err(Miss::CannotWrite(why.clone())),
         });
         let into = into.ok().flatten();
         event.serve_ms = serve_ms;
         match restored {
-            Ok(messages) if mode == Mode::Audit => {
+            Ok(restored) if mode == Mode::Audit => {
                 event.outcome = Some(Outcome::Hit);
-                audited = into;
-                drop(messages);
+                audited = into.map(|object| (object, restored.aside));
             }
             // The object is in place; with the dependency file, the compile
             // is done. Without it, it runs after all, and writes both.
-            Ok(messages) => match keyed.keep_depend() {
+            Ok(restored) => match keyed.keep_depend() {
                 Ok(()) => {
+                    let messages = restored.messages;
                     event.outcome = Some(Outcome::Hit);
                     event.exit = Some(0);
                     event.object_bytes = std::fs::metadata(&keyed.compile.output).ok().map(|meta| meta.len());
@@ -312,6 +321,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
                     };
                     let _ = std::io::stdout().lock().write_all(&shown(&messages.stdout));
                     let _ = std::io::stderr().lock().write_all(&shown(&messages.stderr));
+                    keyed.clean_up();
                     std::process::exit(0)
                 }
                 Err(e) => event.store = Some(format!("the dependency file could not be put in place: {e}")),
@@ -328,21 +338,23 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         keyed.drop_depend();
     }
 
-    // The compile, given the path map's flags when its result is to be
-    // stored: the stored object must be the one the key describes.
+    // The compile, as the key describes it when its result is to be stored
+    // (the path map's flags; for Fortran, the renamed copy, §18.10): the
+    // stored object must be the one the key describes.
     let publishing = store.is_ok() && keyed.is_ok();
-    let extra = match (&keyed, publishing) {
-        (Ok(keyed), true) => keyed.compile_flags(),
-        _ => Vec::new(),
+    let (compile_argv, rewrite) = match (&keyed, publishing) {
+        (Ok(keyed), true) => (keyed.compile_argv(argv), keyed.rewrite(conf)),
+        _ => (argv.to_vec(), None),
     };
     // The file that was identified is the file that runs.
     let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.clone());
-    let streams = if publishing { Output::PassOn } else { Output::Inherit };
-    let (ran, compile_ms) = timed(|| run(job, argv, identified.as_deref(), &extra, streams));
+    let streams = if publishing { Output::PassOn(rewrite.clone()) } else { Output::Inherit };
+    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams));
     let Some((status, captured)) = ran else {
         drop(audited);
         if let Ok(keyed) = &mut keyed {
             keyed.drop_depend();
+            keyed.clean_up();
         }
         leave_to(job, conf, cc_dir, "the compiler cannot be started directly, so the recipe's shell runs it")
     };
@@ -359,9 +371,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     event.recheck_ms = recheck_ms;
     event.object_bytes = output.as_ref().and_then(|output| output.metadata().ok()).map(|meta| meta.len());
 
-    if let (Some(stored), Ok(keyed)) = (&audited, &mut keyed) {
-        let checked = Checked { status, stable, stored };
-        event.audit = Some(audit(job, argv, identified.as_deref(), &extra, &checked, keyed));
+    if let (Some((stored, modules)), Ok(keyed)) = (&audited, &mut keyed) {
+        let checked = Checked { status, stable, stored, modules, cwd: &cwd };
+        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed));
         keyed.drop_depend();
     }
     drop(audited);
@@ -380,7 +392,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         && stable == Some(true)
         && (event.outcome != Some(Outcome::Hit) || wrong)
     {
-        let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event));
+        let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event, &cwd));
         event.publish_ms = publish_ms;
         match published {
             Ok(Published::Stored) => event.published = Some(true),
@@ -393,6 +405,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         }
     }
     event.append(&events_path(cc_dir));
+    if let Ok(keyed) = &mut keyed {
+        keyed.clean_up();
+    }
     #[cfg(debug_assertions)]
     test_panic("after");
     leave_as(status)
@@ -411,6 +426,10 @@ struct Checked<'a> {
     status: ExitStatus,
     stable: Option<bool>,
     stored: &'a Path,
+    /// The stored module files, put aside, and the directory the compile
+    /// writes its own into (§18.10).
+    modules: &'a [(String, tempfile::TempPath)],
+    cwd: &'a Path,
 }
 
 /// Check a hit in audit mode (§18.8): the compile has run as `checked`
@@ -424,7 +443,7 @@ struct Checked<'a> {
 /// the second compile ends it by that signal, as it would have the compile;
 /// a second compile that ends any other way (killed by the kernel, crashed,
 /// failed) leaves the first compile's object the build's, and no verdict.
-fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], checked: &Checked, keyed: &key::Keyed) -> Audit {
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &key::Keyed) -> Audit {
     if !checked.status.success() {
         return Audit::CompileFailed;
     }
@@ -433,8 +452,16 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
     }
     let object = &keyed.compile.output;
     let read = |path: &Path| std::fs::read(path).ok();
+    // The module files the compile wrote, as they are now.
+    let modules_now = || -> Vec<Option<Vec<u8>>> { keyed.modules().iter().map(|name| read(&checked.cwd.join(name))).collect() };
     let fresh = read(object);
-    if fresh.is_some() && fresh == read(checked.stored) {
+    let fresh_modules = modules_now();
+    let stored_modules: Vec<Option<Vec<u8>>> = keyed
+        .modules()
+        .iter()
+        .map(|name| checked.modules.iter().find(|(stored, _)| stored == name).and_then(|(_, path)| read(path)))
+        .collect();
+    if fresh.is_some() && fresh == read(checked.stored) && fresh_modules.iter().all(Option::is_some) && fresh_modules == stored_modules {
         return match keyed.depend_files() {
             Some((ours, compiles)) if read(ours).is_none() || read(ours) != read(compiles) => Audit::WrongDependencyFile,
             _ => Audit::Same,
@@ -449,7 +476,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
     let again_as = std::env::var_os("CACTUP_CC_TEST_SECOND_COMPILER").map(PathBuf::from);
     #[cfg(debug_assertions)]
     let identified = again_as.as_deref().or(identified);
-    let again = run(job, argv, identified, extra, Output::Swallow);
+    let again = run(job, argv, identified, Output::Swallow(rewrite));
     // Asked to stop, however the second compile then ended (a driver may
     // exit with a status rather than by the signal): the compile would have
     // been stopped.
@@ -465,7 +492,9 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
     }
     match again {
         Some((again, _)) if again.success() && !keyed.still_holds() => Audit::InputsChanged,
-        Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) => Audit::WrongHit,
+        Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) && modules_now() == fresh_modules => {
+            Audit::WrongHit
+        }
         Some((again, _)) if again.success() => Audit::NotDeterministic,
         // The second compile failed, was killed, or could not run: the
         // first object is the build's.
@@ -478,7 +507,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStr
 
 /// Publish the object of a compile that succeeded and whose key held, with
 /// the messages it wrote (§18.7, §18.8).
-fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event) -> Result<Published, String> {
+fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event, cwd: &Path) -> Result<Published, String> {
     if captured.kept_open {
         return Err("a process the compiler started kept its output open, so not all of it could be stored".to_owned());
     }
@@ -490,12 +519,14 @@ fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event
         None => text.to_vec(),
     };
     let (stdout, stderr) = (stored(&captured.stdout), stored(&captured.stderr));
+    let modules = super::fortran::module_files(cwd, keyed.modules());
     let entry = NewEntry {
         key: event.key.as_deref().unwrap_or_default(),
         parts: &keyed.parts,
         object: &keyed.compile.output,
         stdout: &stdout,
         stderr: &stderr,
+        modules: &modules,
         about: About {
             unit: event.unit.clone(),
             compiler: event.compiler.clone(),
@@ -667,16 +698,18 @@ struct Captured {
     kept_open: bool,
 }
 
-/// What becomes of a compile's stdout and stderr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What becomes of a compile's stdout and stderr. Through this process,
+/// names in them may be rewritten, line by line: those of a compile of a
+/// renamed copy (§18.10).
+#[derive(Debug, Clone)]
 enum Output {
     /// The recipe's own, inherited: nothing passes through this process.
     Inherit,
     /// Through this process, passed on as it comes and kept (§18.8).
-    PassOn,
+    PassOn(Option<key::Rewrite>),
     /// Through this process and kept, not passed on: a compile audit mode
     /// runs a second time, whose messages were shown the first time.
-    Swallow,
+    Swallow(Option<key::Rewrite>),
 }
 
 /// A piece of a stream for [`write_out`], or the word to stop.
@@ -687,21 +720,42 @@ enum Piece {
 
 /// Read `from` to its end, handing each piece to `to` as it comes and
 /// keeping a copy of up to [`MESSAGES_CAP`] bytes. Reading never waits for
-/// writing: a slow terminal holds up [`write_out`], not this.
-fn read_and_keep(mut from: impl Read + Send + 'static, to: std::sync::mpsc::Sender<Piece>) -> std::io::Result<std::thread::JoinHandle<(Vec<u8>, bool)>> {
+/// writing: a slow terminal holds up [`write_out`], not this. With
+/// `rewrite`, pieces are whole lines, rewritten (a name never spans lines),
+/// and what is kept is what was passed on.
+fn read_and_keep(mut from: impl Read + Send + 'static, to: std::sync::mpsc::Sender<Piece>, rewrite: Option<key::Rewrite>) -> std::io::Result<std::thread::JoinHandle<(Vec<u8>, bool)>> {
     std::thread::Builder::new().spawn(move || {
         let (mut kept, mut overflow) = (Vec::new(), false);
+        let mut keep = |piece: Vec<u8>| {
+            match kept.len() + piece.len() <= MESSAGES_CAP {
+                true => kept.extend_from_slice(&piece),
+                false => overflow = true,
+            }
+            let _ = to.send(Piece::Bytes(piece));
+        };
         let mut buf = vec![0u8; 64 * 1024];
+        let mut pending = Vec::new();
         loop {
             let n = match from.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
-            let _ = to.send(Piece::Bytes(buf[..n].to_vec()));
-            match kept.len() + n <= MESSAGES_CAP {
-                true => kept.extend_from_slice(&buf[..n]),
-                false => overflow = true,
+            match &rewrite {
+                None => keep(buf[..n].to_vec()),
+                Some(rewrite) => {
+                    pending.extend_from_slice(&buf[..n]);
+                    if let Some(end) = pending.iter().rposition(|b| *b == b'\n') {
+                        let rest = pending.split_off(end + 1);
+                        keep(rewrite.apply(&pending));
+                        pending = rest;
+                    }
+                }
             }
+        }
+        if let Some(rewrite) = &rewrite
+            && !pending.is_empty()
+        {
+            keep(rewrite.apply(&pending));
         }
         (kept, overflow)
     })
@@ -727,13 +781,13 @@ struct Passing {
 impl Passing {
     /// `Err` if a thread cannot be made; whatever was made then ends by
     /// itself once `from`'s other end is gone.
-    fn new(from: impl Read + Send + 'static, to: impl Write + Send + 'static, pass_on: bool) -> std::io::Result<Self> {
+    fn new(from: impl Read + Send + 'static, to: impl Write + Send + 'static, pass_on: bool, rewrite: Option<key::Rewrite>) -> std::io::Result<Self> {
         let (stop, pieces) = std::sync::mpsc::channel();
         let writer = match pass_on {
             true => Some(write_out(to, pieces)?),
             false => None,
         };
-        let reader = read_and_keep(from, stop.clone())?;
+        let reader = read_and_keep(from, stop.clone(), rewrite)?;
         Ok(Self { reader, writer, stop })
     }
 
@@ -763,9 +817,8 @@ impl Passing {
 static HANDLERS: OnceLock<bool> = OnceLock::new();
 
 /// Run the compiler as a child and wait for it, passing on every signal
-/// that asks this process to stop. `extra` goes after the recipe's
-/// arguments; `output` says whether the compiler's stdout and stderr come
-/// through this process, to be kept (§18.8).
+/// that asks this process to stop. `output` says whether the compiler's
+/// stdout and stderr come through this process, to be kept (§18.8).
 ///
 /// `make` signals the recipe it started, not that recipe's children, so a
 /// wrapper that just died would leave the compiler running — and writing
@@ -785,7 +838,7 @@ static HANDLERS: OnceLock<bool> = OnceLock::new();
 /// `None`: the compiler could not be started this way, and nothing has
 /// run. The recipe's shell may still know how (a keyword such as `time`, a
 /// function, a script without an interpreter line).
-fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsString], output: Output) -> Option<(ExitStatus, Option<Captured>)> {
+fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) -> Option<(ExitStatus, Option<Captured>)> {
     // The build script's self-test has checked that this can be read here.
     let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
@@ -824,19 +877,23 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, extra: &[OsStrin
 
     // The handlers above do not survive becoming the shell that runs what
     // cannot be started here.
-    let full: Vec<OsString> = argv.iter().chain(extra).cloned().collect();
-    let mut command = direct(&full, identified);
+    let mut command = direct(argv, identified);
     // Through this process: the pipes, and the threads that read them, are
     // made before the compiler starts, so that what cannot be made costs
     // the keeping (the streams are then the recipe's), never the compile.
     let mut passing = None;
-    if output != Output::Inherit
+    let through = match output {
+        Output::Inherit => None,
+        Output::PassOn(rewrite) => Some((true, rewrite)),
+        Output::Swallow(rewrite) => Some((false, rewrite)),
+    };
+    if let Some((pass_on, rewrite)) = through
         && let (Ok((out_from, out_to)), Ok((err_from, err_to))) = (std::io::pipe(), std::io::pipe())
     {
-        let pass_on = output == Output::PassOn;
-        if let (Ok(stdout), Ok(stderr)) =
-            (Passing::new(out_from, std::io::stdout(), pass_on), Passing::new(err_from, std::io::stderr(), pass_on))
-        {
+        if let (Ok(stdout), Ok(stderr)) = (
+            Passing::new(out_from, std::io::stdout(), pass_on, rewrite.clone()),
+            Passing::new(err_from, std::io::stderr(), pass_on, rewrite),
+        ) {
             command.stdout(Stdio::from(out_to)).stderr(Stdio::from(err_to));
             passing = Some((stdout, stderr));
         }
