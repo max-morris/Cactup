@@ -52,7 +52,7 @@ the last milestone, for when that host is not at hand.
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
-| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; a renamed copy under the path map (decision 13) | **implemented** at `85407d6`; the Einstein Toolkit audit builds next, then review |
+| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | Einstein Toolkit audit builds **clean** on `8827465` (0 wrong, both optionlists); review next |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1300,9 +1300,28 @@ mapping (decision 13, as built); the dependency run runs in an empty
 directory of its own with `scratch` first in `-I`; only `__NAME__`-shaped
 words keep a source out. `smoke.th` with `et.toml` and with `et-ld.toml`,
 served and audited across the two installations on `8827465`: 357 of 357
-checked, 0 wrong. The Einstein Toolkit again: `gate-2.sh`, `gate-2.out`.
+checked, 0 wrong.
+
+**The Einstein Toolkit again, on `8827465`** (`gate-2.sh`, `gate-2.out`,
+stores `store-et-2` and `store-et-ld-2`): 3376 compiles in each build, 594
+of them Fortran, every build exit 0.
+
+| Build | Result |
+|---|---|
+| `et.toml`, served in `build-cache` | 3376 published |
+| audited in `build-cache-b` | 3375 checked (594 Fortran), 0 wrong |
+| audited in `build-cache` | 3375 checked, 0 wrong |
+| `et-ld.toml` (line directives), served in `build-cache` | 3376 published |
+| audited in `build-cache-b` | 3374 checked (593 Fortran), 0 wrong |
+
+The misses in the other installation: `HTTPD/Content.c` (as in every
+earlier gate), and with line directives `TestLoopControl/TestLoopFortran.F90`,
+whose build copy holds the absolute path of its source in string literals
+that Cactus's own preprocessing wrote (LoopControl's macros): a different
+text in each installation, rightly another key. The cost of Fortran on
+real code (the audit in `build-cache-b`): keying 19 s and checking again
+19 s, summed over the 594 compiles, against 451 s of compiling.
 
 ## Next step
 
-Record the Einstein Toolkit Fortran runs, then M2a's review gate. After
-that, the CUDA compilers.
+M2a's review gate (two reviewers). Then the CUDA compilers.

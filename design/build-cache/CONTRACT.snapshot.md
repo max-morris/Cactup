@@ -283,6 +283,18 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   `mdb/GENERATION` bump on the cache side (question c). A serving build
   also writes one small use log per build under `<store>/used/`.
 
+- 2026-10-08, on `feature/build-cache`: **Fortran is cached** (gfortran;
+  M2a, in review). What it changes for the speed side, with the cache
+  serving or auditing: before each gfortran compile cactup runs gfortran
+  once more (`-cpp -undef -M -fsyntax-only`, in a directory of its own) to
+  learn which files the compile reads, and once more after it; the compile
+  names its source by its path from `scratch` (`../build/<Thorn>/x.f90`)
+  instead of the absolute path, and a source with line markers is
+  compiled as a copy in `build/<Thorn>/.cactup/` (left there); a hit
+  writes the module files into `scratch` itself, only those whose bytes
+  differ. Store entries are format 2 (`v2/`). In record mode the compile
+  is unchanged. Timings with the cache serving are not comparable.
+
 ## Speed-side planned changes
 
 (speed side: please list here anything touching A1-A8, the compile recipes,
@@ -400,3 +412,6 @@ every milestone.
 - 2026-10-07  cache side  M1b passed review at `6b8efb1`, M1c at `01bd00a`
   (landed changes): the store's default moved beside the installations;
   `build-cache-home` replaces the `build-cache-dir` knob.
+- 2026-10-07  cache side  **Load on plato:** five Einstein Toolkit builds (GCC, gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 22:57 local, for about an hour: the build cache now caches Fortran.
+- 2026-10-07  cache side  **Load on plato:** five more Einstein Toolkit builds (GCC, gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:49 local, for about an hour (the Fortran gate again, after a fix).
+- 2026-10-08  cache side  Fortran (gfortran) is cached on the feature branch (landed changes); its Einstein Toolkit audit builds on plato are done.
