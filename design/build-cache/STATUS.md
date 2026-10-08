@@ -53,6 +53,8 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
+| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **in progress** |
+| M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so** on M3a's measured lookup cost |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1417,7 +1419,66 @@ text in each installation, rightly another key. The cost of Fortran on
 real code (the audit in `build-cache-b`): keying 19 s and checking again
 19 s, summed over the 594 compiles, against 451 s of compiling.
 
+## What M3a is
+
+Decision 14, the first half: the check after a compile that is to be
+stored runs no compiler. Today it runs the key's compiler run again (`-E`
+for C and C++, the dependency run for gfortran) and compares; that is
+107 s of the 236 s a fresh Einstein Toolkit build pays (`a14f279`, fet
+attempt 0006). The check stays as strong: every case the second run
+catches must still be caught, or the compile falls back to the second run.
+
+What the second run catches, and what replaces it:
+
+- **A file it read changed.** The files are read again and compared with
+  what was keyed (bytes, and the `seen` digest: identity, size, times, and
+  every entry the name resolves through), as now. No compiler needed.
+- **A lookup that would now go elsewhere**: a file that appeared where the
+  compiler looks before the place it found one (a header earlier in the
+  search path, a module file in the working directory), a directory that
+  appeared or vanished in the path, a `.gch` beside a header. cactup
+  repeats each lookup itself and requires the file the key's run entered.
+  - C and C++: the key's `-E` run is given `-dI`, which prints each
+    `#include`/`#include_next` as written (a macro-named one expanded)
+    just before the marker that enters the file; one skipped by its
+    guard or `#pragma once` is printed with no entering marker. The
+    search list is the one the run's `-v` printed (quote, then bracket
+    directories), with the directories it ignored as nonexistent, which
+    must still not exist. Quote includes look first in the including
+    file's directory; `#include_next` after the directory the including
+    file was found in. A directory where a header could be is skipped
+    (GCC and Clang, tried); any `.gch` at a place looked at sends the
+    compile to the fallback.
+  - gfortran: modules in the compile's order (`module_dirs`, as the key
+    checks now); included files from each file's own `INCLUDE` lines, in
+    the source's directory and then the `-I` directories (tried: the
+    working directory is not searched). Any entry at a place looked at
+    first counts as found: gfortran does not skip a directory there (it
+    hangs on one, tried).
+- **`__has_include`**: no output says what the key's run was answered.
+  Each literal `__has_include`/`__has_include_next` in a file read is
+  answered by cactup at key time over the same search lists, and the
+  answers (by mapped name) join the key (label bump); the check after the
+  compile asks again and must get the same. An answer that changed
+  between the key's run and cactup's asking makes a key no other compile
+  arrives at (its text says one thing and its answers another), so it
+  serves nothing wrong. libstdc++'s `c++config.h` and glibc's `unistd.h`
+  path have them, so nearly every compile does.
+- **Anything this does not model** goes to the second compiler run, as
+  today: forced includes (`-include`), `#include_next` in the main file
+  or in a file not found by the search, a `__has_include` whose argument
+  is not a literal, `#embed`/`__has_embed`, `#import`, a `.gch` anywhere
+  looked at, a marker or directive line that cannot be read.
+
+The lookups a check makes are counted and timed in `events.jsonl`, and
+that cost on the Einstein Toolkit (here, and on a cluster's filesystem) is
+what Max decides M3b on. Gate: the review pair, and the Einstein Toolkit
+served and audited across both installations with GCC, Clang and
+gfortran, 0 wrong, with the fallback count reported.
+
 ## Next step
 
-The CUDA compilers (decision 2), with audit mode to prove them; the
-narrower key of decision 4 can be revisited with audit mode too.
+M3a (below and decision 14). Then Max decides on M3b from M3a's
+measured lookup cost; after that, the CUDA compilers (decision 2), with
+audit mode to prove them; the narrower key of decision 4 can be revisited
+with audit mode too.

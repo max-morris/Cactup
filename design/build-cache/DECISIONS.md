@@ -227,6 +227,36 @@ Asked as seven questions with options; the answers, in Max's numbering.
     checks: the "In file" string named the private directory, so every
     build made different objects of 63 sources, and audit mode said so.
 
+## What a miss costs (2026-10-08)
+
+14. **The cost of a miss comes down, in two milestones.** Measured on the
+    all-miss Einstein Toolkit build at `a14f279` (fet attempt 0006,
+    summed over 3376 compiles): 1296 s of compiling, and on top of it
+    112 s keying, 107 s checking again after the compile, 17 s storing:
+    18% more compiler time (C 27%, C++ 20%, Fortran 10%), nearly all of it
+    the extra compiler runs. On a build that compiling dominates, with
+    every core busy, that is close to 18% of wall time too. Max: "That
+    performance penalty is brutal. A fresh build taking 2 hours at a 15%
+    penalty adds nearly 20 minutes to the build", and then: "add A as the
+    next milestone, add B as a milestone after A contingent upon a
+    decision based on A's lookup cost".
+    - **M3a (A): the check after the compile runs no compiler.** It reads
+      the files again and repeats the compiler's lookups itself, so a
+      file that appeared during the compile where the compile would have
+      found it first still shows. Keys keep their meaning; rule 1 and
+      every case the second compiler run caught stay caught. Expected:
+      18% down to about 10%.
+    - **M3b (B), only if Max decides so once M3a's lookup cost is
+      measured** (here and on a cluster filesystem): the compile itself
+      writes the list of what it read (`-MD`; gfortran `-cpp -MD`), and
+      the key is built from the arguments, the files' bytes and the
+      lookups, with no preprocessor run on a miss (and none on a hit,
+      through a manifest). Expected: about 2–3%. Open for that decision:
+      a file changed *during* the compile is then caught only by change
+      times against a stamp made before it, and a filesystem cactup
+      cannot write to has no stamp of its own.
+    - CUDA moves after these.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
