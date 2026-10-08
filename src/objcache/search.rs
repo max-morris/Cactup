@@ -34,7 +34,7 @@ use super::hash::Hasher;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::ErrorKind;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 /// Where the preprocessor searched, as its `-v` says.
@@ -104,37 +104,35 @@ impl Search {
     }
 
     /// Look `spelling` up in `dirs` (each with its position, as
-    /// [`Found`]), as the compiler does: the first file found. Lookups made
-    /// are counted in `count`.
-    fn find<'a>(&self, spelling: &[u8], dirs: impl Iterator<Item = (&'a [u8], Place)>, count: &mut u64) -> Result<Option<Found>, String> {
+    /// [`Found`]), as the compiler does: the first file found.
+    fn find<'a>(&self, spelling: &[u8], dirs: impl Iterator<Item = (&'a [u8], Place)>, looker: &mut Looker) -> Result<Option<Found>, String> {
         for (dir, place) in dirs {
-            let path = joined(dir, spelling);
-            *count += 2;
-            // GCC takes `<file>.gch` in place of the file, where it looks.
-            match entry(&[path.as_slice(), b".gch"].concat(), false)? {
-                Entry::Absent => {}
-                _ => return Err("a precompiled header is where the compiler looks".to_owned()),
-            }
-            match entry(&path, true)? {
-                Entry::File => return Ok(Some(Found { path, place })),
-                Entry::Absent | Entry::Directory => {}
+            if let Some(found) = looker.file(dir, spelling)? {
+                return Ok(Some(Found { path: found, place }));
             }
         }
         Ok(None)
     }
 
-    /// Every directory a lookup of `kind` from `from` searches, in order.
-    fn dirs<'a>(&'a self, kind: Kind, from: &'a [u8], from_place: Option<Place>) -> Result<Vec<(&'a [u8], Place)>, String> {
+    /// Every directory a lookup of `kind` from `from` (found at
+    /// `from_place`; none for the source itself) searches, in order.
+    /// `#include_next` goes on after the directory its file was found in;
+    /// from a file found otherwise, GCC goes on from the start of the list
+    /// when that file was found beside the file including it, and searches
+    /// as for a plain include when it was the source itself or named
+    /// absolutely, as Clang does from any of them.
+    fn dirs<'a>(&'a self, kind: Kind, from: &'a [u8], from_place: Option<Place>, gcc: bool) -> Vec<(&'a [u8], Place)> {
         let chain = self.quote.iter().chain(&self.bracket).enumerate().map(|(at, dir)| (dir.as_slice(), Place::Chain(at)));
-        Ok(match kind {
-            Kind::Quote => std::iter::once((dir_of(from), Place::Including)).chain(chain).collect(),
-            Kind::Angled => chain.skip(self.quote.len()).collect(),
-            Kind::Next => match from_place {
-                Some(Place::Chain(at)) => chain.skip(at + 1).collect(),
-                // GCC and Clang differ there, and nobody relies on it.
-                _ => return Err("#include_next in a file not found by the search".to_owned()),
-            },
-        })
+        let plain = match kind {
+            Kind::Quote | Kind::Next { angled: false } => false,
+            Kind::Angled | Kind::Next { angled: true } => true,
+        };
+        match (kind, from_place) {
+            (Kind::Next { .. }, Some(Place::Chain(at))) => chain.skip(at + 1).collect(),
+            (Kind::Next { .. }, Some(Place::Including)) if gcc => chain.collect(),
+            _ if plain => chain.skip(self.quote.len()).collect(),
+            _ => std::iter::once((dir_of(from), Place::Including)).chain(chain).collect(),
+        }
     }
 }
 
@@ -154,12 +152,13 @@ struct Found {
     place: Place,
 }
 
-/// How an include names its file: `"name"`, `<name>`, `#include_next`.
+/// How an include names its file: `"name"`, `<name>`, `#include_next`
+/// (with either).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
     Quote,
     Angled,
-    Next,
+    Next { angled: bool },
 }
 
 /// One `#include` the key's preprocessor run carried out.
@@ -197,6 +196,110 @@ fn entry(path: &[u8], follow: bool) -> Result<Entry, String> {
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(Entry::Absent),
         Err(e) => Err(format!("{} cannot be looked at ({e})", path.display())),
     }
+}
+
+/// What lies in a directory, by name, as one listing of it showed.
+type Listing = HashMap<Vec<u8>, Listed>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Listed {
+    File,
+    Directory,
+    /// A symlink, or anything the listing did not say the kind of: looked
+    /// at by its path.
+    Other,
+}
+
+/// Lookups for one pass over a compile's includes: each directory is
+/// listed once, and names in it are answered from the listing (a few
+/// listings where looking at every place a compiler tries would take
+/// thousands of system calls). Nothing is kept from one pass to the next.
+#[derive(Default)]
+pub struct Looker {
+    listings: HashMap<Vec<u8>, Option<Listing>>,
+    /// System calls made: listings and lookups by path.
+    pub count: u64,
+}
+
+impl Looker {
+    /// `spelling` in `dir`: the path, if a file is there (following
+    /// symlinks; a directory there is passed over, as the compilers do).
+    /// `Err` where GCC would take a precompiled header (`<file>.gch`)
+    /// instead, and for what is neither file nor directory, or cannot be
+    /// looked at: not modeled.
+    fn file(&mut self, dir: &[u8], spelling: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let path = joined(dir, spelling);
+        let gch = [spelling, b".gch"].concat();
+        if !matches!(self.at(dir, &gch, false)?, Entry::Absent) {
+            return Err("a precompiled header is where the compiler looks".to_owned());
+        }
+        Ok(matches!(self.at(dir, spelling, true)?, Entry::File).then_some(path))
+    }
+
+    /// What is at `spelling` in `dir` (following a final symlink if
+    /// `follow`), from listings where the names are plain, or by the path.
+    fn at(&mut self, dir: &[u8], spelling: &[u8], follow: bool) -> Result<Entry, String> {
+        let parts: Vec<&[u8]> = spelling.split(|b| *b == b'/').collect();
+        if spelling.starts_with(b"/") || parts.iter().any(|part| matches!(*part, b"" | b"." | b"..")) {
+            self.count += 1;
+            return entry(&joined(dir, spelling), follow);
+        }
+        let mut here = if dir.is_empty() { b".".to_vec() } else { dir.to_vec() };
+        for (at, part) in parts.iter().enumerate() {
+            let last = at + 1 == parts.len();
+            let listed = match self.listing(&here) {
+                Some(listing) => listing.get(*part).copied(),
+                None => Some(Listed::Other),
+            };
+            let next = joined(&here, part);
+            let kind = match listed {
+                None => return Ok(Entry::Absent),
+                Some(Listed::File) => Entry::File,
+                Some(Listed::Directory) => Entry::Directory,
+                Some(Listed::Other) => {
+                    self.count += 1;
+                    entry(&next, follow || !last)?
+                }
+            };
+            match (last, kind) {
+                (true, kind) => return Ok(kind),
+                (false, Entry::Directory) => here = next,
+                (false, _) => return Ok(Entry::Absent),
+            }
+        }
+        Ok(Entry::Absent)
+    }
+
+    /// The listing of `dir`: empty if there is no such directory, `None` if
+    /// it cannot be listed (its names are then looked at by path).
+    fn listing(&mut self, dir: &[u8]) -> Option<&Listing> {
+        if !self.listings.contains_key(dir) {
+            self.count += 1;
+            let listing = match std::fs::read_dir(Path::new(OsStr::from_bytes(dir))) {
+                Ok(entries) => entries
+                    .map(|entry| {
+                        let entry = entry.ok()?;
+                        let kind = match entry.file_type().ok()? {
+                            kind if kind.is_file() => Listed::File,
+                            kind if kind.is_dir() => Listed::Directory,
+                            _ => Listed::Other,
+                        };
+                        Some((entry.file_name().into_vec(), kind))
+                    })
+                    .collect::<Option<Listing>>(),
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Some(Listing::new()),
+                Err(_) => None,
+            };
+            self.listings.insert(dir.to_vec(), listing);
+        }
+        self.listings.get(dir).and_then(Option::as_ref)
+    }
+}
+
+/// The physical path of `path`: GCC names a system header so where that is
+/// shorter (`-fcanonical-system-headers`, its default).
+fn canonical(path: &[u8]) -> Option<Vec<u8>> {
+    std::fs::canonicalize(Path::new(OsStr::from_bytes(path))).ok().map(|path| path.into_os_string().into_vec())
 }
 
 /// `spelling` in `dir`, as the compilers put them together: nothing in
@@ -237,7 +340,7 @@ pub fn directive(line: &[u8]) -> Option<(Kind, Vec<u8>)> {
         return None;
     }
     let kind = match (next, angled) {
-        (true, _) => Kind::Next,
+        (true, angled) => Kind::Next { angled },
         (false, true) => Kind::Angled,
         (false, false) => Kind::Quote,
     };
@@ -334,11 +437,11 @@ pub struct Probe {
     spelling: Vec<u8>,
 }
 
-/// Find the `__has_include`s in `bytes`, a file the compile reads. `Err`:
-/// one this module does not follow — `__has_include_next` (whose answer
-/// depends on where the file it stands in was found), or one whose argument
-/// is not a literal name (a macro), or the name used other than to call it
-/// or to ask whether it is defined (where a macro can call it in turn).
+/// Find the `__has_include`s (and `__has_include_next`s) in `bytes`, a file
+/// the compile reads. `Err`: one this module does not follow — one whose
+/// argument is not a literal name (a macro), or the name used other than
+/// to call it or to ask whether it is defined (where a macro can call it
+/// in turn); a comment begun on its own line aside.
 pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
     const NAME: &[u8] = b"__has_include";
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
@@ -351,11 +454,11 @@ pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
             continue;
         }
         let rest = &bytes[end..];
+        // `__has_include_next` is answered as `__has_include` is (each
+        // directory), and GCC before 10 also knew `__has_include__`.
         if rest.starts_with(b"_next") && !rest.get(5).is_some_and(|b| ident(*b)) {
-            return Err("a source asks __has_include_next, which the cache does not follow".to_owned());
-        }
-        // GCC before 10 also knew `__has_include__`.
-        if rest.starts_with(b"__") && !rest.get(2).is_some_and(|b| ident(*b)) {
+            end += 5;
+        } else if rest.starts_with(b"__") && !rest.get(2).is_some_and(|b| ident(*b)) {
             end += 2;
         } else if rest.first().is_some_and(|b| ident(*b)) {
             continue;
@@ -380,6 +483,11 @@ pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
             out.push(Probe { angled, spelling: inner[1..1 + len].to_vec() });
             continue;
         }
+        // In a comment (`#endif // __has_include`), where nothing is
+        // asked.
+        if in_comment(bytes, start) {
+            continue;
+        }
         // Only asked whether it is defined: `defined __has_include`,
         // `defined(__has_include)`, `#ifdef __has_include`.
         let before = trim_end(&bytes[..start]);
@@ -394,6 +502,39 @@ pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Is `at` in `bytes` inside a comment begun on its own line: after a `//`
+/// or a `/*` (not closed since) that no string or character literal holds?
+/// (A comment begun on an earlier line is not told from a `/*` in a string
+/// there: such a `__has_include` is taken for one in code.)
+fn in_comment(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+    let (mut quote, mut block) = (None, false);
+    let mut line = bytes[line_start..at].iter().peekable();
+    while let Some(b) = line.next() {
+        let next = line.peek().copied().copied();
+        match (quote, block, *b) {
+            (_, true, b'*') if next == Some(b'/') => {
+                line.next();
+                block = false;
+            }
+            (_, true, _) => {}
+            (Some(_), _, b'\\') => {
+                line.next();
+            }
+            (Some(open), _, b) if b == open => quote = None,
+            (Some(_), _, _) => {}
+            (None, _, b'"' | b'\'') => quote = Some(*b),
+            (None, _, b'/') if next == Some(b'/') => return true,
+            (None, _, b'/') if next == Some(b'*') => {
+                line.next();
+                block = true;
+            }
+            _ => {}
+        }
+    }
+    block
 }
 
 fn trim_end(bytes: &[u8]) -> &[u8] {
@@ -422,45 +563,54 @@ pub struct Lookups {
     expected: Option<Vec<Option<Found>>>,
     /// Lookups made, before and after the compile.
     pub count: u64,
+    /// GCC, which goes on with `#include_next` otherwise than Clang.
+    gcc: bool,
 }
 
 impl Lookups {
     /// The lookups of a run whose `-v` said `said`, whose output had
     /// `directives`, and whose files (`files`, by the names the markers
     /// gave) asked `probes`.
-    pub fn new(said: &[u8], directives: Vec<Directive>, mut probes: Vec<Probe>, files: &[Vec<u8>]) -> Result<Self, String> {
+    pub fn new(said: &[u8], directives: Vec<Directive>, mut probes: Vec<Probe>, files: &[Vec<u8>], gcc: bool) -> Result<Self, String> {
         let search = Search::from_verbose(said)?;
         probes.sort();
         probes.dedup();
         let mut dirs: Vec<Vec<u8>> = files.iter().map(|file| dir_of(file).to_vec()).collect();
         dirs.sort();
         dirs.dedup();
-        Ok(Self { search, directives, probes, dirs, expected: None, count: 0 })
+        Ok(Self { search, directives, probes, dirs, expected: None, count: 0, gcc })
     }
 
     /// The answers to the `__has_include`s, digested for the key, names
     /// under `map`.
+    ///
+    /// Each name is answered for every directory it could be looked for
+    /// in: each of the search list, and the directory of each file read
+    /// (a `"name"` is looked for beside the file that asks, which a macro
+    /// can make any of them; `__has_include_next` goes on from where its
+    /// file was found). Whatever the compiler asked, its answer follows from
+    /// these.
     pub fn answers(&mut self, map: Option<&PathMap>) -> Result<String, String> {
         let mut hasher = Hasher::new("has_include");
         let mapped = |name: &[u8]| map.map_or_else(|| name.to_vec(), |map| map.apply(name));
-        let mut count = 0;
+        let mut looker = Looker::default();
         for probe in &self.probes {
-            hasher.feed(if probe.angled { b"<>" } else { b"\"\"" });
             hasher.feed(&mapped(&probe.spelling));
-            let chain_from = if probe.angled { self.search.quote.len() } else { 0 };
-            let chain = self.search.quote.iter().chain(&self.search.bracket).enumerate().skip(chain_from);
-            let found = self.search.find(&probe.spelling, chain.map(|(at, dir)| (dir.as_slice(), Place::Chain(at))), &mut count)?;
-            hasher.feed(if found.is_some() { b"found" } else { b"not found" });
+            for (at, dir) in self.search.quote.iter().chain(&self.search.bracket).enumerate() {
+                if looker.file(dir, &probe.spelling)?.is_some() {
+                    hasher.feed(&(at as u64).to_le_bytes());
+                }
+            }
+            hasher.feed(b"beside");
             if !probe.angled {
                 for dir in &self.dirs {
-                    let here = self.search.find(&probe.spelling, std::iter::once((dir.as_slice(), Place::Including)), &mut count)?;
-                    if here.is_some() {
+                    if looker.file(dir, &probe.spelling)?.is_some() {
                         hasher.feed(&mapped(dir));
                     }
                 }
             }
         }
-        self.count += count;
+        self.count += looker.count;
         Ok(hasher.hex())
     }
 
@@ -474,8 +624,8 @@ impl Lookups {
         let mut entered = HashSet::new();
         for (directive, found) in self.directives.iter().zip(&found) {
             match (&directive.entered, found) {
-                (Some(name), Some(found)) if *name == found.path => {
-                    entered.insert(name.clone());
+                (Some(name), Some(found)) if *name == found.path || canonical(&found.path).is_some_and(|path| path == *name) => {
+                    entered.insert(found.path.clone());
                 }
                 (None, Some(found)) if entered.contains(&found.path) => {}
                 (None, None) if is_command_line(&directive.from) => {}
@@ -507,13 +657,13 @@ impl Lookups {
     fn look_up(&mut self) -> Result<Vec<Option<Found>>, String> {
         let mut places: HashMap<&[u8], Place> = HashMap::new();
         let mut out = Vec::with_capacity(self.directives.len());
-        let mut count = 0;
+        let mut looker = Looker::default();
         for directive in &self.directives {
             let found = match directive.spelling.starts_with(b"/") {
-                true => self.search.find(&directive.spelling, std::iter::once((&b""[..], Place::Absolute)), &mut count)?,
+                true => self.search.find(&directive.spelling, std::iter::once((&b""[..], Place::Absolute)), &mut looker)?,
                 false => {
-                    let dirs = self.search.dirs(directive.kind, &directive.from, places.get(directive.from.as_slice()).copied())?;
-                    self.search.find(&directive.spelling, dirs.into_iter(), &mut count)?
+                    let dirs = self.search.dirs(directive.kind, &directive.from, places.get(directive.from.as_slice()).copied(), self.gcc);
+                    self.search.find(&directive.spelling, dirs.into_iter(), &mut looker)?
                 }
             };
             if let (Some(name), Some(found)) = (&directive.entered, &found) {
@@ -521,7 +671,7 @@ impl Lookups {
             }
             out.push(found);
         }
-        self.count += count;
+        self.count += looker.count;
         Ok(out)
     }
 }
@@ -549,7 +699,7 @@ mod tests {
     fn reads_include_lines_of_both_compilers() {
         assert_eq!(directive(b"#include <a/b.h>\n"), Some((Kind::Angled, b"a/b.h".to_vec())));
         assert_eq!(directive(b"#include \"x.h\" /* clang -E -dI */\n"), Some((Kind::Quote, b"x.h".to_vec())));
-        assert_eq!(directive(b"#include_next <x.h>"), Some((Kind::Next, b"x.h".to_vec())));
+        assert_eq!(directive(b"#include_next <x.h>"), Some((Kind::Next { angled: true }, b"x.h".to_vec())));
         assert_eq!(directive(b"# include <x.h>"), None);
         assert_eq!(directive(b"#include <x.h> trailing"), None);
         assert_eq!(directive(b"#include <>"), None);
@@ -568,9 +718,9 @@ mod tests {
     #[test]
     fn finds_has_include_where_it_can_be_followed() {
         let mut out = Vec::new();
-        probes(b"#if __has_include(<tbb/tbb.h>)\n#  define X __has_include( \"y.h\" )\n#endif\n#ifdef __has_include\n#if defined(__has_include) && defined __has_include\nint my__has_include;\n", &mut out).unwrap();
+        probes(b"#if __has_include(<tbb/tbb.h>)\n#  define X __has_include( \"y.h\" )\n#endif // __has_include\n#ifdef __has_include\n#if defined(__has_include) && defined __has_include\nint my__has_include;\n/* __has_include */ /* a */\n", &mut out).unwrap();
         assert_eq!(out, vec![Probe { angled: true, spelling: b"tbb/tbb.h".to_vec() }, Probe { angled: false, spelling: b"y.h".to_vec() }]);
-        for odd in [&b"#if __has_include(HEADER)\n"[..], b"#define H __has_include\n", b"#if __has_include_next(<x.h>)\n", b"#if __has_include(<x.h\n"] {
+        for odd in [&b"#if __has_include(HEADER)\n"[..], b"#define H __has_include\n", b"#if __has_include_next(X)\n", b"#if __has_include(<x.h\n", b"#define H \"//\" __has_include\n", b"/* */ __has_include\n", b"/* a\n __has_include */\n"] {
             assert!(probes(odd, &mut Vec::new()).is_err(), "{}", String::from_utf8_lossy(odd));
         }
     }

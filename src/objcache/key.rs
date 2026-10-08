@@ -920,7 +920,12 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
     let mut probes = Vec::new();
-    let mut unfollowed = None;
+    // A macro given on the command line could ask too.
+    let mut unfollowed = compile
+        .preprocess
+        .iter()
+        .any(|arg| arg.as_bytes().windows(13).any(|window| window == b"__has_include"))
+        .then(|| "a macro on the command line uses __has_include, which the cache does not follow".to_owned());
     let (files, seen) = read_files(&named, map, |_, bytes| {
         if unfollowed.is_none()
             && let Err(why) = search::probes(bytes, &mut probes)
@@ -933,7 +938,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let mut lookups = match (unfollowed, compile.forced_include) {
         (Some(why), _) => Err(why),
         (None, true) => Err("-include is given".to_owned()),
-        (None, false) => tracker.finish(compiler.family == Family::Gcc).and_then(|directives| Lookups::new(&said, directives, probes, &names)),
+        (None, false) => tracker.finish(compiler.family == Family::Gcc).and_then(|directives| Lookups::new(&said, directives, probes, &names, compiler.family == Family::Gcc)),
     };
     let answers = match &mut lookups {
         Ok(lookups) => lookups.answers(map),
