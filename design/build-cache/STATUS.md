@@ -52,7 +52,7 @@ the last milestone, for when that host is not at hand.
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
-| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | Einstein Toolkit audit builds **clean** on `8827465` (0 wrong, both optionlists); review next |
+| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | review **passed** at `a14f279` (four rounds); Einstein Toolkit audit builds clean on `8827465`, run again on `a14f279` |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1304,6 +1304,16 @@ below `scratch` is declined, a lost hit only (the spec says why).
    `build/<Thorn>/x.inc` where the dependency run read the file one level
    up. *Fixed: for a copied source, an included file named with `..`
    keeps the compile out (the dependency run prints the name as written).*
+
+### M2a, round 4 (on `a14f279`): SIGN-OFF by both
+
+Both re-ran every reproduction of the four rounds through the wrapper:
+each is a correct miss or declined with its reason, and the cases that
+should be cached (an uncompressed module file found only outside
+`scratch`, a copied source with a plain include beside it) still are.
+Non-blocking (B): the `..` check also fires for an `-I` directory spelled
+with `..`, a lost hit only. The Einstein Toolkit gate is run once more on
+`a14f279` itself (`gate-4.sh`), the commit the reviews signed.
 
 ## Decisions
 
