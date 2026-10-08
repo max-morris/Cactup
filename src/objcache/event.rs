@@ -51,10 +51,18 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_bytes: Option<u64>,
     /// Wall-clock milliseconds: computing the key, the compile itself, and
-    /// checking the text again afterward.
+    /// checking afterward (with the lookups made for it right before the
+    /// compile).
     pub key_ms: u64,
     pub compile_ms: u64,
     pub recheck_ms: u64,
+    /// How the check after the compile was made (§18.5): by this many
+    /// lookups of files and directories, or by running the compiler again,
+    /// for the reason given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookups: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_by_compiler: Option<String>,
     /// In a serving build (§18.8): found in the store (served, or in audit
     /// mode checked), or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]

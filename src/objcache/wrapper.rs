@@ -337,6 +337,13 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     {
         keyed.drop_depend();
     }
+    // The check after the compile looks the inputs up again where it can,
+    // which needs them looked up right before the compile (§18.5).
+    let ((), looking_ms) = timed(|| {
+        if let Ok(keyed) = &mut keyed {
+            keyed.before_compile();
+        }
+    });
 
     // The compile, as the key describes it when its result is to be stored
     // (the path map's flags; for Fortran, the renamed copy, §18.10): the
@@ -363,12 +370,18 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     event.signal = status.signal();
     // A stop signal from here on ends this process on the spot (see `run`):
     // nothing below is worth making `make` wait for.
-    let (stable, recheck_ms) = timed(|| match &keyed {
+    let (stable, recheck_ms) = timed(|| match &mut keyed {
         Ok(keyed) if status.success() => Some(keyed.still_holds()),
         _ => None,
     });
     event.stable = stable;
-    event.recheck_ms = recheck_ms;
+    event.recheck_ms = looking_ms + recheck_ms;
+    if let (Ok(keyed), Some(_)) = (&keyed, stable) {
+        match keyed.check_made() {
+            Ok(count) => event.lookups = Some(count),
+            Err(why) => event.checked_by_compiler = Some(why),
+        }
+    }
     event.object_bytes = output.as_ref().and_then(|output| output.metadata().ok()).map(|meta| meta.len());
 
     if let (Some((stored, modules)), Ok(keyed)) = (&audited, &mut keyed) {
@@ -443,17 +456,18 @@ struct Checked<'a> {
 /// the second compile ends it by that signal, as it would have the compile;
 /// a second compile that ends any other way (killed by the kernel, crashed,
 /// failed) leaves the first compile's object the build's, and no verdict.
-fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &key::Keyed) -> Audit {
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed) -> Audit {
     if !checked.status.success() {
         return Audit::CompileFailed;
     }
     if checked.stable != Some(true) {
         return Audit::InputsChanged;
     }
-    let object = &keyed.compile.output;
+    let object = &keyed.compile.output.clone();
     let read = |path: &Path| std::fs::read(path).ok();
     // The module files the compile wrote, as they are now.
-    let modules_now = || -> Vec<Option<Vec<u8>>> { keyed.modules().iter().map(|name| read(&checked.cwd.join(name))).collect() };
+    let modules = keyed.modules().to_vec();
+    let modules_now = || -> Vec<Option<Vec<u8>>> { modules.iter().map(|name| read(&checked.cwd.join(name))).collect() };
     let fresh = read(object);
     let fresh_modules = modules_now();
     let stored_modules: Vec<Option<Vec<u8>>> = keyed

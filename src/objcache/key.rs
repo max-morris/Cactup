@@ -31,6 +31,7 @@
 use super::compile::{self, Compile};
 use super::fortran;
 use super::hash::{bytes_digest, Hasher};
+use super::search::{self, Lookups};
 use super::identity::{self, Compiler, Family};
 use super::{environment, platform, BuildConf};
 use crate::Res;
@@ -264,7 +265,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-6";
+pub const KEY_LABEL: &str = "key-7";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -294,6 +295,12 @@ pub struct Keyed {
     depend: Option<(tempfile::TempPath, PathBuf)>,
     /// A Fortran compile's copy, module files and dependency run (§18.10).
     fortran: Option<fortran::Fortran>,
+    /// The files the key's preprocessor run named, read again after the
+    /// compile (C and C++).
+    named: Named,
+    /// What the check after the compile looks up in place of running the
+    /// preprocessor again, or why it runs it again (C and C++; §18.5).
+    lookups: Result<Lookups, String>,
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
@@ -402,6 +409,8 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
             seen: read.seen,
             depend: None,
             fortran: Some(read.fortran),
+            named: Named::new(),
+            lookups: Err("Fortran".to_owned()),
         });
     }
     let depend = match serving {
@@ -419,7 +428,8 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
         text: read.text,
         files: read.files,
     };
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, seen: read.seen, depend, fortran: None })
+    let (named, lookups) = (read.named, read.lookups);
+    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, seen: read.seen, depend, fortran: None, named, lookups })
 }
 
 /// The dependency flags of `compile` for the key's preprocessor run, if it
@@ -477,12 +487,53 @@ impl Keyed {
     /// Each file must also look as it did when it was keyed: a file changed
     /// and changed back during the compile has its old bytes, and the
     /// object may still have the new ones (§18.5).
-    pub fn still_holds(&self) -> bool {
-        if let Some(fortran) = &self.fortran {
+    ///
+    /// Where [`Keyed::before_compile`] looked every include up, the files
+    /// are read again and the includes looked up again; otherwise the
+    /// preprocessor runs again.
+    pub fn still_holds(&mut self) -> bool {
+        if let Some(fortran) = &mut self.fortran {
             return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
+        }
+        if let Ok(lookups) = &mut self.lookups
+            && lookups.looked_up()
+        {
+            let read = read_files(&self.named, self.map.as_ref(), |_, _| Ok(()));
+            return read.is_ok_and(|(files, seen)| {
+                seen == self.seen
+                    && lookups.answers(self.map.as_ref()).is_ok_and(|answers| files_part(&files, Ok(&answers)) == self.parts.files)
+            }) && lookups.still_hold();
         }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
+    }
+
+    /// Get ready for the check after the compile, right before the compile
+    /// (only a compile whose result may be stored needs it): look every
+    /// include up as the compiler did, so that the check can look them up
+    /// again instead of running the preprocessor again. Where that does not
+    /// lead where the key's run went, the check runs the preprocessor.
+    pub fn before_compile(&mut self) {
+        if let Some(fortran) = &mut self.fortran {
+            fortran.before_compile();
+        } else if let Ok(lookups) = &mut self.lookups
+            && let Err(why) = lookups.before_compile()
+        {
+            self.lookups = Err(why);
+        }
+    }
+
+    /// How the check after the compile was made: by the count of lookups it
+    /// made in place of a compiler run, or why it ran the compiler again.
+    pub fn check_made(&self) -> Result<u64, String> {
+        match &self.fortran {
+            Some(fortran) => fortran.check_made(),
+            None => match &self.lookups {
+                Ok(lookups) if lookups.looked_up() => Ok(lookups.count),
+                Ok(_) => Err("not looked up before the compile".to_owned()),
+                Err(why) => Err(why.clone()),
+            },
+        }
     }
 
     /// The command line of the compile whose result is to be stored, in
@@ -560,6 +611,10 @@ struct Read {
     /// compile. A file changed and changed back in between has its old
     /// bytes again, but not its old change time, which nothing can set back.
     seen: String,
+    /// The files it named.
+    named: Named,
+    /// What the check after the compile looks up, or why it cannot.
+    lookups: Result<Lookups, String>,
 }
 
 /// A line that names a file: a line marker of preprocessor output
@@ -580,6 +635,12 @@ impl Naming<'_> {
     /// repeats what a `#line` in the source said.
     fn enters(&self) -> bool {
         self.tail[1..].split(|b| b.is_ascii_whitespace()).any(|flag| flag == b"1")
+    }
+
+    /// Does the marker say the preprocessor went back to the file (flag
+    /// `2`) from one it had entered?
+    fn returns(&self) -> bool {
+        self.tail[1..].split(|b| b.is_ascii_whitespace()).any(|flag| flag == b"2")
     }
 }
 
@@ -782,7 +843,9 @@ fn preprocessor(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Optio
     let mut command = Command::new(&compiler.path);
     // `-v`: the driver then says, on stderr, where it takes flags from
     // besides its command line (see `flags_from_elsewhere`).
-    command.arg0(name).args(&compile.preprocess).args(["-E", "-v"]);
+    // `-dI`: each `#include` as written, for the check after the compile
+    // (`search`).
+    command.arg0(name).args(&compile.preprocess).args(["-E", "-v", "-dI"]);
     if let Some(depend) = depend {
         command.args(depend);
     }
@@ -846,7 +909,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
     let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-    let (text, text_bytes, mut named) = read?;
+    let (text, text_bytes, mut named, tracker) = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
@@ -856,8 +919,45 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    let (files, seen) = read_files(&named, map)?;
-    Ok(Read { text, text_bytes, files, count: named.len(), seen })
+    let mut probes = Vec::new();
+    let mut unfollowed = None;
+    let (files, seen) = read_files(&named, map, |_, bytes| {
+        if unfollowed.is_none()
+            && let Err(why) = search::probes(bytes, &mut probes)
+        {
+            unfollowed = Some(why);
+        }
+        Ok(())
+    })?;
+    let names: Vec<Vec<u8>> = named.keys().map(|(_, path)| path.as_os_str().as_bytes().to_vec()).collect();
+    let mut lookups = match (unfollowed, compile.forced_include) {
+        (Some(why), _) => Err(why),
+        (None, true) => Err("-include is given".to_owned()),
+        (None, false) => tracker.finish(compiler.family == Family::Gcc).and_then(|directives| Lookups::new(&said, directives, probes, &names)),
+    };
+    let answers = match &mut lookups {
+        Ok(lookups) => lookups.answers(map),
+        Err(why) => Err(why.clone()),
+    };
+    if let Err(why) = &answers {
+        lookups = Err(why.clone());
+    }
+    let files = files_part(&files, answers.as_ref().map(String::as_str));
+    Ok(Read { text, text_bytes, files, count: named.len(), seen, named, lookups })
+}
+
+/// The `files` part of a C or C++ key: the files' bytes, with the answers to
+/// the `__has_include`s in them, which a run's output does not show
+/// (`search`); `Err` where they are not followed (the check after the
+/// compile then runs the preprocessor again).
+fn files_part(files: &str, answers: Result<&str, &String>) -> String {
+    let mut hasher = Hasher::new("files and has_include");
+    hasher.feed(files.as_bytes());
+    match answers {
+        Ok(answers) => hasher.feed(answers.as_bytes()),
+        Err(_) => hasher.feed(b"not followed"),
+    }
+    hasher.hex()
 }
 
 /// Digest the files `named`, each under its mapped name: their bytes (the
@@ -869,7 +969,9 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// `#line` gave (generated code names its origin so) may be of no file at
 /// all; the bytes compiled are those of the file the directive stands in,
 /// which was entered.
-pub(super) fn read_files(named: &Named, map: Option<&PathMap>) -> Res<(String, String)> {
+///
+/// `each` is given every file's bytes as they are read.
+pub(super) fn read_files(named: &Named, map: Option<&PathMap>, mut each: impl FnMut(&Path, &[u8]) -> Res<()>) -> Res<(String, String)> {
     let mut files = Hasher::new("files");
     let mut seen = Hasher::new("seen");
     let mut steps = HashMap::new();
@@ -902,7 +1004,10 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>) -> Res<(String, S
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
         match read {
-            Ok((_, bytes)) => files.feed(content_digest(&bytes, map).as_bytes()),
+            Ok((_, bytes)) => {
+                each(path, &bytes)?;
+                files.feed(content_digest(&bytes, map).as_bytes())
+            }
             Err(_) if !entered && absent() => files.feed(b"no such file"),
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         }
@@ -992,10 +1097,11 @@ pub(super) type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
 
 /// Digest the preprocessor's output as it comes, and collect the files it
 /// names.
-fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
+fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named, search::Tracker)> {
     let mut output = BufReader::new(child.stdout.take().context("the preprocessor has no output")?);
     let mut hasher = Hasher::new("text");
     let mut named = Named::new();
+    let mut tracker = search::Tracker::default();
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -1019,6 +1125,7 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
                 // name (a header may be called `<odd>.h`); and a name
                 // ending in `//`, GCC's note of the working directory.
                 let pseudo = NOT_FILES.contains(&marker.name.as_slice()) || marker.name.ends_with(b"//") || marker.name.is_empty();
+                tracker.marker(&marker.name, marker.enters(), marker.returns());
                 if !pseudo {
                     let entered = marker.enters();
                     *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
@@ -1030,11 +1137,18 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
             None if assembler_include(&line) => {
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
-            None => feed(&line),
+            None => {
+                match search::directive(&line) {
+                    Some((kind, spelling)) => tracker.directive(kind, spelling),
+                    None if !line.iter().all(u8::is_ascii_whitespace) => tracker.text(),
+                    None => {}
+                }
+                feed(&line)
+            }
         }
     }
     hasher.end_stream(bytes);
-    Ok((hasher.hex(), bytes, named))
+    Ok((hasher.hex(), bytes, named, tracker))
 }
 
 #[cfg(test)]
@@ -1186,7 +1300,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "ae136801392e82c501174d2989ef3d8c5a4a2829c1b61855aaa7f3b81445f6d6");
+        assert_eq!(parts.key(), "cf50c3d8d34326175229c53c0b0e74ad60fb97a8ccc1a764f8e7d708128dd314");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -1366,6 +1480,18 @@ mod tests {
             key(&self.conf, &self.cc, &self.argv("gcc", flags), false).unwrap()
         }
 
+        /// The key of a compile, looked up for the check after the compile
+        /// (which then makes it by lookups) if `looked`, or not (which then
+        /// runs the preprocessor again).
+        fn keyed(&self, compiler: &str, flags: &[&str], looked: bool) -> Keyed {
+            let mut keyed = key(&self.conf, &self.cc, &self.argv(compiler, flags), false).unwrap();
+            if looked {
+                keyed.before_compile();
+                assert!(keyed.check_made().is_ok(), "{compiler}: the check is made by lookups: {:?}", keyed.check_made());
+            }
+            keyed
+        }
+
         fn why_not(&self, flags: &[&str]) -> String {
             key(&self.conf, &self.cc, &self.argv("gcc", flags), false).unwrap_err()
         }
@@ -1387,11 +1513,12 @@ mod tests {
         }
         let (here, there, renamed) = (Tree::new(), Tree::new(), Tree::named("sim-debug"));
         assert_ne!(here.conf.cactus_root, there.conf.cactus_root);
-        let a = here.key(&["-O2", "-g"]);
+        let mut a = here.key(&["-O2", "-g"]);
         assert!(a.relocatable() && a.files >= 2, "the source and its header, and what the compiler includes by itself");
         assert_eq!(there.key(&["-O2", "-g"]).parts, a.parts, "nothing in the key may know where the tree is");
         assert_eq!(renamed.key(&["-O2", "-g"]).parts, a.parts, "nor what the configuration is called");
         assert!(a.still_holds());
+        assert!(here.keyed("gcc", &["-O2", "-g"], true).still_holds());
     }
 
     /// The check after the compile holds for files that were left alone,
@@ -1404,15 +1531,19 @@ mod tests {
             return;
         }
         let tree = Tree::new();
-        let keyed = tree.key(&["-O2"]);
-        assert!(keyed.still_holds());
-        let header = std::fs::read(tree.header()).unwrap();
-        std::fs::write(tree.header(), b"#define CHANGED 1\n").unwrap();
-        std::fs::write(tree.header(), &header).unwrap();
-        assert_eq!(std::fs::read(tree.header()).unwrap(), header);
-        assert!(!keyed.still_holds(), "a header written over in between passed the check");
+        for looked in [true, false] {
+            let mut keyed = tree.keyed("gcc", &["-O2"], looked);
+            assert!(keyed.still_holds());
+            let header = std::fs::read(tree.header()).unwrap();
+            std::fs::write(tree.header(), b"#define CHANGED 1\n").unwrap();
+            std::fs::write(tree.header(), &header).unwrap();
+            assert_eq!(std::fs::read(tree.header()).unwrap(), header);
+            assert!(!keyed.still_holds(), "a header written over in between passed the check");
+        }
         // Keyed again, it holds again.
-        assert!(tree.key(&["-O2"]).still_holds());
+        for looked in [true, false] {
+            assert!(tree.keyed("gcc", &["-O2"], looked).still_holds());
+        }
     }
 
     /// The same for a directory on the way to a header: an include
@@ -1435,12 +1566,16 @@ mod tests {
             std::fs::rename(&new, &src).unwrap();
         };
         switch(&a);
-        let keyed = tree.key(&["-O2"]);
-        assert!(keyed.still_holds());
-        switch(&b);
-        switch(&a);
-        assert!(!keyed.still_holds(), "an include directory switched away and back passed the check");
-        assert!(tree.key(&["-O2"]).still_holds());
+        for looked in [true, false] {
+            let mut keyed = tree.keyed("gcc", &["-O2"], looked);
+            assert!(keyed.still_holds());
+            switch(&b);
+            switch(&a);
+            assert!(!keyed.still_holds(), "an include directory switched away and back passed the check");
+        }
+        for looked in [true, false] {
+            assert!(tree.keyed("gcc", &["-O2"], looked).still_holds());
+        }
     }
 
     #[test]
@@ -1449,7 +1584,8 @@ mod tests {
             return;
         }
         let tree = Tree::new();
-        let base = tree.key(&["-O2"]);
+        let mut base = tree.key(&["-O2"]);
+        let mut looked = tree.keyed("gcc", &["-O2"], true);
 
         // A flag that decides code generation: the arguments differ.
         let optimized = tree.key(&["-O3"]);
@@ -1471,6 +1607,7 @@ mod tests {
             let edited = tree.key(&["-O2"]);
             assert_ne!(edited.parts.files, base.parts.files, "{what}");
             assert!(!base.still_holds(), "{what}: what was keyed before the edit is no longer there");
+            assert!(!looked.still_holds(), "{what}: looked up, what was keyed before the edit is no longer there");
         }
         std::fs::write(tree.header(), HEADER).unwrap();
         std::fs::write(tree.source(), SOURCE.replace("int answer", "int   answer")).unwrap();
@@ -1486,6 +1623,64 @@ mod tests {
         let there = key(&elsewhere, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap();
         assert_ne!(there.parts.platform, base.parts.platform);
         assert_eq!(there.parts.text, base.parts.text);
+    }
+
+    /// A header that appears where the compiler looks before the place it
+    /// found one, after the key and before the check: the compile may have
+    /// read it, and neither way of checking lets that pass.
+    #[test]
+    fn a_header_appearing_earlier_in_the_search_does_not_pass_the_check() {
+        for compiler in [("gcc", Family::Gcc), ("clang", Family::Clang)] {
+            if !have(compiler.0, compiler.1) {
+                continue;
+            }
+            for looked in [true, false] {
+                let tree = Tree::new();
+                let mut keyed = tree.keyed(compiler.0, &["-O2"], looked);
+                assert!(keyed.still_holds());
+                // `"t.h"` is looked for beside the source first.
+                std::fs::write(tree.source().with_file_name("t.h"), "#define ANSWER 41\n").unwrap();
+                assert!(!keyed.still_holds(), "{}: a header beside the source passed the check", compiler.0);
+                std::fs::remove_file(tree.source().with_file_name("t.h")).unwrap();
+                // A directory there is passed over.
+                std::fs::create_dir(tree.source().with_file_name("t.h")).unwrap();
+                assert!(tree.keyed(compiler.0, &["-O2"], looked).still_holds(), "{}", compiler.0);
+            }
+        }
+    }
+
+    /// Includes skipped for their guard, `#include_next`, and an include
+    /// named by a macro are followed; `__has_include` is answered, keyed,
+    /// and asked again after the compile.
+    #[test]
+    fn includes_of_every_kind_are_followed_and_has_include_is_keyed() {
+        for compiler in [("gcc", Family::Gcc), ("clang", Family::Clang)] {
+            if !have(compiler.0, compiler.1) {
+                continue;
+            }
+            let tree = Tree::new();
+            let src = tree.header().parent().unwrap().to_owned();
+            let next = tree.conf.cactus_root.join("next");
+            std::fs::create_dir_all(next.join("sub")).unwrap();
+            std::fs::write(src.join("n.h"), "#include_next <n.h>\n#define FIRST 1\n").unwrap();
+            std::fs::write(next.join("n.h"), "#ifndef N_H\n#define N_H\n#define SECOND 2\n#endif\n").unwrap();
+            std::fs::write(
+                tree.header(),
+                "#define HDR <n.h>\n#include HDR\n#include <n.h>\n#if __has_include(<sub/extra.h>)\n#define EXTRA 1\n#endif\n#define ANSWER 42\n",
+            )
+            .unwrap();
+            let flags = ["-O2", &format!("-I{}", next.display())];
+            let mut keyed = tree.keyed(compiler.0, &flags, true);
+            assert!(keyed.still_holds(), "{}: {:?}", compiler.0, keyed.check_made());
+            assert!(keyed.check_made().is_ok_and(|count| count > 0), "{}", compiler.0);
+            // The answer to `__has_include` changes: so does the key, and the
+            // check does not pass.
+            std::fs::write(next.join("sub/extra.h"), "").unwrap();
+            assert!(!keyed.still_holds(), "{}: an answer that changed passed the check", compiler.0);
+            let answered = tree.keyed(compiler.0, &flags, true);
+            assert_ne!(answered.parts.files, keyed.parts.files, "{}", compiler.0);
+            assert_eq!(answered.parts.text, keyed.parts.text, "{}: the text alone does not show it here", compiler.0);
+        }
     }
 
     #[test]

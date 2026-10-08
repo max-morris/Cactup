@@ -34,6 +34,7 @@ pub mod key;
 pub mod lookup;
 pub mod platform;
 pub mod probe;
+pub mod search;
 pub mod specs;
 pub mod store;
 pub mod upkeep;
