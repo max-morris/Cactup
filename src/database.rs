@@ -120,11 +120,6 @@ pub fn validate_knob_name(name: &str) -> Res<()> {
              character, and dashes anywhere but first or last"
         );
     }
-    // A standard knob that was renamed: taken as a custom knob, it would be
-    // ignored without a word, and a build would cache in the wrong place.
-    if name == "build-cache-dir" {
-        bail!("the build-cache-dir knob is now called build-cache-home");
-    }
     // `cactup knob <subcommand>` shares the positional slot with knob names,
     // so a knob by that name could be created but never read or deleted.
     if RESERVED_KNOB_NAMES.contains(&name) {
@@ -727,10 +722,6 @@ mod tests {
         }
         for bad in ["", "1a", "-a", "a-", "Queue", "mail_type", "a b", "ünï", "a.b", "a/b", "delete"] {
             assert!(validate_knob_name(bad).is_err(), "{bad:?} accepted");
-        }
-        for renamed in ["build-cache-dir"] {
-            let err = knob_stored_form(renamed, "/x").unwrap_err().to_string();
-            assert!(err.contains("build-cache-home"), "{err}");
         }
         // Every standard knob passes its own rule.
         for spec in KNOWN_KNOBS {

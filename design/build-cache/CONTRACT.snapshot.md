@@ -278,7 +278,7 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   objects live changed: by default `<install-home>/.cactup-build-cache`,
   beside the installations (`install-home` is the knob of that name, else
   the machine's, else `~/.cactup/cacti`); the knob `build-cache-home`
-  moves it, and replaces `build-cache-dir`, which is now refused. Every
+  moves it, and replaces `build-cache-dir`. Every
   `[paths]` key has a knob of the same name now. No `mdb/` change and no
   `mdb/GENERATION` bump on the cache side (question c). A serving build
   also writes one small use log per build under `<store>/used/`.

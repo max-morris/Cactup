@@ -1214,12 +1214,13 @@ machine `build-cache-home` warns and goes on to the install home; an
 unreadable or unlistable use log stops `gc`, with nothing removed), and
 both confirmed that `mdb/` is unchanged and no generation bump is due.
 
-Non-blocking points taken after the gate: the removed `build-cache-dir`
-knob is refused with its new name, not taken as a custom knob (both: a
-gate script still passing it would have filled the default store); the
+Non-blocking points taken after the gate: the
 `Paths` doc comment names `.cactup-build-cache`; the docs say a store
 left behind by a new `install-home` or `build-cache-home` is moved or
-removed by hand. Left as they are: `@SCRATCH_HOME@` read at each submit
+removed by hand. Left as they are: the removed `build-cache-dir` knob is taken as a custom
+knob like any unknown name (both; it was never released, and Max: "The old
+knob name fallback is pointless. None of these changes have ever been
+live."); `@SCRATCH_HOME@` read at each submit
 (as a machine edit would be); the machine-detection notice in the cache
 commands on an unknown host. (B) noted that machines whose `install-home`
 is `$HOME` keep the store there: decision 12, Max's.
@@ -1244,5 +1245,5 @@ unchecked.
 
 M1 is done. Next, by decision 2: gfortran, proved with audit mode, then
 the CUDA compilers. (The gate scripts in `~/tmp/build-cache-m1b` pass
-`build-cache-dir`, which a binary from `01bd00a` on refuses: use
+`build-cache-dir`, which a binary from `01bd00a` on ignores: use
 `build-cache-home` in any re-run.)
