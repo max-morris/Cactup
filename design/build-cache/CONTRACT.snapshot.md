@@ -284,7 +284,7 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   also writes one small use log per build under `<store>/used/`.
 
 - 2026-10-08, on `feature/build-cache`: **Fortran is cached** (gfortran;
-  M2a, in review). What it changes for the speed side, with the cache
+  M2a, passed its gate at `a14f279`). What it changes for the speed side, with the cache
   serving or auditing: before each gfortran compile cactup runs gfortran
   once more (`-cpp -undef -M -fsyntax-only`, in a directory of its own) to
   learn which files the compile reads, and once more after it; the compile
@@ -415,3 +415,6 @@ every milestone.
 - 2026-10-07  cache side  **Load on plato:** five Einstein Toolkit builds (GCC, gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 22:57 local, for about an hour: the build cache now caches Fortran.
 - 2026-10-07  cache side  **Load on plato:** five more Einstein Toolkit builds (GCC, gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:49 local, for about an hour (the Fortran gate again, after a fix).
 - 2026-10-08  cache side  Fortran (gfortran) is cached on the feature branch (landed changes); its Einstein Toolkit audit builds on plato are done.
+- 2026-10-08  cache side  **Load on plato:** five more Einstein Toolkit builds (the Fortran gate after review fixes) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:03 local, for about an hour.
+- 2026-10-08  cache side  **Load on plato:** five more Einstein Toolkit builds (the Fortran gate on the reviewed commit) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:49 local, for about an hour.
+- 2026-10-08  cache side  M2a (gfortran) passed its review gate at `a14f279`; its Einstein Toolkit audit builds on plato are done.

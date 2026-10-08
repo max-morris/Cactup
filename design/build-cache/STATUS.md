@@ -52,7 +52,7 @@ the last milestone, for when that host is not at hand.
 | M1a | Store: publish, restore, invalidate; the `build-cache-dir` knob; thorn stand-down on `include`/`define`/`eval`; the shell asked what the compiler's name resolves to; link-only GCC specs files | **passed the gate** at `9d8f62b` (three review rounds) |
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
-| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | review **passed** at `a14f279` (four rounds); Einstein Toolkit audit builds clean on `8827465`, run again on `a14f279` |
+| M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1315,6 +1315,12 @@ Non-blocking (B): the `..` check also fires for an `-I` directory spelled
 with `..`, a lost hit only. The Einstein Toolkit gate is run once more on
 `a14f279` itself (`gate-4.sh`), the commit the reviews signed.
 
+**The Einstein Toolkit gate on `e9b0a33` (`gate-3.out`) and on `a14f279`
+(`gate-4.out`)**, alike: `et.toml` served in `build-cache`, 3376 published;
+audited in `build-cache-b` and in `build-cache`, 3375 checked each, 0
+wrong; `et-ld.toml` served, 3376 published, audited in `build-cache-b`,
+3374 checked, 0 wrong; every build exit 0. **M2a has passed its gate.**
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1413,4 +1419,5 @@ real code (the audit in `build-cache-b`): keying 19 s and checking again
 
 ## Next step
 
-M2a's review gate (two reviewers). Then the CUDA compilers.
+The CUDA compilers (decision 2), with audit mode to prove them; the
+narrower key of decision 4 can be revisited with audit mode too.
