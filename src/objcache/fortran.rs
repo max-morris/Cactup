@@ -452,20 +452,35 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         let file_name = input.file_name().unwrap_or_default();
         // A module file by its name and by what it is (gfortran writes them
         // gzip-compressed): a text file named so is an included file.
-        let module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod") && is_gzip(input);
-        if module {
+        // A file named like a module file may be one, whatever its bytes
+        // (gfortran reads module files through zlib, which takes an
+        // uncompressed file as it is): it is checked as a module file. Only
+        // one that is gzip-compressed, as gfortran writes them, is surely
+        // not an included file; any other is checked as one too.
+        let named_module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
+        if named_module {
             let first = fortran.module_dirs.iter().find(|dir| dir.join(file_name).exists());
             if first.is_some_and(|dir| Some(dir.as_path()) != physical.parent()) {
                 bail!("the compile would find another module file of the name {} first", file_name.to_string_lossy());
             }
-        } else {
+        }
+        if !(named_module && is_gzip(input)) {
             if input.starts_with(&fortran.cwd) || physical.starts_with(&fortran.cwd) {
                 bail!("an included file would be found under the working directory, where the compile does not look for one");
             }
-            // The copy's directory, which the compile searches first, has
-            // copies of other sources, and copies whose build copy is gone.
-            if copies.as_ref().is_some_and(|copies| copies.join(file_name).exists()) {
-                bail!("an included file of that name is beside the copy, where the compile would look first");
+            if copies.is_some() {
+                // The compile of a copy looks first in the copy's directory,
+                // which has copies of other sources and copies whose build
+                // copy is gone; and a name with `..` in it (the dependency
+                // run prints each as it was written, after the directory it
+                // was found in) leads elsewhere from there than from the
+                // source's directory.
+                if copies.as_ref().is_some_and(|copies| copies.join(file_name).exists()) {
+                    bail!("an included file of that name is beside the copy, where the compile would look first");
+                }
+                if input.components().any(|part| part == std::path::Component::ParentDir) {
+                    bail!("an included file is named with \"..\", which leads elsewhere from the copy");
+                }
             }
         }
         named.insert((mapped(input), input.clone()), true);
@@ -1053,5 +1068,37 @@ mod tests {
         std::fs::write(real.build.join(".cactup/b.f90"), "integer, parameter :: y = 5\n").unwrap();
         let err = real.key("c.f90", &[&include]).err().unwrap_or_default();
         assert!(err.contains("beside the copy"), "{err}");
+    }
+
+    /// A module file that is not compressed is still a module file to
+    /// gfortran, and is checked as one: here one beside the source, which
+    /// the compile finds after the working directory's. And a copied
+    /// source's included file named with `..` keeps the compile out.
+    #[test]
+    fn module_files_by_name_and_includes_by_the_name_as_written() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        std::fs::write(real.build.join("mymod.f90"), "module mymod\n  integer :: v = 1\nend module mymod\n").unwrap();
+        real.compile("mymod.f90");
+        std::fs::write(real.build.join("user.f90"), "subroutine user()\n  use mymod\n  print *, v\nend subroutine\n").unwrap();
+        let plain = Command::new("gzip").arg("-dc").arg(real.scratch.join("mymod.mod")).output().unwrap();
+        assert!(plain.status.success());
+        std::fs::write(real.build.join("mymod.mod"), &plain.stdout).unwrap();
+        let err = real.key("user.f90", &[]).err().unwrap_or_default();
+        assert!(err.contains("another module file"), "{err}");
+        std::fs::remove_file(real.build.join("mymod.mod")).unwrap();
+
+        let sub = real.build.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(real.build.join("x.inc"), "integer, parameter :: z = 2\n").unwrap();
+        let original = real.root.join("arrangements/A/T/src/sub/a.F90");
+        std::fs::write(sub.join("a.f90"), format!("# 1 \"{}\"\nsubroutine a()\n  include '../x.inc'\n  print *, z\nend subroutine\n", original.display())).unwrap();
+        let args = real.args("sub/a.f90", &[]);
+        let compile = super::super::compile::parse(&args).unwrap();
+        let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
+        let err = key(&real.compiler, OsStr::new("gfortran"), &compile, &args, &real.scratch, Some(&map), &real.cc, true).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains("\"..\""), "{err}");
     }
 }

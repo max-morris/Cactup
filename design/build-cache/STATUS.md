@@ -1289,6 +1289,22 @@ only, that CRLF sources are not cached, and that `.cactup/` is safe to
 delete. Left as it is (A): an included file an external library installed
 below `scratch` is declined, a lost hit only (the spec says why).
 
+### M2a, round 3 (on `6a55842`): BLOCKED by both, one finding each
+
+1. (A) Round 2's fix decided by content: a `.mod` file that is not
+   gzip-compressed was treated as an included file only, and so escaped
+   the search-order check; but gfortran reads module files through zlib,
+   which takes an uncompressed file as it is, so round 1's module file
+   beside the source came back (A served `$0x1` where the compile gives
+   `$0x3`). *Fixed: every file named like a module file gets the
+   search-order check; one that is not gzip-compressed gets the
+   included-file rules as well.*
+2. (B) A copied source's `include "../x.inc"` resolves from `.cactup/`,
+   which is the source's directory one level down: the compile read
+   `build/<Thorn>/x.inc` where the dependency run read the file one level
+   up. *Fixed: for a copied source, an included file named with `..`
+   keeps the compile out (the dependency run prints the name as written).*
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

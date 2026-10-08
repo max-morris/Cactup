@@ -5597,9 +5597,11 @@ directory for included files, which the compile does not. So each module
 file it read must be the first of its name in the compile's order (none of
 that name in a directory the compile searches before it), and no included
 file may be found under the working directory; otherwise the compile is
-not cached. A file counts as a module file by its name (`.mod`, `.smod`)
-and by being one (gfortran writes them gzip-compressed): a text file
-named so is an included file. The rule for included files is the plain
+not cached. A file named like a module file (`.mod`, `.smod`) is checked
+as one whatever its bytes, since gfortran reads module files through
+zlib, which takes an uncompressed file as it is; only one that is
+gzip-compressed, as gfortran writes them, is surely not an included file,
+and any other is checked as an included file too. The rule for included files is the plain
 one, not a check of the compile's order: it also turns away a Fortran
 `include` of a file an external library installed below `scratch`
 (`scratch/external/...`), a lost hit and never a wrong one, since which
@@ -5643,7 +5645,9 @@ messages name), with the source's own directory first among the `-I`
 directories, right after the copy's own, where Fortran `include` would
 have looked first (an included file of a name the copy's directory has
 too, a copy of another source or one whose build copy is gone, keeps the
-compile out). `.cactup/` is cactup's alone, and safe to delete: it is
+compile out; so does one named with `..`, which from the copy's directory
+leads elsewhere than from the source's: the dependency run prints each
+included file as it was named, after the directory it was found in). `.cactup/` is cactup's alone, and safe to delete: it is
 written again by the next compile that needs it. Only the compile for the store reads the copy, so only a
 serving or auditing build writes it, whole (a temporary file renamed into
 place); it stays there like the build copy itself, and another compile of
