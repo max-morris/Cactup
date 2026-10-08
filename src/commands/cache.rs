@@ -87,9 +87,10 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
 /// that came from (`objcache::store_root`).
 fn store_root(ctx: &Ctx) -> Res<(PathBuf, String)> {
     let db = ctx.db.read()?;
-    // The machine is only asked for its places: a host it cannot resolve
+    // The machine is only asked for its places: a host it cannot resolve,
+    // or does not recognize (a build there uses `generic`, which sets none),
     // leaves the knobs and the default.
-    let machine = crate::commands::machine::resolve(ctx).ok();
+    let machine = crate::commands::machine::resolve_quietly(ctx).ok().flatten();
     let root = crate::objcache::store_root(&db, machine.as_ref());
     for warning in &root.warnings {
         println!("{} {warning}; looking further for the build cache", "warning:".yellow().bold());

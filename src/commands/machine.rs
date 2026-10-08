@@ -80,6 +80,24 @@ pub fn resolve_with(
     }
 }
 
+/// [`resolve`] without its notice for an unrecognized host: `None` there,
+/// for a caller that only wants a machine's settings and has its own
+/// defaults for the built-in `generic` machine's (which sets none).
+pub fn resolve_quietly(ctx: &Ctx) -> Res<Option<Machine>> {
+    let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
+    let resolution = resolve_inner(
+        &ctx.db,
+        &mdb,
+        ctx.globals.machine.as_deref(),
+        ctx.globals.hostname.as_deref(),
+        ctx.globals.verbose,
+    )?;
+    Ok(match resolution {
+        Resolution::Known(machine) => Some(machine),
+        Resolution::Unrecognized(_) => None,
+    })
+}
+
 /// §4.7 install integration — the `setup-silent` successor. Resolves the
 /// local machine like `resolve`, but an unrecognized host gets a user-MDB
 /// machine created silently (and cached) instead of the in-place `generic`

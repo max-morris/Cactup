@@ -1182,6 +1182,21 @@ fn path_fields(paths: &mut Paths) -> [(&'static str, &mut Option<String>); 5] {
     ]
 }
 
+/// What a path knob left unset comes to, said for `cactup knob`; `None`
+/// for any other name.
+pub fn path_knob_unset(key: &str) -> Option<String> {
+    let root = crate::CACTUP_ROOT.display();
+    let fallback = match key {
+        "install-home" => format!("{root}/cacti"),
+        "simulation-home" => format!("{root}/simulations"),
+        "test-home" => format!("{root}/tests"),
+        "scratch-home" => "empty".to_owned(),
+        "build-cache-home" => "<install-home>/.cactup-build-cache".to_owned(),
+        _ => return None,
+    };
+    Some(format!("unset: the machine's value, else {fallback}"))
+}
+
 /// `@USER@` and `@ENV(NAME)@` in one `[paths]` value.
 fn resolve_path(key: &str, value: &str) -> Res<String> {
     let mut vars = VarSet::new();
@@ -1710,7 +1725,9 @@ mod tests {
             assert!(crate::database::knob_spec(key).is_some(), "{key} is a standard knob");
             assert!(crate::database::knob_stored_form(key, "relative").is_err());
             assert_eq!(crate::database::knob_stored_form(key, " /abs/x ").unwrap(), "/abs/x");
+            assert!(path_knob_unset(key).is_some_and(|note| note.contains("machine's value")), "{key}");
         }
+        assert_eq!(path_knob_unset("queue"), None);
     }
 
     #[test]
