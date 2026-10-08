@@ -888,6 +888,7 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) 
         Output::Swallow(rewrite) => Some((false, rewrite)),
     };
     let renamed = through.as_ref().is_some_and(|(_, rewrite)| rewrite.is_some());
+    let shown = through.as_ref().is_some_and(|(pass_on, _)| *pass_on);
     if let Some((pass_on, rewrite)) = through
         && let (Ok((out_from, out_to)), Ok((err_from, err_to))) = (std::io::pipe(), std::io::pipe())
     {
@@ -903,8 +904,13 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) 
     // must have its messages rewritten on their way: without the pipes, it
     // is the recipe's own compile that runs.
     if renamed && passing.is_none() {
-        debug("its messages cannot be passed on, and they would name its files otherwise");
-        pass_through(job)
+        // Audit mode's second compile is not shown at all.
+        if !shown {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        } else {
+            debug("its messages cannot be passed on, and they would name its files otherwise");
+            pass_through(job)
+        }
     }
     PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
     let spawned = command.spawn();

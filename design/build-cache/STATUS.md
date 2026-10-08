@@ -1264,6 +1264,31 @@ spec says how module files are restored and what a signal leaves; the
 docs and decision 13 say what "In file" messages name. The wrong premise
 of the "module file beside the source" decline went with it.
 
+### M2a, round 2 (on `e9b0a33`): A SIGN-OFF, B BLOCKED
+
+Both re-ran every round-1 reproduction: each is now a correct miss or
+declined with its reason.
+
+1. (B) An included file named like a module file (`include "cfg.mod"`, a
+   text file) was taken by its name for a module file, and so could be
+   found in `scratch` by the dependency run, which the compile does not
+   search for included files. *Fixed: a module file is one by its name and
+   by being gzip-compressed, as gfortran writes them.*
+2. (B) For a copied source, a file of an included file's name in
+   `.cactup/` (a copy whose build copy is gone) was checked only when the
+   included file was found in the source's directory; the compile, which
+   looks in `.cactup/` first, read it, and an object of other text was
+   published. *Fixed: any file of that name there keeps the compile out, as
+   the spec said.*
+
+Non-blocking points taken: the module comment and `key::key`'s argument
+(`serving`) say what they now mean; audit mode's second compile, should
+its messages not be passable, runs with them discarded rather than as the
+recipe's; the spec says `-D`/`-U` are kept from the preprocessing runs
+only, that CRLF sources are not cached, and that `.cactup/` is safe to
+delete. Left as it is (A): an included file an external library installed
+below `scratch` is declined, a lost hit only (the spec says why).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

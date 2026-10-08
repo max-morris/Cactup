@@ -300,10 +300,12 @@ pub struct Keyed {
 /// arguments). `Err` says why it is not one the cache keys; the compile
 /// itself is none of this function's business.
 ///
-/// With `depend`, a dependency file the compile asks for is written by the
-/// key's preprocessor run, under a temporary name ([`Keyed::keep_depend`]
-/// gives it the compile's): what a hit needs, since no compile runs.
-pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> Result<Keyed, String> {
+/// `serving`: the compile may be served, and its result stored. A dependency
+/// file the compile asks for is then written by the key's preprocessor run,
+/// under a temporary name ([`Keyed::keep_depend`] gives it the compile's):
+/// what a hit needs, since no compile runs; and a Fortran compile's copy is
+/// written, which the compile for the store reads (§18.10).
+pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -> Result<Keyed, String> {
     let whole = |e: anyhow::Error| format!("{e:#}");
     // Before anything else: a variable that rules the compile out says so
     // whatever the compiler.
@@ -380,7 +382,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
     let name = argv[0].clone();
     if compile.language.is_fortran() {
         let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
-        let read = fortran::key(&compiler, &name, &compile, &argv[1..], &cwd, map.as_ref(), cc_dir, depend).map_err(whole)?;
+        let read = fortran::key(&compiler, &name, &compile, &argv[1..], &cwd, map.as_ref(), cc_dir, serving).map_err(whole)?;
         let parts = Parts {
             platform: platform.digest,
             compiler: compiler.id.clone(),
@@ -402,7 +404,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], depend: bool) -> 
             fortran: Some(read.fortran),
         });
     }
-    let depend = match depend {
+    let depend = match serving {
         true => depend_flags(&compile).map_err(whole)?,
         false => None,
     };

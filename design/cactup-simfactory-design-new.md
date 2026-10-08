@@ -5567,7 +5567,8 @@ every file the compile reads, and tells the driver nothing will be linked
 escape is not read, and the compile is not cached.
 
 That run needs the C preprocessor, which the compile does not run. `-D` and
-`-U` do nothing to the compile and are not given to it. Even so, in
+`-U` do nothing to the compile (the compile gets them, as the recipe gave
+them); the runs that preprocess do not. Even so, in
 traditional mode with every macro it can drop dropped (`-undef`), the
 preprocessor still acts on more than a Fortran source should give it: a
 `/*` (which swallows lines up to the next `*/`), a line ending in `\`
@@ -5578,7 +5579,8 @@ the same arguments and `-E`, and its output must be the source: every line
 but its line markers, in order (lines blank on both sides aside, since it
 may stand a marker for a run of them). Otherwise the compile is not
 cached. All 594 of the Einstein Toolkit's Fortran build copies come back
-from it byte for byte. A line beginning with `#` that is not a line marker
+from it byte for byte. (A source with CRLF line ends does not, since the
+preprocessor drops the carriage returns: it is not cached.) A line beginning with `#` that is not a line marker
 is a directive, which leaves no line to compare, and keeps the compile out
 too.
 
@@ -5595,7 +5597,14 @@ directory for included files, which the compile does not. So each module
 file it read must be the first of its name in the compile's order (none of
 that name in a directory the compile searches before it), and no included
 file may be found under the working directory; otherwise the compile is
-not cached. A module file it names in its own directory is its own output,
+not cached. A file counts as a module file by its name (`.mod`, `.smod`)
+and by being one (gfortran writes them gzip-compressed): a text file
+named so is an included file. The rule for included files is the plain
+one, not a check of the compile's order: it also turns away a Fortran
+`include` of a file an external library installed below `scratch`
+(`scratch/external/...`), a lost hit and never a wrong one, since which
+name an included file was written by cannot be told from where it was
+found. A module file it names in its own directory is its own output,
 not an input. Both checks are made again after the compile, with the
 dependency run.
 
@@ -5632,8 +5641,10 @@ given), in `.cactup/` beside the source, named from the working directory
 too (`../build/<Thorn>/.cactup/x.f90`, which is then what "In file"
 messages name), with the source's own directory first among the `-I`
 directories, right after the copy's own, where Fortran `include` would
-have looked first (an included file the copy's directory has too keeps
-the compile out). Only the compile for the store reads the copy, so only a
+have looked first (an included file of a name the copy's directory has
+too, a copy of another source or one whose build copy is gone, keeps the
+compile out). `.cactup/` is cactup's alone, and safe to delete: it is
+written again by the next compile that needs it. Only the compile for the store reads the copy, so only a
 serving or auditing build writes it, whole (a temporary file renamed into
 place); it stays there like the build copy itself, and another compile of
 the same source writes the same bytes. Its bytes are the key's text, and

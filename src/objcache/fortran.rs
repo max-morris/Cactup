@@ -9,11 +9,12 @@
 //! [`dependencies`]): each file by the name it was found under, module files
 //! included — the intrinsic ones by their full path — and the module files it
 //! writes as targets. That run needs the C preprocessor, which the compile
-//! does not run, so the source must be one the preprocessor reads as gfortran
-//! does ([`check_text`]). It writes module files, and reads back the ones it
-//! wrote, so it runs in an empty directory of its own with the compile's
-//! working directory first among its `-I` directories: it then finds every
-//! module file where the compile finds it, its own first.
+//! does not run, so the source must read to that preprocessor as it is
+//! ([`preprocessor_agrees`]). It writes module files, and reads back the
+//! ones it wrote, so it runs in an empty directory of its own with the
+//! compile's working directory first among its `-I` directories; since its
+//! search order is still not the compile's, each file it read is checked
+//! against the order the compile searches in ([`read_inputs`]).
 //!
 //! **What it writes.** The object, and one module file (`.mod`, `.smod` for a
 //! submodule) per module the source defines, into the working directory
@@ -449,7 +450,9 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
     for input in &deps.inputs {
         let physical = std::fs::canonicalize(input).unwrap_or_else(|_| input.clone());
         let file_name = input.file_name().unwrap_or_default();
-        let module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
+        // A module file by its name and by what it is (gfortran writes them
+        // gzip-compressed): a text file named so is an included file.
+        let module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod") && is_gzip(input);
         if module {
             let first = fortran.module_dirs.iter().find(|dir| dir.join(file_name).exists());
             if first.is_some_and(|dir| Some(dir.as_path()) != physical.parent()) {
@@ -459,8 +462,10 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
             if input.starts_with(&fortran.cwd) || physical.starts_with(&fortran.cwd) {
                 bail!("an included file would be found under the working directory, where the compile does not look for one");
             }
-            if copies.as_ref().is_some_and(|copies| physical.parent() == copies.parent() && copies.join(file_name).exists()) {
-                bail!("an included file would be found beside the copy first");
+            // The copy's directory, which the compile searches first, has
+            // copies of other sources, and copies whose build copy is gone.
+            if copies.as_ref().is_some_and(|copies| copies.join(file_name).exists()) {
+                bail!("an included file of that name is beside the copy, where the compile would look first");
             }
         }
         named.insert((mapped(input), input.clone()), true);
@@ -490,6 +495,12 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         seen = hasher.hex();
     }
     Ok((files, seen, named.len()))
+}
+
+/// Does the file at `path` begin as a gzip stream does?
+fn is_gzip(path: &Path) -> bool {
+    let mut magic = [0u8; 2];
+    std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)).is_ok() && magic == [0x1f, 0x8b]
 }
 
 /// Run the dependency run of `fortran`, and read what it says.
@@ -1014,5 +1025,33 @@ mod tests {
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &served.fortran, &served.files, &served.seen));
         std::fs::write(&copy, "subroutine x()\n  print *, 2\nend subroutine\n").unwrap();
         assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &served.fortran, &served.files, &served.seen));
+    }
+
+    /// A text file named like a module file is an included file, with an
+    /// included file's rules; an included file of a name the copy's
+    /// directory has keeps a copied source out, wherever it was found.
+    #[test]
+    fn included_files_are_told_by_what_they_are_and_where_the_compile_looks() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        let shared = real.root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("cfg.mod"), "integer, parameter :: z = 2\n").unwrap();
+        std::fs::write(real.build.join("t.f90"), "subroutine t()\n  include 'cfg.mod'\n  print *, z\nend subroutine\n").unwrap();
+        let include = format!("-I{}", shared.display());
+        assert!(real.key("t.f90", &[&include]).is_ok());
+        std::fs::write(real.scratch.join("cfg.mod"), "integer, parameter :: z = 1\n").unwrap();
+        let err = real.key("t.f90", &[&include]).err().unwrap_or_default();
+        assert!(err.contains("under the working directory"), "{err}");
+
+        let original = real.root.join("arrangements/A/T/src/c.F90");
+        std::fs::write(shared.join("b.f90"), "integer, parameter :: y = 6\n").unwrap();
+        std::fs::write(real.build.join("c.f90"), format!("# 1 \"{}\"\nsubroutine c()\n  include 'b.f90'\n  print *, y\nend subroutine\n", original.display())).unwrap();
+        assert!(real.key("c.f90", &[&include]).is_ok());
+        std::fs::write(real.build.join(".cactup/b.f90"), "integer, parameter :: y = 5\n").unwrap();
+        let err = real.key("c.f90", &[&include]).err().unwrap_or_default();
+        assert!(err.contains("beside the copy"), "{err}");
     }
 }
