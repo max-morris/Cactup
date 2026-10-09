@@ -445,6 +445,8 @@ pub struct Probe {
 pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
     const NAME: &[u8] = b"__has_include";
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    // Worked out only for a file that needs it.
+    let mut in_comments: Option<Vec<(usize, usize)>> = None;
     let mut at = 0;
     while let Some(found) = find(&bytes[at..], NAME) {
         let start = at + found;
@@ -485,7 +487,8 @@ pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
         }
         // In a comment (`#endif // __has_include`), where nothing is
         // asked.
-        if in_comment(bytes, start) {
+        let comments = in_comments.get_or_insert_with(|| comments(bytes));
+        if comments.iter().any(|(from, to)| (*from..*to).contains(&start)) {
             continue;
         }
         // Only asked whether it is defined: `defined __has_include`,
@@ -504,37 +507,79 @@ pub fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
     Ok(())
 }
 
-/// Is `at` in `bytes` inside a comment begun on its own line: after a `//`
-/// or a `/*` (not closed since) that no string or character literal holds?
-/// (A comment begun on an earlier line is not told from a `/*` in a string
-/// there: such a `__has_include` is taken for one in code.)
-fn in_comment(bytes: &[u8], at: usize) -> bool {
-    let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
-    let (mut quote, mut block) = (None, false);
-    let mut line = bytes[line_start..at].iter().peekable();
-    while let Some(b) = line.next() {
-        let next = line.peek().copied().copied();
-        match (quote, block, *b) {
-            (_, true, b'*') if next == Some(b'/') => {
-                line.next();
-                block = false;
+/// The comments in `bytes`, a C or C++ file, as spans `[start, end)`: read
+/// as the compilers read the file, past string and character literals (raw
+/// strings too) and lines spliced with a backslash. Where it could be read
+/// otherwise, it errs toward code: a comment taken for code only sends a
+/// `__has_include` in it to the second compiler run, while code taken for a
+/// comment could hide one.
+fn comments(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    // The next byte at or after `at` that is not a line splice.
+    let skip_splices = |mut at: usize| {
+        while bytes.get(at) == Some(&b'\\') {
+            match bytes.get(at + 1) {
+                Some(b'\n') => at += 2,
+                Some(b'\r') if bytes.get(at + 2) == Some(&b'\n') => at += 3,
+                _ => break,
             }
-            (_, true, _) => {}
-            (Some(_), _, b'\\') => {
-                line.next();
+        }
+        at
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let next = skip_splices(at + 1);
+        match (bytes[at], bytes.get(next)) {
+            (b'/', Some(b'/')) => {
+                // To the end of the line, a spliced one included.
+                let start = at;
+                at = next + 1;
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at = if bytes[at] == b'\\' { skip_splices(at).max(at + 1) } else { at + 1 };
+                }
+                spans.push((start, at));
             }
-            (Some(open), _, b) if b == open => quote = None,
-            (Some(_), _, _) => {}
-            (None, _, b'"' | b'\'') => quote = Some(*b),
-            (None, _, b'/') if next == Some(b'/') => return true,
-            (None, _, b'/') if next == Some(b'*') => {
-                line.next();
-                block = true;
+            (b'/', Some(b'*')) => {
+                let start = at;
+                at = next + 1;
+                loop {
+                    match bytes.get(at) {
+                        None => break,
+                        Some(b'*') if bytes.get(skip_splices(at + 1)) == Some(&b'/') => {
+                            at = skip_splices(at + 1) + 1;
+                            break;
+                        }
+                        Some(_) => at += 1,
+                    }
+                }
+                spans.push((start, at));
             }
-            _ => {}
+            (b'"', _) if at > 0 && bytes[at - 1] == b'R' && (at < 2 || !ident(bytes[at - 2]) || matches!(&bytes[at.saturating_sub(3)..at - 1], b"u8" | [_, b'u' | b'U' | b'L'])) => {
+                // A raw string: `R"delim( ... )delim"`.
+                let open = &bytes[at + 1..];
+                let delim_len = open.iter().take(17).position(|b| *b == b'(');
+                match delim_len.filter(|len| !open[..*len].iter().any(|b| matches!(b, b' ' | b')' | b'\\' | b'\t' | b'\n'))) {
+                    Some(len) => {
+                        let close = [&b")"[..], &open[..len], b"\""].concat();
+                        let body = at + 1 + len + 1;
+                        at = find(&bytes[body..], &close).map_or(bytes.len(), |found| body + found + close.len());
+                    }
+                    None => at += 1,
+                }
+            }
+            (quote @ (b'"' | b'\''), _) => {
+                // A literal: to its closing quote, or the end of its line.
+                at += 1;
+                while at < bytes.len() && bytes[at] != quote && bytes[at] != b'\n' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+                at += 1;
+            }
+            _ => at += 1,
         }
     }
-    block
+    spans
 }
 
 fn trim_end(bytes: &[u8]) -> &[u8] {
@@ -718,9 +763,9 @@ mod tests {
     #[test]
     fn finds_has_include_where_it_can_be_followed() {
         let mut out = Vec::new();
-        probes(b"#if __has_include(<tbb/tbb.h>)\n#  define X __has_include( \"y.h\" )\n#endif // __has_include\n#ifdef __has_include\n#if defined(__has_include) && defined __has_include\nint my__has_include;\n/* __has_include */ /* a */\n", &mut out).unwrap();
+        probes(b"#if __has_include(<tbb/tbb.h>)\n#  define X __has_include( \"y.h\" )\n#endif // __has_include\n#ifdef __has_include\n#if defined(__has_include) && defined __has_include\nint my__has_include;\n/* __has_include */ /* a */\n/* two\n   lines: __has_include argument */\n// spliced \\\n__has_include\nconst char *s = \"\\\"\"; // __has_include\n", &mut out).unwrap();
         assert_eq!(out, vec![Probe { angled: true, spelling: b"tbb/tbb.h".to_vec() }, Probe { angled: false, spelling: b"y.h".to_vec() }]);
-        for odd in [&b"#if __has_include(HEADER)\n"[..], b"#define H __has_include\n", b"#if __has_include_next(X)\n", b"#if __has_include(<x.h\n", b"#define H \"//\" __has_include\n", b"/* */ __has_include\n", b"/* a\n __has_include */\n"] {
+        for odd in [&b"#if __has_include(HEADER)\n"[..], b"#define H __has_include\n", b"#if __has_include_next(X)\n", b"#if __has_include(<x.h\n", b"#define H \"//\" __has_include\n", b"/* */ __has_include\n", b"#define H \"/*\" __has_include\n", b"R\"x(/*)x\" __has_include\n"] {
             assert!(probes(odd, &mut Vec::new()).is_err(), "{}", String::from_utf8_lossy(odd));
         }
     }
