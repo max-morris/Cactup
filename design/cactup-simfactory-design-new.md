@@ -5097,38 +5097,41 @@ the key; the check asks again and must get the same. (An answer that
 changed between the key's run and cactup's asking gives a key whose text
 says one thing and whose answers another: no compile with consistent inputs
 arrives at it, so it serves nothing wrong.) `__has_include_next` is answered
-the same way: the answers for every directory decide it. The files are
-scanned as the compilers read them, with lines spliced by a backslash
-joined and past comments (read past literals, raw strings and numbers with
-digit separators). For gfortran (§18.10) the places the compile passes over
-before each included file must hold nothing, nor may a module file appear
-named like a module gfortran has built in (`iso_c_binding`,
+the same way: the answers for every directory decide it, and the search
+list itself goes into the key with them. The files are scanned as the
+compilers read them: lines spliced by a backslash joined, each comment a
+blank, literals kept apart. For gfortran (§18.10) the places the compile
+passes over before each included file must hold nothing, nor may a module
+file appear named like a module gfortran has built in (`iso_c_binding`,
 `iso_fortran_env`: a `use` that does not say `intrinsic` takes a file of
 that name if it finds one), and module files keep their order check.
 **Whatever this does not model sends the check to a second compiler run**,
-as before: `-include`, a source character set (`-finput-charset=`), a
-precompiled header (`<name>.gch`) anywhere looked at, a `__has_include`
+as before: `-include`; a source character set (`-finput-charset=`); C90,
+which has no `//` comments; anything GCC and Clang, or one language mode and
+another, could read otherwise: a NUL byte, a carriage return that ends a
+line by itself, a trigraph, a raw string, a number with a `'` in it; a
+precompiled header (`<name>.gch`) anywhere looked at; a `__has_include`
 whose argument is not a name as written, or used other than to call it or
-to ask whether it is defined; token pasting anywhere in what the compile
-reads when an identifier there begins `__has_include`, `__has_embed`,
-`__DATE__`, `__TIME__` or `__TIMESTAMP__` without being all of it (the two
-could be pasted into one); a `??/` trigraph; `#embed` and `__has_embed`,
-which read a file no line marker names; `__TIMESTAMP__`, and `__DATE__` or
-`__TIME__` unless the compile's `SOURCE_DATE_EPOCH` fixes them (a second
-compiler run saw the clock move on, and so did the compile); `#import`; a
-framework directory or a header map; a directory the compiler dropped as
-the same as another under another name; a lookup that does not lead where
-the compiler went (a name the compiler gave a file is taken to agree with
-another name of the same file: GCC names a system header by its physical
-path where that is shorter, Clang keeps a relative source's `./`); a file
-entered that no `#include` names (GCC's own `stdc-predef.h` aside, looked
-for as `<stdc-predef.h>` whether found or not, unless `-ffreestanding` or
-`-nostdinc` keeps GCC from reading it); a line marker that returns to
-another file than the one the output was reading. Directories are listed
-once a pass has looked in them a few times; in a listing, a name not found
-that another case of it could be (a directory that folds case) is looked up
-by its path. The log says how each check was made: the lookups by path and
-the directory listings it took (`lookups`, `listings`), or why it ran the
+to ask whether it is defined; `#embed` and `__has_embed`, which read a file
+no line marker names; `__TIMESTAMP__`, and `__DATE__` or `__TIME__` unless
+the compile's `SOURCE_DATE_EPOCH` fixes them (a second compiler run saw the
+clock move on, and so did the compile); what could write a line the reader
+of the output takes for the compiler's own line marker: a line marker given
+in a source (`# 12 "file" 2`), a `#` that is no directive and no operator
+of a function-like macro, a line marker that returns to another file than
+the one the output was reading; `#import`; a framework directory or a header
+map; a directory the compiler dropped as the same as another under another
+name; a lookup that does not lead where the compiler went; a file entered
+that no `#include` names (GCC's own `stdc-predef.h` aside, looked for as
+`<stdc-predef.h>` whether found or not, unless `-ffreestanding` or
+`-nostdinc` keeps GCC from reading it). GCC names a system header (one its
+marker flags so) by its physical path where that is shorter than the path
+it was found by: the lookups take that name to agree, and after the compile
+the file found must still have it. Directories are listed once a pass has
+looked in them a few times; in a listing, a name not found that another case
+of it could be (a directory that folds case) is looked up by its path. The
+log says how each check was made: the lookups by path and the directory
+listings it took (`lookups`, `listings`), or why it ran the
 compiler (`checked_by_compiler`).
 
 The key's preprocessor run, the reading of the files, and the check's
@@ -5203,9 +5206,13 @@ nobody has to find out:
   `#include_next`, `.gch` files, directories in the way, `__has_include`
   and `__has_include_next`, GCC's `stdc-predef.h`, gfortran's built-in
   modules. Known and sent to a compiler run: the cases listed under record
-  mode above. The scan for names it must see bounds token pasting by the
-  identifiers that could begin such a name, which must stand in what the
-  compile reads (or in a macro on its command line) to be pasted at all. Also left, as for
+  mode above. **A name pasted from pieces is not seen** (decision 15): a
+  `__has_include`, `__has_embed`, `__DATE__` or `__TIME__` assembled by
+  `##` from parts of it leaves no trace a scan of the files can find, and
+  bounding it sent nearly every compile to the compiler. Nobody writes that
+  by accident. gfortran's pre-included header is where the driver's own
+  search found it; that search is not repeated (a copy appearing earlier in
+  the driver's prefixes would be read instead). Also left, as for
   a second compiler run: a file that appears and is gone again while the
   compile runs, and one that does so between the key's run and cactup's
   lookups before the compile.

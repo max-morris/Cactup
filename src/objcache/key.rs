@@ -642,6 +642,11 @@ impl Naming<'_> {
     fn returns(&self) -> bool {
         self.tail[1..].split(|b| b.is_ascii_whitespace()).any(|flag| flag == b"2")
     }
+
+    /// Does the marker say the file is a system header (flag `3`)?
+    fn system(&self) -> bool {
+        self.tail[1..].split(|b| b.is_ascii_whitespace()).any(|flag| flag == b"3")
+    }
 }
 
 /// Take apart a line that begins with `opening` (`# ` in preprocessor
@@ -934,13 +939,22 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     })?;
     let probes = match unfollowed {
         Some(why) => Err(why),
-        None => scanned.finish(),
+        None => Ok(scanned.probes),
     };
     let names: Vec<Vec<u8>> = named.keys().map(|(_, path)| path.as_os_str().as_bytes().to_vec()).collect();
     let gcc = compiler.family == Family::Gcc;
     // GCC reads `stdc-predef.h` unasked, unless it compiles for no hosted
     // system or searches no system directories (tried).
     let preinclude = gcc && !compile.preprocess.iter().any(|arg| ["-ffreestanding", "-fno-hosted", "-nostdinc"].iter().any(|flag| arg == *flag));
+    // C90 has no `//` comments: what the scan takes for one is code there.
+    let c90 = compile.language == compile::Language::C
+        && compile.preprocess.iter().any(|arg| {
+            ["-ansi", "-std=c89", "-std=c90", "-std=gnu89", "-std=gnu90", "-std=iso9899:1990", "-std=iso9899:199409"].iter().any(|flag| arg == *flag)
+        });
+    let probes = match c90 {
+        true => Err("the source is C90, whose comments the cache does not follow".to_owned()),
+        false => probes,
+    };
     let mut lookups = match (probes, compile.forced_include, compile.charset) {
         (Err(why), ..) => Err(why),
         (Ok(_), true, _) => Err("-include is given".to_owned()),
@@ -1137,7 +1151,7 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
                 // name (a header may be called `<odd>.h`); and a name
                 // ending in `//`, GCC's note of the working directory.
                 let pseudo = NOT_FILES.contains(&marker.name.as_slice()) || marker.name.ends_with(b"//") || marker.name.is_empty();
-                tracker.marker(&marker.name, marker.enters(), marker.returns());
+                tracker.marker(&marker.name, marker.enters(), marker.returns(), marker.system());
                 if !pseudo {
                     let entered = marker.enters();
                     *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
@@ -1686,6 +1700,47 @@ mod tests {
                 assert!(!keyed.still_holds(), "{}: a header in a directory that was a file passed the check", compiler.0);
             }
         }
+    }
+
+    /// GCC names a system header by its physical path where that is shorter:
+    /// the lookups accept that name only for a system header, and after the
+    /// compile the file found must still be that one (a symlink on the way
+    /// turned elsewhere, the compile read another).
+    #[test]
+    fn a_system_header_named_by_its_physical_path_is_checked_by_it() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        let root = &tree.conf.cactus_root;
+        for (dir, value) in [("x1", 1), ("x2", 2)] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("h.h"), format!("#define V {value}\n")).unwrap();
+        }
+        let long = root.join("a-rather-long-directory-name-for-the-system-headers");
+        std::fs::create_dir_all(&long).unwrap();
+        let point = |to: &str| {
+            let new = long.join("inc.new");
+            std::os::unix::fs::symlink(root.join(to), &new).unwrap();
+            std::fs::rename(&new, long.join("inc")).unwrap();
+        };
+        point("x1");
+        std::fs::write(tree.header(), "#include <h.h>\n#define ANSWER V\n").unwrap();
+        let flags = ["-O2", "-isystem", &long.join("inc").display().to_string()];
+        let mut keyed = tree.keyed("gcc", &flags, true);
+        assert!(keyed.still_holds());
+        point("x2");
+        assert!(!keyed.still_holds(), "a system header's symlink turned elsewhere passed the check");
+        point("x1");
+        // The same file appearing earlier in the search, by a symlink in a
+        // directory that is no system one: not taken for the same.
+        let early = root.join("early");
+        std::fs::create_dir_all(&early).unwrap();
+        let flags = ["-O2", &format!("-I{}", early.display()), "-isystem", &long.join("inc").display().to_string()];
+        let mut keyed = tree.keyed("gcc", &flags, true);
+        assert!(keyed.still_holds());
+        std::os::unix::fs::symlink(root.join("x1/h.h"), early.join("h.h")).unwrap();
+        assert!(!keyed.still_holds(), "the same file found elsewhere passed the check");
     }
 
     /// `#embed` reads a file no line marker names: the check runs the

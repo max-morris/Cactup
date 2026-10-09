@@ -257,6 +257,17 @@ Asked as seven questions with options; the answers, in Max's numbering.
       cannot write to has no stamp of its own.
     - CUDA moves after these.
 
+15. **A name pasted from pieces is a stated limit of the check by lookups**
+    (2026-10-09). A `__has_include`, `__has_embed`, `__DATE__` or
+    `__TIME__` assembled by token pasting (`__has_ ## include`) cannot be
+    seen without running a preprocessor. Guarding against it sent nearly
+    every C and C++ compile back to the second compiler run, since glibc
+    and libstdc++ have both `##` and the pieces (`__`, `__h`) everywhere
+    (M3a review round 2). Asked whether to state it as a limit, as the spec
+    already does for an assembler `.incbin` assembled from pieces, or keep
+    the guard; answer: "Stated limit". Audit mode would show an object it
+    made wrong.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

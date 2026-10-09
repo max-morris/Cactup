@@ -1364,7 +1364,8 @@ and the check by lookups did not (all reproduced, A and B):
 
 Non-blocking, also done: the spec and STATUS lists of what falls back
 match the code (`__has_include_next` is answered, `#include_next` from the
-source is modeled); Clang's `./` for a relative source and GCC with
+source is modeled); Clang's `./` for a relative source (undone in round
+2) and GCC with
 `-ffreestanding` or `-nostdinc` no longer fall back every time; a pass
 lists a directory with a name the listing lacks under another case by its
 path (casefold directories); the key's `__has_include` answers and the pass
@@ -1376,6 +1377,54 @@ the compile (it is what ties a skipped include to the file the run had
 entered before it); hits now pay the `__has_include` answers and the scan
 (the audit builds' median key: g++ 90 to 109 ms, gcc 16 to 19 ms, on
 `afa94e7`, before the faster scan of `b2f7c1d`).
+
+### M3a, round 2 (on `9515bb4`): BLOCKED by both
+
+Both confirmed every round-1 finding fixed in the form reported, and both
+found the fixes incomplete or too broad (all reproduced; A and B each
+served stale objects end to end):
+
+1. **The pasting rule of round 1 sent nearly every C and C++ compile back to
+   the compiler** (A, B): glibc's `sys/cdefs.h` has `__ ## f ## _alias`,
+   libstdc++ has `__h` and `__has_` as identifiers. No bound short of a
+   preprocessor tells those from a pasted `__has_include`. Asked, Max made
+   such a name a stated limit (decision 15); the rule is gone.
+2. **The scan still did not read every file as the compilers do** (A, B):
+   a backslash then a lone carriage return splices for both compilers, and
+   a lone carriage return ends a line; `??=` pastes (`a ??=??= b`) and
+   makes `#` under strict ISO modes; in C17 a `'` after a digit begins a
+   character literal; `auR"` was taken for a raw string; `#/* c */ embed`
+   and `/* c */ #embed` are directives. Fixed: the scan now works on each
+   file's code (lines spliced, each comment one blank, literals apart) and
+   falls back on whatever two compilers or two language modes could read
+   otherwise (a NUL byte, a lone carriage return, any trigraph, a raw
+   string, a number with a `'`, C90); `#embed`, the date words and
+   `__has_include` are looked for in that code.
+3. **Fake line markers** (B): a raw string, a line marker in a source, or a
+   macro that expands to `# 1 "file" 2` at the start of a line writes a
+   line the tracker takes for the compiler's. Fixed: raw strings, line
+   markers in a source, and any `#` that is no directive and no operator of
+   a function-like macro fall back.
+4. **The same physical file at another place** (A, B): `before_compile`
+   took a name to agree with a lookup whenever both led to the same file,
+   so a symlink appearing earlier in the search to the found header passed;
+   and after the compile only the path strings were compared, so a symlink
+   on the way to a system header named by its physical path, turned
+   elsewhere during the compile, passed (A served a stale object). Fixed:
+   only GCC's own rule is followed, for a header its marker flags as a
+   system one and whose physical path is shorter, and after the compile the
+   file found must still have that physical path. (Clang's `./` for a
+   relative source falls back again; Cactus names sources absolutely.)
+
+Non-blocking, done: the `__has_include` answers' digest has the search list
+in it (positions alone did not say which directories; A noted that keys now
+differ between search lists, which they must); `Looker`'s doc; the spec's
+lists. Noted, not done: gfortran's pre-included header is found by the
+driver's own search, which is not repeated (stated in the spec); the key's
+own `__has_include` answers are not counted in `lookups`; the listing cost
+on a cluster filesystem is for M3b's decision. STATUS's figures of the
+smoke and Einstein Toolkit runs above are of `afa94e7`, before the round-1
+pasting rule.
 
 ## Decisions
 
