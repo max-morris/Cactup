@@ -1430,6 +1430,48 @@ with something to look for (116 of them), from one byte that matters to the
 next: 7 ms, on a host loaded by other work. The smoke builds on `87bde6c`
 made every check by lookups, 0 wrong.
 
+### M3a, round 3 (on `503638c`): BLOCKED by both
+
+Both confirmed the model of the compilers' search again (every lookup case
+they worked through held), and found the scan, and the edges of two
+round-2 fixes, still open (all reproduced end to end, stale objects
+served):
+
+1. **The scan's reading of comments and literals** (B): where a number with
+   a digit separator ends (`e+1'2`, `a.1'2`), a header name with `/*` in it,
+   Clang reading `#warning` text raw; each hid code. Three rounds of this
+   class: the scan no longer tells code from comments and literals at all.
+   What it looks for counts wherever it stands (a misreading can only cost a
+   needless fallback, never hide anything), and a use is taken for a
+   comment only where its own line proves one. Measured on the 464 headers
+   two real compiles read: no needless fallback.
+2. **A `<name>` the compilers expand macros in** (A): in a macro, or in a
+   macro's argument, `__has_include(<x.h>)` asks for the macro-expanded
+   name (`linux` is predefined in GNU modes). Fixed: the key's run is given
+   `-dD`, so every macro as the compiler read it is in the output: such a
+   name is followed only while no word in it is a macro (the compilers'
+   own included); an alias of `__has_include` and a `#` in an object-like
+   macro are read there exactly. The definitions are in the text too (GCC's
+   markers around them would differ otherwise): an unused `-D` now changes
+   the key, which Cactus, giving every compile of a configuration the same
+   ones, does not feel.
+3. **An `-I` that is not a directory** (A, B): `-w`, colors and line
+   wrapping hide GCC's warning. Fixed: every directory the compile names and
+   neither list has is watched, from the command line.
+4. **A line marker with a comment after its `#`** (A, B), past the
+   pre-check of `9efbb9f`: gone with that pre-check; such a marker falls
+   back.
+5. **The physical name before the compile** (A, B): a symlink to the found
+   header appearing in an earlier `-I` directory after the key's run was
+   taken for it. Fixed: only where cactup itself found the file in a system
+   directory (a bracket one not given by `-I`); and the entries its path
+   resolves through are watched (A's N1: a symlink turned and turned back).
+
+Also: `__has_include_next__` (GCC 9) is recognized; `__DATE__` and
+`__TIME__` fall back whatever `SOURCE_DATE_EPOCH` says (older Clang ignores
+it). A's remark that the lookups before the compile could run while the
+compiler does is left for later.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

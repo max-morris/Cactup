@@ -739,7 +739,7 @@ fn content_digest(bytes: &[u8], map: Option<&PathMap>) -> String {
 /// what tells a new entry from an old one under a reused inode number:
 /// its birth time, and a symlink's change time), and where a symlink led.
 #[derive(Clone)]
-enum Step {
+pub(super) enum Step {
     Entry(Vec<u8>, Option<PathBuf>),
     Absent,
 }
@@ -755,7 +755,7 @@ enum Step {
 /// moves when files are created inside a directory. (A directory renamed away and the same one renamed
 /// back does not: decision 9, spec §18.5.) `steps` remembers each entry
 /// looked at, for the many names that share their directories.
-fn trail(path: &Path, seen: &mut Hasher, steps: &mut HashMap<PathBuf, Step>) {
+pub(super) fn trail(path: &Path, seen: &mut Hasher, steps: &mut HashMap<PathBuf, Step>) {
     let mut pending: std::collections::VecDeque<std::ffi::OsString> = std::collections::VecDeque::new();
     let start = match path.is_absolute() {
         true => path.to_owned(),
@@ -850,12 +850,11 @@ fn preprocessor(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Optio
     // besides its command line (see `flags_from_elsewhere`).
     // `-dI`: each `#include` as written, for the check after the compile
     // (`search`).
-    command.arg0(name).args(&compile.preprocess).args(["-E", "-v", "-dI"]);
+    // `-dD`: every macro as defined (also kept in the text, which `-g3`
+    // needs: the object's debug information then has them).
+    command.arg0(name).args(&compile.preprocess).args(["-E", "-v", "-dI", "-dD"]);
     if let Some(depend) = depend {
         command.args(depend);
-    }
-    if compile.macros_in_debug {
-        command.arg("-dD");
     }
     if compiler.family == Family::Gcc {
         command.arg("-fpch-preprocess");
@@ -926,12 +925,11 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 
     // What the check by lookups must know of in the files read, and in the
     // macros given on the command line, which count as much (`search`).
-    let dated = std::env::var_os("SOURCE_DATE_EPOCH").is_some_and(|epoch| !epoch.is_empty());
     let mut scanned = search::Scan::default();
-    let mut unfollowed = compile.preprocess.iter().find_map(|arg| search::scan(arg.as_bytes(), dated, &mut scanned).err());
+    let mut unfollowed = compile.preprocess.iter().find_map(|arg| search::scan(arg.as_bytes(), &mut scanned).err());
     let (files, seen) = read_files(&named, map, |_, bytes| {
         if unfollowed.is_none()
-            && let Err(why) = search::scan(bytes, dated, &mut scanned)
+            && let Err(why) = search::scan(bytes, &mut scanned)
         {
             unfollowed = Some(why);
         }
@@ -959,7 +957,9 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
         (Err(why), ..) => Err(why),
         (Ok(_), true, _) => Err("-include is given".to_owned()),
         (Ok(_), _, true) => Err("a character set is given for the source, which the cache does not follow".to_owned()),
-        (Ok(probes), false, false) => tracker.finish(preinclude).and_then(|directives| Lookups::new(&said, directives, probes, &names, gcc)),
+        (Ok(probes), false, false) => tracker
+            .finish(preinclude)
+            .and_then(|followed| Lookups::new(&said, followed, probes, &names, gcc, &search::Given::from_args(&compile.preprocess))),
     };
     let answers = match &mut lookups {
         Ok(lookups) => lookups.answers(map),
@@ -1157,6 +1157,9 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
                     *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
                 }
             }
+            // A macro `-dD` printed: in the text too (`-g3` needs it, and
+            // without it GCC's markers around the definitions still differ).
+            None if tracker.macro_line(&line) => feed(&line),
             None if line.starts_with(b"#pragma GCC pch_preprocess") => {
                 bail!("a precompiled header would be used, which the cache does not follow")
             }
@@ -1619,7 +1622,8 @@ mod tests {
         assert_ne!(optimized.parts.arguments, base.parts.arguments);
         assert_eq!((&optimized.parts.text, &optimized.parts.files), (&base.parts.text, &base.parts.files));
         // A macro on the command line that the source uses: the text differs.
-        assert_eq!(tree.key(&["-O2", "-DUNUSED=1"]).parts, base.parts, "an unused macro changes nothing without debug information");
+        // Every macro is in the text (`-dD`), used or not.
+        assert_ne!(tree.key(&["-O2", "-DUNUSED=1"]).parts.text, base.parts.text);
         assert_ne!(tree.key(&["-O2", "-Dfile=renamed"]).parts.text, base.parts.text);
         // With -g3 the macro is in the object, used or not.
         assert_ne!(tree.key(&["-g3", "-DUNUSED=1"]).parts.text, tree.key(&["-g3", "-DUNUSED=2"]).parts.text);
@@ -1685,13 +1689,17 @@ mod tests {
             if !have(compiler.0, compiler.1) {
                 continue;
             }
-            for looked in [true, false] {
+            // The warning GCC gives of a file in `-I` is not what tells: `-w`
+            // and colors hide it.
+            for (looked, quiet) in [(true, None), (false, None), (true, Some("-w")), (true, Some("-fdiagnostics-color=always"))] {
                 let tree = Tree::new();
                 let odd = tree.conf.cactus_root.join("odd");
                 let dangling = tree.conf.cactus_root.join("dangling");
                 std::fs::write(&odd, "").unwrap();
                 std::os::unix::fs::symlink(tree.conf.cactus_root.join("nowhere"), &dangling).unwrap();
-                let flags = ["-O2", &format!("-I{}", odd.display()), &format!("-I{}", dangling.display())];
+                let mut flags = vec!["-O2".to_owned(), format!("-I{}", odd.display()), format!("-I{}", dangling.display())];
+                flags.extend(quiet.map(str::to_owned));
+                let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
                 let mut keyed = tree.keyed(compiler.0, &flags, looked);
                 assert!(keyed.still_holds(), "{}", compiler.0);
                 std::fs::remove_file(&odd).unwrap();
@@ -1741,6 +1749,32 @@ mod tests {
         assert!(keyed.still_holds());
         std::os::unix::fs::symlink(root.join("x1/h.h"), early.join("h.h")).unwrap();
         assert!(!keyed.still_holds(), "the same file found elsewhere passed the check");
+        // And appearing between the key's run and the lookups before the
+        // compile: not taken for the file the run entered.
+        std::fs::remove_file(early.join("h.h")).unwrap();
+        let mut keyed = key(&tree.conf, &tree.cc, &tree.argv("gcc", &flags), false).unwrap();
+        std::os::unix::fs::symlink(root.join("x1/h.h"), early.join("h.h")).unwrap();
+        keyed.before_compile();
+        assert!(keyed.check_made().is_err() || !keyed.still_holds(), "the same file found in a directory no system one was taken for it");
+    }
+
+    /// A `<name>` the compilers expand macros in (in a macro, or in a
+    /// macro's argument) is followed only while no word in it is a macro.
+    #[test]
+    fn a_has_include_in_a_macro_is_followed_only_without_macros_in_its_name() {
+        for compiler in [("gcc", Family::Gcc), ("clang", Family::Clang)] {
+            if !have(compiler.0, compiler.1) {
+                continue;
+            }
+            let tree = Tree::new();
+            std::fs::write(tree.header(), "#define HAS __has_include(<plain/name.h>)\n#if HAS\n#endif\n#define ANSWER 42\n").unwrap();
+            let mut keyed = tree.keyed(compiler.0, &["-O2"], true);
+            assert!(keyed.still_holds(), "{}", compiler.0);
+            std::fs::write(tree.header(), "#define x y\n#define HAS __has_include(<x.h>)\n#if HAS\n#endif\n#define ANSWER 42\n").unwrap();
+            let mut keyed = key(&tree.conf, &tree.cc, &tree.argv(compiler.0, &["-O2"]), false).unwrap();
+            keyed.before_compile();
+            assert!(keyed.check_made().is_err_and(|why| why.contains("x.h")), "{}: {:?}", compiler.0, keyed.check_made());
+        }
     }
 
     /// `#embed` reads a file no line marker names: the check runs the
@@ -1792,7 +1826,7 @@ mod tests {
             assert!(!keyed.still_holds(), "{}: an answer that changed passed the check", compiler.0);
             let answered = tree.keyed(compiler.0, &flags, true);
             assert_ne!(answered.parts.files, keyed.parts.files, "{}", compiler.0);
-            assert_eq!(answered.parts.text, keyed.parts.text, "{}: the text alone does not show it here", compiler.0);
+            assert_ne!(answered.parts.text, keyed.parts.text, "{}: the macro the answer defines is in the text", compiler.0);
         }
     }
 

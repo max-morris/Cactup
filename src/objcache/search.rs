@@ -29,7 +29,7 @@
 //! Whatever this does not model leaves the check to a second preprocessor
 //! run, as before ([`Lookups::unmodeled`]).
 
-use super::key::PathMap;
+use super::key::{self, PathMap};
 use super::hash::Hasher;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -366,6 +366,51 @@ impl Looker {
     }
 }
 
+/// What the path `path` resolves through (`key::trail`: each directory and
+/// symlink, by identity), digested: a symlink turned elsewhere and back is a
+/// new one.
+fn resolved(path: &[u8]) -> String {
+    let mut hasher = Hasher::new("resolved");
+    key::trail(Path::new(OsStr::from_bytes(path)), &mut hasher, &mut HashMap::new());
+    hasher.hex()
+}
+
+/// The directories a compile names for its search, from its arguments:
+/// all of them, and those given by `-I` or `-iquote` (no system ones).
+#[derive(Debug, Default)]
+pub struct Given {
+    all: Vec<Vec<u8>>,
+    user: Vec<Vec<u8>>,
+}
+
+impl Given {
+    pub fn from_args(args: &[std::ffi::OsString]) -> Self {
+        let mut given = Self::default();
+        let mut args = args.iter().map(|arg| arg.as_bytes());
+        while let Some(arg) = args.next() {
+            for (flag, user) in [(&b"-I"[..], true), (b"-iquote", true), (b"-isystem", false), (b"-idirafter", false)] {
+                let Some(joined) = arg.strip_prefix(flag) else { continue };
+                // `-isystem` is not `-I` with "system" joined to it.
+                if flag == b"-I" && arg.starts_with(b"-iquote") {
+                    continue;
+                }
+                let dir = match joined.is_empty() {
+                    true => args.next().unwrap_or_default(),
+                    false => joined,
+                };
+                // As the compilers print it: no trailing `/` (but `/`).
+                let len = dir.iter().rposition(|b| *b != b'/').map_or(dir.len().min(1), |at| at + 1);
+                given.all.push(dir[..len].to_vec());
+                if user {
+                    given.user.push(dir[..len].to_vec());
+                }
+                break;
+            }
+        }
+        given
+    }
+}
+
 /// The physical path of `path`: GCC names a system header so where that is
 /// shorter (`-fcanonical-system-headers`, its default).
 fn canonical(path: &[u8]) -> Option<Vec<u8>> {
@@ -431,6 +476,18 @@ pub struct Tracker {
     pending: Option<usize>,
     /// Why the output cannot be followed, if it cannot.
     unmodeled: Option<String>,
+    /// Every name `-dD` showed defined or undefined (the compilers' own
+    /// among them), and the `__has_include`s in macros.
+    defined: HashSet<Vec<u8>>,
+    macro_probes: Vec<Probe>,
+}
+
+/// What a run's output showed, for [`Lookups::new`].
+#[derive(Debug)]
+pub struct Followed {
+    directives: Vec<Directive>,
+    defined: HashSet<Vec<u8>>,
+    probes: Vec<Probe>,
 }
 
 /// A file being read, in a run's output.
@@ -515,6 +572,24 @@ impl Tracker {
         self.pending = None;
     }
 
+    /// A line `-dD` printed: `#define …` or `#undef …`. `false` if it is
+    /// neither.
+    pub fn macro_line(&mut self, line: &[u8]) -> bool {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let (rest, define) = match (line.strip_prefix(b"#define "), line.strip_prefix(b"#undef ")) {
+            (Some(rest), _) => (rest, true),
+            (None, Some(rest)) => (rest, false),
+            _ => return false,
+        };
+        self.text();
+        let name_len = rest.iter().take_while(|b| ident(**b)).count();
+        self.defined.insert(rest[..name_len].to_vec());
+        if define && let Err(why) = macro_body(rest, &mut self.macro_probes) {
+            self.unmodeled(&why);
+        }
+        true
+    }
+
     fn unmodeled(&mut self, why: &str) {
         self.unmodeled.get_or_insert_with(|| why.to_owned());
     }
@@ -522,7 +597,7 @@ impl Tracker {
     /// What was collected, with `stdc-predef.h` looked for where GCC reads
     /// it unasked (`preinclude`) and it was not found: it would be read if
     /// it appeared.
-    pub fn finish(mut self, preinclude: bool) -> Result<Vec<Directive>, String> {
+    pub fn finish(mut self, preinclude: bool) -> Result<Followed, String> {
         if let Some(why) = self.unmodeled.take() {
             return Err(why);
         }
@@ -536,7 +611,7 @@ impl Tracker {
                 system: false,
             });
         }
-        Ok(self.directives)
+        Ok(Followed { directives: self.directives, defined: self.defined, probes: self.macro_probes })
     }
 }
 
@@ -556,6 +631,10 @@ fn is_command_line(name: &[u8]) -> bool {
 pub struct Probe {
     angled: bool,
     spelling: Vec<u8>,
+    /// A `<name>` the compilers may expand macros in: one not written
+    /// right on an `#if` or `#elif` line (in a macro, or in a macro's
+    /// argument), where `<`, the words and `>` are tokens already.
+    expanded: bool,
 }
 
 /// What the scan of the files a compile reads found, all files together:
@@ -566,30 +645,34 @@ pub struct Scan {
 }
 
 /// Scan `bytes`, a file the compile reads (or a macro given on the command
-/// line), for what the check by lookups must know of or cannot follow. It
-/// is read as the compilers read it — lines spliced by a backslash joined,
-/// comments taken out, literals kept apart — and wherever GCC and Clang, or
-/// one language mode and another, could read it otherwise, the scan stops
-/// with `Err`, and the check is left to a second compiler run:
+/// line), for what the check by lookups must know of or cannot follow.
+///
+/// The scan does not tell code from comments and literals: what it looks
+/// for counts wherever it stands, so that no misreading of a file can hide
+/// anything from it (a `__has_include` in a comment only makes one lookup
+/// more). The one exception is a comment it can prove from its own line.
+/// Lines spliced by a backslash are joined first. `Err` — the check is
+/// left to a second compiler run — for
 ///
 /// - a NUL byte, a carriage return that ends a line by itself, a trigraph
-///   (`??` and one of `=/'()!<>-`), a raw string (`R"…"`), a number with a
-///   `'` in it (a digit separator, or not, by the language);
-/// - `#embed` and `__has_embed`, which read a file no line marker names;
-/// - `__TIMESTAMP__`, and `__DATE__` or `__TIME__` unless `dated` (the
-///   compile's `SOURCE_DATE_EPOCH` fixes them): the second compiler run saw
-///   a clock that moved on;
-/// - a line marker given in the source (`# 12 "file" 2`), and a `#` that
-///   is no directive and no operator of a function-like macro (a macro can
-///   put one at the start of an output line): either can write a line the
-///   reader of the output takes for the compiler's own marker;
+///   (`??` and one of `=/'()!<>-`): read otherwise by one compiler or
+///   language mode than another;
+/// - `__has_embed`, `__TIMESTAMP__`, `__DATE__` and `__TIME__` anywhere,
+///   and an `#embed` directive: a file no line marker names, and a clock
+///   that moved on between the key's run and the compile;
+/// - a line marker given in a source (`# 12 "file" 2`), and a `#` that
+///   follows `(` or `,` outside a directive (a `#` passed to a macro can
+///   start an output line): either can write a line the reader of the
+///   output takes for the compiler's own marker;
 /// - a `__has_include` (or `__has_include_next`) whose argument is not a
 ///   name as written, or that is used other than to call it or to ask
-///   whether it is defined (a macro can call it in turn).
+///   whether it is defined (a macro can call it in turn), unless its line
+///   shows it to be in a comment.
 ///
-/// A name pasted together from pieces (`__has_ ## include`) is not seen:
-/// a stated limit (decision 15).
-pub fn scan(bytes: &[u8], dated: bool, scan: &mut Scan) -> Result<(), String> {
+/// What macros make is judged from the run's own `-dD` output instead
+/// ([`macro_body`]); a name pasted from pieces is a stated limit (decision
+/// 15).
+pub fn scan(bytes: &[u8], scan: &mut Scan) -> Result<(), String> {
     let refuse = |why: &str| Err(format!("a source has {why}, which the cache does not follow"));
     if memchr::memchr(0, bytes).is_some() {
         return refuse("a NUL byte");
@@ -597,100 +680,128 @@ pub fn scan(bytes: &[u8], dated: bool, scan: &mut Scan) -> Result<(), String> {
     if memchr::memchr_iter(b'\r', bytes).any(|at| bytes.get(at + 1) != Some(&b'\n')) {
         return refuse("a carriage return that ends a line by itself");
     }
-    let trigraph = memchr::memmem::find_iter(bytes, b"??").any(|at| bytes.get(at + 2).is_some_and(|b| b"=/'()!<>-".contains(b)));
-    if trigraph {
+    if memchr::memmem::find_iter(bytes, b"??").any(|at| bytes.get(at + 2).is_some_and(|b| b"=/'()!<>-".contains(b))) {
         return refuse("a trigraph");
     }
-    let spliced = spliced(bytes);
-    if !worth_reading(&spliced) {
-        return Ok(());
+    let bytes = &spliced(bytes)[..];
+    for word in [&b"__has_embed"[..], b"__TIMESTAMP__", b"__DATE__", b"__TIME__"] {
+        if words(bytes, word).next().is_some() {
+            return refuse(&format!("{}", String::from_utf8_lossy(word)));
+        }
     }
-    let (code, bare) = code(&spliced)?;
-    // Words outside literals.
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-    let word = |word: &[u8]| {
-        memchr::memmem::find_iter(&bare, word).any(|at| {
-            let joined_before = at > 0 && ident(bare[at - 1]);
-            let joined_after = bare.get(at + word.len()).is_some_and(|b| ident(*b));
-            !joined_before && !joined_after
-        })
-    };
-    if word(b"__has_embed") {
-        return refuse("__has_embed");
+    let hashes = memchr::memchr_iter(b'#', bytes).chain(memchr::memmem::find_iter(bytes, b"%:"));
+    for at in hashes {
+        let len = if bytes[at] == b'#' { 1 } else { 2 };
+        if begins_line(bytes, at) {
+            let after = &bytes[skip_blanks(bytes, at + len)..];
+            if after.first().is_some_and(u8::is_ascii_digit) {
+                return refuse("a line marker of its own");
+            }
+            if after.strip_prefix(b"embed").is_some_and(|rest| !rest.first().is_some_and(|b| ident(*b))) {
+                return refuse("#embed");
+            }
+        } else if !directive_line(bytes, at) && !after_line_comment(bytes, at) && matches!(before_blanks(bytes, at), Some(b'(' | b',')) {
+            return refuse("a # passed to a macro");
+        }
     }
-    if word(b"__TIMESTAMP__") {
-        return refuse("__TIMESTAMP__");
-    }
-    if !dated && (word(b"__DATE__") || word(b"__TIME__")) {
-        return refuse("the date or time of the compile");
-    }
-    // Each line with a `#` in it (or `%:`, or the word `embed`).
-    let mut lines: Vec<usize> = memchr::memchr_iter(b'#', &bare)
-        .chain(memchr::memmem::find_iter(&bare, b"%:"))
-        .chain(memchr::memmem::find_iter(&bare, b"embed"))
-        .map(|at| bare[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1))
-        .collect();
-    lines.sort_unstable();
-    lines.dedup();
-    for start in lines {
-        let end = memchr::memchr(b'\n', &bare[start..]).map_or(bare.len(), |len| start + len);
-        directive_line(&bare[start..end])?;
-    }
-    probes(&code, &bare, &mut scan.probes)
+    probes(bytes, &mut scan.probes)
 }
 
-/// Does `bytes` (lines spliced) have anything the scan looks for, read in
-/// any way at all: a watched name or what could begin one (`__has_`,
-/// `__DATE__`, `__TIME`), `embed`, the digraph `%:`, a `#` that does not
-/// begin its line, or a line that begins with `#` and a digit? Most files
-/// have none, and need no reading as code.
-fn worth_reading(bytes: &[u8]) -> bool {
-    let words = [&b"__has_"[..], b"__DATE__", b"__TIME", b"embed", b"%:"];
-    if words.iter().any(|word| memchr::memmem::find(bytes, word).is_some()) {
-        return true;
-    }
-    let blank = |b: &u8| matches!(b, b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r');
-    memchr::memchr_iter(b'#', bytes).any(|at| {
-        let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
-        let after = &bytes[at + 1..];
-        let after = &after[after.iter().take_while(|b| blank(b)).count()..];
-        !bytes[line_start..at].iter().all(blank) || after.first().is_some_and(u8::is_ascii_digit)
+/// Can `b` be part of an identifier?
+fn ident(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Where `word` stands in `bytes` as a whole identifier.
+fn words<'a>(bytes: &'a [u8], word: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
+    memchr::memmem::find_iter(bytes, word).filter(move |at| {
+        let joined_before = *at > 0 && ident(bytes[at - 1]);
+        let joined_after = bytes.get(at + word.len()).is_some_and(|b| ident(*b));
+        !joined_before && !joined_after
     })
 }
 
-/// Check one line of a file's code (comments out, literals blanked) for a
-/// `#` the scan does not follow ([`scan`]).
-fn directive_line(line: &[u8]) -> Result<(), String> {
-    let blank = |b: &u8| matches!(b, b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r');
-    let ident = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'$';
-    let hash = |text: &[u8]| find(text, b"#").is_some() || find(text, b"%:").is_some();
-    let refuse = |why: &str| Err(format!("a source has {why}, which the cache does not follow"));
-    let line = &line[line.iter().take_while(|b| blank(b)).count()..];
-    let Some(rest) = line.strip_prefix(b"#").or_else(|| line.strip_prefix(b"%:")) else {
-        return match hash(line) {
-            true => refuse("a # outside a directive"),
-            false => Ok(()),
-        };
-    };
-    let rest = &rest[rest.iter().take_while(|b| blank(b)).count()..];
-    if rest.first().is_some_and(u8::is_ascii_digit) {
-        return refuse("a line marker of its own");
-    }
-    let name_len = rest.iter().take_while(|b| ident(b)).count();
-    match &rest[..name_len] {
-        b"embed" => refuse("#embed"),
-        b"define" => {
-            let after = &rest[name_len..];
-            let after = &after[after.iter().take_while(|b| blank(b)).count()..];
-            let macro_len = after.iter().take_while(|b| ident(b)).count();
-            // An object-like macro: its `#` is a token of its expansion.
-            match after.get(macro_len) == Some(&b'(') || !hash(&after[macro_len..]) {
-                true => Ok(()),
-                false => refuse("a # in an object-like macro"),
-            }
+/// The first position at or after `at` past blanks and whole `/* … */`
+/// comments (a directive's name may follow its `#` so).
+fn skip_blanks(bytes: &[u8], mut at: usize) -> usize {
+    loop {
+        match bytes.get(at..) {
+            Some([b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r', ..]) => at += 1,
+            Some([b'/', b'*', ..]) => match find(&bytes[at + 2..], b"*/") {
+                Some(len) => at += 2 + len + 2,
+                None => return bytes.len(),
+            },
+            _ => return at,
         }
-        _ => Ok(()),
     }
+}
+
+/// The byte before `at`, past blanks, line ends and whole `/* … */`
+/// comments.
+fn before_blanks(bytes: &[u8], mut at: usize) -> Option<u8> {
+    loop {
+        match &bytes[..at] {
+            [.., b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r' | b'\n'] => at -= 1,
+            [.., b'*', b'/'] => at = bytes[..at - 2].windows(2).rposition(|w| w == b"/*")?,
+            [.., b] => return Some(*b),
+            [] => return None,
+        }
+    }
+}
+
+/// Could the `#` (or `%:`) at `at` begin its line, as a directive does:
+/// nothing before it on the line but blanks, whole comments, and the end of
+/// a comment begun on a line before?
+fn begins_line(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+    let mut end = at;
+    loop {
+        match &bytes[line_start..end] {
+            [] => return true,
+            [.., b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r'] => end -= 1,
+            [.., b'*', b'/'] => match bytes[line_start..end - 2].windows(2).rposition(|w| w == b"/*") {
+                Some(open) => end = line_start + open,
+                None => return true,
+            },
+            _ => return false,
+        }
+    }
+}
+
+/// Is the line of `at` a directive (its first token a `#` or `%:`)?
+fn directive_line(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+    let first = skip_blanks(bytes, line_start);
+    first < at && (bytes[first] == b'#' || bytes[first..].starts_with(b"%:")) && begins_line(bytes, first)
+}
+
+/// Is `at` after a `//` on its line that no quote stands before: in a
+/// comment (or in a block comment or a raw string the line is inside, where
+/// it is no code either)?
+fn after_line_comment(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+    let before = &bytes[line_start..at];
+    find(before, b"//").is_some_and(|slashes| {
+        !before[..slashes].iter().any(|b| matches!(b, b'"' | b'\'')) && find(&before[slashes..], b"*/").is_none()
+    })
+}
+
+/// Is `[start, end)` shown by its own line to be inside a comment: after a
+/// `//` (see [`after_line_comment`]), or before the `*/` that ends a block
+/// comment begun on a line before (no `/*` before it on the line, no quote
+/// between)?
+fn in_comment(bytes: &[u8], start: usize, end: usize) -> bool {
+    let line_start = bytes[..start].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+    let line_end = memchr::memchr(b'\n', &bytes[end..]).map_or(bytes.len(), |len| end + len);
+    let after = &bytes[end..line_end];
+    let before = &bytes[line_start..start];
+    let quoted = |text: &[u8]| text.iter().any(|b| matches!(b, b'"' | b'\''));
+    // After a `/*` not closed since, with no quote before it on the line
+    // (inside a block comment either way).
+    let opened = before.windows(2).rposition(|w| w == b"/*").is_some_and(|open| !quoted(before) && find(&before[open..], b"*/").is_none());
+    after_line_comment(bytes, start)
+        || opened
+        || (find(before, b"/*").is_none() && find(after, b"*/").is_some_and(|close| !quoted(&after[..close])))
 }
 
 /// `bytes` with every line splice taken out: a backslash, blanks, and a
@@ -727,137 +838,20 @@ fn spliced(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
-/// A file's code, its lines spliced already: each comment one blank, as the
-/// compilers take it, literals kept (`code`); and the same with the inside
-/// of every literal blanked (`bare`, as long). `Err` for what reads
-/// otherwise by compiler or language: a raw string, a number with a `'`.
-fn code(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-    let refuse = |why: &str| Err(format!("a source has {why}, which the cache does not follow"));
-    let (mut code, mut bare) = (Vec::with_capacity(bytes.len()), Vec::with_capacity(bytes.len()));
-    let mut at = 0;
-    // From one byte that matters to the next (`/`, a quote), what lies
-    // between is code as it is.
-    while let Some(found) = memchr::memchr3(b'/', b'"', b'\'', &bytes[at..]) {
-        let here = at + found;
-        code.extend_from_slice(&bytes[at..here]);
-        bare.extend_from_slice(&bytes[at..here]);
-        at = here;
-        let next = bytes.get(at + 1).copied();
-        match bytes[at] {
-            b'/' if next == Some(b'/') => {
-                at = memchr::memchr(b'\n', &bytes[at..]).map_or(bytes.len(), |len| at + len);
-                code.push(b' ');
-                bare.push(b' ');
-            }
-            b'/' if next == Some(b'*') => {
-                at = find(&bytes[at + 2..], b"*/").map_or(bytes.len(), |len| at + 2 + len + 2);
-                code.push(b' ');
-                bare.push(b' ');
-            }
-            b'/' => {
-                code.push(b'/');
-                bare.push(b'/');
-                at += 1;
-            }
-            quote => {
-                // The token the quote follows: an identifier that makes it a
-                // raw string (`R"`), or a number, in which a `'` is a digit
-                // separator in C++14 and C23 and begins a character literal
-                // before them.
-                let mut start = at;
-                while start > 0 {
-                    let b = bytes[start - 1];
-                    let sign = matches!(b, b'+' | b'-') && start > 1 && matches!(bytes[start - 2], b'e' | b'E' | b'p' | b'P');
-                    if !(ident(b) || b == b'.' || sign) {
-                        break;
-                    }
-                    start -= 1;
-                }
-                let token = &bytes[start..at];
-                let number = token.first().is_some_and(u8::is_ascii_digit) || (token.first() == Some(&b'.') && token.get(1).is_some_and(u8::is_ascii_digit));
-                if quote == b'\'' && number {
-                    return refuse("a ' in a number");
-                }
-                let prefix_start = bytes[..at].iter().rposition(|b| !ident(*b)).map_or(0, |p| p + 1);
-                if quote == b'"' && matches!(&bytes[prefix_start..at], b"R" | b"LR" | b"uR" | b"UR" | b"u8R") {
-                    return refuse("a raw string");
-                }
-                // To the closing quote, or the end of the line.
-                let begin = at;
-                at += 1;
-                loop {
-                    let Some(found) = memchr::memchr3(quote, b'\n', b'\\', &bytes[at.min(bytes.len())..]) else {
-                        at = bytes.len();
-                        break;
-                    };
-                    at += found;
-                    match bytes[at] {
-                        b'\\' => at += 2,
-                        b'\n' => break,
-                        _ => {
-                            at += 1;
-                            break;
-                        }
-                    }
-                }
-                at = at.min(bytes.len());
-                code.extend_from_slice(&bytes[begin..at]);
-                bare.push(quote);
-                bare.extend(std::iter::repeat_n(b' ', at - begin - 1));
-            }
-        }
-    }
-    code.extend_from_slice(&bytes[at..]);
-    bare.extend_from_slice(&bytes[at..]);
-    Ok((code, bare))
-}
-
-/// Find the `__has_include`s (and `__has_include_next`s) in `code`, with
-/// `bare` the same with its literals blanked, as [`scan`] says.
-fn probes(code: &[u8], bare: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
-    const NAME: &[u8] = b"__has_include";
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-    // Looked for where no literal is; read where literals are kept (a
-    // `"name"` is one).
-    let bytes = bare;
-    let mut at = 0;
-    while let Some(found) = find(&bytes[at..], NAME) {
-        let start = at + found;
-        let mut end = start + NAME.len();
-        at = end;
-        if start > 0 && ident(bytes[start - 1]) {
-            continue;
-        }
-        let rest = &bytes[end..];
-        // `__has_include_next` is answered as `__has_include` is (each
-        // directory), and GCC before 10 also knew `__has_include__`.
-        if rest.starts_with(b"_next") && !rest.get(5).is_some_and(|b| ident(*b)) {
-            end += 5;
-        } else if rest.starts_with(b"__") && !rest.get(2).is_some_and(|b| ident(*b)) {
-            end += 2;
-        } else if rest.first().is_some_and(|b| ident(*b)) {
-            continue;
-        }
-        let blank = |b: &u8| matches!(b, b' ' | b'\t');
-        let paren = end + bytes[end..].iter().take_while(|b| blank(b)).count();
+/// The `__has_include`s (and `__has_include_next`s) in `bytes` (lines
+/// spliced), as [`scan`] says.
+fn probes(bytes: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
+    for (start, end) in has_includes(bytes) {
+        let paren = skip_blanks(bytes, end);
         if bytes.get(paren) == Some(&b'(') {
-            let inner = &code[paren + 1..];
-            let inner = &inner[inner.iter().take_while(|b| blank(b)).count()..];
-            let (angled, close) = match inner.first() {
-                Some(b'<') => (true, b'>'),
-                Some(b'"') => (false, b'"'),
-                _ => return Err("a source asks __has_include of something other than a name as written".to_owned()),
-            };
-            let len = inner[1..].iter().position(|b| *b == close || *b == b'\n');
-            let unreadable = || "a __has_include cannot be read".to_owned();
-            let len = len.filter(|len| *len > 0 && inner[1 + len] == close).ok_or_else(unreadable)?;
-            let tail = &inner[2 + len..];
-            if tail.iter().find(|b| !blank(b)) != Some(&b')') {
-                return Err(unreadable());
+            match literal_name(&bytes[paren + 1..]) {
+                Some((angled, spelling)) => {
+                    out.push(Probe { angled, spelling, expanded: angled && !written_on_if_line(bytes, start) });
+                    continue;
+                }
+                None if in_comment(bytes, start, end) => continue,
+                None => return Err("a source asks __has_include of something other than a name as written".to_owned()),
             }
-            out.push(Probe { angled, spelling: inner[1..1 + len].to_vec() });
-            continue;
         }
         // Only asked whether it is defined: `defined __has_include`,
         // `defined(__has_include)`, `#ifdef __has_include`.
@@ -865,11 +859,111 @@ fn probes(code: &[u8], bare: &[u8], out: &mut Vec<Probe>) -> Result<(), String> 
         let before = before.strip_suffix(b"(").map_or(before, trim_end);
         let line_start = before.iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
         let words: Vec<&[u8]> = before[line_start..].split(|b| !ident(*b) && *b != b'#').filter(|w| !w.is_empty()).collect();
-        let defined = before.ends_with(b"defined")
-            && !before.get(before.len().wrapping_sub(8)).is_some_and(|b| ident(*b))
+        let defined = before.ends_with(b"defined") && !before.get(before.len().wrapping_sub(8)).is_some_and(|b| ident(*b))
             || matches!(words.as_slice(), [b"#ifdef"] | [b"#ifndef"] | [b"#", b"ifdef"] | [b"#", b"ifndef"]);
-        if !defined {
+        if !defined && !in_comment(bytes, start, end) {
             return Err("a source uses __has_include other than to call it, which the cache does not follow".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Each `__has_include` in `bytes` as a whole word (with `_next`, and GCC
+/// before 10's `__has_include__` and `__has_include_next__`), as `[start,
+/// end)`.
+fn has_includes(bytes: &[u8]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    memchr::memmem::find_iter(bytes, b"__has_include").filter_map(move |start| {
+        if start > 0 && ident(bytes[start - 1]) {
+            return None;
+        }
+        let mut end = start + b"__has_include".len();
+        if bytes[end..].starts_with(b"_next") {
+            end += 5;
+        }
+        if bytes[end..].starts_with(b"__") {
+            end += 2;
+        }
+        (!bytes.get(end).is_some_and(|b| ident(*b))).then_some((start, end))
+    })
+}
+
+/// The name written as `<name>` or `"name"` (blanks around it), then `)`,
+/// at the start of `inner`: whether angled, and the name.
+fn literal_name(inner: &[u8]) -> Option<(bool, Vec<u8>)> {
+    let blank = |b: &u8| matches!(b, b' ' | b'\t');
+    let inner = &inner[inner.iter().take_while(|b| blank(b)).count()..];
+    let (angled, close) = match inner.first()? {
+        b'<' => (true, b'>'),
+        b'"' => (false, b'"'),
+        _ => return None,
+    };
+    let len = inner[1..].iter().position(|b| *b == close || *b == b'\n')?;
+    if len == 0 || inner[1 + len] != close {
+        return None;
+    }
+    let tail = &inner[2 + len..];
+    (tail.iter().find(|b| !blank(b)) == Some(&b')')).then(|| (angled, inner[1..1 + len].to_vec()))
+}
+
+/// Is the `__has_include` at `at` written right on an `#if` or `#elif`
+/// line, not inside a macro's parentheses there? Its `<name>` is then a
+/// header name, read as it stands.
+fn written_on_if_line(bytes: &[u8], at: usize) -> bool {
+    let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+    let first = skip_blanks(bytes, line_start);
+    let hash = if bytes[first..].starts_with(b"#") { 1 } else if bytes[first..].starts_with(b"%:") { 2 } else { return false };
+    let name = skip_blanks(bytes, first + hash);
+    let word_len = bytes[name..].iter().take_while(|b| ident(**b)).count();
+    if !matches!(&bytes[name..name + word_len], b"if" | b"elif") || name + word_len > at {
+        return false;
+    }
+    // No macro's parentheses open around it: each `(` right after a word
+    // other than `defined` is one.
+    let mut open = Vec::new();
+    let text = &bytes[name + word_len..at];
+    for (i, b) in text.iter().enumerate() {
+        match b {
+            b'(' => {
+                let before = trim_end(&text[..i]);
+                let word_len = before.iter().rev().take_while(|b| ident(**b)).count();
+                let word = &before[before.len() - word_len..];
+                open.push(!word.is_empty() && word != b"defined");
+            }
+            b')' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    !open.contains(&true)
+}
+
+/// Check what `-dD` printed of one macro, `#define <rest>`: the run's own
+/// reading of the source, so exact. `Err` for an object-like macro with a
+/// `#` in it (it can start an output line with one), and for one that uses
+/// a watched name otherwise than to call `__has_include` on a name as
+/// written. The probes it makes are angled ones the compilers expand.
+pub fn macro_body(rest: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("a macro has {why}, which the cache does not follow"));
+    let name_len = rest.iter().take_while(|b| ident(**b)).count();
+    let function_like = rest.get(name_len) == Some(&b'(');
+    let body = match function_like {
+        true => rest.iter().position(|b| *b == b')').map_or(&rest[..0], |close| &rest[close + 1..]),
+        false => &rest[name_len..],
+    };
+    if !function_like && (memchr::memchr(b'#', body).is_some() || find(body, b"%:").is_some()) {
+        return refuse("a #");
+    }
+    for word in [&b"__has_embed"[..], b"__TIMESTAMP__", b"__DATE__", b"__TIME__"] {
+        if words(body, word).next().is_some() {
+            return refuse(&format!("{}", String::from_utf8_lossy(word)));
+        }
+    }
+    for (_, end) in has_includes(body) {
+        let paren = skip_blanks(body, end);
+        match (body.get(paren), body.get(paren + 1..).and_then(literal_name)) {
+            (Some(b'('), Some((angled, spelling))) => out.push(Probe { angled, spelling, expanded: angled }),
+            _ => return refuse("__has_include used otherwise than on a name as written"),
         }
     }
     Ok(())
@@ -900,8 +994,12 @@ pub struct Lookups {
     /// ([`Lookups::before_compile`]); none until then.
     expected: Option<Vec<Option<Found>>>,
     /// For each include whose file GCC named by its physical path, that
-    /// name: after the compile, the file found must still be it.
-    physical: Vec<(usize, Vec<u8>)>,
+    /// name and what its path resolved through: after the compile, the file
+    /// found must still be it, reached the same way.
+    physical: Vec<(usize, Vec<u8>, String)>,
+    /// Which directories of the search list (quote, then bracket) are
+    /// system ones, where GCC names a header by its physical path.
+    system: Vec<bool>,
     /// The lookups of the key's answers, which the pass before the compile
     /// goes on with (the directories as listed then are as good as any
     /// taken after the key's run).
@@ -918,14 +1016,38 @@ impl Lookups {
     /// The lookups of a run whose `-v` said `said`, whose output had
     /// `directives`, and whose files (`files`, by the names the markers
     /// gave) asked `probes`.
-    pub fn new(said: &[u8], directives: Vec<Directive>, mut probes: Vec<Probe>, files: &[Vec<u8>], gcc: bool) -> Result<Self, String> {
-        let search = Search::from_verbose(said)?;
+    pub fn new(said: &[u8], followed: Followed, mut probes: Vec<Probe>, files: &[Vec<u8>], gcc: bool, given: &Given) -> Result<Self, String> {
+        let mut search = Search::from_verbose(said)?;
+        // What the compile was given and the run left out: nonexistent, or
+        // no directory (GCC says so in a warning that flags can hide). Each
+        // must stay no directory. One that is a directory now was searched
+        // under another name.
+        for dir in &given.all {
+            if search.quote.contains(dir) || search.bracket.contains(dir) || search.absent.contains(dir) {
+                continue;
+            }
+            match std::fs::metadata(Path::new(OsStr::from_bytes(dir))) {
+                Ok(meta) if meta.is_dir() => return Err(format!("the compiler searches {} under another name", String::from_utf8_lossy(dir))),
+                _ => search.absent.push(dir.clone()),
+            }
+        }
+        // A system directory: a bracket one not given by `-I`.
+        let system = search.quote.iter().map(|_| false).chain(search.bracket.iter().map(|dir| !given.user.contains(dir))).collect();
+        probes.extend(followed.probes);
         probes.sort();
         probes.dedup();
+        // A `<name>` the compilers expand macros in names another header
+        // if a word in it is a macro.
+        for probe in probes.iter().filter(|probe| probe.expanded) {
+            if probe.spelling.split(|b| !ident(*b)).any(|word| followed.defined.contains(word)) {
+                return Err(format!("a __has_include in a macro asks for <{}>, a name with a macro in it", String::from_utf8_lossy(&probe.spelling)));
+            }
+        }
         let mut dirs: Vec<Vec<u8>> = files.iter().map(|file| dir_of(file).to_vec()).collect();
         dirs.sort();
         dirs.dedup();
-        Ok(Self { search, directives, probes, dirs, expected: None, physical: Vec::new(), looker: None, stats: 0, listed: 0, gcc })
+        let directives = followed.directives;
+        Ok(Self { search, directives, probes, dirs, system, expected: None, physical: Vec::new(), looker: None, stats: 0, listed: 0, gcc })
     }
 
     /// The answers to the `__has_include`s, digested for the key, names
@@ -999,17 +1121,19 @@ impl Lookups {
         // shorter than the path it was found by
         // (`-fcanonical-system-headers`, its default).
         let gcc = self.gcc;
-        let shorter = |directive: &Directive, name: &[u8], path: &[u8]| {
-            gcc && directive.system && name.len() < path.len() && canonical(path).is_some_and(|path| path == name)
+        let system = &self.system;
+        let shorter = |directive: &Directive, name: &[u8], found: &Found| {
+            let in_system = matches!(found.place, Place::Chain(at) if system[at]);
+            gcc && directive.system && in_system && name.len() < found.path.len() && canonical(&found.path).is_some_and(|path| path == name)
         };
         for (at, (directive, found)) in self.directives.iter().zip(&found).enumerate() {
             match (&directive.entered, found) {
                 (Some(name), Some(found)) if *name == found.path => {
                     entered.insert(found.path.clone());
                 }
-                (Some(name), Some(found)) if shorter(directive, name, &found.path) => {
+                (Some(name), Some(found)) if shorter(directive, name, found) => {
                     entered.insert(found.path.clone());
-                    physical.push((at, name.clone()));
+                    physical.push((at, name.clone(), resolved(&found.path)));
                 }
                 (None, Some(found)) if entered.contains(&found.path) => {}
                 (None, None) if is_command_line(&directive.from) => {}
@@ -1049,10 +1173,10 @@ impl Lookups {
         (self.expected.as_ref() == Some(&found)).then_some(())?;
         // A file named by its physical path must still be that file: a
         // symlink on the way to it may have been turned elsewhere.
-        for (at, name) in &self.physical {
+        for (at, name, through) in &self.physical {
             looker.stats += 1;
             let path = &found[*at].as_ref()?.path;
-            (canonical(path).as_deref() == Some(name.as_slice())).then_some(())?;
+            (canonical(path).as_deref() == Some(name.as_slice()) && resolved(path) == *through).then_some(())?;
         }
         self.answer(map, looker).ok()
     }
@@ -1126,56 +1250,95 @@ mod tests {
         assert_eq!(dir_of(b"inc/sub/b.h"), b"inc/sub/");
     }
 
-    fn scanned(bytes: &[u8], dated: bool) -> Result<Vec<Probe>, String> {
+    fn scanned(bytes: &[u8]) -> Result<Vec<Probe>, String> {
         let mut scan = Scan::default();
-        super::scan(bytes, dated, &mut scan)?;
+        super::scan(bytes, &mut scan)?;
         Ok(scan.probes)
     }
 
-    /// The scan reads a file as the compilers do, and what they could read
-    /// otherwise goes to the second compiler run.
+    /// The scan counts what it looks for wherever it stands, so no reading
+    /// of comments or literals can hide it; what could be read otherwise, or
+    /// could forge a line marker, goes to the second compiler run.
     #[test]
-    fn the_scan_reads_as_the_compilers_do() {
-        let spliced = scanned(b"#if __has_\\\ninclude(<x.h>)\n#endif\n", false).unwrap();
-        assert_eq!(spliced, vec![Probe { angled: true, spelling: b"x.h".to_vec() }]);
-        assert!(scanned(b"#if __has_\\  \r\ninclude(<x.h>)\r\n", false).is_ok_and(|probes| probes.len() == 1));
+    fn the_scan_cannot_be_misled() {
+        let probes = |bytes: &[u8]| scanned(bytes).unwrap().into_iter().map(|probe| probe.spelling).collect::<Vec<_>>();
+        assert_eq!(probes(b"#if __has_\\\ninclude(<x.h>)\n#endif\n"), [b"x.h".to_vec()]);
+        assert_eq!(probes(b"#if __has_\\  \r\ninclude(<x.h>)\r\n"), [b"x.h".to_vec()]);
+        // Whatever a reader of comments and literals would make of them.
+        assert_eq!(probes(b"#if (e+1'2) && __has_include(<y.h>)\n"), [b"y.h".to_vec()]);
+        assert_eq!(probes(b"#warning about /*\n#if __has_include(<w.h>)\n#endif\n"), [b"w.h".to_vec()]);
+        assert_eq!(probes(b"#if __has_include(<a/*b.h>)\n#endif\n"), [b"a/*b.h".to_vec()]);
+        assert_eq!(probes(b"/* #if __has_include(<c.h>) */\n"), [b"c.h".to_vec()]);
         for odd in [
-            // Read otherwise by one compiler or language than another.
             &b"#if __has_\\\rinclude(<x.h>)\n"[..],
             b"// x\r#define H __has_include\n",
             b"int x;\0\n",
             b"#if __has_include(<x.h>) ??/\n#endif\n",
             b"#define CAT(a, b) a ??=??= b\n",
-            b"const char *s = R\"x(\n# 1 \"s.c\" 2\n)x\";\n",
-            b"#define W 1'a/*'\n#define H __has_include\n",
-            // What the scan leaves to the compiler.
             b"#embed \"data.bin\"\n",
             b"  %: embed <data.bin>\n",
             b"#/* the data */ embed \"data.bin\"\n",
             b"/* the data: */ #embed \"data.bin\"\n",
             b"#if __has_embed(\"data.bin\")\n#endif\n",
-            b"const char *when = __DATE__ \" \" __TIME__;\n",
+            b"/* __DATE__ */\n",
+            b"const char *when = \"\" __TIME__;\n",
             b"const char *when = __TIMESTAMP__;\n",
-            b"int g(int, const char *, int);\nint x = g(1'0, \"x'/*\", 1);\n#define H __has_include\n",
+            b"#define H __has_include\n",
+            b"#if APPLY(__has_include, <x.h>)\n",
+            b"#if __has_include(X)\n",
             // What could write a line taken for a line marker.
             b"# 1 \"s.c\" 2\n",
-            b"#define M # 1 \"s.c\" 2\nM\n",
+            b"#/**/ 3 \"s.c\" 2\n",
+            b"/* a\n */ # 1 \"s.c\" 2\n",
             b"#define E(x) x\nE(#) 1 \"s.c\" 2\n",
+            b"E( /* c */ %:) 1 \"s.c\" 2\n",
         ] {
-            assert!(scanned(odd, false).is_err(), "{}", String::from_utf8_lossy(odd));
+            assert!(scanned(odd).is_err(), "{}", String::from_utf8_lossy(odd));
         }
         for fine in [
-            // Comments and literals are not code.
-            &b"/* __DATE__ #embed */ const char *s = \"__TIME__ # 1\"; // __has_embed\n"[..],
-            b"#define STR(x) #x\n#define CAT(a, b) a ## b\n#line 7 \"orig.c\"\n",
-            b"int auR = 1; const char *s = auR\"x\";\n",
+            &b"#define STR(x) #x\n#define CAT(a, b) a ## b\n#line 7 \"orig.c\"\n"[..],
+            b"# define V(x) __attribute__ ((__visibility__ (#x)))\n",
+            b"int weak; // #weak + (#shared != 0)\n",
+            b"/* see issue #181 and tables.html#65 */\n",
+            b"#endif // __has_include\n",
+            b"/* a\n   __has_include argument (GCC PR 80005).  */\n",
+            b"#ifdef __has_include\n#if defined(__has_include) && defined __has_include\n#endif\n#endif\n",
             b"int embedded;\n#define embed 1\n",
             // A name pasted from pieces is a stated limit (decision 15).
             b"#define HAS(h) __has_ ## include(h)\n#if HAS(<x.h>)\n#endif\n",
         ] {
-            assert!(scanned(fine, false).is_ok(), "{}: {:?}", String::from_utf8_lossy(fine), scanned(fine, false));
+            assert!(scanned(fine).is_ok(), "{}: {:?}", String::from_utf8_lossy(fine), scanned(fine));
         }
-        assert!(scanned(b"const char *when = __DATE__;\n", true).is_ok(), "SOURCE_DATE_EPOCH fixes the date");
+        // A `<name>` in a macro, or a macro's argument, is expanded.
+        let expanded = |bytes: &[u8]| scanned(bytes).unwrap().iter().map(|probe| probe.expanded).collect::<Vec<_>>();
+        assert_eq!(expanded(b"#if __has_include(<x.h>) || (__has_include(<y.h>))\n"), [false, false]);
+        assert_eq!(expanded(b"#if ID(__has_include(<x.h>))\n#  define X __has_include(<y.h>)\n"), [true, true]);
+        assert_eq!(expanded(b"#if defined(X) && __has_include(<x.h>)\n"), [false]);
+    }
+
+    /// What `-dD` printed of a macro is checked exactly.
+    #[test]
+    fn macros_are_read_as_the_run_printed_them() {
+        let body = |rest: &[u8]| {
+            let mut probes = Vec::new();
+            macro_body(rest, &mut probes).map(|()| probes)
+        };
+        assert!(body(b"M # 1 \"s.c\" 2").is_err(), "an object-like macro with a #");
+        assert!(body(b"STR(x) #x").is_ok());
+        assert!(body(b"H __has_include").is_err());
+        assert!(body(b"WHEN __DATE__").is_err());
+        let probes = body(b"_GLIBCXX_USE_TBB_PAR_BACKEND __has_include(<tbb/tbb.h>)").unwrap();
+        assert_eq!(probes, [Probe { angled: true, spelling: b"tbb/tbb.h".to_vec(), expanded: true }]);
+        let mut tracker = Tracker::default();
+        tracker.marker(b"s.c", false, false, false);
+        assert!(tracker.macro_line(b"#define linux 1\n"));
+        assert!(tracker.macro_line(b"#define HAS __has_include(<linux/version.h>)\n"));
+        assert!(!tracker.macro_line(b"int x;\n"));
+        let followed = tracker.finish(false).unwrap();
+        assert!(followed.defined.contains(b"linux".as_slice()));
+        let said = b"#include \"...\" search starts here:\n#include <...> search starts here:\n /usr/include\nEnd of search list.\n";
+        let lookups = Lookups::new(said, followed, Vec::new(), &[], true, &Given::default());
+        assert!(lookups.is_err_and(|why| why.contains("linux/version.h")), "a macro in a name the compiler expands");
     }
 
     /// A line marker that returns elsewhere than to the file being read,
@@ -1191,8 +1354,8 @@ mod tests {
         tracker.marker(b"a.h", false, true, false);
         tracker.marker(b"s.c", false, true, false);
         let directives = tracker.finish(false).unwrap();
-        assert_eq!(directives[1].from, b"a.h");
-        assert_eq!(directives[1].by, Some(0));
+        assert_eq!(directives.directives[1].from, b"a.h");
+        assert_eq!(directives.directives[1].by, Some(0));
         let mut fake = Tracker::default();
         fake.marker(b"s.c", false, false, false);
         fake.directive(Kind::Quote, b"a.h".to_vec());
@@ -1209,10 +1372,10 @@ mod tests {
 
     #[test]
     fn finds_has_include_where_it_can_be_followed() {
-        let out = scanned(b"#if __has_include(<tbb/tbb.h>)\n#  define X __has_include( \"y.h\" )\n#endif // __has_include\n#ifdef __has_include\n#if defined(__has_include) && defined __has_include\nint my__has_include;\n/* __has_include */ /* a */\n/* two\n   lines: __has_include argument */\n// spliced \\\n__has_include\nconst char *s = \"\\\"\"; // __has_include\n", false).unwrap();
-        assert_eq!(out, vec![Probe { angled: true, spelling: b"tbb/tbb.h".to_vec() }, Probe { angled: false, spelling: b"y.h".to_vec() }]);
+        let out = scanned(b"#if __has_include(<tbb/tbb.h>)\n#  define X __has_include( \"y.h\" )\n#endif // __has_include\n#ifdef __has_include\n#if defined(__has_include) && defined __has_include\nint my__has_include;\n/* __has_include */ /* a */\n/* two\n   lines: __has_include argument */\n// spliced \\\n__has_include\n").unwrap();
+        assert_eq!(out, vec![Probe { angled: true, spelling: b"tbb/tbb.h".to_vec(), expanded: false }, Probe { angled: false, spelling: b"y.h".to_vec(), expanded: false }]);
         for odd in [&b"#if __has_include(HEADER)\n"[..], b"#define H __has_include\n", b"#if __has_include_next(X)\n", b"#if __has_include(<x.h\n", b"#define H \"//\" __has_include\n", b"/* */ __has_include\n", b"#define H \"/*\" __has_include\n", b"R\"x(/*)x\" __has_include\n"] {
-            assert!(scanned(odd, false).is_err(), "{}", String::from_utf8_lossy(odd));
+            assert!(scanned(odd).is_err(), "{}", String::from_utf8_lossy(odd));
         }
     }
 }

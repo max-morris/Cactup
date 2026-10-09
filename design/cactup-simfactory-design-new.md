@@ -4861,9 +4861,11 @@ fixed parts, so that the key does not change by accident:
 - **Preprocessed text.** The output of the same compiler with the same
   arguments and `-E` in place of `-c -o <object>`. It shows what the include
   paths and macro definitions made of the source: which files were found,
-  which branches were taken. No header is tracked or guessed at. With `-g3`
-  macro definitions are kept (`-dD`), since the object's debug information
-  then has them.
+  which branches were taken. No header is tracked or guessed at. Macro
+  definitions are kept (`-dD`): the object's debug information has them
+  under `-g3`, and the check after the compile reads them (below). So a
+  macro given on the command line changes the key even where nothing uses
+  it.
 - **Files read.** The bytes of every file the preprocessor names in its
   line markers: the source and every header (everything but the compilers'
   own names for what is not a file, `<built-in>` and its like, matched
@@ -5098,39 +5100,54 @@ changed between the key's run and cactup's asking gives a key whose text
 says one thing and whose answers another: no compile with consistent inputs
 arrives at it, so it serves nothing wrong.) `__has_include_next` is answered
 the same way: the answers for every directory decide it, and the search
-list itself goes into the key with them. The files are scanned as the
-compilers read them: lines spliced by a backslash joined, each comment a
-blank, literals kept apart. For gfortran (§18.10) the places the compile
-passes over before each included file must hold nothing, nor may a module
-file appear named like a module gfortran has built in (`iso_c_binding`,
-`iso_fortran_env`: a `use` that does not say `intrinsic` takes a file of
-that name if it finds one), and module files keep their order check.
-**Whatever this does not model sends the check to a second compiler run**,
-as before: `-include`; a source character set (`-finput-charset=`); C90,
-which has no `//` comments; anything GCC and Clang, or one language mode and
-another, could read otherwise: a NUL byte, a carriage return that ends a
-line by itself, a trigraph, a raw string, a number with a `'` in it; a
-precompiled header (`<name>.gch`) anywhere looked at; a `__has_include`
-whose argument is not a name as written, or used other than to call it or
-to ask whether it is defined; `#embed` and `__has_embed`, which read a file
-no line marker names; `__TIMESTAMP__`, and `__DATE__` or `__TIME__` unless
-the compile's `SOURCE_DATE_EPOCH` fixes them (a second compiler run saw the
-clock move on, and so did the compile); what could write a line the reader
-of the output takes for the compiler's own line marker: a line marker given
-in a source (`# 12 "file" 2`), a `#` that is no directive and no operator
-of a function-like macro, a line marker that returns to another file than
-the one the output was reading; `#import`; a framework directory or a header
-map; a directory the compiler dropped as the same as another under another
-name; a lookup that does not lead where the compiler went; a file entered
-that no `#include` names (GCC's own `stdc-predef.h` aside, looked for as
+list itself goes into the key with them. **The files are scanned without
+telling code from comments and literals**: what the scan looks for counts
+wherever it stands, so no misreading of a file can hide anything from it (a
+`__has_include` in a comment makes one lookup more), with lines spliced by a
+backslash joined first; it takes a use for a comment only where its own line
+proves one. What macros make is read from the run's own `-dD` output, which
+is the compiler's reading: an alias of `__has_include`, a `#` in an
+object-like macro, and every name defined (the compilers' own among them).
+A `<name>` that is not written right on an `#if` or `#elif` line (in a
+macro, or in a macro's argument) is one the compilers expand macros in: it
+is followed only while no word in it is a macro. For gfortran (§18.10) the
+places the compile passes over before each included file must hold nothing,
+nor may a module file appear named like a module gfortran has built in
+(`iso_c_binding`, `iso_fortran_env`: a `use` that does not say `intrinsic`
+takes a file of that name if it finds one), and module files keep their
+order check. **Whatever this does not model sends the check to a second
+compiler run**, as before: `-include`; a source character set
+(`-finput-charset=`); C90, whose `//` is no comment; a NUL byte, a carriage
+return that ends a line by itself, or a trigraph (read otherwise by one
+compiler or language mode than another); a precompiled header
+(`<name>.gch`) anywhere looked at; a `__has_include` whose argument is not
+a name as written, or used other than to call it or to ask whether it is
+defined; `#embed` and `__has_embed`, which read a file no line marker
+names; `__TIMESTAMP__`, `__DATE__` and `__TIME__` (a second compiler run
+saw the clock move on, and so did the compile; older compilers ignore
+`SOURCE_DATE_EPOCH`); what could write a line the reader of the output
+takes for the compiler's own line marker: a line marker given in a source
+(`# 12 "file" 2`, also with a comment after its `#`), a `#` passed to a
+macro (after `(` or `,` outside a directive), a `#` in an object-like
+macro, a line marker that returns to another file than the one the output
+was reading; `#import`; a framework directory or a header map; a
+directory the compiler dropped as the same as another under another name; a
+lookup that does not lead where the compiler went; a file entered that no
+`#include` names (GCC's own `stdc-predef.h` aside, looked for as
 `<stdc-predef.h>` whether found or not, unless `-ffreestanding` or
-`-nostdinc` keeps GCC from reading it). GCC names a system header (one its
-marker flags so) by its physical path where that is shorter than the path
-it was found by: the lookups take that name to agree, and after the compile
-the file found must still have it. Directories are listed once a pass has
-looked in them a few times; in a listing, a name not found that another case
-of it could be (a directory that folds case) is looked up by its path. The
-log says how each check was made: the lookups by path and the directory
+`-nostdinc` keeps GCC from reading it). Every directory the compile names
+(`-I`, `-iquote`, `-isystem`, `-idirafter`) that is in neither search list
+must not be a directory after the compile either (it was nonexistent, or
+no directory, which GCC says only in a warning that flags can hide); one
+that is a directory already was searched under another name, and the check
+falls back. GCC names a system header (one its marker flags so, found in a
+system directory: a bracket one not given by `-I`) by its physical path
+where that is shorter than the path it was found by: the lookups take that
+name to agree, and after the compile the file found must still have it,
+reached through the same entries. Directories are listed once a pass has
+looked in them a few times; in a listing, a name not found that another
+case of it could be (a directory that folds case) is looked up by its path.
+The log says how each check was made: the lookups by path and the directory
 listings it took (`lookups`, `listings`), or why it ran the
 compiler (`checked_by_compiler`).
 
