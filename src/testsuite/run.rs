@@ -217,7 +217,7 @@ fn start_impl(
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
     let fit = QueueFit::from_config(&cfg);
-    let mut topo = resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
+    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
 
     // 3. TEST script variants for the queue (§11.2: prefer the test

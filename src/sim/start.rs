@@ -310,7 +310,7 @@ fn submit_impl(
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
     let force_queue = args.force_queue || args.force;
     let fit = vars::QueueFit::from_config(&cfg);
-    let mut topo = vars::resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
+    let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
 
@@ -548,7 +548,7 @@ fn run_interactive(
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
     let force_queue = args.start.force_queue || args.start.force;
     let fit = vars::QueueFit::from_config(&cfg);
-    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &fit, force_queue)?;
+    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
 

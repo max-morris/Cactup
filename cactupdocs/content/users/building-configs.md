@@ -77,7 +77,10 @@ run` (`-q`/`--queue`, `-w`/`--wall-time`, `-a`/`--allocation`, `-n`/`--nodes`,
 and so on — see [Running Simulations](running-simulations.html)) for
 overriding the machine's default build-job shape on a one-off basis. Note
 that `-j` still means `--make-jobs` here, not job name — use `-J`/`--job-name`
-if you need to set that.
+if you need to set that. Any of the machine's queues can build any config: a
+CPU-only build may compile on a GPU partition and vice versa. Which queues the
+finished binary may *run* on is checked when you submit a simulation, not
+here.
 
 A queue-submitted build behaves like any other queued job: it can sit
 waiting for resources, and if you close your terminal or lose your

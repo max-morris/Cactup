@@ -787,19 +787,19 @@ impl Meta {
         !self.variants.buildsubmitscript.variants.is_empty() && self.scheduler.submit.is_some()
     }
 
-    /// The queue used when -q is omitted, restricted to queues compatible with
-    /// the config's build `universe` (§4.4): the `default = true` queue among
-    /// them, or the sole compatible queue.
-    pub fn default_queue(&self, universe: &str) -> Option<&str> {
-        let mut compatible = self.queues.iter().filter(|(_, q)| q.compatible_with(universe));
+    /// The queue used when -q is omitted: the `default = true` queue, or the
+    /// sole queue. A sim/test job passes the config's build `universe` to
+    /// restrict the pick to queues that serve its binary (§4.4); a build job
+    /// passes `None`, since where `make` runs says nothing about where the
+    /// binary may (§7.9).
+    pub fn default_queue(&self, universe: Option<&str>) -> Option<&str> {
+        let serves = |q: &Queue| universe.is_none_or(|u| q.compatible_with(u));
+        let mut compatible = self.queues.iter().filter(|(_, q)| serves(q));
         let first = compatible.next()?;
         if compatible.next().is_none() {
             return Some(first.0.as_str());
         }
-        self.queues
-            .iter()
-            .find(|(_, q)| q.default && q.compatible_with(universe))
-            .map(|(n, _)| n.as_str())
+        self.queues.iter().find(|(_, q)| q.default && serves(q)).map(|(n, _)| n.as_str())
     }
 
     /// The scheduler-facing name of queue `key` (what `@QUEUE@` resolves to):
@@ -1213,7 +1213,7 @@ mod tests {
     fn parses_and_validates_the_spec_example() {
         let meta = mike();
         assert_eq!(meta.machine.name.as_deref(), Some("mike"));
-        assert_eq!(meta.default_queue(HOST_UNIVERSE), Some("checkpt"));
+        assert_eq!(meta.default_queue(Some(HOST_UNIVERSE)), Some("checkpt"));
         assert!(meta.queues["gpu"].gpu);
         assert_eq!(meta.variants.optionlist.variants, ["cpu", "gpu", "test-cpu"]);
         // Array shorthand and inline-table forms normalize identically.
@@ -1799,8 +1799,8 @@ mod tests {
         // The default queue is chosen among the universe-compatible queues:
         // "host-only" for host builds, and (as the sole compatible one) "sing"
         // for et-sing builds even though it is not marked default.
-        assert_eq!(meta.default_queue("host"), Some("host-only"));
-        assert_eq!(meta.default_queue("et-sing"), Some("sing"));
+        assert_eq!(meta.default_queue(Some("host")), Some("host-only"));
+        assert_eq!(meta.default_queue(Some("et-sing")), Some("sing"));
     }
 
     #[test]

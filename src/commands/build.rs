@@ -311,10 +311,10 @@ fn submit(ctx: &Ctx, args: BuildSubmitArgs) -> Res<()> {
     watch_build(&machine, &config_dir, attempt_id, mode)
 }
 
-/// Resolve the reservation/topology BEFORE `prepare` runs — the
-/// chicken-and-egg `build::queue_fit` solves (see its doc comment) — then
-/// stage the attempt, generate the buildsubmitscript, and hand it to the
-/// scheduler. Mirrors `testsuite::run::start_impl`'s submit half.
+/// Resolve the reservation/topology BEFORE `prepare` runs (prepare stages
+/// the reservation into the attempt), then stage the attempt, generate the
+/// buildsubmitscript, and hand it to the scheduler. Mirrors
+/// `testsuite::run::start_impl`'s submit half.
 fn submit_impl(
     inst: &Installation,
     machine: &Machine,
@@ -341,12 +341,14 @@ fn submit_impl(
 
     // §2: [build] defaults + the MAKEJOBS/CPUS_PER_TASK coupling, resolved
     // BEFORE the queue is picked — a build must never reserve fewer cores
-    // than `make -j` asks for — then the topology itself.
+    // than `make -j` asks for — then the topology itself. No binary fit: the
+    // build job's queue is where `make` runs, and the optionlist's
+    // compatible-queues/gpu/build universe describe where the *binary* may
+    // run, which is a sim's business, not this job's (§7.9).
     let mut flags = args.topology.clone();
     build::apply_build_defaults(&mut flags, machine);
     let make_jobs = build::reconcile_make_jobs(&mut flags, args.opts.make_jobs, machine);
-    let fit = build::queue_fit(&cactus_root, machine, &name, &args.opts)?;
-    let topo = resolve_topology(&flags, machine, db, &fit, false)?;
+    let topo = resolve_topology(&flags, machine, db, None, false)?;
 
     let reservation = Reservation {
         queue: topo.queue.clone(),
@@ -398,9 +400,12 @@ fn submit_impl(
     vset.set("ENV_SETUP", machine.meta.effective_env(build_universe, Phase::Submit));
 
     // §4: buildsubmitscript variant + universe, generate + write, submit.
+    // Routed by the queue (filtered by the build universe the job's `make`
+    // runs in) and nothing else: the optionlist's `--variant` names what is
+    // built, never which script queues it (§7.9).
     let scripts = machine.meta.script_variants(ScriptKind::BuildSubmit);
     let cfg_universe = attempt.meta.config_meta.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (variant, entry) = scripts.select(&topo.queue, cfg_universe, false, args.opts.variant.as_deref())?;
+    let (variant, entry) = scripts.select(&topo.queue, cfg_universe, false, None)?;
     let submit_uni =
         resolve_submit_universe(machine, entry.universe.as_deref(), scripts.default_universe.as_deref())?;
     let submit_uni_name = submit_uni.as_ref().map(|(n, _)| n.as_str());
@@ -1471,6 +1476,124 @@ mod tests {
         let built = crate::build::ConfigMeta::load(&cactus, "sim").unwrap().expect("config recorded");
         assert!(built.built.is_some());
         assert!(crate::build::is_complete(&cactus, "sim"));
+    }
+
+    // ---- the build job's queue is not the binary's (§7.9) ------------------
+
+    /// A machine with a GPU and a CPU partition, a GPU and a CPU optionlist
+    /// (each `compatible-queues`-restricted to its own partition), and one
+    /// buildsubmitscript per partition. The script names deliberately match
+    /// no optionlist name, and each script stamps its own name into the
+    /// generated file, so a test can see which one was routed.
+    fn two_partition_machine(dir: &Path, cactus: &Path) -> Machine {
+        fake_submit_machine(dir, &completing_make_body(cactus, "sim"), "", false);
+        fs::write(
+            dir.join("meta.toml"),
+            format!(
+                r#"
+                [machine]
+                nickname = "fake"
+
+                [build]
+                make = "{make} -j@MAKEJOBS@"
+                make-jobs = 4
+
+                [scheduler]
+                submit = "echo [JOB-B@ATTEMPT_ID@]"
+                submit-pattern = '\[(JOB-[^\]]*)\]'
+                get-status = "true"
+                status-pattern = "$^"
+                queued-pattern = "$^"
+                running-pattern = "$^"
+                holding-pattern = "$^"
+                stop = "true"
+
+                [queues.gpu]
+                default = true
+                gpu = true
+                max-walltime = "8:00:00"
+                [queues.cpu]
+                max-walltime = "8:00:00"
+
+                [variants.submitscript]
+                "default" = {{ queues = ["gpu", "cpu"], default = true }}
+                [variants.runscript]
+                "default" = {{ queues = ["gpu", "cpu"], default = true }}
+                [variants.buildsubmitscript]
+                "on-gpu" = {{ queues = ["gpu"], default = true }}
+                "on-cpu" = ["cpu"]
+                [variants.optionlist]
+                variants = ["gpu", "cpu"]
+                "#,
+                make = dir.join("fakemake").display(),
+            ),
+        )
+        .unwrap();
+        fs::remove_file(dir.join("optionlists/default.toml")).unwrap();
+        fs::write(
+            dir.join("optionlists/gpu.toml"),
+            "[cactup]\ngpu = true\ndefault = true\ncompatible-queues = [\"gpu\"]\n[options]\nVERSION = \"1\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("optionlists/cpu.toml"),
+            "[cactup]\ngpu = false\ncompatible-queues = [\"cpu\"]\n[options]\nVERSION = \"1\"\n",
+        )
+        .unwrap();
+        fs::remove_file(dir.join("buildsubmitscripts/default.sh")).unwrap();
+        for v in ["on-gpu", "on-cpu"] {
+            fs::write(
+                dir.join(format!("buildsubmitscripts/{v}.sh")),
+                format!("#!/bin/sh\necho script={v} q=@QUEUE@\n"),
+            )
+            .unwrap();
+        }
+        let meta: Meta = toml::from_str(&fs::read_to_string(dir.join("meta.toml")).unwrap()).unwrap();
+        meta.validate("fake").unwrap();
+        Machine { name: "fake".to_owned(), dir: dir.to_owned(), layer: Layer::System, meta }
+    }
+
+    /// Submit `--variant variant` to `queue` (or the machine default) on the
+    /// two-partition machine; returns the generated buildsubmitscript.
+    fn submit_flavor(variant: &str, queue: Option<&str>) -> Res<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let machine = two_partition_machine(&tmp.path().join("mdb/fake"), &cactus);
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let mut topology = bare_topology();
+        topology.queue = queue.map(str::to_owned);
+        let mut args = submit_args("sim", topology);
+        args.opts.variant = Some(variant.to_owned());
+        submit_impl(&inst, &machine, &Database::new(), &args, Some("subhost"))?;
+        let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
+        Ok(fs::read_to_string(attempt.submit_script_path()).unwrap())
+    }
+
+    /// A CPU-only optionlist compiles on a GPU queue: its compatible-queues
+    /// name where the binary may run, not where `make` may.
+    #[test]
+    fn cpu_optionlist_builds_on_a_gpu_queue() {
+        let script = submit_flavor("cpu", Some("gpu")).unwrap();
+        assert!(script.contains("script=on-gpu q=gpu"), "{script}");
+    }
+
+    /// A GPU optionlist compiles on a non-GPU queue: compiling CUDA code needs
+    /// no GPU, so the binary's GPU cross-check has no say over the build job.
+    #[test]
+    fn gpu_optionlist_builds_on_a_cpu_queue() {
+        let script = submit_flavor("gpu", Some("cpu")).unwrap();
+        assert!(script.contains("script=on-cpu q=cpu"), "{script}");
+    }
+
+    /// The optionlist `--variant` never picks the buildsubmitscript: with no
+    /// -q, the default queue routes it — even though no script shares the
+    /// optionlist's name, and the optionlist itself only runs elsewhere.
+    #[test]
+    fn optionlist_variant_never_selects_the_buildsubmitscript() {
+        let script = submit_flavor("cpu", None).unwrap();
+        assert!(script.contains("script=on-gpu q=gpu"), "{script}");
     }
 
     // ---- build submit --block (§7.9) --------------------------------------

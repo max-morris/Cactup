@@ -16,7 +16,6 @@ use crate::mdb::meta::Phase;
 use crate::mdb::{Machine, Optionlist};
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{script_command, spawn_and_wait, write_executable};
-use crate::sim::vars::QueueFit;
 use crate::template::{Syntax, VarSet, VarValue};
 use crate::thornlist::Thornlist;
 use crate::Res;
@@ -1307,46 +1306,17 @@ pub fn resolve_optionlist(
     })
 }
 
-/// The §4.4/D12 queue-compatibility facts, given an already-resolved
-/// optionlist. Split out so `prepare` can reuse the resolution it has already
-/// done rather than reading the optionlist a second time, while `queue_fit`
-/// stays the one entry point for callers that have nothing resolved yet.
-fn fit_from(machine: &Machine, name: &str, opts: &BuildOpts, optionlist: &Optionlist) -> QueueFit {
-    let universe = resolve_build_universe(
+/// The universe a build of this optionlist runs in (§4.8): the CLI flag, the
+/// optionlist's own `[cactup].universe`, `[build].universe`, or the declared
+/// host, in that order.
+fn build_universe(machine: &Machine, opts: &BuildOpts, optionlist: &Optionlist) -> Option<String> {
+    resolve_build_universe(
         opts,
         optionlist.header.universe.as_deref(),
         machine.meta.build.universe.as_deref(),
         machine.meta.declared_host().is_some(),
     )
-    .map(str::to_owned);
-    QueueFit {
-        universe,
-        compatible_queues: optionlist.header.compatible_queues.clone(),
-        gpu: optionlist.header.gpu,
-        label: name.to_owned(),
-    }
-}
-
-/// The §4.4/D12 queue-compatibility facts for `name` on `machine`: whatever
-/// `resolve_optionlist` picks (the MDB variant, or the sticky `--optionlist`
-/// file this config already records) fed through `resolve_build_universe`.
-/// `prepare` needs these as part of composing a
-/// config, and `build submit` needs them BEFORE `prepare` runs — a topology
-/// (and the reservation `prepare` must be handed) can't be resolved without
-/// knowing which queues this build is compatible with, but that compatibility
-/// is itself an optionlist-header fact `prepare` alone used to derive. Both
-/// paths route through this one function so they can never silently disagree
-/// about which queues a build may land on.
-pub fn queue_fit(cactus_root: &Path, machine: &Machine, name: &str, opts: &BuildOpts) -> Res<QueueFit> {
-    // Loaded here rather than taken as an argument because the stored
-    // metadata is what makes a `--optionlist` choice sticky (rule 3), and
-    // `build submit` calls this before it has any reason to have read it.
-    let stored = ConfigMeta::load(cactus_root, name)?;
-    if let Some(stored) = &stored {
-        check_config_machine(machine, stored, opts)?;
-    }
-    let resolved = resolve_optionlist(cactus_root, name, machine, stored.as_ref(), opts)?;
-    Ok(fit_from(machine, name, opts, &resolved.optionlist))
+    .map(str::to_owned)
 }
 
 /// §7.4 for a build of an existing config: it must have been built for this
@@ -1534,9 +1504,7 @@ pub fn prepare(
         check_config_machine(machine, stored, opts)?;
     }
 
-    // Selection & inputs (§4.4, §7.8). The universe name comes off the same
-    // `fit_from` that `queue_fit` uses, so this and the pre-topology call
-    // `build submit` makes before `prepare` runs can never silently disagree.
+    // Selection & inputs (§4.4, §7.8).
     let resolved = resolve_optionlist(&cactus_root, name, machine, stored_meta.as_ref(), opts)?;
     let ResolvedOptionlist { source: optionlist_source, optionlist, .. } = &resolved;
     if resolved.from_snapshot {
@@ -1546,7 +1514,7 @@ pub fn prepare(
             "warning:".yellow().bold(),
         );
     }
-    let universe_name = fit_from(machine, name, opts, optionlist).universe;
+    let universe_name = build_universe(machine, opts, optionlist);
     // Unknown universe = hard error listing the known ones (§4.8).
     let universe = universe_name
         .as_deref()
@@ -3854,8 +3822,8 @@ mod tests {
     /// swallowed the inner make's real exit status). The incompleteness error
     /// must name the missing *executable* and point at the build output
     /// files — not blame the configure marker, which is present.
-    /// §7.4: a config built for another machine is refused by both entry
-    /// points (`queue_fit` for `build submit`, `prepare` for everything);
+    /// §7.4: a config built for another machine is refused by `prepare`
+    /// (every build path, `build submit` included);
     /// `--ignore-machine` turns that into a forced full rebuild whose
     /// metadata then names this machine.
     #[test]
@@ -3888,16 +3856,10 @@ mod tests {
             err.contains("built for machine \"elsewhere\"") && err.contains("--ignore-machine"),
             "{err}"
         );
-        let err = match queue_fit(&cactus, &machine, "sim", &opts) {
-            Ok(_) => panic!("a foreign build must be refused"),
-            Err(e) => format!("{e:#}"),
-        };
-        assert!(err.contains("built for machine \"elsewhere\""), "{err}");
 
         opts.ignore_machine = true;
         // `--reconfig` must not soften it: nothing built elsewhere is reused.
         opts.reconfig = true;
-        queue_fit(&cactus, &machine, "sim", &opts).unwrap();
         let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
             Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a foreign build must never read as up to date"),

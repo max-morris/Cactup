@@ -11,7 +11,7 @@ pub mod optionlist;
 pub mod sync;
 
 // Convenience re-exports for the consuming subsystems.
-pub use meta::{BuildAction, Hardware, Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
+pub use meta::{BuildAction, Hardware, Meta, Phase, Queue, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 pub use optionlist::Optionlist;
 
 use crate::Res;
@@ -637,7 +637,7 @@ mod tests {
         let mdb = dev_mdb();
 
         let mel5 = mdb.load("mel5").unwrap();
-        assert_eq!(mel5.meta.default_queue(HOST_UNIVERSE), Some("local"));
+        assert_eq!(mel5.meta.default_queue(Some(HOST_UNIVERSE)), Some("local"));
         // [paths] keep their tokens at load (resolution is a use-time
         // concern — §4.2)…
         assert_eq!(mel5.meta.paths.simulation_home.as_deref(), Some("/home/@USER@/simulations"));
@@ -667,7 +667,7 @@ mod tests {
         // configs to its scripts (§4.4; self-named "db").
         let db1 = mdb.load("db1.hpc.lsu.edu").unwrap();
         assert_eq!(db1.meta.machine.name.as_deref(), Some("db"));
-        assert_eq!(db1.meta.default_queue(HOST_UNIVERSE), Some("gpu"));
+        assert_eq!(db1.meta.default_queue(Some(HOST_UNIVERSE)), Some("gpu"));
         // The cluster's single real partition, GPU-flagged.
         assert_eq!(db1.meta.queues.len(), 1);
         assert!(db1.meta.queues["gpu"].gpu);
@@ -715,7 +715,7 @@ mod tests {
         // placeholder queue with QB4's two real GPU partitions.
         let qbd = mdb.load("qbd").unwrap();
         assert!(qbd.meta.scheduler.submit.as_deref().unwrap().starts_with("sbatch"));
-        assert_eq!(qbd.meta.default_queue(HOST_UNIVERSE), Some("gpu2"));
+        assert_eq!(qbd.meta.default_queue(Some(HOST_UNIVERSE)), Some("gpu2"));
         assert!(qbd.meta.queues["gpu2"].gpu && qbd.meta.queues["gpu4"].gpu);
         // No per-queue `name` override any more: @QUEUE@ is the key itself, so
         // the submitscripts' `-p` directive and their `QUEUE == "gpu4"` gres

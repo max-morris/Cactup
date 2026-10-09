@@ -1,5 +1,5 @@
-# qbd BUILD submitscript (variant "cpu"): compile a CPU-only config on one of
-# the CPU partitions (`cactup build submit <cfg> -q single`). QB4 makes you
+# qbd BUILD submitscript for the CPU partitions: chosen by the queue, for any
+# config built there (`cactup build submit <cfg> -q single`). QB4 makes you
 # compile on a compute node; on these partitions no GPU reservation is needed,
 # so this is the GPU script without the --gres derivation. Batch header plus
 # the compute-node re-invocation, nothing else.

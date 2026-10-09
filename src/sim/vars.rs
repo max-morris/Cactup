@@ -4,7 +4,7 @@
 use crate::args::TopologyFlags;
 use crate::build::ConfigMeta;
 use crate::database::Database;
-use crate::mdb::{Hardware, Machine, Phase, HOST_UNIVERSE};
+use crate::mdb::{Hardware, Machine, Phase, Queue, HOST_UNIVERSE};
 use crate::sim::{restart, Simulation};
 use crate::template::VarSet;
 use crate::walltime::Walltime;
@@ -67,73 +67,41 @@ impl QueueFit {
 
 /// Resolve the §8.5 topology: flag → knob → machine defaults, with the
 /// queue-compatibility and GPU cross-checks (§4.4 / D12).
+///
+/// `fit` is what the job's binary can run on. A sim or test job passes its
+/// config's; a build job passes `None` — it runs `make`, not the binary, so
+/// the queue it lands on is checked against the machine only (§7.9).
 pub fn resolve_topology(
     flags: &TopologyFlags,
     machine: &Machine,
     db: &Database,
-    fit: &QueueFit,
+    fit: Option<&QueueFit>,
     force_queue: bool,
 ) -> Res<Topology> {
     let m = &machine.name;
 
     // The config's build universe gates which queues (and script variants) are
     // reachable (§4.4); configs recording none run in the implicit host.
-    let cfg_universe = fit.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+    let cfg_universe = fit.map(|f| f.universe.as_deref().unwrap_or(HOST_UNIVERSE));
 
-    // Queue: -q → knob → machine default queue (the default is chosen among the
-    // queues compatible with the build universe).
+    // Queue: -q → knob → machine default queue (for a binary, the default is
+    // chosen among the queues compatible with its build universe).
     let queue = flags
         .queue
         .clone()
         .or_else(|| db.knob("queue").map(str::to_owned))
         .or_else(|| machine.meta.default_queue(cfg_universe).map(str::to_owned))
-        .ok_or_else(|| {
-            anyhow!("no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue compatible with build universe \"{cfg_universe}\"")
+        .ok_or_else(|| match cfg_universe {
+            Some(u) => anyhow!(
+                "no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue compatible with build universe \"{u}\""
+            ),
+            None => anyhow!("no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue"),
         })?;
     let queue_def = machine.meta.queue(&queue)?;
-
-    // Build-universe gate (§4.4): a queue restricted to other build universes
-    // cannot serve this config. Structural like variant compatibility — no
-    // --force-queue escape (unlike the compatible-queues/GPU guards below).
-    if !queue_def.compatible_with(cfg_universe) {
-        bail!(
-            "queue \"{queue}\" is not compatible with build universe \"{cfg_universe}\" \
-             (build-universes = [{}])",
-            queue_def.build_universes.as_deref().unwrap_or_default().join(", ")
-        );
-    }
-
-    // compatible-queues guard (§4.4 / D12).
-    if !fit.compatible_queues.is_empty() && !fit.compatible_queues.contains(&queue) && !force_queue {
-        bail!(
-            "config \"{}\" is only compatible with queue(s) {} (not \"{queue}\"); \
-             use --force-queue to override",
-            fit.label,
-            fit.compatible_queues.join(", ")
-        );
-    }
-
-    // GPU: -g or the queue's gpu flag, cross-checked one-directionally
-    // against the binary (D12): only a GPU config in a non-GPU context is
-    // refused. A non-GPU config on a GPU queue is allowed — some machines'
-    // only real partition is GPU-flagged — with an advisory when a non-GPU
-    // queue existed.
     let gpu = flags.gpu || queue_def.gpu;
-    if fit.gpu && !gpu && !force_queue {
-        // §8.5
-        bail!(
-            "config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
-             use --force-queue to override",
-            fit.label,
-        );
-    }
-    if !fit.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
-        eprintln!(
-            "{} config \"{}\" was built without GPU support but queue \"{queue}\" is GPU-flagged; \
-             this machine also has non-GPU queue(s) (D12)",
-            "note:".yellow(),
-            fit.label,
-        );
+
+    if let Some(fit) = fit {
+        check_binary_fit(machine, fit, &queue, queue_def, gpu, force_queue)?;
     }
     // `--gpus-per-task` is meaningful only once GPU is on: refused rather than
     // silently ignored, so a user who asked for GPUs per task and landed on a
@@ -214,6 +182,65 @@ pub fn resolve_topology(
         out: flags.out.clone(),
         err: flags.err.clone(),
     })
+}
+
+/// The checks that keep a binary off a queue it cannot run on: the queue's
+/// build-universe gate (§4.4), the config's compatible-queues (D12), and the
+/// one-directional GPU cross-check (D12). Sim and test jobs only — a build
+/// job's queue is where `make` runs, not the binary (§7.9).
+fn check_binary_fit(
+    machine: &Machine,
+    fit: &QueueFit,
+    queue: &str,
+    queue_def: &Queue,
+    gpu: bool,
+    force_queue: bool,
+) -> Res<()> {
+    let cfg_universe = fit.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+
+    // Build-universe gate (§4.4): a queue restricted to other build universes
+    // cannot serve this config. Structural like variant compatibility — no
+    // --force-queue escape (unlike the compatible-queues/GPU guards below).
+    if !queue_def.compatible_with(cfg_universe) {
+        bail!(
+            "queue \"{queue}\" is not compatible with build universe \"{cfg_universe}\" \
+             (build-universes = [{}])",
+            queue_def.build_universes.as_deref().unwrap_or_default().join(", ")
+        );
+    }
+
+    // compatible-queues guard (§4.4 / D12).
+    if !fit.compatible_queues.is_empty() && !fit.compatible_queues.iter().any(|q| q == queue) && !force_queue {
+        bail!(
+            "config \"{}\" is only compatible with queue(s) {} (not \"{queue}\"); \
+             use --force-queue to override",
+            fit.label,
+            fit.compatible_queues.join(", ")
+        );
+    }
+
+    // GPU: -g or the queue's gpu flag, cross-checked one-directionally
+    // against the binary (D12): only a GPU config in a non-GPU context is
+    // refused. A non-GPU config on a GPU queue is allowed — some machines'
+    // only real partition is GPU-flagged — with an advisory when a non-GPU
+    // queue existed.
+    if fit.gpu && !gpu && !force_queue {
+        // §8.5
+        bail!(
+            "config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
+             use --force-queue to override",
+            fit.label,
+        );
+    }
+    if !fit.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
+        eprintln!(
+            "{} config \"{}\" was built without GPU support but queue \"{queue}\" is GPU-flagged; \
+             this machine also has non-GPU queue(s) (D12)",
+            "note:".yellow(),
+            fit.label,
+        );
+    }
+    Ok(())
 }
 
 /// `GPUS_PER_TASK` (§8.5): `--gpus-per-task` → the queue-effective
@@ -612,7 +639,7 @@ mod tests {
     fn topology_defaults_fill_the_node() {
         let machine = test_machine();
         let db = Database::new();
-        let topo = resolve_topology(&flags(), &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&flags(), &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!(topo.queue, "batch");
         // No `name` override: the scheduler-facing name is the key itself.
         assert_eq!(topo.scheduler_queue, "batch");
@@ -631,7 +658,7 @@ mod tests {
         f.nodes = Some(4);
         f.cpus = Some(4);
         // Knob queue is gpuq; the config must be gpu-built to pass the check.
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(true, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(true, &[])), false).unwrap();
         assert_eq!(topo.queue, "gpuq");
         // The queue's `name` override is what the scheduler (@QUEUE@) sees.
         assert_eq!(topo.scheduler_queue, "gpu_part");
@@ -654,13 +681,13 @@ mod tests {
         f.queue = Some("fillq".to_owned());
 
         // No `-c`: cpus defaults to the queue's 24 → tpn = floor(48/24) = 2.
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn, topo.cpus), (1, 2, 2, 24));
 
         // An explicit `-c 1` request overrides the machine default → full-node
         // single-threaded fill: tpn = floor(48/1) = 48.
         f.cpus = Some(1);
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn, topo.cpus), (1, 48, 48, 1));
     }
 
@@ -674,31 +701,31 @@ mod tests {
 
         let mut f = flags();
         f.tasks = Some(1);
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn), (1, 1, 1));
 
         // Below the fill-the-node value but above 1.
         f.tasks = Some(3);
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn), (1, 3, 3));
 
         // Multi-node: the cap is per node, and never below the ranks a node holds.
         f.nodes = Some(2);
         f.tasks = Some(3);
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn), (2, 3, 2));
 
         // The fill-the-node default is untouched (tasks == nodes * tpn).
         f.nodes = Some(2);
         f.tasks = None;
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.nodes, topo.tasks, topo.tpn), (2, 32, 16));
 
         // An explicit `--tpn` stays authoritative even when it exceeds `--tasks`.
         f.nodes = None;
         f.tasks = Some(1);
         f.tpn = Some(4);
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert_eq!((topo.tasks, topo.tpn), (1, 4));
     }
 
@@ -706,7 +733,7 @@ mod tests {
     fn tasks_default_chain() {
         let machine = test_machine();
         let db = Database::new();
-        let base = || resolve_topology(&flags(), &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let base = || resolve_topology(&flags(), &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
 
         // Script setting wins over the fallback; tpn is capped to match.
         let mut topo = base();
@@ -731,7 +758,7 @@ mod tests {
         ] {
             let mut f = flags();
             set(&mut f);
-            let mut topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+            let mut topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
             let before = (topo.tasks, topo.tpn);
             apply_tasks_default(&mut topo, &f, Some(4), Some(2));
             assert_eq!((topo.tasks, topo.tpn), before, "flags win over defaults");
@@ -743,7 +770,7 @@ mod tests {
         let machine = test_machine();
         let db = Database::new();
         let cfg = test_fit(false, &[]);
-        let topo = |f: &TopologyFlags| resolve_topology(f, &machine, &db, &cfg, false).unwrap();
+        let topo = |f: &TopologyFlags| resolve_topology(f, &machine, &db, Some(&cfg), false).unwrap();
 
         // Non-GPU run: the variable is 0, never 1 — a script must be able to
         // tell "no GPUs" from "one GPU" using this alone.
@@ -794,7 +821,7 @@ mod tests {
         let machine = test_machine();
         let db = Database::new();
         let cfg = test_fit(false, &[]);
-        let err = |f: &TopologyFlags| resolve_topology(f, &machine, &db, &cfg, false).unwrap_err().to_string();
+        let err = |f: &TopologyFlags| resolve_topology(f, &machine, &db, Some(&cfg), false).unwrap_err().to_string();
 
         // 4 GPUs, but 8 ranks per node want one each.
         let mut f = flags();
@@ -814,7 +841,7 @@ mod tests {
         let mut f = flags();
         f.queue = Some("gpucap".to_owned());
         f.gpus_per_task = Some(3);
-        let t = resolve_topology(&f, &machine, &db, &cfg, false).unwrap();
+        let t = resolve_topology(&f, &machine, &db, Some(&cfg), false).unwrap();
         assert_eq!((t.tpn, t.gpus_per_task), (1, 3));
 
         // An over-request no layout can satisfy — more GPUs per rank than the
@@ -827,7 +854,7 @@ mod tests {
         // Exactly filling the node is fine — the check is a ceiling, not a cap
         // on using everything (2 each × 2 ranks = 4).
         f.gpus_per_task = Some(2);
-        assert!(resolve_topology(&f, &machine, &db, &cfg, false).is_ok());
+        assert!(resolve_topology(&f, &machine, &db, Some(&cfg), false).is_ok());
 
         // A queue whose `default-gpus-per-task` overshoots its own node is
         // caught too: gpudef hands out 2 each, so 4 ranks would need 8.
@@ -840,7 +867,7 @@ mod tests {
         // per-task, so fewer ranks simply need fewer GPUs.
         let mut f = flags();
         f.queue = Some("gpudef".to_owned());
-        let mut topo = resolve_topology(&f, &machine, &db, &cfg, false).unwrap();
+        let mut topo = resolve_topology(&f, &machine, &db, Some(&cfg), false).unwrap();
         apply_tasks_default(&mut topo, &f, Some(1), None);
         assert_eq!((topo.tpn, topo.gpus_per_task), (1, 2));
     }
@@ -852,13 +879,13 @@ mod tests {
         let mut f = flags();
         f.gpus_per_task = Some(2);
         // Default queue `batch` is not GPU-flagged: refused, not ignored.
-        let err = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false)
+        let err = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("--gpus-per-task"), "{err}");
         // `--gpu` alone is enough to make it meaningful again.
         f.gpu = true;
-        assert_eq!(resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap().gpus_per_task, 2);
+        assert_eq!(resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap().gpus_per_task, 2);
     }
 
     #[test]
@@ -868,23 +895,23 @@ mod tests {
 
         // compatible-queues mismatch refused (§4.4)…
         let cfg = test_fit(false, &["gpuq"]);
-        let err = resolve_topology(&flags(), &machine, &db, &cfg, false).unwrap_err().to_string();
+        let err = resolve_topology(&flags(), &machine, &db, Some(&cfg), false).unwrap_err().to_string();
         assert!(err.contains("--force-queue"), "{err}");
         // …unless forced.
-        assert!(resolve_topology(&flags(), &machine, &db, &cfg, true).is_ok());
+        assert!(resolve_topology(&flags(), &machine, &db, Some(&cfg), true).is_ok());
 
         // GPU cross-check is one-directional (D12): a GPU binary in a non-GPU
         // context (default queue batch) is refused…
-        let err = resolve_topology(&flags(), &machine, &db, &test_fit(true, &[]), false)
+        let err = resolve_topology(&flags(), &machine, &db, Some(&test_fit(true, &[])), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("GPU"), "{err}");
         // …unless forced.
-        assert!(resolve_topology(&flags(), &machine, &db, &test_fit(true, &[]), true).is_ok());
+        assert!(resolve_topology(&flags(), &machine, &db, Some(&test_fit(true, &[])), true).is_ok());
         // A non-GPU binary on a GPU queue is allowed (advisory only).
         let mut f = flags();
         f.queue = Some("gpuq".to_owned());
-        let topo = resolve_topology(&f, &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&f, &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         assert!(topo.gpu);
     }
 
@@ -943,12 +970,12 @@ mod tests {
         // error even with --force-queue (unlike the compatible-queues guard).
         let mut f = flags();
         f.queue = Some("sing".to_owned());
-        let err = resolve_topology(&f, &machine, &db, &cfg_in("host"), true).unwrap_err().to_string();
+        let err = resolve_topology(&f, &machine, &db, Some(&cfg_in("host")), true).unwrap_err().to_string();
         assert!(err.contains("build universe") && err.contains("\"sing\""), "{err}");
 
         // Each build flavor's default resolves to its sole compatible queue.
-        assert_eq!(resolve_topology(&flags(), &machine, &db, &cfg_in("host"), false).unwrap().queue, "host-only");
-        assert_eq!(resolve_topology(&flags(), &machine, &db, &cfg_in("et-sing"), false).unwrap().queue, "sing");
+        assert_eq!(resolve_topology(&flags(), &machine, &db, Some(&cfg_in("host")), false).unwrap().queue, "host-only");
+        assert_eq!(resolve_topology(&flags(), &machine, &db, Some(&cfg_in("et-sing")), false).unwrap().queue, "sing");
     }
 
     #[test]
@@ -1012,7 +1039,7 @@ mod tests {
             meta,
         };
         let db = Database::new();
-        let topo = resolve_topology(&flags(), &machine, &db, &test_fit(false, &[]), false).unwrap();
+        let topo = resolve_topology(&flags(), &machine, &db, Some(&test_fit(false, &[])), false).unwrap();
         let wall = Walltime::parse("1-01:30:45").unwrap();
         let vars = assemble(&RestartVarsInput {
             sim: &sim,
@@ -1077,7 +1104,7 @@ mod tests {
         for (queue, gpus) in [("gpu2", 2), ("gpu4", 4)] {
             let mut f = flags();
             f.queue = Some(queue.to_owned());
-            let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+            let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
             let hw = machine.meta.effective_hardware(queue).unwrap();
             assert_eq!(hw.max_gpus_per_node, Some(gpus), "{queue}");
             // One rank per GPU, every GPU busy…
@@ -1095,7 +1122,7 @@ mod tests {
         let mut f = flags();
         f.queue = Some("gpu4".to_owned());
         f.tasks = Some(8);
-        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (8, 4, 16, 1));
     }
 
@@ -1120,14 +1147,14 @@ mod tests {
         assert_eq!(hw.max_gpus_per_node, None);
 
         // No flags: 48 cores at 24/task = 2 ranks, one GPU each, no ceiling.
-        let t = resolve_topology(&flags(), &machine, &db, &fit, false).unwrap();
+        let t = resolve_topology(&flags(), &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (2, 2, 24, 1));
 
         // Explicit rank counts resolve as they always did, never refused on
         // GPU grounds (nothing is declared to check against).
         let mut f = flags();
         f.tasks = Some(4);
-        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn), (4, 2));
     }
 
@@ -1158,21 +1185,21 @@ mod tests {
 
         // No flags: one rank on its one GPU, 8 of the node's 72 cores, the
         // rest left for whoever else is on the box.
-        let t = resolve_topology(&flags(), &machine, &db, &fit, false).unwrap();
+        let t = resolve_topology(&flags(), &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (1, 1, 8, 1));
         assert!(t.tpn * t.cpus < hw.max_cpus_per_node.unwrap(), "the whole point: idle cores");
 
         // -c still fills the node on request, and still lands on one rank.
         let mut f = flags();
         f.cpus = Some(72);
-        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn, t.cpus), (1, 1, 72));
 
         // An explicit --tpn is authoritative, so it reaches the ceiling and is
         // refused there rather than being silently bounded.
         let mut f = flags();
         f.tpn = Some(4);
-        let err = resolve_topology(&f, &machine, &db, &fit, false).unwrap_err().to_string();
+        let err = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap_err().to_string();
         assert!(err.contains("needs 4 GPUs per node") && err.contains("--tpn/--tasks"), "{err}");
 
         // An explicit --tasks is a rank count too: on this no-batch single
@@ -1181,13 +1208,13 @@ mod tests {
         // would let 10 ranks fight over the one MI210 via `mpirun -np 10`).
         let mut f = flags();
         f.tasks = Some(10);
-        let err = resolve_topology(&f, &machine, &db, &fit, false).unwrap_err().to_string();
+        let err = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap_err().to_string();
         assert!(err.contains("needs 9 GPUs per node") && err.contains("--tpn/--tasks"), "{err}");
 
         // …while a --tasks the GPU budget can honor still resolves.
         let mut f = flags();
         f.tasks = Some(1);
-        let t = resolve_topology(&f, &machine, &db, &fit, false).unwrap();
+        let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn), (1, 1));
     }
 
@@ -1225,7 +1252,7 @@ mod tests {
                         &flags(),
                         &test_machine(),
                         &Database::new(),
-                        &test_fit(false, &[]),
+                        Some(&test_fit(false, &[])),
                         false,
                     )
                     .unwrap();

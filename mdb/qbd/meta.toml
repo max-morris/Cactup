@@ -190,9 +190,10 @@ default-cpus-per-task = 8
 "cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
 "test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test run`
 
-# Both GPU partitions can build; the script derives --gres per queue. CPU-only
-# configs build on `single` (`cactup build submit <cfg> -q single`), which
-# needs no --gres at all.
+# Any partition can build any config: the build queue is only where `make`
+# runs, independent of where the binary will. The queue picks the script, so
+# a build on a GPU partition gets the --gres derivation it needs and one on a
+# CPU partition (`cactup build submit <cfg> -q single`) gets none.
 [variants.buildsubmitscript]
 "default" = { queues = ["gpu2", "gpu4"], default = true }
 "cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }

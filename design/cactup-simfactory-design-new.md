@@ -2477,7 +2477,7 @@ and **renders** them to that native format before invoking make.
 ```toml
 [cactup]                         # cactup-only metadata; NOT emitted to the native file
 gpu = true                       # binary capability (D12)
-compatible-queues = ["gpu"]      # which queues this build may be submitted to (D12)
+compatible-queues = ["gpu"]      # which queues the built binary may run on (D12)
 default = false                  # optional, default false: marks the implicit choice when the
                                  # machine lists several optionlist variants (§4.4)
 universe = "et-sif"              # optional: build this variant inside this universe (§4.8)
@@ -2804,6 +2804,19 @@ section existed); `build submit` on a machine where submitting is impossible is
 a hard error for the same reason, rather than a silent fallback to the
 foreground — a user who explicitly asked to submit should not be surprised by
 a login-node compile.
+
+**The build job's queue is not the binary's.** A build job runs `make`, not
+the binary it produces, so nothing that describes where a *binary* may run
+constrains it: the optionlist's `compatible-queues` and `gpu` (D12), and a
+queue's `build-universes` list (§4.4), are checked by `sim` and `test` jobs
+only. A CPU-only optionlist may be compiled on a GPU partition and a CUDA one
+on a CPU partition; the build queue is `-q`, else `[build].queue`, else the
+machine's default queue, checked against the machine alone. The
+buildsubmitscript is then routed by that queue exactly as a submitscript is —
+filtered by its `build-universes` list against the config's build universe,
+which here is the universe the job's own `make` runs in — and by nothing
+else: `--variant` names the optionlist being built, never the script that
+queues it.
 
 **The prepare/execute split, and what is frozen at submit time.** A build's
 work splits into two phases with different privileges (D11):
