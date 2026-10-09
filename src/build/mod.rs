@@ -8,11 +8,11 @@ pub mod attempt;
 
 use crate::args::{BuildOpts, MakeJobs, TopologyFlags};
 use crate::build::attempt::{BuildAttempt, BuildMeta, BuildOutcomeRecord, Reservation, Timestamps};
-use crate::database::SCHEMA;
 use crate::fetch::SourceHeads;
 use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
+use crate::mdb::optionlist::RunsOn;
 use crate::mdb::{Machine, Optionlist};
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{script_command, spawn_and_wait, write_executable};
@@ -53,8 +53,13 @@ fn make_jobs_var(cli: Option<MakeJobs>, machine_default: Option<u32>) -> VarValu
     }
 }
 
+/// The config record's own format version. 2 renamed `variant` to `flavor`
+/// and grouped `gpu`/`compatible-queues` as `[runs-on]`; older records are
+/// upgraded on read (`ConfigMeta::from_table`).
+pub const CONFIG_SCHEMA: u32 = 2;
+
 fn default_schema() -> u32 {
-    SCHEMA
+    CONFIG_SCHEMA
 }
 fn default_true() -> bool {
     true
@@ -72,11 +77,6 @@ pub struct ConfigMeta {
     /// (§7.8). Flattened, so on disk this is the single key it names.
     #[serde(flatten)]
     pub optionlist_source: OptionlistSource,
-    /// Snapshotted from the optionlist `[cactup]` header at build time (D12).
-    #[serde(default)]
-    pub gpu: bool,
-    #[serde(default)]
-    pub compatible_queues: Vec<String>,
     pub thornlist: String,
     /// A build is not portable across machines.
     pub machine: String,
@@ -91,6 +91,10 @@ pub struct ConfigMeta {
     pub built: Option<DateTime<Utc>>,
     #[serde(default)]
     pub flags: BuildFlags,
+    /// Where the binary may run, snapshotted from the flavor's header at build
+    /// time (D12). A TOML table, so it follows every scalar key.
+    #[serde(default)]
+    pub runs_on: RunsOn,
     /// Per-repo HEADs (from `fetch-state.toml`) of the repos this config's
     /// thorns came from, as of this build — the §7.4 source-tracking input
     /// that makes a refetch invalidate the builds it actually reaches.
@@ -164,8 +168,8 @@ impl Default for BuildFlags {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OptionlistSource {
-    /// An optionlist variant named by the machine definition (§4.4).
-    Variant(String),
+    /// One of the machine's own optionlist flavors (§4.4).
+    Flavor(String),
     /// A canonicalized path, as given to `--optionlist`. Canonical because a
     /// relative path would resolve against whatever directory a later rebuild
     /// happened to run from.
@@ -178,7 +182,7 @@ pub enum OptionlistSource {
 impl std::fmt::Display for OptionlistSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OptionlistSource::Variant(v) => f.write_str(v),
+            OptionlistSource::Flavor(v) => f.write_str(v),
             OptionlistSource::Optionlist(p) => f.write_str(p),
         }
     }
@@ -195,11 +199,13 @@ impl ConfigMeta {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             other => other.with_context(|| format!("Failed to read {}", path.display()))?,
         };
-        let meta: ConfigMeta =
+        let table: toml::Table =
             toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
-        if meta.schema > SCHEMA {
+        let meta =
+            ConfigMeta::from_table(table).with_context(|| format!("Failed to parse {}", path.display()))?;
+        if meta.schema > CONFIG_SCHEMA {
             bail!(
-                "{} has schema {} (> {SCHEMA}); please upgrade cactup",
+                "{} has schema {} (> {CONFIG_SCHEMA}); please upgrade cactup",
                 path.display(),
                 meta.schema
             );
@@ -207,11 +213,56 @@ impl ConfigMeta {
         Ok(Some(meta))
     }
 
+    /// A config record from its raw TOML table, upgrading an older schema in
+    /// memory first. Every on-disk read goes through here — `load`, and the
+    /// copy embedded in a build attempt's `build.toml` (`deserialize_upgrading`)
+    /// — so a record written by any earlier cactup keeps loading. The file
+    /// itself is left alone; the next `store` writes the current schema.
+    ///
+    /// Deliberately kept indefinitely: a build queued by an older cactup runs
+    /// that older binary on the compute node and writes an old-schema record
+    /// when it finishes, whatever version the user has moved on to since.
+    pub fn from_table(mut table: toml::Table) -> Result<ConfigMeta, toml::de::Error> {
+        upgrade_config_record(&mut table);
+        toml::Value::Table(table).try_into()
+    }
+
+    /// `#[serde(deserialize_with)]` for a `ConfigMeta` embedded in another
+    /// record: the same upgrade `from_table` applies.
+    pub fn deserialize_upgrading<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ConfigMeta, D::Error> {
+        let table = toml::Table::deserialize(d)?;
+        ConfigMeta::from_table(table).map_err(serde::de::Error::custom)
+    }
+
     fn store(&self, cactus_root: &Path) -> Res<()> {
         let path = Self::path_for(cactus_root, &self.name);
         fs::write(&path, toml::to_string_pretty(self)?)
             .with_context(|| format!("Failed to write {}", path.display()))
     }
+}
+
+/// Schema 1 -> 2, in place: `variant = "x"` becomes `flavor = "x"`, and the
+/// flat `gpu`/`compatible-queues` keys move into a `[runs-on]` table as
+/// `gpu`/`queues`. A record already at schema 2 or later is left untouched.
+fn upgrade_config_record(table: &mut toml::Table) {
+    let schema = table.get("schema").and_then(toml::Value::as_integer).unwrap_or(1);
+    if schema >= 2 {
+        return;
+    }
+    if let Some(flavor) = table.remove("variant") {
+        table.insert("flavor".to_owned(), flavor);
+    }
+    let mut runs_on = toml::Table::new();
+    if let Some(queues) = table.remove("compatible-queues") {
+        runs_on.insert("queues".to_owned(), queues);
+    }
+    if let Some(gpu) = table.remove("gpu") {
+        runs_on.insert("gpu".to_owned(), gpu);
+    }
+    if !runs_on.is_empty() {
+        table.insert("runs-on".to_owned(), toml::Value::Table(runs_on));
+    }
+    table.insert("schema".to_owned(), toml::Value::Integer(2));
 }
 
 /// The two thornlist artifacts kept in a config directory (§7.5). The
@@ -1187,18 +1238,18 @@ pub struct ResolvedOptionlist {
 /// Resolve the optionlist for a build (§4.4, §7.8):
 ///
 ///   1. `--optionlist PATH` — explicit; a hard error if unreadable.
-///   2. `--variant NAME` — explicit.
+///   2. `--flavor NAME` — explicit.
 ///   3. whichever of the two this config was last built from, since it records
 ///      exactly one:
-///      - a variant, when the machine still lists it; a hard error naming what
+///      - a flavor, when the machine still has it; a hard error naming what
 ///        went missing when it does not.
 ///      - the `--optionlist` file, falling back to the config's verbatim
 ///        snapshot when that path has since moved or been deleted.
-///   4. the machine's variant selection — the sole variant, or the one marked
+///   4. the machine's flavor selection — the sole flavor, or the one marked
 ///      `default = true` (§4.4).
 ///
 /// Steps 1 and 2 are alternatives, not a precedence chain, and so are the two
-/// halves of step 3: `--optionlist` and `--variant` conflict at the cli, and
+/// halves of step 3: `--optionlist` and `--flavor` conflict at the cli, and
 /// supplying either **replaces** what the config was on record as being. That
 /// is the whole rule — whichever flag was passed most recently is what sticks,
 /// and neither one has to be repeated to keep sticking.
@@ -1207,14 +1258,14 @@ pub struct ResolvedOptionlist {
 /// rebuild must not silently build something other than what the config is on
 /// record as being. All three of the "what is this config made of" flags
 /// behave the same way here — `--thornlist` (§7.5), `--optionlist` and
-/// `--variant` — so there is no rule to remember about which are remembered.
+/// `--flavor` — so there is no rule to remember about which are remembered.
 ///
 /// Preferring the live file over the snapshot is deliberate: editing the
 /// optionlist in place and rebuilding is the whole point of naming one, and
 /// that edit must be picked up (as a full rebuild, since the §7.8 source diff
-/// sees it). A recorded *variant* has no snapshot equivalent because a
+/// sees it). A recorded *flavor* has no snapshot equivalent because a
 /// snapshot records the text one build used, not a standing definition of a
-/// variant the mdb has since dropped.
+/// flavor the mdb has since dropped.
 pub fn resolve_optionlist(
     cactus_root: &Path,
     name: &str,
@@ -1234,16 +1285,16 @@ pub fn resolve_optionlist(
         });
     }
 
-    // Everything below is the sticky path, so an explicit `--variant` skips
+    // Everything below is the sticky path, so an explicit `--flavor` skips
     // all of it — that flag IS how a config is deliberately moved onto the
-    // machine's own variants, whether from another variant or from a
+    // machine's own flavors, whether from another flavor or from a
     // `--optionlist` file. It displaces, exactly as `--optionlist` above did.
-    if opts.variant.is_none()
+    if opts.flavor.is_none()
         && let Some(stored) = stored
     {
         match &stored.optionlist_source {
-            OptionlistSource::Variant(recorded) => {
-                let listed = &machine.meta.variants.optionlist.variants;
+            OptionlistSource::Flavor(recorded) => {
+                let listed = machine.flavors();
                 if listed.contains(recorded) {
                     let optionlist = Optionlist::load(&machine.optionlist_path(recorded))?;
                     return Ok(ResolvedOptionlist {
@@ -1255,13 +1306,13 @@ pub fn resolve_optionlist(
                 // Renamed or dropped from the mdb since this config was built.
                 // Unlike a vanished `--optionlist` file there is nothing to
                 // fall back on — the config's snapshot is the *rendered*
-                // inputs of one particular variant, not a standing definition
+                // inputs of one particular flavor, not a standing definition
                 // of it — so say plainly what went missing rather than
                 // silently resolving to whatever the machine now calls its
                 // default.
                 bail!(
-                    "config \"{name}\" was built with optionlist variant \"{recorded}\", which \
-                     machine \"{}\" no longer has (it now offers: {}) — pass --variant to pick \
+                    "config \"{name}\" was built with optionlist flavor \"{recorded}\", which \
+                     machine \"{}\" no longer has (it now offers: {}) — pass --flavor to pick \
                      one of those, or --optionlist to build from a file",
                     machine.name,
                     if listed.is_empty() { "none".to_owned() } else { listed.join(", ") },
@@ -1280,7 +1331,7 @@ pub fn resolve_optionlist(
                     format!(
                         "config \"{name}\" was built from optionlist {recorded}, which is no \
                          longer readable, and there is no snapshot at {} to fall back on — pass \
-                         --optionlist to say which optionlist to build from, or --variant to \
+                         --optionlist to say which optionlist to build from, or --flavor to \
                          switch to one of the machine's own",
                         snapshot.display()
                     )
@@ -1297,10 +1348,10 @@ pub fn resolve_optionlist(
         }
     }
 
-    let variant = machine.select_optionlist(opts.variant.as_deref())?;
-    let optionlist = Optionlist::load(&machine.optionlist_path(&variant))?;
+    let flavor = machine.select_optionlist(opts.flavor.as_deref())?;
+    let optionlist = Optionlist::load(&machine.optionlist_path(&flavor))?;
     Ok(ResolvedOptionlist {
-        source: OptionlistSource::Variant(variant),
+        source: OptionlistSource::Flavor(flavor),
         optionlist,
         from_snapshot: false,
     })
@@ -1863,13 +1914,12 @@ pub fn prepare(
     // (execute stamps that once the build actually finishes).
     let now = Utc::now();
     let config_meta = ConfigMeta {
-        schema: SCHEMA,
+        schema: CONFIG_SCHEMA,
         name: name.to_owned(),
         // Carried forward on every rebuild, which is what makes the choice —
         // variant or file — sticky (resolution rule 3).
         optionlist_source: optionlist_source.clone(),
-        gpu: optionlist.header.gpu,
-        compatible_queues: optionlist.header.compatible_queues.clone(),
+        runs_on: optionlist.header.runs_on(),
         thornlist: thornlist.recorded.clone(),
         machine: machine.name.clone(),
         universe: universe_name,
@@ -1893,7 +1943,7 @@ pub fn prepare(
     vars.set("STDOUT_FILE", attempt_dir.join("build.out").display().to_string());
     vars.set("STDERR_FILE", attempt_dir.join("build.err").display().to_string());
     let meta = BuildMeta {
-        schema: SCHEMA,
+        schema: crate::database::SCHEMA,
         attempt_id,
         config: name.to_owned(),
         optionlist_source: optionlist_source.clone(),
@@ -2450,6 +2500,70 @@ mod tests {
     /// A comment that merely mentions a thorn name must never be toggled —
     /// a custom thornlist's prose header documents thorns by name, and the
     /// native fetcher now copies that header into the live list verbatim.
+    /// Writes `text` as config "sim"'s record and loads it back.
+    fn load_record(text: &str) -> (tempfile::TempDir, ConfigMeta) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        let meta = ConfigMeta::load(dir.path(), "sim").unwrap().unwrap();
+        (dir, meta)
+    }
+
+    const RECORD_TAIL: &str = "thornlist = \"t.th\"\nmachine = \"qbd\"\nconfig-id = \"c\"\nbuild-id = \"b\"\n";
+
+    /// A schema-1 record (written before the flavor rename) loads as the
+    /// current shape: `variant` is the flavor, and the flat `gpu`/
+    /// `compatible-queues` keys are its `runs-on`. The file is not touched
+    /// by a read; the next store writes the current schema, after which it
+    /// round-trips unchanged.
+    #[test]
+    fn schema_1_flavor_record_upgrades_on_read_and_store_writes_schema_2() {
+        let old = format!(
+            "schema = 1\nname = \"sim\"\nvariant = \"cpu\"\ngpu = true\n\
+             compatible-queues = [\"single\", \"workq\"]\n{RECORD_TAIL}"
+        );
+        let (dir, meta) = load_record(&old);
+        assert_eq!(meta.schema, CONFIG_SCHEMA);
+        assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("cpu".to_owned()));
+        assert_eq!(meta.runs_on, RunsOn { queues: vec!["single".to_owned(), "workq".to_owned()], gpu: true });
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        assert_eq!(fs::read_to_string(&path).unwrap(), old, "a read must not rewrite the record");
+
+        meta.store(dir.path()).unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
+        assert!(stored.contains("schema = 2") && stored.contains("flavor = \"cpu\""), "{stored}");
+        assert!(!stored.contains("variant") && !stored.contains("compatible-queues"), "{stored}");
+        let again = ConfigMeta::load(dir.path(), "sim").unwrap().unwrap();
+        assert_eq!(again.optionlist_source, meta.optionlist_source);
+        assert_eq!(again.runs_on, meta.runs_on);
+    }
+
+    /// A record from before `schema` was written at all reads as schema 1,
+    /// and a config built from an `--optionlist` file has only the
+    /// `runs-on` half of the upgrade to undergo.
+    #[test]
+    fn schemaless_optionlist_record_upgrades_too() {
+        let (_dir, meta) = load_record(&format!(
+            "name = \"sim\"\noptionlist = \"/x/my.cfg\"\ncompatible-queues = [\"gpu\"]\n{RECORD_TAIL}"
+        ));
+        assert_eq!(meta.schema, CONFIG_SCHEMA);
+        assert_eq!(meta.optionlist_source, OptionlistSource::Optionlist("/x/my.cfg".to_owned()));
+        assert_eq!(meta.runs_on, RunsOn { queues: vec!["gpu".to_owned()], gpu: false });
+    }
+
+    /// A current record is taken as-is — the upgrade never touches a key it
+    /// does not own, even one spelled like an old one.
+    #[test]
+    fn schema_2_record_is_not_upgraded() {
+        let (_dir, meta) = load_record(&format!(
+            "schema = 2\nname = \"sim\"\nflavor = \"cpu\"\n{RECORD_TAIL}[runs-on]\nqueues = [\"single\"]\n"
+        ));
+        assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("cpu".to_owned()));
+        assert_eq!(meta.runs_on.queues, ["single"]);
+        assert!(!meta.runs_on.gpu);
+    }
+
     #[test]
     fn toggles_ignore_comment_lines_that_name_thorns() {
         let list = "# comment out CarpetX/TestReal2 below (#DISABLED CarpetX/TestReal2).\n\
@@ -2495,11 +2609,10 @@ mod tests {
         // Rule 2 with a recorded path whose old-name file is gone.
         fs::remove_file(&legacy).unwrap();
         let stored = ConfigMeta {
-            schema: SCHEMA,
+            schema: CONFIG_SCHEMA,
             name: "sim".to_owned(),
-            optionlist_source: OptionlistSource::Variant("default".to_owned()),
-            gpu: false,
-            compatible_queues: Vec::new(),
+            optionlist_source: OptionlistSource::Flavor("default".to_owned()),
+            runs_on: RunsOn::default(),
             thornlist: legacy.display().to_string(),
             machine: "fake".to_owned(),
             universe: None,
@@ -3051,8 +3164,8 @@ mod tests {
         let outcome = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(outcome.rebuilt);
         let meta = &outcome.meta;
-        assert_eq!(meta.optionlist_source, OptionlistSource::Variant("default".to_owned()));
-        assert_eq!(meta.compatible_queues, ["local"]);
+        assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("default".to_owned()));
+        assert_eq!(meta.runs_on.queues, ["local"]);
         assert_eq!(meta.machine, "fake");
         assert!(meta.universe.is_none() && meta.coerce_run_universe);
         assert!(meta.flags.optimize && !meta.flags.debug);
@@ -3129,8 +3242,8 @@ mod tests {
             meta.optionlist_source,
             OptionlistSource::Optionlist(user_optionlist.display().to_string())
         );
-        assert!(meta.compatible_queues.is_empty());
-        assert!(!meta.gpu);
+        assert!(meta.runs_on.queues.is_empty());
+        assert!(!meta.runs_on.gpu);
 
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.starts_with("VERSION = 9\n"), "{rendered}");
@@ -3213,11 +3326,11 @@ mod tests {
         // must clear the recorded path rather than leave it lying around.
         let mut back = opts_with_optionlist(&opts, &user_optionlist);
         back.optionlist = None;
-        back.variant = Some("default".to_owned());
+        back.flavor = Some("default".to_owned());
         let reverted = build(&inst, &machine, "sim", &back).unwrap();
         assert_eq!(
             reverted.meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned()),
+            OptionlistSource::Flavor("default".to_owned()),
             "--variant must displace the recorded path outright, not sit alongside it",
         );
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
@@ -3314,16 +3427,16 @@ mod tests {
         let machine = mdb.load("fake").unwrap();
 
         let mut opts = BuildOpts::default_for_tests();
-        opts.variant = Some("cuda".to_owned());
+        opts.flavor = Some("cuda".to_owned());
         let outcome = build(&inst, &machine, "sim", &opts).unwrap();
-        assert_eq!(outcome.meta.optionlist_source, OptionlistSource::Variant("cuda".to_owned()));
+        assert_eq!(outcome.meta.optionlist_source, OptionlistSource::Flavor("cuda".to_owned()));
 
         // The bare rebuild keeps "cuda" rather than falling to the default,
         // and finds nothing to do — the flag need not be repeated.
         let bare = BuildOpts::default_for_tests();
         let again = build(&inst, &machine, "sim", &bare).unwrap();
         assert!(!again.rebuilt, "nothing changed, so the sticky variant must be up to date");
-        assert_eq!(again.meta.optionlist_source, OptionlistSource::Variant("cuda".to_owned()));
+        assert_eq!(again.meta.optionlist_source, OptionlistSource::Flavor("cuda".to_owned()));
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.contains("CC = nvcc"), "{rendered}");
 
@@ -3340,15 +3453,15 @@ mod tests {
 
         // --variant is still how you deliberately switch flavors.
         let mut to_default = BuildOpts::default_for_tests();
-        to_default.variant = Some("default".to_owned());
+        to_default.flavor = Some("default".to_owned());
         assert_eq!(
             build(&inst, &machine, "sim", &to_default).unwrap().meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned())
+            OptionlistSource::Flavor("default".to_owned())
         );
         // ...and that switch sticks in turn.
         assert_eq!(
             build(&inst, &machine, "sim", &bare).unwrap().meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned())
+            OptionlistSource::Flavor("default".to_owned())
         );
 
         // The other direction of the same rule: --optionlist displaces a
@@ -3416,7 +3529,7 @@ mod tests {
         .unwrap();
 
         let mut opts = BuildOpts::default_for_tests();
-        opts.variant = Some("cuda".to_owned());
+        opts.flavor = Some("cuda".to_owned());
         assert!(build(&inst, &mdb.load("fake").unwrap(), "sim", &opts).unwrap().rebuilt);
 
         // The machine drops the variant this config was built with.
@@ -3439,10 +3552,10 @@ mod tests {
 
         // Naming a surviving variant is the way forward.
         let mut to_default = BuildOpts::default_for_tests();
-        to_default.variant = Some("default".to_owned());
+        to_default.flavor = Some("default".to_owned());
         assert_eq!(
             build(&inst, &machine, "sim", &to_default).unwrap().meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned())
+            OptionlistSource::Flavor("default".to_owned())
         );
     }
 

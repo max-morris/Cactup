@@ -719,40 +719,14 @@ impl ScriptVariants {
         self.partition(test, universe).find(|(_, e)| e.default)
     }
 
-    /// Select the variant serving `queue` for a config built in `universe`
-    /// (§4.4) — pass `HOST_UNIVERSE` when the config records none — honoring
-    /// the §11.2 test partitioning (`prefer_test` = this is a `test …`
-    /// command) and the `--variant` escape hatch.
-    pub fn select(&self, queue: &str, universe: &str, prefer_test: bool, explicit: Option<&str>) -> Res<(&str, &VariantEntry)> {
-        let test_set_nonempty = self.partition(true, universe).next().is_some();
-        let use_test = prefer_test && test_set_nonempty;
-
-        if let Some(name) = explicit {
-            let (name, entry) = self
-                .variants
-                .get_key_value(name)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "no variant named \"{name}\" (known: {})",
-                        self.variants.keys().cloned().collect::<Vec<_>>().join(", ")
-                    )
-                })?;
-            if use_test && !entry.test {
-                bail!("variant \"{name}\" is not test-marked, but this machine has test variants"); // §11.2
-            }
-            if !prefer_test && entry.test {
-                bail!("variant \"{name}\" is test-only (test = true) and cannot serve a normal run"); // §11.2
-            }
-            if !entry.compatible_with(universe) {
-                bail!(
-                    "variant \"{name}\" is not compatible with build universe \"{universe}\" \
-                     (build-universes = [{}])",
-                    entry.build_universes.as_deref().unwrap_or_default().join(", ")
-                ); // §4.4
-            }
-            return Ok((name.as_str(), entry));
-        }
-
+    /// Route `queue` to the variant serving it for a config built in
+    /// `universe` (§4.4) — pass `HOST_UNIVERSE` when the config records none —
+    /// honoring the §11.2 test partitioning (`prefer_test` = this is a
+    /// `test …` command). The queue is the only thing that picks a script:
+    /// nothing a user names for some other purpose (an optionlist flavor) can
+    /// reach this.
+    pub fn route(&self, queue: &str, universe: &str, prefer_test: bool) -> Res<(&str, &VariantEntry)> {
+        let use_test = prefer_test && self.partition(true, universe).next().is_some();
         if let Some(found) = self
             .partition(use_test, universe)
             .find(|(_, e)| e.queues.iter().any(|q| q == queue))
@@ -761,11 +735,38 @@ impl ScriptVariants {
         }
         self.partition_default(use_test, universe).ok_or_else(|| {
             anyhow!(
-                "no {}variant compatible with universe \"{universe}\" serves queue \"{queue}\" \
+                "no {}script compatible with universe \"{universe}\" serves queue \"{queue}\" \
                  and none is a compatible default",
                 if use_test { "test " } else { "" }
             )
         })
+    }
+
+    /// The variant named `name`, bypassing queue routing — `test run/submit
+    /// --script` only (§11.2). Still held to the test partitioning and the
+    /// build-universe filter `route` applies.
+    pub fn by_name(&self, name: &str, universe: &str, prefer_test: bool) -> Res<(&str, &VariantEntry)> {
+        let use_test = prefer_test && self.partition(true, universe).next().is_some();
+        let (name, entry) = self.variants.get_key_value(name).ok_or_else(|| {
+            anyhow!(
+                "no script named \"{name}\" (known: {})",
+                self.variants.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        if use_test && !entry.test {
+            bail!("script \"{name}\" is not test-marked, but this machine has test scripts"); // §11.2
+        }
+        if !prefer_test && entry.test {
+            bail!("script \"{name}\" is test-only (test = true) and cannot serve a normal run"); // §11.2
+        }
+        if !entry.compatible_with(universe) {
+            bail!(
+                "script \"{name}\" is not compatible with build universe \"{universe}\" \
+                 (build-universes = [{}])",
+                entry.build_universes.as_deref().unwrap_or_default().join(", ")
+            ); // §4.4
+        }
+        Ok((name.as_str(), entry))
     }
 }
 
@@ -1332,19 +1333,19 @@ mod tests {
     fn script_selection_follows_queue_then_default() {
         let meta = mike();
         let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", "host", false, None).unwrap().0, "gpu-sing");
-        assert_eq!(rs.select("single", "host", false, None).unwrap().0, "cpu");
+        assert_eq!(rs.route("gpu", "host", false).unwrap().0, "gpu-sing");
+        assert_eq!(rs.route("single", "host", false).unwrap().0, "cpu");
         // Test commands get the test partition; normal never does (§11.2).
-        assert_eq!(rs.select("single", "host", true, None).unwrap().0, "test-cpu");
-        assert!(rs.select("single", "host", false, Some("test-cpu")).is_err());
+        assert_eq!(rs.route("single", "host", true).unwrap().0, "test-cpu");
+        assert!(rs.by_name("test-cpu", "host", false).is_err());
         // With a non-empty test set, --variant must name a test variant.
-        assert!(rs.select("single", "host", true, Some("cpu")).is_err());
-        assert!(rs.select("single", "host", false, Some("nope")).is_err());
+        assert!(rs.by_name("cpu", "host", true).is_err());
+        assert!(rs.by_name("nope", "host", false).is_err());
         // gpu-sing carries its universe association (§4.8 step 3).
-        assert_eq!(rs.select("gpu", "host", false, None).unwrap().1.universe.as_deref(), Some("et-sif"));
+        assert_eq!(rs.route("gpu", "host", false).unwrap().1.universe.as_deref(), Some("et-sif"));
         // test-cpu carries its default-tasks setting (§4.2); cpu has none.
-        assert_eq!(rs.select("single", "host", true, None).unwrap().1.tasks, Some(2));
-        assert_eq!(rs.select("single", "host", false, None).unwrap().1.tasks, None);
+        assert_eq!(rs.route("single", "host", true).unwrap().1.tasks, Some(2));
+        assert_eq!(rs.route("single", "host", false).unwrap().1.tasks, None);
     }
 
     #[test]
@@ -1352,9 +1353,9 @@ mod tests {
         let mut meta = mike();
         meta.variants.runscript.variants.shift_remove("test-cpu");
         let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("single", "host", true, None).unwrap().0, "cpu");
+        assert_eq!(rs.route("single", "host", true).unwrap().0, "cpu");
         // And --variant may then name a normal variant.
-        assert_eq!(rs.select("gpu", "host", true, Some("gpu-sing")).unwrap().0, "gpu-sing");
+        assert_eq!(rs.by_name("gpu-sing", "host", true).unwrap().0, "gpu-sing");
     }
 
     #[test]
@@ -1685,15 +1686,15 @@ mod tests {
         let meta = db();
         let sv = meta.script_variants(ScriptKind::Submit);
         // One queue, four variants: the build universe picks the script (§4.4).
-        assert_eq!(sv.select("gpu", "host", false, None).unwrap().0, "default");
-        assert_eq!(sv.select("gpu", "et-sing", false, None).unwrap().0, "sing");
-        assert_eq!(sv.select("gpu", "et-sing-cpu", false, None).unwrap().0, "sing");
-        assert_eq!(sv.select("gpu", "host", true, None).unwrap().0, "test");
-        assert_eq!(sv.select("gpu", "et-sing", true, None).unwrap().0, "sing-test");
+        assert_eq!(sv.route("gpu", "host", false).unwrap().0, "default");
+        assert_eq!(sv.route("gpu", "et-sing", false).unwrap().0, "sing");
+        assert_eq!(sv.route("gpu", "et-sing-cpu", false).unwrap().0, "sing");
+        assert_eq!(sv.route("gpu", "host", true).unwrap().0, "test");
+        assert_eq!(sv.route("gpu", "et-sing", true).unwrap().0, "sing-test");
         // Runscripts have no test partition: tests borrow normal (§11.2),
         // still universe-filtered.
         let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing");
+        assert_eq!(rs.route("gpu", "et-sing-cpu", true).unwrap().0, "sing");
     }
 
     #[test]
@@ -1706,7 +1707,7 @@ mod tests {
         // …but selecting under it fails, naming universe and queue.
         let err = format!(
             "{:#}",
-            meta.script_variants(ScriptKind::Run).select("gpu", "other", false, None).unwrap_err()
+            meta.script_variants(ScriptKind::Run).route("gpu", "other", false).unwrap_err()
         );
         assert!(err.contains("\"other\"") && err.contains("\"gpu\""), "{err}");
 
@@ -1724,9 +1725,9 @@ mod tests {
         let meta = db();
         let sv = meta.script_variants(ScriptKind::Submit);
         // --variant may pick any compatible variant…
-        assert_eq!(sv.select("gpu", "et-sing", false, Some("sing")).unwrap().0, "sing");
+        assert_eq!(sv.by_name("sing", "et-sing", false).unwrap().0, "sing");
         // …but naming an incompatible one is a hard error naming the universe.
-        let err = format!("{:#}", sv.select("gpu", "host", false, Some("sing")).unwrap_err());
+        let err = format!("{:#}", sv.by_name("sing", "host", false).unwrap_err());
         assert!(err.contains("\"host\"") && err.contains("et-sing"), "{err}");
     }
 

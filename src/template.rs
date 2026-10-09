@@ -873,12 +873,12 @@ impl VarSet {
     /// surfacing the script's stderr.
     pub fn run_py_script(&self, script: &Path) -> Res<String> {
         let body = std::fs::read_to_string(script)
-            .with_context(|| format!("Failed to read Python variant {}", script.display()))?;
+            .with_context(|| format!("Failed to read Python script {}", script.display()))?;
 
         // The preamble + body run as one program from a temp file (stdin must
         // stay free for the JSON payload).
         let mut tmp = tempfile::NamedTempFile::with_suffix(".py")
-            .context("Failed to create temporary file for Python variant")?;
+            .context("Failed to create temporary file for Python script")?;
         tmp.write_all(PY_PREAMBLE.as_bytes())?;
         tmp.write_all(body.as_bytes())?;
         tmp.flush()?;
@@ -915,7 +915,7 @@ impl VarSet {
                 bail!("{} ({})", message.trim(), script.display());
             }
             bail!(
-                "Python variant {} exited unsuccessfully ({}):\n{}",
+                "Python script {} exited unsuccessfully ({}):\n{}",
                 script.display(),
                 output.status,
                 stderr.trim_end()

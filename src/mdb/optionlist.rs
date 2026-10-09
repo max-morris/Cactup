@@ -8,9 +8,22 @@
 use crate::Res;
 use anyhow::{bail, Context};
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::path::Path;
+
+/// Where a flavor's *binary* may run (D12, §4.4): the queues it may be
+/// submitted to (empty = any) and whether it needs a GPU. Checked by sim and
+/// test jobs only — never by the build job that produces the binary (§7.9).
+/// Snapshotted into the config record at build time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RunsOn {
+    #[serde(default)]
+    pub queues: Vec<String>,
+    #[serde(default)]
+    pub gpu: bool,
+}
 
 /// The `[cactup]` header: cactup-only metadata, never emitted to the native
 /// file (§7.8, D12, §4.4, §4.8).
@@ -45,6 +58,13 @@ pub struct OptionlistHeader {
     pub enabled_thorns: Vec<String>,
     #[serde(default)]
     pub disabled_thorns: Vec<String>,
+}
+
+impl OptionlistHeader {
+    /// The header's binary facts, as the config record snapshots them.
+    pub fn runs_on(&self) -> RunsOn {
+        RunsOn { queues: self.compatible_queues.clone(), gpu: self.gpu }
+    }
 }
 
 fn default_true() -> bool {

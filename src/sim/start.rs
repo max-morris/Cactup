@@ -108,7 +108,7 @@ pub fn resolve_run_universe<'m>(
         if verbose && let Some(v) = variant_universe && v != build_uni {
             // §4.8
             eprintln!(
-                "{} runscript variant names universe \"{v}\" but the config's build \
+                "{} runscript names universe \"{v}\" but the config's build \
                  universe \"{build_uni}\" takes precedence",
                 "note:".yellow()
             );
@@ -309,7 +309,7 @@ fn submit_impl(
     check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
     let force_queue = args.force_queue || args.force;
-    let fit = vars::QueueFit::from_config(&cfg);
+    let fit = vars::BinaryFit::from_config(&cfg);
     let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
@@ -345,8 +345,8 @@ fn submit_impl(
     let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, cfg_universe, false, None)?;
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, false, None)?;
+    let (sub_variant, sub_entry) = submit_scripts.route(&topo.queue, cfg_universe, false)?;
+    let (run_variant, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script-variant default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
     let submit_uni = resolve_submit_universe(
@@ -547,7 +547,7 @@ fn run_interactive(
     check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
     let force_queue = args.start.force_queue || args.start.force;
-    let fit = vars::QueueFit::from_config(&cfg);
+    let fit = vars::BinaryFit::from_config(&cfg);
     let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
@@ -567,7 +567,7 @@ fn run_interactive(
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     // Selection is driven by the config's BUILD universe (§4.4).
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, false, None)?;
+    let (run_variant, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
     // Script-variant default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
     let run_uni = resolve_run_universe(
@@ -957,7 +957,7 @@ mod tests {
             cfg_dir.join("cactup-config.toml"),
             r#"
             name = "sim"
-            variant = "default"
+            flavor = "default"
             thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-sim-1"
@@ -1208,7 +1208,7 @@ mod tests {
                 schema: crate::database::SCHEMA,
                 attempt_id: 0,
                 config: "sim".to_owned(),
-                optionlist_source: OptionlistSource::Variant("default".to_owned()),
+                optionlist_source: OptionlistSource::Flavor("default".to_owned()),
                 machine: "fake".to_owned(),
                 alias: "et".to_owned(),
                 config_dir: config_dir.clone(),
@@ -1228,7 +1228,7 @@ mod tests {
                     r#"
                     schema = 1
                     name = "sim"
-                    variant = "default"
+                    flavor = "default"
                     thornlist = "sim.th"
                     machine = "fake"
                     config-id = "cfg-sim"
@@ -1403,7 +1403,7 @@ mod tests {
         let cfg_plain: ConfigMeta = toml::from_str(
             r#"
             name = "sim"
-            variant = "default"
+            flavor = "default"
             thornlist = "t"
             machine = "fake"
             config-id = "c"

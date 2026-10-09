@@ -405,7 +405,7 @@ fn submit_impl(
     // built, never which script queues it (§7.9).
     let scripts = machine.meta.script_variants(ScriptKind::BuildSubmit);
     let cfg_universe = attempt.meta.config_meta.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (variant, entry) = scripts.select(&topo.queue, cfg_universe, false, None)?;
+    let (variant, entry) = scripts.route(&topo.queue, cfg_universe, false)?;
     let submit_uni =
         resolve_submit_universe(machine, entry.universe.as_deref(), scripts.default_universe.as_deref())?;
     let submit_uni_name = submit_uni.as_ref().map(|(n, _)| n.as_str());
@@ -1001,7 +1001,7 @@ fn show_impl(machine: &Machine, inst: &Installation, name: Option<&str>, long: b
             if long {
                 match &attempt.meta.optionlist_source {
                     OptionlistSource::Optionlist(p) => println!("  optionlist:  {p}"),
-                    OptionlistSource::Variant(v) => println!("  variant:     {v}"),
+                    OptionlistSource::Flavor(v) => println!("  flavor:      {v}"),
                 }
                 if let Some(u) = &attempt.meta.universe {
                     println!("  universe:    {}", u.name);
@@ -1565,7 +1565,7 @@ mod tests {
         let mut topology = bare_topology();
         topology.queue = queue.map(str::to_owned);
         let mut args = submit_args("sim", topology);
-        args.opts.variant = Some(variant.to_owned());
+        args.opts.flavor = Some(variant.to_owned());
         submit_impl(&inst, &machine, &Database::new(), &args, Some("subhost"))?;
         let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
         Ok(fs::read_to_string(attempt.submit_script_path()).unwrap())
@@ -2031,7 +2031,7 @@ mod tests {
             r#"
             schema = 1
             name = "{name}"
-            variant = "default"
+            flavor = "default"
             thornlist = "{name}.th"
             machine = "fake"
             config-id = "cfg-{name}"
@@ -2057,7 +2057,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: id,
             config: config.to_owned(),
-            optionlist_source: OptionlistSource::Variant("default".to_owned()),
+            optionlist_source: OptionlistSource::Flavor("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.to_owned(),

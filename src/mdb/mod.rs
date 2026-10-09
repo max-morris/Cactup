@@ -537,41 +537,45 @@ impl Machine {
         }
     }
 
-    /// Select the optionlist variant for a build (§4.4): explicit `--variant`
-    /// if given; else the sole listed variant; else the sole `default = true`
-    /// variant.
+    /// The machine's optionlist flavors (§4.4), in declaration order.
+    pub fn flavors(&self) -> &[String] {
+        &self.meta.variants.optionlist.variants
+    }
+
+    /// Select the optionlist flavor for a build (§4.4): explicit `--flavor`
+    /// if given; else the sole flavor; else the sole `default = true` one.
     pub fn select_optionlist(&self, explicit: Option<&str>) -> Res<String> {
-        let listed = &self.meta.variants.optionlist.variants;
+        let listed = self.flavors();
 
         if let Some(name) = explicit {
             return listed
                 .iter()
                 .find(|n| *n == name)
                 .cloned()
-                .ok_or_else(|| anyhow!("no optionlist variant named \"{name}\" (known: {})", listed.join(", ")));
+                .ok_or_else(|| anyhow!("no optionlist flavor named \"{name}\" (known: {})", listed.join(", ")));
         }
 
-        if let [single] = listed.as_slice() {
+        if let [single] = listed {
             return Ok(single.clone());
         }
         let mut defaults = Vec::new();
-        for variant in listed {
-            if optionlist::load_header(&self.optionlist_path(variant))?.default {
-                defaults.push(variant);
+        for flavor in listed {
+            if optionlist::load_header(&self.optionlist_path(flavor))?.default {
+                defaults.push(flavor);
             }
         }
         match defaults.as_slice() {
             [single] => Ok((*single).clone()),
-            [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist variant", self.name),
+            [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist flavor", self.name),
             [] => bail!(
-                "machine \"{}\" has several optionlist variants ({}) and none is marked \
-                 default = true; pick one with --variant", // §4.4
+                "machine \"{}\" has several optionlist flavors ({}) and none is marked \
+                 default = true; pick one with --flavor", // §4.4
                 self.name,
                 listed.join(", ")
             ),
             several => bail!(
-                "machine \"{}\" marks several optionlist variants default = true ({}); \
-                 pick one with --variant", // §4.4
+                "machine \"{}\" marks several optionlist flavors default = true ({}); \
+                 pick one with --flavor", // §4.4
                 self.name,
                 several.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             ),
@@ -656,8 +660,8 @@ mod tests {
         assert_eq!(mel5.select_optionlist(Some("debug")).unwrap(), "debug");
         // Script selection honors the test partition.
         let rs = mel5.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("local", "host", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("local", "host", true, None).unwrap().0, "test");
+        assert_eq!(rs.route("local", "host", false).unwrap().0, "default");
+        assert_eq!(rs.route("local", "host", true).unwrap().0, "test");
         assert!(!mel5.script_path(ScriptKind::Submit, "test").unwrap().python);
 
         // db1.hpc.lsu.edu is ONE machine for the whole Deep Bayou cluster: the
@@ -705,9 +709,9 @@ mod tests {
         // flavors share the "sing" scripts — same queue, routed by the
         // config's build universe (§4.4).
         let rs = db1.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", "host", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("gpu", "et-sing", false, None).unwrap().0, "sing");
-        assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing-test");
+        assert_eq!(rs.route("gpu", "host", false).unwrap().0, "default");
+        assert_eq!(rs.route("gpu", "et-sing", false).unwrap().0, "sing");
+        assert_eq!(rs.route("gpu", "et-sing-cpu", true).unwrap().0, "sing-test");
 
         // qbd (LSU/LONI Queen Bee 4) runs SLURM, though upstream's 2026-07-07
         // regeneration flipped it to PBS with a blank queue: the port keeps

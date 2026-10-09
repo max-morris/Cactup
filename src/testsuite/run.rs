@@ -19,7 +19,7 @@ use crate::sim::start::{
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
-    set_topology_vars, set_walltime_vars, QueueFit, Topology,
+    set_topology_vars, set_walltime_vars, BinaryFit, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -216,7 +216,7 @@ fn start_impl(
 
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
-    let fit = QueueFit::from_config(&cfg);
+    let fit = BinaryFit::from_config(&cfg);
     let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
 
@@ -226,8 +226,18 @@ fn start_impl(
     let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
     let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, cfg_universe, true, args.variant.as_deref())?;
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, true, args.variant.as_deref())?;
+    // `--script` names a submit+run pair outright; otherwise the queue routes
+    // each kind on its own (§11.2).
+    let ((sub_variant, sub_entry), (run_variant, run_entry)) = match args.script.as_deref() {
+        Some(name) => (
+            submit_scripts.by_name(name, cfg_universe, true)?,
+            run_scripts.by_name(name, cfg_universe, true)?,
+        ),
+        None => (
+            submit_scripts.route(&topo.queue, cfg_universe, true)?,
+            run_scripts.route(&topo.queue, cfg_universe, true)?,
+        ),
+    };
 
     // Testsuites run on a couple of ranks, not a full node: script-variant
     // `tasks` (§4.2, mode-relevant script first), else 2 (the ET convention;
@@ -593,7 +603,7 @@ mod tests {
             cfg_dir.join("cactup-config.toml"),
             r#"
             name = "tests"
-            variant = "default"
+            flavor = "default"
             thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-tests-1"
@@ -610,7 +620,7 @@ mod tests {
         TestStartArgs {
             silent: false,
             config: None,
-            variant: None,
+            script: None,
             force: false,
             overwrite: false,
             force_queue: false,
@@ -805,7 +815,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
-            optionlist_source: OptionlistSource::Variant("default".to_owned()),
+            optionlist_source: OptionlistSource::Flavor("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.clone(),
@@ -825,7 +835,7 @@ mod tests {
                 r#"
                 schema = 1
                 name = "tests"
-                variant = "default"
+                flavor = "default"
                 thornlist = "tests.th"
                 machine = "fake"
                 config-id = "cfg-tests"

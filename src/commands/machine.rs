@@ -19,7 +19,7 @@ pub fn dispatch(ctx: &Ctx, cmd: MachineCommand) -> Res<()> {
     let mdb = || Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db);
     match cmd {
         MachineCommand::List => list(ctx, &mdb()?),
-        MachineCommand::Show { name, variants } => show(ctx, &mdb()?, name, variants),
+        MachineCommand::Show { name, flavors } => show(ctx, &mdb()?, name, flavors),
         MachineCommand::Create { name, from_existing, silent, no_discover } => create_machine(
             &ctx.db,
             &mdb()?,
@@ -323,13 +323,13 @@ fn list(ctx: &Ctx, mdb: &Mdb) -> Res<()> {
 
 /// `cactup machine show [name]`: the machine this host resolves to (§4.3), or
 /// a named one, in detail.
-fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, variants: bool) -> Res<()> {
+fn show(ctx: &Ctx, mdb: &Mdb, name: Option<String>, flavors: bool) -> Res<()> {
     let machine = match name {
         Some(name) => load_checked(mdb, &name)?,
         None => resolve(ctx)?,
     };
-    if variants {
-        return show_variants(&machine);
+    if flavors {
+        return show_flavors(&machine);
     }
     print_summary(&machine)
 }
@@ -463,20 +463,20 @@ fn print_summary(machine: &Machine) -> Res<()> {
             .collect();
         println!("  {label}: {}", names.join(", "));
     }
-    println!("  optionlists: {}", meta.variants.optionlist.variants.join(", "));
+    println!("  flavors: {}", machine.flavors().join(", "));
     if !meta.universes.is_empty() {
         println!("  universes: {}", meta.universes.keys().cloned().collect::<Vec<_>>().join(", "));
     }
     Ok(())
 }
 
-/// `cactup machine show [name] --variants`: the machine's optionlist variants
-/// with their `[cactup]` header details (description, compatible queues,
-/// gpu/default markers, universe, per-variant thorn toggles).
-fn show_variants(machine: &Machine) -> Res<()> {
-    let listed = &machine.meta.variants.optionlist.variants;
+/// `cactup machine show [name] --flavors`: the machine's optionlist flavors
+/// with their `[cactup]` header details (description, the queues the binary
+/// runs on, gpu/default markers, universe, per-flavor thorn toggles).
+fn show_flavors(machine: &Machine) -> Res<()> {
+    let listed = machine.flavors();
     println!(
-        "{} ({:?} MDB) — optionlist variants:",
+        "{} ({:?} MDB) — optionlist flavors:",
         machine.name.bold(),
         machine.layer
     );
@@ -484,27 +484,24 @@ fn show_variants(machine: &Machine) -> Res<()> {
         println!("  {}", "(none)".bright_red());
         return Ok(());
     }
-    for variant in listed {
-        let path = machine.optionlist_path(variant);
+    for flavor in listed {
+        let path = machine.optionlist_path(flavor);
         let header = optionlist::load_header(&path)
-            .with_context(|| format!("failed to read optionlist header for variant \"{variant}\""))?;
-        print!("- {}", variant.bold());
+            .with_context(|| format!("failed to read optionlist header for flavor \"{flavor}\""))?;
+        let runs_on = header.runs_on();
+        print!("- {}", flavor.bold());
         if header.default {
             print!(" (default)");
         }
-        if header.gpu {
+        if runs_on.gpu {
             print!("{}", " [gpu]".cyan());
         }
         println!();
         if let Some(description) = &header.description {
             println!("    {description}");
         }
-        let queues = if header.compatible_queues.is_empty() {
-            "(any)".to_owned()
-        } else {
-            header.compatible_queues.join(", ")
-        };
-        println!("    compatible queues: {queues}");
+        let queues = if runs_on.queues.is_empty() { "(any)".to_owned() } else { runs_on.queues.join(", ") };
+        println!("    runs on queues: {queues}");
         if let Some(universe) = &header.universe {
             println!("    build universe: {universe}");
         }

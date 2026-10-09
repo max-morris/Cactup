@@ -4,6 +4,7 @@
 use crate::args::TopologyFlags;
 use crate::build::ConfigMeta;
 use crate::database::Database;
+use crate::mdb::optionlist::RunsOn;
 use crate::mdb::{Hardware, Machine, Phase, Queue, HOST_UNIVERSE};
 use crate::sim::{restart, Simulation};
 use crate::template::VarSet;
@@ -39,29 +40,20 @@ pub struct Topology {
     pub err: Option<String>,
 }
 
-/// Queue-compatibility facts (D12 / §4.4): the four fields `resolve_topology`
-/// actually reads off a build. Available from a built config's `ConfigMeta`
-/// via `from_config`; a caller with no `ConfigMeta` yet (not yet built) can
-/// still build one directly from these public fields — but should prefer
-/// constructing a `ConfigMeta` first and going through `from_config`, so
-/// there is exactly one place these facts are derived from an optionlist
-/// header and a stale `--variant` can't disagree with the fresh one.
-pub struct QueueFit {
+/// What a job's *binary* can run on (D12 / §4.4): the universe it was built
+/// in and the flavor's `runs-on` facts. Taken off a built config's record by
+/// `from_config`; sim and test jobs hand it to `resolve_topology`, build jobs
+/// never do — they run `make`, not the binary (§7.9).
+pub struct BinaryFit {
     pub universe: Option<String>,
-    pub compatible_queues: Vec<String>,
-    pub gpu: bool,
+    pub runs_on: RunsOn,
     /// Named in the queue-compatibility errors below.
     pub label: String,
 }
 
-impl QueueFit {
+impl BinaryFit {
     pub fn from_config(cfg: &ConfigMeta) -> Self {
-        QueueFit {
-            universe: cfg.universe.clone(),
-            compatible_queues: cfg.compatible_queues.clone(),
-            gpu: cfg.gpu,
-            label: cfg.name.clone(),
-        }
+        BinaryFit { universe: cfg.universe.clone(), runs_on: cfg.runs_on.clone(), label: cfg.name.clone() }
     }
 }
 
@@ -75,7 +67,7 @@ pub fn resolve_topology(
     flags: &TopologyFlags,
     machine: &Machine,
     db: &Database,
-    fit: Option<&QueueFit>,
+    fit: Option<&BinaryFit>,
     force_queue: bool,
 ) -> Res<Topology> {
     let m = &machine.name;
@@ -190,7 +182,7 @@ pub fn resolve_topology(
 /// job's queue is where `make` runs, not the binary (§7.9).
 fn check_binary_fit(
     machine: &Machine,
-    fit: &QueueFit,
+    fit: &BinaryFit,
     queue: &str,
     queue_def: &Queue,
     gpu: bool,
@@ -210,12 +202,13 @@ fn check_binary_fit(
     }
 
     // compatible-queues guard (§4.4 / D12).
-    if !fit.compatible_queues.is_empty() && !fit.compatible_queues.iter().any(|q| q == queue) && !force_queue {
+    let allowed = &fit.runs_on.queues;
+    if !allowed.is_empty() && !allowed.iter().any(|q| q == queue) && !force_queue {
         bail!(
             "config \"{}\" is only compatible with queue(s) {} (not \"{queue}\"); \
              use --force-queue to override",
             fit.label,
-            fit.compatible_queues.join(", ")
+            allowed.join(", ")
         );
     }
 
@@ -224,7 +217,7 @@ fn check_binary_fit(
     // refused. A non-GPU config on a GPU queue is allowed — some machines'
     // only real partition is GPU-flagged — with an advisory when a non-GPU
     // queue existed.
-    if fit.gpu && !gpu && !force_queue {
+    if fit.runs_on.gpu && !gpu && !force_queue {
         // §8.5
         bail!(
             "config \"{}\" was built with GPU support but this run is non-GPU (queue \"{queue}\"); \
@@ -232,7 +225,7 @@ fn check_binary_fit(
             fit.label,
         );
     }
-    if !fit.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
+    if !fit.runs_on.gpu && gpu && machine.meta.queues.values().any(|q| !q.gpu) {
         eprintln!(
             "{} config \"{}\" was built without GPU support but queue \"{queue}\" is GPU-flagged; \
              this machine also has non-GPU queue(s) (D12)",
@@ -599,21 +592,23 @@ mod tests {
         let toml_text = format!(
             r#"
             name = "sim"
-            variant = "default"
-            gpu = {gpu}
-            compatible-queues = [{}]
+            flavor = "default"
             thornlist = "installation-default.th"
             machine = "testbox"
             config-id = "c1"
             build-id = "b1"
+
+            [runs-on]
+            gpu = {gpu}
+            queues = [{}]
             "#,
             compat.iter().map(|q| format!("\"{q}\"")).collect::<Vec<_>>().join(", ")
         );
         toml::from_str(&toml_text).unwrap()
     }
 
-    fn test_fit(gpu: bool, compat: &[&str]) -> QueueFit {
-        QueueFit::from_config(&test_cfg(gpu, compat))
+    fn test_fit(gpu: bool, compat: &[&str]) -> BinaryFit {
+        BinaryFit::from_config(&test_cfg(gpu, compat))
     }
 
     fn flags() -> TopologyFlags {
@@ -950,11 +945,11 @@ mod tests {
             Machine { name: "gq".to_owned(), dir: PathBuf::from("/nonexistent"), layer: Layer::System, meta };
         let db = Database::new();
 
-        let cfg_in = |universe: &str| -> QueueFit {
+        let cfg_in = |universe: &str| -> BinaryFit {
             let cfg: ConfigMeta = toml::from_str(&format!(
                 r#"
                 name = "sim"
-                variant = "default"
+                flavor = "default"
                 thornlist = "installation-default.th"
                 machine = "gq"
                 universe = "{universe}"
@@ -963,7 +958,7 @@ mod tests {
                 "#
             ))
             .unwrap();
-            QueueFit::from_config(&cfg)
+            BinaryFit::from_config(&cfg)
         };
 
         // A host build cannot be routed to the et-sing-gated queue — a hard
@@ -1095,11 +1090,11 @@ mod tests {
         let machine = mdb.load("qbd").unwrap();
         let db = Database::new();
         let cfg: ConfigMeta = toml::from_str(
-            "name=\"s\"\nvariant=\"default\"\ngpu=true\nthornlist=\"t.th\"\n\
-             machine=\"qbd\"\nconfig-id=\"c\"\nbuild-id=\"b\"",
+            "name=\"s\"\nflavor=\"default\"\nthornlist=\"t.th\"\n\
+             machine=\"qbd\"\nconfig-id=\"c\"\nbuild-id=\"b\"\n[runs-on]\ngpu=true",
         )
         .unwrap();
-        let fit = QueueFit::from_config(&cfg);
+        let fit = BinaryFit::from_config(&cfg);
 
         for (queue, gpus) in [("gpu2", 2), ("gpu4", 4)] {
             let mut f = flags();
@@ -1138,11 +1133,11 @@ mod tests {
         let machine = mdb.load("db1.hpc.lsu.edu").unwrap();
         let db = Database::new();
         let cfg: ConfigMeta = toml::from_str(
-            "name=\"s\"\nvariant=\"default\"\ngpu=true\nthornlist=\"t.th\"\n\
-             machine=\"db1.hpc.lsu.edu\"\nconfig-id=\"c\"\nbuild-id=\"b\"",
+            "name=\"s\"\nflavor=\"default\"\nthornlist=\"t.th\"\n\
+             machine=\"db1.hpc.lsu.edu\"\nconfig-id=\"c\"\nbuild-id=\"b\"\n[runs-on]\ngpu=true",
         )
         .unwrap();
-        let fit = QueueFit::from_config(&cfg);
+        let fit = BinaryFit::from_config(&cfg);
         let hw = machine.meta.effective_hardware("gpu").unwrap();
         assert_eq!(hw.max_gpus_per_node, None);
 
@@ -1172,11 +1167,11 @@ mod tests {
         let machine = mdb.load("omnia").unwrap();
         let db = Database::new();
         let cfg: ConfigMeta = toml::from_str(
-            "name=\"s\"\nvariant=\"default\"\ngpu=true\nthornlist=\"t.th\"\n\
-             machine=\"omnia\"\nconfig-id=\"c\"\nbuild-id=\"b\"",
+            "name=\"s\"\nflavor=\"default\"\nthornlist=\"t.th\"\n\
+             machine=\"omnia\"\nconfig-id=\"c\"\nbuild-id=\"b\"\n[runs-on]\ngpu=true",
         )
         .unwrap();
-        let fit = QueueFit::from_config(&cfg);
+        let fit = BinaryFit::from_config(&cfg);
         let hw = machine.meta.effective_hardware("local").unwrap();
         assert_eq!(
             (hw.max_cpus_per_node, hw.default_cpus_per_task, hw.max_gpus_per_node),

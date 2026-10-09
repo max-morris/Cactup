@@ -28,6 +28,94 @@ fn parse_knob_override(s: &str) -> Result<KnobOverride, String> {
     Ok(KnobOverride { name: name.to_owned(), value })
 }
 
+/// A flag cactup once accepted and has since renamed. Retired flags are never
+/// declared to clap, so no help text, completion, or "did you mean" can
+/// mention them; `retired_flag_notice` catches them on the raw arguments
+/// before clap parses anything, so the user gets the rename notice whatever
+/// else is wrong with the line. Keep these indefinitely — at least one user
+/// still types `--variant` from habit.
+struct RetiredFlag {
+    /// The subcommand path the flag was accepted under; `build` covers `build
+    /// run` and `build submit` too, since they share its flags.
+    path: &'static [&'static str],
+    flag: &'static str,
+    replacement: &'static str,
+}
+
+const RETIRED_FLAGS: &[RetiredFlag] = &[
+    RetiredFlag { path: &["build"], flag: "--variant", replacement: "--flavor" },
+    RetiredFlag { path: &["test", "run"], flag: "--variant", replacement: "--script" },
+    RetiredFlag { path: &["test", "submit"], flag: "--variant", replacement: "--script" },
+    RetiredFlag { path: &["machine", "show"], flag: "--variants", replacement: "--flavors" },
+];
+
+/// The rename notice for a retired flag on this command line, if any: the
+/// command line rewritten with the replacement, for the user to re-run.
+/// `args` includes the program name, as `std::env::args_os` yields it.
+pub(crate) fn retired_flag_notice(args: &[OsString]) -> Option<String> {
+    use clap::CommandFactory;
+    let args: Vec<String> = args.iter().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let args_before_passthrough = &args[..end];
+
+    // The subcommand path: skip the top-level flags (and the value of each
+    // that takes one, as clap itself defines them), then take the first word
+    // and, when it follows directly, the second.
+    let root = Args::command();
+    let takes_value = |token: &str| {
+        root.get_arguments().any(|a| {
+            a.get_action().takes_values()
+                && (a.get_long().is_some_and(|l| token == format!("--{l}"))
+                    || a.get_short().is_some_and(|c| token == format!("-{c}")))
+        })
+    };
+    let mut i = 0;
+    while i < args_before_passthrough.len() && args_before_passthrough[i].starts_with('-') {
+        i += if takes_value(&args_before_passthrough[i]) { 2 } else { 1 };
+    }
+    let first = args_before_passthrough.get(i)?;
+    let second = args_before_passthrough.get(i + 1).filter(|a| !a.starts_with('-'));
+
+    let retired = RETIRED_FLAGS.iter().find(|r| {
+        let path_matches = match r.path {
+            [one] => first == one,
+            [one, two] => first == one && second.is_some_and(|s| s == two),
+            _ => false,
+        };
+        path_matches
+            && args_before_passthrough[i + 1..]
+                .iter()
+                .any(|a| a == r.flag || a.starts_with(&format!("{}=", r.flag)))
+    })?;
+
+    let rewritten: Vec<String> = std::iter::once("cactup".to_owned())
+        .chain(args.iter().enumerate().map(|(k, a)| {
+            let a = if k < end && a == retired.flag {
+                retired.replacement.to_owned()
+            } else if k < end && a.starts_with(&format!("{}=", retired.flag)) {
+                format!("{}{}", retired.replacement, &a[retired.flag.len()..])
+            } else {
+                a.clone()
+            };
+            shell_quote(&a)
+        }))
+        .collect();
+    Some(format!(
+        "{} has been renamed {}. Run instead:\n  {}",
+        retired.flag,
+        retired.replacement,
+        rewritten.join(" ")
+    ))
+}
+
+/// Single-quote `s` for a shell when it holds anything but plain word
+/// characters, so a rewritten command line can be pasted back as-is.
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_=./:,@+%".contains(c));
+    if plain { s.to_owned() } else { format!("'{}'", s.replace('\'', r"'\''")) }
+}
+
 /// Fold the two-token spelling of a knob override — `-K NAME VALUE`,
 /// `-KNAME VALUE`, `--knob NAME VALUE` — into the one-token `-K NAME=VALUE`
 /// clap parses. A `NAME` that already carries `=` is left alone, as is
@@ -433,7 +521,7 @@ pub(crate) struct TopologyFlags {
     /// Node count (default: 1).
     #[clap(short, long, value_name = "N")]
     pub nodes: Option<u32>,
-    /// Total tasks (MPI ranks; default: the script variant's `tasks` setting,
+    /// Total tasks (MPI ranks; default: the run/submit script's `tasks` setting,
     /// else nodes * tasks-per-node — but 2 for `test run`/`test submit`).
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,
@@ -487,14 +575,15 @@ pub(crate) struct BuildOpts {
     #[clap(long, value_name = "PATH")]
     pub thornlist: Option<PathBuf>,
     // §4.4
-    /// Optionlist variant (required iff the machine has more than one).
-    #[clap(long, value_name = "VARIANT")]
-    pub variant: Option<String>,
+    /// Optionlist flavor to build (required iff the machine has more than one
+    /// and none is marked default).
+    #[clap(long, value_name = "FLAVOR")]
+    pub flavor: Option<String>,
     // §4.4, §7.8
     /// Build from this optionlist file instead of the machine's: an MDB-style
     /// .toml (with its [cactup] header), an [options]-only .toml, or a native
     /// Cactus .cfg.
-    #[clap(long, value_name = "PATH", conflicts_with = "variant")]
+    #[clap(long, value_name = "PATH", conflicts_with = "flavor")]
     pub optionlist: Option<PathBuf>,
     #[clap(flatten)]
     pub universe: UniverseFlags,
@@ -537,7 +626,7 @@ impl BuildOpts {
             force: false,
             ignore_machine: false,
             thornlist: None,
-            variant: None,
+            flavor: None,
             optionlist: None,
             universe: UniverseFlags { universe: None, no_universe: false },
             debug: false,
@@ -864,9 +953,10 @@ pub(crate) struct TestStartArgs {
     #[clap(long, value_name = "CONFIG")]
     pub config: Option<String>,
     // §11.2
-    /// Runscript variant override.
-    #[clap(long, value_name = "VARIANT")]
-    pub variant: Option<String>,
+    /// Use the submit and run scripts of this name instead of the ones the
+    /// queue selects.
+    #[clap(long, value_name = "NAME")]
+    pub script: Option<String>,
     /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
@@ -912,11 +1002,11 @@ pub(crate) enum MachineCommand {
     /// Show the machine this host resolves to, or a named one
     Show {
         name: Option<String>,
-        /// List the machine's optionlist variants with their details
-        /// (description, compatible queues, universe, …) instead of the
-        /// usual machine summary.
+        /// List the machine's optionlist flavors with their details
+        /// (description, the queues their binaries run on, universe, …)
+        /// instead of the usual machine summary.
         #[clap(long)]
-        variants: bool,
+        flavors: bool,
     },
     // §4.7
     /// Persist a tuned local machine into the user MDB
@@ -981,10 +1071,10 @@ mod tests {
             // thing to break here: "sim" must land as the config positional,
             // not be mistaken for (or reported as) an unknown subcommand. See
             // `build_bare_positional_is_not_mistaken_for_a_subcommand` below.
-            vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
+            vec!["cactup", "build", "sim", "--flavor", "cuda", "--unsafe", "-j", "8"],
             vec!["cactup", "build", "sim", "--optionlist", "/tmp/my.cfg"],
             vec!["cactup", "build", "sim", "--ignore-machine"],
-            vec!["cactup", "build", "run", "sim", "--variant", "cuda", "--universe", "et-sif"],
+            vec!["cactup", "build", "run", "sim", "--flavor", "cuda", "--universe", "et-sif"],
             vec![
                 "cactup", "build", "run", "--config-dir", "/inst/configs/sim", "--attempt-id", "2",
             ],
@@ -1147,6 +1237,69 @@ mod tests {
         assert!(Args::try_parse_from(["cactup", "build", "sim", "-j", "nope"]).is_err());
     }
 
+    fn notice(line: &[&str]) -> Option<String> {
+        let argv: Vec<OsString> = std::iter::once("cactup").chain(line.iter().copied()).map(OsString::from).collect();
+        retired_flag_notice(&argv)
+    }
+
+    /// Every place `--variant` (or `--variants`) used to be accepted stops
+    /// with the rename notice and the corrected command line — in either
+    /// spelling, bare or with a value, after global flags, and whatever else
+    /// on the line clap would have rejected.
+    #[test]
+    fn retired_flags_short_circuit_with_the_rewritten_command() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["build", "sim", "--variant", "cuda", "-j", "8"], "cactup build sim --flavor cuda -j 8"),
+            (&["build", "run", "--variant=cpu"], "cactup build run --flavor=cpu"),
+            (&["build", "submit", "sim", "--variant", "cpu", "-q", "single"], "cactup build submit sim --flavor cpu -q single"),
+            (&["--machine", "qbd", "build", "--variant"], "cactup --machine qbd build --flavor"),
+            (&["build", "--variant", "x", "--optionlist", "y.cfg", "--bogus"], "cactup build --flavor x --optionlist y.cfg --bogus"),
+            (&["test", "run", "--variant", "test", "foo"], "cactup test run --script test foo"),
+            (&["test", "submit", "--variant=t"], "cactup test submit --script=t"),
+            (&["machine", "show", "qbd", "--variants"], "cactup machine show qbd --flavors"),
+            (&["build", "--thornlist", "my list.th", "--variant", "a"], "cactup build --thornlist 'my list.th' --flavor a"),
+        ];
+        for (line, rewritten) in cases {
+            let notice = notice(line).unwrap_or_else(|| panic!("no notice for {line:?}"));
+            assert!(notice.ends_with(&format!("\n  {rewritten}")), "{line:?}: {notice}");
+        }
+        assert!(notice(&["build", "--variant", "x"]).unwrap().starts_with("--variant has been renamed --flavor"));
+    }
+
+    /// Only where the flag was really accepted: elsewhere it stays an
+    /// ordinary clap error, and nothing after `--` is ever inspected.
+    #[test]
+    fn retired_flags_are_left_alone_elsewhere() {
+        for line in [
+            &["sim", "submit", "s", "--variant", "x"][..],
+            &["test", "list", "--variant", "x"],
+            &["machine", "show", "--variant"],
+            &["build", "--flavor", "x"],
+            &["sim", "run", "s", "--", "--variant"],
+            &["--machine", "build", "sim", "submit", "--variant", "x"],
+        ] {
+            assert_eq!(notice(line), None, "{line:?}");
+        }
+    }
+
+    /// The retired spellings appear in no help text anywhere: they are never
+    /// declared to clap, and nothing else in the help may say "variant".
+    #[test]
+    fn no_help_text_mentions_variant() {
+        use clap::CommandFactory;
+        fn walk(cmd: &mut clap::Command, path: &str) {
+            let help = cmd.render_long_help().to_string();
+            assert!(!help.to_lowercase().contains("variant"), "`{path}` help mentions variant:\n{help}");
+            for sub in cmd.get_subcommands_mut() {
+                let name = format!("{path} {}", sub.get_name());
+                walk(sub, &name);
+            }
+        }
+        let mut root = Args::command();
+        root.build();
+        walk(&mut root, "cactup");
+    }
+
     /// `Commands::Build`'s optional subcommand sits beside a positional
     /// (`<config>`) — the likeliest spot for clap to mistake one for the
     /// other. "sim" here must land as the config, not be treated as an
@@ -1154,12 +1307,12 @@ mod tests {
     #[test]
     fn build_bare_positional_is_not_mistaken_for_a_subcommand() {
         let args =
-            Args::try_parse_from(["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"])
+            Args::try_parse_from(["cactup", "build", "sim", "--flavor", "cuda", "--unsafe", "-j", "8"])
                 .unwrap_or_else(|e| panic!("failed to parse: {e}"));
         match args.command {
             Commands::Build { start, command: None } => {
                 assert_eq!(start.name.as_deref(), Some("sim"));
-                assert_eq!(start.opts.variant.as_deref(), Some("cuda"));
+                assert_eq!(start.opts.flavor.as_deref(), Some("cuda"));
                 assert!(start.opts.unsafe_build);
                 assert_eq!(start.opts.make_jobs, Some(MakeJobs::Count(8)));
             }
@@ -1198,18 +1351,18 @@ mod tests {
         );
         // --dry-run and --silent are mutually exclusive (§ RefetchArgs).
         assert!(Args::try_parse_from(["cactup", "inst", "refetch", "-n", "-s"]).is_err());
-        // --optionlist displaces the machine's variant selection entirely, so
-        // pairing it with --variant is a contradiction, not a refinement.
+        // --optionlist displaces the machine's flavor selection entirely, so
+        // pairing it with --flavor is a contradiction, not a refinement.
         assert!(
             Args::try_parse_from([
-                "cactup", "build", "sim", "--optionlist", "x.cfg", "--variant", "cuda"
+                "cactup", "build", "sim", "--optionlist", "x.cfg", "--flavor", "cuda"
             ])
             .is_err()
         );
     }
 
     /// `--optionlist` names a user-supplied file in place of the machine's
-    /// own variants; it must land on `BuildOpts` untouched so `build/mod.rs`
+    /// own flavors; it must land on `BuildOpts` untouched so `build/mod.rs`
     /// can load it (§4.4, §7.8).
     #[test]
     fn optionlist_flag_parses_into_build_opts() {
