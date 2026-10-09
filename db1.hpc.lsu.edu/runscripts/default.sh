@@ -8,13 +8,9 @@
 #   NUM_THREADS -> @CPUS_PER_TASK@
 # Metadata dir SIMFACTORY/ -> .cactup/ (design §9.3).
 #
-# $QUEUE is a shell variable the GRES branch reads; upstream never exports it
-# (the submitscript sets @QUEUE@ only in the #SBATCH -p directive), so it is
-# unset at runtime and GRES stays empty for the "gpu" queue — the srun below
-# still requests a GPU via --gpus-per-task=@GPUS_PER_TASK@ (1 by default —
-# db1 declares no max-gpus-per-node, so §8.5 falls back to one GPU per task).
-# The gpu2/gpu4 branches are kept verbatim for the day a user runs on those
-# partitions.
+# The srun below binds GPUs with --gpus-per-task=@GPUS_PER_TASK@ inside the
+# allocation the submitscript reserved with --gres; it passes no --gres of its
+# own. (Upstream branched on an unexported $QUEUE to add one, which never ran.)
 
 echo "Preparing:"
 set -x                          # Output commands
@@ -38,6 +34,7 @@ export CACTUS_NUM_THREADS=@CPUS_PER_TASK@
 export GMON_OUT_PREFIX=gmon.out
 export OMP_NUM_THREADS=@CPUS_PER_TASK@
 export OMP_PLACES=cores
+export OMP_STACKSIZE=8192
 env | sort > .cactup/ENVIRONMENT
 
 #if [ $(((@TASKS@*@CPUS_PER_TASK@)%48)) != 0 -a $(((@TASKS@*@CPUS_PER_TASK@))) != 24 ]
@@ -48,29 +45,20 @@ env | sort > .cactup/ENVIRONMENT
 #    exit 2
 #fi
 
-GRES=""
-if [ "$QUEUE" = gpu4 ]
-then
-    GRES="--gres=gpu:4"
-fi
-if [ "$QUEUE" = gpu2 ]
-then
-    if [ @TASKS@ == 1 ]
-    then
-        GRES="--gres=gpu:1"
-    else
-        GRES="--gres=gpu:2"
-    fi
-fi
-
 echo "Starting:"
 export CACTUS_STARTTIME=$(date +%s)
+
+# GPU clocks and temperatures before and after, on the node the batch script
+# runs on (the first allocated node), so a timing run can be checked for
+# thermal or power throttling after the fact.
+nvidia-smi -q -d CLOCK,TEMPERATURE > nvidia-smi.before.txt 2>&1 || true
 
 time srun --overlap -n @TASKS@ \
     --cpus-per-task=@CPUS_PER_TASK@ \
     --gpus-per-task=@GPUS_PER_TASK@ \
-    $GRES \
     @EXECUTABLE@ -L 3 @PARFILE@
+
+nvidia-smi -q -d CLOCK,TEMPERATURE > nvidia-smi.after.txt 2>&1 || true
 
 echo "Stopping:"
 date
