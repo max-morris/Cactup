@@ -41,9 +41,13 @@ CPPFLAGS = "-DMPICH_IGNORE_CXX_SEEK"
 FPPFLAGS = "-traditional"
 
 # gcc-safe CFLAGS: yaml-cpp's CMake passes CFLAGS to g++ as well
+# The ISA is pinned rather than taken from the build host (-march=native /
+# -xHOST): builds run on the login node (Xeon Gold 6226R) or a compute node
+# (6248R). Both are Cascade Lake today, but a pinned ISA keeps the binary
+# independent of where it was built.
 CFLAGS   = "-g -U__STRICT_ANSI__"
-CXXFLAGS = "-std=c++17 -g -march=native"
-F90FLAGS = "-g -align -pad -xHOST -diag-disable 10397"
+CXXFLAGS = "-std=c++17 -g -march=cascadelake"
+F90FLAGS = "-g -align -pad -xCORE-AVX512 -diag-disable 10397"
 
 # do not export symbols from hwloc so that it is not used by libmpich
 LIBDIRS = "${MKLROOT}/../compilers_and_libraries/linux/lib/intel64"
@@ -101,7 +105,7 @@ CXX_WARN_FLAGS = "-Wall"
 F90_WARN_FLAGS = "-Wall"
 
 # CUDA, configured with the flesh
-CUCCFLAGS           = "-std=c++17 -x cu --extended-lambda --expt-relaxed-constexpr -DSIMD_DISABLE -m 64 -arch sm_70 -Xcompiler -march=native -g -Drestrict=__restrict__"
+CUCCFLAGS           = "-std=c++17 -x cu --extended-lambda --expt-relaxed-constexpr -DSIMD_DISABLE -m 64 -arch sm_70 -Xcompiler -march=cascadelake -g -Drestrict=__restrict__"
 CUCC_DEBUG_FLAGS    = "-DCARPET_DEBUG -O0"
 CUCC_OPTIMISE_FLAGS = "-O3 -use_fast_math"
 CUCC_WARN_FLAGS     = "-Xcompiler -Wall"
