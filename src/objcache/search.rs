@@ -602,21 +602,60 @@ pub fn scan(bytes: &[u8], dated: bool, scan: &mut Scan) -> Result<(), String> {
         return refuse("a trigraph");
     }
     let spliced = spliced(bytes);
+    if !worth_reading(&spliced) {
+        return Ok(());
+    }
     let (code, bare) = code(&spliced)?;
     // Words outside literals.
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-    for word in bare.split(|b| !ident(*b)) {
-        match word {
-            b"__has_embed" => return refuse("__has_embed"),
-            b"__TIMESTAMP__" => return refuse("__TIMESTAMP__"),
-            b"__DATE__" | b"__TIME__" if !dated => return refuse("the date or time of the compile"),
-            _ => {}
-        }
+    let word = |word: &[u8]| {
+        memchr::memmem::find_iter(&bare, word).any(|at| {
+            let joined_before = at > 0 && ident(bare[at - 1]);
+            let joined_after = bare.get(at + word.len()).is_some_and(|b| ident(*b));
+            !joined_before && !joined_after
+        })
+    };
+    if word(b"__has_embed") {
+        return refuse("__has_embed");
     }
-    for line in bare.split(|b| *b == b'\n') {
-        directive_line(line)?;
+    if word(b"__TIMESTAMP__") {
+        return refuse("__TIMESTAMP__");
+    }
+    if !dated && (word(b"__DATE__") || word(b"__TIME__")) {
+        return refuse("the date or time of the compile");
+    }
+    // Each line with a `#` in it (or `%:`, or the word `embed`).
+    let mut lines: Vec<usize> = memchr::memchr_iter(b'#', &bare)
+        .chain(memchr::memmem::find_iter(&bare, b"%:"))
+        .chain(memchr::memmem::find_iter(&bare, b"embed"))
+        .map(|at| bare[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1))
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    for start in lines {
+        let end = memchr::memchr(b'\n', &bare[start..]).map_or(bare.len(), |len| start + len);
+        directive_line(&bare[start..end])?;
     }
     probes(&code, &bare, &mut scan.probes)
+}
+
+/// Does `bytes` (lines spliced) have anything the scan looks for, read in
+/// any way at all: a watched name or what could begin one (`__has_`,
+/// `__DATE__`, `__TIME`), `embed`, the digraph `%:`, a `#` that does not
+/// begin its line, or a line that begins with `#` and a digit? Most files
+/// have none, and need no reading as code.
+fn worth_reading(bytes: &[u8]) -> bool {
+    let words = [&b"__has_"[..], b"__DATE__", b"__TIME", b"embed", b"%:"];
+    if words.iter().any(|word| memchr::memmem::find(bytes, word).is_some()) {
+        return true;
+    }
+    let blank = |b: &u8| matches!(b, b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r');
+    memchr::memchr_iter(b'#', bytes).any(|at| {
+        let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
+        let after = &bytes[at + 1..];
+        let after = &after[after.iter().take_while(|b| blank(b)).count()..];
+        !bytes[line_start..at].iter().all(blank) || after.first().is_some_and(u8::is_ascii_digit)
+    })
 }
 
 /// Check one line of a file's code (comments out, literals blanked) for a
@@ -697,7 +736,13 @@ fn code(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     let refuse = |why: &str| Err(format!("a source has {why}, which the cache does not follow"));
     let (mut code, mut bare) = (Vec::with_capacity(bytes.len()), Vec::with_capacity(bytes.len()));
     let mut at = 0;
-    while at < bytes.len() {
+    // From one byte that matters to the next (`/`, a quote), what lies
+    // between is code as it is.
+    while let Some(found) = memchr::memchr3(b'/', b'"', b'\'', &bytes[at..]) {
+        let here = at + found;
+        code.extend_from_slice(&bytes[at..here]);
+        bare.extend_from_slice(&bytes[at..here]);
+        at = here;
         let next = bytes.get(at + 1).copied();
         match bytes[at] {
             b'/' if next == Some(b'/') => {
@@ -710,50 +755,61 @@ fn code(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
                 code.push(b' ');
                 bare.push(b' ');
             }
-            // A number: digits, letters, `.`, and a sign after an exponent's
-            // letter; a `'` in it is a digit separator in C++14 and C23, and
-            // begins a character literal before.
-            b'0'..=b'9' if at == 0 || !ident(bytes[at - 1]) => {
-                let start = at;
+            b'/' => {
+                code.push(b'/');
+                bare.push(b'/');
                 at += 1;
-                while let Some(&b) = bytes.get(at) {
-                    match b {
-                        _ if ident(b) || b == b'.' => at += 1,
-                        b'+' | b'-' if matches!(bytes[at - 1], b'e' | b'E' | b'p' | b'P') => at += 1,
-                        b'\'' => return refuse("a ' in a number"),
-                        _ => break,
-                    }
-                }
-                code.extend_from_slice(&bytes[start..at]);
-                bare.extend_from_slice(&bytes[start..at]);
             }
-            quote @ (b'"' | b'\'') => {
-                // A raw string's prefix is a whole identifier before it.
+            quote => {
+                // The token the quote follows: an identifier that makes it a
+                // raw string (`R"`), or a number, in which a `'` is a digit
+                // separator in C++14 and C23 and begins a character literal
+                // before them.
+                let mut start = at;
+                while start > 0 {
+                    let b = bytes[start - 1];
+                    let sign = matches!(b, b'+' | b'-') && start > 1 && matches!(bytes[start - 2], b'e' | b'E' | b'p' | b'P');
+                    if !(ident(b) || b == b'.' || sign) {
+                        break;
+                    }
+                    start -= 1;
+                }
+                let token = &bytes[start..at];
+                let number = token.first().is_some_and(u8::is_ascii_digit) || (token.first() == Some(&b'.') && token.get(1).is_some_and(u8::is_ascii_digit));
+                if quote == b'\'' && number {
+                    return refuse("a ' in a number");
+                }
                 let prefix_start = bytes[..at].iter().rposition(|b| !ident(*b)).map_or(0, |p| p + 1);
                 if quote == b'"' && matches!(&bytes[prefix_start..at], b"R" | b"LR" | b"uR" | b"UR" | b"u8R") {
                     return refuse("a raw string");
                 }
                 // To the closing quote, or the end of the line.
-                let start = at;
+                let begin = at;
                 at += 1;
-                while at < bytes.len() && bytes[at] != quote && bytes[at] != b'\n' {
-                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                loop {
+                    let Some(found) = memchr::memchr3(quote, b'\n', b'\\', &bytes[at.min(bytes.len())..]) else {
+                        at = bytes.len();
+                        break;
+                    };
+                    at += found;
+                    match bytes[at] {
+                        b'\\' => at += 2,
+                        b'\n' => break,
+                        _ => {
+                            at += 1;
+                            break;
+                        }
+                    }
                 }
-                if bytes.get(at) == Some(&quote) {
-                    at += 1;
-                }
-                let at = at.min(bytes.len());
-                code.extend_from_slice(&bytes[start..at]);
+                at = at.min(bytes.len());
+                code.extend_from_slice(&bytes[begin..at]);
                 bare.push(quote);
-                bare.extend(std::iter::repeat_n(b' ', at - start - 1));
-            }
-            b => {
-                code.push(b);
-                bare.push(b);
-                at += 1;
+                bare.extend(std::iter::repeat_n(b' ', at - begin - 1));
             }
         }
     }
+    code.extend_from_slice(&bytes[at..]);
+    bare.extend_from_slice(&bytes[at..]);
     Ok((code, bare))
 }
 
