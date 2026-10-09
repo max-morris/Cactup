@@ -150,9 +150,8 @@ If you have used SimFactory (`sim`), most of what you know carries over:
 | SimFactory | cactup |
 |---|---|
 | `GetComponents --parallel thornlist.th` | `cactup install ET_2026_05_v0` (or `--thornlist thornlist.th`) |
-| `./simfactory/bin/sim build` | `cactup build` |
 | `sim build tutorial --thornlist=tutorial.th` | `cactup build tutorial --thornlist tutorial.th` |
-| `sim create-submit N --parfile=P --procs=4` | `cactup sim submit N P -T 4` |
+| `sim create-submit N --parfile=P --procs=8 --num-threads=2` | `cactup sim submit N P -T 4 -c 2` (four processes of two threads) |
 | `sim list-simulations` | `cactup sim list` |
 | `sim show-output N` | `cactup sim log N` |
 | `sim stop N` | `cactup sim stop N` |

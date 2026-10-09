@@ -53,7 +53,7 @@ pages.
 | 7 | Monitoring and restarts: logs, the follow view, walltime chaining, checkpoint and recovery | 30 min |
 | 8 | Parfile templates, Python-generated parfiles, a small parameter sweep | 25 min |
 | 9 | Test suites, and troubleshooting a broken build and a broken run | 30 min |
-| 10 | SimFactory migration, in depth | 20 min |
+| 10 | SimFactory migration, in depth | 25 min |
 
 Notebook 1 installs the full `ET_2026_05_v0` release, but the config the
 tutorial builds and hacks on, `tutorial`, uses a curated **CarpetX /
@@ -299,6 +299,19 @@ Constraints the notebooks must respect (each found by reading the code):
   call the config up to date and run no make (correct, but not the rebuild
   the cell is there to show). Debugging is taught with `build log -e`,
   `--trace` and `-v`, never by rebuilding `tutorial-debug`.
+- **10:** mostly prose, every claim checked against both SimFactory's
+  source (the release's `simfactory2`, which every release install checks
+  out at `~/Cactus/simfactory`) and cactup's. Its comparison machine is
+  QueenBee4 (`qbd`), whose MDB entry people have run on, not Frontera's
+  (an unvetted port): the release's `qbd.ini` by line range (`%show
+  --lines`, which moving the mirrors can shift), next to `cactup machine
+  show qbd` and the entry's `[build]` table (which moving the pin can
+  change; the prose describes the entry). Its one live translation submits
+  a parameter file with SimFactory's variable names: cactup refuses it at
+  submit, but has already made the simulation, so both submits pass
+  `--overwrite` (the notebook says why). Notebook 1's short table points
+  here. Nothing pipes cactup into `head`: cactup panics on a closed pipe,
+  so run_all forbids "panicked at".
 - **Every build runs in the foreground:** `mdb/cactup-tutorial` sets `[build]
   default-action = "run"` (with a build-submit script variant and a
   `[scheduler].submit`, `cactup build` would otherwise go to the queue).
@@ -354,7 +367,7 @@ configs, simulations). So:
 
 - Every notebook's first code cell runs `cactup-tutorial-catch-up N`
   (`image/rootfs/usr/local/bin/`; each notebook's stage adds that
-  notebook's steps, so far those of notebooks 1 to 9), which
+  notebook's steps: notebooks 1 to 10), which
   brings the container to the state notebook N assumes (installing from the
   mirrors and building from the bakes if needed, selecting the right
   installation and config). It is idempotent and prints one line per thing it
@@ -1007,9 +1020,11 @@ build context. `build.sh` first brings them to the committed lock,
 `tutorial/mirrors/mirrors.lock` (`mirror.py pin`: seconds when they already
 are, a fetch only for commits they lack), so every build serves the same
 commits. `--update-mirrors` instead moves them to upstream's current tips
-(`mirror.py sync`) and rewrites the lock in the checkout; commit it, knowing
-the bakes will be redone. The `mdb` branch in the image's mirror of Cactup is
-always built from the pinned commit's `mdb/`, never from the checkout.
+(`mirror.py sync`) and rewrites the lock in the checkout; commit it,
+knowing the bakes will be redone, and reread notebook 10's excerpt of
+SimFactory's `qbd.ini`, which comes from the mirrors. The `mdb` branch in
+the image's mirror of Cactup is always built from the pinned commit's
+`mdb/`, never from the checkout.
 
 The base image is pinned by digest and the Debian archive by a
 snapshot.debian.org date, both in the Dockerfile's base stage; move them

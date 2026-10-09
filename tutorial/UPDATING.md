@@ -107,17 +107,17 @@ and what catches a change to it.
 
 | In cactup | In the tutorial | Caught by |
 |---|---|---|
-| Subcommand and option names | every notebook's cells, catch-up, `cactup-tutorial-sources-clean` | `check-cactup-usage.py` |
+| Subcommand and option names | every notebook's cells, catch-up, `cactup-tutorial-sources-clean`; notebook 10's prose and tables, which name many commands no cell runs | `check-cactup-usage.py` (cells only), and reading (step 5) for notebook 10 |
 | Output wording (status lines, errors, notes) | prose that quotes it; run_all's EXPECT, RERUN, NEVER and ERRORS | run_all, and reading (step 5) |
 | `cactup list` and `config list` line formats (`- NAME … (active)`), `--version` (`(BUILD `), `database.json`'s `detected` | catch-up's parsing (`ensure_install`, `active_is_tutorial`, `installed_build`, `machine`) | catch-up printing odd lines or failing in run_all |
 | `configs/NAME/cactup-config.toml` (`[sources]`, `[thorn-providers]`); the install's `.cactup/fetch-state.toml` | `cactup-tutorial-sources-clean` | `test_catch_up.py` (formats copied there), notebooks 5 and 7 |
 | `build.toml` fields (config, cactus-root, machine, build-env, flags, `config-meta` sources, thorn-shapes and thorn-providers, options, thornlist); the attempt dir `.cactup-builds/NNNN`, `build-script` and its steps | the make shim's fingerprint, restore and replay (`image/rootfs/usr/local/lib/cactup-tutorial/make_shim.py`) | bake misses (step 3), "not precomputed" (NEVER), `test_make_shim.py`, `tests/platform/replay.sh` |
 | Simulation layout (`output-NNNN`, the `-active` link, `log.txt`), `restart.toml` keys (`CACTUP`, `EXECUTABLE`, `CHECKPOINT_WALLTIME_SECONDS`, `queue`/`QUEUE`, `[universe]`), `submit-script`, `run-script`, `.cactup/ENVIRONMENT` | notebooks 5, 6a, 6b and 7 read these files | run_all patterns |
 | Test layout (`~/.cactup/tests/…/results-NNNN/<config>/…`), test selection rules | notebook 9 | run_all |
-| Template variables, `@KNOB(…)@`/`@ENV(…)@`, the `.py` script and parfile API, `CactupError` | notebooks 6b and 8 | run_all |
-| The machine database: `mdb/GENERATION`, `meta.toml`'s schema, `machine create`'s output | notebooks 6a and 6b (they `%show` line ranges of `meta.toml` files), catch-up's `MYLAB_LINES`, `mdb/cactup-tutorial` | run_all, `test_catch_up.py` |
+| Template variables, `@KNOB(…)@`/`@ENV(…)@`, the `.py` script and parfile API, `CactupError` | notebooks 6b, 8 and 10 (10 also maps SimFactory's commands, keys and variables onto cactup's) | run_all, and reading (step 5) |
+| The machine database: `mdb/GENERATION`, `meta.toml`'s schema, `machine create`'s output, `machine show`'s, the `qbd` entry | notebooks 6a and 6b (they `%show` line ranges of `meta.toml` files), notebook 10 (`machine show qbd`, `qbd/meta.toml`'s `[build]` table, and prose describing the entry; its `.ini` excerpt comes from the mirrors, not cactup), catch-up's `MYLAB_LINES`, `mdb/cactup-tutorial` | run_all, `test_catch_up.py`, reading (step 5) |
 | The installer and the update protocol (`cactup-init.sh`, `latest.json`, `cactup.sha256`), `cactup update`'s output | notebook 1, catch-up's `ensure_cactup`, `image/assemble-update-root.sh` | run_all (notebook 1), `tests/platform/smoke.sh` |
-| Known bugs the notebooks work around or describe | notebook 5 (`--overwrite` and the 60-second live window); notebook 7 (`sim stop` on a chain stops one job; single-threaded processes for TerminationTrigger); notebook 9 (a failed run shows FINISHED; test selection by `Thorn` or `Thorn/test` only); notebook 6b (the optionlist header isn't strict) | reading (step 5): when cactup fixes one of these, a notebook's explanation becomes wrong |
+| Known bugs the notebooks work around or describe | notebook 5 (`--overwrite` and the 60-second live window); notebook 7 (`sim stop` on a chain stops one job; single-threaded processes for TerminationTrigger); notebook 9 (a failed run shows FINISHED; test selection by `Thorn` or `Thorn/test` only); notebook 6b (the optionlist header isn't strict); notebook 10 (a submit refused for its parameter file leaves the simulation made) | reading (step 5): when cactup fixes one of these, a notebook's explanation becomes wrong |
 
 Not pinned: the notebooks' links to the documentation site
 (max-morris.github.io/Cactup) show the live docs. A pin move is a good time

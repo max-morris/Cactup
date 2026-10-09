@@ -45,6 +45,7 @@ NOTEBOOKS = {
     "7": {"cactup": True, "install": True, "tutorial": True},
     "8": {"cactup": True, "install": True, "tutorial": True},
     "9": {"cactup": True, "install": True, "tutorial": True},
+    "10": {"cactup": True, "install": True, "tutorial": True},
 }
 THORNLIST = "/opt/cactup-tutorial/thornlists/tutorial.th"
 
