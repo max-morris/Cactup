@@ -4,8 +4,8 @@
 # .py script (design §6.1): the old script used simfactory's ternary
 # expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
 # — cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
-# Python, alongside the computed --gres=gpu:{typed["NODES"] * typed["TASKS"]}
-# directive and the `if EMAIL:` mail guard below.
+# Python, alongside the computed --gres directive and the `if EMAIL:` mail
+# guard below.
 #
 # Calling convention: cactup binds every §6.3 variable as a module global and
 # this script prints the final submit script to stdout.
@@ -18,9 +18,10 @@
 #   @SIMFACTORY@ run --basedir=… -> @CACTUP@ sim run --installation/--sim-dir/
 #     --machine (the compute-node re-invocation locator)
 #   --gpus-per-task takes the §8.5 GPUS_PER_TASK topology variable instead of a
-#     hardcoded 1. Unchanged in practice: db1 declares no max-gpus-per-node, so
-#     the derivation falls back to 1 — but `--gpus-per-task N` now works, and
-#     declaring `max-gpus-per-node = 2` here would make it follow the layout.
+#     hardcoded 1, so `--gpus-per-task N` works.
+#   --gres is per node: tasks per node × GPUs per task. The old script asked
+#     for NODES × TASKS, which is the whole job's GPU count on every node (a
+#     2-node, 4-task job asked each node for 8 of its 2 GPUs).
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}".format(ALLOCATION))
@@ -29,7 +30,7 @@ lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
 lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
-lines.append("#SBATCH --gres=gpu:{0}".format(typed["NODES"] * typed["TASKS"]))
+lines.append("#SBATCH --gres=gpu:{0}".format(typed["TASKS_PER_NODE"] * typed["GPUS_PER_TASK"]))
 if CHAINED_JOB_ID:
     lines.append("#SBATCH -d afterany:{0}".format(CHAINED_JOB_ID))
 lines.append("#SBATCH -J {0}".format(SHORT_SIMULATION_NAME))
