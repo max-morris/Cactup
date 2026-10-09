@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **in progress** |
+| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **built** (`afa94e7`); Einstein Toolkit gate and review next |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so** on M3a's measured lookup cost |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1469,6 +1469,36 @@ What the second run catches, and what replaces it:
   or in a file not found by the search, a `__has_include` whose argument
   is not a literal, `#embed`/`__has_embed`, `#import`, a `.gch` anywhere
   looked at, a marker or directive line that cannot be read.
+
+**As built** (`52af3c8`, `3b34cc8`, `afa94e7`): `src/objcache/search.rs`
+for C and C++, `Fortran::before_compile` for gfortran; the key's label is
+`key-7` (the `-dI` lines are in the text, the `__has_include` answers in the
+files part). What the smoke builds (`smoke.th`, served in `build-cache` and
+audited in `build-cache-b`, GCC, line directives, Clang; script and logs in
+`~/tmp/build-cache-overhead/`) found on the way, each now modeled:
+
+- GCC names a system header by its physical path where that is shorter
+  (`-fcanonical-system-headers`): Debian's `x86_64-linux-gnu/asm` is a
+  symlink, so `asm/errno.h` is entered as `/usr/lib/linux/uapi/x86/asm/...`.
+  A lookup is taken to agree when the file's physical path is the name.
+- GCC's `limits.h` includes `"syslimits.h"` beside itself, which does
+  `#include_next <limits.h>`: GCC goes on from the start of the list for a
+  file found beside its includer (Clang searches as for a plain include).
+- libstdc++ mentions `__has_include` in a comment (`#endif //
+  __has_include`), glibc in a comment over two lines; Clang's own headers
+  ask `__has_include_next`. Comments are found by reading the file as the
+  compilers do, erring toward code; `__has_include` is answered for every
+  directory of the search list and every directory of a file read, which
+  answers `__has_include_next` too.
+- Looking at every place a compiler tries took a median 4965 system calls
+  for a small C file: each directory is now listed once per pass instead.
+
+On `afa94e7` every check of the smoke builds was made by lookups (0 by a
+compiler run), 0 wrong in every audit. Per compile, the check now costs a
+median 7 ms for C (the key 18 ms), 31 ms for C++ (key 105 ms), nothing to
+speak of for gfortran; most of it is reading every file again (110 files
+for C, 330 for C++), which stays: it is what catches a file rewritten
+within the change-time tick of the key's reading.
 
 The lookups a check makes are counted and timed in `events.jsonl`, and
 that cost on the Einstein Toolkit (here, and on a cluster's filesystem) is

@@ -49,6 +49,9 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm_0
 # Already in the tree (tempfile, crossterm) and pure Rust on Linux: it makes
 # the system calls itself, without libc, so the binary stays static.
 rustix = { version = "1.1", features = ["process"] }
+# Substring search for the build cache's scan of every file a compile reads
+# (src/objcache/search.rs). Already in the tree (regex, gix); pure Rust.
+memchr = "2.8"
 
 [dev-dependencies]
 gix = { version = "0.85.0", features = ["tree-editor"] }

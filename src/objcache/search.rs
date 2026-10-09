@@ -210,13 +210,17 @@ enum Listed {
     Other,
 }
 
-/// Lookups for one pass over a compile's includes: each directory is
-/// listed once, and names in it are answered from the listing (a few
-/// listings where looking at every place a compiler tries would take
-/// thousands of system calls). Nothing is kept from one pass to the next.
+/// Lookups for one pass over a compile's includes: a directory looked in
+/// more than a few times is listed once, and further names in it are
+/// answered from the listing (a few listings where looking at every place
+/// a compiler tries would take thousands of system calls; a large
+/// directory looked in once or twice is not listed). Nothing is kept from
+/// one pass to the next.
 #[derive(Default)]
 pub struct Looker {
     listings: HashMap<Vec<u8>, Option<Listing>>,
+    /// Names looked at by path in each directory not listed yet.
+    looks: HashMap<Vec<u8>, u32>,
     /// System calls made: listings and lookups by path.
     pub count: u64,
 }
@@ -247,11 +251,8 @@ impl Looker {
         let mut here = if dir.is_empty() { b".".to_vec() } else { dir.to_vec() };
         for (at, part) in parts.iter().enumerate() {
             let last = at + 1 == parts.len();
-            let listed = match self.listing(&here) {
-                Some(listing) => listing.get(*part).copied(),
-                None => Some(Listed::Other),
-            };
             let next = joined(&here, part);
+            let listed = self.listed(&here, part, &next)?;
             let kind = match listed {
                 None => return Ok(Entry::Absent),
                 Some(Listed::File) => Entry::File,
@@ -268,6 +269,29 @@ impl Looker {
             }
         }
         Ok(Entry::Absent)
+    }
+
+    /// What `name` is in `dir` (`path` is the two joined): from the listing
+    /// once `dir` has been looked in often enough to list it, by the path
+    /// (not following a symlink) until then. `None`: nothing of that name.
+    fn listed(&mut self, dir: &[u8], name: &[u8], path: &[u8]) -> Result<Option<Listed>, String> {
+        const BEFORE_LISTING: u32 = 4;
+        let looks = self.looks.entry(dir.to_vec()).or_default();
+        if *looks < BEFORE_LISTING && !self.listings.contains_key(dir) {
+            *looks += 1;
+            self.count += 1;
+            return match std::fs::symlink_metadata(Path::new(OsStr::from_bytes(path))) {
+                Ok(meta) if meta.is_file() => Ok(Some(Listed::File)),
+                Ok(meta) if meta.is_dir() => Ok(Some(Listed::Directory)),
+                Ok(_) => Ok(Some(Listed::Other)),
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
+                Err(e) => Err(format!("{} cannot be looked at ({e})", String::from_utf8_lossy(path))),
+            };
+        }
+        Ok(match self.listing(dir) {
+            Some(listing) => listing.get(name).copied(),
+            None => Some(Listed::Other),
+        })
     }
 
     /// The listing of `dir`: empty if there is no such directory, `None` if
@@ -588,7 +612,7 @@ fn trim_end(bytes: &[u8]) -> &[u8] {
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|window| window == needle)
+    memchr::memmem::find(hay, needle)
 }
 
 /// What the check after a C or C++ compile looks up instead of running the
