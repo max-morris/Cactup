@@ -136,10 +136,13 @@ impl Search {
     }
 }
 
+/// One search: the directories in order, and the name.
+type Lookup<'a> = (Vec<(&'a [u8], Place)>, &'a [u8]);
+
 /// Where a file was found: in the directory of the file that included it,
 /// or at a position in the search list (the quote directories, then the
 /// bracket ones), or by its absolute name.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Place {
     Including,
     Chain(usize),
@@ -198,8 +201,14 @@ fn entry(path: &[u8], follow: bool) -> Result<Entry, String> {
     }
 }
 
-/// What lies in a directory, by name, as one listing of it showed.
-type Listing = HashMap<Vec<u8>, Listed>;
+/// What lies in a directory, by name, as one listing of it showed; and
+/// whether any name in it ends in `.gch` (if none does, no precompiled
+/// header needs looking for there).
+#[derive(Default)]
+struct Listing {
+    names: HashMap<Vec<u8>, Listed>,
+    gch: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Listed {
@@ -232,12 +241,11 @@ impl Looker {
     /// instead, and for what is neither file nor directory, or cannot be
     /// looked at: not modeled.
     fn file(&mut self, dir: &[u8], spelling: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        let path = joined(dir, spelling);
         let gch = [spelling, b".gch"].concat();
         if !matches!(self.at(dir, &gch, false)?, Entry::Absent) {
             return Err("a precompiled header is where the compiler looks".to_owned());
         }
-        Ok(matches!(self.at(dir, spelling, true)?, Entry::File).then_some(path))
+        Ok(matches!(self.at(dir, spelling, true)?, Entry::File).then(|| joined(dir, spelling)))
     }
 
     /// What is at `spelling` in `dir` (following a final symlink if
@@ -251,6 +259,10 @@ impl Looker {
         let mut here = if dir.is_empty() { b".".to_vec() } else { dir.to_vec() };
         for (at, part) in parts.iter().enumerate() {
             let last = at + 1 == parts.len();
+            // A `.gch` name, in a listed directory with none.
+            if last && part.ends_with(b".gch") && self.listings.get(here.as_slice()).is_some_and(|listing| listing.as_ref().is_some_and(|listing| !listing.gch)) {
+                return Ok(Entry::Absent);
+            }
             let next = joined(&here, part);
             let listed = self.listed(&here, part, &next)?;
             let kind = match listed {
@@ -276,7 +288,10 @@ impl Looker {
     /// (not following a symlink) until then. `None`: nothing of that name.
     fn listed(&mut self, dir: &[u8], name: &[u8], path: &[u8]) -> Result<Option<Listed>, String> {
         const BEFORE_LISTING: u32 = 4;
-        let looks = self.looks.entry(dir.to_vec()).or_default();
+        let looks = match self.looks.get_mut(dir) {
+            Some(looks) => looks,
+            None => self.looks.entry(dir.to_vec()).or_default(),
+        };
         if *looks < BEFORE_LISTING && !self.listings.contains_key(dir) {
             *looks += 1;
             self.count += 1;
@@ -289,7 +304,7 @@ impl Looker {
             };
         }
         Ok(match self.listing(dir) {
-            Some(listing) => listing.get(name).copied(),
+            Some(listing) => listing.names.get(name).copied(),
             None => Some(Listed::Other),
         })
     }
@@ -310,8 +325,9 @@ impl Looker {
                         };
                         Some((entry.file_name().into_vec(), kind))
                     })
-                    .collect::<Option<Listing>>(),
-                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Some(Listing::new()),
+                    .collect::<Option<HashMap<_, _>>>()
+                    .map(|names| Listing { gch: names.keys().any(|name| name.ends_with(b".gch")), names }),
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Some(Listing::default()),
                 Err(_) => None,
             };
             self.listings.insert(dir.to_vec(), listing);
@@ -727,12 +743,23 @@ impl Lookups {
         let mut places: HashMap<&[u8], Place> = HashMap::new();
         let mut out = Vec::with_capacity(self.directives.len());
         let mut looker = Looker::default();
+        // The same name searched for along the same directories, as many
+        // includes are, is found where it was found before in this pass.
+        let mut found_before: HashMap<Lookup, Option<Found>> = HashMap::new();
         for directive in &self.directives {
             let found = match directive.spelling.starts_with(b"/") {
                 true => self.search.find(&directive.spelling, std::iter::once((&b""[..], Place::Absolute)), &mut looker)?,
                 false => {
                     let dirs = self.search.dirs(directive.kind, &directive.from, places.get(directive.from.as_slice()).copied(), self.gcc);
-                    self.search.find(&directive.spelling, dirs.into_iter(), &mut looker)?
+                    let memo = (dirs, directive.spelling.as_slice());
+                    match found_before.get(&memo) {
+                        Some(found) => found.clone(),
+                        None => {
+                            let found = self.search.find(&directive.spelling, memo.0.iter().copied(), &mut looker)?;
+                            found_before.insert(memo, found.clone());
+                            found
+                        }
+                    }
                 }
             };
             if let (Some(name), Some(found)) = (&directive.entered, &found) {
