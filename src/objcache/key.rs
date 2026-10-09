@@ -500,9 +500,8 @@ impl Keyed {
         {
             let read = read_files(&self.named, self.map.as_ref(), |_, _| Ok(()));
             return read.is_ok_and(|(files, seen)| {
-                seen == self.seen
-                    && lookups.answers(self.map.as_ref()).is_ok_and(|answers| files_part(&files, Ok(&answers)) == self.parts.files)
-            }) && lookups.still_hold();
+                seen == self.seen && lookups.again(self.map.as_ref()).is_some_and(|answers| files_part(&files, Ok(&answers)) == self.parts.files)
+            });
         }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
@@ -523,13 +522,14 @@ impl Keyed {
         }
     }
 
-    /// How the check after the compile was made: by the count of lookups it
-    /// made in place of a compiler run, or why it ran the compiler again.
-    pub fn check_made(&self) -> Result<u64, String> {
+    /// How the check after the compile was made: by lookups in place of a
+    /// compiler run (how many by path, and how many directories listed),
+    /// or why it ran the compiler again.
+    pub fn check_made(&self) -> Result<(u64, u64), String> {
         match &self.fortran {
             Some(fortran) => fortran.check_made(),
             None => match &self.lookups {
-                Ok(lookups) if lookups.looked_up() => Ok(lookups.count),
+                Ok(lookups) if lookups.looked_up() => Ok((lookups.stats, lookups.listed)),
                 Ok(_) => Err("not looked up before the compile".to_owned()),
                 Err(why) => Err(why.clone()),
             },
@@ -919,26 +919,33 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    let mut probes = Vec::new();
-    // A macro given on the command line could ask too.
-    let mut unfollowed = compile
-        .preprocess
-        .iter()
-        .any(|arg| arg.as_bytes().windows(13).any(|window| window == b"__has_include"))
-        .then(|| "a macro on the command line uses __has_include, which the cache does not follow".to_owned());
+    // What the check by lookups must know of in the files read, and in the
+    // macros given on the command line, which count as much (`search`).
+    let dated = std::env::var_os("SOURCE_DATE_EPOCH").is_some_and(|epoch| !epoch.is_empty());
+    let mut scanned = search::Scan::default();
+    let mut unfollowed = compile.preprocess.iter().find_map(|arg| search::scan(arg.as_bytes(), dated, &mut scanned).err());
     let (files, seen) = read_files(&named, map, |_, bytes| {
         if unfollowed.is_none()
-            && let Err(why) = search::probes(bytes, &mut probes)
+            && let Err(why) = search::scan(bytes, dated, &mut scanned)
         {
             unfollowed = Some(why);
         }
         Ok(())
     })?;
+    let probes = match unfollowed {
+        Some(why) => Err(why),
+        None => scanned.finish(),
+    };
     let names: Vec<Vec<u8>> = named.keys().map(|(_, path)| path.as_os_str().as_bytes().to_vec()).collect();
-    let mut lookups = match (unfollowed, compile.forced_include) {
-        (Some(why), _) => Err(why),
-        (None, true) => Err("-include is given".to_owned()),
-        (None, false) => tracker.finish(compiler.family == Family::Gcc).and_then(|directives| Lookups::new(&said, directives, probes, &names, compiler.family == Family::Gcc)),
+    let gcc = compiler.family == Family::Gcc;
+    // GCC reads `stdc-predef.h` unasked, unless it compiles for no hosted
+    // system or searches no system directories (tried).
+    let preinclude = gcc && !compile.preprocess.iter().any(|arg| ["-ffreestanding", "-fno-hosted", "-nostdinc"].iter().any(|flag| arg == *flag));
+    let mut lookups = match (probes, compile.forced_include, compile.charset) {
+        (Err(why), ..) => Err(why),
+        (Ok(_), true, _) => Err("-include is given".to_owned()),
+        (Ok(_), _, true) => Err("a character set is given for the source, which the cache does not follow".to_owned()),
+        (Ok(probes), false, false) => tracker.finish(preinclude).and_then(|directives| Lookups::new(&said, directives, probes, &names, gcc)),
     };
     let answers = match &mut lookups {
         Ok(lookups) => lookups.answers(map),
@@ -1145,6 +1152,7 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
             None => {
                 match search::directive(&line) {
                     Some((kind, spelling)) => tracker.directive(kind, spelling),
+                    None if search::unfollowed_directive(&line) => tracker.unfollowed(),
                     None if !line.iter().all(u8::is_ascii_whitespace) => tracker.text(),
                     None => {}
                 }
@@ -1654,6 +1662,51 @@ mod tests {
         }
     }
 
+    /// An `-I` that is no directory (a file, a dangling symlink) is left out
+    /// of the search, and watched: a header in it, should it become a
+    /// directory, is found first. Left alone, it lets the check pass.
+    #[test]
+    fn a_left_out_include_directory_is_watched() {
+        for compiler in [("gcc", Family::Gcc), ("clang", Family::Clang)] {
+            if !have(compiler.0, compiler.1) {
+                continue;
+            }
+            for looked in [true, false] {
+                let tree = Tree::new();
+                let odd = tree.conf.cactus_root.join("odd");
+                let dangling = tree.conf.cactus_root.join("dangling");
+                std::fs::write(&odd, "").unwrap();
+                std::os::unix::fs::symlink(tree.conf.cactus_root.join("nowhere"), &dangling).unwrap();
+                let flags = ["-O2", &format!("-I{}", odd.display()), &format!("-I{}", dangling.display())];
+                let mut keyed = tree.keyed(compiler.0, &flags, looked);
+                assert!(keyed.still_holds(), "{}", compiler.0);
+                std::fs::remove_file(&odd).unwrap();
+                std::fs::create_dir(&odd).unwrap();
+                std::fs::write(odd.join("t.h"), "#define ANSWER 41\n").unwrap();
+                assert!(!keyed.still_holds(), "{}: a header in a directory that was a file passed the check", compiler.0);
+            }
+        }
+    }
+
+    /// `#embed` reads a file no line marker names: the check runs the
+    /// preprocessor again.
+    #[test]
+    fn embed_is_left_to_the_preprocessor() {
+        if !have("clang", Family::Clang) {
+            return;
+        }
+        let tree = Tree::new();
+        let data = tree.header().with_file_name("data.bin");
+        std::fs::write(&data, "AB").unwrap();
+        std::fs::write(tree.header(), "static const char data[] = {\n#embed \"data.bin\"\n};\n#define ANSWER 42\n").unwrap();
+        let mut keyed = key(&tree.conf, &tree.cc, &tree.argv("clang", &["-O2", "-Wno-c23-extensions"]), false).unwrap();
+        keyed.before_compile();
+        assert!(keyed.check_made().is_err_and(|why| why.contains("#embed")), "{:?}", keyed.check_made());
+        assert!(keyed.still_holds());
+        std::fs::write(&data, "ZZ").unwrap();
+        assert!(!keyed.still_holds(), "an embedded file changed passed the check");
+    }
+
     /// Includes skipped for their guard, `#include_next`, and an include
     /// named by a macro are followed; `__has_include` is answered, keyed,
     /// and asked again after the compile.
@@ -1677,7 +1730,7 @@ mod tests {
             let flags = ["-O2", &format!("-I{}", next.display())];
             let mut keyed = tree.keyed(compiler.0, &flags, true);
             assert!(keyed.still_holds(), "{}: {:?}", compiler.0, keyed.check_made());
-            assert!(keyed.check_made().is_ok_and(|count| count > 0), "{}", compiler.0);
+            assert!(keyed.check_made().is_ok_and(|(lookups, listings)| lookups + listings > 0), "{}", compiler.0);
             // The answer to `__has_include` changes: so does the key, and the
             // check does not pass.
             std::fs::write(next.join("sub/extra.h"), "").unwrap();

@@ -257,8 +257,10 @@ pub struct Fortran {
     /// included file before the place it did, so each must hold nothing.
     /// Or why the check runs the dependency run again.
     places: Result<Vec<PathBuf>, String>,
-    /// Lookups made, before and after the compile.
+    /// Lookups made, before and after the compile; and by the check of
+    /// module files' order ([`read_inputs`]).
     count: u64,
+    module_lookups: std::cell::Cell<u64>,
 }
 
 impl Fortran {
@@ -272,6 +274,8 @@ impl Fortran {
     /// check after the compile runs the dependency run again.
     pub fn before_compile(&mut self) {
         let Some(deps) = &self.deps else { return };
+        // The key's own module lookups are not the check's.
+        self.module_lookups.set(0);
         // As the dependency run names the directories (the source by its
         // physical path, the `-I` directories as given), each with the
         // places before it in the compile's own order.
@@ -299,6 +303,14 @@ impl Fortran {
                 return;
             }
         }
+        // A module gfortran has built in is used without a file, unless the
+        // compile finds one of that name first (a `use` that does not say
+        // `intrinsic` takes it; tried): none may appear where it looks.
+        for name in ["iso_c_binding.mod", "iso_fortran_env.mod"] {
+            if !deps.inputs.iter().any(|input| input.file_name().is_some_and(|file| file == name)) {
+                places.extend(self.module_dirs.iter().map(|dir| dir.join(name)));
+            }
+        }
         places.sort();
         places.dedup();
         self.count += places.len() as u64;
@@ -311,8 +323,8 @@ impl Fortran {
 
     /// How the check after the compile was made: by the count of lookups it
     /// made in place of the dependency run, or why it ran that again.
-    pub fn check_made(&self) -> Result<u64, String> {
-        self.places.as_ref().map(|_| self.count).map_err(Clone::clone)
+    pub fn check_made(&self) -> Result<(u64, u64), String> {
+        self.places.as_ref().map(|_| (self.count + self.module_lookups.get(), 0)).map_err(Clone::clone)
     }
 
     /// The arguments a compile for the store runs with in place of `args`,
@@ -448,6 +460,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
         deps: None,
         places: Err("not looked up before the compile".to_owned()),
         count: 0,
+        module_lookups: std::cell::Cell::new(0),
     };
 
     let deps = dependencies(compiler, name, &fortran)?;
@@ -550,7 +563,10 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         // not an included file; any other is checked as one too.
         let named_module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
         if named_module {
-            let first = fortran.module_dirs.iter().find(|dir| dir.join(file_name).exists());
+            let first = fortran.module_dirs.iter().find(|dir| {
+                fortran.module_lookups.set(fortran.module_lookups.get() + 1);
+                dir.join(file_name).exists()
+            });
             if first.is_some_and(|dir| Some(dir.as_path()) != physical.parent()) {
                 bail!("the compile would find another module file of the name {} first", file_name.to_string_lossy());
             }
@@ -1214,6 +1230,18 @@ mod tests {
         std::fs::copy(elsewhere.join("m.mod"), real.scratch.join("m.mod")).unwrap();
         assert!(!check(&mut keyed), "a module file that appeared in the working directory passed the check");
         assert!(keyed.fortran.check_made().is_ok());
+        std::fs::remove_file(real.scratch.join("m.mod")).unwrap();
+        // A module gfortran has built in, used without `intrinsic`: a file
+        // of its name found first is taken instead.
+        std::fs::write(real.build.join("b.f90"), "subroutine b()\n  use iso_c_binding\n  print *, c_int\nend subroutine\n").unwrap();
+        let mut keyed = real.key("b.f90", &[]).unwrap();
+        keyed.fortran.before_compile();
+        assert!(check(&mut keyed));
+        std::fs::write(elsewhere.join("fake.f90"), "module iso_c_binding\n  integer, parameter :: c_int = 8\nend module\n").unwrap();
+        let status = Command::new("gfortran").args(["-c", "-o", "/dev/null", "fake.f90"]).current_dir(&elsewhere).status().unwrap();
+        assert!(status.success());
+        std::fs::copy(elsewhere.join("iso_c_binding.mod"), real.scratch.join("iso_c_binding.mod")).unwrap();
+        assert!(!check(&mut keyed), "a module file named like a built-in module passed the check");
     }
 
     /// A module file that is not compressed is still a module file to

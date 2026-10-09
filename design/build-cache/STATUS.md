@@ -1323,6 +1323,60 @@ audited in `build-cache-b` and in `build-cache`, 3375 checked each, 0
 wrong; `et-ld.toml` served, 3376 published, audited in `build-cache-b`,
 3374 checked, 0 wrong; every build exit 0. **M2a has passed its gate.**
 
+### M3a, round 1 (on `064cb82`): BLOCKED by both
+
+Both re-ran the lookup model against GCC 14, Clang 19 and gfortran 14 and
+found it agreed with the compilers in every lookup case they tried (quote
+and bracket order, `#include_next` from each kind of file, `-iquote`,
+directories in the way, `.gch`, canonical names, skipped includes,
+gfortran's include order and pre-include); no Einstein Toolkit compile fell
+back. The holes were around it, each a case the second compiler run caught
+and the check by lookups did not (all reproduced, A and B):
+
+1. **`__has_include` the byte scan cannot see** (A, B): spliced across a
+   line (`__has_\` newline `include`), made by pasting (`__has_ ##
+   include`), behind a `??/` trigraph, or behind a C++ digit separator
+   that put the comment scan out of step (`1'0, "x'/*"`). Fixed: the scan
+   reads files with splices undone; a `??/` falls back; pasting falls back
+   when an identifier that begins a watched name (and is not all of it)
+   stands anywhere in what the compile reads; numbers are read as numbers.
+2. **`#embed` and `__has_embed`** (A, B; B served stale objects end to end
+   with Clang 19): no line marker names the embedded file. STATUS said they
+   fall back; nothing did. Fixed: both fall back.
+3. **An `-I` that is not a directory** (A, B): GCC leaves it out with a
+   warning, not in the "nonexistent" lines; if it became a directory the
+   compile would search it. Fixed: it is watched with the nonexistent ones,
+   all of which must not be directories later (which also stops a dangling
+   symlink, and Clang's "nonexistent" regular file, from failing every
+   check).
+4. **Output parsing** (A): a skipped `#import` was not parsed; a line in a
+   raw string that looks like a returning marker could pop the stack. Fixed:
+   `#import` falls back; a marker must return to the file the output was
+   reading before, by the name it last gave it; each include is tied to the
+   include that entered its file (not to a file name).
+5. **`__DATE__`/`__TIME__`** (B): the second run failed when the clock's
+   second moved on; `HTTPD/Content.c` was published by lookups. Fixed: they
+   fall back unless `SOURCE_DATE_EPOCH` is set; `__TIMESTAMP__` always.
+6. **gfortran's built-in modules** (B): a `use iso_c_binding` without
+   `intrinsic` takes a module file of that name if one appears where the
+   compile looks; the dependency run lists none. Fixed: no such file may
+   appear where the compile looks for modules.
+
+Non-blocking, also done: the spec and STATUS lists of what falls back
+match the code (`__has_include_next` is answered, `#include_next` from the
+source is modeled); Clang's `./` for a relative source and GCC with
+`-ffreestanding` or `-nostdinc` no longer fall back every time; a pass
+lists a directory with a name the listing lacks under another case by its
+path (casefold directories); the key's `__has_include` answers and the pass
+before the compile share one set of listings, and the check after the
+compile one more; the log counts lookups by path (`lookups`) and directory
+listings (`listings`) apart, for the check's passes only, Fortran's module
+order lookups included. Not done: B's suggestion to drop the pass before
+the compile (it is what ties a skipped include to the file the run had
+entered before it); hits now pay the `__has_include` answers and the scan
+(the audit builds' median key: g++ 90 to 109 ms, gcc 16 to 19 ms, on
+`afa94e7`, before the faster scan of `b2f7c1d`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1465,10 +1519,7 @@ What the second run catches, and what replaces it:
   serves nothing wrong. libstdc++'s `c++config.h` and glibc's `unistd.h`
   path have them, so nearly every compile does.
 - **Anything this does not model** goes to the second compiler run, as
-  today: forced includes (`-include`), `#include_next` in the main file
-  or in a file not found by the search, a `__has_include` whose argument
-  is not a literal, `#embed`/`__has_embed`, `#import`, a `.gch` anywhere
-  looked at, a marker or directive line that cannot be read.
+  today; the spec (§18.5, record mode) has the list as built.
 
 **As built** (`52af3c8`, `3b34cc8`, `afa94e7`): `src/objcache/search.rs`
 for C and C++, `Fortran::before_compile` for gfortran; the key's label is

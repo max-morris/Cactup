@@ -378,7 +378,10 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     event.recheck_ms = looking_ms + recheck_ms;
     if let (Ok(keyed), Some(_)) = (&keyed, stable) {
         match keyed.check_made() {
-            Ok(count) => event.lookups = Some(count),
+            Ok((lookups, listings)) => {
+                event.lookups = Some(lookups);
+                event.listings = Some(listings);
+            }
             Err(why) => event.checked_by_compiler = Some(why),
         }
     }

@@ -5080,7 +5080,8 @@ then has each `#include` and `#include_next` as written (one named by a
 macro, expanded) right before the line marker that enters the file found,
 and an include skipped for its guard or `#pragma once` with no entering
 marker; its `-v` says where it searched (the `-iquote` directories, then the
-bracket ones, and those it ignored as nonexistent, which must stay so).
+bracket ones, and those it left out as nonexistent, or, GCC warning, as not
+a directory: none of them may be a directory later).
 `objcache::search` looks each include up as GCC and Clang do: `"name"` in
 the directory of the file entered (not the name a `#line` gave it), then the
 quote directories, then the bracket ones; `<name>` in the bracket ones;
@@ -5095,19 +5096,40 @@ since a macro may ask it anywhere), and the answers join the files part of
 the key; the check asks again and must get the same. (An answer that
 changed between the key's run and cactup's asking gives a key whose text
 says one thing and whose answers another: no compile with consistent inputs
-arrives at it, so it serves nothing wrong.) For gfortran (§18.10) the places
-the compile passes over before each included file must hold nothing, and
-module files keep their order check. **Whatever this does not model sends
-the check to a second compiler run**, as before: `-include`, a precompiled
-header (`<name>.gch`) anywhere looked at, `#include_next` in a file not
-found by the search, `__has_include_next`, a `__has_include` whose argument
-is not a name as written or that a macro could call, one on the command
-line, a framework directory or a header map, a directory the compiler
-dropped as the same as another under another name, a lookup that does not
-lead where the compiler went, a file entered that no `#include` names
-(GCC's own `stdc-predef.h` aside, looked for as `<stdc-predef.h>` whether
-found or not). The log says how each check was made: the lookups it took
-(`lookups`), or why it ran the compiler (`checked_by_compiler`).
+arrives at it, so it serves nothing wrong.) `__has_include_next` is answered
+the same way: the answers for every directory decide it. The files are
+scanned as the compilers read them, with lines spliced by a backslash
+joined and past comments (read past literals, raw strings and numbers with
+digit separators). For gfortran (§18.10) the places the compile passes over
+before each included file must hold nothing, nor may a module file appear
+named like a module gfortran has built in (`iso_c_binding`,
+`iso_fortran_env`: a `use` that does not say `intrinsic` takes a file of
+that name if it finds one), and module files keep their order check.
+**Whatever this does not model sends the check to a second compiler run**,
+as before: `-include`, a source character set (`-finput-charset=`), a
+precompiled header (`<name>.gch`) anywhere looked at, a `__has_include`
+whose argument is not a name as written, or used other than to call it or
+to ask whether it is defined; token pasting anywhere in what the compile
+reads when an identifier there begins `__has_include`, `__has_embed`,
+`__DATE__`, `__TIME__` or `__TIMESTAMP__` without being all of it (the two
+could be pasted into one); a `??/` trigraph; `#embed` and `__has_embed`,
+which read a file no line marker names; `__TIMESTAMP__`, and `__DATE__` or
+`__TIME__` unless the compile's `SOURCE_DATE_EPOCH` fixes them (a second
+compiler run saw the clock move on, and so did the compile); `#import`; a
+framework directory or a header map; a directory the compiler dropped as
+the same as another under another name; a lookup that does not lead where
+the compiler went (a name the compiler gave a file is taken to agree with
+another name of the same file: GCC names a system header by its physical
+path where that is shorter, Clang keeps a relative source's `./`); a file
+entered that no `#include` names (GCC's own `stdc-predef.h` aside, looked
+for as `<stdc-predef.h>` whether found or not, unless `-ffreestanding` or
+`-nostdinc` keeps GCC from reading it); a line marker that returns to
+another file than the one the output was reading. Directories are listed
+once a pass has looked in them a few times; in a listing, a name not found
+that another case of it could be (a directory that folds case) is looked up
+by its path. The log says how each check was made: the lookups by path and
+the directory listings it took (`lookups`, `listings`), or why it ran the
+compiler (`checked_by_compiler`).
 
 The key's preprocessor run, the reading of the files, and the check's
 lookups are the cost a build pays for the cache on a miss, and the log has
@@ -5176,10 +5198,14 @@ nobody has to find out:
   include that was entered checks the model against the compiler before the
   compile (a disagreement sends the check to a compiler run); a lookup the
   compiler makes that leaves no trace — one the model does not know of —
-  would not be repeated. Known and modeled: the lists `-v` prints, the
-  including file's directory, `#include_next`, `.gch` files, directories in
-  the way, `__has_include`, GCC's `stdc-predef.h`. Known and sent to a
-  compiler run: the cases listed under record mode above. Also left, as for
+  would not be repeated. Known and modeled: the lists `-v` prints (and the
+  directories they leave out), the including file's directory,
+  `#include_next`, `.gch` files, directories in the way, `__has_include`
+  and `__has_include_next`, GCC's `stdc-predef.h`, gfortran's built-in
+  modules. Known and sent to a compiler run: the cases listed under record
+  mode above. The scan for names it must see bounds token pasting by the
+  identifiers that could begin such a name, which must stand in what the
+  compile reads (or in a macro on its command line) to be pasted at all. Also left, as for
   a second compiler run: a file that appears and is gone again while the
   compile runs, and one that does so between the key's run and cactup's
   lookups before the compile.
