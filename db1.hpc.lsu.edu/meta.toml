@@ -50,12 +50,15 @@ simulation-home = "/work/@USER@/simulations"
 test-home       = "/work/@USER@/tests"
 
 [hardware]
-# Availability vs. request (design §8.5): a Deep Bayou node has 48 CPUs/cores
-# and 2 GPUs. "Filling a node" = 2 tasks/node × 24 CPUs/task = 48 CPUs/node.
+# Availability vs. request (design §8.5): a Deep Bayou node (db001-db011) has
+# 48 CPUs/cores (2 × Xeon Gold 6248R, Cascade Lake) and 2 Tesla V100S GPUs
+# (sm_70). "Filling a node" = 2 tasks/node × 24 CPUs/task = 48 CPUs/node.
 max-cpus-per-node     = 48       # CPUs/cores available per node (NOT MPI ranks)
+max-gpus-per-node     = 2        # `scontrol show node`: Gres=gpu:2
 default-cpus-per-task = 24       # request default when `-c` omitted → fills the
-                                 # node as 2 tasks × 24 CPUs (floor(48/24) = 2)
-memory                = 196608   # MB per node
+                                 # node as 2 tasks × 24 CPUs (floor(48/24) = 2),
+                                 # one GPU each (the partition's DefCpuPerGPU=24)
+memory                = 191000   # MB per node (`scontrol show node`: RealMemory)
 
 [build]
 make      = "make -j@MAKEJOBS@"
