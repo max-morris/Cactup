@@ -5,7 +5,7 @@
 # re-invokes `cactup test run` on the compute node with the §11.6 locator
 # flags (--test-dir + --results-id) instead of `sim run`.
 #
-# .py script (design §6.1): the --gres=gpu:{typed["NODES"] * typed["TASKS"]}
+# .py script (design §6.1): the per-node --gres=gpu:{TASKS_PER_NODE × GPUS_PER_TASK}
 # directive is computed, and the mail directives are guarded by `if EMAIL:`
 # (cactup's @NAME@ engine is literal-only, D7, so both move into Python).
 
@@ -16,7 +16,7 @@ lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
 lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
-lines.append("#SBATCH --gres=gpu:{0}".format(typed["NODES"] * typed["TASKS"]))
+lines.append("#SBATCH --gres=gpu:{0}".format(typed["TASKS_PER_NODE"] * typed["GPUS_PER_TASK"]))
 lines.append("#SBATCH -J {0}".format(TEST_NAME))
 if EMAIL:
     lines.append("#SBATCH --mail-type=ALL")
