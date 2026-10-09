@@ -959,7 +959,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
         (Ok(_), _, true) => Err("a character set is given for the source, which the cache does not follow".to_owned()),
         (Ok(probes), false, false) => tracker
             .finish(preinclude)
-            .and_then(|followed| Lookups::new(&said, followed, probes, &names, gcc, &search::Given::from_args(&compile.preprocess))),
+            .and_then(|followed| Lookups::new(&said, followed, probes, &names, gcc, &search::Given::from_args(&compile.preprocess, compile.language == compile::Language::Cxx))),
     };
     let answers = match &mut lookups {
         Ok(lookups) => lookups.answers(map),

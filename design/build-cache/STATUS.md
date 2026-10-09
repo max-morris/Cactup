@@ -1472,6 +1472,39 @@ Also: `__has_include_next__` (GCC 9) is recognized; `__DATE__` and
 it). A's remark that the lookups before the compile could run while the
 compiler does is left for later.
 
+### M3a, round 4 (on `5bbd724`): BLOCKED by both
+
+Both re-ran every finding of rounds 1–3 in its reported form: all fixed.
+New, each reproduced end to end with a stale object served:
+
+1. **Comment proofs too loose** (A, B): a `*/` later on the line was taken
+   for the end of a comment with a `/*` or `//` between; a `//` or `*/`
+   inside a header name (`<a//b.h>`, `<a*/b.h>`) counted as a comment mark.
+   Fixed: nothing on the way may open a comment, and no quote, `<` or `>`
+   may stand where it could hide a comment mark.
+2. **A `<name>` in a macro made of its parameters** (A, B): `#define
+   HAVE(h) __has_include(<h>)`, and `__VA_ARGS__`; also the compilers'
+   dynamic macros (`__LINE__`, `__COUNTER__`, `__FILE__`, …), which `-dD`
+   does not print (A). Fixed: such a name falls back.
+3. **Search directories from elsewhere** (A, B): `CPATH`,
+   `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, and `-iprefix`/`-iwithprefix`/
+   `-iwithprefixbefore`, `-isysroot`. Fixed: the variables' entries are
+   watched as the flags' are (by the language); the flags fall back. Also
+   (A) `-Iinc/` is printed with its `/`: given and printed names are
+   compared with and without it.
+4. **Performance** (A, B): OpenMPI's `mpi_portable_platform.h` has
+   `(#include "omp.h" not acceptabe)` in a comment, which the rule against a
+   `#` passed to a macro sent to the compiler: 209 of 2782 C and C++ checks
+   of the gate on `5bbd724` (every Carpet compile), 41 of its 56 s of C++
+   checking. Fixed: the rule now asks what a forged marker needs after its
+   `#` (a number, blanks, a quote, on its line or the next).
+
+Measured by A on real compiles (quiet moments): the check after the compile
+takes 10.5 ms for C++ (108 ms as a second compiler run), 2 ms for C (18
+ms); the key grew 15 ms and 1.5 ms (the scan, `-dD`, the answers). The
+gate's 15.2% of compile time (16.9% on `a14f279`) carried the 209
+fallbacks and a host at load 30.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1632,8 +1665,8 @@ audited in `build-cache-b`, GCC, line directives, Clang; script and logs in
   file found beside its includer (Clang searches as for a plain include).
 - libstdc++ mentions `__has_include` in a comment (`#endif //
   __has_include`), glibc in a comment over two lines; Clang's own headers
-  ask `__has_include_next`. Comments are found by reading the file as the
-  compilers do, erring toward code; `__has_include` is answered for every
+  ask `__has_include_next`. (Comments were then found by reading the file
+  as the compilers do; round 3 gave that up.) `__has_include` is answered for every
   directory of the search list and every directory of a file read, which
   answers `__has_include_next` too.
 - Looking at every place a compiler tries took a median 4965 system calls

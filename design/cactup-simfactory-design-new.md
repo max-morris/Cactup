@@ -5105,12 +5105,18 @@ telling code from comments and literals**: what the scan looks for counts
 wherever it stands, so no misreading of a file can hide anything from it (a
 `__has_include` in a comment makes one lookup more), with lines spliced by a
 backslash joined first; it takes a use for a comment only where its own line
-proves one. What macros make is read from the run's own `-dD` output, which
+proves one (after a `//`, after a `/*` not closed since, or before a `*/`
+with no `/*` before it on the line, and nothing on the way that could hold
+a comment mark without being one: a quote, a `<` or `>` of a header name, a
+`//` or `/*` between). What macros make is read from the run's own `-dD` output, which
 is the compiler's reading: an alias of `__has_include`, a `#` in an
 object-like macro, and every name defined (the compilers' own among them).
 A `<name>` that is not written right on an `#if` or `#elif` line (in a
 macro, or in a macro's argument) is one the compilers expand macros in: it
-is followed only while no word in it is a macro. For gfortran (§18.10) the
+is followed only while no word in it is a macro, a parameter of the macro
+it stands in, `__VA_ARGS__`, or written like the compilers' own dynamic
+macros (`__LINE__`, `__COUNTER__`, `__FILE__`: two underscores at each
+end), which `-dD` does not show. For gfortran (§18.10) the
 places the compile passes over before each included file must hold nothing,
 nor may a module file appear named like a module gfortran has built in
 (`iso_c_binding`, `iso_fortran_env`: a `use` that does not say `intrinsic`
@@ -5128,15 +5134,20 @@ saw the clock move on, and so did the compile; older compilers ignore
 `SOURCE_DATE_EPOCH`); what could write a line the reader of the output
 takes for the compiler's own line marker: a line marker given in a source
 (`# 12 "file" 2`, also with a comment after its `#`), a `#` passed to a
-macro (after `(` or `,` outside a directive), a `#` in an object-like
+macro (after `(` or `,` outside a directive, with a number, blanks and a
+quote after it on its line or the next, as a marker has), a `#` in an
+object-like
 macro, a line marker that returns to another file than the one the output
 was reading; `#import`; a framework directory or a header map; a
 directory the compiler dropped as the same as another under another name; a
 lookup that does not lead where the compiler went; a file entered that no
 `#include` names (GCC's own `stdc-predef.h` aside, looked for as
 `<stdc-predef.h>` whether found or not, unless `-ffreestanding` or
-`-nostdinc` keeps GCC from reading it). Every directory the compile names
-(`-I`, `-iquote`, `-isystem`, `-idirafter`) that is in neither search list
+`-nostdinc` keeps GCC from reading it); `-iprefix` and its
+`-iwithprefix…`, a sysroot. Every directory the compile names (`-I`,
+`-iquote`, `-isystem`, `-idirafter`, and the entries of `CPATH` and of
+`C_INCLUDE_PATH` or `CPLUS_INCLUDE_PATH` by the language) that is in
+neither search list
 must not be a directory after the compile either (it was nonexistent, or
 no directory, which GCC says only in a warning that flags can hide); one
 that is a directory already was searched under another name, and the check

@@ -352,7 +352,7 @@ impl Looker {
                     })
                     .collect::<Option<HashMap<_, _>>>()
                     .map(|names| Listing {
-                        gch: names.keys().any(|name| name.ends_with(b".gch")),
+                        gch: names.keys().any(|name| name.to_ascii_lowercase().ends_with(b".gch")),
                         folded: names.keys().map(|name| name.to_ascii_lowercase()).collect(),
                         unfolded: names.keys().any(|name| !name.is_ascii()),
                         names,
@@ -381,33 +381,61 @@ fn resolved(path: &[u8]) -> String {
 pub struct Given {
     all: Vec<Vec<u8>>,
     user: Vec<Vec<u8>>,
+    /// A flag that makes directories this does not work out (`-iprefix`
+    /// and its `-iwithprefix…`, a sysroot).
+    unfollowed: Option<String>,
 }
 
 impl Given {
-    pub fn from_args(args: &[std::ffi::OsString]) -> Self {
+    /// From a compile's arguments, and the variables GCC and Clang read for
+    /// it: `CPATH` (as `-I`), and `C_INCLUDE_PATH` or `CPLUS_INCLUDE_PATH`
+    /// by the language (as `-isystem`), where an empty entry is the working
+    /// directory.
+    pub fn from_args(args: &[std::ffi::OsString], cxx: bool) -> Self {
         let mut given = Self::default();
         let mut args = args.iter().map(|arg| arg.as_bytes());
         while let Some(arg) = args.next() {
+            for flag in [&b"-iprefix"[..], b"-iwithprefix", b"-isysroot", b"--sysroot"] {
+                if arg.starts_with(flag) {
+                    given.unfollowed = Some(format!("{} is given", String::from_utf8_lossy(flag)));
+                }
+            }
             for (flag, user) in [(&b"-I"[..], true), (b"-iquote", true), (b"-isystem", false), (b"-idirafter", false)] {
                 let Some(joined) = arg.strip_prefix(flag) else { continue };
-                // `-isystem` is not `-I` with "system" joined to it.
-                if flag == b"-I" && arg.starts_with(b"-iquote") {
-                    continue;
-                }
                 let dir = match joined.is_empty() {
                     true => args.next().unwrap_or_default(),
                     false => joined,
                 };
-                // As the compilers print it: no trailing `/` (but `/`).
-                let len = dir.iter().rposition(|b| *b != b'/').map_or(dir.len().min(1), |at| at + 1);
-                given.all.push(dir[..len].to_vec());
-                if user {
-                    given.user.push(dir[..len].to_vec());
-                }
+                given.add(dir, user);
                 break;
             }
         }
+        let language = if cxx { "CPLUS_INCLUDE_PATH" } else { "C_INCLUDE_PATH" };
+        for (variable, user) in [("CPATH", true), (language, false)] {
+            if let Some(value) = std::env::var_os(variable) {
+                for dir in value.as_bytes().split(|b| *b == b':') {
+                    given.add(if dir.is_empty() { b"." } else { dir }, user);
+                }
+            }
+        }
         given
+    }
+
+    fn add(&mut self, dir: &[u8], user: bool) {
+        self.all.push(dir.to_vec());
+        if user {
+            self.user.push(dir.to_vec());
+        }
+    }
+
+    /// Is `listed`, as a search list prints it, the directory `dir` given
+    /// (with or without a trailing `/`)?
+    fn same(dir: &[u8], listed: &[u8]) -> bool {
+        let bare = |name: &[u8]| -> Vec<u8> {
+            let len = name.iter().rposition(|b| *b != b'/').map_or(name.len().min(1), |at| at + 1);
+            name[..len].to_vec()
+        };
+        bare(dir) == bare(listed)
     }
 }
 
@@ -700,11 +728,27 @@ pub fn scan(bytes: &[u8], scan: &mut Scan) -> Result<(), String> {
             if after.strip_prefix(b"embed").is_some_and(|rest| !rest.first().is_some_and(|b| ident(*b))) {
                 return refuse("#embed");
             }
-        } else if !directive_line(bytes, at) && !after_line_comment(bytes, at) && matches!(before_blanks(bytes, at), Some(b'(' | b',')) {
-            return refuse("a # passed to a macro");
+        } else if !directive_line(bytes, at) && matches!(before_blanks(bytes, at), Some(b'(' | b',')) && marker_follows(bytes, at + len) {
+            return refuse("a # passed to a macro, with what a line marker has after it");
         }
     }
     probes(bytes, &mut scan.probes)
+}
+
+/// Does what follows `at`, on its line or the next (a macro's call can
+/// span them), have what a line marker has after its `#`: a number, blanks,
+/// a quote?
+fn marker_follows(bytes: &[u8], at: usize) -> bool {
+    let line_end = |from: usize| memchr::memchr(b'\n', &bytes[from..]).map_or(bytes.len(), |len| from + len);
+    let end = line_end(line_end(at).saturating_add(1).min(bytes.len()));
+    let text = &bytes[at..end];
+    text.iter().enumerate().any(|(i, b)| {
+        b.is_ascii_digit() && !(i > 0 && ident(text[i - 1])) && {
+            let digits = text[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+            let blanks = text[i + digits..].iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
+            blanks > 0 && text.get(i + digits + blanks) == Some(&b'"')
+        }
+    })
 }
 
 /// Can `b` be part of an identifier?
@@ -781,27 +825,33 @@ fn directive_line(bytes: &[u8], at: usize) -> bool {
 fn after_line_comment(bytes: &[u8], at: usize) -> bool {
     let line_start = bytes[..at].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
     let before = &bytes[line_start..at];
-    find(before, b"//").is_some_and(|slashes| {
-        !before[..slashes].iter().any(|b| matches!(b, b'"' | b'\'')) && find(&before[slashes..], b"*/").is_none()
-    })
+    find(before, b"//").is_some_and(|slashes| !named(&before[..slashes]) && find(&before[slashes..], b"*/").is_none())
+}
+
+/// Could `text` hold a literal or a header name, inside which `//`, `/*`
+/// and `*/` are no comment marks: a quote, or a `<`?
+fn named(text: &[u8]) -> bool {
+    text.iter().any(|b| matches!(b, b'"' | b'\'' | b'<' | b'>'))
 }
 
 /// Is `[start, end)` shown by its own line to be inside a comment: after a
-/// `//` (see [`after_line_comment`]), or before the `*/` that ends a block
-/// comment begun on a line before (no `/*` before it on the line, no quote
-/// between)?
+/// `//` (see [`after_line_comment`]); after a `/*` not closed since; or
+/// before the `*/` that ends a block comment begun on a line before (no
+/// `/*` before it on the line, nothing between that opens a comment). No
+/// quote or header name may stand where it could hide a comment mark.
 fn in_comment(bytes: &[u8], start: usize, end: usize) -> bool {
     let line_start = bytes[..start].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
     let line_end = memchr::memchr(b'\n', &bytes[end..]).map_or(bytes.len(), |len| end + len);
     let after = &bytes[end..line_end];
     let before = &bytes[line_start..start];
-    let quoted = |text: &[u8]| text.iter().any(|b| matches!(b, b'"' | b'\''));
-    // After a `/*` not closed since, with no quote before it on the line
-    // (inside a block comment either way).
-    let opened = before.windows(2).rposition(|w| w == b"/*").is_some_and(|open| !quoted(before) && find(&before[open..], b"*/").is_none());
-    after_line_comment(bytes, start)
-        || opened
-        || (find(before, b"/*").is_none() && find(after, b"*/").is_some_and(|close| !quoted(&after[..close])))
+    // After a `/*` not closed since, with no quote or header name before it
+    // on the line (inside a block comment either way).
+    let opened = before.windows(2).rposition(|w| w == b"/*").is_some_and(|open| !named(before) && find(&before[open..], b"*/").is_none());
+    let closed = find(after, b"*/").is_some_and(|close| {
+        let between = &after[..close];
+        !named(between) && find(between, b"/*").is_none() && find(between, b"//").is_none()
+    });
+    after_line_comment(bytes, start) || opened || (find(before, b"/*").is_none() && !named(before) && closed)
 }
 
 /// `bytes` with every line splice taken out: a backslash, blanks, and a
@@ -959,9 +1009,21 @@ pub fn macro_body(rest: &[u8], out: &mut Vec<Probe>) -> Result<(), String> {
             return refuse(&format!("{}", String::from_utf8_lossy(word)));
         }
     }
+    // A function-like macro's parameters, which its call replaces.
+    let params: Vec<&[u8]> = match function_like {
+        true => rest[name_len + 1..rest.len() - body.len()]
+            .split(|b| !ident(*b))
+            .filter(|word| !word.is_empty())
+            .chain([&b"__VA_ARGS__"[..], b"__VA_OPT__"])
+            .collect(),
+        false => Vec::new(),
+    };
     for (_, end) in has_includes(body) {
         let paren = skip_blanks(body, end);
         match (body.get(paren), body.get(paren + 1..).and_then(literal_name)) {
+            (Some(b'('), Some((true, spelling))) if spelling.split(|b| !ident(*b)).any(|word| params.contains(&word)) => {
+                return refuse("__has_include of a name made of its parameters");
+            }
             (Some(b'('), Some((angled, spelling))) => out.push(Probe { angled, spelling, expanded: angled }),
             _ => return refuse("__has_include used otherwise than on a name as written"),
         }
@@ -1018,12 +1080,16 @@ impl Lookups {
     /// gave) asked `probes`.
     pub fn new(said: &[u8], followed: Followed, mut probes: Vec<Probe>, files: &[Vec<u8>], gcc: bool, given: &Given) -> Result<Self, String> {
         let mut search = Search::from_verbose(said)?;
+        if let Some(why) = &given.unfollowed {
+            return Err(why.clone());
+        }
         // What the compile was given and the run left out: nonexistent, or
         // no directory (GCC says so in a warning that flags can hide). Each
         // must stay no directory. One that is a directory now was searched
         // under another name.
         for dir in &given.all {
-            if search.quote.contains(dir) || search.bracket.contains(dir) || search.absent.contains(dir) {
+            let listed = |list: &Vec<Vec<u8>>| list.iter().any(|listed| Given::same(dir, listed));
+            if listed(&search.quote) || listed(&search.bracket) || listed(&search.absent) {
                 continue;
             }
             match std::fs::metadata(Path::new(OsStr::from_bytes(dir))) {
@@ -1032,14 +1098,18 @@ impl Lookups {
             }
         }
         // A system directory: a bracket one not given by `-I`.
-        let system = search.quote.iter().map(|_| false).chain(search.bracket.iter().map(|dir| !given.user.contains(dir))).collect();
+        let system = search.quote.iter().map(|_| false).chain(search.bracket.iter().map(|dir| !given.user.iter().any(|user| Given::same(user, dir)))).collect();
         probes.extend(followed.probes);
         probes.sort();
         probes.dedup();
         // A `<name>` the compilers expand macros in names another header
         // if a word in it is a macro.
+        // The compilers' own dynamic macros (`__LINE__`, `__COUNTER__`,
+        // `__FILE__`, …) and `__VA_ARGS__` are no `-dD` names: a word
+        // written so is taken for a macro.
+        let dynamic = |word: &[u8]| word.len() > 4 && word.starts_with(b"__") && word.ends_with(b"__");
         for probe in probes.iter().filter(|probe| probe.expanded) {
-            if probe.spelling.split(|b| !ident(*b)).any(|word| followed.defined.contains(word)) {
+            if probe.spelling.split(|b| !ident(*b)).any(|word| followed.defined.contains(word) || dynamic(word)) {
                 return Err(format!("a __has_include in a macro asks for <{}>, a name with a macro in it", String::from_utf8_lossy(&probe.spelling)));
             }
         }
@@ -1292,6 +1362,15 @@ mod tests {
             b"/* a\n */ # 1 \"s.c\" 2\n",
             b"#define E(x) x\nE(#) 1 \"s.c\" 2\n",
             b"E( /* c */ %:) 1 \"s.c\" 2\n",
+            b"E(#\n) 1 \"s.c\" 2\n",
+            // What only looks like a comment.
+            b"#if __has_include(MACRO) /* c */\n",
+            b"#if __has_include(<y.h> /* c */)\n",
+            b"#if CALL(__has_include, <y.h>) /* c */\n",
+            b"#if __has_include(X) // see */\n",
+            b"#if __has_include(<a//b.h>) || __has_include(Y)\n",
+            b"#if __has_include(Y) || __has_include(<a*/b.h>)\n",
+            b"#if __has_include(<a/*b.h>) || __has_include(Y)\n",
         ] {
             assert!(scanned(odd).is_err(), "{}", String::from_utf8_lossy(odd));
         }
@@ -1299,6 +1378,7 @@ mod tests {
             &b"#define STR(x) #x\n#define CAT(a, b) a ## b\n#line 7 \"orig.c\"\n"[..],
             b"# define V(x) __attribute__ ((__visibility__ (#x)))\n",
             b"int weak; // #weak + (#shared != 0)\n",
+            b"/*\n * C99 (#include \"omp.h\" not acceptable)\n */\n",
             b"/* see issue #181 and tables.html#65 */\n",
             b"#endif // __has_include\n",
             b"/* a\n   __has_include argument (GCC PR 80005).  */\n",
@@ -1316,6 +1396,20 @@ mod tests {
         assert_eq!(expanded(b"#if defined(X) && __has_include(<x.h>)\n"), [false]);
     }
 
+    /// The directories a compile names, from its arguments; flags that
+    /// make others are not followed.
+    #[test]
+    fn reads_the_directories_a_compile_names() {
+        let args = |args: &[&str]| args.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let given = Given::from_args(&args(&["-Iinc/", "-I", "two", "-iquote", "q", "-isystem", "sys", "-idirafter", "late", "-include", "x.h"]), false);
+        assert!(given.all.starts_with(&[b"inc/".to_vec(), b"two".to_vec(), b"q".to_vec(), b"sys".to_vec(), b"late".to_vec()]));
+        assert!(given.user.starts_with(&[b"inc/".to_vec(), b"two".to_vec(), b"q".to_vec()]));
+        assert!(Given::same(b"inc/", b"inc") && Given::same(b"inc", b"inc/") && Given::same(b"/", b"/") && !Given::same(b"inc", b"inc2"));
+        for flag in ["-iprefix", "-iwithprefix", "-iwithprefixbefore", "-isysroot", "--sysroot=/x"] {
+            assert!(Given::from_args(&args(&[flag, "d"]), false).unfollowed.is_some(), "{flag}");
+        }
+    }
+
     /// What `-dD` printed of a macro is checked exactly.
     #[test]
     fn macros_are_read_as_the_run_printed_them() {
@@ -1327,6 +1421,9 @@ mod tests {
         assert!(body(b"STR(x) #x").is_ok());
         assert!(body(b"H __has_include").is_err());
         assert!(body(b"WHEN __DATE__").is_err());
+        assert!(body(b"HAVE(name) __has_include(<name.h>)").is_err(), "a parameter in the name");
+        assert!(body(b"HAVE(...) __has_include(<__VA_ARGS__>)").is_err());
+        assert!(body(b"HAVE(name) __has_include(<other.h>)").is_ok());
         let probes = body(b"_GLIBCXX_USE_TBB_PAR_BACKEND __has_include(<tbb/tbb.h>)").unwrap();
         assert_eq!(probes, [Probe { angled: true, spelling: b"tbb/tbb.h".to_vec(), expanded: true }]);
         let mut tracker = Tracker::default();
@@ -1339,6 +1436,12 @@ mod tests {
         let said = b"#include \"...\" search starts here:\n#include <...> search starts here:\n /usr/include\nEnd of search list.\n";
         let lookups = Lookups::new(said, followed, Vec::new(), &[], true, &Given::default());
         assert!(lookups.is_err_and(|why| why.contains("linux/version.h")), "a macro in a name the compiler expands");
+        // The compilers' dynamic macros are no `-dD` names.
+        let mut tracker = Tracker::default();
+        tracker.marker(b"s.c", false, false, false);
+        let expanded = Probe { angled: true, spelling: b"a/__LINE__.h".to_vec(), expanded: true };
+        let lookups = Lookups::new(said, tracker.finish(false).unwrap(), vec![expanded], &[], true, &Given::default());
+        assert!(lookups.is_err());
     }
 
     /// A line marker that returns elsewhere than to the file being read,
