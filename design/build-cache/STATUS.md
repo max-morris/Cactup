@@ -1424,7 +1424,11 @@ driver's own search, which is not repeated (stated in the spec); the key's
 own `__has_include` answers are not counted in `lookups`; the listing cost
 on a cluster filesystem is for M3b's decision. STATUS's figures of the
 smoke and Einstein Toolkit runs above are of `afa94e7`, before the round-1
-pasting rule.
+pasting rule. Reading each file as code cost 41 ms on the
+437 headers CarpetLib's `dh.cc` reads; `9efbb9f` reads as code only a file
+with something to look for (116 of them), from one byte that matters to the
+next: 7 ms, on a host loaded by other work. The smoke builds on `87bde6c`
+made every check by lookups, 0 wrong.
 
 ## Decisions
 
