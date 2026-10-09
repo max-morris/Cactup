@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **built** (`afa94e7`); Einstein Toolkit gate and review next |
+| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **built** (`46f4c8c`); Einstein Toolkit gate passed on `afa94e7`; review next |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so** on M3a's measured lookup cost |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1499,6 +1499,37 @@ median 7 ms for C (the key 18 ms), 31 ms for C++ (key 105 ms), nothing to
 speak of for gfortran; most of it is reading every file again (110 files
 for C, 330 for C++), which stays: it is what catches a file rewritten
 within the change-time tick of the key's reading.
+
+**The Einstein Toolkit on `afa94e7`** (`gate.sh`, logs and reports
+`*-afa94e7.*` in `~/tmp/build-cache-overhead/`): `et.toml` served in
+`build-cache`, 3376 published, audited in `build-cache-b`, 3375 checked, 0
+wrong; `et-ld.toml` served, 3376 published, audited, 3374 checked, 0 wrong;
+`clang.toml` served, 3376 published, audited, 3375 checked, 0 wrong. Every
+check of the three serve builds was made by lookups. The cost, summed over
+the all-miss `et.toml` build (fet attempts 0006 on `a14f279`, 0008 on
+`afa94e7`, 0009 on `b2f7c1d`; one run each, the host busy with other work
+during 0008 and 0009, as the compile times show):
+
+| | `a14f279` | `afa94e7` | `b2f7c1d` |
+|---|---|---|---|
+| Compiling | 1296 s | 1398 s | 1391 s |
+| Key | 112 s | 145 s | 129 s |
+| Check after the compile | 107 s | 51 s | 57 s |
+| C: key, check | 37 s, 36 s | 50 s, 27 s | 43 s, 31 s |
+| C++: key, check | 53 s, 52 s | 71 s, 23 s | 62 s, 26 s |
+| gfortran: key, check | 22 s, 19 s | 24 s, 0 s | 23 s, 0 s |
+
+(Storing, 17 s on `a14f279`, took 60 to 175 s on the later runs: a few
+publishes of 1 to 15 s each, on a host that had just rebooted and was
+writing a lot; the publishing code did not change, and `fetld` on
+`afa94e7` stored in 16 s.) What the key gained on `afa94e7` was the scan of
+every file read for `__has_include`, 13 ms on a CarpetLib compile (5.8 MB),
+now 1.1 ms (`b2f7c1d`, memchr). `46f4c8c` halves the pass before the
+compile (a name searched along the same directories is found once per
+pass): on real compiles, run in place, the check now takes 1.7 ms for a
+bindings file (29 files read), 3.5 ms for a thorn's C source (115), 11 ms
+for `CarpetLib/dh.cc` (384), most of it reading the files again. The
+key's `-dI` costs the preprocessor nothing (timed).
 
 The lookups a check makes are counted and timed in `events.jsonl`, and
 that cost on the Einstein Toolkit (here, and on a cluster's filesystem) is
