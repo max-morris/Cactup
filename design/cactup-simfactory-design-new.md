@@ -5108,15 +5108,20 @@ backslash joined first; it takes a use for a comment only where its own line
 proves one (after a `//`, after a `/*` not closed since, or before a `*/`
 with no `/*` before it on the line, and nothing on the way that could hold
 a comment mark without being one: a quote, a `<` or `>` of a header name, a
-`//` or `/*` between). What macros make is read from the run's own `-dD` output, which
+`//` or `/*` between; and no comment marks sharing a character, `/**/*`,
+which read one way from code and another from inside a comment). A byte
+order mark at the start of a file is a blank, as for the compilers. What macros make is read from the run's own `-dD` output, which
 is the compiler's reading: an alias of `__has_include`, a `#` in an
 object-like macro, and every name defined (the compilers' own among them).
-A `<name>` that is not written right on an `#if` or `#elif` line (in a
-macro, or in a macro's argument) is one the compilers expand macros in: it
+A `<name>` is one the compilers expand macros in unless it is written right
+on an `#if` or `#elif` line with nothing before it there but `defined` (and
+what it names), numbers, operators, and other `__has_include`s (a word that
+could be a macro could open a call around it, or make its `(`); such a name
 is followed only while no word in it is a macro, a parameter of the macro
-it stands in, `__VA_ARGS__`, or written like the compilers' own dynamic
-macros (`__LINE__`, `__COUNTER__`, `__FILE__`: two underscores at each
-end), which `-dD` does not show. For gfortran (§18.10) the
+it stands in, `__VA_ARGS__`, or a reserved word (`__x`, `_X`: the
+compilers' own macros, `__LINE__` and the built-in function-like
+`__has_attribute` among them, which `-dD` does not show). A name with
+blanks at either end falls back (one compiler keeps them, the other not). For gfortran (§18.10) the
 places the compile passes over before each included file must hold nothing,
 nor may a module file appear named like a module gfortran has built in
 (`iso_c_binding`, `iso_fortran_env`: a `use` that does not say `intrinsic`

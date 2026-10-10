@@ -375,6 +375,11 @@ fn resolved(path: &[u8]) -> String {
     hasher.hex()
 }
 
+/// How many entries the path `path` names (each one a lookup to resolve).
+fn path_entries(path: &[u8]) -> u64 {
+    Path::new(OsStr::from_bytes(path)).components().count() as u64
+}
+
 /// The directories a compile names for its search, from its arguments:
 /// all of them, and those given by `-I` or `-iquote` (no system ones).
 #[derive(Debug, Default)]
@@ -712,6 +717,8 @@ pub fn scan(bytes: &[u8], scan: &mut Scan) -> Result<(), String> {
         return refuse("a trigraph");
     }
     let bytes = &spliced(bytes)[..];
+    // A byte order mark the compilers pass over at the start of a file.
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     for word in [&b"__has_embed"[..], b"__TIMESTAMP__", b"__DATE__", b"__TIME__"] {
         if words(bytes, word).next().is_some() {
             return refuse(&format!("{}", String::from_utf8_lossy(word)));
@@ -842,6 +849,12 @@ fn named(text: &[u8]) -> bool {
 fn in_comment(bytes: &[u8], start: usize, end: usize) -> bool {
     let line_start = bytes[..start].iter().rposition(|b| *b == b'\n').map_or(0, |at| at + 1);
     let line_end = memchr::memchr(b'\n', &bytes[end..]).map_or(bytes.len(), |len| end + len);
+    // Comment marks that share a character (`/**/*`, `*/**/`, `/**//`) read
+    // one way from code and another from inside a comment: no proof.
+    let line = &bytes[line_start..line_end];
+    if [&b"/*/"[..], b"*/*", b"*//"].iter().any(|overlap| find(line, overlap).is_some()) {
+        return false;
+    }
     let after = &bytes[end..line_end];
     let before = &bytes[line_start..start];
     // After a `/*` not closed since, with no quote or header name before it
@@ -948,7 +961,9 @@ fn literal_name(inner: &[u8]) -> Option<(bool, Vec<u8>)> {
         _ => return None,
     };
     let len = inner[1..].iter().position(|b| *b == close || *b == b'\n')?;
-    if len == 0 || inner[1 + len] != close {
+    // Blanks at either end are kept by one compiler's reading and not the
+    // other's.
+    if len == 0 || inner[1 + len] != close || blank(&inner[1]) || blank(&inner[len]) {
         return None;
     }
     let tail = &inner[2 + len..];
@@ -967,25 +982,42 @@ fn written_on_if_line(bytes: &[u8], at: usize) -> bool {
     if !matches!(&bytes[name..name + word_len], b"if" | b"elif") || name + word_len > at {
         return false;
     }
-    // No macro's parentheses open around it: each `(` right after a word
-    // other than `defined` is one.
-    let mut open = Vec::new();
+    // Before it on the line, no word a macro could be (one could open a
+    // call around it, or make a `(` before it), and no comment where one
+    // could hide: only `defined`, numbers, operators, and `__has_include`s
+    // with the `<name>`s they ask of.
     let text = &bytes[name + word_len..at];
-    for (i, b) in text.iter().enumerate() {
-        match b {
-            b'(' => {
-                let before = trim_end(&text[..i]);
-                let word_len = before.iter().rev().take_while(|b| ident(**b)).count();
-                let word = &before[before.len() - word_len..];
-                open.push(!word.is_empty() && word != b"defined");
+    if find(text, b"/*").is_some() || find(text, b"//").is_some() {
+        return false;
+    }
+    let mut i = 0;
+    let mut last_word: &[u8] = b"";
+    while i < text.len() {
+        match text[i] {
+            b if ident(b) => {
+                let len = text[i..].iter().take_while(|b| ident(**b)).count();
+                let word = &text[i..i + len];
+                // `defined X` and `defined(X)` do not expand `X`.
+                let fine = word[0].is_ascii_digit() || word == b"defined" || word.starts_with(b"__has_include") || last_word == b"defined";
+                if !fine {
+                    return false;
+                }
+                last_word = word;
+                i += len;
             }
-            b')' => {
-                open.pop();
+            b'<' if last_word.starts_with(b"__has_include") && trim_end(&text[..i]).ends_with(b"(") => {
+                let Some(close) = text[i..].iter().position(|b| *b == b'>') else { return false };
+                last_word = b"";
+                i += close + 1;
             }
-            _ => {}
+            b' ' | b'\t' | b'(' => i += 1,
+            _ => {
+                last_word = b"";
+                i += 1;
+            }
         }
     }
-    !open.contains(&true)
+    true
 }
 
 /// Check what `-dD` printed of one macro, `#define <rest>`: the run's own
@@ -1107,7 +1139,10 @@ impl Lookups {
         // The compilers' own dynamic macros (`__LINE__`, `__COUNTER__`,
         // `__FILE__`, …) and `__VA_ARGS__` are no `-dD` names: a word
         // written so is taken for a macro.
-        let dynamic = |word: &[u8]| word.len() > 4 && word.starts_with(b"__") && word.ends_with(b"__");
+        // Reserved words (`__x`, `_X`): the compilers' own macros, built-in
+        // function-like ones too (`__has_attribute`), which `-dD` does not
+        // show.
+        let dynamic = |word: &[u8]| word.starts_with(b"__") || (word.first() == Some(&b'_') && word.get(1).is_some_and(u8::is_ascii_uppercase));
         for probe in probes.iter().filter(|probe| probe.expanded) {
             if probe.spelling.split(|b| !ident(*b)).any(|word| followed.defined.contains(word) || dynamic(word)) {
                 return Err(format!("a __has_include in a macro asks for <{}>, a name with a macro in it", String::from_utf8_lossy(&probe.spelling)));
@@ -1210,6 +1245,9 @@ impl Lookups {
                 _ => return Err(format!("the compiler found {} elsewhere than cactup would", String::from_utf8_lossy(&directive.spelling))),
             }
         }
+        // The physical paths worked out, and each path resolved through
+        // (one lookup per entry on the way).
+        self.stats += physical.iter().map(|(at, _, _)| 1 + found[*at].as_ref().map_or(0, |found| path_entries(&found.path))).sum::<u64>();
         self.expected = Some(found);
         self.physical = physical;
         Ok(())
@@ -1244,8 +1282,8 @@ impl Lookups {
         // A file named by its physical path must still be that file: a
         // symlink on the way to it may have been turned elsewhere.
         for (at, name, through) in &self.physical {
-            looker.stats += 1;
             let path = &found[*at].as_ref()?.path;
+            looker.stats += 1 + path_entries(path);
             (canonical(path).as_deref() == Some(name.as_slice()) && resolved(path) == *through).then_some(())?;
         }
         self.answer(map, looker).ok()
@@ -1371,6 +1409,15 @@ mod tests {
             b"#if __has_include(<a//b.h>) || __has_include(Y)\n",
             b"#if __has_include(Y) || __has_include(<a*/b.h>)\n",
             b"#if __has_include(<a/*b.h>) || __has_include(Y)\n",
+            // Comment marks that share a character.
+            b"#if 1 /**/* __has_include(HDR)\n",
+            b"#if __has_include(HDR) */**/1\n",
+            b"#if 1 /**// (1 + __has_include(HDR))\n",
+            // A byte order mark the compilers pass over.
+            b"\xEF\xBB\xBF#embed \"d.bin\"\n",
+            b"\xEF\xBB\xBF# 1 \"s.c\" 2\n",
+            // Blanks one compiler keeps in a name and the other does not.
+            b"#if __has_include(< x.h >)\n",
         ] {
             assert!(scanned(odd).is_err(), "{}", String::from_utf8_lossy(odd));
         }
@@ -1394,6 +1441,9 @@ mod tests {
         assert_eq!(expanded(b"#if __has_include(<x.h>) || (__has_include(<y.h>))\n"), [false, false]);
         assert_eq!(expanded(b"#if ID(__has_include(<x.h>))\n#  define X __has_include(<y.h>)\n"), [true, true]);
         assert_eq!(expanded(b"#if defined(X) && __has_include(<x.h>)\n"), [false]);
+        assert_eq!(expanded(b"# if __has_include (<linux/x.h>)\n#if defined __has_include && __has_include (<y.h>)\n"), [false, false]);
+        assert_eq!(expanded(b"#if CALL __has_include(<y.h>))\n#if ID /* c */ (__has_include(<z.h>))\n"), [true, true]);
+        assert_eq!(expanded(b"#if 1 + X && __has_include(<y.h>)\n"), [true]);
     }
 
     /// The directories a compile names, from its arguments; flags that
@@ -1442,6 +1492,11 @@ mod tests {
         let expanded = Probe { angled: true, spelling: b"a/__LINE__.h".to_vec(), expanded: true };
         let lookups = Lookups::new(said, tracker.finish(false).unwrap(), vec![expanded], &[], true, &Given::default());
         assert!(lookups.is_err());
+        // Nor the built-in function-like ones.
+        let mut tracker = Tracker::default();
+        tracker.marker(b"s.c", false, false, false);
+        let expanded = Probe { angled: true, spelling: b"__has_attribute(packed).h".to_vec(), expanded: true };
+        assert!(Lookups::new(said, tracker.finish(false).unwrap(), vec![expanded], &[], true, &Given::default()).is_err());
     }
 
     /// A line marker that returns elsewhere than to the file being read,

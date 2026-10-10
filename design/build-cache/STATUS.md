@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **built** (`46f4c8c`); Einstein Toolkit gate passed on `afa94e7`; review next |
+| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **in review** (round 6) |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so** on M3a's measured lookup cost |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1504,6 +1504,35 @@ takes 10.5 ms for C++ (108 ms as a second compiler run), 2 ms for C (18
 ms); the key grew 15 ms and 1.5 ms (the scan, `-dD`, the answers). The
 gate's 15.2% of compile time (16.9% on `a14f279`) carried the 209
 fallbacks and a host at load 30.
+
+### M3a, round 5 (on `14b144e`): A SIGN-OFF, B BLOCKED
+
+A re-ran every finding of rounds 1–4 (all fixed), found the model sound and
+no needless fallback (the Einstein Toolkit checks by lookups but for a
+trigraph source and `__DATE__`), and signed off. B, the same re-runs fixed,
+found four more ways to a stale object, each reproduced end to end:
+
+1. **Comment marks sharing a character** (`/**/*`, `*/**/`, `/**//`): the
+   proofs took the substrings for separate marks. Fixed: no proof on such a
+   line.
+2. **A built-in function-like macro in an expanded `<name>`**
+   (`__has_attribute(packed)`), which `-dD` does not show. Fixed: any
+   reserved word (`__x`, `_X`) in such a name falls back.
+3. **A name taken as written right on an `#if` line that the compilers
+   expand**: a macro making the `(` (`#define CALL ID(`), or a comment
+   between a macro's name and its `(`. Fixed: a name counts as written so
+   only with nothing before it on the line but `defined` and its operand,
+   numbers, operators and `__has_include`s, and no comment (glibc's `# if
+   __has_include (<linux/…>)` qualifies, as it must: `linux` is a macro).
+4. **A UTF-8 byte order mark** before `#embed` or a line marker. Fixed: a
+   leading one is a blank.
+
+Also from B: the physical-path work (`canonical`, the resolved entries) is
+counted in `lookups`; a name with blanks at either end falls back. Open for
+M3b's decision on a cluster: on NFS, directory listings and `open()` can be
+answered from different client caches, so a change made by another host
+during a compile might show to one and not the other (to measure, or to
+state).
 
 ## Decisions
 
