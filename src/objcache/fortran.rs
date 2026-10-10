@@ -219,9 +219,70 @@ pub struct Dependencies {
     pub inputs: Vec<PathBuf>,
     /// The module files written, by file name.
     pub modules: Vec<String>,
-    /// The header gfortran reads before the source, unasked, by the name
-    /// its `-v` gives (no search finds it).
+    /// What the driver found by searches of its own and gave the compiler
+    /// proper (its `-v` says).
+    pub driven: Driven,
+}
+
+/// What the gfortran driver finds by searching its own prefixes (its
+/// install directories, `GCC_EXEC_PREFIX`, `LIBRARY_PATH`, …) and gives the
+/// compiler proper, `f951`: the header read before the source, unasked
+/// (`-fpre-include=`), and the directory of the intrinsic modules
+/// (`-fintrinsic-modules-path`). (Whether it read a `specs` file too, it says
+/// itself: `key::flags_from_elsewhere`.)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Driven {
     pub pre_include: Option<PathBuf>,
+    pub intrinsic: Option<PathBuf>,
+}
+
+impl Driven {
+    /// Read from what the driver run with `-v` or `-###` wrote on stderr:
+    /// the command line of `f951` (quoted by `-###`, as `-v` quotes a word
+    /// with a blank in it).
+    fn from_driver(said: &[u8]) -> Self {
+        let said = String::from_utf8_lossy(said);
+        let words = |line: &str| -> Vec<String> {
+            let (mut words, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+            for c in line.chars() {
+                match c {
+                    '"' => {
+                        quoted = !quoted;
+                        any = true;
+                    }
+                    c if c.is_whitespace() && !quoted => {
+                        if any {
+                            words.push(std::mem::take(&mut word));
+                        }
+                        any = false;
+                    }
+                    c => {
+                        word.push(c);
+                        any = true;
+                    }
+                }
+            }
+            if any {
+                words.push(word);
+            }
+            words
+        };
+        let Some(line) = said.lines().map(words).find(|words| words.first().is_some_and(|program| program.ends_with("/f951"))) else {
+            return Self::default();
+        };
+        let mut driven = Self::default();
+        let mut words = line.iter();
+        while let Some(word) = words.next() {
+            if let Some(file) = word.strip_prefix("-fpre-include=") {
+                driven.pre_include = Some(PathBuf::from(file));
+            } else if word == "-fintrinsic-modules-path" {
+                driven.intrinsic = words.next().map(PathBuf::from);
+            } else if let Some(dir) = word.strip_prefix("-fintrinsic-modules-path=") {
+                driven.intrinsic = Some(PathBuf::from(dir));
+            }
+        }
+        driven
+    }
 }
 
 /// The state of a Fortran compile the cache keyed: kept for the compile and
@@ -243,8 +304,9 @@ pub struct Fortran {
     /// reads.
     source: PathBuf,
     /// Where the compile looks for a module file, in its order: its working
-    /// directory, the directory of the file it compiles, its `-I`
-    /// directories. All physical paths.
+    /// directory, the directory of the file it compiles (both physical
+    /// paths), its `-I` directories (as given: the compile resolves them when
+    /// it runs, and so is each looked at).
     module_dirs: Vec<PathBuf>,
     /// The compile's working directory, by its physical path.
     cwd: PathBuf,
@@ -266,11 +328,13 @@ pub struct Fortran {
 impl Fortran {
     /// Work out, right before the compile, where it looks for each file it
     /// includes (the directory of the file it compiles, then its `-I`
-    /// directories: gfortran looks there, also for a file included from an
-    /// included file, and nowhere else; tried), and so which places it
-    /// passes over first: those must hold nothing, now and after the
-    /// compile. Module files are checked by their order in
-    /// [`read_inputs`]. Where an included file cannot be placed so, the
+    /// directories, then the intrinsic modules' directory: gfortran looks
+    /// there, also for a file included from an included file, and not in the
+    /// including file's directory or the working directory; tried), and so
+    /// which places it passes over first: those must hold nothing, now and
+    /// after the compile. Module files are checked by their order in
+    /// [`read_inputs`], when the key is made and after the compile. Where an
+    /// included file cannot be placed so, or a place is not empty now, the
     /// check after the compile runs the dependency run again.
     pub fn before_compile(&mut self) {
         let Some(deps) = &self.deps else { return };
@@ -286,10 +350,12 @@ impl Fortran {
         let source_dir = self.source.parent().unwrap_or(Path::new("/")).to_owned();
         dirs.push(source_dir.clone());
         dirs.extend(self.include_dirs.iter().cloned());
+        dirs.extend(deps.driven.intrinsic.iter().cloned());
         let mut places = Vec::new();
         for input in &deps.inputs {
             let named_module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
-            if (named_module && is_gzip(input)) || deps.pre_include.as_deref() == Some(input.as_path()) {
+            if named_module && is_gzip(input) {
+                self.count += 1;
                 continue;
             }
             let mut placed = false;
@@ -298,7 +364,10 @@ impl Fortran {
                 placed = true;
                 places.extend(dirs[..at].iter().map(|before| before.join(spelling)));
             }
-            if !placed {
+            // The header the driver found for itself is not searched for
+            // here (the driver's search is repeated after the compile); also
+            // included by the source, it is placed like any other.
+            if !placed && deps.driven.pre_include.as_deref() != Some(input.as_path()) {
                 self.places = Err(format!("{} was found where the compile does not look", input.display()));
                 return;
             }
@@ -308,13 +377,12 @@ impl Fortran {
         // `intrinsic` takes it; tried): none may appear where it looks.
         for name in ["iso_c_binding.mod", "iso_fortran_env.mod"] {
             if !deps.inputs.iter().any(|input| input.file_name().is_some_and(|file| file == name)) {
-                places.extend(self.module_dirs.iter().map(|dir| dir.join(name)));
+                places.extend(self.module_dirs.iter().chain(&deps.driven.intrinsic).map(|dir| dir.join(name)));
             }
         }
         places.sort();
         places.dedup();
         self.count += places.len() as u64;
-        let empty = |place: &PathBuf| matches!(std::fs::symlink_metadata(place), Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory));
         self.places = match places.iter().find(|place| !empty(place)) {
             Some(place) => Err(format!("{} is where the compile looks first", place.display())),
             None => Ok(places),
@@ -384,7 +452,6 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     }
     // The dependency run runs elsewhere: a directory it is given by a
     // relative name would be another directory there.
-    let mut include_dirs = Vec::new();
     let mut given_dirs = Vec::new();
     let mut flags = compile.preprocess.iter();
     while let Some(flag) = flags.next() {
@@ -393,7 +460,6 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
             if dir.is_relative() {
                 bail!("an include directory is named by a relative path");
             }
-            include_dirs.push(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned()));
             given_dirs.push(dir.to_owned());
         }
     }
@@ -427,7 +493,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
         Some(renamed) if renamed.copy.is_some() => module_dirs.extend([renamed.copies(), source_dir.clone()]),
         _ => module_dirs.push(source_dir.clone()),
     }
-    module_dirs.extend(include_dirs);
+    module_dirs.extend(given_dirs.iter().cloned());
     let private = tempfile::Builder::new()
         .prefix(".fortran-")
         .tempdir_in(in_dir)
@@ -519,16 +585,25 @@ fn preprocessor_agrees(compiler: &Compiler, name: &OsStr, args: &[OsString], dir
     }
 }
 
+/// Is nothing at `place` (not even a dangling symlink)?
+fn empty(place: &PathBuf) -> bool {
+    matches!(std::fs::symlink_metadata(place), Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory))
+}
+
 /// Do the files `fortran`'s dependency run lists still say what they said
 /// (`files`, `seen`), and would the compile still find them? Where
 /// [`Fortran::before_compile`] worked out where the compile looks, the
-/// files are read again and those places looked at again; otherwise the
-/// dependency run runs again, and must list the same.
+/// files are read again, those places looked at again, and the driver's own
+/// searches repeated (`gfortran -###`, which runs no compiler: the same
+/// `specs` file or none, the same pre-included header and intrinsic module
+/// directory); otherwise the dependency run runs again, and must list the
+/// same.
 pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, fortran: &mut Fortran, files: &str, seen: &str) -> bool {
     if let (Ok(places), Some(deps)) = (&fortran.places, &fortran.deps) {
-        fortran.count += places.len() as u64;
-        let empty = places.iter().all(|place| matches!(std::fs::symlink_metadata(place), Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)));
-        return empty && read_inputs(deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen);
+        fortran.count += places.len() as u64 + 1;
+        return places.iter().all(empty)
+            && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == deps.driven)
+            && read_inputs(deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen);
     }
     let Ok(deps) = dependencies(compiler, name, fortran) else { return false };
     deps.modules == fortran.modules
@@ -563,11 +638,14 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         // not an included file; any other is checked as one too.
         let named_module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
         if named_module {
-            let first = fortran.module_dirs.iter().find(|dir| {
+            // The first of its name where the compile looks, resolved now
+            // (an `-I` directory behind a symlink may lead elsewhere than
+            // when the key was made).
+            let first = fortran.module_dirs.iter().map(|dir| dir.join(file_name)).find(|candidate| {
                 fortran.module_lookups.set(fortran.module_lookups.get() + 1);
-                dir.join(file_name).exists()
+                candidate.exists()
             });
-            if first.is_some_and(|dir| Some(dir.as_path()) != physical.parent()) {
+            if first.is_some_and(|first| std::fs::canonicalize(first).ok().as_ref() != Some(&physical)) {
                 bail!("the compile would find another module file of the name {} first", file_name.to_string_lossy());
             }
         }
@@ -651,17 +729,24 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
     key::flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &out.stderr).map_err(anyhow::Error::msg)?;
     let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copy.is_some()).map(Renamed::copies);
     let mut deps = parse_rule(&out.stdout, &fortran.source, copies.as_deref()).map_err(anyhow::Error::msg)?;
-    deps.pre_include = pre_include(&out.stderr);
+    deps.driven = Driven::from_driver(&out.stderr);
     Ok(deps)
 }
 
-/// The header gfortran's back end was told to read first
-/// (`-fpre-include=<file>` on its command line, which `-v` shows).
-fn pre_include(said: &[u8]) -> Option<PathBuf> {
-    let said = String::from_utf8_lossy(said);
-    let at = said.find("-fpre-include=")? + "-fpre-include=".len();
-    let name = said[at..].split_whitespace().next()?.trim_matches('"');
-    Some(PathBuf::from(name))
+/// What the driver alone says it would do for `fortran`'s dependency run
+/// (`-###`: its own searches, and no compiler run), after it has been asked
+/// whether it reads flags from a file of its own.
+fn driver_says(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Driven> {
+    let mut command = Command::new(&compiler.path);
+    let args = fortran.args.iter().map(|arg| if arg == "-v" { OsStr::new("-###") } else { arg.as_os_str() });
+    command.arg0(name).args(args).current_dir(fortran.private.path());
+    key::in_english(&mut command);
+    let out = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output().context("Failed to run the driver")?;
+    if !out.status.success() {
+        bail!("the driver failed ({})", out.status);
+    }
+    key::flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &out.stderr).map_err(anyhow::Error::msg)?;
+    Ok(Driven::from_driver(&out.stderr))
 }
 
 /// Read the rule a dependency run printed: `<targets>: <the source>
@@ -717,7 +802,7 @@ fn parse_rule(out: &[u8], compiled: &Path, copies: Option<&Path>) -> Result<Depe
     }
     inputs.sort();
     inputs.dedup();
-    Ok(Dependencies { inputs, modules, pre_include: None })
+    Ok(Dependencies { inputs, modules, driven: Driven::default() })
 }
 
 /// The sources of [`relocates`]' trial: a Cactus Fortran compile in
@@ -1191,6 +1276,68 @@ mod tests {
     /// The check after the compile, looked up before the compile, makes no
     /// dependency run, and still sees an included file or a module file
     /// that appeared where the compile looks first.
+    /// The driver's own findings are read from its `-v` and `-###` alike.
+    #[test]
+    fn reads_what_the_driver_gives_f951() {
+        let v = b"COLLECT_GCC_OPTIONS='-I' '/x -fpre-include=/fake.h' '-v'\n /usr/libexec/gcc/x86_64-linux-gnu/14/f951 s.f90 -quiet -v -fintrinsic-modules-path /usr/lib/gcc/x86_64-linux-gnu/14/finclude -fpre-include=/usr/include/finclude/math-vector-fortran.h\n";
+        let hashes = b"Using built-in specs.\n \"/usr/libexec/gcc/x86_64-linux-gnu/14/f951\" \"s.f90\" \"-fintrinsic-modules-path\" \"/usr/lib/gcc/x86_64-linux-gnu/14/finclude\" \"-fpre-include=/usr/include/finclude/math-vector-fortran.h\"\n";
+        let expected = Driven {
+            pre_include: Some(PathBuf::from("/usr/include/finclude/math-vector-fortran.h")),
+            intrinsic: Some(PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/14/finclude")),
+        };
+        assert_eq!(Driven::from_driver(v), expected, "not the options line");
+        assert_eq!(Driven::from_driver(hashes), expected);
+    }
+
+    /// A module file found through an `-I` directory that is a symlink:
+    /// turned elsewhere, where another module file of that name is, the
+    /// compile reads that one, and the check does not pass. And a file the
+    /// driver pre-includes, included by the source too, and a file of the
+    /// intrinsic modules' directory are placed like any other.
+    #[test]
+    fn the_check_resolves_include_directories_when_it_looks() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        let make_module = |dir: &Path, value: u32| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("m.f90"), format!("module m\n  integer, parameter :: w = {value}\nend module m\n")).unwrap();
+            let status = Command::new("gfortran").args(["-c", "-o", "/dev/null", "m.f90"]).current_dir(dir).status().unwrap();
+            assert!(status.success());
+        };
+        let (p1, p2, b) = (real.root.join("p1"), real.root.join("p2"), real.root.join("b"));
+        std::fs::create_dir_all(&p1).unwrap();
+        make_module(&p2.join("a"), 2);
+        make_module(&b, 3);
+        let link = real.root.join("link");
+        std::os::unix::fs::symlink(&p1, &link).unwrap();
+        std::fs::write(real.build.join("u.f90"), "subroutine u()\n  use m\n  print *, w\nend subroutine\n").unwrap();
+        let flags = [format!("-I{}", link.join("a").display()), format!("-I{}", b.display())];
+        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+        let mut keyed = real.key("u.f90", &flags).unwrap();
+        keyed.fortran.before_compile();
+        assert!(keyed.fortran.check_made().is_ok(), "{:?}", keyed.fortran.check_made());
+        let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
+        let mut check = |keyed: &mut Keyed| still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen);
+        assert!(check(&mut keyed));
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&p2, &link).unwrap();
+        assert!(!check(&mut keyed), "a module directory turned elsewhere passed the check");
+
+        let finclude = PathBuf::from(String::from_utf8(Command::new("gfortran").arg("-print-file-name=finclude").output().unwrap().stdout).unwrap().trim());
+        if !finclude.join("omp_lib.h").exists() {
+            return;
+        }
+        std::fs::write(real.build.join("o.f90"), "subroutine o()\n  include 'omp_lib.h'\nend subroutine\n").unwrap();
+        let mut keyed = real.key("o.f90", &[]).unwrap();
+        keyed.fortran.before_compile();
+        assert!(keyed.fortran.check_made().is_ok(), "an include from the intrinsic modules' directory is placed: {:?}", keyed.fortran.check_made());
+        assert!(check(&mut keyed));
+        std::fs::write(real.build.join("omp_lib.h"), "! found first\n").unwrap();
+        assert!(!check(&mut keyed), "an included file that appeared beside the source passed the check");
+    }
+
     #[test]
     fn the_check_after_the_compile_looks_where_the_compile_looks() {
         let Some(real) = Real::new() else {

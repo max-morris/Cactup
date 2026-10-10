@@ -5621,20 +5621,27 @@ keyed for every Fortran compile, and so are the `-I` directories (mapped).
 After the compile, what each file looked like must not have changed (§18.5),
 and nothing may have appeared where the compile looks before the place it
 found a file: gfortran looks for an included file, also one included from
-an included file, in the directory of the file it compiles and then in its
-`-I` directories (tried), and treats anything there as found (a directory
-there hangs it, tried); module files keep their order check; and no module
-file may appear named like a module gfortran has built in
-(`iso_c_binding`, `iso_fortran_env`: a `use` that does not say `intrinsic`
-takes a file of that name if it finds one, tried), where the compile looks
-for modules. All of these are looked at right before the compile and again
-after it, with no compiler run. Where an included file cannot be placed so,
-the dependency run runs again after the compile instead, and what it lists
-must be the same. Left, as for a second dependency run: a file that appears
-and is gone again while the compile runs. The header gfortran reads unasked
-(`-fpre-include=`, which its `-v` names) is where the driver's own search
-found it; that search is not repeated (a copy appearing earlier in the
-driver's prefixes would be read instead).
+an included file, in the directory of the file it compiles, then in its
+`-I` directories, then in the intrinsic modules' directory (tried; not in
+the including file's directory or the working directory), and treats
+anything there as found (a directory there hangs it, tried); no module file
+may appear named like a module gfortran has built in (`iso_c_binding`,
+`iso_fortran_env`: a `use` that does not say `intrinsic` takes a file of
+that name if it finds one, tried) where the compile looks for modules.
+These places are looked at right before the compile (one already taken
+sends the check to the dependency run) and again after it. Module files
+keep their order check, when the key is made and after the compile, along
+the `-I` directories as the compile names them, resolved when looked at (a
+directory behind a symlink turned elsewhere leads elsewhere). And the
+driver's own searches are repeated after the compile by the driver alone
+(`-###`, which runs no compiler): it must read the same `specs` file or
+none, and give the compiler proper the same pre-included header
+(`-fpre-include=`) and intrinsic modules' directory as the key's dependency
+run did; its prefixes include `LIBRARY_PATH`. No compiler runs for any of
+this. Where an included file cannot be placed so, the dependency run runs
+again after the compile instead, and what it lists must be the same. Left,
+as for a second dependency run: a file that appears and is gone again
+while the compile runs.
 
 **What a compile writes.** The object and its module files. An entry keeps
 all of them (§18.7). A hit puts back each module file whose bytes differ

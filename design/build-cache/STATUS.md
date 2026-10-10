@@ -1548,6 +1548,36 @@ gfortran: `feature/build-cache` takes back `a14f279`'s C and C++ path
 and C++ work stays on `feature/build-cache-m3a-cxx` (`d76f6a0`) with these
 findings open. Next: the review gate on the narrowed milestone.
 
+### M3a narrowed, round 7 (on `e67b55d`): BLOCKED by both
+
+Both found the include search model, submodules, the copy (decision 13)
+and the built-in modules sound, and the C and C++ path the same as at
+`0270b7d`; the Fortran check cost 9–18 ms summed over a whole Einstein
+Toolkit build (19 s at `a14f279`), with no fallback. Three findings, the
+same from both (all reproduced; B served stale objects end to end, 0 of
+50 at `a14f279`):
+
+1. **Module directories resolved when the key was made**: an `-I`
+   directory behind a symlink turned elsewhere led the compile to another
+   module file, and the order check (and the built-in places) still looked
+   along the old target. Fixed: the `-I` directories as the compile names
+   them, resolved when looked at; the first module file found is compared
+   with the one read by its physical path.
+2. **The driver's own searches**: its `specs` file, pre-included header and
+   intrinsic modules' directory, found along its prefixes (`LIBRARY_PATH`
+   among them), were caught by a second dependency run and not repeated.
+   Fixed (B's proposal): after the compile, the driver alone (`-###`, no
+   compiler run, about 1 ms) must read the same `specs` file or none and give
+   `f951` the same pre-included header and intrinsic directory; both read
+   from `f951`'s own command line (the first `-fpre-include=` of the `-v`
+   output could be one in `COLLECT_GCC_OPTIONS`).
+3. **A file included that is also the pre-included header** was never
+   placed. Fixed: placed like any other where it can be.
+
+Also: the intrinsic modules' directory is the last place an included file
+can come from (`include 'omp_lib.h'` no longer falls back); the spec says
+when the module order is checked; code tidied (one `empty`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
