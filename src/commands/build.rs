@@ -453,12 +453,20 @@ fn submit_impl(
     // compute node's own cactup has written this attempt's outcome into the
     // very `build.toml` a `store_meta` here would overwrite with our stale
     // copy.
+    //
+    // The callback itself can come that late, too: `sbatch --wait` writing
+    // into a pipe holds back even its "Submitted batch job" line until it
+    // exits (seen on Deep Bayou, also with `stdbuf -oL`), so the job id may
+    // only arrive once the build is over. So the callback records it into
+    // what is on disk now, not into our copy, and never drops an outcome the
+    // compute node has already written.
     if args.block && machine.meta.scheduler.blocking_submit.is_some() {
         let mut record = |job_id: &str| -> Res<()> {
-            attempt.meta.job_id = job_id.to_owned();
-            attempt.meta.submitted = true;
-            attempt.meta.timestamps.submitted = Some(Utc::now());
-            attempt.store_meta()?;
+            let mut fresh = BuildAttempt::open(&config_dir, attempt_id)?;
+            fresh.meta.job_id = job_id.to_owned();
+            fresh.meta.submitted = true;
+            fresh.meta.timestamps.submitted.get_or_insert_with(Utc::now);
+            fresh.store_meta()?;
             println!("Submitted build of {} as job {}", name.bold(), job_id.bold());
             Ok(())
         };
@@ -1678,6 +1686,43 @@ mod tests {
         // the queued job named on disk.
         assert!(attempt.meta.submitted);
         assert!(attempt.meta.timestamps.submitted.is_some());
+    }
+
+    /// `sbatch --wait` writing into a pipe can hold back its "Submitted batch
+    /// job" line until the job is over, so the job id may only reach the
+    /// callback after the compute node has recorded the build's outcome.
+    /// Recording the job id must not erase that outcome. The fake
+    /// `blocking-submit` plays both parts: it writes the outcome the way the
+    /// compute node would, and only then reports the job id.
+    #[test]
+    fn a_late_job_id_keeps_the_outcome_the_compute_node_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let mut machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            false,
+        );
+        machine.meta.scheduler.blocking_submit = Some(
+            "printf '\\n[outcome]\\ncomplete = true\\n' >> @CONFIG_DIR@/.cactup-builds/0000/build.toml && \
+             echo [JOB-LATE@ATTEMPT_ID@]"
+                .to_owned(),
+        );
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let db = Database::new();
+
+        let mut args = submit_args("sim", bare_topology());
+        args.block = true;
+        submit_impl(&inst, &machine, &db, &args, Some("h")).unwrap();
+
+        let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
+        assert_eq!(attempt.meta.job_id, "JOB-LATE0");
+        assert!(attempt.meta.submitted);
+        let outcome = attempt.meta.outcome.as_ref().expect("the recorded outcome survived the late job id");
+        assert!(outcome.complete);
     }
 
     /// Without the key, `--block` is not a different submission — it is the
