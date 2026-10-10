@@ -4911,18 +4911,28 @@ fixed parts, so that the key does not change by accident:
   what the driver says of itself (`--version` without the installation
   directory, and for GCC its built-in specs and target). Not its path and
   not its modification time. The identity is worked out once for a build
-  attempt and remembered with what it was computed from: the files, and
-  every place searched and passed over before each was found, which must
-  go on holding nothing (or what it held) for the next compile to reuse it
-  (tried: an assembler that appeared first on `PATH` mid-build assembled
-  objects stored under the real one's identity). For GCC's programs, the
-  places it says it looks (`-print-search-dirs`), then `PATH`'s for a
-  program it leaves to `PATH` (the assembler); for libraries, the places
-  the loader says it tried (glibc's `LD_DEBUG=libs`), a directory on its
-  search path that is not there (it is not tried again for the next
-  library), and its cache file. A relative place is looked at from each
-  compile's own working directory, and a library found by a relative name
-  rules the compiler out. What still leads the driver elsewhere from one
+  attempt and remembered with what it was computed from: the files (by
+  their physical paths and by the names they were found by, which a link
+  turned elsewhere leads elsewhere from), and the places searched and
+  passed over before each was found, which must go on holding nothing (or
+  what they held) for the next compile to reuse it; and it is worked out
+  again after the compile, before what it made is stored, and must be the
+  same (tried: an assembler that appeared first on `PATH` mid-build, also
+  while a compile ran, assembled objects stored under the real one's
+  identity). For GCC's programs, the places it says it looks
+  (`-print-search-dirs`; none for an assembler it was built to run,
+  `--with-as`), then `PATH`'s for a program it leaves to `PATH` (the
+  assembler); for libraries, the places the loader says it tried (glibc's
+  `LD_DEBUG=libs`, said where cactup reads it whatever `LD_DEBUG_OUTPUT`
+  says), each entry of its search paths that is not there or is no
+  directory (it is not tried again for the next library), a library
+  preloaded by its path that is not there, and its cache file. A relative
+  place is looked at from each compile's own working directory; a library,
+  or a program the driver runs, found by a relative name rules the
+  compiler out. Left: what appears during a compile and is gone again
+  after it, a preload list the system keeps (`/etc/ld.so.preload`), the
+  loader's tunables, and the character-set converters a compile that
+  converts loads (`GCONV_PATH`). What still leads the driver elsewhere from one
   directory to the next keeps the compile out of the cache: an entry of
   `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute path (an empty
   one is the working directory), a library preloaded by a relative path,

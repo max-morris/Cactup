@@ -1728,6 +1728,42 @@ Left, non-blocking: a place empty right before the compile, taken during
 it and empty again after (§18.10's stated limit); the reason a whole build
 was refused is only in `cactup cache report` and `events.jsonl`.
 
+### After M3a, review 2 (on `431d392`): BLOCKED by both
+
+Both re-ran every earlier reproduction (all closed) and confirmed the
+loader model against what `LD_DEBUG=libs` prints (the cache hit has its
+own try line; a missing directory is listed only once). Found, all run
+end to end with a wrong object served, all but one open at `6ba57f8` too:
+- Both: the identity was checked only when the key was made; an assembler
+  appearing (or replaced, as an upgrade does) while a compile ran
+  assembled what was stored. Fixed: the identity is worked out again after
+  the compile, before storing, and must be the same (cheap while what it
+  watches holds; only a miss pays).
+- A (B non-blocking): a program the driver runs found through a relative
+  `PATH` entry was remembered by its absolute path and reused from other
+  directories; reopened by review 1's narrowing. Fixed: it rules the
+  compiler out, as a library found so does.
+- A: a link at the place found, turned elsewhere, was not seen (only the
+  physical file was watched). Fixed: the names as found are watched too
+  (the driver, its programs, the libraries).
+- A, B: the loader stops trying an entry that is no directory; with
+  `LD_DEBUG_OUTPUT` set the loader's report went to files (and those were
+  left behind); a library preloaded by an absolute path that is not there
+  is loaded once it is. Fixed: such an entry is watched, the variable is
+  removed for the probe, and missing preloads are watched.
+- B (regression): a GCC built `--with-as` names an assembler outside its
+  search directories, and was refused; accepted again, with nothing before
+  it to watch.
+
+Also: the watched places are deduplicated (A measured 610 with 25 extra
+`PATH` and 15 `LD_LIBRARY_PATH` directories, about 2 ms a compile on a
+local disk; half after deduplication); "not an absolute path". The
+compiler part of every key changed with review 1 (the loader and preloaded
+libraries are hashed now), so entries stored by earlier binaries are
+misses. Left, stated in the spec: what appears during a compile and is
+gone after, `/etc/ld.so.preload`, `GLIBC_TUNABLES`, `GCONV_PATH`, a Clang
+configuration file added mid-attempt.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

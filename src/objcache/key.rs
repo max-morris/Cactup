@@ -286,6 +286,9 @@ pub struct Keyed {
     pub text_bytes: u64,
     pub files: usize,
     name: OsString,
+    /// Where the compiler's identity is remembered, for the check after the
+    /// compile.
+    cc_dir: PathBuf,
     map: Option<PathMap>,
     /// What the files looked like when they were read for the key.
     seen: String,
@@ -402,6 +405,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
             text_bytes: read.text_bytes,
             files: read.count,
             name,
+            cc_dir: cc_dir.to_owned(),
             map,
             seen: read.seen,
             depend: None,
@@ -423,7 +427,8 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
         text: read.text,
         files: read.files,
     };
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, map, seen: read.seen, depend, fortran: None })
+    let cc_dir = cc_dir.to_owned();
+    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, cc_dir, map, seen: read.seen, depend, fortran: None })
 }
 
 /// The dependency flags of `compile` for the key's preprocessor run, if it
@@ -486,6 +491,12 @@ impl Keyed {
     /// compile looks, the files are read again and those places looked at
     /// again; otherwise the dependency run runs again (§18.10).
     pub fn still_holds(&mut self) -> bool {
+        // The compiler too: an assembler that appeared on `PATH` while the
+        // compile ran assembled it (tried). Its identity again, cheap while
+        // nothing it watches changed, and it must be the same one.
+        if identity::identify(&self.cc_dir, &self.name).ok().as_ref() != Some(&self.compiler) {
+            return false;
+        }
         if let Some(fortran) = &mut self.fortran {
             return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
         }
@@ -1090,7 +1101,7 @@ fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Optio
         }
     }
     if let Some(variable) = variables.into_iter().find(|variable| relative_entry(variable)) {
-        return Some(format!("{variable} has an entry that is no absolute path (an empty one is the working directory)"));
+        return Some(format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"));
     }
     // A preloaded library named without a `/` is searched for, as any other.
     let relative_file = |entry: &[u8]| entry.contains(&b'/') && !entry.starts_with(b"/");
