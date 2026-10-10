@@ -437,6 +437,7 @@ fn generate_mdb_meta_html(model: &DocModel) -> Result<String> {
 fn generate_mdb_optionlist_html(model: &DocModel) -> Result<String> {
     let mut html = String::new();
     generate_mdb_table_html(&model.mdb.optionlist_header, &mut html)?;
+    generate_mdb_table_html(&model.mdb.optionlist_runs_on, &mut html)?;
     html.push_str(
         r#"<p><code>[options]</code> holds raw Cactus <code>NAME = value</code> pairs (VERSION required, emitted first; strings/bools/ints only, no floats).</p>"#
     );

@@ -28,7 +28,7 @@ A change that would break those binaries starts a new generation instead.
 
 - **`mdb/GENERATION`** holds the current generation, a single integer.
   cactup reads it at build time, and `cactup --version` shows it
-  (`… mdb generation 1`).
+  (`… mdb generation 2`).
 - **`mdb/GENERATIONS.md`** is the changelog: one `## Generation N` entry per
   generation, saying what changed and how to bring an overlay machine
   forward. It is published with the MDB, so every user has a copy at
@@ -66,12 +66,12 @@ change can break one direction and not the other; either is enough.
 | Area | Breaking changes |
 |---|---|
 | `meta.toml` schema | Any key or table the MDB starts using that the generation's first binary lacks, **even an optional one**; renaming, removing or retyping a key; a new required key; a changed default or meaning; stricter validation |
-| Variants | The shape of a `[variants.*]` entry; the script-kind directories (`submitscripts/`, `runscripts/`, `buildsubmitscripts/`); how `.sh` and `.py` variants are found |
+| Scripts and flavors | The shape of a route in `[submitscripts]`, `[runscripts]` or `[buildsubmitscripts]`; the script-kind directories (`submitscripts/`, `runscripts/`, `buildsubmitscripts/`); how `.sh` and `.py` scripts are found; how flavors are discovered in `optionlists/` |
 | Templates | A new, renamed, removed or re-meant `@VAR@`; the `@ENV(…)@` and `@KNOB(…)@` forms; `@@`; how comments pass through; where the environment setup is placed |
 | `.py` scripts | The preamble and the calling protocol |
 | Re-invocations | The flags generated scripts pass back to cactup: `sim run --sim-dir/--restart-id`, `test run --test-dir/--results-id`, `build run --config-dir/--attempt-id` |
 | Discovery | What `hostname.regexp` and `discover.py` mean |
-| Optionlists | Keys in the `[cactup]` header (an older binary silently **ignores** an unknown one, so this needs judgment); the render and `VERSION` rules |
+| Optionlists | Keys in the `[cactup]` header or its `[cactup.runs-on]` table (both are closed, like `meta.toml`); the render and `VERSION` rules |
 | Universes | `wrapper-argv`, `wrapper` and `@COMMAND@` |
 
 **Not breaking:** adding a machine, or editing values in an existing one,
@@ -97,9 +97,8 @@ Two checks back this up. A unit test fails the build when
 `mdb-compat` CI job loads every machine in both directions of the rule (the
 MDB at your commit with the generation's first binary, and the generation's
 first MDB with your binary) and tells you to bump if either fails. It checks
-loading only: a changed template variable, a changed `.py` protocol, or a
-new optionlist header key that older binaries silently ignore still needs
-your judgment.
+loading only: a changed template variable or a changed `.py` protocol still
+needs your judgment.
 
 After a bump, users on older builds see the "moved to generation" warning
 until they update; an older build keeps working with the last MDB of its
@@ -112,7 +111,7 @@ generation it was written for in its `meta.toml`:
 
 ```toml
 [cactup]
-mdb-generation = 1
+mdb-generation = 2
 ```
 
 `cactup machine create` writes the current generation for you. A machine

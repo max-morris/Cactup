@@ -439,20 +439,19 @@ fn print_summary(machine: &Machine) -> Res<()> {
         ("runscripts", ScriptKind::Run),
         ("buildsubmitscripts", ScriptKind::BuildSubmit),
     ] {
-        let sv = meta.script_variants(kind);
-        // buildsubmitscript is empty on every machine until `build submit`
-        // lands (Part B groundwork) — an empty section would just be noise.
-        if sv.variants.is_empty() {
+        let sv = meta.scripts(kind);
+        // buildsubmitscripts is opt-in — an empty section would just be noise.
+        if sv.routes.is_empty() {
             continue;
         }
         let names: Vec<String> = sv
-            .variants
+            .routes
             .iter()
             .map(|(n, e)| {
                 format!(
-                    "{n}{}{}{}",
+                    "{n} ({}){}{}",
+                    e.queues.join(", "),
                     if e.test { " [test]" } else { "" },
-                    if e.default { " (default)" } else { "" },
                     // Build-universe compatibility list (§4.4), shown when present.
                     e.build_universes
                         .as_ref()
@@ -463,7 +462,14 @@ fn print_summary(machine: &Machine) -> Res<()> {
             .collect();
         println!("  {label}: {}", names.join(", "));
     }
-    println!("  flavors: {}", machine.flavors().join(", "));
+    // Mark the implicit pick, when there is one, as `build` would make it.
+    let implicit = machine.select_optionlist(None).ok();
+    let flavors: Vec<String> = machine
+        .flavors()?
+        .into_iter()
+        .map(|f| if implicit.as_deref() == Some(f.as_str()) { format!("{f} (default)") } else { f })
+        .collect();
+    println!("  flavors: {}", flavors.join(", "));
     if !meta.universes.is_empty() {
         println!("  universes: {}", meta.universes.keys().cloned().collect::<Vec<_>>().join(", "));
     }
@@ -474,7 +480,7 @@ fn print_summary(machine: &Machine) -> Res<()> {
 /// with their `[cactup]` header details (description, the queues the binary
 /// runs on, gpu/default markers, universe, per-flavor thorn toggles).
 fn show_flavors(machine: &Machine) -> Res<()> {
-    let listed = machine.flavors();
+    let listed = machine.flavors()?;
     println!(
         "{} ({:?} MDB) — optionlist flavors:",
         machine.name.bold(),
@@ -484,11 +490,11 @@ fn show_flavors(machine: &Machine) -> Res<()> {
         println!("  {}", "(none)".bright_red());
         return Ok(());
     }
-    for flavor in listed {
+    for flavor in &listed {
         let path = machine.optionlist_path(flavor);
         let header = optionlist::load_header(&path)
             .with_context(|| format!("failed to read optionlist header for flavor \"{flavor}\""))?;
-        let runs_on = header.runs_on();
+        let runs_on = header.runs_on.clone();
         print!("- {}", flavor.bold());
         if header.default {
             print!(" (default)");
@@ -502,6 +508,9 @@ fn show_flavors(machine: &Machine) -> Res<()> {
         }
         let queues = if runs_on.queues.is_empty() { "(any)".to_owned() } else { runs_on.queues.join(", ") };
         println!("    runs on queues: {queues}");
+        if let Some(queue) = &runs_on.default_queue {
+            println!("    default queue: {queue}");
+        }
         if let Some(universe) = &header.universe {
             println!("    build universe: {universe}");
         }

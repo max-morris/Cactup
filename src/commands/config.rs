@@ -153,7 +153,7 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
-    // Labelled for what it actually is: "flavor" would misdescribe a config
+    // Labeled for what it actually is: "flavor" would misdescribe a config
     // built from a --optionlist file, and — now that the choice is sticky —
     // that path is what the next bare rebuild will use, so it is worth naming.
     match &meta.optionlist_source {
@@ -189,6 +189,9 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     println!("  machine: {}", meta.machine);
     let queues = if meta.runs_on.queues.is_empty() { "any".to_owned() } else { meta.runs_on.queues.join(", ") };
     println!("  runs on: {queues}  gpu: {}", meta.runs_on.gpu);
+    if let Some(queue) = &meta.runs_on.default_queue {
+        println!("  default queue: {queue}");
+    }
     if let Some(universe) = &meta.universe {
         println!("  universe: {universe} (coerce-run-universe: {})", meta.coerce_run_universe);
     }

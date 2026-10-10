@@ -2,7 +2,7 @@
 //! variable set for a restart.
 
 use crate::args::TopologyFlags;
-use crate::build::ConfigMeta;
+use crate::build::{ConfigMeta, OptionlistSource};
 use crate::database::Database;
 use crate::mdb::optionlist::RunsOn;
 use crate::mdb::{Hardware, Machine, Phase, Queue, HOST_UNIVERSE};
@@ -26,7 +26,7 @@ pub struct Topology {
     pub queue: String,
     /// The scheduler-facing queue name (§4.2): the queue's `name` override
     /// when set, else `queue` itself. `@QUEUE@` resolves to this; everything
-    /// cactup-internal (variant selection, walltime ceilings, records) keys
+    /// cactup-internal (script selection, walltime ceilings, records) keys
     /// on `queue`.
     pub scheduler_queue: String,
     pub allocation: Option<String>,
@@ -52,8 +52,34 @@ pub struct BinaryFit {
 }
 
 impl BinaryFit {
+    /// The fit exactly as the config recorded it at build time.
     pub fn from_config(cfg: &ConfigMeta) -> Self {
         BinaryFit { universe: cfg.universe.clone(), runs_on: cfg.runs_on.clone(), label: cfg.name.clone() }
+    }
+
+    /// The fit a sim or test job uses: the recorded one, except that a
+    /// config built from one of the machine's flavors takes its
+    /// `default-queue` from that flavor's current header. Where a binary may
+    /// run (`queues`, `gpu`) is a fact about what was compiled, so it stays
+    /// as recorded; which of those queues a job lands on without `-q` is a
+    /// routing preference of the MDB, so an MDB edit reaches existing configs
+    /// without a rebuild. A config built from an `--optionlist` file, or from
+    /// a flavor the machine has since dropped, keeps its recorded one.
+    pub fn for_config(machine: &Machine, cfg: &ConfigMeta) -> Res<Self> {
+        let mut fit = BinaryFit::from_config(cfg);
+        if let OptionlistSource::Flavor(flavor) = &cfg.optionlist_source
+            && machine.flavors()?.contains(flavor)
+        {
+            let live = crate::mdb::optionlist::load_header(&machine.optionlist_path(flavor))?.runs_on.default_queue;
+            // Only a queue this binary was built to run on: an MDB edit that
+            // moved the flavor's `queues` and `default-queue` together must
+            // not steer a config built before it onto a queue its own record
+            // refuses. Such a config falls through to the machine default.
+            let recorded = &fit.runs_on.queues;
+            fit.runs_on.default_queue =
+                live.filter(|q| recorded.is_empty() || recorded.iter().any(|r| r == q));
+        }
+        Ok(fit)
     }
 }
 
@@ -72,23 +98,43 @@ pub fn resolve_topology(
 ) -> Res<Topology> {
     let m = &machine.name;
 
-    // The config's build universe gates which queues (and script variants) are
+    // The config's build universe gates which queues (and scripts) are
     // reachable (§4.4); configs recording none run in the implicit host.
     let cfg_universe = fit.map(|f| f.universe.as_deref().unwrap_or(HOST_UNIVERSE));
 
-    // Queue: -q → knob → machine default queue (for a binary, the default is
-    // chosen among the queues compatible with its build universe).
+    // Queue: -q → the `queue` knob → the flavor's runs-on default-queue →
+    // the machine default (for a binary, the machine default is chosen among
+    // the queues compatible with its build universe). The knob is the user's
+    // own standing choice, so it outranks what the MDB suggests — unless this
+    // binary may not run on the queue it names, in which case it is passed
+    // over with a note rather than failing every submit of a flavor it cannot
+    // serve (`--force-queue` keeps it regardless). Build jobs pass no fit and
+    // never read the `queue` knob: their queue comes from the `build-queue`
+    // knob or `[build].queue`, resolved by the caller into `flags.queue`.
+    let knob = fit.and_then(|_| db.knob("queue"));
+    let skipped_knob = match (knob, fit) {
+        (Some(k), Some(f)) if !force_queue && !binary_may_use(machine, f, k, flags.gpu) => Some(k),
+        _ => None,
+    };
     let queue = flags
         .queue
         .clone()
-        .or_else(|| db.knob("queue").map(str::to_owned))
+        .or_else(|| knob.filter(|_| skipped_knob.is_none()).map(str::to_owned))
+        .or_else(|| fit.and_then(|f| f.runs_on.default_queue.clone()))
         .or_else(|| machine.meta.default_queue(cfg_universe).map(str::to_owned))
         .ok_or_else(|| match cfg_universe {
             Some(u) => anyhow!(
-                "no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue compatible with build universe \"{u}\""
+                "no queue given (-q), no usable `queue` knob, and machine \"{m}\" has no default queue compatible with build universe \"{u}\""
             ),
-            None => anyhow!("no queue given (-q), no `queue` knob set, and machine \"{m}\" has no default queue"),
+            None => anyhow!("no queue given (-q) and machine \"{m}\" has no default queue"),
         })?;
+    if let (Some(k), None, Some(f)) = (skipped_knob, &flags.queue, fit) {
+        eprintln!(
+            "{} not using your `queue` knob (\"{k}\"): config \"{}\" may not run there; using \"{queue}\" instead",
+            "note:".yellow(),
+            f.label,
+        );
+    }
     let queue_def = machine.meta.queue(&queue)?;
     let gpu = flags.gpu || queue_def.gpu;
 
@@ -140,7 +186,7 @@ pub fn resolve_topology(
     // An explicit `--tasks` overrides the fill-the-node `TASKS`, so the derived
     // fill-the-node `TASKS_PER_NODE` has to be capped to keep the layout
     // self-consistent (`--tasks=1` must not report 2 tasks/node) — the same
-    // capping `apply_tasks_default` does for the script-variant default. A
+    // capping `apply_tasks_default` does for the script default. A
     // user-given `--tpn` stays authoritative. No-op in the default case, where
     // `tasks == nodes * tpn`.
     if flags.tpn.is_none() {
@@ -176,6 +222,19 @@ pub fn resolve_topology(
     })
 }
 
+/// Whether the binary `fit` describes may run on `queue` at all — the same
+/// facts `check_binary_fit` enforces, as a question: the queue exists, serves
+/// the build universe, is one of `runs-on.queues` (when listed), and is not a
+/// non-GPU context for a GPU binary.
+pub(crate) fn binary_may_use(machine: &Machine, fit: &BinaryFit, queue: &str, gpu_flag: bool) -> bool {
+    let Ok(def) = machine.meta.queue(queue) else { return false };
+    let universe = fit.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+    let allowed = &fit.runs_on.queues;
+    def.compatible_with(universe)
+        && (allowed.is_empty() || allowed.iter().any(|q| q == queue))
+        && !(fit.runs_on.gpu && !(gpu_flag || def.gpu))
+}
+
 /// The checks that keep a binary off a queue it cannot run on: the queue's
 /// build-universe gate (§4.4), the config's compatible-queues (D12), and the
 /// one-directional GPU cross-check (D12). Sim and test jobs only — a build
@@ -191,7 +250,7 @@ fn check_binary_fit(
     let cfg_universe = fit.universe.as_deref().unwrap_or(HOST_UNIVERSE);
 
     // Build-universe gate (§4.4): a queue restricted to other build universes
-    // cannot serve this config. Structural like variant compatibility — no
+    // cannot serve this config. Structural like script compatibility — no
     // --force-queue escape (unlike the compatible-queues/GPU guards below).
     if !queue_def.compatible_with(cfg_universe) {
         bail!(
@@ -307,7 +366,7 @@ fn check_gpus_per_node(per_task: u32, tpn: u32, hw: &Hardware, queue: &str) -> R
 }
 
 /// Apply the default-tasks chain to a resolved topology: the selected script
-/// variant's `tasks` setting (§4.2) first, then the caller's fallback (2 for
+/// script's `tasks` setting (§4.2) first, then the caller's fallback (2 for
 /// testsuite runs — §11.6), else keep the §8.5 fill-the-node value. Any
 /// explicit process-layout flag (-n/-T/-t) disables the whole chain; tpn is
 /// capped so the recorded layout stays self-consistent.
@@ -569,14 +628,12 @@ mod tests {
             max-gpus-per-node = 4
             default-gpus-per-task = 2
 
-            [variants.submitscript]
-            "default" = { queues = ["batch", "gpuq", "fillq", "gpucap", "gpudef"], default = true }
+            [submitscripts]
+            "default" = { queues = ["batch", "gpuq", "fillq", "gpucap", "gpudef"] }
 
-            [variants.runscript]
-            "default" = { queues = ["batch", "gpuq", "fillq", "gpucap", "gpudef"], default = true }
+            [runscripts]
+            "default" = { queues = ["batch", "gpuq", "fillq", "gpucap", "gpudef"] }
 
-            [variants.optionlist]
-            variants = ["default"]
             "#,
         )
         .unwrap();
@@ -640,6 +697,77 @@ mod tests {
         assert_eq!(topo.scheduler_queue, "batch");
         assert_eq!((topo.nodes, topo.cpus, topo.tpn, topo.tasks), (1, 1, 16, 16));
         assert_eq!(topo.total_wall, Walltime::parse("24:00:00").unwrap());
+    }
+
+    /// A flavor-built config takes `default-queue` from the flavor's current
+    /// header, not its record, so an MDB edit reaches it without a rebuild;
+    /// `queues`/`gpu` stay as recorded, and an `--optionlist` config keeps
+    /// its recorded default.
+    #[test]
+    fn default_queue_is_read_live_for_flavor_built_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("optionlists")).unwrap();
+        std::fs::write(
+            dir.path().join("optionlists/default.toml"),
+            "[cactup.runs-on]\nqueues = [\"fillq\"]\ndefault-queue = \"fillq\"\n[options]\nVERSION = \"1\"\n",
+        )
+        .unwrap();
+        let mut machine = test_machine();
+        machine.dir = dir.path().to_owned();
+        let mut cfg = test_cfg(false, &["batch", "fillq"]);
+        let fit = BinaryFit::for_config(&machine, &cfg).unwrap();
+        assert_eq!(fit.runs_on.default_queue.as_deref(), Some("fillq"));
+        assert_eq!(fit.runs_on.queues, ["batch", "fillq"], "where the binary may run stays as recorded");
+
+        // A live default the recorded binary may not use is ignored.
+        let mut narrow = test_cfg(false, &["batch"]);
+        narrow.runs_on.default_queue = None;
+        assert_eq!(BinaryFit::for_config(&machine, &narrow).unwrap().runs_on.default_queue, None);
+
+        cfg.optionlist_source = OptionlistSource::Optionlist("/x/my.cfg".to_owned());
+        cfg.runs_on.default_queue = Some("batch".to_owned());
+        let fit = BinaryFit::for_config(&machine, &cfg).unwrap();
+        assert_eq!(fit.runs_on.default_queue.as_deref(), Some("batch"));
+    }
+
+    /// The queue chain with a flavor default: `-q` → `queue` knob → the
+    /// flavor's `[cactup.runs-on] default-queue` → the machine default. A
+    /// CPU flavor confined to `fillq` lands there with no flag, where the
+    /// machine default (`batch`) would have been refused.
+    #[test]
+    fn queue_chain_knob_then_flavor_default_then_machine_default() {
+        let machine = test_machine();
+        let fit = |default_queue: Option<&str>| BinaryFit {
+            universe: None,
+            runs_on: RunsOn {
+                queues: vec!["fillq".to_owned(), "batch".to_owned()],
+                gpu: false,
+                default_queue: default_queue.map(str::to_owned),
+            },
+            label: "sim".to_owned(),
+        };
+        let queue = |f: &TopologyFlags, db: &Database, fit: &BinaryFit| {
+            resolve_topology(f, &machine, db, Some(fit), false).unwrap().queue
+        };
+        let db = Database::new();
+        assert_eq!(queue(&flags(), &db, &fit(Some("fillq"))), "fillq");
+        assert_eq!(queue(&flags(), &db, &fit(None)), "batch", "no flavor default: the machine's");
+        let mut f = flags();
+        f.queue = Some("batch".to_owned());
+        assert_eq!(queue(&f, &db, &fit(Some("fillq"))), "batch", "-q wins");
+        let mut db = Database::new();
+        db.set_knob("queue", "batch".to_owned());
+        assert_eq!(queue(&flags(), &db, &fit(Some("fillq"))), "batch", "a usable knob wins");
+        // A knob naming a queue this binary may not use is passed over for
+        // the flavor's default — unless --force-queue says to keep it.
+        db.set_knob("queue", "gpuq".to_owned());
+        assert_eq!(queue(&flags(), &db, &fit(Some("fillq"))), "fillq", "an unusable knob is skipped");
+        let forced = resolve_topology(&flags(), &machine, &db, Some(&fit(Some("fillq"))), true).unwrap();
+        assert_eq!(forced.queue, "gpuq", "--force-queue keeps the knob");
+        // A build job has no binary fit: no flavor default, and the `queue`
+        // knob (sims and tests only) is never read.
+        let topo = resolve_topology(&flags(), &machine, &db, None, false).unwrap();
+        assert_eq!(topo.queue, "batch");
     }
 
     #[test]
@@ -926,14 +1054,12 @@ mod tests {
             [queues.sing]
             build-universes = ["et-sing"]
 
-            [variants.submitscript]
+            [submitscripts]
             "s" = { queues = ["host-only", "sing"] }
 
-            [variants.runscript]
+            [runscripts]
             "r" = { queues = ["host-only", "sing"] }
 
-            [variants.optionlist]
-            variants = ["default"]
 
             [universes.et-sing]
             wrapper-argv = ["apptainer", "exec", "et.sif"]
@@ -1231,10 +1357,10 @@ mod tests {
                 crate::mdb::ScriptKind::Submit,
                 crate::mdb::ScriptKind::BuildSubmit,
             ] {
-                for variant in machine.meta.script_variants(kind).variants.keys() {
-                    let script = machine.script_path(kind, variant).unwrap();
+                for script_name in machine.meta.scripts(kind).routes.keys() {
+                    let script = machine.script_path(kind, script_name).unwrap();
                     if script.python {
-                        continue; // .py variants read globals, not @NAME@ tokens
+                        continue; // .py scripts read globals, not @NAME@ tokens
                     }
                     let body = std::fs::read_to_string(&script.path).unwrap();
                     if !body.contains("@GPUS_PER_TASK@") {
@@ -1260,7 +1386,7 @@ mod tests {
                         }
                     }
                     v.substitute(&body, Syntax::Shell).unwrap_or_else(|e| {
-                        panic!("{name} {kind:?} {variant} failed to substitute: {e:#}")
+                        panic!("{name} {kind:?} {script_name} failed to substitute: {e:#}")
                     });
                     checked += 1;
                 }

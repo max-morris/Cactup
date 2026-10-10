@@ -142,16 +142,13 @@ exec-host-pattern = "(.*)"
 gpu     = true
 default = true
 
-# One normal variant of each script plus the testsuite variant (design §11.2).
+# One normal script of each kind plus the testsuite one (design §11.2).
 # `tasks = 1` overrides the testsuite default of 2 ranks (§11.6): this node has
 # one GPU, so a second rank has no device to run on.
-[variants.submitscript]
-"default" = { queues = ["local"], default = true }
+[submitscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true, tasks = 1 }   # `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true }
+[runscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true, tasks = 1 }   # `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

@@ -1,5 +1,5 @@
 #!/bin/bash
-# et-juphub TEST runscript (variant "test") — marked test = true in meta.toml
+# et-juphub TEST runscript (script "test") — marked test = true in meta.toml
 # (design §11.2). Drives `make <config>-testsuite` and lets the Cactus flesh
 # harness launch each test (design §11.6); see mdb/mel5/runscripts/test.sh for
 # the annotated reference version.

@@ -103,7 +103,7 @@ force one behavior or the other. To customize the build:
 ```sh
 cactup build myconfig \
   --optimize           # Optimized (-O2) build
-  --variant cuda       # Use the CUDA variant (if available on your machine)
+  --flavor cuda        # Use the CUDA optionlist flavor (if your machine has one)
   -j 8                 # Parallel make with 8 jobs
 ```
 
@@ -120,7 +120,7 @@ cactup build myconfig --force       # Rebuild even if already built
 
 (Optimization is already on by default, so `--optimize` is rarely needed.)
 
-See [Building Configs](building-configs.html) for more details on variants, universes, and advanced options.
+See [Building Configs](building-configs.html) for more details on optionlist flavors, universes, and advanced options.
 
 ## Step 4: Run a simulation
 
@@ -170,7 +170,7 @@ See [Monitoring & Logs](monitoring.html) for more details.
 
 ## What's next?
 
-- **Explore build variants**: Some machines offer multiple optionlists (e.g., CPU vs GPU). See [Building Configs](building-configs.html).
+- **Explore optionlist flavors**: Some machines offer multiple optionlists (e.g., CPU vs GPU). See [Building Configs](building-configs.html).
 - **Learn about universes**: Advanced build environments (Singularity, module-loaded shells). See [Building Configs](building-configs.html).
 - **Run test suites**: Validate your config. See [Test Suites](test-suites.html).
 - **Set machine defaults**: Use the `knob` command to set allocation, queue, and other defaults for your machine — and to define custom knobs your parfiles can read with `@KNOB(name)@`. See [Running Simulations](running-simulations.html#knobs).

@@ -1,9 +1,9 @@
-# SuperMIC optionlist (variant "default"), ported from simfactory2
+# SuperMIC optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/smic-openmpi.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["checkpt"]
+[cactup.runs-on]
+queues = ["checkpt"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

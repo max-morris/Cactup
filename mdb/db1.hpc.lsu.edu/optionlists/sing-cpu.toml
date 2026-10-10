@@ -1,10 +1,8 @@
-# db1.hpc.lsu.edu optionlist (variant "sing-cpu"), ported from simfactory2
+# db1.hpc.lsu.edu optionlist (flavor "sing-cpu"), ported from simfactory2
 # mdb/optionlists/db-sing-cpu.cfg — the Singularity CPU (non-CUDA) Deep Bayou
 # build.
 
 [cactup]
-gpu               = false
-compatible-queues = ["gpu"]
 # CPU (non-CUDA) build: AMREX_ENABLE_CUDA = no, host g++ linker. Built inside
 # the et-sing-cpu universe (a non---nv Singularity wrapper). The run must NOT
 # be coerced into it: the sing runscript does its own per-rank
@@ -12,10 +10,14 @@ compatible-queues = ["gpu"]
 # config that still runs on [queues.gpu] (Deep Bayou's only real partition);
 # D12's guard is one-directional so that's fine. Routing to the "sing" run/
 # submit scripts comes from this config's build universe ("et-sing-cpu"),
-# matched against the `universes` list on the meta.toml script variants
+# matched against the `build-universes` list on the meta.toml scripts
 # (§4.8 Feature 1), not from a dedicated queue.
 universe            = "et-sing-cpu"
 coerce-run-universe = false
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu    = false
 
 [options]
 # Option list for the Einstein Toolkit

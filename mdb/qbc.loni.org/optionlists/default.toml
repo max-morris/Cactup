@@ -1,13 +1,15 @@
-# qbc.loni.org optionlist (variant "default"), ported from simfactory2
+# qbc.loni.org optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/db-sing-cpu.cfg.
 
 [cactup]
-gpu               = false
-compatible-queues = ["checkpt"]
 # Configs built with this optionlist are built inside the machine's et-sing
 # universe (§4.8), but the run must NOT be coerced into it: the runscript does
 # its own `srun … singularity exec` launching (§4.8's MPI boundary).
 coerce-run-universe = false
+
+[cactup.runs-on]
+queues = ["checkpt"]
+gpu    = false
 
 [options]
 # Option list for the Einstein Toolkit

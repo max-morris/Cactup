@@ -1,11 +1,11 @@
 +++
 title = "Building Configs"
-description = "Build Cactus configurations with variants, universes, and customized compiler settings"
+description = "Build Cactus configurations with optionlist flavors, universes, and customized compiler settings"
 +++
 
 # Building Cactus Configurations
 
-A Cactus **configuration** is a compiled Cactus executable built from your installation with specific thorns, compiler settings, and optionlist variant. This guide covers everything you need to know about building configs.
+A Cactus **configuration** is a compiled Cactus executable built from your installation with specific thorns, compiler settings, and optionlist flavor. This guide covers everything you need to know about building configs.
 
 ## Basic build
 
@@ -17,7 +17,7 @@ cactup build myconfig
 
 This creates a config named `myconfig` using:
 - The active Einstein Toolkit installation
-- The machine's default optionlist variant
+- The machine's default optionlist flavor
 - Default compiler flags: **optimized** (optimization is the one build flag that is on by default), no debugging, no profiling
 
 On most machines that's the whole story: `make` runs right there in your
@@ -69,7 +69,7 @@ get its job id back:
 cactup build submit myconfig --block
 ```
 
-Every other build flag — `--variant`, `--universe`, `--optimize`, `-j`, and
+Every other build flag — `--flavor`, `--universe`, `--optimize`, `-j`, and
 so on — works identically whether the build runs in the foreground or on the
 queue; the queue is a detail of *where* `make` runs, not of what gets built.
 `build submit` also accepts the same topology flags as `sim submit`/`sim
@@ -80,7 +80,14 @@ that `-j` still means `--make-jobs` here, not job name — use `-J`/`--job-name`
 if you need to set that. Any of the machine's queues can build any config: a
 CPU-only build may compile on a GPU partition and vice versa. Which queues the
 finished binary may *run* on is checked when you submit a simulation, not
-here.
+here, and `--flavor` only says what to build — the build job's script is
+picked by its queue.
+
+Without `-q`, a build goes to the queue named by your `build-queue` knob, if
+you set one (`cactup knob build-queue single`), else to the machine's own
+build queue, else to its default queue. The `queue` knob you may have set for
+simulations is never used for builds. A `build-queue` naming a queue this
+machine cannot queue a build on is passed over with a note.
 
 A queue-submitted build behaves like any other queued job: it can sit
 waiting for resources, and if you close your terminal or lose your
@@ -205,7 +212,7 @@ copies, rewritten on every build, so your edits there would be overwritten:
 - `cactup-thornlist.th` — cactup's processed copy, with the machine's
   `disabled-thorns`/`enabled-thorns` toggles applied. This is what cactup hands
   to Cactus. If your thornlist enables a thorn that the machine (or the
-  optionlist variant you're building) lists in `disabled-thorns`, the build
+  optionlist flavor you're building) lists in `disabled-thorns`, the build
   prints a yellow warning naming the thorn and which of the two disabled it —
   the thorn will *not* be built, and that warning is your only notice.
 - `ThornList` — Cactus's own copy of that file, made by its build system. This
@@ -336,53 +343,53 @@ cactup build myconfig --virtual-executable /path/to/cactus_myconfig
 
 This skips `configure` and `make` entirely, useful when the executable was built elsewhere. It's a plain file copy, not a build, so it's rejected together with `build submit` — and, for the same reason, with `--block`, which has nothing queued to wait for — combine it with `build run` (or the plain `cactup build` foreground form) instead.
 
-## Optionlist variants
+## Optionlist flavors
 
-Your machine may provide multiple **optionlist variants** — different compiler environments or configurations. For example:
+Your machine may provide multiple optionlists, called **flavors** — different compiler environments or configurations. For example:
 
 - `default` — CPU build
 - `cuda` — GPU/CUDA build
-- `intel` — Intel compiler variant
+- `intel` — Intel compiler build
 
-List available variants:
-
-```sh
-cactup machine show --variants
-```
-
-Build with a specific variant:
+List available flavors:
 
 ```sh
-cactup build myconfig --variant cuda
+cactup machine show --flavors
 ```
 
-If your machine has multiple variants, you must choose one explicitly (unless one is marked default). Each variant can have different compiler flags, GPU support, and compatible queues for job submission.
+Build with a specific flavor:
 
-The choice sticks. Once a config is built with `--variant cuda`, later rebuilds
-keep using `cuda` without the flag; you pass `--variant` again only to switch it
+```sh
+cactup build myconfig --flavor cuda
+```
+
+If your machine has multiple flavors, you must choose one explicitly (unless one is marked default). Each flavor can have different compiler flags and its own rules for where the binary may run (GPU support and the queues its simulations may be submitted to).
+
+The choice sticks. Once a config is built with `--flavor cuda`, later rebuilds
+keep using `cuda` without the flag; you pass `--flavor` again only to switch it
 to a different one — or `--optionlist` (below) to move the config off the
-machine's variants altogether. Editing that variant's optionlist in the machine
+machine's flavors altogether. Editing that flavor's optionlist in the machine
 definition is picked up by a plain `cactup build`, same as any other optionlist
 change.
 
 ### Building from your own optionlist
 
 `--optionlist` builds from a file of your own instead of one of the machine's
-variants — useful when you are porting a machine, chasing a compiler bug, or
+flavors — useful when you are porting a machine, chasing a compiler bug, or
 trying a flag that does not yet deserve to live in the MDB:
 
 ```sh
 cactup build myconfig --optionlist ~/my-experiment.cfg
 ```
 
-It replaces variant selection entirely, so it cannot be combined with
-`--variant`. Three file formats are accepted, detected automatically:
+It replaces flavor selection entirely, so it cannot be combined with
+`--flavor`. Three file formats are accepted, detected automatically:
 
 1. **A full optionlist**, exactly as the MDB writes them — a `[cactup]` header
    plus an `[options]` table. The header is honored just as it would be inside
-   the MDB: `gpu` and `compatible-queues` still gate which queues a simulation
-   built from it may be submitted to, `universe` still selects a build
-   environment, and the per-variant thorn toggles still apply. (`default` means
+   the MDB: its `[cactup.runs-on]` table (`queues` and `gpu`) still gates which
+   queues a simulation built from it may be submitted to, `universe` still
+   selects a build environment, and the per-flavor thorn toggles still apply. (`default` means
    nothing here — you named the file yourself — and is ignored.)
 2. **Just the options**, with or without the `[options]` header line:
 
@@ -425,7 +432,7 @@ cactup build myconfig                                    # rebuilds from it
 ```
 
 Passing `--optionlist` again with a different file re-points the config at that
-one instead. To go back to one of the machine's own variants, pass `--variant`,
+one instead. To go back to one of the machine's own flavors, pass `--flavor`,
 which clears the recorded file.
 
 > [!NOTE]
@@ -486,7 +493,7 @@ cactup config use myconfig
 ```
 
 `config show`/`config list` describe the **config** — what it's built from,
-its variant and flags, whether it's complete. For the **build attempt**
+its flavor, where its binary may run, its flags, whether it's complete. For the **build attempt**
 itself — whether one is currently queued or running, its job id, its output —
 use `cactup build show`/`cactup build list`/`cactup build log`, covered in
 [Monitoring & Logs](monitoring.html).
@@ -507,18 +514,18 @@ cactup config delete myconfig --force
 
 This removes the config but does not touch existing simulations (though they may become unable to run).
 
-## Understanding build variants and universes
+## Understanding flavors and universes
 
-**Variants** and **universes** allow machines to support diverse build environments without fragmenting the MDB (machine database). Here's how they work:
+**Flavors** and **universes** allow machines to support diverse build environments without fragmenting the MDB (machine database). Here's how they work:
 
-### Optionlist variants
+### Optionlist flavors
 
-An **optionlist** is a TOML file specifying compiler flags, optimization levels, and enabled thorns. A machine can have multiple variants:
+An **optionlist** is a TOML file specifying compiler flags, optimization levels, and enabled thorns. A machine can have several, called flavors:
 
-- Each variant has a name (`default`, `cuda`, etc.) and a description
-- You choose which variant when building with `--variant`
-- The variant determines the compiler environment and enabled features
-- Variants are configured per-machine in the machine definition
+- Each flavor has a name (`default`, `cuda`, etc.) and a description
+- You choose which flavor when building with `--flavor`
+- The flavor determines the compiler environment, enabled features, and which queues the binary may run on
+- Flavors are configured per-machine in the machine definition
 - `--optionlist <path>` bypasses them and builds from a file of your own instead
 
 ### Universes
@@ -532,17 +539,17 @@ A **universe** is an optional build wrapper (Singularity, modules, etc.):
 
 ### Common patterns
 
-**Single build environment**: Most machines have one optionlist variant and no universe wrappers. Just run:
+**Single build environment**: Most machines have one optionlist flavor and no universe wrappers. Just run:
 
 ```sh
 cactup build myconfig
 ```
 
-**GPU vs CPU**: Machines with both CPU and GPU queues often have two optionlist variants:
+**GPU vs CPU**: Machines with both CPU and GPU queues often have two optionlist flavors:
 
 ```sh
-cactup build cpu-config --variant default
-cactup build gpu-config --variant cuda
+cactup build cpu-config --flavor default
+cactup build gpu-config --flavor cuda
 ```
 
 **Container + native**: Some machines support both Singularity and native builds:
@@ -572,21 +579,21 @@ cactup build native-build --no-universe
 
 ## Troubleshooting
 
-**"Must specify --variant"**: Your machine has multiple optionlist variants. Use `cactup machine show --variants` to list them, then `--variant <name>`.
+**"has several optionlist flavors (…) and none is marked default = true; pick one with --flavor"**: Your machine has multiple optionlist flavors and none is the default. Use `cactup machine show --flavors` to list them, then `--flavor <name>`.
 
-**"Variant not found"**: Check the spelling with `cactup machine show --variants`.
+**"no optionlist flavor named \<name\> (known: …)"**: Check the spelling against the list in the message, or `cactup machine show --flavors`.
 
-**"was built with optionlist variant \<name\>, which machine \<m\> no longer has"**: this config records a variant the machine definition has since renamed or dropped, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--variant`, or build from your own file with `--optionlist`.
+**"was built with optionlist flavor \<name\>, which machine \<m\> no longer has"**: this config records a flavor the machine definition has since renamed or dropped, so a rebuild has nothing to build. The message lists what the machine does offer now — pick one with `--flavor`, or build from your own file with `--optionlist`.
 
 **"mixes quoted and unquoted values"**: an `--optionlist` file has to be written in one of the three accepted formats, not a blend of two. Either quote every string (the TOML forms) or quote none of them (the native `.cfg` form) — the message names the two lines that disagree.
 
-**"was built from optionlist \<path\>, which is no longer readable"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--variant` to switch to one of the machine's own.
+**"was built from optionlist \<path\>, which is no longer readable"**: the file you built this config from was moved or deleted, and the config has no snapshot to fall back on. Pass `--optionlist` with the file's new location, or `--flavor` to switch to one of the machine's own.
 
 **Build fails**: `cactup build show myconfig` reports the most recent attempt's outcome, and `cactup build log myconfig` shows its output. Both find the right attempt automatically — there's no build log path to remember (see "Where build output goes" above).
 
 **"Universe not found"**: If the machine defines optional universes, use `cactup machine show` to see available ones.
 
-**"cactup build submit is not possible on this machine"**: the machine needs both a `buildsubmitscript` variant and a scheduler `submit` command declared before it can queue a build — see [meta.toml Reference](../authors/meta-toml.html) or ask whoever ported the machine. `cactup build run` always works regardless.
+**"cactup build submit is not possible on this machine"**: the machine needs both a `[buildsubmitscripts]` route and a scheduler `submit` command declared before it can queue a build — see [meta.toml Reference](../authors/meta-toml.html) or ask whoever ported the machine. `cactup build run` always works regardless.
 
 **"--block waits for a queued build to finish, but this build runs in the foreground"**: `--block` only makes sense for a build that's going to the queue, and a bare `cactup build` resolved to the foreground instead — because you passed `--virtual-executable`, because the machine sets `[build].default-action = "run"`, or because it can't submit builds at all. The rest of the message names which one applies. Drop `--block`, or use `cactup build submit --block` on a machine that can queue the build. (`cactup build run --block` gets its own, blunter version of the same complaint: that command never queues anything.)
 

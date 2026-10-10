@@ -1,5 +1,5 @@
 #! /bin/bash
-# athena TEST submitscript (variant "test"), written 2026-09-29 as a copy of
+# athena TEST submitscript (script "test"), written 2026-09-29 as a copy of
 # mdb/et-juphub/submitscripts/test.sh: no batch system, serves both queues.
 # Marked test = true in meta.toml (design §11.2). Re-invokes cactup on the
 # "compute node" to run the testsuite; one-shot, no restart chaining (design

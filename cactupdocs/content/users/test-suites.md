@@ -49,11 +49,15 @@ Run with different topology (nodes, CPUs, GPU):
 cactup test run -n 2 --gpu -c 2     # 2 nodes, GPU, 2 CPUs per task
 ```
 
-Override the runscript variant:
+The queue decides which test scripts run, just as it does for simulations;
+to get different ones, choose a different queue with `-q`.
 
-```sh
-cactup test run --variant default    # Use a specific variant
-```
+Testsuites run only on queues the machine has a test script for. On any other
+queue, `test run`/`test submit` stops with an error listing the queues your
+config can run its testsuite on instead, for example
+`no test run script serves queue "bigmem"; config "sim" can run its testsuite
+on gpu2, gpu4; pick one of those with -q`. If there are none, the error says
+the machine cannot run that config's testsuite at all.
 
 Override the universe:
 
@@ -76,7 +80,7 @@ This requires a valid job allocation:
 cactup test submit -n 1 -w 1:00:00   # 1 node, 1 hour
 ```
 
-Pass `--config`, `--variant`, and `--universe` like with `test run`.
+Pass `--config` and `--universe` like with `test run`.
 
 ## Topology and resource control
 
@@ -267,10 +271,10 @@ cactup test run McLachlan/ML_BSSN
 cactup test submit -n 4 --gpu -w 1:00:00
 ```
 
-### Test with a custom runscript variant
+### Test on a specific partition
 
 ```sh
-cactup test run --variant cuda --gpu
+cactup test submit -q workq          # the queue picks that partition's test scripts
 ```
 
 ## Troubleshooting

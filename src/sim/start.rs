@@ -79,15 +79,14 @@ fn obtain_sim(
 }
 
 /// Resolve the RUN universe per the §4.8 precedence:
-/// CLI → coerced build universe → runscript variant / default-universe →
+/// CLI → coerced build universe → the runscript's own `universe` →
 /// declared host → none (a machine without `[universes.host]` keeps
 /// resolving to none: implicit host ≡ identity ≡ bare execution).
 pub fn resolve_run_universe<'m>(
     machine: &'m Machine,
     cfg: &ConfigMeta,
     cli: &UniverseFlags,
-    variant_universe: Option<&str>,
-    default_universe: Option<&str>,
+    script_universe: Option<&str>,
     verbose: bool,
 ) -> Res<Option<(String, &'m Universe)>> {
     if cli.no_universe {
@@ -105,7 +104,7 @@ pub fn resolve_run_universe<'m>(
                 cfg.name
             )
         })?;
-        if verbose && let Some(v) = variant_universe && v != build_uni {
+        if verbose && let Some(v) = script_universe && v != build_uni {
             // §4.8
             eprintln!(
                 "{} runscript names universe \"{v}\" but the config's build \
@@ -115,21 +114,19 @@ pub fn resolve_run_universe<'m>(
         }
         return Ok(Some((build_uni.clone(), u)));
     }
-    let name = variant_universe.or(default_universe);
-    match name {
+    match script_universe {
         Some(n) => Ok(Some((n.to_owned(), machine.meta.universe(n)?))),
         None => Ok(machine.meta.declared_host().map(|u| (HOST_UNIVERSE.to_owned(), u))),
     }
 }
 
-/// Resolve the SUBMIT universe: submitscript variant → `default-universe` →
+/// Resolve the SUBMIT universe: the submitscript's own `universe` →
 /// declared host → none (the CLI flag targets the run universe — §8.3).
 pub(crate) fn resolve_submit_universe<'m>(
     machine: &'m Machine,
-    variant_universe: Option<&str>,
-    default_universe: Option<&str>,
+    script_universe: Option<&str>,
 ) -> Res<Option<(String, &'m Universe)>> {
-    match variant_universe.or(default_universe) {
+    match script_universe {
         Some(n) => Ok(Some((n.to_owned(), machine.meta.universe(n)?))),
         None => Ok(machine.meta.declared_host().map(|u| (HOST_UNIVERSE.to_owned(), u))),
     }
@@ -190,19 +187,19 @@ fn prepend_env(script: &str, env: &str, kind: ScriptKind) -> String {
 }
 
 /// Generate one script artifact for a restart or test run (§6.1/§6.2): `.sh`
-/// variants are `@NAME@`-substituted with the phase env — under the phase's
+/// scripts are `@NAME@`-substituted with the phase env — under the phase's
 /// resolved `universe`, whose env keys override the machine's (§6.1) —
-/// auto-prepended; `.py` variants run per the calling convention and own
+/// auto-prepended; `.py` scripts run per the calling convention and own
 /// their env placement.
 pub(crate) fn generate_script(
     machine: &Machine,
     kind: ScriptKind,
-    variant: &str,
+    script_name: &str,
     vars: &VarSet,
     phase: Phase,
     universe: Option<&str>,
 ) -> Res<String> {
-    let script = machine.script_path(kind, variant)?;
+    let script = machine.script_path(kind, script_name)?;
     if script.python {
         vars.run_py_script(&script.path)
     } else {
@@ -309,7 +306,7 @@ fn submit_impl(
     check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
     let force_queue = args.force_queue || args.force;
-    let fit = vars::BinaryFit::from_config(&cfg);
+    let fit = vars::BinaryFit::for_config(machine, &cfg)?;
     let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
@@ -340,26 +337,24 @@ fn submit_impl(
         activate_first = false;
     }
 
-    // Script variants for the chosen queue (§4.4) and universes (§4.8);
+    // Scripts for the chosen queue (§4.4) and universes (§4.8);
     // selection is driven by the config's BUILD universe (§4.4).
-    let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
-    let run_scripts = machine.meta.script_variants(ScriptKind::Run);
+    let submit_scripts = machine.meta.scripts(ScriptKind::Submit);
+    let run_scripts = machine.meta.scripts(ScriptKind::Run);
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (sub_variant, sub_entry) = submit_scripts.route(&topo.queue, cfg_universe, false)?;
-    let (run_variant, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
-    // Script-variant default tasks (§4.2): submitscript first for a submit.
+    let (sub_script_name, sub_entry) = submit_scripts.route(&topo.queue, cfg_universe, false)?;
+    let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
+    // Script default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
     let submit_uni = resolve_submit_universe(
         machine,
         sub_entry.universe.as_deref(),
-        submit_scripts.default_universe.as_deref(),
     )?;
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
         &args.universe,
         run_entry.universe.as_deref(),
-        run_scripts.default_universe.as_deref(),
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
@@ -382,7 +377,7 @@ fn submit_impl(
     }
 
     let identity = Identity::resolve(db, hostname_override);
-    let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
+    let (sub_script_name, run_script_name) = (sub_script_name.to_owned(), run_script_name.to_owned());
 
     for seg in 0..segments {
         // Every restart gets a fresh id: the reaper (above) cleared the stale
@@ -420,12 +415,12 @@ fn submit_impl(
         // submit universe (§6.1).
         let mut submit_vars = vset.clone();
         submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
-        let submit_script = generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit, submit_uni_name)?;
+        let submit_script = generate_script(machine, ScriptKind::Submit, &sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
 
         // Run-phase artifact, frozen now so the compute node never touches
         // the MDB (§8.3.1).
-        let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run, run_uni_name)?;
+        let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
         write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
         let mut r = Restart {
@@ -547,7 +542,7 @@ fn run_interactive(
     check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
     crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
     let force_queue = args.start.force_queue || args.start.force;
-    let fit = vars::BinaryFit::from_config(&cfg);
+    let fit = vars::BinaryFit::for_config(machine, &cfg)?;
     let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
     let sched = Scheduler::new(&machine.meta);
@@ -564,18 +559,17 @@ fn run_interactive(
         );
     }
 
-    let run_scripts = machine.meta.script_variants(ScriptKind::Run);
+    let run_scripts = machine.meta.scripts(ScriptKind::Run);
     // Selection is driven by the config's BUILD universe (§4.4).
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (run_variant, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
-    // Script-variant default tasks (§4.2).
+    let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
+    // Script default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
         &args.start.universe,
         run_entry.universe.as_deref(),
-        run_scripts.default_universe.as_deref(),
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
@@ -615,7 +609,7 @@ fn run_interactive(
     fs::create_dir_all(rdir.join(".cactup"))
         .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
-    let run_script = generate_script(machine, ScriptKind::Run, run_variant, &vset, Phase::Run, run_uni_name)?;
+    let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
     let mut r = Restart {
@@ -924,14 +918,12 @@ mod tests {
             default = true
             max-walltime = "24:00:00"
 
-            [variants.submitscript]
-            "default" = { queues = ["batch"], default = true }
+            [submitscripts]
+            "default" = { queues = ["batch"] }
 
-            [variants.runscript]
-            "default" = { queues = ["batch"], default = true }
+            [runscripts]
+            "default" = { queues = ["batch"] }
 
-            [variants.optionlist]
-            variants = []
             "#,
         )
         .unwrap();
@@ -1389,12 +1381,10 @@ mod tests {
             wrapper-argv = ["apptainer", "exec", "img.sif"]
             [universes.other]
             wrapper-argv = ["env"]
-            [variants.submitscript]
-            "default" = { queues = ["batch"], default = true }
-            [variants.runscript]
-            "default" = { queues = ["batch"], default = true }
-            [variants.optionlist]
-            variants = []
+            [submitscripts]
+            "default" = { queues = ["batch"] }
+            [runscripts]
+            "default" = { queues = ["batch"] }
             "#,
         )
         .unwrap();
@@ -1418,39 +1408,39 @@ mod tests {
 
         // 1. CLI wins.
         let cli = UniverseFlags { universe: Some("other".to_owned()), no_universe: false };
-        let got = resolve_run_universe(&machine, &cfg_coerced, &cli, None, None, false).unwrap();
+        let got = resolve_run_universe(&machine, &cfg_coerced, &cli, None, false).unwrap();
         assert_eq!(got.unwrap().0, "other");
         // --no-universe forces the host context.
         let no_uni = UniverseFlags { universe: None, no_universe: true };
-        assert!(resolve_run_universe(&machine, &cfg_coerced, &no_uni, None, None, false).unwrap().is_none());
-        // 2. Build-universe coercion beats the variant's own universe.
-        let got = resolve_run_universe(&machine, &cfg_coerced, &no_flags, Some("other"), None, false).unwrap();
+        assert!(resolve_run_universe(&machine, &cfg_coerced, &no_uni, None, false).unwrap().is_none());
+        // 2. Build-universe coercion beats the script's own universe.
+        let got = resolve_run_universe(&machine, &cfg_coerced, &no_flags, Some("other"), false).unwrap();
         assert_eq!(got.unwrap().0, "sif");
-        // Opt-out (§7.8) falls through to the variant.
+        // Opt-out (§7.8) falls through to the script.
         let mut cfg_optout = cfg_coerced.clone();
         cfg_optout.coerce_run_universe = false;
-        let got = resolve_run_universe(&machine, &cfg_optout, &no_flags, Some("other"), None, false).unwrap();
+        let got = resolve_run_universe(&machine, &cfg_optout, &no_flags, Some("other"), false).unwrap();
         assert_eq!(got.unwrap().0, "other");
-        // 3/4. Variant → default-universe → 5. none (no declared host here).
-        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, Some("sif"), false).unwrap();
+        // 3. The runscript's own universe → 5. none (no declared host here).
+        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, Some("sif"), false).unwrap();
         assert_eq!(got.unwrap().0, "sif");
-        assert!(resolve_run_universe(&machine, &cfg_plain, &no_flags, None, None, false).unwrap().is_none());
+        assert!(resolve_run_universe(&machine, &cfg_plain, &no_flags, None, false).unwrap().is_none());
         // Unknown names are hard errors listing the known set (§4.8).
         let bad = UniverseFlags { universe: Some("ghost".to_owned()), no_universe: false };
-        let err = resolve_run_universe(&machine, &cfg_plain, &bad, None, None, false).unwrap_err();
+        let err = resolve_run_universe(&machine, &cfg_plain, &bad, None, false).unwrap_err();
         assert!(format!("{err:#}").contains("sif"), "{err:#}");
 
         // 5'. A DECLARED host becomes the final fallback of both chains
         // (§4.8); --no-universe still bypasses it.
         let host: Universe = toml::from_str("env-run-setup = \"module load x\"").unwrap();
         machine.meta.universes.insert("host".to_owned(), host);
-        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, None, false).unwrap();
+        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, false).unwrap();
         assert_eq!(got.unwrap().0, "host");
-        assert!(resolve_run_universe(&machine, &cfg_plain, &no_uni, None, None, false).unwrap().is_none());
-        let got = resolve_submit_universe(&machine, None, None).unwrap();
+        assert!(resolve_run_universe(&machine, &cfg_plain, &no_uni, None, false).unwrap().is_none());
+        let got = resolve_submit_universe(&machine, None).unwrap();
         assert_eq!(got.unwrap().0, "host");
-        // With a variant/default-universe, host stays out of the way.
-        let got = resolve_submit_universe(&machine, Some("sif"), None).unwrap();
+        // With a script universe, host stays out of the way.
+        let got = resolve_submit_universe(&machine, Some("sif")).unwrap();
         assert_eq!(got.unwrap().0, "sif");
     }
 

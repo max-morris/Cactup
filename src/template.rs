@@ -1,4 +1,4 @@
-//! Literal `@NAME@` substitution engine and the `.py` variant calling
+//! Literal `@NAME@` substitution engine and the `.py` script calling
 //! convention (spec §6.1–§6.3, D7). No expression evaluation; the computed
 //! token forms are `@ENV(…)@` and `@KNOB(…)@` with their `-OPTIONAL` variants.
 //!
@@ -21,7 +21,7 @@
 //!   does not collapse, a lone `@` is fine. What a comment is depends on the
 //!   text's [`Syntax`] — the caller says which it is substituting.
 //!
-//! `.py` variants (§6.1, kind 2): `python3` runs the script with a fixed
+//! `.py` scripts (§6.1, kind 2): `python3` runs the script with a fixed
 //! preamble that reads one JSON object from stdin and binds every variable as
 //! a module global (canonical string form), plus a `typed` dict carrying
 //! native ints/bools and a `knobs` dict (with a `knob(name, default)` helper
@@ -399,7 +399,7 @@ pub struct VarSet {
     knobs: Option<IndexMap<String, String>>,
 }
 
-/// Prepended to every `.py` variant (§6.1): binds each variable as a module
+/// Prepended to every `.py` script (§6.1): binds each variable as a module
 /// global in canonical-string form and exposes the typed companions as
 /// `typed`, the knob snapshot as `knobs`, and a `knob()` accessor.
 /// Everything after this marker on stderr is a script's own refusal message,
@@ -867,7 +867,7 @@ impl VarSet {
         serde_json::json!({ "vars": vars, "typed": typed, "knobs": knobs })
     }
 
-    /// Run a `.py` variant per the §6.1 calling convention and return its
+    /// Run a `.py` script per the §6.1 calling convention and return its
     /// stdout. The variable set travels as JSON on stdin (keeping values out
     /// of the process table and argv limits); a non-zero exit is an error
     /// surfacing the script's stderr.
@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn py_variant_sees_knobs() {
+    fn py_script_sees_knobs() {
         if Command::new("python3").arg("--version").output().is_err() {
             eprintln!("python3 not found; skipping");
             return;
@@ -1226,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn py_variant_can_refuse_the_run() {
+    fn py_script_can_refuse_the_run() {
         if Command::new("python3").arg("--version").output().is_err() {
             eprintln!("python3 not found; skipping");
             return;

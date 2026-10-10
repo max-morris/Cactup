@@ -1,9 +1,9 @@
-# Frontera optionlist (variant "default"), ported from simfactory2
+# Frontera optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/frontera.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["normal"]
+[cactup.runs-on]
+queues = ["normal"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

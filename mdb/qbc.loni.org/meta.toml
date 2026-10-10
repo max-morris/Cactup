@@ -12,7 +12,7 @@
 # differing only in that its build runs plain `make` from *inside* the workshop
 # container instead of wrapping make in the et-sing universe. That is just this
 # machine built with `--no-universe` (build from inside the container), so no
-# separate variant is needed; etworkshop-qbc is not ported.
+# separate machine is needed; etworkshop-qbc is not ported.
 
 [machine]
 name        = "qbc.loni.org"
@@ -94,13 +94,10 @@ max-walltime    = "72:00:00"
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["checkpt"], default = true }
+[submitscripts]
+"default" = { queues = ["checkpt"] }
 "test"    = { queues = ["checkpt"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["checkpt"], default = true }
+[runscripts]
+"default" = { queues = ["checkpt"] }
 "test"    = { queues = ["checkpt"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

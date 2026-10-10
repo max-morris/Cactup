@@ -1,8 +1,8 @@
-# qbd optionlist (variant "cpu"): a CPU-only build for the Carpet-based
+# qbd optionlist (flavor "cpu"): a CPU-only build for the Carpet-based
 # Einstein Toolkit stack (McLachlan, IllinoisGRMHD, AHFinderDirect, Fuka/Kadath
 # initial data, ...) on QB4's CPU partitions (single/workq/checkpt/bigmem).
 #
-# Derived from the "default" (CUDA/CarpetX) variant on 2026-09-02: same
+# Derived from the "default" (CUDA/CarpetX) flavor on 2026-09-02: same
 # compilers, flags and prebuilt externals under /ddnB/project/sbrandt/
 # externals-qbd, minus everything that only exists for nvcc/AMReX (CUCC*, the
 # nvcc LD, cudart libs, AMREX_*, AMREX_ENABLE_CUDA). The CPU nodes are the same
@@ -15,9 +15,14 @@
 # below (FFTW3 built from source, GSL from the system).
 
 [cactup]
-gpu               = false
 description       = "CPU-only build (Carpet/McLachlan/IllinoisGRMHD, Fuka) for the CPU partitions"
-compatible-queues = ["single", "workq", "checkpt", "bigmem"]
+
+[cactup.runs-on]
+queues = ["single", "workq", "checkpt", "bigmem"]
+gpu    = false
+# Without -q, a sim of this flavor goes to workq, the general multi-node CPU
+# partition, rather than to the machine default gpu2, which it may not use.
+default-queue = "workq"
 
 [options]
 VERSION = "qbd-cpu-2026-09-02"

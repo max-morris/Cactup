@@ -126,7 +126,7 @@ cactup sim submit mysim -t 32       # 32 tasks per node
 
 If you don't specify:
 - Tasks per node (`-t`) defaults to filling the node: `floor(MAX_CPUS_PER_NODE / CPUS_PER_TASK)` (one task per CPU when `-c` is 1)
-- Total tasks (`-T`) defaults to nodes × tasks-per-node (or the script variant's `tasks` setting when it declares one)
+- Total tasks (`-T`) defaults to nodes × tasks-per-node (or the selected script's `tasks` setting when it declares one)
 
 For example, a 4-node submission with 32 CPUs per node and no `-T` or `-t` creates 4 × 32 = 128 tasks.
 
@@ -168,8 +168,8 @@ will never schedule:
 ```
 $ cactup sim submit mysim -q gpu2 -c 16
 error: this layout needs 4 GPUs per node (1 per task × 4 tasks/node) but queue
-"gpu2" has 2 (§8.5); lower --tpn/--tasks, or raise --cpus so fewer ranks land on
-a node
+"gpu2" has 2; each rank already takes one GPU, so lower --tpn/--tasks to put at
+most 2 on a node
 ```
 
 Some machines enforce extra rules of their own and will refuse a request with a
@@ -218,7 +218,13 @@ cactup sim submit mysim -q gpu       # GPU queue
 cactup sim submit mysim -q cpu       # CPU queue
 ```
 
-If not specified, cactup uses the machine's default queue.
+If not specified, cactup uses your `queue` knob if you set one, else the
+flavor's default queue if its optionlist names one, else the machine's
+default queue. A `queue` knob naming a queue your config's binary may not
+run on (a GPU partition, say, for a CPU-only build) is passed over with a
+note, so one knob does not break every flavor it cannot serve; `--force-queue`
+keeps it. The `queue` knob applies to simulations and test runs only. Builds
+have their own, `build-queue` (see [Building Configs](building-configs.html)).
 
 ### Allocation and account
 
@@ -241,8 +247,9 @@ cactup sim submit mysim --job-name my-run-123
 ## Knobs
 
 A **knob** is a value cactup remembers for you on this machine. The
-**standard knobs** — `allocation`, `queue`, `mail`, `mail-type`, `user`,
-`email`, `wisdom-frequency`, `wisdom-kind` — are the defaults behind the
+**standard knobs** — `allocation`, `queue`, `build-queue`, `mail`,
+`mail-type`, `user`, `email`, `wisdom-frequency`, `wisdom-kind` — are the
+defaults behind the
 flags above: `-a` beats the `allocation` knob, which beats the machine's
 default.
 
@@ -490,7 +497,7 @@ command.
 
 **"Config not found"**: Build the config first with `cactup build myconfig`.
 
-**"Incompatible queue"**: The optionlist variant isn't compatible with the chosen queue. Use `cactup machine show --variants` to see which variants work with which queues. Or use `--force-queue` to override (use carefully).
+**"config \<c\> is only compatible with queue(s) …"** or **"was built with GPU support but this run is non-GPU"**: the config's binary may not run on the chosen queue — its optionlist flavor says where it may run. `cactup config show` prints the config's `runs on:` line, and `cactup machine show --flavors` shows each flavor's queues and GPU flag. Pick a listed queue, rebuild with a different `--flavor`, or use `--force-queue` to override (use carefully).
 
 **"Queue not found"**: Check available queues with `cactup machine show` and pick a valid `-q` name.
 

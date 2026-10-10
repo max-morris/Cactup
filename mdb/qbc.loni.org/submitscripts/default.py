@@ -1,7 +1,7 @@
-# qbc.loni.org submitscript (variant "default"), ported from simfactory2
+# qbc.loni.org submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/mike.sub.
 #
-# .py variant (design §6.1): the old script used simfactory's ternary
+# .py script (design §6.1): the old script used simfactory's ternary
 # expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
 # — cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
 # Python, alongside the `if EMAIL:` mail guard below.
@@ -31,7 +31,7 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

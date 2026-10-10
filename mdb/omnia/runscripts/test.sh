@@ -1,5 +1,5 @@
 #!/bin/bash
-# omnia TEST runscript (variant "test") — marked test = true in meta.toml
+# omnia TEST runscript (script "test") — marked test = true in meta.toml
 # (design §11.2). Drives `make <config>-testsuite` and lets the Cactus flesh
 # harness launch each test (design §11.6); see mdb/mel5/runscripts/test.sh for
 # the annotated reference version.
@@ -28,7 +28,7 @@ date
 # default ('mpirun -np $nprocs $exe $parfile' when MPI is built, plain
 # '$exe $parfile' otherwise), which is exactly what the normal runscript does.
 # Only the processor count is pinned to the requested topology — one rank here
-# (the test variants carry tasks = 1: one rank for the one GPU).
+# (the test scripts carry tasks = 1: one rank for the one GPU).
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
 
 # Redirect testsuite output into test-home (design §11.6, step 6): the flesh

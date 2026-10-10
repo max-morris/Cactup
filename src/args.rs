@@ -35,19 +35,33 @@ fn parse_knob_override(s: &str) -> Result<KnobOverride, String> {
 /// else is wrong with the line. Keep these indefinitely — at least one user
 /// still types `--variant` from habit.
 struct RetiredFlag {
-    /// The subcommand path the flag was accepted under; `build` covers `build
-    /// run` and `build submit` too, since they share its flags.
+    /// The exact subcommand path the flag was accepted under. `build` alone
+    /// is the bare `cactup build [<name>]`; `build run`/`build submit` are
+    /// listed separately, so `build log --variant` stays an ordinary error.
     path: &'static [&'static str],
     flag: &'static str,
-    replacement: &'static str,
+    retirement: Retirement,
+}
+
+enum Retirement {
+    /// Renamed: the notice rewrites the flag to its new spelling.
+    Renamed(&'static str),
+    /// Removed with nothing in its place: the notice says why and drops the
+    /// flag (and its value) from the suggested command.
+    Removed(&'static str),
 }
 
 const RETIRED_FLAGS: &[RetiredFlag] = &[
-    RetiredFlag { path: &["build"], flag: "--variant", replacement: "--flavor" },
-    RetiredFlag { path: &["test", "run"], flag: "--variant", replacement: "--script" },
-    RetiredFlag { path: &["test", "submit"], flag: "--variant", replacement: "--script" },
-    RetiredFlag { path: &["machine", "show"], flag: "--variants", replacement: "--flavors" },
+    RetiredFlag { path: &["build"], flag: "--variant", retirement: Retirement::Renamed("--flavor") },
+    RetiredFlag { path: &["build", "run"], flag: "--variant", retirement: Retirement::Renamed("--flavor") },
+    RetiredFlag { path: &["build", "submit"], flag: "--variant", retirement: Retirement::Renamed("--flavor") },
+    RetiredFlag { path: &["test", "run"], flag: "--variant", retirement: Retirement::Removed(TEST_SCRIPTS_BY_QUEUE) },
+    RetiredFlag { path: &["test", "submit"], flag: "--variant", retirement: Retirement::Removed(TEST_SCRIPTS_BY_QUEUE) },
+    RetiredFlag { path: &["machine", "show"], flag: "--variants", retirement: Retirement::Renamed("--flavors") },
 ];
+
+const TEST_SCRIPTS_BY_QUEUE: &str =
+    "the queue now picks the test scripts — choose a different queue with -q to use different ones";
 
 /// The rename notice for a retired flag on this command line, if any: the
 /// command line rewritten with the replacement, for the user to re-run.
@@ -56,56 +70,74 @@ pub(crate) fn retired_flag_notice(args: &[OsString]) -> Option<String> {
     use clap::CommandFactory;
     let args: Vec<String> = args.iter().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
-    let args_before_passthrough = &args[..end];
+    let before_passthrough = &args[..end];
 
-    // The subcommand path: skip the top-level flags (and the value of each
-    // that takes one, as clap itself defines them), then take the first word
-    // and, when it follows directly, the second.
+    // The subcommand path, found the way clap finds it: walk the command
+    // tree, skipping flags (and the value of each that takes one, by the
+    // definitions of the command reached so far — global flags included, as
+    // they may sit at any level) and descending while a word names a
+    // subcommand. The first word that does not is a positional, so the path
+    // ends there.
     let root = Args::command();
-    let takes_value = |token: &str| {
-        root.get_arguments().any(|a| {
+    let takes_value = |cmd: &clap::Command, token: &str| {
+        cmd.get_arguments().chain(root.get_arguments()).any(|a| {
             a.get_action().takes_values()
                 && (a.get_long().is_some_and(|l| token == format!("--{l}"))
                     || a.get_short().is_some_and(|c| token == format!("-{c}")))
         })
     };
+    let mut path: Vec<&str> = Vec::new();
+    let mut cmd = &root;
     let mut i = 0;
-    while i < args_before_passthrough.len() && args_before_passthrough[i].starts_with('-') {
-        i += if takes_value(&args_before_passthrough[i]) { 2 } else { 1 };
+    while i < before_passthrough.len() {
+        let token = before_passthrough[i].as_str();
+        if token.starts_with('-') {
+            i += if takes_value(cmd, token) { 2 } else { 1 };
+            continue;
+        }
+        match cmd.find_subcommand(token) {
+            Some(sub) => {
+                path.push(sub.get_name());
+                cmd = sub;
+                i += 1;
+            }
+            None => break,
+        }
     }
-    let first = args_before_passthrough.get(i)?;
-    let second = args_before_passthrough.get(i + 1).filter(|a| !a.starts_with('-'));
 
     let retired = RETIRED_FLAGS.iter().find(|r| {
-        let path_matches = match r.path {
-            [one] => first == one,
-            [one, two] => first == one && second.is_some_and(|s| s == two),
-            _ => false,
-        };
-        path_matches
-            && args_before_passthrough[i + 1..]
-                .iter()
-                .any(|a| a == r.flag || a.starts_with(&format!("{}=", r.flag)))
+        r.path == path.as_slice()
+            && before_passthrough.iter().any(|a| a == r.flag || a.starts_with(&format!("{}=", r.flag)))
     })?;
 
-    let rewritten: Vec<String> = std::iter::once("cactup".to_owned())
-        .chain(args.iter().enumerate().map(|(k, a)| {
-            let a = if k < end && a == retired.flag {
-                retired.replacement.to_owned()
-            } else if k < end && a.starts_with(&format!("{}=", retired.flag)) {
-                format!("{}{}", retired.replacement, &a[retired.flag.len()..])
-            } else {
-                a.clone()
-            };
-            shell_quote(&a)
-        }))
-        .collect();
-    Some(format!(
-        "{} has been renamed {}. Run instead:\n  {}",
-        retired.flag,
-        retired.replacement,
-        rewritten.join(" ")
-    ))
+    let mut rewritten = vec!["cactup".to_owned()];
+    let mut k = 0;
+    while k < args.len() {
+        let a = &args[k];
+        let spelled = k < end && a == retired.flag;
+        let joined = k < end && a.starts_with(&format!("{}=", retired.flag));
+        match &retired.retirement {
+            Retirement::Renamed(new) if spelled => rewritten.push(new.to_string()),
+            Retirement::Renamed(new) if joined => {
+                rewritten.push(shell_quote(&format!("{new}{}", &a[retired.flag.len()..])))
+            }
+            // A removed flag goes, and so does its value when it was given
+            // as the next word.
+            Retirement::Removed(_) if spelled => {
+                if args.get(k + 1).is_some_and(|v| k + 1 < end && !v.starts_with('-')) {
+                    k += 1;
+                }
+            }
+            Retirement::Removed(_) if joined => {}
+            _ => rewritten.push(shell_quote(a)),
+        }
+        k += 1;
+    }
+    let what = match &retired.retirement {
+        Retirement::Renamed(new) => format!("{} has been renamed {new}", retired.flag),
+        Retirement::Removed(why) => format!("{} has been removed: {why}", retired.flag),
+    };
+    Some(format!("{what}. Run instead:\n  {}", rewritten.join(" ")))
 }
 
 /// Single-quote `s` for a shell when it holds anything but plain word
@@ -952,11 +984,6 @@ pub(crate) struct TestStartArgs {
     /// Config whose testsuite to run (default: the active config).
     #[clap(long, value_name = "CONFIG")]
     pub config: Option<String>,
-    // §11.2
-    /// Use the submit and run scripts of this name instead of the ones the
-    /// queue selects.
-    #[clap(long, value_name = "NAME")]
-    pub script: Option<String>,
     /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
@@ -1254,9 +1281,10 @@ mod tests {
             (&["build", "submit", "sim", "--variant", "cpu", "-q", "single"], "cactup build submit sim --flavor cpu -q single"),
             (&["--machine", "qbd", "build", "--variant"], "cactup --machine qbd build --flavor"),
             (&["build", "--variant", "x", "--optionlist", "y.cfg", "--bogus"], "cactup build --flavor x --optionlist y.cfg --bogus"),
-            (&["test", "run", "--variant", "test", "foo"], "cactup test run --script test foo"),
-            (&["test", "submit", "--variant=t"], "cactup test submit --script=t"),
+            (&["test", "run", "--variant", "test", "foo"], "cactup test run foo"),
+            (&["test", "submit", "--variant=t", "-q", "gpu"], "cactup test submit -q gpu"),
             (&["machine", "show", "qbd", "--variants"], "cactup machine show qbd --flavors"),
+            (&["test", "--machine", "qbd", "run", "--variant", "t"], "cactup test --machine qbd run"),
             (&["build", "--thornlist", "my list.th", "--variant", "a"], "cactup build --thornlist 'my list.th' --flavor a"),
         ];
         for (line, rewritten) in cases {
@@ -1264,6 +1292,7 @@ mod tests {
             assert!(notice.ends_with(&format!("\n  {rewritten}")), "{line:?}: {notice}");
         }
         assert!(notice(&["build", "--variant", "x"]).unwrap().starts_with("--variant has been renamed --flavor"));
+        assert!(notice(&["test", "run", "--variant", "x"]).unwrap().starts_with("--variant has been removed: the queue now picks"));
     }
 
     /// Only where the flag was really accepted: elsewhere it stays an
@@ -1277,6 +1306,8 @@ mod tests {
             &["build", "--flavor", "x"],
             &["sim", "run", "s", "--", "--variant"],
             &["--machine", "build", "sim", "submit", "--variant", "x"],
+            &["build", "log", "sim", "--variant", "x"],
+            &["build", "list", "--variant", "x"],
         ] {
             assert_eq!(notice(line), None, "{line:?}");
         }

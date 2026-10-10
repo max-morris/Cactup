@@ -136,12 +136,12 @@ fn require_can_submit_builds(machine: &Machine) -> Res<()> {
 /// nothing — the naming half of [`require_can_submit_builds`], split out so
 /// [`no_queue_to_block_on`] can name the same gap without raising an error.
 fn missing_to_submit_builds(machine: &Machine) -> Option<&'static str> {
-    let no_variant = machine.meta.script_variants(ScriptKind::BuildSubmit).variants.is_empty();
+    let no_script = machine.meta.scripts(ScriptKind::BuildSubmit).routes.is_empty();
     let no_submit_cmd = machine.meta.scheduler.submit.is_none();
-    match (no_variant, no_submit_cmd) {
+    match (no_script, no_submit_cmd) {
         (false, false) => None,
-        (true, true) => Some("a [variants.buildsubmitscript] variant and a [scheduler].submit command"),
-        (true, false) => Some("a [variants.buildsubmitscript] variant"),
+        (true, true) => Some("a [buildsubmitscripts] script and a [scheduler].submit command"),
+        (true, false) => Some("a [buildsubmitscripts] script"),
         (false, true) => Some("a [scheduler].submit command"),
     }
 }
@@ -345,10 +345,37 @@ fn submit_impl(
     // build job's queue is where `make` runs, and the optionlist's
     // compatible-queues/gpu/build universe describe where the *binary* may
     // run, which is a sim's business, not this job's (§7.9).
+    //
+    // The queue: -q → the `build-queue` knob → `[build].queue` → the machine
+    // default. The knob is the user's standing choice for build jobs, as
+    // `queue` is for sims and tests (which builds never read), so it outranks
+    // the MDB's `[build].queue` — unless this machine cannot queue a build
+    // there (no such queue, or no build-submit script serves it), in which
+    // case it is passed over with a note.
     let mut flags = args.topology.clone();
+    let mut skipped_knob = None;
+    if flags.queue.is_none()
+        && let Some(knob) = db.knob("build-queue")
+    {
+        let routed = machine.meta.scripts(ScriptKind::BuildSubmit).routes.values().any(|r| r.queues.iter().any(|q| q == knob));
+        if machine.meta.queues.contains_key(knob) && routed {
+            flags.queue = Some(knob.to_owned());
+        } else {
+            skipped_knob = Some(knob);
+        }
+    }
     build::apply_build_defaults(&mut flags, machine);
     let make_jobs = build::reconcile_make_jobs(&mut flags, args.opts.make_jobs, machine);
     let topo = resolve_topology(&flags, machine, db, None, false)?;
+    if let Some(knob) = skipped_knob {
+        eprintln!(
+            "{} not using your `build-queue` knob (\"{knob}\"): machine \"{}\" cannot queue a build \
+             there; using \"{}\" instead",
+            "note:".yellow(),
+            machine.name,
+            topo.queue
+        );
+    }
 
     let reservation = Reservation {
         queue: topo.queue.clone(),
@@ -399,20 +426,20 @@ fn submit_impl(
     // than changing the shared helper.
     vset.set("ENV_SETUP", machine.meta.effective_env(build_universe, Phase::Submit));
 
-    // §4: buildsubmitscript variant + universe, generate + write, submit.
+    // §4: buildsubmitscript + universe, generate + write, submit.
     // Routed by the queue (filtered by the build universe the job's `make`
-    // runs in) and nothing else: the optionlist's `--variant` names what is
+    // runs in) and nothing else: the optionlist's `--flavor` names what is
     // built, never which script queues it (§7.9).
-    let scripts = machine.meta.script_variants(ScriptKind::BuildSubmit);
+    let scripts = machine.meta.scripts(ScriptKind::BuildSubmit);
     let cfg_universe = attempt.meta.config_meta.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (variant, entry) = scripts.route(&topo.queue, cfg_universe, false)?;
+    let (script_name, entry) = scripts.route(&topo.queue, cfg_universe, false)?;
     let submit_uni =
-        resolve_submit_universe(machine, entry.universe.as_deref(), scripts.default_universe.as_deref())?;
+        resolve_submit_universe(machine, entry.universe.as_deref())?;
     let submit_uni_name = submit_uni.as_ref().map(|(n, _)| n.as_str());
-    let variant = variant.to_owned();
+    let script_name = script_name.to_owned();
 
     let script =
-        generate_script(machine, ScriptKind::BuildSubmit, &variant, &vset, Phase::Submit, submit_uni_name)?;
+        generate_script(machine, ScriptKind::BuildSubmit, &script_name, &vset, Phase::Submit, submit_uni_name)?;
     write_executable(&attempt.submit_script_path(), &script)?;
     attempt.store_meta()?;
 
@@ -1317,7 +1344,7 @@ mod tests {
     // exactly as `testsuite::run::tests::fake_machine` does.
 
     /// A machine that can submit builds: a `[build]` reservation, a
-    /// buildsubmitscript variant, and a `[scheduler]` whose `submit` is a
+    /// buildsubmitscript, and a `[scheduler]` whose `submit` is a
     /// local shell command that echoes a fake job id (mirrors
     /// `testsuite::run::tests::fake_machine`). The `make` command is a fake
     /// `case "$2" in …` script, exactly like `build::tests::fake_tree` — that
@@ -1371,14 +1398,12 @@ mod tests {
                 default = true
                 max-walltime = "8:00:00"
 
-                [variants.submitscript]
+                [submitscripts]
                 "default" = ["local"]
-                [variants.runscript]
+                [runscripts]
                 "default" = ["local"]
-                [variants.buildsubmitscript]
-                "default" = {{ queues = ["local"], default = true }}
-                [variants.optionlist]
-                variants = ["default"]
+                [buildsubmitscripts]
+                "default" = {{ queues = ["local"] }}
                 "#,
                 make = fake_make.display(),
             ),
@@ -1386,7 +1411,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         for s in ["runscripts/default.sh", "submitscripts/default.sh"] {
@@ -1515,15 +1540,13 @@ mod tests {
                 [queues.cpu]
                 max-walltime = "8:00:00"
 
-                [variants.submitscript]
-                "default" = {{ queues = ["gpu", "cpu"], default = true }}
-                [variants.runscript]
-                "default" = {{ queues = ["gpu", "cpu"], default = true }}
-                [variants.buildsubmitscript]
-                "on-gpu" = {{ queues = ["gpu"], default = true }}
+                [submitscripts]
+                "default" = {{ queues = ["gpu", "cpu"] }}
+                [runscripts]
+                "default" = {{ queues = ["gpu", "cpu"] }}
+                [buildsubmitscripts]
+                "on-gpu" = {{ queues = ["gpu"] }}
                 "on-cpu" = ["cpu"]
-                [variants.optionlist]
-                variants = ["gpu", "cpu"]
                 "#,
                 make = dir.join("fakemake").display(),
             ),
@@ -1532,12 +1555,12 @@ mod tests {
         fs::remove_file(dir.join("optionlists/default.toml")).unwrap();
         fs::write(
             dir.join("optionlists/gpu.toml"),
-            "[cactup]\ngpu = true\ndefault = true\ncompatible-queues = [\"gpu\"]\n[options]\nVERSION = \"1\"\n",
+            "[cactup]\ndefault = true\n[cactup.runs-on]\nqueues = [\"gpu\"]\ngpu = true\n[options]\nVERSION = \"1\"\n",
         )
         .unwrap();
         fs::write(
             dir.join("optionlists/cpu.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"cpu\"]\n[options]\nVERSION = \"1\"\n",
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"cpu\"]\ngpu = false\n[options]\nVERSION = \"1\"\n",
         )
         .unwrap();
         fs::remove_file(dir.join("buildsubmitscripts/default.sh")).unwrap();
@@ -1553,9 +1576,9 @@ mod tests {
         Machine { name: "fake".to_owned(), dir: dir.to_owned(), layer: Layer::System, meta }
     }
 
-    /// Submit `--variant variant` to `queue` (or the machine default) on the
+    /// Submit `--flavor flavor` to `queue` (or the machine default) on the
     /// two-partition machine; returns the generated buildsubmitscript.
-    fn submit_flavor(variant: &str, queue: Option<&str>) -> Res<String> {
+    fn submit_flavor(flavor: &str, queue: Option<&str>) -> Res<String> {
         let tmp = tempfile::tempdir().unwrap();
         let cactus = tmp.path().join("inst/Cactus");
         let machine = two_partition_machine(&tmp.path().join("mdb/fake"), &cactus);
@@ -1565,10 +1588,38 @@ mod tests {
         let mut topology = bare_topology();
         topology.queue = queue.map(str::to_owned);
         let mut args = submit_args("sim", topology);
-        args.opts.flavor = Some(variant.to_owned());
+        args.opts.flavor = Some(flavor.to_owned());
         submit_impl(&inst, &machine, &Database::new(), &args, Some("subhost"))?;
         let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
         Ok(fs::read_to_string(attempt.submit_script_path()).unwrap())
+    }
+
+    /// Build jobs take their queue from the `build-queue` knob ahead of
+    /// `[build].queue` (here: none, so the default `gpu`), pass over a knob
+    /// naming a queue no build-submit script serves, and never read the
+    /// `queue` knob, which is for sims and tests.
+    #[test]
+    fn build_queue_knob_routes_build_jobs() {
+        let submit_with = |knobs: &[(&str, &str)]| -> String {
+            let tmp = tempfile::tempdir().unwrap();
+            let cactus = tmp.path().join("inst/Cactus");
+            let machine = two_partition_machine(&tmp.path().join("mdb/fake"), &cactus);
+            fs::create_dir_all(cactus.join("thornlists")).unwrap();
+            fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+            let inst = Installation::new("et", tmp.path().join("inst"));
+            let mut db = Database::new();
+            for (k, v) in knobs {
+                db.set_knob(k, (*v).to_owned());
+            }
+            let mut args = submit_args("sim", bare_topology());
+            args.opts.flavor = Some("cpu".to_owned());
+            submit_impl(&inst, &machine, &db, &args, Some("subhost")).unwrap();
+            let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
+            fs::read_to_string(attempt.submit_script_path()).unwrap()
+        };
+        assert!(submit_with(&[("build-queue", "cpu")]).contains("q=cpu"));
+        assert!(submit_with(&[("build-queue", "nowhere")]).contains("q=gpu"), "an unusable knob is skipped");
+        assert!(submit_with(&[("queue", "cpu")]).contains("q=gpu"), "the `queue` knob is not for builds");
     }
 
     /// A CPU-only optionlist compiles on a GPU queue: its compatible-queues
@@ -1587,11 +1638,11 @@ mod tests {
         assert!(script.contains("script=on-cpu q=cpu"), "{script}");
     }
 
-    /// The optionlist `--variant` never picks the buildsubmitscript: with no
+    /// The optionlist `--flavor` never picks the buildsubmitscript: with no
     /// -q, the default queue routes it — even though no script shares the
     /// optionlist's name, and the optionlist itself only runs elsewhere.
     #[test]
-    fn optionlist_variant_never_selects_the_buildsubmitscript() {
+    fn flavor_never_selects_the_buildsubmitscript() {
         let script = submit_flavor("cpu", None).unwrap();
         assert!(script.contains("script=on-gpu q=gpu"), "{script}");
     }
@@ -1783,16 +1834,16 @@ mod tests {
         assert!(format!("{err:#}").contains("SIMULATION_NAME"), "{err:#}");
     }
 
-    /// A machine that never declares `[variants.buildsubmitscript]` refuses
+    /// A machine that never declares `[buildsubmitscripts]` refuses
     /// with a message naming exactly what is missing.
     #[test]
-    fn submit_refused_without_a_buildsubmitscript_variant_names_it() {
+    fn submit_refused_without_a_buildsubmitscript_names_it() {
         let tmp = tempfile::tempdir().unwrap();
         let cactus = tmp.path().join("inst/Cactus");
         let machine_dir = tmp.path().join("mdb/fake");
         let mut machine =
             fake_submit_machine(&machine_dir, &completing_make_body(&cactus, "sim"), "", false);
-        machine.meta.variants.buildsubmitscript.variants.clear();
+        machine.meta.buildsubmitscripts.routes.clear();
         let inst = Installation::new("et", tmp.path().join("inst"));
         let db = Database::new();
 
@@ -1801,7 +1852,7 @@ mod tests {
         assert!(format!("{err:#}").contains("buildsubmitscript"), "{err:#}");
     }
 
-    /// A machine with a buildsubmitscript variant but no `[scheduler].submit`
+    /// A machine with a buildsubmitscript but no `[scheduler].submit`
     /// command is refused too, naming that piece instead.
     #[test]
     fn submit_refused_without_a_scheduler_submit_command_names_it() {
@@ -1929,7 +1980,7 @@ mod tests {
 
         let can_submit = fresh("can");
         let mut cannot_submit = fresh("cannot");
-        cannot_submit.meta.variants.buildsubmitscript.variants.clear();
+        cannot_submit.meta.buildsubmitscripts.routes.clear();
 
         let opts = BuildOpts::default_for_tests();
 
@@ -1949,7 +2000,7 @@ mod tests {
         assert!(choose_submit(&submit_forced, &opts).unwrap());
 
         let mut submit_impossible = fresh("submit_impossible");
-        submit_impossible.meta.variants.buildsubmitscript.variants.clear();
+        submit_impossible.meta.buildsubmitscripts.routes.clear();
         submit_impossible.meta.build.default_action = Some(BuildAction::Submit);
         // "submit" + impossible -> hard error naming the missing piece.
         let err = choose_submit(&submit_impossible, &opts).unwrap_err();
@@ -2135,12 +2186,10 @@ mod tests {
             holding-pattern = "$^"
             [queues.local]
             default = true
-            [variants.submitscript]
+            [submitscripts]
             "default" = ["local"]
-            [variants.runscript]
+            [runscripts]
             "default" = ["local"]
-            [variants.optionlist]
-            variants = ["default"]
             "#,
             log.display()
         ))

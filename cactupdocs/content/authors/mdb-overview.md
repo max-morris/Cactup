@@ -42,14 +42,14 @@ Each machine (in the system or user MDB) is a directory directly under the MDB r
 <mdb>/<machine-name>/
   meta.toml                    # Machine metadata and configuration
   optionlists/
-    default.toml               # One TOML per optionlist variant
+    default.toml               # One TOML per optionlist flavor
     cuda.toml                  # (machine-specific names)
   submitscripts/
-    default.sh                 # One shell script per submit variant
-    test.sh                    # Special variant for `test submit`
+    default.sh                 # One file per submit script
+    test.sh                    # Test-marked script for `test submit`
   runscripts/
-    default.sh                 # One shell script per run variant
-    test.sh                    # Special variant for `test run`
+    default.sh                 # One file per run script
+    test.sh                    # Test-marked script for `test run`
   buildsubmitscripts/          # OPTIONAL — only clusters that forbid
     default.sh                 # login-node compiling need this one
   hostname.regexp              # Machine detection: one regex (optional)
@@ -66,7 +66,7 @@ The **meta.toml** file defines:
 - Build environment: make command, make-jobs default, and (optional) queued-build defaults
 - Scheduler: submit, status, stop commands; queue patterns; environment setup
 - Queues: one `[queues.<name>]` section per queue (GPU yes/no, max walltime)
-- Variants: optionlist, submitscript, and runscript variants with metadata, plus an optional buildsubmitscript variant for clusters that queue builds
+- Script routes: `[submitscripts]` and `[runscripts]` map queues to script files, plus an optional `[buildsubmitscripts]` for clusters that queue builds (optionlist flavors need no entry; they are the files in `optionlists/`)
 
 See [meta.toml Reference](meta-toml.html) for the full schema.
 
@@ -76,10 +76,10 @@ An **optionlist** is a TOML file specifying compiler flags, optimization levels,
 
 - `default.toml` — standard CPU build
 - `cuda.toml` — GPU/CUDA build
-- `intel.toml` — Intel compiler variant
+- `intel.toml` — Intel compiler build
 - `debug.toml` — debug symbols and checks
 
-Users choose which variant when building: `cactup build myconfig --variant cuda`.
+Each optionlist is a **flavor**. Users choose which flavor when building: `cactup build myconfig --flavor cuda`.
 
 See [Optionlists](optionlists.html) for schema and template variables.
 
@@ -88,7 +88,7 @@ See [Optionlists](optionlists.html) for schema and template variables.
 **Submit scripts** are shell scripts that render a simulation as a scheduler job script (SLURM `sbatch`, PBS `qsub`, etc.). cactup provides:
 
 - Template variables like `@NODES@`, `@TASKS@`, `@WALLTIME@`, `@CHECKPOINT_WALLTIME@`
-- Script variants for different submit modes (default, test)
+- Several scripts per kind, routed by queue (e.g. a normal one and a test-marked one)
 - The machine's submit command to pass the script to the scheduler
 
 **Run scripts** are similar but used for interactive runs — they don't submit to a queue, they execute directly (or under an allocation).
@@ -126,7 +126,7 @@ Show a machine's configuration:
 
 ```sh
 cactup machine show mylab     # Show machine details
-cactup machine show mylab --variants  # Show optionlist variants
+cactup machine show mylab --flavors   # Show optionlist flavors
 ```
 
 Show the detected machine for the current host:
@@ -146,7 +146,7 @@ If you manage an HPC cluster or workstation, you can add it to cactup:
 
 2. **Edit the generated meta.toml** to set compiler commands, queue names, paths, etc.
 
-3. **Add optionlist variants** with compiler flags for your cluster
+3. **Add optionlist flavors** with compiler flags for your cluster
 
 4. **Write submit and run scripts** that format jobs for your scheduler (SLURM, PBS, etc.)
 
@@ -213,7 +213,7 @@ gpu = true
 max-walltime = "12:00:00"
 ```
 
-Users submit to a specific queue with `-q <queue>`, and cactup validates that the optionlist variant is compatible.
+Users submit to a specific queue with `-q <queue>`, and cactup validates that the config's binary may run there (the flavor's `[cactup.runs-on]` header).
 
 ## Next steps
 

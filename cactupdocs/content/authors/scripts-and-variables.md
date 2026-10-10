@@ -14,11 +14,11 @@ Scripts are stored alongside meta.toml:
 ```
 <mdb>/<machine>/
   submitscripts/
-    default.sh          # Submit variant for queued jobs
-    test.sh             # Special variant used by `cactup test submit`
+    default.sh          # Submit script for queued jobs
+    test.sh             # Test-marked script used by `cactup test submit`
   runscripts/
-    default.sh          # Run variant for interactive execution
-    test.sh             # Special variant used by `cactup test run`
+    default.sh          # Run script for interactive execution
+    test.sh             # Test-marked script used by `cactup test run`
   buildsubmitscripts/    # OPTIONAL — only if the cluster forbids
     default.sh           # login-node compiling; used by `cactup build submit`
 ```
@@ -227,9 +227,9 @@ mpirun -np @TASKS@ @EXECUTABLE@ @PARFILE@  →  mpirun -np 8 /path/to/cactus_sim
 > runs (see [Universes](meta-toml.html#universes)) — the script itself just
 > invokes `@EXECUTABLE@` and cactup applies the wrapper around it.
 
-## Variants in scripts
+## Several scripts per kind
 
-Submit and run scripts can have multiple **variants**. Each variant is a separate file in `submitscripts/` or `runscripts/`:
+A machine can have several submit and run scripts. Each is a separate file in `submitscripts/` or `runscripts/`:
 
 ```
 submitscripts/
@@ -240,21 +240,28 @@ runscripts/
   test.sh       # Used by `cactup test run`
 ```
 
-Declare variants in meta.toml:
+Route them in meta.toml. Each key names a script file, and its entry lists the
+queues it serves:
 
 ```toml
-[variants.submitscript]
-"default" = { queues = ["cpu", "gpu"], default = true }
+[submitscripts]
+"default" = { queues = ["cpu", "gpu"] }
 "test" = { queues = ["cpu", "gpu"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["cpu", "gpu"], default = true }
+[runscripts]
+"default" = { queues = ["cpu", "gpu"] }
 "test" = { queues = ["cpu", "gpu"], test = true }
 ```
 
-### Test variants
+Users never pick a script for a simulation: cactup routes by the chosen queue
+(and the config's build universe, below). A script serves exactly the queues
+it lists, with no fallback, so the normal submit scripts must list every
+queue in `[queues.*]`, and so must the normal run scripts; cactup checks that
+when it loads the machine.
 
-The `test = true` flag marks a variant as the default for `cactup test run` and `cactup test submit`. Test runs typically use fewer nodes and tasks (e.g., single node, 2 MPI ranks).
+### Test scripts
+
+The `test = true` flag marks a script for `cactup test run` and `cactup test submit`. Tests route among the test-marked scripts only, and the two sets never mix: a normal simulation never gets a test script, and a testsuite never gets a normal one, which could not run it. Test scripts need not cover every queue. A queue that no test script lists simply cannot run the testsuite, and choosing it is an error naming the queues that can. Test runs typically use fewer nodes and tasks (e.g., single node, 2 MPI ranks). Nothing picks a test script by name: make sure every queue that should run testsuites is listed by a test submit script and a test run script (one script may serve several queues).
 
 Example test-specific script:
 
@@ -274,7 +281,7 @@ cd @RUNDIR@-active
 srun @EXECUTABLE@ @PARFILE@
 ```
 
-## Script variants with different universes
+## Scripts for different build universes
 
 If your machine supports both native and Singularity builds, you may need **different run/submit scripts** for each:
 
@@ -287,8 +294,8 @@ runscripts/
 In meta.toml, associate scripts with build universes:
 
 ```toml
-[variants.runscript]
-"native" = { queues = ["cpu"], build-universes = ["host"], default = true }
+[runscripts]
+"native" = { queues = ["cpu"], build-universes = ["host"] }
 "singularity" = { queues = ["cpu"], build-universes = ["et-sif"] }
 ```
 
@@ -302,7 +309,7 @@ with every build universe"; an explicitly empty list is a validation error.
 
 Queues accept the same `build-universes` key, so a machine that unifies several
 upstream clusters behind one set of scheduler queues can restrict a queue to the
-build flavors it actually serves:
+configs whose build universe it actually serves:
 
 ```toml
 [queues.gpu]
@@ -318,11 +325,12 @@ build-universes = ["et-sif"]    # only Singularity-built configs
 When `-q` is omitted, cactup's default-queue pick is restricted to the queues
 compatible with the config's build universe; naming an incompatible queue
 explicitly is a hard error (there is no `--force-queue` escape, since the gate
-is structural like script-variant compatibility).
+is structural like script routing). This gate applies to simulations and tests;
+a `cactup build submit` job may compile on any of the machine's queues.
 
 ## Shell vs Python scripts
 
-A variant file is either shell (`.sh`) or Python (`.py`), and the two use
+A script file is either shell (`.sh`) or Python (`.py`), and the two use
 **different calling conventions**:
 
 ```
@@ -339,7 +347,7 @@ block for submitscripts), and that expanded text *is* the script.
 
 ### Python (`.py`)
 
-`.py` variants are **not** `@VAR@`-substituted. cactup runs the file with
+`.py` scripts are **not** `@VAR@`-substituted. cactup runs the file with
 `python3`, handing it the variable set as JSON on stdin; a prelude binds every
 variable as a **module global in canonical string form** (named exactly like the
 tokens — `JOB_NAME`, `NODES`, `TASKS`, uppercase), plus a `typed` dict carrying
@@ -544,6 +552,6 @@ srun @EXECUTABLE@ @PARFILE@
 
 ## Next steps
 
-- [meta.toml Reference](meta-toml.html) — declare script variants
+- [meta.toml Reference](meta-toml.html) — route scripts to queues
 - [Machine Discovery](machine-discovery.html) — auto-detect machines
 - [Porting a Cluster](porting-a-cluster.html) — complete example
