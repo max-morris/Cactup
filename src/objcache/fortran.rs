@@ -220,8 +220,11 @@ pub struct Dependencies {
     /// The module files written, by file name.
     pub modules: Vec<String>,
     /// What the driver found by searches of its own and gave the compiler
-    /// proper (its `-v` says).
+    /// proper: as the compile's driver will (asked by `-###` in the
+    /// compile's working directory, where its relative prefixes lead), and
+    /// as the dependency run's driver did (its `-v`, in its own directory).
     pub driven: Driven,
+    pub run_driven: Driven,
 }
 
 /// What the gfortran driver finds by searching its own prefixes (its
@@ -232,6 +235,8 @@ pub struct Dependencies {
 /// itself: `key::flags_from_elsewhere`.)
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Driven {
+    /// The compiler proper the driver runs.
+    pub proper: Option<PathBuf>,
     pub pre_include: Option<PathBuf>,
     pub intrinsic: Option<PathBuf>,
 }
@@ -271,8 +276,8 @@ impl Driven {
         let Some(line) = said.lines().map(words).find(|words| words.first().is_some_and(|program| program.ends_with("/f951"))) else {
             return Self::default();
         };
-        let mut driven = Self::default();
-        let mut words = line.iter();
+        let mut driven = Self { proper: line.first().map(PathBuf::from), ..Self::default() };
+        let mut words = line.iter().skip(1);
         while let Some(word) = words.next() {
             if let Some(file) = word.strip_prefix("-fpre-include=") {
                 driven.pre_include = Some(PathBuf::from(file));
@@ -324,6 +329,9 @@ pub struct Fortran {
     /// included file before the place it did, so each must hold nothing.
     /// Or why the check runs the dependency run again.
     places: Result<Vec<PathBuf>, String>,
+    /// The check after the compile fails: neither lookups nor a second
+    /// dependency run would see what the compile reads.
+    blind: bool,
     /// Lookups made, before and after the compile; and by the check of
     /// module files' order ([`read_inputs`]).
     count: u64,
@@ -345,6 +353,15 @@ impl Fortran {
         let Some(deps) = &self.deps else { return };
         // The key's own module lookups are not the check's.
         self.module_lookups.set(0);
+        // The driver of the dependency run, in its own directory, must have
+        // found what the compile's will (else the run read other files than
+        // the compile will, and running it again would be as blind).
+        if deps.run_driven != deps.driven {
+            let why = "the driver finds other files for the dependency run than for the compile".to_owned();
+            self.unfollowed(why);
+            self.blind = true;
+            return;
+        }
         // As the dependency run names the directories (the source by its
         // physical path, the `-I` directories as given), each with the
         // places before it in the compile's own order.
@@ -364,6 +381,16 @@ impl Fortran {
                 continue;
             }
             let mut placed = false;
+            // An absolute name (`include '/abs/x.inc'`) gfortran opens as it
+            // is first, and searches as `<dir>//abs/x.inc` when it is not
+            // there: the run prints the double `/`.
+            let raw = input.as_os_str().as_bytes();
+            let absolute = dirs.iter().find_map(|dir| {
+                let dir = dir.as_os_str().as_bytes();
+                let rest = raw.strip_prefix(dir)?.strip_prefix(b"/")?;
+                rest.starts_with(b"/").then(|| PathBuf::from(OsStr::from_bytes(rest)))
+            });
+            places.extend(absolute);
             for (at, dir) in dirs.iter().enumerate() {
                 let Ok(spelling) = input.strip_prefix(dir) else { continue };
                 placed = true;
@@ -401,6 +428,7 @@ impl Fortran {
     /// the copy's directory, where the compile looks first; the check then
     /// fails, and nothing is stored.
     fn unfollowed(&mut self, why: String) {
+        self.blind = self.copy_written;
         self.places = Err(match self.copy_written {
             true => format!("{why}; the copy's compile is not stored then"),
             false => why,
@@ -472,13 +500,6 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     // compile: a directory named relatively would be another one there,
     // also among the driver's own prefixes (an empty entry is the working
     // directory).
-    for variable in ["LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"] {
-        if let Some(value) = std::env::var_os(variable)
-            && value.as_bytes().split(|b| *b == b':').any(|entry| !entry.starts_with(b"/"))
-        {
-            bail!("{variable} has an entry that is no absolute path");
-        }
-    }
     let mut given_dirs = Vec::new();
     let mut flags = compile.preprocess.iter();
     while let Some(flag) = flags.next() {
@@ -493,6 +514,15 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     let cwd = std::fs::canonicalize(cwd).with_context(|| format!("Failed to resolve {}", cwd.display()))?;
     // The source, read once: what the compile reads is this, or a copy of it.
     let joined = cwd.join(&compile.source);
+    // The way its name leads, before it is read and after the key is made:
+    // a name that leads elsewhere meanwhile has the key read another file
+    // than the dependency run.
+    let pin = |path: &Path| {
+        let mut seen = Hasher::new("way to the source");
+        key::trail(path, &mut seen, &mut std::collections::HashMap::new());
+        seen.hex()
+    };
+    let pinned = pin(&joined);
     let source_dir = joined.parent().and_then(|dir| std::fs::canonicalize(dir).ok()).with_context(|| format!("Failed to resolve {}", joined.display()))?;
     let source = source_dir.join(joined.file_name().with_context(|| format!("{} names no file", joined.display()))?);
     let mut file = std::fs::File::open(&source).with_context(|| format!("Failed to open {}", source.display()))?;
@@ -506,6 +536,11 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
             true
         }
         _ => false,
+    };
+    // (A copy is pinned as written.)
+    let given_pinned = match &renamed {
+        Some(renamed) if serving => pin(&cwd.join(&renamed.given)),
+        _ => pinned.clone(),
     };
     let (compiled, given) = match &renamed {
         Some(Renamed { copy: Some((_, copy)), given, .. }) => (copy.clone(), given.clone()),
@@ -555,6 +590,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
         include_dirs: given_dirs,
         deps: None,
         places: Err("not looked up before the compile".to_owned()),
+        blind: false,
         count: 0,
         module_lookups: std::cell::Cell::new(0),
     };
@@ -569,6 +605,16 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     }
     let text_bytes = compiled.len() as u64;
     let (files, seen, count) = read_inputs(&deps, map, &fortran)?;
+    // The name the compile gives must reach the file read, by the way it
+    // took then (a copy is checked by its bytes).
+    if fortran.renamed.as_ref().is_none_or(|renamed| renamed.copy.is_none())
+        && std::fs::canonicalize(&fortran.given_source).ok().as_ref() != Some(&std::fs::canonicalize(&fortran.source)?)
+    {
+        bail!("{} is not the file read", fortran.given_source.display());
+    }
+    if pin(&joined) != pinned || pin(&fortran.given_source) != given_pinned {
+        bail!("the way to {} changed while it was read", joined.display());
+    }
     fortran.deps = Some(deps);
     Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, fortran })
 }
@@ -635,16 +681,18 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
             && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == deps.driven)
             && read_inputs(deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen);
     }
-    if fortran.copy_written && fortran.deps.is_some() {
+    if fortran.blind {
         return false;
     }
     let Ok(deps) = dependencies(compiler, name, fortran) else { return false };
     deps.modules == fortran.modules
+        && fortran.deps.as_ref().is_none_or(|before| before.driven == deps.driven)
         && read_inputs(&deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen)
 }
 
 /// The files the dependency run listed, digested as `key::read_files` does,
-/// with the source itself (and the copy, when the compile reads one: below);
+/// with the source itself (and the copy, when the compile reads one, which
+/// must hold the text keyed: below);
 /// their bytes are checked again after the compile, like any file read.
 ///
 /// The dependency run searches in another order than the compile: its own
@@ -722,6 +770,11 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         looked_at.insert((b"source".to_vec(), fortran.source.clone()), true);
         if fortran.copy_written {
             looked_at.insert((mapped(copy_path), copy_path.clone()), true);
+            // What the compile reads must be the text keyed.
+            let written = std::fs::read(copy_path).with_context(|| format!("Failed to read {}", copy_path.display()))?;
+            if Some(&written) != copy.map(|(_, text)| text) {
+                bail!("{} does not hold the copy written", copy_path.display());
+            }
         }
     }
     let (bytes, also_seen) = key::read_files(&looked_at, map)?;
@@ -765,8 +818,9 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
     key::flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &out.stderr).map_err(anyhow::Error::msg)?;
     let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copy.is_some()).map(Renamed::copies);
     let mut deps = parse_rule(&out.stdout, &fortran.source, copies.as_deref()).map_err(anyhow::Error::msg)?;
-    // What the driver found for itself, as the check after the compile
-    // asks it: `-###` quotes and escapes what `-v` prints as it stands.
+    // What the driver found for itself: for this run, by its own `-v`; for
+    // the compile, as the check after the compile asks it.
+    deps.run_driven = Driven::from_driver(&out.stderr);
     deps.driven = driver_says(compiler, name, fortran)?;
     Ok(deps)
 }
@@ -777,7 +831,8 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
 fn driver_says(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Driven> {
     let mut command = Command::new(&compiler.path);
     let args = fortran.args.iter().map(|arg| if arg == "-v" { OsStr::new("-###") } else { arg.as_os_str() });
-    command.arg0(name).args(args).current_dir(fortran.private.path());
+    // Where the compile runs: a relative prefix leads there.
+    command.arg0(name).args(args).current_dir(&fortran.cwd);
     key::in_english(&mut command);
     let child = command
         .stdin(Stdio::null())
@@ -849,7 +904,7 @@ fn parse_rule(out: &[u8], compiled: &Path, copies: Option<&Path>) -> Result<Depe
     }
     inputs.sort();
     inputs.dedup();
-    Ok(Dependencies { inputs, modules, driven: Driven::default() })
+    Ok(Dependencies { inputs, modules, driven: Driven::default(), run_driven: Driven::default() })
 }
 
 /// The sources of [`relocates`]' trial: a Cactus Fortran compile in
@@ -1356,6 +1411,32 @@ mod tests {
         assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut served.fortran, &served.files, &served.seen));
     }
 
+    /// An absolute name not there is searched for under each directory
+    /// (the run prints `<dir>//<name>`): the name itself, where gfortran
+    /// looks first, must stay empty.
+    #[test]
+    fn an_absolute_include_is_looked_for_by_its_own_name_first() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        let absolute = real.root.join("abs/x.inc");
+        let shared = real.root.join("shared");
+        let under = PathBuf::from(format!("{}/{}", shared.display(), absolute.display()));
+        std::fs::create_dir_all(under.parent().unwrap()).unwrap();
+        std::fs::write(&under, "integer, parameter :: y = 6\n").unwrap();
+        std::fs::write(real.build.join("a.f90"), format!("subroutine a()\n  include '{}'\n  print *, y\nend subroutine\n", absolute.display())).unwrap();
+        let include = format!("-I{}", shared.display());
+        let mut keyed = real.key("a.f90", &[&include]).unwrap();
+        keyed.fortran.before_compile();
+        assert!(keyed.fortran.places.as_ref().is_ok_and(|places| places.contains(&absolute)), "{:?}", keyed.fortran.places);
+        let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
+        assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(&absolute, "integer, parameter :: y = 5\n").unwrap();
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+    }
+
     /// A text file named like a module file is an included file, with an
     /// included file's rules; an included file of a name the copy's
     /// directory has keeps a copied source out, wherever it was found.
@@ -1391,6 +1472,7 @@ mod tests {
         let v = b"COLLECT_GCC_OPTIONS='-I' '/x -fpre-include=/fake.h' '-v'\n /usr/libexec/gcc/x86_64-linux-gnu/14/f951 s.f90 -quiet -v -fintrinsic-modules-path /usr/lib/gcc/x86_64-linux-gnu/14/finclude -fpre-include=/usr/include/finclude/math-vector-fortran.h\n";
         let hashes = b"Using built-in specs.\n \"/usr/libexec/gcc/x86_64-linux-gnu/14/f951\" \"s.f90\" \"-fintrinsic-modules-path\" \"/usr/lib/gcc/x86_64-linux-gnu/14/finclude\" \"-fpre-include=/usr/include/finclude/math-vector-fortran.h\"\n";
         let expected = Driven {
+            proper: Some(PathBuf::from("/usr/libexec/gcc/x86_64-linux-gnu/14/f951")),
             pre_include: Some(PathBuf::from("/usr/include/finclude/math-vector-fortran.h")),
             intrinsic: Some(PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/14/finclude")),
         };

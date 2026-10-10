@@ -1602,6 +1602,28 @@ a symlink on the way turned and back); the `-###` child is registered for a
 stop signal. B's: an `-I` directory given twice is no place before itself;
 test docs; the spec's "left" window.
 
+### M3a narrowed, round 9 (on `da35df8`): BLOCKED by both
+
+Both blocked on the same finding, made by round 8's fix: the key's driver
+findings came from a `-###` run after the dependency run, so a `specs` file
+or prefix that changed between the two had the key read the old
+pre-included header and the check compare against the new one, which the
+compile also read. Fixed: the dependency run's own `-v` is read too, and
+the check fails unless what its driver gave the compiler proper (now also
+which compiler proper) is what the `-###` run, made in the compile's own
+working directory, says the compile's will; relative driver prefixes then
+lead where the compile's do, and the blanket refusal of them is gone.
+
+A blocked on two more. An included file named by an absolute path that is
+not there is found under a directory as `<dir>//<name>` (tried), and the
+absolute name itself, where gfortran looks first, was no watched place:
+it is now. And the way the source's name leads could change while the key
+read it (a symlink on the way turned and back between the read and the
+dependency run; B too, non-blocking): the way is now pinned before the
+source is read and must be the same when the key is made, the name the
+compile gives must reach the file read, and a written copy must hold the
+text keyed.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

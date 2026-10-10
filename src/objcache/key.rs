@@ -694,7 +694,7 @@ fn content_digest(bytes: &[u8], map: Option<&PathMap>) -> String {
 /// what tells a new entry from an old one under a reused inode number:
 /// its birth time, and a symlink's change time), and where a symlink led.
 #[derive(Clone)]
-enum Step {
+pub(super) enum Step {
     Entry(Vec<u8>, Option<PathBuf>),
     Absent,
 }
@@ -710,7 +710,7 @@ enum Step {
 /// moves when files are created inside a directory. (A directory renamed away and the same one renamed
 /// back does not: decision 9, spec §18.5.) `steps` remembers each entry
 /// looked at, for the many names that share their directories.
-fn trail(path: &Path, seen: &mut Hasher, steps: &mut HashMap<PathBuf, Step>) {
+pub(super) fn trail(path: &Path, seen: &mut Hasher, steps: &mut HashMap<PathBuf, Step>) {
     let mut pending: std::collections::VecDeque<std::ffi::OsString> = std::collections::VecDeque::new();
     let start = match path.is_absolute() {
         true => path.to_owned(),

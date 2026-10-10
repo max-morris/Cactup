@@ -57,8 +57,10 @@ pub struct Event {
     pub compile_ms: u64,
     pub recheck_ms: u64,
     /// How the check after a Fortran compile was made (§18.10): by this
-    /// many lookups of a path, before and after the compile, or by running
-    /// the dependency run again, for the reason given.
+    /// many lookups of a path, before and after the compile, or, for the
+    /// reason given, by running the dependency run again (where the compile
+    /// reads a copy, or the dependency run's driver found other files than
+    /// the compile's, not at all: the check fails).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookups: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

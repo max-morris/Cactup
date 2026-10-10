@@ -5627,7 +5627,11 @@ the including file's directory or the working directory), and treats
 anything there as found (a directory there hangs it, tried); no module file
 may appear named like a module gfortran has built in (`iso_c_binding`,
 `iso_fortran_env`: a `use` that does not say `intrinsic` takes a file of
-that name if it finds one, tried) where the compile looks for modules.
+that name if it finds one, tried) where the compile looks for modules. An
+included file named by an absolute path is opened by that name first, and
+only where nothing is there searched for under each directory as
+`<dir>//<name>` (the dependency run prints the double `/`, tried): found so,
+the name itself is a place before it.
 These places are looked at right before the compile (one already taken
 sends the check to the dependency run) and again after it. Module files
 keep their order check, when the key is made and after the compile, along
@@ -5635,14 +5639,17 @@ the `-I` directories as the compile names them, resolved when looked at (a
 directory behind a symlink turned elsewhere leads elsewhere). And the
 driver's own searches are repeated after the compile by the driver alone
 (`-###`, which runs no compiler): it must read the same `specs` file or
-none, and give the compiler proper the same pre-included header
-(`-fpre-include=`) and intrinsic modules' directory as the key's dependency
-run did (the key's run asks it the same way); its prefixes include
-`LIBRARY_PATH`, `COMPILER_PATH` and `GCC_EXEC_PREFIX`, and an entry there
-that is no absolute path (an empty one is the working directory, which is
-another for the dependency run than for the compile) keeps the compile out
-of the cache. The file compiled is also watched by the name the compile
-reads it by (through a symlink, maybe). No compiler runs for any of this.
+none, and name the same compiler proper, pre-included header
+(`-fpre-include=`) and intrinsic modules' directory as when the key was
+made. The driver is asked so in the compile's working directory (where its
+relative prefixes, from `LIBRARY_PATH`, `COMPILER_PATH` or
+`GCC_EXEC_PREFIX`, lead), right after the key's dependency run, and what
+that run's own driver gave its compiler proper (its `-v` says) must be the
+same; else the dependency run reads other files than the compile would,
+and the check fails. The file compiled is also watched by the name the
+compile reads it by (through a symlink, maybe): the way that name leads is
+the same when the key is made as before the source is read, and a copy
+must hold the text keyed. No compiler runs for any of this.
 Where an included file cannot be placed so, or a place is already taken
 right before the compile, the dependency run runs again after the compile
 instead, and what it lists must be the same; but not where the compile
