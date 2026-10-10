@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); two inherited holes closed after it, in review |
+| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), in review |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1690,6 +1690,43 @@ Left, non-blocking: an absolute include found directly falls back to the
 dependency run; a driver passing two `-fintrinsic-modules-path` (only from
 modified language specs) would be read as one; `lookups` counts gzip module
 inputs never looked up; `checked_by_compiler` names cases where nothing ran.
+
+### After M3a, review 1 (on `ebaee25`): BLOCKED by both, on the same three
+
+Both found the two holes closed only in the shape reproduced, and three
+ways (all open at `6ba57f8` and `a14f279` too) to a wrong object served:
+- A Fortran source that also includes a file by an absolute name: the
+  first file that could not be placed sent the check to the dependency
+  run before any place was looked at, so a file appearing and gone again
+  was stored. Fixed: every place is looked at first (one taken fails the
+  check), and the fallback looks at them again after the compile.
+- An assembler (or `f951`, `cc1`, by `COMPILER_PATH`) appearing in an
+  absolute directory searched before the one found, after the build's
+  compiler identity was remembered (the round-12 case was about timing,
+  not the relative entry). Fixed: the identity is remembered with every
+  place passed over before each program (`-print-search-dirs`, then
+  `PATH` for the assembler) and library (the places glibc's loader says it
+  tried, a missing directory on its search path, its cache file); each
+  must hold nothing (or what it held) for the identity to be reused. About
+  15 empty places and 30–40 files per compiler on `plato`; key time
+  unchanged in the smoke builds.
+- A library loaded from the working directory through an empty
+  `LD_LIBRARY_PATH` entry (as cactup's own docs' `export` idiom leaves
+  one) was dropped from the identity. Fixed: those places are looked at
+  from each compile's own directory, and a library found by a relative
+  name rules the compiler out.
+
+With places watched, the refusals were narrowed (A, B): relative `PATH`
+entries and a relatively named compiler keep only Fortran out (its
+dependency run runs elsewhere), `LIBRARY_PATH` only Fortran (it finds a
+`specs` file, which C and C++ compiles report each time);
+`COMPILER_PATH`, `GCC_EXEC_PREFIX`, a library preloaded by a relative
+path and `LD_AUDIT` keep every compile out. The refusal names an empty
+entry as the working directory.
+
+Left, non-blocking: a place empty right before the compile, taken during
+it and empty again after (§18.10's stated limit); the reason a whole build
+was refused is only in `cactup cache report` and `events.jsonl`.
 
 ## Decisions
 
