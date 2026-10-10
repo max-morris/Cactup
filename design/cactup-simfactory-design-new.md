@@ -5640,14 +5640,19 @@ directory behind a symlink turned elsewhere leads elsewhere). And the
 driver's own searches are repeated after the compile by the driver alone
 (`-###`, which runs no compiler): it must read the same `specs` file or
 none, and name the same compiler proper, pre-included header
-(`-fpre-include=`) and intrinsic modules' directory as when the key was
-made. The driver is asked so in the compile's working directory (where its
-relative prefixes, from `LIBRARY_PATH`, `COMPILER_PATH` or
-`GCC_EXEC_PREFIX`, lead) right before the compile (so a hit does not pay
-for it), and what the key's dependency run's own driver gave its compiler
-proper (its `-v` says) must be the same, by absolute names; else the
-dependency run reads other files than the compile would, and the check
-fails. The file compiled is also watched by the name the
+(`-fpre-include=`) and intrinsic modules' directory as when it was asked
+right before the compile (so a hit does not pay for it), in the compile's
+working directory; and what the key's dependency run's own driver gave its
+compiler proper (its `-v` says) must be the same, by absolute names; else
+the dependency run reads other files than the compile would, and the check
+fails. A hit compares none of this, so what could lead the driver
+elsewhere from another directory keeps the compile out of the cache when
+the key is made: an entry of `LIBRARY_PATH`, `COMPILER_PATH` or
+`GCC_EXEC_PREFIX` that is no absolute path (an empty one is the working
+directory; tried, a `specs` file and a pre-included header found so), a
+compiler named by a relative path, and, for one named without a `/`
+(which the driver looks for along `PATH` to find its own prefix), such an
+entry of `PATH`. The file compiled is also watched by the name the
 compile reads it by (through a symlink, maybe): the way that name leads is
 the same when the key is made as before the source is read, and a copy
 must hold the text keyed. No compiler runs for any of this.

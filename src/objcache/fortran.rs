@@ -367,6 +367,7 @@ impl Fortran {
                     .flatten()
                     .any(|path| path.is_relative());
                 match () {
+                    _ if deps.driven.proper.is_none() => Some("the driver's answer names no compiler proper".to_owned()),
                     _ if relative => Some("the driver finds files for the compile by a relative name".to_owned()),
                     _ if deps.run_driven != deps.driven => Some("the driver finds other files for the dependency run than for the compile".to_owned()),
                     _ => None,
@@ -514,10 +515,11 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     if compiler.family != Family::Gfortran {
         bail!("Fortran is cached for gfortran only");
     }
+    if let Some(why) = driver_led_elsewhere(name, |variable| std::env::var_os(variable)) {
+        bail!(why);
+    }
     // The dependency run and the driver's check run elsewhere than the
-    // compile: a directory named relatively would be another one there,
-    // also among the driver's own prefixes (an empty entry is the working
-    // directory).
+    // compile: a directory named relatively would be another one there.
     let mut given_dirs = Vec::new();
     let mut flags = compile.preprocess.iter();
     while let Some(flag) = flags.next() {
@@ -635,6 +637,24 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     }
     fortran.deps = Some(deps);
     Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, fortran })
+}
+
+/// Why the driver, run as `name` with the environment `env` gives, could
+/// find other files from the dependency run's directory than from the
+/// compile's: by its own prefixes named relatively (an empty entry is the
+/// working directory), or by where it finds itself (by the name it is run
+/// by, or along `PATH` for a bare one). Refused in the key, as a hit
+/// compares nothing after.
+fn driver_led_elsewhere(name: &OsStr, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
+    let bare = !name.as_bytes().contains(&b'/');
+    if !bare && !name.as_bytes().starts_with(b"/") {
+        return Some("the compiler is named by a relative path".to_owned());
+    }
+    ["LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"].into_iter().chain(bare.then_some("PATH")).find_map(|variable| {
+        env(variable)
+            .is_some_and(|value| value.as_bytes().split(|b| *b == b':').any(|entry| !entry.starts_with(b"/")))
+            .then(|| format!("{variable} has an entry that is no absolute path"))
+    })
 }
 
 /// Does the preprocessor of the dependency run, run with `args` (the source
@@ -1455,6 +1475,22 @@ mod tests {
         // Gone again by the check: the dependency run lists what it did.
         std::fs::remove_file(&taken).unwrap();
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+    }
+
+    /// What leads the driver elsewhere from another directory keeps the
+    /// compile out of the cache (a hit could not tell).
+    #[test]
+    fn a_driver_led_by_relative_names_is_refused() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |variable: &str| pairs.iter().find(|(name, _)| *name == variable).map(|(_, value)| OsString::from(value));
+        let gfortran = OsStr::new("gfortran");
+        assert_eq!(driver_led_elsewhere(gfortran, env(&[("PATH", "/usr/bin:/bin"), ("LIBRARY_PATH", "/opt/lib")])), None);
+        assert!(driver_led_elsewhere(gfortran, env(&[("LIBRARY_PATH", ":/opt/lib")])).is_some_and(|why| why.starts_with("LIBRARY_PATH")));
+        assert!(driver_led_elsewhere(gfortran, env(&[("COMPILER_PATH", "/opt:lib")])).is_some());
+        assert!(driver_led_elsewhere(gfortran, env(&[("GCC_EXEC_PREFIX", "x86/")])).is_some());
+        assert!(driver_led_elsewhere(gfortran, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
+        // Named with its directory, it does not look along `PATH`.
+        assert_eq!(driver_led_elsewhere(OsStr::new("/usr/bin/gfortran"), env(&[("PATH", "/usr/bin:")])), None);
+        assert!(driver_led_elsewhere(OsStr::new("../bin/gfortran"), env(&[])).is_some());
     }
 
     /// An absolute name not there is searched for under each directory

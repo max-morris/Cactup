@@ -1638,6 +1638,32 @@ with `..` could name two compilers proper alike from the two directories:
 any relative name there now fails the check. A test of the fallback to the
 dependency run (with the driver compared) was added.
 
+### M3a narrowed, round 11 (on `dd02e31`): BLOCKED by both, on the same one
+
+Both re-ran rounds 7–10's findings (0 stale served; B's timing batches 40
+and 120 runs each) and found the search model matching gfortran in every
+case tried. Both blocked on one finding that round 9 had opened: with the
+refusal of relative driver prefixes gone, an empty `LIBRARY_PATH` entry (as
+`export LIBRARY_PATH=$LIBRARY_PATH:/x` leaves when it was unset) led the
+key's driver, in its own directory, elsewhere than the compile's; the
+comparison of the two runs only before a compile, so a hit served a stale
+object (A: a fake `omp_lib.mod` in `configs/<conf>/lib/finclude`; B: a
+`specs` file and a pre-included header under the working directory; audit
+mode called it "inputs changed", not a wrong hit). Inherited from M2a
+(`a14f279` serves it too), closed at `da35df8`, reopened at `6849a3a`.
+Fixed: the refusal is back in the key (no cost on a hit), and it now also
+covers a compiler named by a relative path and, for one named without a
+`/`, an entry of `PATH` that is no absolute path. Also: a driver answer
+naming no compiler proper fails the check; spec wording on when the driver
+is asked.
+
+Left, non-blocking: an absolute include found directly falls back to the
+dependency run (a copy's compile is then not stored), sound and rare in
+Cactus; record mode keeps a copy's refusals for a source with line markers;
+`checked_by_compiler` also names cases where nothing ran; an assembler found
+through a relative `COMPILER_PATH` or `PATH` entry (all languages, inherited
+from M1, not reproduced).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
