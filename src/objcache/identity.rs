@@ -81,6 +81,12 @@ pub struct Compiler {
     /// Every compile must say it read this file and no other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specs: Option<PathBuf>,
+    /// The flags that select another of a GCC's sets of libraries and
+    /// programs than its default one (`-m32`, `-mx32`; `-print-multi-lib`):
+    /// the driver looks for its programs elsewhere then, where the identity
+    /// did not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multilib: Vec<String>,
 }
 
 /// One file an identity was computed from, as it looked then.
@@ -178,7 +184,9 @@ fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
     let path = std::env::var_os("PATH").context("PATH is not set")?;
     let dirs = path.as_bytes().split(|b| *b == b':').map(|dir| if dir.is_empty() { Path::new(".") } else { Path::new(OsStr::from_bytes(dir)) });
     for place in dirs.map(|dir| dir.join(program)) {
-        if executable(&place) {
+        // `execvp` goes on past a file it may not run (no permission for
+        // this user, a filesystem mounted `noexec`): so does this search.
+        if executable(&place) && (!watched.helper || runs(&place)) {
             if place.is_relative() && watched.helper {
                 bail!("{} is found through a relative entry of PATH, which each working directory may have another of", place.display());
             }
@@ -187,6 +195,19 @@ fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
         watched.passed(&place);
     }
     Ok(None)
+}
+
+/// Does `program` start (it is asked for its version and left to it)? Not
+/// where the system refuses to run it.
+fn runs(program: &Path) -> bool {
+    let started = Command::new(program).arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    match started {
+        Ok(mut child) => {
+            let _ = child.wait();
+            true
+        }
+        Err(e) => e.kind() != std::io::ErrorKind::PermissionDenied,
+    }
 }
 
 /// What an identity is computed from: the files it read, and the places
@@ -304,7 +325,7 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
         .env_remove("LD_DEBUG_OUTPUT")
         .stdin(Stdio::null())
         .output();
-    let Ok(out) = out else { return Ok(Vec::new()) };
+    let out = out.with_context(|| format!("Failed to run {} to list the libraries it loads", program.display()))?;
     // `\tlibisl.so.23 => /lib/x86_64-linux-gnu/libisl.so.23 (0x00007f…)`,
     // or a library preloaded by its path: `\t/opt/lib/libx.so (0x…)`.
     let listed = String::from_utf8_lossy(&out.stdout);
@@ -313,14 +334,29 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
         let at = line.split_once(" => ").map_or(line, |(_, at)| at);
         Some(PathBuf::from(at.rsplit_once(" (")?.0))
     };
-    let libraries = listed.lines().filter_map(library).filter(|path| path.is_absolute()).collect();
+    let mut libraries = Vec::new();
+    for path in listed.lines().filter_map(library) {
+        match () {
+            _ if path.is_absolute() => libraries.push(path),
+            // Opened as named, from the working directory, unsearched.
+            _ if path.as_os_str().as_bytes().contains(&b'/') => {
+                bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), path.display())
+            }
+            // The loader's own (`linux-vdso.so.1`), no file.
+            _ => {}
+        }
+    }
     // `  1234:\t find library=libz.so.1 [0]; searching`, then its search
     // paths and tries, the last try the one found.
     let said = String::from_utf8_lossy(&out.stderr);
     let mut tries: Vec<PathBuf> = Vec::new();
     let settle = |tries: &mut Vec<PathBuf>, watched: &mut Watched| -> Res<()> {
         if let Some(found) = tries.pop() {
-            if found.is_relative() {
+            // Found nowhere (a preloaded library that is not there): the
+            // last try was passed over too.
+            if fs::metadata(&found).is_err() {
+                watched.passed(&found);
+            } else if found.is_relative() {
                 bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), found.display());
             }
             for place in tries.drain(..) {
@@ -344,7 +380,7 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
                 }
             }
         } else if let Some(cache) = line.strip_prefix("search cache=") {
-            watched.files.extend(Seen::of(Path::new(cache)));
+            watched.passed(Path::new(cache));
         }
     }
     settle(&mut tries, watched)?;
@@ -501,6 +537,8 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
 
     let mut hasher = Hasher::new("compiler");
     let mut specs = None;
+    let mut multilib = Vec::new();
+    let mut answers = Vec::new();
     hasher.feed(name.as_bytes());
     hasher.feed(bytes_digest(&bytes).as_bytes());
     // The programs that do the work, each with the libraries it loads.
@@ -550,6 +588,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
                 .collect();
             for helper in helpers {
                 let named = ask(path, &[&format!("-print-prog-name={helper}")])?;
+                answers.push((helper, named.clone()));
                 // A bare name back means "whatever PATH has": a front end
                 // that is not installed (no C++), or the system assembler.
                 // Passed over first: each of the driver's places.
@@ -574,6 +613,12 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
                     Some(file) => {
                         watched.files.extend(Seen::of(&file));
                         let file = fs::canonicalize(&file).unwrap_or(file);
+                        // A script runs some other program, which nothing
+                        // here would follow (a wrapper around `as`).
+                        let mut magic = [0u8; 4];
+                        if fs::File::open(&file).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic)).is_err() || magic != *b"\x7fELF" {
+                            bail!("{} runs {} for {helper}, which is no program cactup can identify (a script, maybe)", path.display(), file.display());
+                        }
                         hasher.feed(file_digest(&file)?.as_bytes());
                         watched.files.push(Seen::of(&file)?);
                         programs.push(file);
@@ -584,6 +629,12 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
             }
             // The rules by which the driver builds their command lines: the
             // built-in ones (`-dumpspecs` ignores a specs file).
+            for line in ask(path, &["-print-multi-lib"])?.lines() {
+                let flags = line.split_once(';').map_or("", |(_, flags)| flags);
+                multilib.extend(flags.split('@').filter(|flag| !flag.is_empty()).map(|flag| format!("-{flag}")));
+            }
+            multilib.sort();
+            multilib.dedup();
             let builtin = ask(path, &["-dumpspecs"])?;
             hasher.feed(builtin.as_bytes());
             hasher.feed(ask(path, &["-dumpmachine"])?.as_bytes());
@@ -615,6 +666,24 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
     }
     libraries.sort();
     libraries.dedup();
+    // The places passed over were looked at after the driver and the loader
+    // searched them: a program or library that appeared there in between
+    // would be watched as it is now, with the one found before hashed.
+    // Asked again, after the looking, they must say the same.
+    for (helper, named) in &answers {
+        if ask(path, &[&format!("-print-prog-name={helper}")])? != *named {
+            bail!("{} found another {helper} while it was examined", path.display());
+        }
+    }
+    let mut again = Vec::new();
+    for program in &programs {
+        again.extend(loaded_libraries(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true })?);
+    }
+    again.sort();
+    again.dedup();
+    if again != libraries {
+        bail!("{} loads other libraries than it did a moment ago", path.display());
+    }
     for library in libraries {
         watched.files.extend(Seen::of(&library));
         let library = fs::canonicalize(&library).unwrap_or(library);
@@ -632,6 +701,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
         locale_neutral,
         id: hasher.hex(),
         specs,
+        multilib,
     })
 }
 
@@ -869,7 +939,7 @@ mod tests {
             .output()
             .unwrap();
         let said = String::from_utf8_lossy(&out.stdout);
-        assert!(said.contains("assembler seen") && said.contains("link seen") && said.contains("library seen"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+        assert!(said.contains("assembler seen") && said.contains("link seen") && said.contains("script seen") && said.contains("library seen"), "{said}{}", String::from_utf8_lossy(&out.stderr));
     }
 
     /// An assembler found through a relative entry of `PATH` is another one,
@@ -910,8 +980,10 @@ mod tests {
         let memo = tempfile::tempdir().unwrap();
         let first = identify(memo.path(), OsStr::new("gcc")).unwrap();
         assert_eq!(identify(memo.path(), OsStr::new("gcc")).unwrap(), first);
-        // An assembler first on `PATH`.
-        script(Path::new("bin"), "as", "exec /usr/bin/as \"$@\"");
+        // An assembler first on `PATH` (another program: what it is does not
+        // matter here, only that it is no script).
+        let other = fs::canonicalize(find_program(OsStr::new("true")).unwrap()).unwrap();
+        fs::copy(&other, "bin/as").unwrap();
         if identify(memo.path(), OsStr::new("gcc")).is_ok_and(|now| now.id != first.id) {
             println!("assembler seen");
         }
@@ -921,11 +993,16 @@ mod tests {
         let real_as = find_program(OsStr::new("as")).unwrap();
         std::os::unix::fs::symlink(&real_as, "bin/as").unwrap();
         let linked = identify(memo.path(), OsStr::new("gcc")).unwrap();
-        script(Path::new("."), "other-as", "exec /usr/bin/as \"$@\"");
         fs::remove_file("bin/as").unwrap();
-        std::os::unix::fs::symlink(fs::canonicalize("other-as").unwrap(), "bin/as").unwrap();
+        std::os::unix::fs::symlink(&other, "bin/as").unwrap();
         if identify(memo.path(), OsStr::new("gcc")).is_ok_and(|now| now.id != linked.id) {
             println!("link seen");
+        }
+        fs::remove_file("bin/as").unwrap();
+        // One that is a script: what it runs is followed by nothing here.
+        script(Path::new("bin"), "as", "exec /usr/bin/as \"$@\"");
+        if identify(memo.path(), OsStr::new("gcc")).is_err_and(|e| format!("{e:#}").contains("a script, maybe")) {
+            println!("script seen");
         }
         fs::remove_file("bin/as").unwrap();
         // A library in the working directory, where the empty entry of

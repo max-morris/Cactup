@@ -1764,6 +1764,39 @@ misses. Left, stated in the spec: what appears during a compile and is
 gone after, `/etc/ld.so.preload`, `GLIBC_TUNABLES`, `GCONV_PATH`, a Clang
 configuration file added mid-attempt.
 
+### After M3a, review 3 (on `6d4de25`): BLOCKED by both
+
+Both re-ran every earlier reproduction (B: 31 cases; all serve a wrong
+object at `6ba57f8`, none at `6d4de25`). The Einstein Toolkit gate on
+`6d4de25`: 3376 published, no place taken, no refusal; key and check time
+within the host's noise. Found, all inherited and run end to end with a
+wrong object served:
+- Both: a program the driver runs that is a script (a wrapper around
+  `as`) was hashed by its own bytes; what it runs was not followed. Now
+  ruled out, as a driver that is a script is.
+- A: `-m32` and `-mx32` (accepted as machine options) have the driver look
+  for its programs in other directories than the identity asked about.
+  Now the flags `-print-multi-lib` lists keep the compile out.
+- A: the identity's own search along `PATH` took a file the system would
+  not run (mode, `noexec`), where `execvp` goes on to the next. Now each
+  candidate is started to see; a program whose libraries cannot be listed
+  fails closed.
+- B: a library its program names by a relative path with a `/` is opened
+  unsearched, and was dropped. Now it rules the compiler out.
+
+Also: a place that appeared between the driver's or loader's search and
+the identity's look is caught by asking both again after looking (B); a
+preloaded library found nowhere and a missing loader cache are watched
+(A, B); the spec's Clang sentence was wrong (each compile reports a
+configuration file; A); the cost on a network filesystem without negative
+lookup caching is stated (B).
+
+Left, non-blocking: a refusal made in one directory (a helper found there
+by a relative name) holds for the attempt in other directories (lost hits
+only); Fortran with an empty `LIBRARY_PATH` entry, or `.` in `PATH` with
+`gfortran` named bare, is still refused (B suggests the dependency run
+could be given the identified path as its name instead).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1980,9 +2013,9 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-Review of the two inherited holes closed after M3a's sign-off (the round 12
-record), with the Einstein Toolkit gate on that commit. Then Max decides
-what to cut next. The clean timings on `saturn` (local disk, every compile a
+Review 4 of the changes after M3a (the compiler identity's watched places
+and what reviews 1–3 found), with the Einstein Toolkit gate on that commit.
+Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
 miss, summed over compiles; about 2100 s of compiling): the cache's own time
 was 472 s at `a14f279` and 442 s with M3a, the Fortran check 32 s down to
 3.4 s; what is left is the C and C++ key and check, a preprocessor run each

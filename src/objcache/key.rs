@@ -322,6 +322,12 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
     }
     let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
     let compile = compile::parse(&argv[1..])?;
+    if let Some(flag) = compile.keyed.iter().find(|argument| compiler.multilib.iter().any(|flag| argument.as_bytes() == flag.as_bytes())) {
+        return Err(format!(
+            "{} has the compiler use another of its sets of programs and libraries (a multilib), which the cache does not follow",
+            flag.to_string_lossy()
+        ));
+    }
     if (compiler.family == Family::Gfortran) != compile.language.is_fortran() {
         return Err(match compile.language.is_fortran() {
             true => "Fortran is cached for gfortran only".to_owned(),
@@ -1218,7 +1224,7 @@ mod tests {
         let compile = compile::parse(&args).unwrap();
         assert_eq!(compile.depend, os(&depend));
         for family in [Family::Gcc, Family::Clang] {
-            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), specs: None };
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None };
             let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None, None);
             let given: Vec<&OsStr> = command.get_args().collect();
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");

@@ -4928,11 +4928,26 @@ fixed parts, so that the key does not change by accident:
   directory (it is not tried again for the next library), a library
   preloaded by its path that is not there, and its cache file. A relative
   place is looked at from each compile's own working directory; a library,
-  or a program the driver runs, found by a relative name rules the
-  compiler out. Left: what appears during a compile and is gone again
-  after it, a preload list the system keeps (`/etc/ld.so.preload`), the
-  loader's tunables, and the character-set converters a compile that
-  converts loads (`GCONV_PATH`). What still leads the driver elsewhere from one
+  or a program the driver runs, found by a relative name (or a library
+  its program names with a `/` but not from the root) rules the compiler
+  out. Along `PATH`, as `execvp` does, a file the system will not run (no
+  permission, a filesystem mounted `noexec`; tried by starting it) is
+  passed over. A program the driver runs must be one, as the driver must:
+  a script runs something nothing here follows (tried, a wrapper around
+  `as`). Once the places are looked at, the driver is asked again where its
+  programs are and the libraries are listed again, and a different answer
+  rules the compiler out (something appeared at a place between the search
+  and the look). A flag that selects another of a GCC's sets of programs
+  and libraries (`-print-multi-lib`: `-m32`, `-mx32`) keeps the compile out
+  of the cache: the driver looks for its programs elsewhere then (tried).
+  Each compile looks at all these places, a hit too: a few hundred lookups
+  with a long `PATH`, about a millisecond on a local disk, and one round
+  trip each on a network filesystem that caches no negative lookups
+  (`lookupcache=positive`). Left: what appears during a compile and is
+  gone again after it, a preload list the system keeps
+  (`/etc/ld.so.preload`), the loader's tunables, the character-set
+  converters a compile that converts loads (`GCONV_PATH`), and the
+  libraries of a program whose loader is not glibc's (it lists none). What still leads the driver elsewhere from one
   directory to the next keeps the compile out of the cache: an entry of
   `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute path (an empty
   one is the working directory), a library preloaded by a relative path,
@@ -5159,9 +5174,8 @@ nobody has to find out:
   that are named nowhere above — a plugin directory, lists in Clang's
   resource directory, whatever a later version adds — are not hashed. The
   remembered identity watches where programs and libraries are searched
-  for, not where a Clang configuration file could appear: one *added*
-  while a build attempt runs is seen by the next attempt, not by the rest
-  of this one (a GCC `specs` file is seen by each compile: above).
+  for (above); a Clang configuration file or a GCC `specs` file added
+  while a build attempt runs is reported by each compile, and seen there.
 - *The path map.* The trial shows the map holds for the trial's compile. A
   flag on the list that makes the compiler put an unmapped path *it worked
   out itself* into the object, where the trial does not look, would give
