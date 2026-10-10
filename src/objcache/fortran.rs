@@ -323,8 +323,8 @@ impl Fortran {
 
     /// How the check after the compile was made: by the count of lookups it
     /// made in place of the dependency run, or why it ran that again.
-    pub fn check_made(&self) -> Result<(u64, u64), String> {
-        self.places.as_ref().map(|_| (self.count + self.module_lookups.get(), 0)).map_err(Clone::clone)
+    pub fn check_made(&self) -> Result<u64, String> {
+        self.places.as_ref().map(|_| self.count + self.module_lookups.get()).map_err(Clone::clone)
     }
 
     /// The arguments a compile for the store runs with in place of `args`,
@@ -597,7 +597,7 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
     if copy.is_none() {
         named.insert((b"source".to_vec(), fortran.source.clone()), true);
     }
-    let (files, mut seen) = key::read_files(&named, map, |_, _| Ok(()))?;
+    let (files, mut seen) = key::read_files(&named, map)?;
     // Where a copy is compiled, its bytes (the source's, mapped) are the
     // key's text already; the source, whose line markers name this tree,
     // and the copy (written only by a build that serves, so that one that
@@ -609,7 +609,7 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
         if fortran.copy_written {
             looked_at.insert((mapped(copy_path), copy_path.clone()), true);
         }
-        let (bytes, also_seen) = key::read_files(&looked_at, map, |_, _| Ok(()))?;
+        let (bytes, also_seen) = key::read_files(&looked_at, map)?;
         let mut hasher = Hasher::new("seen with the source and its copy");
         for part in [&seen, &bytes, &also_seen] {
             hasher.feed(part.as_bytes());

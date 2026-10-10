@@ -337,8 +337,8 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     {
         keyed.drop_depend();
     }
-    // The check after the compile looks the inputs up again where it can,
-    // which needs them looked up right before the compile (§18.5).
+    // The check after a Fortran compile looks the inputs up again where it
+    // can, which needs them looked up right before the compile (§18.10).
     let ((), looking_ms) = timed(|| {
         if let Ok(keyed) = &mut keyed {
             keyed.before_compile();
@@ -378,11 +378,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     event.recheck_ms = looking_ms + recheck_ms;
     if let (Ok(keyed), Some(_)) = (&keyed, stable) {
         match keyed.check_made() {
-            Ok((lookups, listings)) => {
-                event.lookups = Some(lookups);
-                event.listings = Some(listings);
-            }
-            Err(why) => event.checked_by_compiler = Some(why),
+            Some(Ok(lookups)) => event.lookups = Some(lookups),
+            Some(Err(why)) => event.checked_by_compiler = Some(why),
+            None => {}
         }
     }
     event.object_bytes = output.as_ref().and_then(|output| output.metadata().ok()).map(|meta| meta.len());

@@ -53,8 +53,8 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after the compile runs no compiler: the files read again and the compiler's lookups repeated by cactup (decision 14) | **in review** (round 6) |
-| M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so** on M3a's measured lookup cost |
+| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **narrowed** to gfortran; review next |
+| M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1534,6 +1534,20 @@ answered from different client caches, so a change made by another host
 during a compile might show to one and not the other (to measure, or to
 state).
 
+### M3a, round 6 (on `d76f6a0`): BLOCKED by both; M3a narrowed
+
+Both re-ran rounds 1–5 (fixed) and found three more ways each to a stale
+object, all deliberate constructions: a macro dropping a `*/` argument
+(`DROP(*/)`) past the comment proof; UTF-8 identifiers (GCC 10+, Clang)
+past every ASCII word rule (`é(…)` making a call, `__has_include_x`, a
+UTF-8 parameter); blanks or a comment inside an expanded `<name>`; `g++`
+compiling a `.c` file reading `CPLUS_INCLUDE_PATH`. And the cost: 16.8% to
+14.4% overall, C not at all, hits dearer (decision 16). Max narrowed M3a to
+gfortran: `feature/build-cache` takes back `a14f279`'s C and C++ path
+(`key.rs` as at `0270b7d`, plus the hooks of the Fortran check), and the C
+and C++ work stays on `feature/build-cache-m3a-cxx` (`d76f6a0`) with these
+findings open. Next: the review gate on the narrowed milestone.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1631,6 +1645,9 @@ real code (the audit in `build-cache-b`): keying 19 s and checking again
 19 s, summed over the 594 compiles, against 451 s of compiling.
 
 ## What M3a is
+
+(Narrowed to gfortran by decision 16: what follows on C and C++ is the
+history of the branch `feature/build-cache-m3a-cxx`.)
 
 Decision 14, the first half: the check after a compile that is to be
 stored runs no compiler. Today it runs the key's compiler run again (`-E`
@@ -1747,7 +1764,12 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M3a (below and decision 14). Then Max decides on M3b from M3a's
-measured lookup cost; after that, the CUDA compilers (decision 2), with
-audit mode to prove them; the narrower key of decision 4 can be revisited
-with audit mode too.
+The review gate of M3a narrowed to gfortran (decision 16). Then clean
+timings on `saturn` (an NFS home, quiet; `~/tmp/build-cache-timing/` there,
+its own cactup instance and installation): a build without the cache,
+`a14f279`, and M3a, to see what a miss costs now and where (the key's
+preprocessor run; storing, whose `fsync` cost about 60 ms per object on a
+spinning disk on `melete05`, more than keying and checking together).
+Max then decides what to cut next (M3b, storing). After that, the CUDA
+compilers (decision 2), with audit mode to prove them; the narrower key of
+decision 4 can be revisited with audit mode too.

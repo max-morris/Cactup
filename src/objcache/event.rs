@@ -56,13 +56,11 @@ pub struct Event {
     pub key_ms: u64,
     pub compile_ms: u64,
     pub recheck_ms: u64,
-    /// How the check after the compile was made (§18.5): by this many
-    /// lookups of a path and listings of a directory, before and after the
-    /// compile, or by running the compiler again, for the reason given.
+    /// How the check after a Fortran compile was made (§18.10): by this
+    /// many lookups of a path, before and after the compile, or by running
+    /// the dependency run again, for the reason given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookups: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listings: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_by_compiler: Option<String>,
     /// In a serving build (§18.8): found in the store (served, or in audit

@@ -268,6 +268,22 @@ Asked as seven questions with options; the answers, in Max's numbering.
     the guard; answer: "Stated limit". Audit mode would show an object it
     made wrong.
 
+16. **M3a is narrowed to gfortran** (2026-10-09). After six review rounds
+    the C and C++ half had not paid off: on the Einstein Toolkit gate the
+    cache's extra compiler time went from 16.8% (`a14f279`) to 14.4%
+    (`d76f6a0`): C++ 19.0% to 15.8%, C 24.3% to 24.6%, Fortran 9.1% to
+    5.4%. The check after the compile was 4–5 times cheaper, but the key
+    grew (the `-dI`/`-dD` output, the scan of every file read, the
+    `__has_include` answers) by about half of what the check saved, and
+    hits got about 20% dearer for C++. Its soundness rested on a scan for
+    `__has_include` that each round's reviewers defeated with a more
+    deliberate construction, while the Fortran half had held since round 1.
+    Asked whether to ship Fortran only, keep hardening C and C++, or pause
+    M3a; answer: "Fortran only". C and C++ keep the second preprocessor run
+    of `a14f279` (key label `key-6` again). The C and C++ work is kept on
+    the branch `feature/build-cache-m3a-cxx` at `d76f6a0`, with round 6's
+    findings open (`STATUS.md`); decision 15 applies to it.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

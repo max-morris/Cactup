@@ -4849,7 +4849,7 @@ A key is a digest that two compiles share only when they would produce the
 same object (rule 1). `objcache::key` builds it from six parts, each a
 SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
 so that two builds can be compared part by part. The six digests are
-combined under a label (`key::KEY_LABEL`, now `key-7`), and **any change
+combined under a label (`key::KEY_LABEL`, now `key-6`), and **any change
 that can make one key stand for another object changes the label**:
 something the key now covers that it did not, anything cactup adds to or
 changes in a compile it runs, a change in how a part is digested. Several
@@ -4861,11 +4861,9 @@ fixed parts, so that the key does not change by accident:
 - **Preprocessed text.** The output of the same compiler with the same
   arguments and `-E` in place of `-c -o <object>`. It shows what the include
   paths and macro definitions made of the source: which files were found,
-  which branches were taken. No header is tracked or guessed at. Macro
-  definitions are kept (`-dD`): the object's debug information has them
-  under `-g3`, and the check after the compile reads them (below). So a
-  macro given on the command line changes the key even where nothing uses
-  it.
+  which branches were taken. No header is tracked or guessed at. With `-g3`
+  macro definitions are kept (`-dD`), since the object's debug information
+  then has them.
 - **Files read.** The bytes of every file the preprocessor names in its
   line markers: the source and every header (everything but the compilers'
   own names for what is not a file, `<built-in>` and its like, matched
@@ -5066,110 +5064,16 @@ cache only records**: the objects of a recording build are byte for byte
 those of a build without the cache.
 
 **Record mode** does around each compile what a serving cache does around
-one it has to run: key it, run it, and check afterward that the key still
-describes what was compiled (a header edited during the compile would
-otherwise leave an object of the new text under the key of the old). Only
-the compile has any effect.
-
-**The check after the compile runs no compiler where it can** (decision 14
-in `design/build-cache/DECISIONS.md`). It reads every file again (bytes and
-`seen`, below) and repeats the compiler's lookups itself, so that a file
-that appeared where the compiler looks before the place it found one — a
-header earlier in the search path, beside the including file, a module file
-in the working directory — shows as surely as a second compiler run would
-show it. For C and C++ the key's preprocessor run is given `-dI`: its output
-then has each `#include` and `#include_next` as written (one named by a
-macro, expanded) right before the line marker that enters the file found,
-and an include skipped for its guard or `#pragma once` with no entering
-marker; its `-v` says where it searched (the `-iquote` directories, then the
-bracket ones, and those it left out as nonexistent, or, GCC warning, as not
-a directory: none of them may be a directory later).
-`objcache::search` looks each include up as GCC and Clang do: `"name"` in
-the directory of the file entered (not the name a `#line` gave it), then the
-quote directories, then the bracket ones; `<name>` in the bracket ones;
-`#include_next` after the directory the including file was found in; an
-absolute name where it is. A directory where a file could be is passed over
-(both compilers, tried). Right before the compile, every include must lead
-where the run went (a skipped one, to a file the run had entered before it);
-after the compile, to the same place again. `__has_include` leaves no trace
-in the output, so cactup answers every literal one in the files read itself,
-over the same lists (a `"name"` also in the directory of each file read,
-since a macro may ask it anywhere), and the answers join the files part of
-the key; the check asks again and must get the same. (An answer that
-changed between the key's run and cactup's asking gives a key whose text
-says one thing and whose answers another: no compile with consistent inputs
-arrives at it, so it serves nothing wrong.) `__has_include_next` is answered
-the same way: the answers for every directory decide it, and the search
-list itself goes into the key with them. **The files are scanned without
-telling code from comments and literals**: what the scan looks for counts
-wherever it stands, so no misreading of a file can hide anything from it (a
-`__has_include` in a comment makes one lookup more), with lines spliced by a
-backslash joined first; it takes a use for a comment only where its own line
-proves one (after a `//`, after a `/*` not closed since, or before a `*/`
-with no `/*` before it on the line, and nothing on the way that could hold
-a comment mark without being one: a quote, a `<` or `>` of a header name, a
-`//` or `/*` between; and no comment marks sharing a character, `/**/*`,
-which read one way from code and another from inside a comment). A byte
-order mark at the start of a file is a blank, as for the compilers. What macros make is read from the run's own `-dD` output, which
-is the compiler's reading: an alias of `__has_include`, a `#` in an
-object-like macro, and every name defined (the compilers' own among them).
-A `<name>` is one the compilers expand macros in unless it is written right
-on an `#if` or `#elif` line with nothing before it there but `defined` (and
-what it names), numbers, operators, and other `__has_include`s (a word that
-could be a macro could open a call around it, or make its `(`); such a name
-is followed only while no word in it is a macro, a parameter of the macro
-it stands in, `__VA_ARGS__`, or a reserved word (`__x`, `_X`: the
-compilers' own macros, `__LINE__` and the built-in function-like
-`__has_attribute` among them, which `-dD` does not show). A name with
-blanks at either end falls back (one compiler keeps them, the other not). For gfortran (§18.10) the
-places the compile passes over before each included file must hold nothing,
-nor may a module file appear named like a module gfortran has built in
-(`iso_c_binding`, `iso_fortran_env`: a `use` that does not say `intrinsic`
-takes a file of that name if it finds one), and module files keep their
-order check. **Whatever this does not model sends the check to a second
-compiler run**, as before: `-include`; a source character set
-(`-finput-charset=`); C90, whose `//` is no comment; a NUL byte, a carriage
-return that ends a line by itself, or a trigraph (read otherwise by one
-compiler or language mode than another); a precompiled header
-(`<name>.gch`) anywhere looked at; a `__has_include` whose argument is not
-a name as written, or used other than to call it or to ask whether it is
-defined; `#embed` and `__has_embed`, which read a file no line marker
-names; `__TIMESTAMP__`, `__DATE__` and `__TIME__` (a second compiler run
-saw the clock move on, and so did the compile; older compilers ignore
-`SOURCE_DATE_EPOCH`); what could write a line the reader of the output
-takes for the compiler's own line marker: a line marker given in a source
-(`# 12 "file" 2`, also with a comment after its `#`), a `#` passed to a
-macro (after `(` or `,` outside a directive, with a number, blanks and a
-quote after it on its line or the next, as a marker has), a `#` in an
-object-like
-macro, a line marker that returns to another file than the one the output
-was reading; `#import`; a framework directory or a header map; a
-directory the compiler dropped as the same as another under another name; a
-lookup that does not lead where the compiler went; a file entered that no
-`#include` names (GCC's own `stdc-predef.h` aside, looked for as
-`<stdc-predef.h>` whether found or not, unless `-ffreestanding` or
-`-nostdinc` keeps GCC from reading it); `-iprefix` and its
-`-iwithprefix…`, a sysroot. Every directory the compile names (`-I`,
-`-iquote`, `-isystem`, `-idirafter`, and the entries of `CPATH` and of
-`C_INCLUDE_PATH` or `CPLUS_INCLUDE_PATH` by the language) that is in
-neither search list
-must not be a directory after the compile either (it was nonexistent, or
-no directory, which GCC says only in a warning that flags can hide); one
-that is a directory already was searched under another name, and the check
-falls back. GCC names a system header (one its marker flags so, found in a
-system directory: a bracket one not given by `-I`) by its physical path
-where that is shorter than the path it was found by: the lookups take that
-name to agree, and after the compile the file found must still have it,
-reached through the same entries. Directories are listed once a pass has
-looked in them a few times; in a listing, a name not found that another
-case of it could be (a directory that folds case) is looked up by its path.
-The log says how each check was made: the lookups by path and the directory
-listings it took (`lookups`, `listings`), or why it ran the
-compiler (`checked_by_compiler`).
-
-The key's preprocessor run, the reading of the files, and the check's
-lookups are the cost a build pays for the cache on a miss, and the log has
-what each took. A stop signal that
+one it has to run: key it, run it, and compute the text and file digests
+again to see whether the key still describes what was compiled (a header
+edited during the compile would otherwise leave an object of the new text
+under the key of the old). Only the compile has any effect. The two
+preprocessor runs and the reading of the files are the cost a build pays
+for the cache on a miss, and the log has what each took. For gfortran the
+check runs no compiler where it can: it reads the files again and looks
+where the compile looks (§18.10, decision 14 and 16 in
+`design/build-cache/DECISIONS.md`); the log says how many lookups that took
+(`lookups`), or why the dependency run ran again (`checked_by_compiler`). A stop signal that
 arrives during the check afterward ends the wrapper on the spot, by that
 signal (`make` then discards the object, as it would have with the compiler
 still running); the compile is not logged.
@@ -5229,26 +5133,6 @@ nobody has to find out:
   places where one could appear: a `specs` file or a Clang configuration
   file *added* while a build attempt runs is seen by the next attempt, not
   by the rest of this one.
-- *The compilers' search, as modeled.* The check by lookups is as good as
-  `objcache::search`'s model of where GCC, Clang and gfortran look. Each
-  include that was entered checks the model against the compiler before the
-  compile (a disagreement sends the check to a compiler run); a lookup the
-  compiler makes that leaves no trace — one the model does not know of —
-  would not be repeated. Known and modeled: the lists `-v` prints (and the
-  directories they leave out), the including file's directory,
-  `#include_next`, `.gch` files, directories in the way, `__has_include`
-  and `__has_include_next`, GCC's `stdc-predef.h`, gfortran's built-in
-  modules. Known and sent to a compiler run: the cases listed under record
-  mode above. **A name pasted from pieces is not seen** (decision 15): a
-  `__has_include`, `__has_embed`, `__DATE__` or `__TIME__` assembled by
-  `##` from parts of it leaves no trace a scan of the files can find, and
-  bounding it sent nearly every compile to the compiler. Nobody writes that
-  by accident. gfortran's pre-included header is where the driver's own
-  search found it; that search is not repeated (a copy appearing earlier in
-  the driver's prefixes would be read instead). Also left, as for
-  a second compiler run: a file that appears and is gone again while the
-  compile runs, and one that does so between the key's run and cactup's
-  lookups before the compile.
 - *The path map.* The trial shows the map holds for the trial's compile. A
   flag on the list that makes the compiler put an unmapped path *it worked
   out itself* into the object, where the trial does not look, would give
@@ -5734,15 +5618,23 @@ names of the module files it writes; its files part, of every file the
 dependency run read, under its mapped name. Since module files are found
 by names relative to the working directory, the working directory is
 keyed for every Fortran compile, and so are the `-I` directories (mapped).
-After the compile, what each file looked like must not have changed, and
-nothing may have appeared where the compile looks before the place it found
-a file (§18.5): gfortran looks for an included file, also one included from
+After the compile, what each file looked like must not have changed (§18.5),
+and nothing may have appeared where the compile looks before the place it
+found a file: gfortran looks for an included file, also one included from
 an included file, in the directory of the file it compiles and then in its
 `-I` directories (tried), and treats anything there as found (a directory
-there hangs it, tried). The header it reads unasked (`-fpre-include=`, which
-its `-v` names) is not searched for. Where an included file cannot be
-placed so, the dependency run runs again after the compile instead, and what
-it lists must be the same.
+there hangs it, tried); module files keep their order check; and no module
+file may appear named like a module gfortran has built in
+(`iso_c_binding`, `iso_fortran_env`: a `use` that does not say `intrinsic`
+takes a file of that name if it finds one, tried), where the compile looks
+for modules. All of these are looked at right before the compile and again
+after it, with no compiler run. Where an included file cannot be placed so,
+the dependency run runs again after the compile instead, and what it lists
+must be the same. Left, as for a second dependency run: a file that appears
+and is gone again while the compile runs. The header gfortran reads unasked
+(`-fpre-include=`, which its `-v` names) is where the driver's own search
+found it; that search is not repeated (a copy appearing earlier in the
+driver's prefixes would be read instead).
 
 **What a compile writes.** The object and its module files. An entry keeps
 all of them (§18.7). A hit puts back each module file whose bytes differ

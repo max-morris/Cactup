@@ -17,7 +17,6 @@ dependencies = [
  "gix",
  "include_dir",
  "indexmap",
- "memchr",
  "prodash",
  "ratatui",
  "regex",
