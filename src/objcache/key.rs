@@ -313,6 +313,9 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
     // The compiler before its arguments: for a compiler the cache has no
     // reader for, "which compiler" is the reason worth giving, not whichever
     // of its flags the GCC reader trips over first.
+    if let Some(why) = driver_led_elsewhere(&argv[0], |variable| std::env::var_os(variable)) {
+        return Err(why);
+    }
     let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
     let compile = compile::parse(&argv[1..])?;
     if (compiler.family == Family::Gfortran) != compile.language.is_fortran() {
@@ -1058,6 +1061,26 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
     Ok((hasher.hex(), bytes, named))
 }
 
+/// Why the driver, run as `name` with the environment `env` gives, could
+/// find other programs and files from one directory than from another: by
+/// its own prefixes named relatively (an empty entry is the working
+/// directory), by where it finds itself (by the name it is run by, or along
+/// `PATH` for a bare one), or by where it finds the assembler (along
+/// `PATH`, after its own prefixes). A compiler's identity is worked out
+/// once, a Fortran compile's dependency run runs in a directory of its own,
+/// and a hit compares nothing after the key: so these keep the compile out
+/// of the cache.
+pub(super) fn driver_led_elsewhere(name: &OsStr, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
+    if name.as_bytes().contains(&b'/') && !name.as_bytes().starts_with(b"/") {
+        return Some("the compiler is named by a relative path".to_owned());
+    }
+    ["LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "PATH"].into_iter().find_map(|variable| {
+        env(variable)
+            .is_some_and(|value| value.as_bytes().split(|b| *b == b':').any(|entry| !entry.starts_with(b"/")))
+            .then(|| format!("{variable} has an entry that is no absolute path"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,5 +1607,22 @@ mod tests {
         // A file forced in may be replaced by a precompiled one.
         let forced = clang(&here, &["-include", here.header().to_str().unwrap()]).unwrap_err();
         assert!(forced.contains("-include with Clang"), "{forced}");
+    }
+
+    /// What leads the driver elsewhere from another directory keeps the
+    /// compile out of the cache (a hit could not tell).
+    #[test]
+    fn a_driver_led_by_relative_names_is_refused() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |variable: &str| pairs.iter().find(|(name, _)| *name == variable).map(|(_, value)| OsString::from(value));
+        let gfortran = OsStr::new("gfortran");
+        assert_eq!(driver_led_elsewhere(gfortran, env(&[("PATH", "/usr/bin:/bin"), ("LIBRARY_PATH", "/opt/lib")])), None);
+        assert!(driver_led_elsewhere(gfortran, env(&[("LIBRARY_PATH", ":/opt/lib")])).is_some_and(|why| why.starts_with("LIBRARY_PATH")));
+        assert!(driver_led_elsewhere(gfortran, env(&[("COMPILER_PATH", "/opt:lib")])).is_some());
+        assert!(driver_led_elsewhere(gfortran, env(&[("GCC_EXEC_PREFIX", "x86/")])).is_some());
+        assert!(driver_led_elsewhere(gfortran, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
+        // Named with its directory, it still finds the assembler along `PATH`.
+        assert!(driver_led_elsewhere(OsStr::new("/usr/bin/gcc"), env(&[("PATH", "/usr/bin:")])).is_some());
+        assert_eq!(driver_led_elsewhere(OsStr::new("/usr/bin/gcc"), env(&[("PATH", "/usr/bin")])), None);
+        assert!(driver_led_elsewhere(OsStr::new("../bin/gfortran"), env(&[])).is_some());
     }
 }

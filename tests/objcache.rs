@@ -1177,18 +1177,21 @@ fn what_the_object_depends_on_is_in_the_key() {
             assert!(why.contains("the cache"), "{compiler} {flags:?}: {why}");
         }
 
-        // Another program of the compiler's name, first on PATH through a
-        // relative entry: that is what would run, and it is not a compiler
-        // the cache can identify.
+        // Another program of the compiler's name, first on PATH: that is
+        // what would run, and it is not a compiler the cache can identify.
         let scratch = build.config.join("scratch");
-        executable(&scratch.join(compiler), &format!("#!/bin/sh\nexec /usr/bin/env PATH=\"${{PATH#.:}}\" {compiler} -O3 \"$@\"\n"));
+        executable(&scratch.join(compiler), &format!("#!/bin/sh\nexec /usr/bin/env PATH=\"${{PATH#*:}}\" {compiler} -O3 \"$@\"\n"));
         let args = unit.args(&["-O2"], &lib);
-        let path = format!(".:{}", std::env::var("PATH").unwrap());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = build.wrap(compiler, &args).current_dir(&scratch).env("PATH", &path).output().unwrap();
-        assert!(out.status.success(), "{}", text(&out.stderr));
-        let last = build.events().pop().unwrap();
-        assert!(last.contains("is a script, not a compiler cactup can identify") && !last.contains("\"key\""), "{last}");
+        for (first, why) in [(scratch.display().to_string(), "is a script, not a compiler cactup can identify"), (".".to_owned(), "PATH has an entry that is no absolute path")] {
+            // A relative entry keeps any compile out: it could lead
+            // elsewhere from another directory.
+            let path = format!("{first}:{}", std::env::var("PATH").unwrap());
+            let out = build.wrap(compiler, &args).current_dir(&scratch).env("PATH", &path).output().unwrap();
+            assert!(out.status.success(), "{}", text(&out.stderr));
+            let last = build.events().pop().unwrap();
+            assert!(last.contains(why) && !last.contains("\"key\""), "{last}");
+        }
         fs::remove_file(scratch.join(compiler)).unwrap();
     }
 }

@@ -4905,13 +4905,19 @@ fixed parts, so that the key does not change by accident:
   a file: `-W…` (diagnostics) and `-m…` (machine options; `-mllvm` and
   Clang's `-module…` excepted).
 - **Compiler.** `objcache::identity`: the bytes of the file that would run
-  (found as `execvp` finds it, relative and empty `PATH` entries included),
-  the name it is run by (`clang` and `clang++` are one file), for GCC the
+  (found as `execvp` finds it), the name it is run by (`clang` and `clang++` are one file), for GCC the
   bytes of `cc1`, `cc1plus` and the assembler it names, and of every shared
   library each program loads (as the dynamic loader resolves them), plus
   what the driver says of itself (`--version` without the installation
   directory, and for GCC its built-in specs and target). Not its path and
-  not its modification time. The driver's own bytes must say it is GCC or
+  not its modification time. The identity is worked out once for a
+  build, and the driver finds programs and files from the directory it
+  runs in wherever it is led by a relative name: so an entry of `PATH`,
+  `LIBRARY_PATH`, `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute
+  path (an empty one is the working directory), or a compiler named by a
+  relative path, keeps every compile out of the cache (tried: an assembler
+  that appeared in the working directory, found through `.` in `PATH`,
+  assembled objects stored under the real one's identity). The driver's own bytes must say it is GCC or
   Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes `--version` on
   to a compiler and is not one, and is not cached. Neither is a compiler
   that takes flags from a file of its own — a GCC with a `specs` file on
@@ -5633,7 +5639,8 @@ only where nothing is there searched for under each directory as
 `<dir>//<name>` (the dependency run prints the double `/`, tried): found so,
 the name itself is a place before it.
 These places are looked at right before the compile (one already taken
-sends the check to the dependency run) and again after it. Module files
+fails the check: what appeared there since the key's dependency run may be
+gone again before a second one could see it, tried) and again after it. Module files
 keep their order check, when the key is made and after the compile, along
 the `-I` directories as the compile names them, resolved when looked at (a
 directory behind a symlink turned elsewhere leads elsewhere). And the
@@ -5645,19 +5652,15 @@ right before the compile (so a hit does not pay for it), in the compile's
 working directory; and what the key's dependency run's own driver gave its
 compiler proper (its `-v` says) must be the same, by absolute names; else
 the dependency run reads other files than the compile would, and the check
-fails. A hit compares none of this, so what could lead the driver
-elsewhere from another directory keeps the compile out of the cache when
-the key is made: an entry of `LIBRARY_PATH`, `COMPILER_PATH` or
-`GCC_EXEC_PREFIX` that is no absolute path (an empty one is the working
-directory; tried, a `specs` file and a pre-included header found so), a
-compiler named by a relative path, and, for one named without a `/`
-(which the driver looks for along `PATH` to find its own prefix), such an
-entry of `PATH`. The file compiled is also watched by the name the
+fails. A hit compares none of this; what could lead the driver elsewhere
+from another directory keeps the compile out of the cache when the key is
+made (§18.5, Compiler; tried here, a `specs` file and a pre-included header found
+through an empty `LIBRARY_PATH` entry). The file compiled is also watched by the name the
 compile reads it by (through a symlink, maybe): the way that name leads is
 the same when the key is made as before the source is read, and a copy
 must hold the text keyed. No compiler runs for any of this.
-Where an included file cannot be placed so, or a place is already taken
-right before the compile, the dependency run runs again after the compile
+Where an included file cannot be placed so (one named by an absolute
+path and found there), the dependency run runs again after the compile
 instead, and what it lists must be the same; but not where the compile
 reads a copy (decision 13): the dependency run reads the source and is
 blind to the copy's directory, so the check then fails and nothing is

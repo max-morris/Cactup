@@ -376,8 +376,7 @@ impl Fortran {
             Err(err) => Some(format!("the driver could not be asked: {err:#}")),
         };
         if let Some(why) = why {
-            self.unfollowed(why);
-            self.blind = true;
+            self.unfollowed(why, true);
             return;
         }
         let Some(deps) = &self.deps else { return };
@@ -420,7 +419,7 @@ impl Fortran {
             // here (the driver's search is repeated after the compile); also
             // included by the source, it is placed like any other.
             if !placed && deps.driven.pre_include.as_deref() != Some(input.as_path()) {
-                self.unfollowed(format!("{} was found where the compile does not look", input.display()));
+                self.unfollowed(format!("{} was found where the compile does not look", input.display()), false);
                 return;
             }
         }
@@ -436,21 +435,26 @@ impl Fortran {
         places.dedup();
         self.count += places.len() as u64;
         match places.iter().find(|place| !empty(place)) {
-            Some(place) => self.unfollowed(format!("{} is where the compile looks first", place.display())),
+            // Something appeared there since the key's dependency run: the
+            // compile may read it, and it may be gone again before a second
+            // dependency run could see it (tried).
+            Some(place) => self.unfollowed(format!("{} is where the compile looks first", place.display()), true),
             None => self.places = Ok(places),
         }
     }
 
     /// The check cannot be made by lookups, for `why`: the dependency run
-    /// runs again after the compile. Not where the compile reads a copy
-    /// (decision 13): the dependency run reads the source, and is blind to
-    /// the copy's directory, where the compile looks first; the check then
-    /// fails, and nothing is stored.
-    fn unfollowed(&mut self, why: String) {
-        self.blind = self.copy_written;
-        self.places = Err(match self.copy_written {
-            true => format!("{why}; the copy's compile is not stored then"),
-            false => why,
+    /// runs again after the compile, unless it would be `blind` to what the
+    /// compile reads. It is where the compile reads a copy (decision 13):
+    /// the dependency run reads the source, and does not look in the copy's
+    /// directory, where the compile looks first. The check then fails, and
+    /// nothing is stored.
+    fn unfollowed(&mut self, why: String, blind: bool) {
+        self.blind = blind || self.copy_written;
+        self.places = Err(match (blind, self.copy_written) {
+            (true, _) => format!("{why}; the compile is not stored then"),
+            (false, true) => format!("{why}; the copy's compile is not stored then"),
+            (false, false) => why,
         });
     }
 
@@ -514,9 +518,6 @@ fn without_macros(args: Vec<OsString>) -> Vec<OsString> {
 pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsString], cwd: &Path, map: Option<&PathMap>, in_dir: &Path, serving: bool) -> Res<Keyed> {
     if compiler.family != Family::Gfortran {
         bail!("Fortran is cached for gfortran only");
-    }
-    if let Some(why) = driver_led_elsewhere(name, |variable| std::env::var_os(variable)) {
-        bail!(why);
     }
     // The dependency run and the driver's check run elsewhere than the
     // compile: a directory named relatively would be another one there.
@@ -637,24 +638,6 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     }
     fortran.deps = Some(deps);
     Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, fortran })
-}
-
-/// Why the driver, run as `name` with the environment `env` gives, could
-/// find other files from the dependency run's directory than from the
-/// compile's: by its own prefixes named relatively (an empty entry is the
-/// working directory), or by where it finds itself (by the name it is run
-/// by, or along `PATH` for a bare one). Refused in the key, as a hit
-/// compares nothing after.
-fn driver_led_elsewhere(name: &OsStr, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
-    let bare = !name.as_bytes().contains(&b'/');
-    if !bare && !name.as_bytes().starts_with(b"/") {
-        return Some("the compiler is named by a relative path".to_owned());
-    }
-    ["LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX"].into_iter().chain(bare.then_some("PATH")).find_map(|variable| {
-        env(variable)
-            .is_some_and(|value| value.as_bytes().split(|b| *b == b':').any(|entry| !entry.starts_with(b"/")))
-            .then(|| format!("{variable} has an entry that is no absolute path"))
-    })
 }
 
 /// Does the preprocessor of the dependency run, run with `args` (the source
@@ -1451,11 +1434,13 @@ mod tests {
         assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut served.fortran, &served.files, &served.seen));
     }
 
-    /// A place taken right before the compile sends the check to the
-    /// dependency run, which must list the same files, read from a driver
-    /// that finds the same as before.
+    /// A place taken right before the compile fails the check: what the
+    /// compile reads there may be gone before a second dependency run could
+    /// see it. An included file that cannot be placed (one named by an
+    /// absolute path, found there) sends the check to the dependency run,
+    /// which must list the same files, from a driver that finds the same.
     #[test]
-    fn a_place_taken_before_the_compile_runs_the_dependency_run_again() {
+    fn a_place_taken_before_the_compile_fails_the_check() {
         let Some(real) = Real::new() else {
             eprintln!("skipped: no gfortran on this host");
             return;
@@ -1471,26 +1456,18 @@ mod tests {
         std::fs::write(&taken, "integer, parameter :: z = 1\n").unwrap();
         keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("where the compile looks first")), "{:?}", keyed.fortran.check_made());
-        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
-        // Gone again by the check: the dependency run lists what it did.
+        // Gone again by the check: it fails all the same.
         std::fs::remove_file(&taken).unwrap();
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+        // Found by its absolute name: the dependency run runs again.
+        let absolute = shared.join("i.inc");
+        std::fs::write(real.build.join("u.f90"), format!("subroutine u()\n  include '{}'\n  print *, z\nend subroutine\n", absolute.display())).unwrap();
+        let mut keyed = real.key("u.f90", &[]).unwrap();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
+        assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("where the compile does not look")), "{:?}", keyed.fortran.check_made());
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
-    }
-
-    /// What leads the driver elsewhere from another directory keeps the
-    /// compile out of the cache (a hit could not tell).
-    #[test]
-    fn a_driver_led_by_relative_names_is_refused() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| move |variable: &str| pairs.iter().find(|(name, _)| *name == variable).map(|(_, value)| OsString::from(value));
-        let gfortran = OsStr::new("gfortran");
-        assert_eq!(driver_led_elsewhere(gfortran, env(&[("PATH", "/usr/bin:/bin"), ("LIBRARY_PATH", "/opt/lib")])), None);
-        assert!(driver_led_elsewhere(gfortran, env(&[("LIBRARY_PATH", ":/opt/lib")])).is_some_and(|why| why.starts_with("LIBRARY_PATH")));
-        assert!(driver_led_elsewhere(gfortran, env(&[("COMPILER_PATH", "/opt:lib")])).is_some());
-        assert!(driver_led_elsewhere(gfortran, env(&[("GCC_EXEC_PREFIX", "x86/")])).is_some());
-        assert!(driver_led_elsewhere(gfortran, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
-        // Named with its directory, it does not look along `PATH`.
-        assert_eq!(driver_led_elsewhere(OsStr::new("/usr/bin/gfortran"), env(&[("PATH", "/usr/bin:")])), None);
-        assert!(driver_led_elsewhere(OsStr::new("../bin/gfortran"), env(&[])).is_some());
+        std::fs::write(&absolute, "integer, parameter :: z = 3\n").unwrap();
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
     }
 
     /// An absolute name not there is searched for under each directory

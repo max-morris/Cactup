@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **narrowed** to gfortran; review next |
+| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); two inherited holes closed after it, in review |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
@@ -1664,6 +1664,33 @@ Cactus; record mode keeps a copy's refusals for a source with line markers;
 through a relative `COMPILER_PATH` or `PATH` entry (all languages, inherited
 from M1, not reproduced).
 
+### M3a narrowed, round 12 (on `6ba57f8`): SIGN-OFF by both
+
+Both re-ran every earlier blocking finding (0 stale served; B 30 runs a
+case, submodules too) and checked the search model against gfortran 14.2
+once more. The Einstein Toolkit gate on `6ba57f8`: 594 of 594 Fortran
+checks by lookups, no fallback, 1.9 s in all (median 3 ms; about 19 s at
+`a14f279`), 0 wrong in audit. **M3a signs off here.**
+
+Two holes inherited from earlier milestones, reproduced end to end with a
+wrong object served, and as open at `a14f279` (never caught by a second
+dependency run, so not blocking M3a), closed right after it in one change
+reviewed on its own:
+- B: a place taken right before the compile sent the check to the
+  dependency run; a file put there, read by the compile and gone again
+  before that run, was stored. Such a place now fails the check.
+- A (inherited from M1, all languages): with `.` in `PATH`, an assembler
+  that appeared in the working directory after the build's compiler
+  identity was worked out assembled objects stored under the real one's
+  identity. A relative or empty entry of `PATH`, `LIBRARY_PATH`,
+  `COMPILER_PATH` or `GCC_EXEC_PREFIX`, or a compiler named by a relative
+  path, now keeps every compile out of the cache (it was Fortran only).
+
+Left, non-blocking: an absolute include found directly falls back to the
+dependency run; a driver passing two `-fintrinsic-modules-path` (only from
+modified language specs) would be read as one; `lookups` counts gzip module
+inputs never looked up; `checked_by_compiler` names cases where nothing ran.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -1880,12 +1907,15 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-The review gate of M3a narrowed to gfortran (decision 16). Then clean
-timings on `saturn` (an NFS home, quiet; `~/tmp/build-cache-timing/` there,
-its own cactup instance and installation): a build without the cache,
-`a14f279`, and M3a, to see what a miss costs now and where (the key's
-preprocessor run; storing, whose `fsync` cost about 60 ms per object on a
-spinning disk on `melete05`, more than keying and checking together).
-Max then decides what to cut next (M3b, storing). After that, the CUDA
-compilers (decision 2), with audit mode to prove them; the narrower key of
-decision 4 can be revisited with audit mode too.
+Review of the two inherited holes closed after M3a's sign-off (the round 12
+record), with the Einstein Toolkit gate on that commit. Then Max decides
+what to cut next. The clean timings on `saturn` (local disk, every compile a
+miss, summed over compiles; about 2100 s of compiling): the cache's own time
+was 472 s at `a14f279` and 442 s with M3a, the Fortran check 32 s down to
+3.4 s; what is left is the C and C++ key and check, a preprocessor run each
+(about 390 s; for C, 220 s against 530 s of compiling). Storing cost 9 s
+there (the `fsync` cost was `melete05`'s spinning disk). M3b would remove
+that preprocessor run (decision 14), and needs the `__has_include` knowledge
+the C and C++ half of M3a could not make sound (decision 16). After that,
+the CUDA compilers (decision 2), with audit mode to prove them; the narrower
+key of decision 4 can be revisited with audit mode too.
