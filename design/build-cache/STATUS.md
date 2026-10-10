@@ -1624,6 +1624,20 @@ source is read and must be the same when the key is made, the name the
 compile gives must reach the file read, and a written copy must hold the
 text keyed.
 
+### M3a narrowed, round 10 (on `6849a3a`): A SIGN-OFF; B did not report
+
+A re-ran round 9's three blocking findings end to end (all caught, 0 stale
+served) and found no new hole. B ended on an API error before reporting. The
+Einstein Toolkit gate on `6849a3a`: 0 wrong in all three audits; the
+Fortran check 1.3 s over 594 compiles (median 2 ms, all by lookups; 18.6 s
+at `a14f279`), the Fortran key 28 s (22 s at `a14f279`). A's non-blocking
+findings, taken: the driver's `-###` ran in every key though only the check
+uses it (about 1.4 ms on a hit too): it now runs right before the compile;
+and the driver's findings were compared as strings, so a relative prefix
+with `..` could name two compilers proper alike from the two directories:
+any relative name there now fails the check. A test of the fallback to the
+dependency run (with the driver compared) was added.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

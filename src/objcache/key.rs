@@ -495,7 +495,7 @@ impl Keyed {
     /// (§18.10). C and C++ are checked by a second preprocessor run.
     pub fn before_compile(&mut self) {
         if let Some(fortran) = &mut self.fortran {
-            fortran.before_compile();
+            fortran.before_compile(&self.compiler, &self.name);
         }
     }
 

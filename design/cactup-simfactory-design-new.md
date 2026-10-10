@@ -5643,10 +5643,11 @@ none, and name the same compiler proper, pre-included header
 (`-fpre-include=`) and intrinsic modules' directory as when the key was
 made. The driver is asked so in the compile's working directory (where its
 relative prefixes, from `LIBRARY_PATH`, `COMPILER_PATH` or
-`GCC_EXEC_PREFIX`, lead), right after the key's dependency run, and what
-that run's own driver gave its compiler proper (its `-v` says) must be the
-same; else the dependency run reads other files than the compile would,
-and the check fails. The file compiled is also watched by the name the
+`GCC_EXEC_PREFIX`, lead) right before the compile (so a hit does not pay
+for it), and what the key's dependency run's own driver gave its compiler
+proper (its `-v` says) must be the same, by absolute names; else the
+dependency run reads other files than the compile would, and the check
+fails. The file compiled is also watched by the name the
 compile reads it by (through a symlink, maybe): the way that name leads is
 the same when the key is made as before the source is read, and a copy
 must hold the text keyed. No compiler runs for any of this.

@@ -220,8 +220,8 @@ pub struct Dependencies {
     /// The module files written, by file name.
     pub modules: Vec<String>,
     /// What the driver found by searches of its own and gave the compiler
-    /// proper: as the compile's driver will (asked by `-###` in the
-    /// compile's working directory, where its relative prefixes lead), and
+    /// proper: as the compile's driver will (asked by `-###` right before
+    /// the compile, in its working directory, where relative prefixes lead), and
     /// as the dependency run's driver did (its `-v`, in its own directory).
     pub driven: Driven,
     pub run_driven: Driven,
@@ -349,19 +349,37 @@ impl Fortran {
     /// [`read_inputs`], when the key is made and after the compile. Where an
     /// included file cannot be placed so, or a place is not empty now, the
     /// check after the compile runs the dependency run again.
-    pub fn before_compile(&mut self) {
-        let Some(deps) = &self.deps else { return };
+    pub fn before_compile(&mut self, compiler: &Compiler, name: &OsStr) {
         // The key's own module lookups are not the check's.
         self.module_lookups.set(0);
-        // The driver of the dependency run, in its own directory, must have
-        // found what the compile's will (else the run read other files than
-        // the compile will, and running it again would be as blind).
-        if deps.run_driven != deps.driven {
-            let why = "the driver finds other files for the dependency run than for the compile".to_owned();
+        // What the compile's driver will find for itself (asked here, so that
+        // a hit does not pay for it). The dependency run's driver, in its own
+        // directory, must have found the same (else the run read other files
+        // than the compile will, and running it again would be as blind); by
+        // absolute names, which lead to one file wherever it runs.
+        let said = driver_says(compiler, name, self);
+        let Some(deps) = &mut self.deps else { return };
+        let why = match said {
+            Ok(driven) => {
+                deps.driven = driven;
+                let relative = [&deps.driven.proper, &deps.driven.pre_include, &deps.driven.intrinsic]
+                    .into_iter()
+                    .flatten()
+                    .any(|path| path.is_relative());
+                match () {
+                    _ if relative => Some("the driver finds files for the compile by a relative name".to_owned()),
+                    _ if deps.run_driven != deps.driven => Some("the driver finds other files for the dependency run than for the compile".to_owned()),
+                    _ => None,
+                }
+            }
+            Err(err) => Some(format!("the driver could not be asked: {err:#}")),
+        };
+        if let Some(why) = why {
             self.unfollowed(why);
             self.blind = true;
             return;
         }
+        let Some(deps) = &self.deps else { return };
         // As the dependency run names the directories (the source by its
         // physical path, the `-I` directories as given), each with the
         // places before it in the compile's own order.
@@ -686,7 +704,9 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
     }
     let Ok(deps) = dependencies(compiler, name, fortran) else { return false };
     deps.modules == fortran.modules
-        && fortran.deps.as_ref().is_none_or(|before| before.driven == deps.driven)
+        && fortran.deps.as_ref().is_some_and(|before| {
+            before.run_driven == deps.run_driven && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == before.driven)
+        })
         && read_inputs(&deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen)
 }
 
@@ -818,10 +838,9 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
     key::flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &out.stderr).map_err(anyhow::Error::msg)?;
     let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copy.is_some()).map(Renamed::copies);
     let mut deps = parse_rule(&out.stdout, &fortran.source, copies.as_deref()).map_err(anyhow::Error::msg)?;
-    // What the driver found for itself: for this run, by its own `-v`; for
-    // the compile, as the check after the compile asks it.
+    // What the driver found for itself for this run, by its own `-v` (for
+    // the compile, right before it: [`Fortran::before_compile`]).
     deps.run_driven = Driven::from_driver(&out.stderr);
-    deps.driven = driver_says(compiler, name, fortran)?;
     Ok(deps)
 }
 
@@ -1193,6 +1212,7 @@ mod tests {
         assert_eq!(keyed.fortran.modules, ["inner.mod", "user.mod"]);
         let again = key_of(&compile, &args).unwrap();
         assert_eq!((&again.text, &again.files), (&keyed.text, &keyed.files));
+        keyed.fortran.before_compile(&compiler, OsStr::new("gfortran"));
         assert!(still_holds(&compiler, OsStr::new("gfortran"), Some(&conf_map), &mut keyed.fortran, &keyed.files, &keyed.seen));
         // The compile writes `inner.mod` over the stale one: no input changed.
         let argv: Vec<OsString> = keyed.fortran.arguments(&args, compile.source_at);
@@ -1341,19 +1361,19 @@ mod tests {
         std::fs::write(real.build.join("c.f90"), format!("# 1 \"{}\"\nsubroutine c()\n  include 'sub/j.inc'\n  print *, j\nend subroutine\n", original.display())).unwrap();
         let include = format!("-I{}", shared.display());
         let mut keyed = real.key("c.f90", &[&include]).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.check_made().is_ok(), "{:?}", keyed.fortran.check_made());
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
         std::fs::create_dir_all(real.build.join(".cactup/sub")).unwrap();
         std::fs::write(real.build.join(".cactup/sub/j.inc"), "integer, parameter :: j = 4\n").unwrap();
         let mut keyed = real.key("c.f90", &[&include]).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.check_made().is_err());
         assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen), "a file beside the copy passed the check");
         std::fs::remove_dir_all(real.build.join(".cactup/sub")).unwrap();
         // The same `-I` twice.
         let mut keyed = real.key("c.f90", &[&include, &include]).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.check_made().is_ok(), "{:?}", keyed.fortran.check_made());
     }
 
@@ -1379,7 +1399,7 @@ mod tests {
         let args: Vec<OsString> = vec!["-c".into(), "-o".into(), real.build.join("s.f90.o").into(), link.join("s.f90").into()];
         let compile = super::super::compile::parse(&args).unwrap();
         let mut keyed = key(&real.compiler, OsStr::new("gfortran"), &compile, &args, &real.scratch, None, &real.cc, false).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), None, &mut keyed.fortran, &keyed.files, &keyed.seen));
         point(&other);
         point(&real.build);
@@ -1405,10 +1425,36 @@ mod tests {
         assert_eq!((&recorded.text, &recorded.files), (&served.text, &served.files), "recorded and served alike");
         let copy = real.build.join(".cactup/x.f90");
         assert!(copy.is_file());
-        served.fortran.before_compile();
+        served.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut served.fortran, &served.files, &served.seen));
         std::fs::write(&copy, "subroutine x()\n  print *, 2\nend subroutine\n").unwrap();
         assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut served.fortran, &served.files, &served.seen));
+    }
+
+    /// A place taken right before the compile sends the check to the
+    /// dependency run, which must list the same files, read from a driver
+    /// that finds the same as before.
+    #[test]
+    fn a_place_taken_before_the_compile_runs_the_dependency_run_again() {
+        let Some(real) = Real::new() else {
+            eprintln!("skipped: no gfortran on this host");
+            return;
+        };
+        let shared = real.root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("i.inc"), "integer, parameter :: z = 2\n").unwrap();
+        std::fs::write(real.build.join("t.f90"), "subroutine t()\n  include 'i.inc'\n  print *, z\nend subroutine\n").unwrap();
+        let include = format!("-I{}", shared.display());
+        let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
+        let taken = real.build.join("i.inc");
+        let mut keyed = real.key("t.f90", &[&include]).unwrap();
+        std::fs::write(&taken, "integer, parameter :: z = 1\n").unwrap();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
+        assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("where the compile looks first")), "{:?}", keyed.fortran.check_made());
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+        // Gone again by the check: the dependency run lists what it did.
+        std::fs::remove_file(&taken).unwrap();
+        assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
     }
 
     /// An absolute name not there is searched for under each directory
@@ -1428,7 +1474,7 @@ mod tests {
         std::fs::write(real.build.join("a.f90"), format!("subroutine a()\n  include '{}'\n  print *, y\nend subroutine\n", absolute.display())).unwrap();
         let include = format!("-I{}", shared.display());
         let mut keyed = real.key("a.f90", &[&include]).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.places.as_ref().is_ok_and(|places| places.contains(&absolute)), "{:?}", keyed.fortran.places);
         let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
@@ -1509,7 +1555,7 @@ mod tests {
         let flags = [format!("-I{}", link.join("a").display()), format!("-I{}", b.display())];
         let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
         let mut keyed = real.key("u.f90", &flags).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.check_made().is_ok(), "{:?}", keyed.fortran.check_made());
         let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
         let check = |keyed: &mut Keyed| still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen);
@@ -1524,7 +1570,7 @@ mod tests {
         }
         std::fs::write(real.build.join("o.f90"), "subroutine o()\n  include 'omp_lib.h'\nend subroutine\n").unwrap();
         let mut keyed = real.key("o.f90", &[]).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(keyed.fortran.check_made().is_ok(), "an include from the intrinsic modules' directory is placed: {:?}", keyed.fortran.check_made());
         assert!(check(&mut keyed));
         std::fs::write(real.build.join("omp_lib.h"), "! found first\n").unwrap();
@@ -1554,7 +1600,7 @@ mod tests {
         let include = format!("-I{}", shared.display());
         let looked = || {
             let mut keyed = real.key("t.f90", &[&include]).unwrap();
-            keyed.fortran.before_compile();
+            keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
             assert!(keyed.fortran.check_made().is_ok(), "{:?}", keyed.fortran.check_made());
             keyed
         };
@@ -1578,7 +1624,7 @@ mod tests {
         // of its name found first is taken instead.
         std::fs::write(real.build.join("b.f90"), "subroutine b()\n  use iso_c_binding\n  print *, c_int\nend subroutine\n").unwrap();
         let mut keyed = real.key("b.f90", &[]).unwrap();
-        keyed.fortran.before_compile();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
         assert!(check(&mut keyed));
         std::fs::write(elsewhere.join("fake.f90"), "module iso_c_binding\n  integer, parameter :: c_int = 8\nend module\n").unwrap();
         let status = Command::new("gfortran").args(["-c", "-o", "/dev/null", "fake.f90"]).current_dir(&elsewhere).status().unwrap();
