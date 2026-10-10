@@ -204,6 +204,11 @@ run_as_user() {
 
 cd "$TUTORIAL_HOME"
 if [ -n "${JUPYTERHUB_API_TOKEN:-}" ]; then
+    # DockerSpawner passes the command to run (the image has no CMD to
+    # default to): `jupyterhub-singleuser` and any arguments.
+    if [ "${1:-}" = jupyterhub-singleuser ]; then
+        shift
+    fi
     run_as_user jupyterhub-singleuser "$@"
 fi
 

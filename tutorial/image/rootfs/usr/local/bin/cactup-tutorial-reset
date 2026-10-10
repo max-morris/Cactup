@@ -65,7 +65,7 @@ def notebook(number: str) -> int:
         shutil.copy2(dst, keep)
         print(f"saved your copy to {keep}")
     shutil.copyfile(src, dst)
-    print(f"restored {dst}; if it is open, reload it (File > Reload ... from Disk)")
+    print(f"restored {dst}; if it is open, reload it (File > Reload Notebook from Disk)")
     return 0
 
 
@@ -125,7 +125,7 @@ def everything(yes: bool) -> int:
     else:
         kept = " (~/tutorial-saved is kept)" if SAVED.exists() else ""
         print(f"Your home is as it was at the start{kept}. Now:")
-    print("- in each open notebook: File > Reload ... from Disk, then Kernel > Restart Kernel;")
+    print("- in each open notebook: File > Reload Notebook from Disk, then Kernel > Restart Kernel;")
     print("  if JupyterLab says a file changed on disk, choose Revert, not Overwrite;")
     print("- in each open Terminal: cd ~")
     return 1 if failed else 0

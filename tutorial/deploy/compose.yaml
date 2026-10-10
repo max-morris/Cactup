@@ -1,0 +1,87 @@
+# The tutorial's server: JupyterHub, one container per attendee, and Caddy in
+# front. Settings are in .env (copy .env.example); see "Deploying" in
+# tutorial/README.md.
+#
+#   docker compose up -d --build
+name: cactup-tutorial
+
+services:
+  hub:
+    build: hub
+    image: cactup-tutorial-hub:local
+    restart: unless-stopped
+    # Time to stop cleanly (its services, its database); the attendees'
+    # servers keep running (cleanup_servers is off).
+    stop_grace_period: 30s
+    environment:
+      TUTORIAL_IMAGE: ${TUTORIAL_IMAGE:-cactup-tutorial:tutorial}
+      USER_NETWORK: ${USER_NETWORK:-cactup-tutorial-users}
+      SECURE_COOKIES: ${SECURE_COOKIES:-1}
+      HUB_ADMINS: ${HUB_ADMINS:-}
+      CPUS_PER_ATTENDEE: ${CPUS_PER_ATTENDEE:-4}
+      CPUSET: ${CPUSET:-1}
+      MEM_LIMIT: ${MEM_LIMIT:-6G}
+      GPU: ${GPU:-0}
+      CULL_TIMEOUT: ${CULL_TIMEOUT:-18000}
+      TOKEN_ROTATE_MINUTES: ${TOKEN_ROTATE_MINUTES:-60}
+      TOKEN_GRACE_MINUTES: ${TOKEN_GRACE_MINUTES:-5}
+      SHARED_GID: ${SHARED_GID:-}
+    volumes:
+      # DockerSpawner starts the attendees' containers through it.
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      # The hub's database, cookie secret, accounts and token state.
+      - hub-data:/srv/jupyterhub
+      # The session token for people (session-token), and `token --rotate`'s
+      # request.
+      - ${SHARED_DIR:-/srv/cactup-tutorial}:/srv/cactup-tutorial
+    networks: [front, users]
+
+  # COMPOSE_PROFILES=tls: HTTPS on 443 (TLS=auto or TLS=provided), and 80
+  # redirecting to it.
+  caddy:
+    profiles: [tls]
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    restart: unless-stopped
+    depends_on: [hub]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    volumes:
+      - ./caddy/Caddyfile.${TLS:-auto}:/etc/caddy/Caddyfile:ro
+      - ${TLS_CERT_DIR:-./caddy/certs}:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [front]
+
+  # COMPOSE_PROFILES=plain: HTTP only, behind the site's proxy.
+  caddy-plain:
+    profiles: [plain]
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    restart: unless-stopped
+    depends_on: [hub]
+    ports:
+      - "${PLAIN_BIND:-127.0.0.1}:${PLAIN_PORT:-8000}:80"
+    volumes:
+      - ./caddy/Caddyfile.plain:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [front]
+
+networks:
+  front: {}
+  # The attendees' containers. No route out, so code run in a notebook can't
+  # reach the internet or the site's network (the tutorial needs neither:
+  # installs come from the image's mirrors, and cactup updates from the
+  # container's own update site). They do reach the hub, each other's
+  # containers (whose services need a token or key), and the host's address on
+  # this network: see "Deploying" in the README for a firewall rule.
+  users:
+    name: ${USER_NETWORK:-cactup-tutorial-users}
+    internal: true
+
+volumes:
+  hub-data: {}
+  caddy-data: {}
+  caddy-config: {}

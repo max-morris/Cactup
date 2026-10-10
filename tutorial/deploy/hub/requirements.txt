@@ -1,0 +1,6 @@
+# On top of quay.io/jupyterhub/jupyterhub:5.5.2 (which has the rest: requests,
+# python-dateutil, six, ...). Exact versions: a rebuild must not change them.
+dockerspawner==14.0.0
+docker==7.2.0
+escapism==1.1.0
+jupyterhub-idle-culler==1.4.0

@@ -33,10 +33,15 @@ attendee. For **N** simultaneous attendees it needs:
   disk section). 128 GB for 30 attendees is the comfortable choice.
 - **Software**: Linux with cgroup v2; Docker Engine whose containers can be
   given a cpuset (rootful Docker, or rootless with the `cpuset` controller
-  delegated to the user's systemd slice); inbound HTTPS for the attendees.
-  The tutorial needs no outbound network during the workshop beyond the
-  attendees' browsers following links to the documentation site; the 18.5
-  GB image is copied onto the machine once beforehand.
+  delegated to the user's systemd slice).
+- **Network**: inbound ports 443 and 80 (HTTPS, and the redirect to it), or
+  only the site proxy's way in if the site puts its own proxy in front. For
+  setting up, outbound access to the package repositories, quay.io, Docker
+  Hub and PyPI (the hub's and Caddy's images); with Let's Encrypt
+  certificates, outbound access to Let's Encrypt from then on. During the
+  workshop the tutorial needs nothing else outbound: the attendees'
+  containers have no route out at all, and the 18.5 GB tutorial image is
+  copied onto the machine once beforehand (README, "Deploying").
 - A GPU is optional: notebook 4b shows a GPU queue only when the VM passes
   an NVIDIA GPU through, and never runs a GPU job otherwise.
 
@@ -210,7 +215,7 @@ development machine, under other load, fio reported 168 MB/s while
 `copybench.py` reached 205 MB/s: fio is the stricter of the two). Remove the
 directory afterward.
 
-Once the image is loaded, from a checkout of this branch:
+Once the image is loaded, from a checkout of this repository:
 
 ```sh
 tutorial/tools/sizing/copybench.py /var/lib/docker/copybench N   # the restore burst itself

@@ -1,0 +1,20 @@
+# COMPOSE_PROFILES=plain: plain HTTP (on PLAIN_BIND:PLAIN_PORT), for the site's
+# proxy in front to do TLS. Its X-Forwarded-For is trusted from private
+# addresses only (where such a proxy lives), and strictly: the address taken
+# is the rightmost one the proxy didn't vouch for, so a client can't put its
+# own pick at the front. The login rate limit then sees each attendee's
+# address.
+{
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+		trusted_proxies_strict
+	}
+}
+
+:80 {
+	encode gzip
+	reverse_proxy hub:8000 {
+		header_up X-Real-IP {client_ip}
+	}
+}

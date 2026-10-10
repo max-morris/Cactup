@@ -1,0 +1,18 @@
+# TLS=provided: the certificate and key the site gives you, in $TLS_CERT_DIR
+# as cert.pem (with the intermediate certificates after it) and key.pem.
+{
+	auto_https disable_certs
+}
+
+(hub) {
+	encode gzip
+	header Strict-Transport-Security "max-age=604800"
+	reverse_proxy hub:8000 {
+		header_up X-Real-IP {client_ip}
+	}
+}
+
+{$DOMAIN} {
+	tls /certs/cert.pem /certs/key.pem
+	import hub
+}

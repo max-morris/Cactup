@@ -13,12 +13,12 @@ and how to maintain, rebuild and deploy it.
 | Path | What it is |
 |---|---|
 | `notebooks/*.md` | Notebook sources in jupytext MyST format (reviewable diffs). The image converts them to `.ipynb`. |
-| `jupyter/` | Python package `cactup_tutorial`: the IPython magics (`%%shell`, `%%file`, `%show`), Pygments lexers, and a prebuilt JupyterLab 4 labextension (TypeScript source in `jupyter/labext/`). |
+| `jupyter/` | Python package `cactup_tutorial`: the IPython magics (`%%shell`, `%%file`, `%show`), Pygments lexers, and a prebuilt JupyterLab 4 labextension (TypeScript source in `jupyter/labext/`, npm versions locked in its `package-lock.json`). `constraints.txt` pins every Python package the image installs. |
 | `image/` | The image: `Dockerfile`, `build.sh` (orchestrates base image → mirrors → bakes → final image), and `rootfs/` (entrypoint, SLURM config, the `make` shim, the update server, the home skeleton, the catch-up and reset tools). |
 | `bake/` | Drives real installs and builds inside a bake container and harvests their results. |
 | `mirrors/` | Turns thornlists into local bare git mirrors, a lock file of mirrored commits, and per-repository `insteadOf` rules. |
-| `deploy/` | JupyterHub + DockerSpawner + Caddy compose file, the choose-your-own-login authenticator, the session-token tool. |
-| `tests/` | pytest suites and the headless notebook runner `run_all.py`. |
+| `deploy/` | JupyterHub + DockerSpawner + Caddy compose file, the choose-your-own-login authenticator, the session-token tool; see Deploying. |
+| `tests/` | pytest suites, the headless notebook runner `run_all.py`, and `hub/`: a hub brought up and checked end to end. |
 | `cactup.pin` | The cactup commit the image is built from (binaries, installer, MDB); see `UPDATING.md`. |
 | `UPDATING.md` | How to move the pin to a newer cactup, and everything in the tutorial that depends on cactup's behavior. |
 | `tools/` | `check-cactup-usage.py`: checks every cactup command the tutorial runs against a cactup build. |
@@ -1028,7 +1028,12 @@ the image's mirror of Cactup is always built from the pinned commit's
 
 The base image is pinned by digest and the Debian archive by a
 snapshot.debian.org date, both in the Dockerfile's base stage; move them
-together, on purpose (it changes the toolchain, and so every bake).
+together, on purpose (it changes the toolchain, and so every bake). Python
+packages are pinned by `jupyter/constraints.txt` (every package in
+`/opt/venv`; regenerate it from a built image with the command at its top)
+and the labextension's npm packages by `jupyter/labext/package-lock.json`
+(`npm ci`). Neither is part of the toolchain the bakes depend on (that is
+Debian's packages), so moving them rebuilds no bake.
 
 The two cactup builds get their stamps from git: "current" is the last commit
 that touched cactup's inputs, "previous" the one before, so a build needs two
@@ -1037,11 +1042,12 @@ such commits.
 Checks:
 
 ```sh
-PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, session, mirrors, make shim
+PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, session, mirrors, make shim, hub logins
 tutorial/tests/browser/run.sh cactup-tutorial:lab             # the frontend, in headless Chromium
 tutorial/tests/platform/smoke.sh cactup-tutorial:lab          # install, update, SLURM, a simulation
 tutorial/tests/platform/replay.sh cactup-tutorial:tutorial    # a replayed build, its executable, real rebuilds
 tutorial/tests/run_all.py                                     # every notebook, headless, in order and alone
+tutorial/tests/hub/run.sh                                     # a hub on this machine, checked end to end (see Deploying)
 ```
 
 To try the image locally as one attendee:
@@ -1055,22 +1061,286 @@ docker run --rm -p 8888:8888 --hostname cactup-tutorial \
 is delegated to the user's systemd slice; without it the container sees every
 host CPU.)
 
-## Deploying to a VM
+## Deploying
 
-(Filled in with the deployment stage: compose, choose-your-own-login, session
-token, sizing.) Two things the deployment must provide, found while building
-the platform: a named volume for `/var/spool/slurmctld` per attendee (SLURM's
-state; without it a re-created container restarts job ids at 1, and cactup
-could mistake a new job for an old simulation's), and a cpuset per container
-that Docker actually applies (see the rootless note above). The idle culler
-judges idleness by Jupyter activity only, so its timeout should be at least
-the `batch` partition's limit (4 hours), or jobs still running are stopped
-and requeued. Only a clean stop (`docker stop`, the hub's stop, the culler)
-saves SLURM's state fully: a `docker kill`, `docker rm -f` or host crash can
-lose submits from its last couple of seconds (and reuse their job ids), and a
-kill in the first seconds of a start leaves a job it had requeued on SLURM's
-two-minute hold. A job whose launch failed on a drained node ends up
-"launch failed requeued held"; `scontrol release <job>` lets it run again.
-After a restart, `scontrol show job` shows the jobs the entrypoint requeued
-with a high priority (100000 and down) that keeps their turn; every other
-job has priority 1.
+`deploy/` runs the tutorial for a room: JupyterHub, one container per
+attendee, and Caddy in front, as one compose project. What the machine needs
+for a given number of attendees, measured, is in `SIZING.md`.
+
+| Piece | What it does |
+|---|---|
+| `deploy/compose.yaml` | The `hub` service, and Caddy as `caddy` (profile `tls`) or `caddy-plain` (profile `plain`). Two networks: `front` (Caddy and the hub) and `cactup-tutorial-users`, internal, for the attendees' containers. |
+| `deploy/hub/` | The hub's image: `quay.io/jupyterhub/jupyterhub:5.5.2` (the version the tutorial image's `jupyterhub-singleuser` has; they must match), DockerSpawner, the idle culler, and `cactup_cyol` (choose your own login, the token's rotator, the account tools, the cpuset assignment), all pinned. `jupyterhub_config.py` reads its settings from the environment. |
+| `deploy/caddy/` | One Caddyfile per mode: `auto`, `provided` (profile `tls`), `plain`. |
+| `deploy/.env.example` | Every setting, explained. Copy it to `deploy/.env`. |
+| `deploy/token` | Shows the session token, big, for the room; `--rotate` makes a new one. |
+| `tests/hub/` | `run.sh` brings a hub up on this machine and runs `check_hub.py` against it (`--keep` leaves it up, `--down` removes it); `browse.sh` then looks at it in headless Chromium (screenshots); `check_hub.py` also checks a deployed hub. |
+
+### Each attendee's container
+
+DockerSpawner starts `cactup-tutorial:tutorial` as `cactup-<username>`,
+labeled `org.cactup-tutorial.attendee=<username>`, with:
+
+- hostname `cactup-tutorial` (the MDB entry is discovered on it, and the
+  entrypoint refuses any other);
+- two volumes of its own, which outlive the container (a new one is made on
+  every start, so a new image takes effect at an attendee's next start):
+  `cactup-home-<username>` for `/home/cactus` (seeded from the image's
+  skeleton on first start) and `cactup-slurm-<username>` for
+  `/var/spool/slurmctld` (SLURM's state: without it a new container would
+  restart job ids at 1, and cactup could mistake a new job for an old
+  simulation's);
+- a cpuset of `CPUS_PER_ATTENDEE` cores (4): the least used slice of the
+  machine's cores, counting the slices the hub handed out itself (a room
+  logging in at once starts many containers before Docker lists any) and
+  those of the containers running (after a hub restart), so attendees share
+  cores only when there are more of them than slices (`CPUSET=1`, which
+  needs Docker to apply cpusets: rootful Docker, or rootless with the cpuset
+  controller delegated; cores beyond a whole slice go unused);
+- a memory cap (`MEM_LIMIT`, 6 GB: a cap against a runaway, not a
+  reservation; see `SIZING.md`), a 1 GB `/dev/shm` for OpenMPI, and at most
+  4096 processes;
+- the machine's NVIDIA GPUs with `GPU=1` (needs the NVIDIA container
+  toolkit; notebook 4b's `gpu` partition works only then);
+- the network `cactup-tutorial-users`, internal: no route out, so code run in
+  a notebook can't reach the internet or the site's network, and the
+  tutorial needs neither (installs come from the image's mirrors, updates
+  from the container's own update site, the MDB from the image). Containers
+  on it do reach the hub, each other (their notebook servers want a token,
+  their SLURM a key of their own) and the host's address on that bridge: on
+  a host with services listening on all addresses, add a firewall rule
+  dropping traffic from the bridge to the host (Docker names the bridge
+  `br-` and the start of the network's id), after the first `docker compose
+  up` makes the network:
+
+  ```sh
+  sudo iptables -I INPUT -i br-$(docker network inspect -f '{{.Id}}' cactup-tutorial-users | cut -c1-12) -j DROP
+  ```
+
+  The rule lasts until a reboot, and names this network only: one made
+  again (after `docker compose down`) has a new id.
+
+Usernames are lowercase letters, digits and dashes; DockerSpawner's names
+for containers and volumes spell a dash `-2d` (`ada-l` → `cactup-ada-2dl`).
+
+### Logins: choose your own
+
+The login page has a third field, "Session token (new accounts only)"
+(JupyterHub 5's extra login field), and above the form, what to type:
+
+- a known username logs in with its password; the token field is ignored;
+- an unknown username with the current session token creates the account
+  with the password typed (at least 8 characters), and logs in. Not for a
+  name in `HUB_ADMINS`: an admin's account is made on the machine (below),
+  so nobody holding the token can take an admin name first;
+- anything else gets JupyterHub's "Invalid username or password". The
+  reason goes to the hub's log: `docker compose logs hub | grep 'login
+  refused'`. The usual ones: a mistyped token, a name someone else has
+  taken, a name with characters other than lowercase letters, digits and
+  dashes, a password under 8 characters.
+
+Accounts are scrypt hashes in `/srv/jupyterhub/cyol-accounts.sqlite`, in the
+hub's volume. The token is a silly sentence (`daisy gathered 15 mighty
+walnuts!`), after the template of Steve Brandt's generator
+(https://www.cct.lsu.edu/~sbrandt/passwds.txt), from word lists of our own
+(`deploy/hub/cactup_cyol/words/`, avoiding words with variant spellings).
+Case, spacing and punctuation don't matter when typing it. The hub's
+`cyol-rotator` service replaces it every `TOKEN_ROTATE_MINUTES` (60; 0 never
+by time), and the previous one keeps working for `TOKEN_GRACE_MINUTES` (5),
+so someone typing it as it changes isn't turned away. The rotator writes the
+current token to `$SHARED_DIR/session-token` (mode 0640, group
+`SHARED_GID`): anyone in that group reads it with `cat` or `deploy/token`.
+
+Failed logins are limited, each within 10 minutes: 5 per address and
+username (one attendee's typos lock only that name, from that address), 20
+per username from any address, and 100 wrong session tokens per address.
+The second bounds guessing a password even by someone who can claim any
+address: from inside an attendee's container the hub can be reached
+directly, where the address header is whatever the client sends. Its price:
+someone can lock a name out for 10 minutes. The third bounds guessing the
+token, and stops only signing up from that address: logging in goes on, so
+a room that shares one address isn't locked out by its own typos. Tries made
+while locked out aren't counted, so a lock ends 10 minutes after the failure
+that set it; an attendee who is locked out should stop trying, and wait or
+pick another name. A hub restart (`docker compose restart hub`, which leaves
+the servers running) clears every lock.
+
+The address is often the same for the whole room. Caddy passes each
+attendee's address in `X-Real-IP`, which JupyterHub reads before
+`X-Forwarded-For`, setting it itself, so a client coming through Caddy
+can't forge it: with `tls` it is the connection's address, and with `plain`
+the rightmost public address in `X-Forwarded-For`, or the site's proxy's own
+when there is none. So attendees on a private network behind the site's
+proxy share the proxy's address, those behind a NAT the NAT's, and with
+rootless Docker (whose port forwarding hides the client) or over IPv6 (Docker
+forwards it to the containers' IPv4 network) everyone has Docker's address.
+
+The account tools run in the hub's container, so they need Docker access on
+the machine (which is root's power: the hub's Docker socket can do anything
+Docker can). From `tutorial/deploy`:
+
+```sh
+docker compose exec -it hub python3 -m cactup_cyol.make_users --name ada    # one account: asks for its password
+docker compose exec hub python3 -m cactup_cyol.make_users 30 --prefix attendee   # prepared accounts, printed as username,password
+docker compose exec -it hub python3 -m cactup_cyol.set_password ada         # a forgotten password: asks for the new one
+```
+
+The hub's admin page lists the usernames, for someone who forgot theirs.
+Deleting a user there doesn't free the name: the account stays in the
+account database.
+
+### TLS: three ways
+
+`COMPOSE_PROFILES` and `TLS` in `.env` choose:
+
+- `COMPOSE_PROFILES=tls`, `TLS=auto`: Caddy gets and renews a certificate
+  for `DOMAIN` from Let's Encrypt. `DOMAIN` must point at the machine, ports
+  80 and 443 be open to the internet, and the machine reach Let's Encrypt.
+- `COMPOSE_PROFILES=tls`, `TLS=provided`: the site's certificate, as
+  `cert.pem` (the full chain: the server certificate, then the
+  intermediates) and `key.pem` (unencrypted) in `TLS_CERT_DIR`. Copy the
+  files in: links (certbot's `live/` directory holds links into
+  `../../archive`) don't resolve inside Caddy's container. Caddy doesn't
+  watch the files: after the site renews them, `docker compose exec caddy
+  caddy reload --force --config /etc/caddy/Caddyfile` (without `--force`,
+  Caddy sees an unchanged Caddyfile and keeps the old certificate).
+
+  With either, Caddy serves HTTPS on 443 and redirects 80 to it.
+- `COMPOSE_PROFILES=plain`: plain HTTP on `PLAIN_BIND:PLAIN_PORT`
+  (127.0.0.1:8000), for the site's own proxy to put HTTPS in front of. That
+  proxy must pass WebSocket upgrades (kernels and terminals use them), pass
+  the `Host` header through unchanged (JupyterLab and the hub compare it
+  with the browser's `Origin`; nginx: `proxy_set_header Host $host;`,
+  Apache: `ProxyPreserveHost On`), set `X-Forwarded-For` (appending) and
+  `X-Forwarded-Proto: https`, allow idle connections of an hour or more and
+  uploads of 100 MB or more, and connect from a private address (Caddy
+  trusts `X-Forwarded-For` from those only). If it runs on another machine,
+  set `PLAIN_BIND` to this machine's address on the network they share, and
+  firewall `PLAIN_PORT` to the proxy alone.
+
+The hub's cookies are marked Secure (`SECURE_COOKIES=1`): attendees always
+come over HTTPS, and a browser must not send the login cookie over a plain
+`http://` request.
+
+### Setting it up
+
+On the machine (`SIZING.md` says what it needs, and has the disk and CPU
+checks to run on it first):
+
+1. Docker Engine, with cgroup v2 (`docker info -f '{{.CgroupVersion}}'`
+   prints 2), and a checkout of this repository (only `tutorial/deploy` is
+   used on the machine). The first `docker compose up --build` needs to
+   reach quay.io, Docker Hub and PyPI (for the hub's image and Caddy's).
+2. The tutorial image: built there (`tutorial/image/build.sh`, an hour or
+   more the first time), or built elsewhere and copied (about 18.5 GB),
+   which needs Docker access on both sides:
+   `docker save cactup-tutorial:tutorial | zstd | ssh MACHINE 'zstd -d | docker load'`.
+3. The token's directory and group:
+
+   ```sh
+   sudo groupadd cactup-tutorial
+   sudo usermod -aG cactup-tutorial "$USER"   # and whoever else may see the token; log in again for it to apply
+   sudo install -d -m 2770 -g cactup-tutorial /srv/cactup-tutorial
+   ```
+
+   With rootless Docker the hub can't write there (its container keeps
+   none of your groups): use a directory of your own, say `install -d -m
+   0750 ~/cactup-tutorial-shared` as `SHARED_DIR`, with `SHARED_GID=0`
+   (your own group, seen from the container). Only you, and your group's
+   members, then read the token.
+
+The commands from here on run in `tutorial/deploy`:
+
+4. `cp .env.example .env`, and set at least `COMPOSE_PROFILES` and `TLS`,
+   `DOMAIN` (with `tls`), the certificate in `TLS_CERT_DIR` (with
+   `TLS=provided`), `PLAIN_BIND` and `PLAIN_PORT` (with `plain`),
+   `SHARED_GID` (`getent group cactup-tutorial | cut -d: -f3`) and
+   `HUB_ADMINS`.
+5. `docker compose up -d --build`.
+6. The admins' accounts, before anyone sees the token:
+   `docker compose exec -it hub python3 -m cactup_cyol.make_users --name NAME`
+   for each name in `HUB_ADMINS`. They get the hub's admin page
+   (`/hub/admin`): servers to stop or start, users.
+7. `./token`, then sign up at the site with it, as an attendee would. After
+   that first sign-up, `docker inspect -f '{{.HostConfig.CpusetCpus}}'
+   cactup-<username>` shows the container's cores (empty: Docker isn't
+   applying cpusets; see `CPUSET`).
+
+### During and after the workshop
+
+- `./token` keeps the token on a screen and follows rotations (large letters
+  need `figlet` installed; otherwise enlarge the terminal's font). To show it
+  from a laptop: `ssh -t MACHINE .../tutorial/deploy/token` (without `-t` it
+  prints once). `./token --rotate` makes a new one at once, say after the
+  room has signed up. Showing and rotating the token needs a login on the
+  machine, in the group; the account tools above need Docker access.
+- The idle culler stops a server after `CULL_TIMEOUT` seconds (5 hours)
+  without notebook activity, looking every 5 minutes. It judges by Jupyter
+  activity only, so the timeout should outlast the longest queue (`batch`,
+  4 hours): stopping a container requeues the jobs that were running in it.
+  For the attendee, nothing is lost: they log in again, their server starts
+  in seconds with every file as it was, and the requeued jobs run again.
+- Restarting the hub (`docker compose up -d` after changing `.env`, `docker
+  compose restart hub`, a new hub image) leaves the attendees' servers
+  running: the hub picks them up again when it is back. The hub's proxy runs
+  in its container, so for the seconds it is away attendees' pages lose their
+  connection; JupyterLab reconnects by itself, and kernels and jobs keep
+  running throughout.
+- Only a clean stop (`docker stop`, the hub's stop, the culler) saves
+  SLURM's state fully: a `docker kill`, `docker rm -f` or host crash can
+  lose submits from its last couple of seconds (and reuse their job ids),
+  and a kill in the first seconds of a start leaves a job it had requeued
+  on SLURM's two-minute hold. A job whose launch failed on a drained node
+  ends up "launch failed requeued held"; `scontrol release <job>` lets it
+  run again. After a restart, `scontrol show job` shows the jobs the
+  entrypoint requeued with a high priority (100000 and down) that keeps
+  their turn; every other job has priority 1.
+- A new tutorial image (`docker load` of a rebuilt one) reaches each
+  attendee at their server's next start.
+- After the workshop, in this order: stop the attendees' servers (the admin
+  page's "Stop All", or `docker ps -q -f label=org.cactup-tutorial.attendee
+  | xargs -r docker stop`); `docker compose down -v` (the hub and Caddy, and
+  their volumes: accounts, token, hub database, certificates); then the
+  attendees' volumes, and what else is left:
+
+  ```sh
+  docker volume ls -q -f name=^cactup-home- -f name=^cactup-slurm- | xargs -r docker volume rm
+  docker image rm cactup-tutorial:tutorial cactup-tutorial-hub:local   # 18.5 GB and the hub's
+  sudo rm -r /srv/cactup-tutorial && sudo groupdel cactup-tutorial
+  ```
+
+### Checking a hub
+
+`tutorial/tests/hub/run.sh` brings a hub up on this machine (its own compose
+project, network `cactup-hubtest-users`, and plain HTTP on 127.0.0.1:18000,
+so it doesn't meet a real deployment; run one at a time) and runs
+`check_hub.py` against it:
+
+- sign-ups through the login page with the session token, and the refusals
+  (no token, a wrong token, a short password, a taken name with the wrong
+  password);
+- two attendees' servers started through the hub's API, with different
+  cores where Docker applies cpusets, and every notebook run in order in
+  both at once, with `run_all.py`'s checks;
+- every setting `jupyterhub_config.py` makes, with its optional ones on, is
+  one JupyterHub knows (it only warns about a misspelled one, and ignores
+  it);
+- a hub restart: both servers keep running, untouched;
+- a stop and a start: the home survives, and SLURM's job ids keep counting
+  up.
+
+It removes everything it made, unless `--keep`; then `tests/hub/browse.sh`
+looks at the hub in headless Chromium, as an attendee meets it (the login
+page and its token field, a refused token, signing up, notebook 1 and a
+cell run, the File menu, a terminal), leaving screenshots, and `run.sh
+--down` removes it all. With rootless Docker, `run.sh` turns cpusets off
+(rootless Docker drops them). Against a deployed hub, `check_hub.py --url
+https://DOMAIN --shared /srv/cactup-tutorial` (it needs Python's `requests`,
+and Docker access, on the machine) checks the same, except the hub's
+settings and the restart, which `--hub-container cactup-tutorial-hub-1` adds (that
+restarts the live hub). It makes accounts named like `check1a2b-0`; remove
+their volumes after, `docker volume ls -q -f
+'name=^cactup-(home|slurm)-check[0-9a-f]{4}-2d[0-9]+$' | xargs -r docker
+volume rm`. The pytest suite's login tests need
+JupyterHub 5.5.2 installed (`pip install jupyterhub==5.5.2`); without it
+they are skipped.

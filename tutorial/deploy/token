@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Show the current session token, big, for the room.
+
+    tutorial/deploy/token            print it (and keep printing it as it changes: Ctrl-C ends)
+    tutorial/deploy/token --once     print it once
+    tutorial/deploy/token --rotate   make a new one now, then print it
+
+Reads SHARED_DIR and DOMAIN from tutorial/deploy/.env (SHARED_DIR defaults to
+/srv/cactup-tutorial). Large letters need `figlet` (or `toilet`) installed;
+otherwise the token is printed bold, at the terminal's own size. To show it
+from a laptop: `ssh -t MACHINE .../tutorial/deploy/token` (without -t it
+prints once and exits).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def setting(name: str) -> str | None:
+    value = os.environ.get(name)
+    env_file = HERE / ".env"
+    if value is None and env_file.exists():
+        for line in env_file.read_text().splitlines():
+            key, sep, val = line.partition("=")
+            if sep and key.strip() == name:
+                value = val.strip().strip("'\"")
+    return value or None
+
+
+def shared_dir() -> Path:
+    return Path(setting("SHARED_DIR") or "/srv/cactup-tutorial")
+
+
+def read(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except FileNotFoundError:
+        sys.exit(f"no token yet at {path}: is the hub running?")
+    except PermissionError:
+        sys.exit(f"can't read {path}: you need to be in its group (after `usermod -aG`, log in again)")
+
+
+def show(token: str) -> None:
+    width = shutil.get_terminal_size().columns
+    print("\033[2J\033[H", end="")
+    print("\n  Session token (for new accounts):\n")
+    big = shutil.which("figlet") or shutil.which("toilet")
+    if big:
+        subprocess.run([big, "-w", str(width), token])
+    else:
+        print(f"    \033[1m{token}\033[0m")
+    print("\n  (Case, spacing and punctuation don't matter.)")
+    domain = setting("DOMAIN")
+    if domain and setting("COMPOSE_PROFILES") != "plain":
+        print(f"  Sign up at https://{domain}")
+    print(flush=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--rotate", action="store_true")
+    args = parser.parse_args()
+    shared = shared_dir()
+    path = shared / "session-token"
+    try:
+        if args.rotate:
+            old = read(path)
+            (shared / "rotate").touch()
+            deadline = time.time() + 15
+            while read(path) == old:
+                if time.time() > deadline:
+                    sys.exit("the hub didn't rotate the token within 15 s: is it running?")
+                time.sleep(0.5)
+        token = read(path)
+        show(token)
+        if args.once or args.rotate or not sys.stdout.isatty():
+            return 0
+        while True:
+            time.sleep(2)
+            new = read(path)
+            if new != token:
+                token = new
+                show(token)
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

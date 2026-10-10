@@ -21,11 +21,14 @@ ARG TARGET=x86_64-unknown-linux-musl
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS labext
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir 'jupyterlab>=4.4,<5'
+# Every Python package version is pinned (constraints.txt) and every npm one
+# (package-lock.json): a rebuild installs exactly what was tested.
+COPY tutorial/jupyter/constraints.txt /tmp/constraints.txt
+RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -c /tmp/constraints.txt jupyterlab
 ENV PATH=/venv/bin:$PATH
 WORKDIR /src/labext
-COPY tutorial/jupyter/labext/package.json ./
-RUN --mount=type=cache,target=/root/.npm npm install --no-audit --no-fund
+COPY tutorial/jupyter/labext/package.json tutorial/jupyter/labext/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY tutorial/jupyter/labext/ ./
 RUN npm run build && npm test
 
@@ -139,9 +142,10 @@ ARG CACTUP_CURRENT_ID
 ARG CACTUP_CURRENT_DATE
 RUN python3 -m venv /opt/venv
 ENV PATH=/home/cactus/.cactup/bin:/opt/venv/bin:$PATH
+COPY tutorial/jupyter/constraints.txt /tmp/constraints.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --retries 10 --timeout 60 --resume-retries 5 'jupyterlab>=4.4,<5' 'jupyterhub>=5,<6' jupytext ipykernel \
-      numpy pandas matplotlib
+    pip install --retries 10 --timeout 60 --resume-retries 5 -c /tmp/constraints.txt \
+      jupyterlab jupyterhub jupytext ipykernel numpy pandas matplotlib
 # Every repository the tutorial installs or refetches, and the rules that send
 # git (and cactup's git layer) to them instead of upstream; see the README.
 COPY --from=mirrors / /opt/cactup-mirrors/
@@ -154,7 +158,9 @@ RUN set -eu; \
     git config --system --add safe.directory '/opt/cactup-mirrors/*'
 COPY tutorial/jupyter/ /src/cactup-tutorial/
 COPY --from=labext /src/cactup_tutorial/labextension/ /src/cactup-tutorial/cactup_tutorial/labextension/
-RUN --mount=type=cache,target=/root/.cache/pip pip install --retries 10 --timeout 60 '/src/cactup-tutorial[lab]' && rm -rf /src/cactup-tutorial
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 10 --timeout 60 -c /tmp/constraints.txt '/src/cactup-tutorial[lab]' \
+    && rm -rf /src/cactup-tutorial /tmp/constraints.txt
 
 # The local update site: one root that offers both builds. The installer reads
 # <target>/cactup.sha256, which names "previous"; cactup's update check reads

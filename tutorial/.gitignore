@@ -4,6 +4,8 @@ jupyter/labext/node_modules/
 jupyter/labext/lib/
 jupyter/labext/build-test/
 jupyter/labext/tsconfig.tsbuildinfo
-jupyter/labext/package-lock.json
 *.egg-info/
 .pytest_cache/
+# Screenshots and logs the browser checks leave by default.
+tests/browser/out/
+tests/hub/out/

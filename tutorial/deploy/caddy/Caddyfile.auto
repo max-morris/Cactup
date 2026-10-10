@@ -1,0 +1,19 @@
+# TLS=auto: Caddy gets and renews a certificate for $DOMAIN itself (Let's
+# Encrypt), which needs the domain to point at this machine and ports 80 and
+# 443 open to the internet. (No email given: Caddy renews by itself.)
+(hub) {
+	encode gzip
+	# Browsers that have been here come back over HTTPS only, for a week
+	# (the workshop; not longer, the domain may serve other things later).
+	header Strict-Transport-Security "max-age=604800"
+	reverse_proxy hub:8000 {
+		# The attendee's address, for the login rate limit (JupyterHub reads
+		# X-Real-IP first; its own proxy would otherwise hide every attendee
+		# behind this one's address). Set here, so a client can't forge it.
+		header_up X-Real-IP {client_ip}
+	}
+}
+
+{$DOMAIN} {
+	import hub
+}
