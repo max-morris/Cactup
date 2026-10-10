@@ -4910,14 +4910,27 @@ fixed parts, so that the key does not change by accident:
   library each program loads (as the dynamic loader resolves them), plus
   what the driver says of itself (`--version` without the installation
   directory, and for GCC its built-in specs and target). Not its path and
-  not its modification time. The identity is worked out once for a
-  build, and the driver finds programs and files from the directory it
-  runs in wherever it is led by a relative name: so an entry of `PATH`,
-  `LIBRARY_PATH`, `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute
-  path (an empty one is the working directory), or a compiler named by a
-  relative path, keeps every compile out of the cache (tried: an assembler
-  that appeared in the working directory, found through `.` in `PATH`,
-  assembled objects stored under the real one's identity). The driver's own bytes must say it is GCC or
+  not its modification time. The identity is worked out once for a build
+  attempt and remembered with what it was computed from: the files, and
+  every place searched and passed over before each was found, which must
+  go on holding nothing (or what it held) for the next compile to reuse it
+  (tried: an assembler that appeared first on `PATH` mid-build assembled
+  objects stored under the real one's identity). For GCC's programs, the
+  places it says it looks (`-print-search-dirs`), then `PATH`'s for a
+  program it leaves to `PATH` (the assembler); for libraries, the places
+  the loader says it tried (glibc's `LD_DEBUG=libs`), a directory on its
+  search path that is not there (it is not tried again for the next
+  library), and its cache file. A relative place is looked at from each
+  compile's own working directory, and a library found by a relative name
+  rules the compiler out. What still leads the driver elsewhere from one
+  directory to the next keeps the compile out of the cache: an entry of
+  `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute path (an empty
+  one is the working directory), a library preloaded by a relative path,
+  `LD_AUDIT`; and for Fortran, whose dependency run runs in a directory of
+  its own (§18.10), also such an entry of `LIBRARY_PATH` (where the driver
+  finds a `specs` file), a compiler named by a relative path, and, for one
+  named without a `/` (which finds its own prefix along `PATH`), such an
+  entry of `PATH`. The driver's own bytes must say it is GCC or
   Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes `--version` on
   to a compiler and is not one, and is not cached. Neither is a compiler
   that takes flags from a file of its own — a GCC with a `specs` file on
@@ -5134,11 +5147,11 @@ nobody has to find out:
   one that built in a flag the reader would decline is not noticed.
 - *The compiler's identity.* Files a compiler reads by rules of its own
   that are named nowhere above — a plugin directory, lists in Clang's
-  resource directory, whatever a later version adds — are not hashed. And
-  the remembered identity watches the files it was computed from, not the
-  places where one could appear: a `specs` file or a Clang configuration
-  file *added* while a build attempt runs is seen by the next attempt, not
-  by the rest of this one.
+  resource directory, whatever a later version adds — are not hashed. The
+  remembered identity watches where programs and libraries are searched
+  for, not where a Clang configuration file could appear: one *added*
+  while a build attempt runs is seen by the next attempt, not by the rest
+  of this one (a GCC `specs` file is seen by each compile: above).
 - *The path map.* The trial shows the map holds for the trial's compile. A
   flag on the list that makes the compiler put an unmapped path *it worked
   out itself* into the object, where the trial does not look, would give

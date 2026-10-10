@@ -329,6 +329,10 @@ pub struct Fortran {
     /// included file before the place it did, so each must hold nothing.
     /// Or why the check runs the dependency run again.
     places: Result<Vec<PathBuf>, String>,
+    /// The places looked at before the compile, also where an included
+    /// file could not be placed: they are looked at again after it, in
+    /// either check.
+    watched: Vec<PathBuf>,
     /// The check after the compile fails: neither lookups nor a second
     /// dependency run would see what the compile reads.
     blind: bool,
@@ -392,6 +396,7 @@ impl Fortran {
         dirs.extend(self.include_dirs.iter().cloned());
         dirs.extend(deps.driven.intrinsic.iter().cloned());
         let mut places = Vec::new();
+        let mut unplaced = None;
         for input in &deps.inputs {
             let named_module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
             if named_module && is_gzip(input) {
@@ -419,8 +424,7 @@ impl Fortran {
             // here (the driver's search is repeated after the compile); also
             // included by the source, it is placed like any other.
             if !placed && deps.driven.pre_include.as_deref() != Some(input.as_path()) {
-                self.unfollowed(format!("{} was found where the compile does not look", input.display()), false);
-                return;
+                unplaced = unplaced.or(Some(input));
             }
         }
         // A module gfortran has built in is used without a file, unless the
@@ -434,12 +438,17 @@ impl Fortran {
         places.sort();
         places.dedup();
         self.count += places.len() as u64;
-        match places.iter().find(|place| !empty(place)) {
-            // Something appeared there since the key's dependency run: the
-            // compile may read it, and it may be gone again before a second
-            // dependency run could see it (tried).
-            Some(place) => self.unfollowed(format!("{} is where the compile looks first", place.display()), true),
-            None => self.places = Ok(places),
+        // Something appeared at a place since the key's dependency run: the
+        // compile may read it, and it may be gone again before a second
+        // dependency run could see it (tried). Looked at also where another
+        // file sends the check to that run.
+        let taken = places.iter().find(|place| !empty(place)).cloned();
+        let unplaced = unplaced.cloned();
+        self.watched = places.clone();
+        match (taken, unplaced) {
+            (Some(place), _) => self.unfollowed(format!("{} is where the compile looks first", place.display()), true),
+            (None, Some(input)) => self.unfollowed(format!("{} was found where the compile does not look", input.display()), false),
+            (None, None) => self.places = Ok(places),
         }
     }
 
@@ -611,6 +620,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
         include_dirs: given_dirs,
         deps: None,
         places: Err("not looked up before the compile".to_owned()),
+        watched: Vec::new(),
         blind: false,
         count: 0,
         module_lookups: std::cell::Cell::new(0),
@@ -703,6 +713,10 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
             && read_inputs(deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen);
     }
     if fortran.blind {
+        return false;
+    }
+    fortran.count += fortran.watched.len() as u64;
+    if !fortran.watched.iter().all(|place| empty(place)) {
         return false;
     }
     let Ok(deps) = dependencies(compiler, name, fortran) else { return false };
@@ -1467,6 +1481,28 @@ mod tests {
         assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("where the compile does not look")), "{:?}", keyed.fortran.check_made());
         assert!(still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
         std::fs::write(&absolute, "integer, parameter :: z = 3\n").unwrap();
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+        std::fs::write(&absolute, "integer, parameter :: z = 2\n").unwrap();
+        // Both: the place taken still fails the check (it is not left to the
+        // dependency run, which would not see it gone).
+        // (Found in no directory the compile searches.)
+        let apart = real.root.join("apart/k.inc");
+        std::fs::create_dir_all(apart.parent().unwrap()).unwrap();
+        std::fs::write(&apart, "integer, parameter :: k = 1\n").unwrap();
+        std::fs::write(shared.join("j.inc"), "integer, parameter :: w = 4\n").unwrap();
+        std::fs::write(real.build.join("v.f90"), format!("subroutine v()\n  include '{}'\n  include 'j.inc'\n  print *, k, w\nend subroutine\n", apart.display())).unwrap();
+        let mut keyed = real.key("v.f90", &[&include]).unwrap();
+        let taken = real.build.join("j.inc");
+        std::fs::write(&taken, "integer, parameter :: w = 5\n").unwrap();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
+        assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("where the compile looks first")), "{:?}", keyed.fortran.check_made());
+        std::fs::remove_file(&taken).unwrap();
+        assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
+        // Empty before, taken after: the fallback looks there too.
+        let mut keyed = real.key("v.f90", &[&include]).unwrap();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
+        assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("does not look")), "{:?}", keyed.fortran.check_made());
+        std::fs::write(&taken, "integer, parameter :: w = 5\n").unwrap();
         assert!(!still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen));
     }
 
