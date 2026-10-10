@@ -1,5 +1,5 @@
 #! /bin/bash
-# saturn TEST submitscript (variant "test") -- marked test = true in meta.toml
+# saturn TEST submitscript (script "test") -- marked test = true in meta.toml
 # (design §11.2). Written 2026-09-29; copied from
 # mdb/et-juphub/submitscripts/test.sh. Re-invokes cactup on the node to run
 # the testsuite; one-shot, no restart chaining (design §11.6).

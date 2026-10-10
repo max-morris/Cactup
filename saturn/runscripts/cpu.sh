@@ -1,5 +1,5 @@
 #! /bin/bash
-# saturn runscript (variant "cpu"): CPU-only runs on Frank's saturn node
+# saturn runscript (script "cpu"): CPU-only runs on Frank's saturn node
 # through the `cpu` queue (`cactup sim submit ... -q cpu`). Written
 # 2026-09-29. Mirrors mdb/qbd/runscripts/cpu.sh (OMP_PLACES=cores,
 # OMP_PROC_BIND=close, -r -b line), launched with a local mpirun instead of

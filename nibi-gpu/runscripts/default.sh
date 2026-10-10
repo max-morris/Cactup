@@ -1,5 +1,5 @@
 #! /bin/bash
-# nibi-gpu runscript (variant "default"), ported from simfactory2
+# nibi-gpu runscript (script "default"), ported from simfactory2
 # mdb/runscripts/nibi.run.
 #
 # Variable renames vs. simfactory (design §6.3):

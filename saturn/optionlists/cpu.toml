@@ -1,24 +1,29 @@
-# saturn optionlist (variant "cpu"): CPU-only build (Carpet/McLachlan/
+# saturn optionlist (flavor "cpu"): CPU-only build (Carpet/McLachlan/
 # IllinoisGRMHD-style thornlists, or a CarpetX build without AMReX's CUDA
 # backend) for Frank's saturn node, run through the `cpu` queue
-# (`cactup sim submit ... -q cpu`). Written 2026-09-29, derived from this
-# machine's "default" (CUDA) variant the way mdb/qbd/optionlists/cpu.toml is
+# (its default-queue below, so no -q is needed). Written 2026-09-29, derived from this
+# machine's "default" (CUDA) flavor the way mdb/qbd/optionlists/cpu.toml is
 # derived from qbd's: same compilers, flags and libraries, minus everything
 # that exists only for nvcc/AMReX-CUDA (CUCC*, the nvcc LD, cudart libs,
 # AMREX_ENABLE_CUDA, the CUDA architecture).
 #
 # Measured facts it depends on: gcc 13.2.0 (/packages/gcc/13.2.0; has
-# _Float16, so -mf16c stays, unlike qbd's cpu variant on gcc 8.5), OpenMPI
+# _Float16, so -mf16c stays, unlike qbd's cpu flavor on gcc 8.5), OpenMPI
 # 4.1.8 built with that gcc, Xeon Platinum 8367HC (Cooper Lake, AVX-512).
-# Libraries the node lacks are BUILD, as in the default variant.
+# Libraries the node lacks are BUILD, as in the default flavor.
 #
 # spelling-check: skip -- the bare OPTIMISE and VECTORISE keys below are the
 # Cactus flesh's own option names and must be spelled exactly that way.
 
 [cactup]
-gpu               = false
 description       = "CPU-only build (no nvcc, no AMReX CUDA) for the `cpu` queue"
-compatible-queues = ["cpu"]
+
+[cactup.runs-on]
+queues = ["cpu"]
+gpu    = false
+# Without -q, a sim of this flavor goes here rather than to the GPU-flagged
+# machine default `local`.
+default-queue = "cpu"
 
 [options]
 # -mf16c: hardware binary16<->binary32 conversion for gcc's _Float16
@@ -120,7 +125,7 @@ OPENPMD_DIR = "BUILD"
 NSIMD_DIR  = "BUILD"
 NSIMD_SIMD = "AVX512_SKYLAKE"
 
-# CPU-only AMReX, for a CarpetX thornlist built with this variant.
+# CPU-only AMReX, for a CarpetX thornlist built with this flavor.
 AMREX_DIR            = "BUILD"
 AMREX_ENABLE_FORTRAN = "OFF"
 AMREX_ENABLE_HIP     = "no"

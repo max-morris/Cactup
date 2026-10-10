@@ -10,7 +10,7 @@
 # /ddnB/project/sbrandt/externals-qbd. One we do NOT keep: that regeneration
 # also dropped the srun-wrapped `make` (builds farmed out to the queue). qbd
 # requires building on the compute nodes, so that behavior is restored — but as
-# a first-class queued build ([variants.buildsubmitscript] below, §7.9), not by
+# a first-class queued build ([buildsubmitscripts] below, §7.9), not by
 # wrapping `make` in a universe. A universe says WHERE a command runs; the
 # scheduler says HOW work reaches a machine. Conflating them is what made the
 # old wrapper reimplement job-id parsing, status polling and log streaming in
@@ -64,10 +64,15 @@ default-action = "submit"
 # The build job's shape. One node, one task: `make -j` is shared-memory, so
 # extra nodes buy nothing. cpus-per-task tracks make-jobs (a full node's 64
 # cores) — the old wrapper's `--cpus-per-task @MAKEJOBS@`. Compiling needs no
-# GPU, but see the --gres note in buildsubmitscripts/default.py: QB4 counts
-# only GPUs asked for via --gres against its CPUs-per-GPU cap, so a full-node
-# build must reserve the node's whole GPU complement to be allowed its cores.
-queue         = "gpu2"
+# GPU, so every flavor builds on `single`, the one-node CPU partition: the
+# CUDA optionlist targets sm_80 explicitly and links against the toolkit on
+# the shared filesystem, and nvcc comes from the same `module load cuda` the
+# env-setup does on any node, so nothing about the build depends on the node
+# it runs on. Building on a GPU partition (`-q gpu2`) still works, but there
+# QB4 counts only GPUs asked for via --gres against its CPUs-per-GPU cap, so a
+# full-node build has to hold the node's whole GPU complement just to get its
+# cores (see buildsubmitscripts/gpu-partition.py).
+queue         = "single"
 walltime      = "4:00:00"
 nodes         = 1
 tasks         = 1
@@ -120,8 +125,8 @@ max-walltime     = "24:00:00"
 # QB4's GPU partitions (the old ini's scripts branched on exactly these two).
 # gpu2: 2 GPUs/node; gpu4: 4 GPUs/node. QB4 enforces db1-style gres rules —
 # CPUs per GPU are capped (32 on gpu2) and only GPUs requested via `--gres`
-# count — so the submitscripts emit `--gres=gpu:{4,2}` per queue and the
-# build universe above requests `--gres=gpu:2`.
+# count — so the submitscripts emit `--gres=gpu:{4,2}` per queue, as does
+# the build-submit script for a build sent to a GPU partition.
 #
 # The 2-vs-4 split is a per-queue `max-gpus-per-node` override (§4.2) rather
 # than a machine-level [hardware] key, because the two partitions genuinely
@@ -156,7 +161,7 @@ default-cpus-per-task = 16
 # limit; site policy: one node per job, enforced in submitscripts/cpu.py),
 # `workq` and `checkpt` (3-day limit, multi-node; checkpt is the higher-priority
 # but preemptable one, which a checkpointing Cactus run tolerates) — plus
-# `bigmem` (5 nodes, 2 TB). They serve the CPU-only optionlist variant `cpu`
+# `bigmem` (5 nodes, 2 TB). They serve the CPU-only flavor `cpu`
 # (Carpet/McLachlan/IllinoisGRMHD-style builds, no nvcc). 8 threads per rank
 # gives 8 ranks per node, one per 8-core slice, which is the usual sweet spot
 # for Carpet; override with -c.
@@ -180,23 +185,23 @@ gpu = false
 max-walltime = "3-00:00:00"
 default-cpus-per-task = 8
 
-[variants.submitscript]
-"default" = { queues = ["gpu2", "gpu4"], default = true }
+[submitscripts]
+"default" = { queues = ["gpu2", "gpu4"] }
 "cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
-"test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test submit`
+"test"     = { queues = ["gpu2", "gpu4"], test = true }                       # used by `cactup test submit`
+"test-cpu" = { queues = ["single", "workq", "checkpt", "bigmem"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["gpu2", "gpu4"], default = true }
+[runscripts]
+"default" = { queues = ["gpu2", "gpu4"] }
 "cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
-"test"    = { queues = ["gpu2", "gpu4"], test = true }   # used by `cactup test run`
+"test"     = { queues = ["gpu2", "gpu4"], test = true }                       # used by `cactup test run`
+"test-cpu" = { queues = ["single", "workq", "checkpt", "bigmem"], test = true }
 
 # Any partition can build any config: the build queue is only where `make`
 # runs, independent of where the binary will. The queue picks the script, so
-# a build on a GPU partition gets the --gres derivation it needs and one on a
-# CPU partition (`cactup build submit <cfg> -q single`) gets none.
-[variants.buildsubmitscript]
-"default" = { queues = ["gpu2", "gpu4"], default = true }
-"cpu"     = { queues = ["single", "workq", "checkpt", "bigmem"] }
-
-[variants.optionlist]
-variants = ["default", "cpu"]
+# a build on a CPU partition (the [build].queue default, `single`) requests no
+# GPUs, and one sent to a GPU partition with -q gets the --gres derivation it
+# needs there.
+[buildsubmitscripts]
+"gpu-partition" = { queues = ["gpu2", "gpu4"] }
+"cpu-partition" = { queues = ["single", "workq", "checkpt", "bigmem"] }

@@ -150,31 +150,29 @@ exec-host-pattern = "(.*)"
 # Two cactup queues on the one node; no scheduler sees either name.
 # `local` (default) is GPU-flagged because the default optionlist is the CUDA
 # build (D12, §4.4, refuses a GPU binary on a non-GPU queue). `cpu` serves the
-# CPU-only optionlist variant, mirroring qbd's CPU partitions: without it a
+# CPU-only flavor, mirroring qbd's CPU partitions: without it a
 # CPU run on `local` would have its derived rank count capped at the four
-# GPUs. Run a CPU config with `-q cpu`.
+# GPUs. A CPU config's sims land on `cpu` without -q: the cpu flavor names
+# it as its [cactup.runs-on] default-queue.
 [queues.local]
 gpu     = true
 default = true
 
 # 8 threads per rank, as on qbd's CPU queues (two ranks per 16-core NUMA
-# node). The runscript variant below defaults to 8 ranks: half the node, the
+# node). The cpu runscript below defaults to 8 ranks: half the node, the
 # same share a no-flag GPU run takes.
 [queues.cpu]
 gpu = false
 default-cpus-per-task = 8
 
-# The normal variant of each script, the CPU-only variant (mirrors qbd's
-# `cpu`), and the testsuite variant (design §11.2). One submitscript serves
+# The normal script of each kind, the CPU-only one (mirrors qbd's
+# `cpu`), and the testsuite one (design §11.2). One submitscript serves
 # both queues: with no scheduler it only re-invokes cactup.
-[variants.submitscript]
-"default" = { queues = ["local", "cpu"], default = true }
+[submitscripts]
+"default" = { queues = ["local", "cpu"] }
 "test"    = { queues = ["local", "cpu"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true }
+[runscripts]
+"default" = { queues = ["local"] }
 "cpu"     = { queues = ["cpu"], tasks = 8 }
 "test"    = { queues = ["local", "cpu"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default", "cpu"]

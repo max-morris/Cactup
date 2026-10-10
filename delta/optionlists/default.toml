@@ -1,9 +1,9 @@
-# delta optionlist (variant "default"), ported from simfactory2
+# delta optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/delta.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["cpu"]
+[cactup.runs-on]
+queues = ["cpu"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

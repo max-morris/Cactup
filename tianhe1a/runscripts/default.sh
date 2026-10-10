@@ -1,5 +1,5 @@
 #! /bin/bash
-# tianhe1a runscript (variant "default"), ported from simfactory2
+# tianhe1a runscript (script "default"), ported from simfactory2
 # mdb/runscripts/tianhe1a.run.
 #
 # Variable renames vs. simfactory (design §6.3):

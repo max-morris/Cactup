@@ -1,5 +1,5 @@
 #! /bin/bash
-# graham runscript (variant "default"), ported from simfactory2
+# graham runscript (script "default"), ported from simfactory2
 # mdb/runscripts/graham.run.
 #
 # Variable renames vs. simfactory (design §6.3):

@@ -1,7 +1,7 @@
-# Sciama runscript (variant "default"), ported from simfactory2
+# Sciama runscript (script "default"), ported from simfactory2
 # mdb/runscripts/sciama.run.
 #
-# This is a .py variant (design §6.1): the old script used computed float
+# This is a .py script (design §6.1): the old script used computed float
 # templates that the literal-only @NAME@ engine (D7) cannot express —
 #   @(1.0*@NUM_PROCS@/@NODES@)@                       (MPI processes per node)
 #   @(1.0*(@NUM_PROCS@*@NUM_THREADS@)/(@NODES@*@MAX_CPUS_PER_NODE@))@ (OpenMP threads per core)
@@ -12,7 +12,7 @@
 # metadata dir SIMFACTORY/ -> .cactup/ (§9.3; .cactup/NODES is also read by
 # the machine's exec-host command).
 #
-# env-setup is NOT auto-prepended for .py variants (design §6.1); it is
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); it is
 # emitted right after the shebang, where cactup would have placed it for a
 # .sh runscript.
 

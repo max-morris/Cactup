@@ -1,4 +1,4 @@
-# db1.hpc.lsu.edu optionlist (variant "native"), ported from simfactory2
+# db1.hpc.lsu.edu optionlist (flavor "native"), ported from simfactory2
 # mdb/optionlists/db-new.cfg — the native (non-Singularity) Deep Bayou build:
 # gcc/g++ for C/C++, ifort for Fortran, nvcc for CUDA and the link, against a
 # frozen set of prebuilt externals under
@@ -11,16 +11,18 @@
 # not carried; the surviving VERSION line is the last one in the file.
 
 [cactup]
-gpu               = true
-compatible-queues = ["gpu"]
 # Names no universe, so it falls back to the declared [universes.host] (§4.8
 # "implicit host universe": loads the host gcc/cuda/mpich modules, via
 # env-build-setup, around make). The run must NOT be coerced into it — the
 # native runscript loads those modules itself. Routing to the "default"
 # run/submit scripts comes from this config's build universe ("host"),
-# matched against the `universes` list on the meta.toml script variants
+# matched against the `build-universes` list on the meta.toml scripts
 # (§4.8 Feature 1), not from a dedicated queue.
 coerce-run-universe = false
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu    = true
 
 [options]
 VERSION = "db-new-2026-07-07-externals-2026-06-23-cucc-openmp-cpp8-externals-2026-06-25"

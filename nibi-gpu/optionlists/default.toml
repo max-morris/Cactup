@@ -1,9 +1,9 @@
-# nibi.sharcnet optionlist (variant "default"), ported from simfactory2
+# nibi.sharcnet optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/nibi-gpu.cfg.
 
-[cactup]
-gpu               = true
-compatible-queues = ["default"]
+[cactup.runs-on]
+queues = ["default"]
+gpu    = true
 
 [options]
 # generic

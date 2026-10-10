@@ -1,5 +1,5 @@
 #! /bin/bash
-# saturn submitscript (variant "default"). Written 2026-09-29; copied from
+# saturn submitscript (script "default"). Written 2026-09-29; copied from
 # mdb/et-juphub/submitscripts/default.sh (simfactory2 generic.sub), because
 # Frank has no batch scheduler: cactup's "submit" backgrounds this script with
 # nohup and records its PID as the job id (meta.toml [scheduler]). Nothing
@@ -7,7 +7,7 @@
 #
 # Chaining is emulated by waiting for the previous job's PID to exit. Plain
 # bash conditional (the NAME engine does literal substitution only -- §6/§D7),
-# so a .sh variant suffices.
+# so a .sh script suffices.
 
 cd @SOURCEDIR@ || exit 1
 

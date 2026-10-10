@@ -70,13 +70,10 @@ max-walltime    = "96:00:00"
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["wholenode"], default = true }
+[submitscripts]
+"default" = { queues = ["wholenode"] }
 "test"    = { queues = ["wholenode"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["wholenode"], default = true }
+[runscripts]
+"default" = { queues = ["wholenode"] }
 "test"    = { queues = ["wholenode"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

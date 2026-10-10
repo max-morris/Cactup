@@ -1,11 +1,11 @@
-# qbd submitscript (variant "default"), ported from simfactory2.
+# qbd submitscript (script "default"), ported from simfactory2.
 #
 # NOTE: upstream simfactory-configure.py flipped this machine's scheduler
 # SLURM->PBS when it regenerated the mdb on 2026-07-07. We do not follow that
 # flip: qbd (LSU/LONI Queen Bee 4) runs SLURM, matching its sibling LONI
 # machine qbc.loni.org, so these directives are #SBATCH.
 #
-# .py variant (design §6.1): the `-p @QUEUE@` directive is guarded by
+# .py script (design §6.1): the `-p @QUEUE@` directive is guarded by
 # `if QUEUE:` and restart chaining is `-d afterany` guarded by CHAINED_JOB_ID
 # — cactup's @NAME@ engine is literal-only (D7), so both conditionals move
 # into Python.
@@ -97,7 +97,7 @@ lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
 lines.append(f"# INFO: CPUS_PER_TASK={CPUS_PER_TASK}, TASKS_PER_NODE={TASKS_PER_NODE}")
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

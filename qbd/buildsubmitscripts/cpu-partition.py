@@ -17,7 +17,7 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header. The build itself re-applies the build-phase
 # env-setup from its own frozen script, so this only has to be enough to
 # reach the cactup binary.

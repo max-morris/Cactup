@@ -1,4 +1,4 @@
-# qbd submitscript (variant "cpu"): CPU partitions single/workq/checkpt/bigmem.
+# qbd submitscript (script "cpu"): CPU partitions single/workq/checkpt/bigmem.
 #
 # Same shape as qbc.loni.org's script (plain -N/-n/--cpus-per-task, no --gres,
 # no --gpus-per-task): none of QB4's GPU gres rules apply on these partitions.
@@ -33,7 +33,7 @@ lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
 lines.append(f"# INFO: CPUS_PER_TASK={CPUS_PER_TASK}, TASKS_PER_NODE={TASKS_PER_NODE}")
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 
