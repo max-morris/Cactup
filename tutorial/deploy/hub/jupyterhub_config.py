@@ -72,7 +72,7 @@ c.DockerSpawner.volumes = {
 }
 # The image has no CMD; its entrypoint starts SLURM, then this.
 c.DockerSpawner.cmd = ["jupyterhub-singleuser"]
-c.DockerSpawner.mem_limit = env("MEM_LIMIT", "6G")
+c.DockerSpawner.mem_limit = env("MEM_LIMIT", "8G")
 extra_host_config = {
     # OpenMPI's shared-memory transport.
     "shm_size": "1g",

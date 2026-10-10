@@ -75,6 +75,10 @@ def update_demo() -> int:
     sha = next(UPDATE_ROOT.glob("*/cactup.sha256")).read_text()
     previous = re.search(r"cactup-(\w+)", sha).group(1)
     bin_dir = HOME / ".cactup" / "bin"
+    if not bin_dir.is_dir():
+        print("cactup isn't installed yet: notebook 1's first cells install it (and update it on the way)",
+              file=sys.stderr)
+        return 1
     build = bin_dir / f"cactup-{previous}"
     if not build.exists():
         target = next(UPDATE_ROOT.glob(f"*/cactup-{previous}"))

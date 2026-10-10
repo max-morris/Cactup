@@ -6,12 +6,15 @@
 #
 # Stages:
 #   labext    the prebuilt JupyterLab extension
-#   cactup    two static distribution builds of cactup from this checkout
+#   cactup    two static distribution builds of cactup, from the pinned
+#             commit (cactup.pin)
 #   base      Debian trixie with the tools every later stage needs
+#   cuda      base + NVIDIA's CUDA toolkit, mounted only by the CUDA bakes
 #   platform  base + the Einstein Toolkit toolchain, SLURM and munge
 #   lab       platform + the git mirrors, JupyterLab, the tutorial package,
 #             the local update site cactup is installed from, and the
 #             attendees' home skeleton
+#   tutorial  lab + the bakes and the notebooks: the image attendees get
 #
 # The mirrors come from the `mirrors` build context (see build.sh).
 
@@ -158,8 +161,10 @@ RUN set -eu; \
     git config --system --add safe.directory '/opt/cactup-mirrors/*'
 COPY tutorial/jupyter/ /src/cactup-tutorial/
 COPY --from=labext /src/cactup_tutorial/labextension/ /src/cactup-tutorial/cactup_tutorial/labextension/
+# PIP_CONSTRAINT, not -c: it reaches the isolated environment pip builds the
+# package in, too (hatchling).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --retries 10 --timeout 60 -c /tmp/constraints.txt '/src/cactup-tutorial[lab]' \
+    PIP_CONSTRAINT=/tmp/constraints.txt pip install --retries 10 --timeout 60 '/src/cactup-tutorial[lab]' \
     && rm -rf /src/cactup-tutorial /tmp/constraints.txt
 
 # The local update site: one root that offers both builds. The installer reads

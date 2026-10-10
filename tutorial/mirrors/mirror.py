@@ -14,9 +14,10 @@ sync inside the tutorial image never reach GitHub or Bitbucket:
 - Cactup's `mdb` branch, which cactup's MDB sync fetches from the `mdb-url`
   knob (`https://github.com/max-morris/Cactup.git` by default) with the
   refspec `+refs/heads/mdb:refs/mdb/head`, reading `GENERATION` at the tree's
-  root (src/mdb/sync.rs). It is built from a local directory (this
-  checkout's `mdb/`, uncommitted edits included), not fetched, so the image
-  works before a machine entry is published.
+  root (src/mdb/sync.rs). It is built from a local directory (`--mdb-dir`:
+  image/build.sh passes the pinned commit's `mdb/`; the default is this
+  checkout's, uncommitted edits included), not fetched, so the image works
+  before a machine entry is published.
 
 Subcommands:
 

@@ -1,7 +1,8 @@
 # Exact versions of everything pip installs into the image (/opt/venv), as
 # tested: a rebuild must not pick up new releases. Regenerate on purpose:
 #   docker run --rm --entrypoint /opt/venv/bin/pip cactup-tutorial:tutorial freeze --exclude cactup-tutorial
-# and keep the lines at the end, which pin what only the labext build stage uses.
+# and keep the lines at the end, which pin what pip freeze can't see: the
+# labext build stage's extras, and the tutorial package's build backend.
 alembic==1.20.0
 annotated-types==0.8.0
 anyio==4.15.1
@@ -121,3 +122,10 @@ websocket-client==1.9.2
 # Not in /opt/venv: the labext build stage runs Python 3.11, where
 # jupyter-server also needs overrides (only before 3.12).
 overrides==7.7.0
+# The tutorial package's build backend (pip builds it in an isolated
+# environment, which only PIP_CONSTRAINT reaches) and what it needs.
+hatchling==1.32.4
+pathspec==1.1.1
+pluggy==1.6.0
+tomlkit==0.15.1
+trove-classifiers==2026.9.21.13

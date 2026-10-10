@@ -1,14 +1,15 @@
-# Builds the prebuilt JupyterLab extension. Used by the main image and, with
-# `--output`, to drop the built extension into the source tree for local work:
+# Builds the JupyterLab extension into the source tree, for local work (the
+# image builds it in its own labext stage, the same way):
 #   docker build -f tutorial/jupyter/Dockerfile.labext --output tutorial/jupyter/cactup_tutorial tutorial/jupyter
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS build
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir 'jupyterlab>=4.4,<5'
+COPY constraints.txt /tmp/constraints.txt
+RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -c /tmp/constraints.txt jupyterlab
 ENV PATH=/venv/bin:$PATH
 WORKDIR /src/labext
-COPY labext/package.json ./
-RUN npm install --no-audit --no-fund
+COPY labext/package.json labext/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY labext/ ./
 RUN npm run build && npm test
 

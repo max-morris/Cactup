@@ -15,6 +15,11 @@ So cactup can change freely on any branch without changing the tutorial.
 Moving the pin is the only way a cactup change reaches it. This file is the
 procedure for doing that, for an agent or a person.
 
+The pinned commit must stay reachable: `build.sh` refuses a commit this
+repository doesn't have. A merge commit or a fast-forward keeps a branch's
+commits; a rebase or a squash merge leaves them behind, so after one, move
+the pin to the commit that carries the same tree.
+
 ## When to move the pin
 
 - The tutorial needs a cactup change: a fix for something a notebook trips

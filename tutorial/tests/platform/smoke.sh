@@ -117,7 +117,7 @@ tips=$(as_user 'cactup knob wisdom-frequency' 2>&1 || true)
 case $tips in *off*) r=ok ;; *) r=no ;; esac
 check "$r" "cactup's random tips are off in the notebooks (wisdom-frequency: $tips)"
 
-machine=$(as_user 'cactup machine show' 2>&1 | head -5 || true)
+machine=$(as_user 'cactup machine show' 2>&1 | sed -n 1,5p || true)
 case $machine in *cactup-tutorial*) r=ok ;; *) r=no ;; esac
 check "$r" "the machine is discovered as cactup-tutorial"
 

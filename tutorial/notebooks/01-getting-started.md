@@ -166,7 +166,7 @@ Notebook 10 goes through the differences in depth.
 `cactup releases` above listed the Einstein Toolkit's releases, newest first.
 Install the latest one. `--silent` accepts the defaults for everything
 `cactup install` would otherwise ask (where to put it, what to call it). Run
-again, the cell says that installation exists already.
+it again and the cell says that installation exists already.
 
 ```{code-cell} ipython3
 %%shell

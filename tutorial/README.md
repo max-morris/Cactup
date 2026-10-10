@@ -746,9 +746,9 @@ submits to `mylab` use `--ignore-machine` on the stock `tutorial`).
 | Notebook | Command (install) | cactup decides | Shim |
 |---|---|---|---|
 | 2 | `build tutorial --thornlist tutorial.th` (stock) | new config | hit B1: restore + replay |
-| catch-up N ≥ 5, late arrival | `build tutorial --thornlist tutorial.th` (stock) | new config | hit B1: restore + replay |
-| catch-up N ≥ 5, after restoring edited files | the same | incremental | hit B1, built on: real, the restored files (all of a `.ccl`'s thorn) |
-| catch-up N ≥ 5, otherwise | the same | up to date | no make at all |
+| catch-up 4b and N ≥ 5, late arrival | `build tutorial --thornlist tutorial.th` (stock) | new config | hit B1: restore + replay |
+| catch-up 4b and N ≥ 5, after restoring edited files | the same | incremental | hit B1, built on: real, the restored files (all of a `.ccl`'s thorn) |
+| catch-up 4b and N ≥ 5, otherwise | the same | up to date | no make at all |
 | 3 | `build tutorial` (et-mp, before the refetch) | new config | hit B2a: restore + replay |
 | 3 | `build tutorial` (et-mp, after the fork refetch) | full rebuild: the flesh moved | realclean real; hit B2b: restore + replay |
 | 4b | `-I et-gpu build tutorial-gpu --variant gpu` (et-gpu) | new config | hit B3 |
@@ -771,7 +771,9 @@ Traces remain for anyone who looks closely: a full build that took 45
 seconds (in the cell's output and the build attempt's timestamps), with
 configure and the external libraries passing quickly; a Ctrl-C that leaves
 an empty tree behind rather than a half-built one; and the shim's dot-files
-in the config directory. The notebooks point out none of them.
+in the config directory. Notebook 2 says its build was prepared ahead of
+time (as 4b, 5 and 7 say of theirs); the notebooks point out none of the
+rest.
 
 ### Bakes
 
@@ -965,7 +967,7 @@ Measured on the development machine (a container limited to 4 CPUs):
 | B1, the `tutorial` config from `tutorial.th` | tree 1.5 GB (`build/` 570 MB, `lib/` 550 MB, `scratch/` 340 MB, of which AMReX and NSIMD), executable 340 MB | a real build: about 10 minutes |
 | B1 replayed (restore and replay) | | 46 s, longest pause 1.4 s |
 | a real incremental build on the restored tree (one Cottonmouth file) | | 13 s |
-| the image | 17.6 GB on disk (the lab image without the bakes: 9.4 GB) | |
+| the image | 18.5 GB on disk (the lab image without the bakes: 9.4 GB) | |
 
 A full-ET config tree, for comparison, is 6–9 GB with ExternalLibraries built
 from source, and an install's sources are about 1.8 GB (83 repositories).
@@ -1097,9 +1099,9 @@ labeled `org.cactup-tutorial.attendee=<username>`, with:
   cores only when there are more of them than slices (`CPUSET=1`, which
   needs Docker to apply cpusets: rootful Docker, or rootless with the cpuset
   controller delegated; cores beyond a whole slice go unused);
-- a memory cap (`MEM_LIMIT`, 6 GB: a cap against a runaway, not a
-  reservation; see `SIZING.md`), a 1 GB `/dev/shm` for OpenMPI, and at most
-  4096 processes;
+- a memory cap (`MEM_LIMIT`, 8 GB, as the tutorial's machine entry says: a
+  cap against a runaway, not a reservation; see `SIZING.md`), a 1 GB
+  `/dev/shm` for OpenMPI, and at most 4096 processes;
 - the machine's NVIDIA GPUs with `GPU=1` (needs the NVIDIA container
   toolkit; notebook 4b's `gpu` partition works only then);
 - the network `cactup-tutorial-users`, internal: no route out, so code run in

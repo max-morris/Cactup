@@ -124,12 +124,12 @@ def discover_claims(script: Path) -> bool:
 
 
 def claims_this_host(entry: Path) -> bool:
-    if (entry / "discover.py").exists() and discover_claims(entry / "discover.py"):
-        return True
+    # As cactup decides it: a hostname.regexp, if there is one, and only
+    # otherwise discover.py.
     try:
         pattern = (entry / "hostname.regexp").read_text().strip()
     except OSError:
-        return False
+        return (entry / "discover.py").exists() and discover_claims(entry / "discover.py")
     try:
         # Unanchored, as cactup matches it.
         return bool(pattern) and re.search(pattern, MACHINE) is not None

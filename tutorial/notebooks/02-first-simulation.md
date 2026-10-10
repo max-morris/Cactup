@@ -50,8 +50,13 @@ cactup build tutorial --thornlist /opt/cactup-tutorial/thornlists/tutorial.th
 
 The output is Cactus's own (scroll up in its box for the start): configure,
 the CCL files, then every thorn's sources, the external libraries (AMReX and
-NSIMD) first, and finally the link. cactup ran it as a build *attempt* and kept a record of it, and of the
-config itself: what it was built from, with which flags, on which machine.
+NSIMD) first, and finally the link. It took under a minute because this
+build was prepared ahead of time for the tutorial: cactup ran for real, but
+the build itself was done earlier, and its recorded output played back while
+its results were put in place. On a cluster, a first build of these thorns
+takes about ten minutes. cactup ran it as a build *attempt* and kept a
+record of it, and of the config itself: what it was built from, with which
+flags, on which machine.
 
 ```{code-cell} ipython3
 %%shell
@@ -63,6 +68,9 @@ cactup config show tutorial
 cactup build list
 cactup build show tutorial
 ```
+
+(The "job" of a build that ran here in the foreground, as this one did, is
+its process id, not a SLURM job; notebook 9 comes back to that.)
 
 The attempt's full output is in its directory (`build.out` and `build.err`),
 and `cactup build log tutorial` shows it. Since the build succeeded,

@@ -120,7 +120,8 @@ grep -q 'not precomputed' "$logs/build.err" && r=no || r=ok
 check "$r" "the shim found the bake (no \"not precomputed\" note)"
 
 # The bake's own cactup transcript, against this one.
-bake=$(docker exec "$name" sh -c 'ls -d /opt/cactup-bakes/*/ | head -1')
+# B1, the stock `tutorial` config's bake (the image holds one per bake id).
+bake=$(docker exec "$name" sh -c 'dirname "$(grep -l "\"id\": *\"B1\"" /opt/cactup-bakes/*/bake.json)"')
 for stream in out err; do
     docker exec "$name" cat "$bake/transcript.$stream" > "$logs/bake.$stream"
     for f in "$logs/bake.$stream" "$logs/build.$stream"; do

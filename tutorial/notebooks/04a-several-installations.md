@@ -102,7 +102,7 @@ an install, every repository is where the fetch put it. The one repository
 it does list is the Einstein Toolkit's own doing: the thornlist checks
 FUKA's sources out into a directory inside the `KadathThorn` repository, so
 git counts them as untracked files there. Builds ignore untracked files;
-they matter only to `cactup refetch --prune`, which won't delete a
+they matter only to `cactup inst refetch --prune`, which won't delete a
 repository with files in it that git doesn't track. Each repository is an
 ordinary git clone, so git can say more; here, the commit `master`'s CarpetX
 is on, against the release's. (CarpetX's development branch is called

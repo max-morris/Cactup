@@ -33,6 +33,7 @@ import base64
 import calendar
 import hashlib
 import json
+import mmap
 import re
 import selectors
 import shutil
@@ -487,6 +488,49 @@ def stamp_swaps(baked: dict, when: float) -> dict[bytes, bytes]:
     return {k.encode(): v.encode() for k, v in swaps.items() if len(k.encode()) == len(v.encode())}
 
 
+def padded(date: str) -> bytes:
+    """CCTK_CompileDate's form of a `__DATE__`: the day as two digits."""
+    return (date[:4] + "0" + date[5:] if date[4] == " " else date).encode()
+
+
+def compile_date_patches(data, baked_date: str, when: float) -> list[tuple[int, bytes]]:
+    """Where to write what in `data` (an executable or datestamp.o) so that
+    CCTK_CompileDate reports `when`'s date. gcc doesn't keep that string
+    anywhere for stamp_swaps to find: it copies the padded date in with
+    instructions: `__DATE__`'s first 8 bytes as an immediate (`movabs`,
+    "Oct  1 2"), its last 3 and the terminator as another (`movl`), and, for
+    a one-digit day, a byte store of the padding "0" (`movb`). Each of those,
+    found after the 8-byte immediate, gets the new padded date's bytes."""
+    old, new = baked_date.encode(), padded(time.strftime("%b %e %Y", time.localtime(when)))
+    patches = []
+    at = data.find(old[:8])
+    while at != -1:
+        # movabs $imm64 into a register: REX.W (0x48, or 0x49 for r8-r15), 0xb8-0xbf.
+        if at >= 2 and data[at - 2] in (0x48, 0x49) and 0xb8 <= data[at - 1] <= 0xbf:
+            patches.append((at, new[:8]))
+            window = bytes(data[at + 8:at + 64])
+            # movl $imm32 to memory, rip-relative: c7 05 <rel32> <imm32>.
+            year = re.search(rb"\xc7\x05.{4}(" + re.escape(old[8:] + b"\0") + rb")", window, re.DOTALL)
+            if year:
+                patches.append((at + 8 + year.start(1), new[8:] + b"\0"))
+            # movb $0x30 to memory, rip-relative: c6 05 <rel32> 30.
+            pad = baked_date[4] == " " and re.search(rb"\xc6\x05.{4}(0)", window, re.DOTALL)
+            if pad:
+                patches.append((at + 8 + pad.start(1), new[4:5]))
+        at = data.find(old[:8], at + 1)
+    return patches
+
+
+def patch_compile_date(path: Path, baked_date: str, when: float) -> None:
+    with open(path, "r+b") as f:
+        data = mmap.mmap(f.fileno(), 0)
+        try:
+            for at, value in compile_date_patches(data, baked_date, when):
+                data[at:at + len(value)] = value
+        finally:
+            data.close()
+
+
 # Text files in a config's tree that record the build they came from: the
 # configure step's summary (its date, the options and thornlist it was given,
 # make's jobserver) and ExternalLibraries' "done" stamps (the date each
@@ -539,7 +583,8 @@ def copier(staging: Path, bake: Path, shell: tuple[int, int], start: float, end:
     last = 0.0
     # The compile date and time Cactus reports (datestamp.o, linked last):
     # the end of this replay's build step, not the bake's.
-    swaps = stamp_swaps(info.get("compile-stamp") or {}, end)
+    stamp = info.get("compile-stamp") or {}
+    swaps = stamp_swaps(stamp, end)
 
     def advance(n: int) -> None:
         nonlocal done, last
@@ -550,13 +595,16 @@ def copier(staging: Path, bake: Path, shell: tuple[int, int], start: float, end:
             last = now
 
     def copy_file(src: Path, dst: Path) -> None:
+        stamped = swaps and (src.name == "datestamp.o" or src.parent.name == "exe")
         with open(src, "rb") as fin, open(dst, "wb") as fout:
-            if swaps and (src.name == "datestamp.o" or src.parent.name == "exe"):
+            if stamped:
                 stream_replace(fin, fout, swaps, advance)
             else:
                 while chunk := fin.read(1 << 20):
                     fout.write(chunk)
                     advance(len(chunk))
+        if stamped and "date" in stamp:
+            patch_compile_date(dst, stamp["date"], end)
 
     def report(state: str, error: str = "") -> None:
         write_json(progress, {"state": state, "done": done, "total": total, "error": error})

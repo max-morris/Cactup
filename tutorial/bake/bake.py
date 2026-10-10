@@ -16,7 +16,8 @@ the notebooks build them), runs the bake's `cactup build` once as a probe that
 only learns the build's fingerprint, and, unless the cache already has that
 bake for this toolchain, runs the build for real with the make shim recording,
 and harvests the result into /bakes/<toolchain>/<fingerprint>/. It writes the
-fingerprints the image needs to /bakes/<toolchain>/wanted.
+fingerprints the image needs to the file `--wanted` names under
+/bakes/<toolchain>/ (build.sh: wanted-cpu or wanted-cuda).
 """
 
 from __future__ import annotations

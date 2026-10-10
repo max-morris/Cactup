@@ -101,9 +101,9 @@ installs, which the kernel reclaims under pressure.)
 
 So 2.5 GB per attendee: the measured peak, the kernel's share, and every
 notebook's kernel left running. Give each container a memory *limit* well
-above that (about 6 GB): a limit is a cap against a runaway, not a
-reservation, and a tight one also caps how much of a restore the kernel can
-buffer for that container (writeback limits are per cgroup).
+above that (8 GB, the hub's default `MEM_LIMIT`): a limit is a cap against a
+runaway, not a reservation, and a tight one also caps how much of a restore
+the kernel can buffer for that container (writeback limits are per cgroup).
 
 The fixed 16 GB covers the files every container reads (the image's bakes,
 6.9 GB, and git mirrors, 3.2 GB: one copy in the page cache, shared by all

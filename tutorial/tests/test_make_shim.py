@@ -623,3 +623,39 @@ def test_stream_replace_counts_what_it_has_written():
     make_shim.stream_replace(io.BytesIO(b"x" * (3 << 20)), out, {b"ab": b"cd"},
                              lambda n: seen.append((n, out.tell())))
     assert all(written >= sum(k for k, _ in seen[: i + 1]) - 1 for i, (_, written) in enumerate(seen)), seen
+
+
+def run_compile_date(code: bytes) -> bytes:
+    """What CCTK_CompileDate's compiled body (as gcc 14 makes it) leaves in
+    its buffer: the two immediates, then the padding byte at [4], if any."""
+    imm8 = code[code.index(b"\x48\xb8") + 2:][:8]
+    imm4 = code[code.index(b"\xc7\x05") + 6:][:4]
+    date = bytearray(imm8 + imm4)
+    if b"\xc6\x05" in code:
+        date[4] = code[code.index(b"\xc6\x05") + 6]
+    return bytes(date[:11])
+
+
+def compile_date_code(date: bytes) -> bytes:
+    code = (b"\x90\x48\xb8" + date[:8] + b"\xc7\x05\x01\x02\x03\x04" + date[8:] + b"\0"
+            + b"\x48\x89\x05\x01\x02\x03\x04" + b"\x48\x8d\x05\x01\x02\x03\x04")
+    if date[4:5] == b" ":
+        code += b"\xc6\x05\x01\x02\x03\x04" + b"0"
+    return code + b"\xc3"
+
+
+@pytest.mark.parametrize("baked, when, want", [
+    ("Oct  1 2026", (2026, 10, 10, 9, 0, 0), b"Oct 10 2026"),
+    ("Oct  1 2026", (2026, 11, 5, 9, 0, 0), b"Nov 05 2026"),
+    ("Sep 30 2026", (2026, 10, 7, 9, 0, 0), b"Oct 07 2026"),
+    ("Dec 30 2026", (2027, 1, 21, 9, 0, 0), b"Jan 21 2027"),
+])
+def test_compile_date_patches_reach_the_folded_padded_date(tmp_path, baked, when, want):
+    # The __DATE__ string elsewhere in the file is left to stamp_swaps.
+    path = tmp_path / "datestamp.o"
+    path.write_bytes(b"\x7fELF" + baked.encode() + b"\0" + compile_date_code(baked.encode()) + b"tail")
+    assert run_compile_date(path.read_bytes()) == make_shim.padded(baked)
+    make_shim.patch_compile_date(path, baked, time.mktime(when + (0, 0, -1)))
+    data = path.read_bytes()
+    assert run_compile_date(data) == want
+    assert data.startswith(b"\x7fELF" + baked.encode() + b"\0") and data.endswith(b"\xc3tail")
