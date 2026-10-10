@@ -1319,7 +1319,7 @@ mod tests {
         keyed.fortran.before_compile();
         assert!(keyed.fortran.check_made().is_ok(), "{:?}", keyed.fortran.check_made());
         let map = PathMap::for_trial(&real.root, &real.root.join("configs/sim"));
-        let mut check = |keyed: &mut Keyed| still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen);
+        let check = |keyed: &mut Keyed| still_holds(&real.compiler, OsStr::new("gfortran"), Some(&map), &mut keyed.fortran, &keyed.files, &keyed.seen);
         assert!(check(&mut keyed));
         std::fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&p2, &link).unwrap();
