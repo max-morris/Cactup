@@ -1578,6 +1578,30 @@ Also: the intrinsic modules' directory is the last place an included file
 can come from (`include 'omp_lib.h'` no longer falls back); the spec says
 when the module order is checked; code tidied (one `empty`).
 
+### M3a narrowed, round 8 (on `52f4dfd`): A SIGN-OFF, B BLOCKED
+
+Both re-ran round 7's harnesses end to end (0 stale where `e67b55d` still
+served some) and found the search model sound (B traced gfortran's file
+calls one by one). The Einstein Toolkit gate on `52f4dfd`: 594 of 594
+Fortran checks by lookups, 1.6 s in all (19 s at `a14f279`).
+
+B blocked on one finding, inherited from M2a (`a14f279` publishes the same):
+where the compile reads a copy, a fallback to the dependency run is blind to
+the copy's directory, so a file there (`.cactup/sub/j.inc`, an
+`iso_c_binding.mod`) was compiled in and published. Fixed: where a copy is
+compiled, a place taken before the compile, or an included file that cannot
+be placed, fails the check instead of falling back. Also fixed, A's
+non-blocking findings: the key's run and the check now both ask the driver
+by `-###` (`-v` and `-###` quote differently, so a path with a blank or `$`
+would never have matched); an entry of `LIBRARY_PATH`, `COMPILER_PATH` or
+`GCC_EXEC_PREFIX` that is no absolute path keeps the compile out (inherited:
+the driver searched a relative prefix from another directory than the
+compile's; A served a stale `specs` that way on `a14f279` too); without the
+map, the source is watched by the name the compile reads it by (inherited:
+a symlink on the way turned and back); the `-###` child is registered for a
+stop signal. B's: an `-I` directory given twice is no place before itself;
+test docs; the spec's "left" window.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

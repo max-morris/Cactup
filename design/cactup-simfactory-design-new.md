@@ -5637,11 +5637,19 @@ driver's own searches are repeated after the compile by the driver alone
 (`-###`, which runs no compiler): it must read the same `specs` file or
 none, and give the compiler proper the same pre-included header
 (`-fpre-include=`) and intrinsic modules' directory as the key's dependency
-run did; its prefixes include `LIBRARY_PATH`. No compiler runs for any of
-this. Where an included file cannot be placed so, the dependency run runs
-again after the compile instead, and what it lists must be the same. Left,
-as for a second dependency run: a file that appears and is gone again
-while the compile runs.
+run did (the key's run asks it the same way); its prefixes include
+`LIBRARY_PATH`, `COMPILER_PATH` and `GCC_EXEC_PREFIX`, and an entry there
+that is no absolute path (an empty one is the working directory, which is
+another for the dependency run than for the compile) keeps the compile out
+of the cache. The file compiled is also watched by the name the compile
+reads it by (through a symlink, maybe). No compiler runs for any of this.
+Where an included file cannot be placed so, or a place is already taken
+right before the compile, the dependency run runs again after the compile
+instead, and what it lists must be the same; but not where the compile
+reads a copy (decision 13): the dependency run reads the source and is
+blind to the copy's directory, so the check then fails and nothing is
+stored. Left, as for a second dependency run: a file that appears and is
+gone again between the key's dependency run and the check.
 
 **What a compile writes.** The object and its module files. An entry keeps
 all of them (§18.7). A hit puts back each module file whose bytes differ
