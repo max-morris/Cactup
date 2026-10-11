@@ -1,9 +1,9 @@
-# FUCHS optionlist (variant "default"), ported from simfactory2
+# FUCHS optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/fuchs.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["parallel"]
+[cactup.runs-on]
+queues = ["parallel"]
+gpu    = false
 
 [options]
 # fuchs

@@ -1,9 +1,9 @@
-# hedges optionlist (variant "default"), ported from simfactory2
+# hedges optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/generic.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["local"]
+[cactup.runs-on]
+queues = ["local"]
+gpu    = false
 
 [options]
 # generic

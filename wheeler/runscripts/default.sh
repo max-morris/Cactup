@@ -1,5 +1,5 @@
 #! /bin/bash
-# wheeler runscript (variant "default"), ported from simfactory2
+# wheeler runscript (script "default"), ported from simfactory2
 # mdb/runscripts/wheeler-intel.run.
 #
 # Variable renames vs. simfactory (design §6.3):

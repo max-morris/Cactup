@@ -1,8 +1,8 @@
-# mel5 optionlist (variant "debug") — the DEBUG build.
+# mel5 optionlist (flavor "debug") — the DEBUG build.
 #
 # mel5 ships two optionlists: "default" (the implicit choice, marked
 # `default = true`) and this one. Pick it explicitly with
-# `cactup config build --variant debug` — e.g. to run the testsuite against a
+# `cactup cactup build --flavor debug` — e.g. to run the testsuite against a
 # DEBUG binary (§4.4).
 #
 # Why a separate optionlist: it enables DEBUG (assertions / bounds checking) to
@@ -13,9 +13,9 @@
 # The [options] table is rendered back to the native Cactus "NAME = value"
 # optionlist before `make <config>-config` (design §7.8).
 
-[cactup]
-gpu               = false
-compatible-queues = ["local"]
+[cactup.runs-on]
+queues = ["local"]
+gpu    = false
 
 [options]
 # Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.

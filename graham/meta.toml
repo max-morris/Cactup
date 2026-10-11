@@ -3,7 +3,7 @@
 # "One machine per cluster"). Upstream simfactory splits Graham into two
 # machine defs — `graham` (CPU, g++) and `graham-gpu` (CUDA, nvcc) — because it
 # cannot express two build recipes on one machine. Cactup folds them back into
-# two optionlist variants:
+# two flavors:
 #
 #   flavor   optionlist   build compiler   queue   run/submit scripts
 #   -------  -----------  ---------------  ------  --------------------
@@ -52,7 +52,7 @@ disabled-thorns = [
 # Both flavors share this. It includes cuda/11.0 (from the upstream graham-gpu
 # env-setup): loading it for the CPU build is harmless — the g++ build never
 # references it — and it keeps a single machine-level env-setup rather than a
-# per-flavor one (env-setup cannot be scoped per variant).
+# per-flavor one (env-setup cannot be scoped per flavor).
 env-setup = """
 module -q load StdEnv/2020 &&
 module -q load gcc/9.3.0 &&
@@ -87,8 +87,8 @@ max-walltime    = "24:00:00"
 # allocation      = "def-@USER@"
 
 # Two cactup queues over Compute Canada's account-scheduled (no-partition)
-# system. The keys carry the D12 gpu flag and route to the run/submit script
-# variants; `name = "NO_QUEUE"` keeps @QUEUE@ at the historical placeholder
+# system. The keys carry the D12 gpu flag and route to the run/submit
+# scripts; `name = "NO_QUEUE"` keeps @QUEUE@ at the historical placeholder
 # (the submitscripts pass no -p anyway).
 [queues.cpu]
 gpu     = false
@@ -101,17 +101,13 @@ name   = "NO_QUEUE"
 memory = 127518    # GPU nodes report slightly less (matches upstream graham-gpu)
 
 # CPU builds use the "default" submitscript; CUDA builds use "gpu" (adds
-# --gres=gpu:p100). The runscript is identical for both flavors (one variant).
-[variants.submitscript]
-"default"  = { queues = ["cpu"], default = true }
+# --gres=gpu:p100). The runscript is identical for both flavors (one script).
+[submitscripts]
+"default"  = { queues = ["cpu"] }
 "gpu"      = { queues = ["gpu"] }
 "test"     = { queues = ["cpu"], test = true }
 "gpu-test" = { queues = ["gpu"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["cpu", "gpu"], default = true }
+[runscripts]
+"default" = { queues = ["cpu", "gpu"] }
 "test"    = { queues = ["cpu", "gpu"], test = true }
-
-[variants.optionlist]
-# Two build flavors; `config build` must pick one with --variant (§4.4).
-variants = ["default", "gpu"]

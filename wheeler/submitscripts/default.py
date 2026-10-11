@@ -1,7 +1,7 @@
-# wheeler submitscript (variant "default"), ported from simfactory2
+# wheeler submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/wheeler.sub.
 #
-# .py variant (design §6.1): the old script used the chained-job ternary
+# .py script (design §6.1): the old script used the chained-job ternary
 # @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@ AND the
 # arithmetic expression -n @(@NUM_PROCS@*@NUM_THREADS@)@ (Wheeler allocates
 # one SLURM task per *core*, not per MPI rank) — cactup's @NAME@ engine is
@@ -34,7 +34,7 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

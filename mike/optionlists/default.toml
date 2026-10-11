@@ -1,4 +1,4 @@
-# mike optionlist (variant "default"), ported from simfactory2
+# mike optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/mike.cfg — regenerated upstream by simfactory-configure.py on
 # 2026-07-06 (native gcc-11.2.0 build against the prebuilt externals under
 # /ddnA/project/sbrandt/externals-mike; no CUDA).
@@ -7,9 +7,9 @@
 # optionlist before `make <config>-config` (design §7.8); every value is kept
 # as a TOML string so the render is faithful to the original.
 
-[cactup]
-gpu               = false
-compatible-queues = ["single"]
+[cactup.runs-on]
+queues = ["single"]
+gpu    = false
 
 [options]
 VERSION = "mike-2026-07-06"

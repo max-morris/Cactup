@@ -1,5 +1,5 @@
 #! /bin/bash
-# omnia submitscript (variant "default"), ported from simfactory2 generic.sub
+# omnia submitscript (script "default"), ported from simfactory2 generic.sub
 # (the old ini's `submitscript = generic.sub`; the new format has no
 # cross-machine file sharing, so this machine carries its own copy).
 # Changes vs simfactory (design §6.3, §8.3.1): SIMFACTORY run → @CACTUP@ sim run,
@@ -7,7 +7,7 @@
 #
 # No batch scheduler: chaining is emulated by waiting for the previous job's PID
 # to exit. Plain bash conditional (the NAME engine does literal substitution
-# only — §6/§D7), so a .sh variant suffices.
+# only — §6/§D7), so a .sh script suffices.
 
 cd @SOURCEDIR@ || exit 1
 

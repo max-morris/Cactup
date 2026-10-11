@@ -1,9 +1,9 @@
-# Thorny Flat optionlist (variant "default"), ported from simfactory2
+# Thorny Flat optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/thornyflat.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["comm_small_week"]
+[cactup.runs-on]
+queues = ["comm_small_week"]
+gpu    = false
 
 [options]
 # Option list for the Einstein Toolkit

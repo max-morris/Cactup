@@ -1,9 +1,9 @@
-# QB2 optionlist (variant "default"), ported from simfactory2
+# QB2 optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/qb-mvapich2.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["checkpt"]
+[cactup.runs-on]
+queues = ["checkpt"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

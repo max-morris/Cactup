@@ -1,11 +1,11 @@
-# db1.hpc.lsu.edu submitscript (variant "sing"), ported from simfactory2
+# db1.hpc.lsu.edu submitscript (script "sing"), ported from simfactory2
 # mdb/submitscripts/db-sing-nv.sub. Serves the Singularity build flavors (the
 # et-sing and et-sing-cpu build universes; upstream db-sing-cpu reused
 # db-sing-nv's submitscript). The GPU directives (--gpus-per-task, --gres=gpu:2)
 # apply to both; --gres stays verbatim, while --gpus-per-task now carries the
 # §8.5 GPUS_PER_TASK topology variable (still 1 by default — see default.py).
 #
-# .py variant (design §6.1): the old script used simfactory's ternary
+# .py script (design §6.1): the old script used simfactory's ternary
 # expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
 # — cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
 # Python, alongside the computed --gres=gpu:{typed["NODES"] * typed["TASKS"]}
@@ -38,7 +38,7 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

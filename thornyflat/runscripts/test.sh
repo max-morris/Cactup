@@ -1,5 +1,5 @@
 #! /bin/bash
-# thornyflat TEST runscript (variant "test") — marked test = true in meta.toml
+# thornyflat TEST runscript (script "test") — marked test = true in meta.toml
 # (design §11.2). Instead of launching a parfile like runscripts/default.sh,
 # it drives `make <config>-testsuite` and lets the Cactus flesh harness launch
 # each test (design §11.6). The launcher mirrors default.sh's mpiexec without
@@ -8,7 +8,7 @@
 #
 # Testsuite-only variables (design §11.9): TESTSUITE_RESULTS_DIR (where the
 # harness output must land, under test-home) and TESTSUITE_SELECT (which tests
-# to run; empty = all). env-setup is auto-prepended by cactup for .sh variants
+# to run; empty = all). env-setup is auto-prepended by cactup for .sh scripts
 # (design §6.1).
 
 echo "Preparing testsuite:"

@@ -60,18 +60,14 @@ gpu          = false
 max-walltime = "8760:00:00"
 default      = true
 
-# Single variant of each script; being the sole variant it is the implicit
-# default, so default = true is optional but stated for clarity (design §4.2).
-# A variant may also set tasks = N — the default TASKS when no -n/-T/-t flag is
+# One normal script of each kind plus a testsuite one, each serving the one
+# queue it lists (design §4.2, §11.2). A script may also set tasks = N — the default TASKS when no -n/-T/-t flag is
 # given, instead of filling the node (§8.5); testsuite runs already default to
 # 2 without it (§11.6).
-[variants.submitscript]
-"default" = { queues = ["local"], default = true }
+[submitscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true }
+[runscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

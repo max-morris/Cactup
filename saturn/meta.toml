@@ -129,27 +129,26 @@ exec-host-pattern = "(.*)"
 gpu     = true
 default = true
 
-# The CPU-only optionlist variant (optionlists/cpu.toml) runs through its own
-# runscript, and cactup picks script variants by queue, so it gets a queue of
-# its own (the qbd pattern): `cactup sim submit ... -q cpu`. Same node, no GPU
+# The CPU-only flavor (optionlists/cpu.toml) runs through its own
+# runscript, and cactup picks scripts by queue, so it gets a queue of
+# its own (the qbd pattern), which the flavor names as its default-queue, so
+# no -q is needed. Same node, no GPU
 # binding; 8 threads per rank gives 13 ranks when the whole node is asked for.
 [queues.cpu]
 gpu = false
 default-cpus-per-task = 8
 
-# tasks = 1 on the default variants: a no-flag run takes one GPU (the fill-
+# tasks = 1 on the default scripts: a no-flag run takes one GPU (the fill-
 # the-node rule would otherwise derive 3 ranks and grab all three A100s on a
-# shared node). Ask for more with -n 2 / -n 3. The test variants keep the
+# shared node). Ask for more with -n 2 / -n 3. The test scripts keep the
 # testsuite default of 2 ranks (two GPUs).
-[variants.submitscript]
-"default" = { queues = ["local"], default = true, tasks = 1 }
+[submitscripts]
+"default" = { queues = ["local"], tasks = 1 }
 "cpu"     = { queues = ["cpu"] }
-"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
+"test"    = { queues = ["local", "cpu"], test = true }   # used by `cactup test submit`; nothing in it is GPU-specific
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true, tasks = 1 }
+[runscripts]
+"default" = { queues = ["local"], tasks = 1 }
 "cpu"     = { queues = ["cpu"] }
-"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default", "cpu"]
+"test"     = { queues = ["local"], test = true }   # used by `cactup test run`
+"test-cpu" = { queues = ["cpu"], test = true }
