@@ -95,7 +95,7 @@ export HIPCC_LINK_FLAGS_APPEND="-fgpu-rdc --hip-link"
 export ROCR_VISIBLE_DEVICES=0
 
 export PATH="${ROCM_PATH}/bin:${PATH}"
-export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${ROCM_PATH}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 export MPI_ROOT=/opt/intel/oneapi/mpi/latest
 . ${MPI_ROOT}/env/vars.sh > /dev/null
