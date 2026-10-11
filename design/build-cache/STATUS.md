@@ -1909,6 +1909,23 @@ empty entry after every library is found); spec text (the cost sentence,
 a second `specs` place, §18.8 on character sets); `KEY_LABEL` to bump at
 landing.
 
+### After M3a, follow-up to review 7 (decision 20)
+
+Review 7's non-blocking findings, taken: the compiler identity's watched
+places are kept in memory by the compile that identified it (`Watch`) and
+checked from there (the memo is read once a compile; a memo that could not
+be written, as with a `PATH` entry whose name is not UTF-8, no longer
+leaves the stamps empty and passing: such a name is refused at once);
+watched files are opened, not only `stat`ed (NFS attribute caching); a
+place passed over that is not there is looked at by its own name only
+(decision 20: no busy ancestor such as `$HOME` or `TMPDIR` under watch);
+a stamp mismatch names the directory that changed; the refusal of relative
+`PATH` and `LD_LIBRARY_PATH` entries is judged by the searches themselves
+(the loader's `;` included; an entry after what is found keeps nothing
+out); the `specs` file GCC reads from its machine's directory is watched;
+spec text (the cost sentence, §18.8 on character sets); `KEY_LABEL` is
+`key-7`.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -2125,9 +2142,9 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-Review 7 of the changes after M3a, adversarial within accidents (decision
-19): every earlier reproduction re-run, new hunting with real tools, and
-the Einstein Toolkit gate on that commit. Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
+A narrow review (round 8) of the follow-up to review 7 (decision 20),
+with the Einstein Toolkit gate on that commit; then the branch is ready to
+land. Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
 miss, summed over compiles; about 2100 s of compiling): the cache's own time
 was 472 s at `a14f279` and 442 s with M3a, the Fortran check 32 s down to
 3.4 s; what is left is the C and C++ key and check, a preprocessor run each

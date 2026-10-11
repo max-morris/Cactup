@@ -1183,8 +1183,9 @@ fn what_the_object_depends_on_is_in_the_key() {
         executable(&scratch.join(compiler), &format!("#!/bin/sh\nexec /usr/bin/env PATH=\"${{PATH#*:}}\" {compiler} -O3 \"$@\"\n"));
         let args = unit.args(&["-O2"], &lib);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        for (first, why) in [(scratch.display().to_string(), "is a script, not a compiler cactup can identify"), (".".to_owned(), "PATH has an entry that is not an absolute path")] {
-            // By an absolute entry; a relative one keeps any compile out.
+        for (first, why) in [(scratch.display().to_string(), "is a script, not a compiler cactup can identify"), (".".to_owned(), "is a script, not a compiler cactup can identify")] {
+            // By an absolute entry or a relative one: the program found from
+            // the compile's own directory.
             let path = format!("{first}:{}", std::env::var("PATH").unwrap());
             let out = build.wrap(compiler, &args).current_dir(&scratch).env("PATH", &path).output().unwrap();
             assert!(out.status.success(), "{}", text(&out.stderr));

@@ -264,7 +264,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-6";
+pub const KEY_LABEL: &str = "key-7";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -286,11 +286,10 @@ pub struct Keyed {
     pub text_bytes: u64,
     pub files: usize,
     name: OsString,
-    /// Where the compiler's identity is remembered, for the check after the
-    /// compile.
-    cc_dir: PathBuf,
+    /// What the compiler's identity watches, checked again from memory.
+    watch: identity::Watch,
     /// Right before the compile: did the identity still hold, and how did
-    /// the directories it watches look ([`identity::directories`])?
+    /// what it watches look ([`identity::Watch::stamps`])?
     before: Option<(bool, identity::Stamps)>,
     map: Option<PathMap>,
     /// What the files looked like when they were read for the key.
@@ -318,9 +317,11 @@ pub struct Keyed {
 /// they are searched for and gone again by the end is seen there).
 pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -> Result<Keyed, String> {
     let (keyed, identified) = key_made(conf, cc_dir, argv, serving)?;
-    let holds = identity::identify(cc_dir, &argv[0]).ok().as_ref() == Some(&keyed.compiler);
-    if !holds || identity::directories(cc_dir, &argv[0]) != identified {
+    if !keyed.watch.holds() {
         return Err("the compiler's programs or libraries changed while the key was made".to_owned());
+    }
+    if let Some(what) = identified.changed(&keyed.watch.stamps()) {
+        return Err(format!("{what} changed while the key was made, where the compiler's programs or libraries are"));
     }
     Ok(keyed)
 }
@@ -339,8 +340,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     if let Some(why) = driver_led_elsewhere(&argv[0], fortran, |variable| std::env::var_os(variable)) {
         return Err(why);
     }
-    let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
-    let identified = identity::directories(cc_dir, &argv[0]);
+    let (compiler, watch) = identity::identify_watching(cc_dir, &argv[0]).map_err(whole)?;
+    let identified = watch.stamps();
     let compile = compile::parse(&argv[1..])?;
     if let Some(flag) = compile.keyed.iter().find(|argument| compiler.multilib.iter().any(|flag| argument.as_bytes() == flag.as_bytes())) {
         return Err(format!(
@@ -438,7 +439,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             text_bytes: read.text_bytes,
             files: read.count,
             name,
-            cc_dir: cc_dir.to_owned(),
+            watch,
             before: None,
             map,
             seen: read.seen,
@@ -461,8 +462,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         text: read.text,
         files: read.files,
     };
-    let cc_dir = cc_dir.to_owned();
-    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, cc_dir, before: None, map, seen: read.seen, depend, fortran: None };
+    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None };
     Ok((keyed, identified))
 }
 
@@ -527,14 +527,10 @@ impl Keyed {
     /// again; otherwise the dependency run runs again (§18.10).
     pub fn still_holds(&mut self) -> bool {
         // The compiler too: an assembler that appeared on `PATH` while the
-        // compile ran assembled it (tried). Its identity again, cheap while
-        // nothing it watches changed, and it must be the same one.
-        if identity::identify(&self.cc_dir, &self.name).ok().as_ref() != Some(&self.compiler) {
-            return false;
-        }
-        // As right before the compile, and nothing came or went meanwhile.
+        // compile ran assembled it (tried). What its identity watches must
+        // hold, as right before the compile, with nothing come or gone.
         match &self.before {
-            Some((true, dirs)) if *dirs == identity::directories(&self.cc_dir, &self.name) => {}
+            Some((true, stamps)) if self.watch.holds() && *stamps == self.watch.stamps() => {}
             _ => return false,
         }
         if let Some(fortran) = &mut self.fortran {
@@ -552,8 +548,7 @@ impl Keyed {
         // The compiler's identity, as for the key: what appeared since then
         // where its programs are searched for would run (tried: put there
         // during the key's preprocessor run, gone by the check after).
-        let holds = identity::identify(&self.cc_dir, &self.name).ok().as_ref() == Some(&self.compiler);
-        self.before = Some((holds, identity::directories(&self.cc_dir, &self.name)));
+        self.before = Some((self.watch.holds(), self.watch.stamps()));
         if let Some(fortran) = &mut self.fortran {
             fortran.before_compile(&self.compiler, &self.name);
         }
@@ -1139,13 +1134,23 @@ fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Optio
     if fortran && !bare && !name.as_bytes().starts_with(b"/") {
         return Some("the compiler is named by a relative path".to_owned());
     }
-    // `PATH` and `LD_LIBRARY_PATH` too, for every compile: a relative entry
-    // leads into the compile's working directory, which the compile writes,
-    // so what appears there during it and is gone after cannot be seen
-    // (decision 17).
-    let mut variables = vec!["COMPILER_PATH", "GCC_EXEC_PREFIX", "PATH", "LD_LIBRARY_PATH"];
+    // (A relative entry of `PATH` or `LD_LIBRARY_PATH` that a search for the
+    // compiler's programs or libraries passes through rules the compiler
+    // out: `identity`.) A Fortran driver named without a `/` finds its own
+    // prefix along `PATH` from the dependency run's directory too.
+    let mut variables = vec!["COMPILER_PATH", "GCC_EXEC_PREFIX"];
     if fortran {
         variables.push("LIBRARY_PATH");
+        if bare {
+            variables.push("PATH");
+        }
+    }
+    // A name that is not UTF-8 cannot be remembered with the identity, which
+    // would then be worked out afresh for every compile.
+    for variable in ["PATH", "LD_LIBRARY_PATH", "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_PRELOAD"] {
+        if env(variable).is_some_and(|value| value.to_str().is_none()) {
+            return Some(format!("{variable} has an entry whose name is not UTF-8"));
+        }
     }
     if let Some(variable) = variables.into_iter().find(|variable| relative_entry(variable)) {
         return Some(format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"));
@@ -1309,7 +1314,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "ae136801392e82c501174d2989ef3d8c5a4a2829c1b61855aaa7f3b81445f6d6");
+        assert_eq!(parts.key(), "cf50c3d8d34326175229c53c0b0e74ad60fb97a8ccc1a764f8e7d708128dd314");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -1709,13 +1714,16 @@ mod tests {
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_AUDIT", "/opt/libaudit.so")])).is_some());
             assert_eq!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "libx.so /opt/liby.so")])), None);
         }
-        // `PATH` and the loader's search path lead into the working
-        // directory, which the compile writes, for every compile.
-        for compiler in [(gfortran, true), (gcc, false), (OsStr::new("/usr/bin/gcc"), false)] {
-            assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
-            assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_LIBRARY_PATH", "/opt/lib:")])).is_some_and(|why| why.starts_with("LD_LIBRARY_PATH")));
-        }
+        // `PATH` and the loader's search path are judged by where the
+        // searches go (`identity`), but for a Fortran driver named without
+        // a `/`, which finds itself along `PATH` from another directory.
+        assert!(driver_led_elsewhere(gfortran, true, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
+        assert_eq!(driver_led_elsewhere(OsStr::new("/usr/bin/gfortran"), true, env(&[("PATH", "/usr/bin:.")])), None);
+        assert_eq!(driver_led_elsewhere(gcc, false, env(&[("PATH", "/usr/bin:."), ("LD_LIBRARY_PATH", "/opt/lib:")])), None);
         assert!(driver_led_elsewhere(OsStr::new("../bin/gfortran"), true, env(&[])).is_some());
+        // A name that is not UTF-8 cannot be remembered with the identity.
+        let odd = |variable: &str| (variable == "PATH").then(|| OsString::from(OsStr::from_bytes(b"/usr/bin:/opt/\xff/bin")));
+        assert!(driver_led_elsewhere(gcc, false, odd).is_some_and(|why| why.contains("not UTF-8")));
         assert_eq!(driver_led_elsewhere(OsStr::new("../bin/gcc"), false, env(&[])), None);
     }
 }

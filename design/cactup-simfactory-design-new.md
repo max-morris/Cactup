@@ -5063,7 +5063,7 @@ A key is a digest that two compiles share only when they would produce the
 same object (rule 1). `objcache::key` builds it from six parts, each a
 SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
 so that two builds can be compared part by part. The six digests are
-combined under a label (`key::KEY_LABEL`, now `key-6`), and **any change
+combined under a label (`key::KEY_LABEL`, now `key-7`), and **any change
 that can make one key stand for another object changes the label**:
 something the key now covers that it did not, anything cactup adds to or
 changes in a compile it runs, a change in how a part is digested. Several
@@ -5125,8 +5125,10 @@ fixed parts, so that the key does not change by accident:
   what the driver says of itself (`--version` without the installation
   directory, and for GCC its built-in specs and target). Not its path and
   not its modification time. The identity is worked out once for a build
-  attempt and remembered with what it was computed from: the files (by the
-  names they were found by and by where those lead now, physical paths:
+  attempt and remembered with what it was computed from: the files (opened,
+  where they can be, so that a network filesystem's attribute cache does
+  not answer for them; by the names they were found by and by where those
+  lead now, physical paths:
   a link on the way turned to another tree of the same files, hard links,
   leaves every file as it was but has a program take its `$ORIGIN`, and
   the driver its prefix, from that tree; tried), and the places searched
@@ -5135,8 +5137,9 @@ fixed parts, so that the key does not change by accident:
   places it says it looks (`-print-search-dirs`; none for an assembler it
   was built to run, `--with-as`), then `PATH`'s for a program it leaves to
   `PATH` (the assembler), and the places it looks for a `specs` file (its
-  library prefixes, `LIBRARY_PATH`'s entries among them: one that appears
-  there is read; tried); along `PATH`, as `execvp` does, a file the system
+  library prefixes, `LIBRARY_PATH`'s entries among them, and its machine's
+  directory above the one it is installed in, which it does not list: one
+  that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
   refuses to run (no permission, `noexec`; tried by starting it) is passed
   over, and one that fails to start otherwise rules the compiler out. For
   libraries, the places the loader says it tried (glibc's `LD_DEBUG=libs`,
@@ -5159,8 +5162,9 @@ fixed parts, so that the key does not change by accident:
   look). The identity is worked out again at the end of the key (whose
   preprocessor runs use the compiler's programs too, and on whose reading
   a hit is served), right before the compile and after it, before what it
-  made is stored, and must be the same each time. Across the key, and
-  across the compile, the directories that hold what it watches must look
+  made is stored, and must hold each time (checked from what the compile
+  that identified it keeps, not read again). Across the key, and across
+  the compile, the directories that hold the files it watches must look
   the same (compiles do not write there, so one that changed means
   something came or went meanwhile, even if it is gone again; tried, an
   assembler that deletes itself), and so must every entry on the way to
@@ -5168,18 +5172,26 @@ fixed parts, so that the key does not change by accident:
   for the files a key reads: a link turned to another tree and back leaves
   every directory looking the same through it, tried; a directory renamed
   away and the same one renamed back is decision 9's limit here too). A
-  missing place has its nearest existing ancestor watched, so a missing
-  `PATH` entry such as `~/bin` puts the home directory under watch: what
-  changes there during a compile keeps it out of the store. Each compile
-  looks at all of this, a hit twice and a miss four times: a few hundred lookups with a
-  long `PATH`, about a millisecond on a local disk, and one round trip each
-  on a network filesystem that caches no negative lookups
-  (`lookupcache=positive`). What leads the driver elsewhere from one
-  directory to the next, or into the working directory (which the compile
-  writes, so what comes and goes there while it runs cannot be told from
-  its own writing), keeps the compile out of the cache: an entry of
-  `PATH`, `LD_LIBRARY_PATH`, `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is
-  not an absolute path (an empty one is the working directory), a library
+  place passed over that is not there is looked at by its own name only,
+  before and after: its nearest existing ancestor may be a directory
+  people and compiles write in all the time (the home directory for a
+  missing `~/bin`, the temporary one), so what appears there and is gone
+  again within one compile is decision 20's limit. Each compile looks at
+  all of this, a hit twice and a miss four times: a few hundred lookups
+  with dozens of `PATH` and `LD_LIBRARY_PATH` entries, from about a
+  millisecond with a short `PATH` to 10–20 ms with a long one on a local
+  disk, and one round trip each on a network filesystem that caches no
+  negative lookups (`lookupcache=positive`). A search for a program the
+  driver runs, or for a library, that passes through the working
+  directory (an empty or relative entry of `PATH` or `LD_LIBRARY_PATH`
+  before what it finds) rules the compiler out: the compile writes that
+  directory, so what comes and goes there cannot be told from its own
+  writing (decision 18); one after what is found is never searched and
+  keeps nothing out. What leads the driver elsewhere from one directory to
+  the next keeps the compile out of the cache: an entry of
+  `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is not an absolute path (an
+  empty one is the working directory), a name in one of the search
+  variables that is not UTF-8 (the identity could not be remembered), a library
   preloaded by a relative path, `LD_AUDIT`, a flag that selects another of
   a GCC's sets of programs and libraries (`-print-multi-lib`: `-m32`,
   `-mx32`; the driver looks for its programs elsewhere then, tried), a
@@ -5188,8 +5200,10 @@ fixed parts, so that the key does not change by accident:
   tried, two converters and two locales, each two objects; Cactus asks for
   none); and for Fortran, whose
   dependency run runs in a directory of its own (§18.10), also such an
-  entry of `LIBRARY_PATH` (where the driver finds a `specs` file) and a
-  compiler named by a relative path. The loader's tunables
+  entry of `LIBRARY_PATH` (where the driver finds a `specs` file), a
+  compiler named by a relative path, and, for one named without a `/`
+  (which finds its own prefix along `PATH` from that directory too), such
+  an entry of `PATH`. The loader's tunables
   (`GLIBC_TUNABLES`) are among the variables a change of which has the
   identity worked out again. All of this guards against accidents
   (upgrades, reinstalls, module loads, links turned to new versions,
@@ -5706,10 +5720,10 @@ twice: in the session's locale, and in the C locale (`LC_ALL=C`, `LANG`,
 `LANGUAGE` and the other `LC_*` removed). A compiler that makes one object
 of both is keyed without `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE` and
 `LC_MESSAGES`; one that does not keeps them. A compile that converts
-character sets (`-finput-charset=`, `-fexec-charset=`) keeps them whatever
-the trial said: the trial compiles without such flags, and a conversion can
-follow the locale (GCC's `ASCII//TRANSLIT` gives `cafe` in a UTF-8 locale
-and `caf?` in C, from the same text). Each session is compared with
+character sets (`-finput-charset=`, `-fexec-charset=`) is not cached at
+all: a conversion follows the locale (GCC's `ASCII//TRANSLIT` gives `cafe`
+in a UTF-8 locale and `caf?` in C, from the same text), its data and the
+converters loaded, none of which the key follows (§18.5). Each session is compared with
 the same reference, so two sessions whose compilers pass are interchangeable
 for that source. The remembered identity depends on those variables, so a
 session in another locale tries again.

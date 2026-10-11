@@ -338,6 +338,27 @@ Asked as seven questions with options; the answers, in Max's numbering.
     someone with write access to the toolchain or the search paths who
     means to plant a wrong object.
 
+20. **Watched places that are not there: by their own names** (2026-10-11).
+    The compiler identity watched the nearest existing ancestor of each
+    place it passed over that is not there, to see something appear and
+    vanish there within one compile. That ancestor is often a busy
+    directory (the home directory for a missing `~/bin` on `PATH`, the
+    temporary directory), and the cost was real: lost stores and hits, and
+    with `TMPDIR` as that ancestor every Fortran compile refused (review 7
+    after M3a). Asked whether such an appearance is feasible by accident:
+    it needs a program or library to appear at a new, earlier place and
+    vanish again within one compile while the compile runs it (a failed
+    install that rolls back, a deploy that turns a link and back), which
+    upgrades, reinstalls, copies and editors do not do (they rename over
+    the old name and leave the new file). Max: "go with the refined option
+    2": such places are looked at by their own names before and after
+    (and the way to them, entry by entry); the directories that hold the
+    files the identity watches stay stamped across the key and the
+    compile. With it (same day): a search that passes through the working
+    directory rules the compiler out, judged by the searches themselves
+    (an entry after what is found keeps nothing out, `LD_LIBRARY_PATH=""`
+    neither), which narrows decision 18's refusal.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
