@@ -5,7 +5,7 @@ description = "Complete reference for the machine configuration file schema"
 
 # meta.toml Reference
 
-The **meta.toml** file is the core configuration for a machine in the MDB. It defines machine identity, paths, hardware specs, scheduler commands, queue definitions, and variants.
+The **meta.toml** file is the core configuration for a machine in the MDB. It defines machine identity, paths, hardware specs, scheduler commands, queue definitions, and the routes that pick a submit, run, or build-submit script for each queue.
 
 The schema is closed: every table below accepts only the keys listed for it, and an unrecognized key fails the load with `unknown field \`x\`` plus the accepted spellings. A misspelled key is never silently ignored — so if you want to record something cactup has no key for, write it as a `#` comment.
 
@@ -35,7 +35,7 @@ make-jobs = 128
 # default-action = "submit"     # optional: force `cactup build` to queue a
                                  # build instead of running it in the
                                  # foreground (see "Queue-submitted builds"
-                                 # below) — requires [variants.buildsubmitscript]
+                                 # below) — requires [buildsubmitscripts]
 
 [environment]
 env-setup = """export PATH="/opt/bin:$PATH" """
@@ -50,23 +50,23 @@ gpu = false
 default = true
 max-walltime = "24:00:00"
 
-[variants.optionlist]
-variants = ["default", "cuda"]
+# Each key names a script file (submitscripts/default.sh, ...); each entry
+# routes queues to it. The optionlist flavors need no table: they are the
+# *.toml files in optionlists/.
+[submitscripts]
+"default" = { queues = ["default"] }
 
-[variants.submitscript]
-"default" = { queues = ["default"], default = true }
-
-[variants.runscript]
-"default" = { queues = ["default"], default = true }
+[runscripts]
+"default" = { queues = ["default"] }
 
 # Optional — only if your cluster forbids compiling on the login node:
-# [variants.buildsubmitscript]
-# "default" = { queues = ["default"], default = true }
+# [buildsubmitscripts]
+# "default" = { queues = ["default"] }
 
 # Overlay machines only (~/.cactup/machines/<name>/): the MDB generation
 # this file was written for. `cactup machine create` fills it in.
 [cactup]
-mdb-generation = 1
+mdb-generation = 2
 ```
 
 See [MDB Generations](mdb-generations.html) for what `mdb-generation` means
@@ -132,15 +132,12 @@ max-walltime = "24:00:00"
 gpu = false
 default = true
 
-[variants.optionlist]
-variants = ["default"]
-
-[variants.submitscript]
-"default" = { queues = ["default"], default = true }
+[submitscripts]
+"default" = { queues = ["default"] }
 "test" = { queues = ["default"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["default"], default = true }
+[runscripts]
+"default" = { queues = ["default"] }
 "test" = { queues = ["default"], test = true }
 ```
 
@@ -156,20 +153,21 @@ max-walltime = "24:00:00"
 gpu = true
 max-walltime = "12:00:00"
 
-[variants.optionlist]
-variants = ["default", "cuda"]
+[submitscripts]
+"default" = { queues = ["cpu", "gpu"] }
 
-[variants.submitscript]
-"default" = { queues = ["cpu", "gpu"], default = true }
-
-[variants.runscript]
-"default" = { queues = ["cpu", "gpu"], default = true }
+[runscripts]
+"default" = { queues = ["cpu", "gpu"] }
 ```
+
+The machine's two flavors, `optionlists/default.toml` and
+`optionlists/cuda.toml`, need no entry here; each says where its binary may
+run in its own `[cactup.runs-on]` header (see [Optionlists](optionlists.html)).
 
 ### Queue-submitted builds
 
 A cluster that forbids compiling on the login node needs three things beyond
-a normal machine: a `buildsubmitscript` variant, `[build].default-action`,
+a normal machine: a `[buildsubmitscripts]` route, `[build].default-action`,
 and (optionally) a build-specific job shape:
 
 ```toml
@@ -183,15 +181,23 @@ nodes          = 1            # keys are optional and only ever consulted
 tasks          = 1            # for a SUBMITTED build (a foreground `build
 cpus-per-task  = 64           # run` ignores them entirely)
 
-[variants.buildsubmitscript]
-"default" = { queues = ["cpu", "gpu"], default = true }
+[buildsubmitscripts]
+"default" = { queues = ["cpu", "gpu"] }
 ```
+
+The build job's queue is only where `make` runs: it is never checked against
+the flavor's `[cactup.runs-on]` queues or `gpu` flag, nor against a queue's
+`build-universes`, so any queue can compile any config — a CPU flavor on a GPU
+partition or the other way round. That queue (`-q`, else `[build].queue`, else
+the default queue) routes the build-submit script; `--flavor` never picks one.
+On a `[buildsubmitscripts]` route, `build-universes = ["X"]` means "serves
+builds of configs whose build universe is X".
 
 `cpus-per-task` falls back to `make-jobs` when unset, so a machine that
 already tunes `make-jobs` to its node size gets a matching build-job shape
 for free. `default-action` is what makes an unqualified `cactup build`
 submit instead of trying (and failing) to compile locally; leaving it unset
-still lets cactup submit automatically whenever a `buildsubmitscript` variant
+still lets cactup submit automatically whenever a `[buildsubmitscripts]` route
 and `[scheduler].submit` are both present — `default-action = "run"` is the
 escape hatch for a machine that *can* submit builds but shouldn't by default.
 See [Building Configs](../users/building-configs.html) for the user-facing
@@ -226,15 +232,12 @@ exec-host-pattern = "(.*)"
 gpu = false
 default = true
 
-[variants.optionlist]
-variants = ["default"]
-
-[variants.submitscript]
-"default" = { queues = ["local"], default = true }
+[submitscripts]
+"default" = { queues = ["local"] }
 "test" = { queues = ["local"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true }
+[runscripts]
+"default" = { queues = ["local"] }
 "test" = { queues = ["local"], test = true }
 ```
 
@@ -400,12 +403,13 @@ the required form for the user's own parfiles. Knobs are **not** available in
 ## Validation tips
 
 - All `@VAR@` tokens in patterns must appear in the actual scheduler output
-- Queue names in `[variants.*]` must exist in `[queues.*]`
-- `build-universes` lists (on queues and on `[variants.*]` entries) must name declared universes and may not be empty; omit the key for "all universes"
-- Variant names must match files in `optionlists/`, `submitscripts/`, and `runscripts/` directories
-- Test variants should be present in all `[variants.*]` sections (used by `cactup test run/submit`)
-- `[variants.buildsubmitscript]` is the one script kind that's allowed to be entirely absent — a machine that never queues a build simply omits the table (and the `buildsubmitscripts/` directory) rather than needing an empty one
-- `[build].default-action = "submit"` only works once a `buildsubmitscript` variant and `[scheduler].submit` are both declared; without either, `cactup build submit` errors naming what's missing (`cactup build run` always works regardless)
+- Queue names in `[submitscripts]`, `[runscripts]` and `[buildsubmitscripts]` must exist in `[queues.*]`
+- `build-universes` lists (on queues and on script routes) must name declared universes and may not be empty; omit the key for "all universes"
+- Every key in a script table names a file in the matching directory (`submitscripts/<name>.sh` or `.py`, likewise `runscripts/` and `buildsubmitscripts/`); there are no reserved keys, so a script may be named `default`
+- A script route has no machine-wide universe fallback: a route that should run inside a universe says so with its own `universe = "..."`
+- Test-marked scripts should be present in both `[submitscripts]` and `[runscripts]` (used by `cactup test run/submit`)
+- `[buildsubmitscripts]` is the one script table that's allowed to be entirely absent — a machine that never queues a build simply omits the table (and the `buildsubmitscripts/` directory) rather than needing an empty one
+- `[build].default-action = "submit"` only works once a `[buildsubmitscripts]` route and `[scheduler].submit` are both declared; without either, `cactup build submit` errors naming what's missing (`cactup build run` always works regardless)
 - `[scheduler].blocking-submit` is optional and needs no matching table of its own — a machine that omits it still supports `cactup build submit --block`, just via emulated polling instead of a native blocking submit — but when present, its output must parse with the same `submit-pattern` as `submit`
 
 ## Next steps

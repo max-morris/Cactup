@@ -1,9 +1,9 @@
-# holodeck optionlist (variant "default"), ported from simfactory2
+# holodeck optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/holodeck.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["debug"]
+[cactup.runs-on]
+queues = ["debug"]
+gpu    = false
 
 [options]
 

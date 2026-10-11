@@ -8,15 +8,14 @@ pub mod attempt;
 
 use crate::args::{BuildOpts, MakeJobs, TopologyFlags};
 use crate::build::attempt::{BuildAttempt, BuildMeta, BuildOutcomeRecord, Reservation, Timestamps};
-use crate::database::SCHEMA;
 use crate::fetch::SourceHeads;
 use crate::installation::Installation;
 use crate::lock::LinkLock;
 use crate::mdb::meta::Phase;
+use crate::mdb::optionlist::RunsOn;
 use crate::mdb::{Machine, Optionlist};
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{script_command, spawn_and_wait, write_executable};
-use crate::sim::vars::QueueFit;
 use crate::template::{Syntax, VarSet, VarValue};
 use crate::thornlist::Thornlist;
 use crate::Res;
@@ -54,8 +53,19 @@ fn make_jobs_var(cli: Option<MakeJobs>, machine_default: Option<u32>) -> VarValu
     }
 }
 
+fn tolerant_runs_on<'de, D: serde::Deserializer<'de>>(d: D) -> Result<RunsOn, D::Error> {
+    let mut table = toml::Table::deserialize(d)?;
+    table.retain(|key, _| ["queues", "gpu", "default-queue"].contains(&key.as_ref()));
+    toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)
+}
+
+/// The config record's own format version. 2 renamed `variant` to `flavor`
+/// and grouped `gpu`/`compatible-queues` as `[runs-on]`; older records are
+/// upgraded on read (`ConfigMeta::from_table`).
+pub const CONFIG_SCHEMA: u32 = 2;
+
 fn default_schema() -> u32 {
-    SCHEMA
+    CONFIG_SCHEMA
 }
 fn default_true() -> bool {
     true
@@ -73,11 +83,6 @@ pub struct ConfigMeta {
     /// (§7.8). Flattened, so on disk this is the single key it names.
     #[serde(flatten)]
     pub optionlist_source: OptionlistSource,
-    /// Snapshotted from the optionlist `[cactup]` header at build time (D12).
-    #[serde(default)]
-    pub gpu: bool,
-    #[serde(default)]
-    pub compatible_queues: Vec<String>,
     pub thornlist: String,
     /// A build is not portable across machines.
     pub machine: String,
@@ -92,6 +97,13 @@ pub struct ConfigMeta {
     pub built: Option<DateTime<Utc>>,
     #[serde(default)]
     pub flags: BuildFlags,
+    /// Where the binary may run, snapshotted from the flavor's header at build
+    /// time (D12). A TOML table, so it follows every scalar key. Read
+    /// tolerantly, unlike the closed MDB header the same type parses: a key a
+    /// newer cactup added must reach the `schema` check below ("please
+    /// upgrade") rather than fail the parse first.
+    #[serde(default, deserialize_with = "tolerant_runs_on")]
+    pub runs_on: RunsOn,
     /// Per-repo HEADs (from `fetch-state.toml`) of the repos this config's
     /// thorns came from, as of this build — the §7.4 source-tracking input
     /// that makes a refetch invalidate the builds it actually reaches.
@@ -153,33 +165,33 @@ impl Default for BuildFlags {
 }
 
 /// Which optionlist a config is built from (§4.4, §7.8): one of the machine's
-/// own variants, or a file the user pointed `--optionlist` at. Never both —
+/// own flavors, or a file the user pointed `--optionlist` at. Never both —
 /// the two flags conflict at the cli, so a config is on record as one or the
 /// other, and re-supplying either flag is what moves it between them.
 ///
 /// Serialized flattened into `cactup-config.toml`, where it is the single key
-/// `variant = "cuda"` or `optionlist = "/abs/path/my.cfg"`. Modeling it as a
+/// `flavor = "cuda"` or `optionlist = "/abs/path/my.cfg"`. Modeling it as a
 /// sum rather than two optional keys is what keeps "exactly one" true by
 /// construction: neither the metadata nor the resolver below can express a
 /// config that is both, or neither.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OptionlistSource {
-    /// An optionlist variant named by the machine definition (§4.4).
-    Variant(String),
+    /// One of the machine's own optionlist flavors (§4.4).
+    Flavor(String),
     /// A canonicalized path, as given to `--optionlist`. Canonical because a
     /// relative path would resolve against whatever directory a later rebuild
     /// happened to run from.
     Optionlist(String),
 }
 
-/// What every display site prints for "which optionlist": the variant name, or
+/// What every display site prints for "which optionlist": the flavor name, or
 /// the path. Unambiguous in practice because the path is absolute, and a bare
-/// variant name never is.
+/// flavor name never is.
 impl std::fmt::Display for OptionlistSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OptionlistSource::Variant(v) => f.write_str(v),
+            OptionlistSource::Flavor(v) => f.write_str(v),
             OptionlistSource::Optionlist(p) => f.write_str(p),
         }
     }
@@ -196,11 +208,13 @@ impl ConfigMeta {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             other => other.with_context(|| format!("Failed to read {}", path.display()))?,
         };
-        let meta: ConfigMeta =
+        let table: toml::Table =
             toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
-        if meta.schema > SCHEMA {
+        let meta =
+            ConfigMeta::from_table(table).with_context(|| format!("Failed to parse {}", path.display()))?;
+        if meta.schema > CONFIG_SCHEMA {
             bail!(
-                "{} has schema {} (> {SCHEMA}); please upgrade cactup",
+                "{} has schema {} (> {CONFIG_SCHEMA}); please upgrade cactup",
                 path.display(),
                 meta.schema
             );
@@ -208,11 +222,56 @@ impl ConfigMeta {
         Ok(Some(meta))
     }
 
+    /// A config record from its raw TOML table, upgrading an older schema in
+    /// memory first. Every on-disk read goes through here — `load`, and the
+    /// copy embedded in a build attempt's `build.toml` (`deserialize_upgrading`)
+    /// — so a record written by any earlier cactup keeps loading. The file
+    /// itself is left alone; the next `store` writes the current schema.
+    ///
+    /// Deliberately kept indefinitely: a build queued by an older cactup runs
+    /// that older binary on the compute node and writes an old-schema record
+    /// when it finishes, whatever version the user has moved on to since.
+    pub fn from_table(mut table: toml::Table) -> Result<ConfigMeta, toml::de::Error> {
+        upgrade_config_record(&mut table);
+        toml::Value::Table(table).try_into()
+    }
+
+    /// `#[serde(deserialize_with)]` for a `ConfigMeta` embedded in another
+    /// record: the same upgrade `from_table` applies.
+    pub fn deserialize_upgrading<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ConfigMeta, D::Error> {
+        let table = toml::Table::deserialize(d)?;
+        ConfigMeta::from_table(table).map_err(serde::de::Error::custom)
+    }
+
     fn store(&self, cactus_root: &Path) -> Res<()> {
         let path = Self::path_for(cactus_root, &self.name);
         fs::write(&path, toml::to_string_pretty(self)?)
             .with_context(|| format!("Failed to write {}", path.display()))
     }
+}
+
+/// Schema 1 -> 2, in place: `variant = "x"` becomes `flavor = "x"`, and the
+/// flat `gpu`/`compatible-queues` keys move into a `[runs-on]` table as
+/// `gpu`/`queues`. A record already at schema 2 or later is left untouched.
+fn upgrade_config_record(table: &mut toml::Table) {
+    let schema = table.get("schema").and_then(toml::Value::as_integer).unwrap_or(1);
+    if schema >= 2 {
+        return;
+    }
+    if let Some(flavor) = table.remove("variant") {
+        table.insert("flavor".to_owned(), flavor);
+    }
+    let mut runs_on = toml::Table::new();
+    if let Some(queues) = table.remove("compatible-queues") {
+        runs_on.insert("queues".to_owned(), queues);
+    }
+    if let Some(gpu) = table.remove("gpu") {
+        runs_on.insert("gpu".to_owned(), gpu);
+    }
+    if !runs_on.is_empty() {
+        table.insert("runs-on".to_owned(), toml::Value::Table(runs_on));
+    }
+    table.insert("schema".to_owned(), toml::Value::Integer(2));
 }
 
 /// The two thornlist artifacts kept in a config directory (§7.5). The
@@ -438,7 +497,7 @@ pub fn apply_thorn_toggles(thornlist: &str, enabled: &[String], disabled: &[Stri
 pub enum DisabledBy {
     /// The machine's own `[build].disabled-thorns` (§7.5).
     Machine,
-    /// The selected optionlist variant's `[cactup].disabled-thorns` (§7.8).
+    /// The selected flavor's `[cactup].disabled-thorns` (§7.8).
     Optionlist,
 }
 
@@ -478,7 +537,7 @@ pub fn disabled_thorn_overrides(
             if thorn.is_empty() || thorn.starts_with('#') || thorn.starts_with('!') {
                 return None;
             }
-            // Machine first: the variant layers on top of the machine list, so
+            // Machine first: the flavor layers on top of the machine list, so
             // a thorn both of them disable is attributed to the machine.
             let (spec, by) = machine_disabled
                 .iter()
@@ -1046,7 +1105,7 @@ pub fn shape_delta(
 
 /// `stored_thornlist`/`fresh_thornlist` are the *processed* (toggles-applied)
 /// texts, so this one comparison covers a source-thornlist edit, a switch to a
-/// different thornlist file, and a change to the machine's or variant's
+/// different thornlist file, and a change to the machine's or flavor's
 /// `enabled-thorns`/`disabled-thorns` — none of which the optionlist TOML diff
 /// can see.
 ///
@@ -1106,6 +1165,51 @@ pub fn rebuild_decision(
     }
 }
 
+/// The line a short-circuited build prints. It must never claim "same
+/// sources" for anything cactup did not actually compare: not when the probe
+/// found no sources at all (`no_sources`), not when there was no baseline to
+/// compare with (`had_baseline`), and not for the thorns of a plain
+/// `ThornList` that have no repo behind them (`untracked`) — each of those is
+/// a way for an edit to be silently ignored, which is the one thing a user
+/// must be told.
+fn up_to_date_message(
+    name: &str,
+    no_sources: Option<&crate::fetch::NoSources>,
+    had_baseline: bool,
+    untracked: &[String],
+) -> String {
+    const AGAIN: &str = "pass --reconfig to rebuild incrementally, or -f to rebuild from scratch";
+    if let Some(why) = no_sources {
+        return format!(
+            "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+             universe, same thornlist), but it cannot track this config's sources: {why}. Source \
+             edits and refetches go unnoticed; {AGAIN}."
+        );
+    }
+    let untracked_note = if untracked.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Not tracked, since they are not links into the installation's repos/, so edits to \
+             them go unnoticed: {}.",
+            summarize(untracked)
+        )
+    };
+    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
+    if !had_baseline {
+        format!(
+            "Config {name} is up to date (same optionlist, same universe, same thornlist). It had \
+             no source baseline, so the sources as they stand now become one and later changes \
+             are detected.{untracked_note} If they changed since the last build, {AGAIN}."
+        )
+    } else {
+        format!(
+            "Config {name} is up to date (same optionlist, same universe, same thornlist, \
+             {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
+        )
+    }
+}
+
 /// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4):
 /// CLI → optionlist → [build].universe → declared host → None.
 /// `--no-universe` stays the true bare escape hatch, bypassing even a
@@ -1143,18 +1247,18 @@ pub struct ResolvedOptionlist {
 /// Resolve the optionlist for a build (§4.4, §7.8):
 ///
 ///   1. `--optionlist PATH` — explicit; a hard error if unreadable.
-///   2. `--variant NAME` — explicit.
+///   2. `--flavor NAME` — explicit.
 ///   3. whichever of the two this config was last built from, since it records
 ///      exactly one:
-///      - a variant, when the machine still lists it; a hard error naming what
+///      - a flavor, when the machine still has it; a hard error naming what
 ///        went missing when it does not.
 ///      - the `--optionlist` file, falling back to the config's verbatim
 ///        snapshot when that path has since moved or been deleted.
-///   4. the machine's variant selection — the sole variant, or the one marked
+///   4. the machine's flavor selection — the sole flavor, or the one marked
 ///      `default = true` (§4.4).
 ///
 /// Steps 1 and 2 are alternatives, not a precedence chain, and so are the two
-/// halves of step 3: `--optionlist` and `--variant` conflict at the cli, and
+/// halves of step 3: `--optionlist` and `--flavor` conflict at the cli, and
 /// supplying either **replaces** what the config was on record as being. That
 /// is the whole rule — whichever flag was passed most recently is what sticks,
 /// and neither one has to be repeated to keep sticking.
@@ -1163,14 +1267,14 @@ pub struct ResolvedOptionlist {
 /// rebuild must not silently build something other than what the config is on
 /// record as being. All three of the "what is this config made of" flags
 /// behave the same way here — `--thornlist` (§7.5), `--optionlist` and
-/// `--variant` — so there is no rule to remember about which are remembered.
+/// `--flavor` — so there is no rule to remember about which are remembered.
 ///
 /// Preferring the live file over the snapshot is deliberate: editing the
 /// optionlist in place and rebuilding is the whole point of naming one, and
 /// that edit must be picked up (as a full rebuild, since the §7.8 source diff
-/// sees it). A recorded *variant* has no snapshot equivalent because a
+/// sees it). A recorded *flavor* has no snapshot equivalent because a
 /// snapshot records the text one build used, not a standing definition of a
-/// variant the mdb has since dropped.
+/// flavor the mdb has since dropped.
 pub fn resolve_optionlist(
     cactus_root: &Path,
     name: &str,
@@ -1190,16 +1294,16 @@ pub fn resolve_optionlist(
         });
     }
 
-    // Everything below is the sticky path, so an explicit `--variant` skips
+    // Everything below is the sticky path, so an explicit `--flavor` skips
     // all of it — that flag IS how a config is deliberately moved onto the
-    // machine's own variants, whether from another variant or from a
+    // machine's own flavors, whether from another flavor or from a
     // `--optionlist` file. It displaces, exactly as `--optionlist` above did.
-    if opts.variant.is_none()
+    if opts.flavor.is_none()
         && let Some(stored) = stored
     {
         match &stored.optionlist_source {
-            OptionlistSource::Variant(recorded) => {
-                let listed = &machine.meta.variants.optionlist.variants;
+            OptionlistSource::Flavor(recorded) => {
+                let listed = machine.flavors()?;
                 if listed.contains(recorded) {
                     let optionlist = Optionlist::load(&machine.optionlist_path(recorded))?;
                     return Ok(ResolvedOptionlist {
@@ -1211,20 +1315,26 @@ pub fn resolve_optionlist(
                 // Renamed or dropped from the mdb since this config was built.
                 // Unlike a vanished `--optionlist` file there is nothing to
                 // fall back on — the config's snapshot is the *rendered*
-                // inputs of one particular variant, not a standing definition
+                // inputs of one particular flavor, not a standing definition
                 // of it — so say plainly what went missing rather than
                 // silently resolving to whatever the machine now calls its
                 // default.
                 bail!(
-                    "config \"{name}\" was built with optionlist variant \"{recorded}\", which \
-                     machine \"{}\" no longer has (it now offers: {}) — pass --variant to pick \
+                    "config \"{name}\" was built with optionlist flavor \"{recorded}\", which \
+                     machine \"{}\" no longer has (it now offers: {}) — pass --flavor to pick \
                      one of those, or --optionlist to build from a file",
                     machine.name,
                     if listed.is_empty() { "none".to_owned() } else { listed.join(", ") },
                 );
             }
             OptionlistSource::Optionlist(recorded) => {
-                if let Ok(optionlist) = Optionlist::load_any(Path::new(recorded)) {
+                // The snapshot stands in only for a file that is gone or
+                // unreadable. A file that reads but does not parse is the
+                // user's to fix, so its own error, against its own path, is
+                // what they need — not a complaint about the snapshot.
+                if let Ok(source) = fs::read_to_string(recorded) {
+                    let optionlist = Optionlist::parse_any(&source)
+                        .with_context(|| format!("invalid optionlist {recorded}"))?;
                     return Ok(ResolvedOptionlist {
                         source: stored.optionlist_source.clone(),
                         optionlist,
@@ -1236,13 +1346,22 @@ pub fn resolve_optionlist(
                     format!(
                         "config \"{name}\" was built from optionlist {recorded}, which is no \
                          longer readable, and there is no snapshot at {} to fall back on — pass \
-                         --optionlist to say which optionlist to build from, or --variant to \
+                         --optionlist to say which optionlist to build from, or --flavor to \
                          switch to one of the machine's own",
                         snapshot.display()
                     )
                 })?;
+                // The snapshot is cactup's own copy, not a file the user edits:
+                // one this cactup cannot parse (an older format) is reported as
+                // such, pointing at the flag that names a current file instead.
                 let optionlist = Optionlist::parse_any(&source).with_context(|| {
-                    format!("invalid optionlist snapshot {}", snapshot.display())
+                    format!(
+                        "config \"{name}\" was built from optionlist {recorded}, which is no longer \
+                         readable, and its snapshot {} cannot be read by this cactup — pass \
+                         --optionlist to name a current copy of the file, or --flavor to switch to one \
+                         of the machine's own",
+                        snapshot.display()
+                    )
                 })?;
                 return Ok(ResolvedOptionlist {
                     source: stored.optionlist_source.clone(),
@@ -1253,55 +1372,26 @@ pub fn resolve_optionlist(
         }
     }
 
-    let variant = machine.select_optionlist(opts.variant.as_deref())?;
-    let optionlist = Optionlist::load(&machine.optionlist_path(&variant))?;
+    let flavor = machine.select_optionlist(opts.flavor.as_deref())?;
+    let optionlist = Optionlist::load(&machine.optionlist_path(&flavor))?;
     Ok(ResolvedOptionlist {
-        source: OptionlistSource::Variant(variant),
+        source: OptionlistSource::Flavor(flavor),
         optionlist,
         from_snapshot: false,
     })
 }
 
-/// The §4.4/D12 queue-compatibility facts, given an already-resolved
-/// optionlist. Split out so `prepare` can reuse the resolution it has already
-/// done rather than reading the optionlist a second time, while `queue_fit`
-/// stays the one entry point for callers that have nothing resolved yet.
-fn fit_from(machine: &Machine, name: &str, opts: &BuildOpts, optionlist: &Optionlist) -> QueueFit {
-    let universe = resolve_build_universe(
+/// The universe a build of this optionlist runs in (§4.8): the CLI flag, the
+/// optionlist's own `[cactup].universe`, `[build].universe`, or the declared
+/// host, in that order.
+fn build_universe(machine: &Machine, opts: &BuildOpts, optionlist: &Optionlist) -> Option<String> {
+    resolve_build_universe(
         opts,
         optionlist.header.universe.as_deref(),
         machine.meta.build.universe.as_deref(),
         machine.meta.declared_host().is_some(),
     )
-    .map(str::to_owned);
-    QueueFit {
-        universe,
-        compatible_queues: optionlist.header.compatible_queues.clone(),
-        gpu: optionlist.header.gpu,
-        label: name.to_owned(),
-    }
-}
-
-/// The §4.4/D12 queue-compatibility facts for `name` on `machine`: whatever
-/// `resolve_optionlist` picks (the MDB variant, or the sticky `--optionlist`
-/// file this config already records) fed through `resolve_build_universe`.
-/// `prepare` needs these as part of composing a
-/// config, and `build submit` needs them BEFORE `prepare` runs — a topology
-/// (and the reservation `prepare` must be handed) can't be resolved without
-/// knowing which queues this build is compatible with, but that compatibility
-/// is itself an optionlist-header fact `prepare` alone used to derive. Both
-/// paths route through this one function so they can never silently disagree
-/// about which queues a build may land on.
-pub fn queue_fit(cactus_root: &Path, machine: &Machine, name: &str, opts: &BuildOpts) -> Res<QueueFit> {
-    // Loaded here rather than taken as an argument because the stored
-    // metadata is what makes a `--optionlist` choice sticky (rule 3), and
-    // `build submit` calls this before it has any reason to have read it.
-    let stored = ConfigMeta::load(cactus_root, name)?;
-    if let Some(stored) = &stored {
-        check_config_machine(machine, stored, opts)?;
-    }
-    let resolved = resolve_optionlist(cactus_root, name, machine, stored.as_ref(), opts)?;
-    Ok(fit_from(machine, name, opts, &resolved.optionlist))
+    .map(str::to_owned)
 }
 
 /// §7.4 for a build of an existing config: it must have been built for this
@@ -1388,7 +1478,7 @@ pub struct BuildOutcome {
 
 /// Join names for a one-line message, capping the tail: a release bump moves
 /// every repo in the list, and 81 names is not a message.
-fn summarize(names: &[String]) -> String {
+pub(crate) fn summarize(names: &[String]) -> String {
     const SHOWN: usize = 8;
     let head = names.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
     match names.len().checked_sub(SHOWN) {
@@ -1505,9 +1595,7 @@ fn prepare_with_cache(
         check_config_machine(machine, stored, opts)?;
     }
 
-    // Selection & inputs (§4.4, §7.8). The universe name comes off the same
-    // `fit_from` that `queue_fit` uses, so this and the pre-topology call
-    // `build submit` makes before `prepare` runs can never silently disagree.
+    // Selection & inputs (§4.4, §7.8).
     let resolved = resolve_optionlist(&cactus_root, name, machine, stored_meta.as_ref(), opts)?;
     let ResolvedOptionlist { source: optionlist_source, optionlist, .. } = &resolved;
     if resolved.from_snapshot {
@@ -1517,7 +1605,19 @@ fn prepare_with_cache(
             "warning:".yellow().bold(),
         );
     }
-    let universe_name = fit_from(machine, name, opts, optionlist).universe;
+    // The flavor's default queue is header-checked against its own `queues`
+    // at parse; whether this machine has it is only knowable here (§4.4).
+    if let Some(queue) = &optionlist.header.runs_on.default_queue
+        && !machine.meta.queues.contains_key(queue)
+    {
+        bail!(
+            "optionlist {optionlist_source} names default-queue \"{queue}\" in [cactup.runs-on], \
+             but machine \"{}\" has no such queue (it has: {})",
+            machine.name,
+            machine.meta.queues.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let universe_name = build_universe(machine, opts, optionlist);
     // Unknown universe = hard error listing the known ones (§4.8).
     let universe = universe_name
         .as_deref()
@@ -1542,11 +1642,11 @@ fn prepare_with_cache(
             THORNLIST_SNAPSHOT,
         );
     }
-    // Machine-level thorn toggles (§7.5) plus this optionlist variant's own
-    // (§7.8): the variant augments the machine, so one machine can carry build
-    // flavors that disable different thorns (e.g. a CUDA variant dropping
+    // Machine-level thorn toggles (§7.5) plus this flavor's own
+    // (§7.8): the flavor augments the machine, so one machine can carry build
+    // flavors that disable different thorns (e.g. a CUDA flavor dropping
     // thorns that won't compile with nvcc). apply_thorn_toggles checks
-    // `disabled` before `enabled`, so a variant disable wins over a machine
+    // `disabled` before `enabled`, so a flavor disable wins over a machine
     // enable of the same thorn.
     let enabled_thorns: Vec<String> = machine
         .meta
@@ -1568,7 +1668,7 @@ fn prepare_with_cache(
     // thorn the user put in their thornlist on purpose, dropped from the
     // config by the mdb, otherwise surfaces only as a mystery missing thorn
     // at runtime. Both layers are named separately so the warning can point
-    // at the file to go edit (machine meta.toml vs. the variant's optionlist).
+    // at the file to go edit (machine meta.toml vs. the flavor's optionlist).
     warn_disabled_overrides(
         &thornlist.text,
         &machine.meta.build.disabled_thorns,
@@ -1579,13 +1679,13 @@ fn prepare_with_cache(
     let thornlist_processed =
         apply_thorn_toggles(&thornlist.text, &enabled_thorns, &disabled_thorns);
 
-    // There is deliberately no "did the variant change out from under us?"
+    // There is deliberately no "did the flavor change out from under us?"
     // guard here any more. It existed because a bare rebuild used to
     // re-resolve to the machine's default and could silently build a
     // different flavor than the config was on record as; `resolve_optionlist`
     // now hands back whatever the config recorded (rules 3-5), so the
     // mismatch it caught can no longer arise — and the one case that still
-    // can, a recorded variant the mdb has since dropped, is a hard error
+    // can, a recorded flavor the mdb has since dropped, is a hard error
     // there, where it can name what went missing.
     let flags = effective_flags(opts, stored_meta.as_ref().map(|m| m.flags));
 
@@ -1602,8 +1702,10 @@ fn prepare_with_cache(
     // no inspectable repo, yields `None` for either — which `source_delta`/
     // `provider_delta` read as "no information" and which therefore leaves
     // the rebuild decision exactly as it was before source/provenance
-    // tracking. A build must never fail over this.
-    let parsed_list = crate::thornlist::parse(&thornlist_processed).ok();
+    // tracking. A build never fails over this (only an interrupt stops it,
+    // §2.4), but it does say so: see `no_sources` below.
+    let parsed_list =
+        crate::thornlist::parse_config_list(&thornlist_processed, &installation.root, &cactus_root)?;
     // When this whole reading was taken, for the [`SourceProbe`] handed back
     // below. Stamped BEFORE the walks, not after: the reading describes the
     // tree as it was when the first walk started, so aging it from then is
@@ -1613,9 +1715,22 @@ fn prepare_with_cache(
     // (§7.4) — a refetch, a manual checkout, or a hand-edited thorn. None of
     // the text diffs above can see any of it: they all leave the thornlist
     // byte-identical.
-    let fresh_sources = parsed_list
-        .as_ref()
-        .and_then(|l| crate::fetch::source_heads_with_progress(&installation.root, l).ok().flatten());
+    //
+    // `no_sources` is why there is no reading, when there is none. Such a
+    // config gets no baseline, so nothing will ever notice its sources
+    // changing; that must be said on every build, or "up to date" reads as
+    // "same sources" when cactup has not looked at them at all.
+    let (fresh_sources, no_sources) = match &parsed_list {
+        Ok(l) => match crate::fetch::source_heads_with_progress(&installation.root, l)? {
+            Ok(heads) => (Some(heads), None),
+            Err(why) => (None, Some(why)),
+        },
+        Err(why) => (None, Some(crate::fetch::NoSources::Unparseable(why.clone()))),
+    };
+    let parsed_list = parsed_list.ok();
+    // The partial version of the same gap: a plain `ThornList` whose thorns
+    // are not all links into `repos/` (see `thornlist::parse_config_list`).
+    let untracked = parsed_list.as_ref().map(|l| l.untracked().to_vec()).unwrap_or_default();
     let fresh_providers = parsed_list.as_ref().map(|l| l.thorn_providers());
     // Computed unconditionally, even under `-f`: the baseline must be
     // recorded on every build, or a config that always rebuilds with `-f`
@@ -1642,9 +1757,17 @@ fn prepare_with_cache(
         stored_meta.as_ref().and_then(|m| m.thorn_shapes.as_ref()),
         fresh_shapes.as_ref(),
     );
+    // Compared as what reaches the build, not as text (§7.8): a header or
+    // comment edit — every shipped optionlist's, at the generation-2
+    // migration — must not cost a from-scratch rebuild. A stored copy that no
+    // longer parses counts as changed.
+    let stored_options = stored_optionlist
+        .as_deref()
+        .map(|text| crate::mdb::optionlist::build_relevant(text).unwrap_or_else(|_| String::from("\0unreadable")));
+    let fresh_options = crate::mdb::optionlist::build_relevant(&optionlist.source)?;
     let mut decision = rebuild_decision(
-        stored_optionlist.as_deref(),
-        &optionlist.source,
+        stored_options.as_deref(),
+        &fresh_options,
         stored_meta.as_ref().and_then(|m| m.universe.as_deref()),
         universe_name.as_deref(),
         stored_thornlist.as_deref(),
@@ -1653,22 +1776,25 @@ fn prepare_with_cache(
         &changed_providers,
         &changed_shapes,
     );
-    if opts.force || opts.reconfig {
-        decision = RebuildDecision::Full("-f/--reconfig given");
+    if opts.force {
+        decision = RebuildDecision::Full("-f given");
     } else if stored_meta.as_ref().is_some_and(|m| m.machine != machine.name) {
         // Only reachable with --ignore-machine (the check above refused
         // otherwise): nothing built for the other machine may be reused,
         // and the metadata written below re-records this one.
         decision = RebuildDecision::Full("the machine changed");
+    } else if opts.reconfig && decision == RebuildDecision::UpToDate {
+        // `--reconfig` is the incremental counterpart of `-f`: rebuild now,
+        // whatever the diffs say, but reconfigure + `make` only. It is the
+        // only way to ask for that when the diffs cannot see a change — most
+        // of all for a config whose sources cactup cannot track. Anything
+        // the diffs DID find keeps its own (equal or stronger) decision.
+        decision = RebuildDecision::Incremental("--reconfig given");
     } else if decision == RebuildDecision::UpToDate
         && is_complete(&cactus_root, name)
         && let Some(stored) = stored_meta.clone()
     {
-        println!(
-            "Config {} is up to date (same optionlist, same universe, same thornlist, same \
-             sources); pass -f to rebuild.",
-            name
-        );
+        println!("{}", up_to_date_message(name, no_sources.as_ref(), stored.sources.is_some(), &untracked));
         // Record the source/provider/shape baseline even though nothing was
         // built. A config last built by a cactup without source, provenance,
         // or shape tracking has none of them, and without this it could never
@@ -1683,7 +1809,28 @@ fn prepare_with_cache(
             fresh_providers.as_ref().is_some_and(|live| stored.thorn_providers.as_ref() != Some(live));
         let shapes_changed =
             fresh_shapes.as_ref().is_some_and(|live| stored.thorn_shapes.as_ref() != Some(live));
-        if sources_changed || providers_changed || shapes_changed {
+        // The header facts the record snapshots (§7.4) can change without
+        // anything the build consumes changing — the rebuild decision
+        // ignores the header — so they are refreshed here instead, along
+        // with the verbatim snapshot (the fallback a vanished `--optionlist`
+        // file builds from must be one this cactup can still read).
+        // So is which optionlist the config is on record as: a `--flavor` or
+        // `--optionlist` switch to one whose options render identically
+        // builds nothing, but must still stick (resolution rule 3).
+        let header = &optionlist.header;
+        let header_changed = stored.runs_on != header.runs_on
+            || stored.coerce_run_universe != header.coerce_run_universe
+            || stored.optionlist_source != *optionlist_source;
+        if header_changed {
+            stored.runs_on = header.runs_on.clone();
+            stored.coerce_run_universe = header.coerce_run_universe;
+            stored.optionlist_source = optionlist_source.clone();
+        }
+        if stored_optionlist.as_deref() != Some(optionlist.source.as_str()) {
+            fs::write(&snapshot_path, &optionlist.source)
+                .with_context(|| format!("Failed to write {}", snapshot_path.display()))?;
+        }
+        if sources_changed || providers_changed || shapes_changed || header_changed {
             if let Some(live) = fresh_sources {
                 stored.sources = Some(live.heads);
             }
@@ -1696,6 +1843,22 @@ fn prepare_with_cache(
             stored.store(&cactus_root)?;
         }
         return Ok(Prepared::UpToDate(stored));
+    }
+    if let Some(why) = &no_sources {
+        println!(
+            "{} cactup cannot track config {name}'s sources: {why}. This build records no \
+             source baseline, so later edits and refetches will not trigger a rebuild; pass \
+             --reconfig to rebuild after changing them.",
+            "note:".yellow().bold()
+        );
+    }
+    if !untracked.is_empty() && fresh_sources.is_some() {
+        println!(
+            "{} cactup does not track these sources of config {name}, which are not links into \
+             the installation's repos/: {}.",
+            "note:".yellow().bold(),
+            summarize(&untracked)
+        );
     }
     // Say which cheaper path is being taken, so a thornlist edit does not look
     // like it was ignored (it used to be) and a *reconfigure* is not mistaken
@@ -1850,13 +2013,12 @@ fn prepare_with_cache(
     // (execute stamps that once the build actually finishes).
     let now = Utc::now();
     let config_meta = ConfigMeta {
-        schema: SCHEMA,
+        schema: CONFIG_SCHEMA,
         name: name.to_owned(),
         // Carried forward on every rebuild, which is what makes the choice —
-        // variant or file — sticky (resolution rule 3).
+        // flavor or file — sticky (resolution rule 3).
         optionlist_source: optionlist_source.clone(),
-        gpu: optionlist.header.gpu,
-        compatible_queues: optionlist.header.compatible_queues.clone(),
+        runs_on: optionlist.header.runs_on.clone(),
         thornlist: thornlist.recorded.clone(),
         machine: machine.name.clone(),
         universe: universe_name,
@@ -1880,7 +2042,7 @@ fn prepare_with_cache(
     vars.set("STDOUT_FILE", attempt_dir.join("build.out").display().to_string());
     vars.set("STDERR_FILE", attempt_dir.join("build.err").display().to_string());
     let meta = BuildMeta {
-        schema: SCHEMA,
+        schema: crate::database::SCHEMA,
         attempt_id,
         config: name.to_owned(),
         optionlist_source: optionlist_source.clone(),
@@ -2047,7 +2209,7 @@ fn prepare_with_cache(
 /// Deliberately NOT re-run: the optionlist/thornlist/universe half of the
 /// §7.8 rebuild decision (`RebuildDecision::Full`/`Incremental` from an
 /// optionlist or thornlist edit). That half is genuinely MDB-derived
-/// (`machine.meta`, the optionlist variant) and D11 forbids reading the MDB
+/// (`machine.meta`, the flavor) and D11 forbids reading the MDB
 /// here — it stays correctly frozen at `prepare` time. Only the
 /// source-derived half (`SourceDelta`) can plausibly change while a build
 /// sits queued, so only it is re-checked, via the `FLESH_NOT_AS_BUILT`
@@ -2117,13 +2279,16 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                 // installation registry, or knob (D11-clean).
                 let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
                     .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
-                let fresh_list = crate::thornlist::parse(&processed_thornlist).ok();
+                let fresh_list =
+                    crate::thornlist::parse_config_list(&processed_thornlist, &install_root, &cactus_root)?.ok();
                 // Best-effort, matching `prepare`'s own tolerance: an
                 // unparseable thornlist or a tree with no inspectable repo
-                // yields no baseline rather than failing the build outright.
-                let sources = fresh_list
-                    .as_ref()
-                    .and_then(|l| crate::fetch::source_heads_with_progress(&install_root, l).ok().flatten());
+                // yields no baseline rather than failing the build outright
+                // (`prepare` already said why). An interrupt still stops it.
+                let sources = match &fresh_list {
+                    Some(l) => crate::fetch::source_heads_with_progress(&install_root, l)?.ok(),
+                    None => None,
+                };
                 let providers = fresh_list.as_ref().map(|l| l.thorn_providers());
                 // Unlike `sources` above, a `thorn_shapes` failure is NOT
                 // swallowed: since this chunk gave it proper interrupt
@@ -2470,6 +2635,86 @@ mod tests {
     use super::*;
     use crate::mdb::Mdb;
 
+    /// Writes `text` as config "sim"'s record and loads it back.
+    fn load_record(text: &str) -> (tempfile::TempDir, ConfigMeta) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        let meta = ConfigMeta::load(dir.path(), "sim").unwrap().unwrap();
+        (dir, meta)
+    }
+
+    const RECORD_TAIL: &str = "thornlist = \"t.th\"\nmachine = \"qbd\"\nconfig-id = \"c\"\nbuild-id = \"b\"\n";
+
+    /// A schema-1 record (written before the flavor rename) loads as the
+    /// current shape: `variant` is the flavor, and the flat `gpu`/
+    /// `compatible-queues` keys are its `runs-on`. The file is not touched
+    /// by a read; the next store writes the current schema, after which it
+    /// round-trips unchanged.
+    #[test]
+    fn schema_1_flavor_record_upgrades_on_read_and_store_writes_schema_2() {
+        let old = format!(
+            "schema = 1\nname = \"sim\"\nvariant = \"cpu\"\ngpu = true\n\
+             compatible-queues = [\"single\", \"workq\"]\n{RECORD_TAIL}"
+        );
+        let (dir, meta) = load_record(&old);
+        assert_eq!(meta.schema, CONFIG_SCHEMA);
+        assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("cpu".to_owned()));
+        assert_eq!(meta.runs_on, RunsOn { queues: vec!["single".to_owned(), "workq".to_owned()], gpu: true, default_queue: None });
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        assert_eq!(fs::read_to_string(&path).unwrap(), old, "a read must not rewrite the record");
+
+        meta.store(dir.path()).unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
+        assert!(stored.contains("schema = 2") && stored.contains("flavor = \"cpu\""), "{stored}");
+        assert!(!stored.contains("variant") && !stored.contains("compatible-queues"), "{stored}");
+        let again = ConfigMeta::load(dir.path(), "sim").unwrap().unwrap();
+        assert_eq!(again.optionlist_source, meta.optionlist_source);
+        assert_eq!(again.runs_on, meta.runs_on);
+    }
+
+    /// A record from before `schema` was written at all reads as schema 1,
+    /// and a config built from an `--optionlist` file has only the
+    /// `runs-on` half of the upgrade to undergo.
+    #[test]
+    fn schemaless_optionlist_record_upgrades_too() {
+        let (_dir, meta) = load_record(&format!(
+            "name = \"sim\"\noptionlist = \"/x/my.cfg\"\ncompatible-queues = [\"gpu\"]\n{RECORD_TAIL}"
+        ));
+        assert_eq!(meta.schema, CONFIG_SCHEMA);
+        assert_eq!(meta.optionlist_source, OptionlistSource::Optionlist("/x/my.cfg".to_owned()));
+        assert_eq!(meta.runs_on, RunsOn { queues: vec!["gpu".to_owned()], gpu: false, default_queue: None });
+    }
+
+    /// A record a newer cactup wrote may carry `runs-on` keys this one does
+    /// not know; they must not fail the parse ahead of the schema check.
+    #[test]
+    fn newer_record_reaches_the_schema_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ConfigMeta::path_for(dir.path(), "sim");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!("schema = 99\nname = \"sim\"\nflavor = \"cpu\"\n{RECORD_TAIL}[runs-on]\nfuture-key = 1\n"),
+        )
+        .unwrap();
+        let err = format!("{:#}", ConfigMeta::load(dir.path(), "sim").unwrap_err());
+        assert!(err.contains("please upgrade cactup"), "{err}");
+    }
+
+    /// A current record is taken as-is — the upgrade never touches a key it
+    /// does not own, even one spelled like an old one.
+    #[test]
+    fn schema_2_record_is_not_upgraded() {
+        let (_dir, meta) = load_record(&format!(
+            "schema = 2\nname = \"sim\"\nflavor = \"cpu\"\n{RECORD_TAIL}[runs-on]\nqueues = [\"single\"]\n"
+        ));
+        assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("cpu".to_owned()));
+        assert_eq!(meta.runs_on.queues, ["single"]);
+        assert!(!meta.runs_on.gpu);
+    }
+
     /// A comment that merely mentions a thorn name must never be toggled —
     /// a custom thornlist's prose header documents thorns by name, and the
     /// native fetcher now copies that header into the live list verbatim.
@@ -2518,11 +2763,10 @@ mod tests {
         // Rule 2 with a recorded path whose old-name file is gone.
         fs::remove_file(&legacy).unwrap();
         let stored = ConfigMeta {
-            schema: SCHEMA,
+            schema: CONFIG_SCHEMA,
             name: "sim".to_owned(),
-            optionlist_source: OptionlistSource::Variant("default".to_owned()),
-            gpu: false,
-            compatible_queues: Vec::new(),
+            optionlist_source: OptionlistSource::Flavor("default".to_owned()),
+            runs_on: RunsOn::default(),
             thornlist: legacy.display().to_string(),
             machine: "fake".to_owned(),
             universe: None,
@@ -2574,8 +2818,8 @@ mod tests {
                     CarpetX/CarpetX\n\
                     EinsteinInitialData/Meudon_Bin_BH\n";
         let machine = ["ExternalLibraries/PAPI".to_owned(), "ML_BSSN".to_owned()];
-        let variant = ["CarpetX".to_owned(), "ExternalLibraries/PAPI".to_owned()];
-        let got = disabled_thorn_overrides(list, &machine, &variant);
+        let flavor = ["CarpetX".to_owned(), "ExternalLibraries/PAPI".to_owned()];
+        let got = disabled_thorn_overrides(list, &machine, &flavor);
         assert_eq!(
             got,
             vec![
@@ -2586,7 +2830,7 @@ mod tests {
                     spec: "ExternalLibraries/PAPI".to_owned(),
                     by: DisabledBy::Machine,
                 },
-                // Bare-name entry, and the variant is the only layer that
+                // Bare-name entry, and the flavor is the only layer that
                 // disables it.
                 DisabledOverride {
                     thorn: "CarpetX/CarpetX".to_owned(),
@@ -2595,12 +2839,12 @@ mod tests {
                 },
             ],
             "ML_BSSN is already #DISABLED (no conflict), Meudon_Bin_BH is untouched, and PAPI \
-             is attributed to the machine even though the variant disables it too"
+             is attributed to the machine even though the flavor disables it too"
         );
         // Every reported thorn really does get switched off downstream.
         let processed = apply_thorn_toggles(list, &[], &{
             let mut all = machine.to_vec();
-            all.extend(variant.iter().cloned());
+            all.extend(flavor.iter().cloned());
             all
         });
         for o in &got {
@@ -3045,12 +3289,10 @@ mod tests {
                 env-setup = "CACTUP_BUILD_ENV=on"
                 [queues.local]
                 default = true
-                [variants.submitscript]
+                [submitscripts]
                 "default" = ["local"]
-                [variants.runscript]
+                [runscripts]
                 "default" = ["local"]
-                [variants.optionlist]
-                variants = ["default"]
                 "#,
                 fake_make.display()
             ),
@@ -3058,7 +3300,7 @@ mod tests {
         .unwrap();
         fs::write(
             machine_dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         for s in ["runscripts/default.sh", "submitscripts/default.sh"] {
@@ -3073,8 +3315,8 @@ mod tests {
         let outcome = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(outcome.rebuilt);
         let meta = &outcome.meta;
-        assert_eq!(meta.optionlist_source, OptionlistSource::Variant("default".to_owned()));
-        assert_eq!(meta.compatible_queues, ["local"]);
+        assert_eq!(meta.optionlist_source, OptionlistSource::Flavor("default".to_owned()));
+        assert_eq!(meta.runs_on.queues, ["local"]);
         assert_eq!(meta.machine, "fake");
         assert!(meta.universe.is_none() && meta.coerce_run_universe);
         assert!(meta.flags.optimize && !meta.flags.debug);
@@ -3107,7 +3349,7 @@ mod tests {
         // stable config-id (§7.4, §7.8).
         fs::write(
             machine_dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"2\"\nCC = \"gcc\"\n",
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n[options]\nVERSION = \"2\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         let machine = mdb.load("fake").unwrap();
@@ -3119,14 +3361,14 @@ mod tests {
         assert!(log.contains("sim-realclean"), "{log}");
     }
 
-    /// `--optionlist PATH` must displace the machine's own variants
+    /// `--optionlist PATH` must displace the machine's own flavors
     /// entirely, not merely add to them: a build driven this way should
     /// never touch `optionlists/default.toml`'s `CC = gcc`, and the file it
     /// DID use — no `[cactup]` header, so no queue restriction and no gpu
     /// claim — should be exactly what lands in both the rendered `.cfg` and
     /// the source snapshot the next rebuild decision diffs against (§7.8).
     #[test]
-    fn optionlist_flag_builds_from_the_given_file_not_the_machine_variant() {
+    fn optionlist_flag_builds_from_the_given_file_not_the_machine_flavor() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let cactus = root.join("inst/Cactus");
@@ -3151,13 +3393,13 @@ mod tests {
             meta.optionlist_source,
             OptionlistSource::Optionlist(user_optionlist.display().to_string())
         );
-        assert!(meta.compatible_queues.is_empty());
-        assert!(!meta.gpu);
+        assert!(meta.runs_on.queues.is_empty());
+        assert!(!meta.runs_on.gpu);
 
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.starts_with("VERSION = 9\n"), "{rendered}");
         assert!(rendered.contains("CC = clang"), "{rendered}");
-        assert!(!rendered.contains("gcc"), "the machine's own variant must not be used: {rendered}");
+        assert!(!rendered.contains("gcc"), "the machine's own flavor must not be used: {rendered}");
 
         // Byte-identical to the user's file: this is what the rebuild
         // decision diffs against on the next `cactup build`.
@@ -3167,10 +3409,10 @@ mod tests {
 
     /// `--optionlist` is sticky exactly as `--thornlist` is (§7.8 rule 3): a
     /// bare `cactup build` on a config built from a file must rebuild from
-    /// that same file, not silently revert to the machine's variant, and must
+    /// that same file, not silently revert to the machine's flavor, and must
     /// not need the flag repeated. An edit to the file is then picked up on
     /// the next bare rebuild — as a full rebuild, since the source diff sees
-    /// it. `--variant` remains the way to move the config back onto the mdb.
+    /// it. `--flavor` remains the way to move the config back onto the mdb.
     #[test]
     fn optionlist_choice_is_sticky_across_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
@@ -3198,9 +3440,9 @@ mod tests {
         first.optionlist = None;
 
         // Nothing changed: the sticky path resolves to the same bytes, so the
-        // build short-circuits instead of erroring on a variant mismatch.
+        // build short-circuits instead of erroring on a flavor mismatch.
         let again = build(&inst, &machine, "sim", &first).unwrap();
-        assert!(!again.rebuilt, "a bare rebuild must not re-resolve onto the machine variant");
+        assert!(!again.rebuilt, "a bare rebuild must not re-resolve onto the machine flavor");
         assert_eq!(again.meta.optionlist_source, OptionlistSource::Optionlist(recorded.clone()));
 
         // Edit the file: a bare rebuild picks the edit up.
@@ -3231,16 +3473,16 @@ mod tests {
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.contains("CC = icx-2025"), "{rendered}");
 
-        // --variant is the deliberate way back onto the machine's own, and it
+        // --flavor is the deliberate way back onto the machine's own, and it
         // must clear the recorded path rather than leave it lying around.
         let mut back = opts_with_optionlist(&opts, &user_optionlist);
         back.optionlist = None;
-        back.variant = Some("default".to_owned());
+        back.flavor = Some("default".to_owned());
         let reverted = build(&inst, &machine, "sim", &back).unwrap();
         assert_eq!(
             reverted.meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned()),
-            "--variant must displace the recorded path outright, not sit alongside it",
+            OptionlistSource::Flavor("default".to_owned()),
+            "--flavor must displace the recorded path outright, not sit alongside it",
         );
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.contains("CC = gcc"), "{rendered}");
@@ -3288,18 +3530,18 @@ mod tests {
         assert!(!rendered.contains("gcc"), "{rendered}");
     }
 
-    /// `--variant` is sticky the way `--optionlist` and `--thornlist` are: on
-    /// a machine with more than one variant, a bare rebuild of a config built
-    /// with `--variant cuda` rebuilds cuda — it does not re-resolve to the
-    /// machine's `default = true` variant, and does not make the user repeat
-    /// the flag forever. Also covers the displacement rule from the variant
-    /// side: `--optionlist` replaces a recorded variant outright, the mirror
-    /// of `--variant` replacing a recorded path. The one case that still
-    /// refuses is a recorded variant the mdb has since dropped, which is an
+    /// `--flavor` is sticky the way `--optionlist` and `--thornlist` are: on
+    /// a machine with more than one flavor, a bare rebuild of a config built
+    /// with `--flavor cuda` rebuilds cuda — it does not re-resolve to the
+    /// machine's `default = true` flavor, and does not make the user repeat
+    /// the flag forever. Also covers the displacement rule from the flavor
+    /// side: `--optionlist` replaces a recorded flavor outright, the mirror
+    /// of `--flavor` replacing a recorded path. The one case that still
+    /// refuses is a recorded flavor the mdb has since dropped, which is an
     /// error naming what went missing rather than a silent fallback to the
     /// default.
     #[test]
-    fn variant_choice_is_sticky_across_rebuilds() {
+    fn flavor_choice_is_sticky_across_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let cactus = root.join("inst/Cactus");
@@ -3312,47 +3554,41 @@ mod tests {
             ),
         );
 
-        // Give the machine a second variant, with `default` marked as the
-        // implicit choice (§4.4).
+        // Give the machine a second flavor (a second optionlist file), with
+        // `default` marked as the implicit choice (§4.4).
         let machine_dir = root.join("mdb/fake");
-        let meta = fs::read_to_string(machine_dir.join("meta.toml")).unwrap();
-        fs::write(
-            machine_dir.join("meta.toml"),
-            meta.replace(r#"variants = ["default"]"#, r#"variants = ["default", "cuda"]"#),
-        )
-        .unwrap();
         fs::write(
             machine_dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\ndefault = true\n\
+            "[cactup]\ndefault = true\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n\
              [options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         fs::write(
             machine_dir.join("optionlists/cuda.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n\
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n\
              [options]\nVERSION = \"1\"\nCC = \"nvcc\"\n",
         )
         .unwrap();
         let machine = mdb.load("fake").unwrap();
 
         let mut opts = BuildOpts::default_for_tests();
-        opts.variant = Some("cuda".to_owned());
+        opts.flavor = Some("cuda".to_owned());
         let outcome = build(&inst, &machine, "sim", &opts).unwrap();
-        assert_eq!(outcome.meta.optionlist_source, OptionlistSource::Variant("cuda".to_owned()));
+        assert_eq!(outcome.meta.optionlist_source, OptionlistSource::Flavor("cuda".to_owned()));
 
         // The bare rebuild keeps "cuda" rather than falling to the default,
         // and finds nothing to do — the flag need not be repeated.
         let bare = BuildOpts::default_for_tests();
         let again = build(&inst, &machine, "sim", &bare).unwrap();
-        assert!(!again.rebuilt, "nothing changed, so the sticky variant must be up to date");
-        assert_eq!(again.meta.optionlist_source, OptionlistSource::Variant("cuda".to_owned()));
+        assert!(!again.rebuilt, "nothing changed, so the sticky flavor must be up to date");
+        assert_eq!(again.meta.optionlist_source, OptionlistSource::Flavor("cuda".to_owned()));
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.contains("CC = nvcc"), "{rendered}");
 
-        // Editing the recorded variant's own file is picked up bare, too.
+        // Editing the recorded flavor's own file is picked up bare, too.
         fs::write(
             machine_dir.join("optionlists/cuda.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n\
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n\
              [options]\nVERSION = \"1\"\nCC = \"nvcc\"\nCXX = \"nvc++\"\n",
         )
         .unwrap();
@@ -3360,21 +3596,21 @@ mod tests {
         let rendered = fs::read_to_string(cactus.join("configs/sim/cactup-optionlist.cfg")).unwrap();
         assert!(rendered.contains("CXX = nvc++"), "{rendered}");
 
-        // --variant is still how you deliberately switch flavors.
+        // --flavor is still how you deliberately switch flavors.
         let mut to_default = BuildOpts::default_for_tests();
-        to_default.variant = Some("default".to_owned());
+        to_default.flavor = Some("default".to_owned());
         assert_eq!(
             build(&inst, &machine, "sim", &to_default).unwrap().meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned())
+            OptionlistSource::Flavor("default".to_owned())
         );
         // ...and that switch sticks in turn.
         assert_eq!(
             build(&inst, &machine, "sim", &bare).unwrap().meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned())
+            OptionlistSource::Flavor("default".to_owned())
         );
 
         // The other direction of the same rule: --optionlist displaces a
-        // recorded variant just as --variant displaces a recorded path. The
+        // recorded flavor just as --flavor displaces a recorded path. The
         // two are alternatives, so what a config records is whichever flag
         // was passed most recently — never both, and never a fallback from
         // one to the other.
@@ -3387,7 +3623,7 @@ mod tests {
         assert_eq!(
             displaced.meta.optionlist_source,
             OptionlistSource::Optionlist(recorded.clone()),
-            "--optionlist must displace the recorded variant outright",
+            "--optionlist must displace the recorded flavor outright",
         );
         // And it is the path, not "default", that the next bare rebuild uses.
         assert_eq!(
@@ -3398,13 +3634,13 @@ mod tests {
         assert!(rendered.contains("CC = clang"), "{rendered}");
     }
 
-    /// A recorded variant the mdb no longer has is the one case stickiness
+    /// A recorded flavor the mdb no longer has is the one case stickiness
     /// cannot paper over: there is nothing to fall back on, since the config's
     /// snapshot is one build's rendered inputs, not a standing definition of
-    /// the variant. It must name what went missing and what the machine now
+    /// the flavor. It must name what went missing and what the machine now
     /// offers, rather than quietly building the default instead.
     #[test]
-    fn a_dropped_variant_is_named_not_silently_replaced() {
+    fn a_dropped_flavor_is_named_not_silently_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let cactus = root.join("inst/Cactus");
@@ -3418,35 +3654,24 @@ mod tests {
         );
 
         let machine_dir = root.join("mdb/fake");
-        let meta = fs::read_to_string(machine_dir.join("meta.toml")).unwrap();
-        fs::write(
-            machine_dir.join("meta.toml"),
-            meta.replace(r#"variants = ["default"]"#, r#"variants = ["default", "cuda"]"#),
-        )
-        .unwrap();
         fs::write(
             machine_dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\ndefault = true\n\
+            "[cactup]\ndefault = true\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n\
              [options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         fs::write(
             machine_dir.join("optionlists/cuda.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n\
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n\
              [options]\nVERSION = \"1\"\nCC = \"nvcc\"\n",
         )
         .unwrap();
 
         let mut opts = BuildOpts::default_for_tests();
-        opts.variant = Some("cuda".to_owned());
+        opts.flavor = Some("cuda".to_owned());
         assert!(build(&inst, &mdb.load("fake").unwrap(), "sim", &opts).unwrap().rebuilt);
 
-        // The machine drops the variant this config was built with.
-        let meta_toml = machine_dir.join("meta.toml");
-        let dropped = fs::read_to_string(&meta_toml)
-            .unwrap()
-            .replace(r#"variants = ["default", "cuda"]"#, r#"variants = ["default"]"#);
-        fs::write(&meta_toml, dropped).unwrap();
+        // The machine drops the flavor this config was built with.
         fs::remove_file(machine_dir.join("optionlists/cuda.toml")).unwrap();
         let machine = mdb.load("fake").unwrap();
 
@@ -3459,12 +3684,12 @@ mod tests {
         assert!(msg.contains("no longer has"), "{msg}");
         assert!(msg.contains("default"), "must list what the machine does offer: {msg}");
 
-        // Naming a surviving variant is the way forward.
+        // Naming a surviving flavor is the way forward.
         let mut to_default = BuildOpts::default_for_tests();
-        to_default.variant = Some("default".to_owned());
+        to_default.flavor = Some("default".to_owned());
         assert_eq!(
             build(&inst, &machine, "sim", &to_default).unwrap().meta.optionlist_source,
-            OptionlistSource::Variant("default".to_owned())
+            OptionlistSource::Flavor("default".to_owned())
         );
     }
 
@@ -3519,12 +3744,10 @@ mod tests {
                 make = "{} -j@MAKEJOBS@"
                 [queues.local]
                 default = true
-                [variants.submitscript]
+                [submitscripts]
                 "default" = ["local"]
-                [variants.runscript]
+                [runscripts]
                 "default" = ["local"]
-                [variants.optionlist]
-                variants = ["default"]
                 "#,
                 fake_make.display()
             ),
@@ -3532,7 +3755,7 @@ mod tests {
         .unwrap();
         fs::write(
             machine_dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         for s in ["runscripts/default.sh", "submitscripts/default.sh"] {
@@ -3708,12 +3931,10 @@ mod tests {
                 make = "{} -j@MAKEJOBS@"
                 [queues.local]
                 default = true
-                [variants.submitscript]
+                [submitscripts]
                 "default" = ["local"]
-                [variants.runscript]
+                [runscripts]
                 "default" = ["local"]
-                [variants.optionlist]
-                variants = ["default"]
                 "#,
                 fake_make.display()
             ),
@@ -3721,7 +3942,7 @@ mod tests {
         .unwrap();
         fs::write(
             machine_dir.join("optionlists/default.toml"),
-            "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
+            "[cactup]\n[cactup.runs-on]\nqueues = [\"local\"]\ngpu = false\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
         for s in ["runscripts/default.sh", "submitscripts/default.sh"] {
@@ -3732,6 +3953,96 @@ mod tests {
         let machine = mdb.load("fake").unwrap();
         let inst = Installation::new("et", root.join("inst"));
         (mdb, machine, inst, BuildOpts::default_for_tests())
+    }
+
+    /// The rebuild decision compares what reaches the build, not the text: a
+    /// header or comment edit (and a stored snapshot still in the generation-1
+    /// header format) leaves the config up to date while the record picks up
+    /// the new header facts; an `[options]` edit is still a full rebuild.
+    #[test]
+    fn only_build_relevant_optionlist_edits_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;",
+                c = cactus.display()
+            ),
+        );
+        assert!(build(&inst, &machine, "sim", &opts).unwrap().rebuilt);
+
+        let optionlist = machine.optionlist_path("default");
+        fs::write(
+            &optionlist,
+            "# a new comment\n[cactup]\ndescription = \"edited\"\n[cactup.runs-on]\nqueues = [\"local\"]\n\
+             gpu = true\n[options]\nVERSION = \"1\"\n# another\nCC = \"gcc\"\n",
+        )
+        .unwrap();
+        // A snapshot from before the flavor rename, same options.
+        let snapshot = cactus.join("configs/sim").join(OPTIONLIST_SNAPSHOT);
+        fs::write(&snapshot, "[cactup]\ngpu = false\ncompatible-queues = [\"local\"]\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n")
+            .unwrap();
+        assert!(!build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "header/comment edits rebuild nothing");
+        let meta = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        assert!(meta.runs_on.gpu, "the record picks up the header's new runs-on");
+        assert!(fs::read_to_string(&snapshot).unwrap().contains("edited"), "and the snapshot is refreshed");
+
+        // Moving onto a file whose options render the same builds nothing,
+        // but the config must now be on record as built from that file.
+        let own = root.join("same.cfg");
+        fs::write(&own, "VERSION = 1\nCC = gcc\n").unwrap();
+        let mut from_file = BuildOpts::default_for_tests();
+        from_file.optionlist = Some(own.clone());
+        assert!(!build(&inst, &machine, "sim", &from_file).unwrap().rebuilt);
+        let meta = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        assert!(matches!(meta.optionlist_source, OptionlistSource::Optionlist(_)), "{:?}", meta.optionlist_source);
+
+        let mut back = BuildOpts::default_for_tests();
+        back.flavor = Some("default".to_owned());
+        fs::write(&optionlist, "[options]\nVERSION = \"1\"\nCC = \"clang\"\n").unwrap();
+        let outcome = build(&inst, &machine, "sim", &back).unwrap();
+        assert!(outcome.rebuilt, "an [options] edit still rebuilds");
+    }
+
+    /// A flavor's `default-queue` must be a queue of the machine building it
+    /// — refused at build, naming the queue — and a valid one is snapshotted
+    /// into the config record with the rest of `[runs-on]`.
+    #[test]
+    fn flavor_default_queue_is_checked_at_build_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;",
+                c = cactus.display()
+            ),
+        );
+        let optionlist = machine.optionlist_path("default");
+        let with_default = |queue: &str| {
+            fs::write(
+                &optionlist,
+                format!("[cactup.runs-on]\ndefault-queue = \"{queue}\"\n[options]\nVERSION = \"1\"\nCC = \"gcc\"\n"),
+            )
+            .unwrap();
+        };
+
+        with_default("nowhere");
+        let err = match build(&inst, &machine, "sim", &opts) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("a default-queue the machine lacks must be refused"),
+        };
+        assert!(err.contains("default-queue \"nowhere\"") && err.contains("it has: local"), "{err}");
+
+        with_default("local");
+        build(&inst, &machine, "sim", &opts).unwrap();
+        let meta = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        assert_eq!(meta.runs_on.default_queue.as_deref(), Some("local"));
     }
 
     /// Stand up a tree whose `make` fakes a successful configure+build, plus
@@ -3920,8 +4231,8 @@ mod tests {
     /// swallowed the inner make's real exit status). The incompleteness error
     /// must name the missing *executable* and point at the build output
     /// files — not blame the configure marker, which is present.
-    /// §7.4: a config built for another machine is refused by both entry
-    /// points (`queue_fit` for `build submit`, `prepare` for everything);
+    /// §7.4: a config built for another machine is refused by `prepare`
+    /// (every build path, `build submit` included);
     /// `--ignore-machine` turns that into a forced full rebuild whose
     /// metadata then names this machine.
     #[test]
@@ -3954,19 +4265,17 @@ mod tests {
             err.contains("built for machine \"elsewhere\"") && err.contains("--ignore-machine"),
             "{err}"
         );
-        let err = match queue_fit(&cactus, &machine, "sim", &opts) {
-            Ok(_) => panic!("a foreign build must be refused"),
-            Err(e) => format!("{e:#}"),
-        };
-        assert!(err.contains("built for machine \"elsewhere\""), "{err}");
 
         opts.ignore_machine = true;
-        queue_fit(&cactus, &machine, "sim", &opts).unwrap();
+        // `--reconfig` must not soften it: nothing built elsewhere is reused.
+        opts.reconfig = true;
         let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
             Prepared::Ready(a, _) => a,
             Prepared::UpToDate(_) => panic!("a foreign build must never read as up to date"),
         };
         assert_eq!(attempt.meta.decision, "the machine changed");
+        assert!(attempt.meta.full_rebuild);
+        opts.reconfig = false;
         execute(&mut attempt, true, None).unwrap();
         assert_eq!(ConfigMeta::load(&cactus, "sim").unwrap().unwrap().machine, "fake");
         // Back on its own machine, the usual short-circuit applies again.
@@ -4131,6 +4440,139 @@ mod tests {
         let unknown = build(&inst, &machine, "sim", &opts).unwrap();
         assert!(!unknown.rebuilt, "without inspectable sources nothing is claimed to have changed");
         assert!(log().is_empty(), "no make at all: {}", log());
+    }
+
+    /// `--reconfig` is the incremental counterpart of `-f`: it rebuilds an
+    /// up-to-date config with a reconfigure + `make` and no realclean. It is
+    /// the only way to get an incremental rebuild of a config whose sources
+    /// cactup cannot track (here: no repos on disk at all), where nothing
+    /// else would ever trigger one. It used to realclean exactly like `-f`.
+    #[test]
+    fn reconfig_rebuilds_incrementally_and_force_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let clear_log = || {
+            let _ = fs::remove_file(root.join("make.log"));
+        };
+
+        let first = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(first.rebuilt);
+        assert!(first.meta.sources.is_none(), "no repos on disk, so no baseline");
+        assert!(!build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "nothing to see: up to date");
+
+        clear_log();
+        let mut reconfig = BuildOpts::default_for_tests();
+        reconfig.reconfig = true;
+        assert!(build(&inst, &machine, "sim", &reconfig).unwrap().rebuilt, "--reconfig must rebuild");
+        assert!(log().contains("sim-config"), "--reconfig must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "--reconfig must not realclean: {}", log());
+
+        clear_log();
+        let mut forced = BuildOpts::default_for_tests();
+        forced.force = true;
+        assert!(build(&inst, &machine, "sim", &forced).unwrap().rebuilt, "-f must rebuild");
+        assert!(log().contains("sim-realclean"), "-f rebuilds from scratch: {}", log());
+
+        // `--reconfig` never downgrades what the diffs decided on their own:
+        // an optionlist edit still rebuilds from scratch under it.
+        let optionlist = root.join("my.cfg");
+        fs::write(&optionlist, "VERSION = 1\nCC = cc\n").unwrap();
+        let mut own = BuildOpts::default_for_tests();
+        own.optionlist = Some(optionlist.clone());
+        assert!(build(&inst, &machine, "sim", &own).unwrap().rebuilt);
+        fs::write(&optionlist, "VERSION = 2\nCC = cc\n").unwrap();
+        clear_log();
+        assert!(build(&inst, &machine, "sim", &reconfig).unwrap().rebuilt);
+        assert!(log().contains("sim-realclean"), "an optionlist edit outranks --reconfig: {}", log());
+    }
+
+    /// The up-to-date line never says "same sources" for anything cactup did
+    /// not compare: no reading at all, no baseline yet, or untracked thorns.
+    #[test]
+    fn up_to_date_message_never_overclaims_the_sources() {
+        let plain = up_to_date_message("bcx", None, true, &[]);
+        assert!(plain.contains("same sources)"), "{plain}");
+
+        let untracked = up_to_date_message("bcx", None, true, &["Local/Mine".to_string()]);
+        assert!(!untracked.contains("same sources)"), "{untracked}");
+        assert!(untracked.contains("Local/Mine") && untracked.contains("--reconfig"), "{untracked}");
+
+        let fresh = up_to_date_message("bcx", None, false, &["Local/Mine".to_string()]);
+        assert!(!fresh.contains("same sources"), "{fresh}");
+        assert!(fresh.contains("no source baseline") && fresh.contains("Local/Mine"), "{fresh}");
+
+        let why = crate::fetch::NoSources::NoGitRepos;
+        let blind = up_to_date_message("bcx", Some(&why), true, &[]);
+        assert!(!blind.contains("same sources"), "{blind}");
+        assert!(blind.contains("names no git repos") && blind.contains("--reconfig"), "{blind}");
+    }
+
+    /// The bug report this exists for: a config built only with `-f` from a
+    /// plain Cactus `ThornList` (a hand-written benchmark list, no
+    /// `!CRL_VERSION`) recorded no source baseline, so a later edit read as
+    /// "up to date (same sources)" forever. Its thorns are links into
+    /// `repos/`, and that is now enough to track them.
+    #[test]
+    fn a_plain_thornlist_is_tracked_through_the_tree() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) echo \"$@\" >> {r}/make.log; cd {c}/configs/sim/config-data && \
+                 touch cctk_Config.h ;;\n\
+                 sim) echo \"$@\" >> {r}/make.log; mkdir -p {c}/exe && \
+                 touch {c}/exe/cactus_sim ;;\n\
+                 *) echo \"$@\" >> {r}/make.log ;;",
+                r = root.display(),
+                c = cactus.display()
+            ),
+        );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
+        let repos = cactus.join("repos");
+        for name in ["flesh", "cactusbase"] {
+            crate::fetch::git::testrepo::init(&repos.join(name));
+        }
+        crate::fetch::git::testrepo::commit_file(&repos.join("flesh"), "Makefile", "all:\n");
+        // The thorn is the repo's root here: `commit_file` only writes
+        // top-level files, and where in the repo the link lands is immaterial.
+        crate::fetch::git::testrepo::commit_file(&repos.join("cactusbase"), "b.cc", "int a;\n");
+        let _ = fs::remove_file(cactus.join("Makefile"));
+        symlink("repos/flesh/Makefile", cactus.join("Makefile")).unwrap();
+        fs::create_dir_all(cactus.join("arrangements/CactusBase")).unwrap();
+        symlink("../../repos/cactusbase", cactus.join("arrangements/CactusBase/Boundary")).unwrap();
+        let list = root.join("bench.th");
+        fs::write(&list, "CactusBase/Boundary\n").unwrap();
+
+        let mut forced = BuildOpts::default_for_tests();
+        forced.thornlist = Some(list.clone());
+        forced.force = true;
+        let first = build(&inst, &machine, "sim", &forced).unwrap();
+        let recorded = first.meta.sources.clone().expect("a -f build from a plain list records a baseline");
+        assert_eq!(recorded.keys().cloned().collect::<Vec<_>>(), ["cactusbase", "flesh"]);
+        assert!(!build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "nothing changed");
+
+        let _ = fs::remove_file(root.join("make.log"));
+        fs::write(repos.join("cactusbase/b.cc"), "int a; int b;\n").unwrap();
+        let edited = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(edited.rebuilt, "an edit under a plain list must rebuild");
+        assert!(!log().contains("realclean"), "an edit needs no realclean: {}", log());
     }
 
     #[test]

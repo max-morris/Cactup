@@ -19,6 +19,7 @@ mod tail;
 mod template;
 mod testsuite;
 mod thornlist;
+mod timing;
 mod update;
 mod walltime;
 // The corpus parser: used by build.rs (via include!) at build time, and by
@@ -81,6 +82,7 @@ fn main() -> Res<()> {
     // First, while the process is still single-threaded: it removes an
     // environment variable.
     update::take_updated_marker();
+    timing::start();
 
     // Grace count 1: the FIRST Ctrl-C sets the interrupt flag — which every
     // long-running path polls, so cactup winds down within moments (locks
@@ -105,7 +107,14 @@ fn main() -> Res<()> {
     }
 
     // `-K NAME VALUE` is folded into `-K NAME=VALUE` before clap parses.
-    let args = Args::parse_from(args::normalize_knob_args(std::env::args_os()));
+    let argv = args::normalize_knob_args(std::env::args_os());
+    // A retired flag stops the command before anything else happens — before
+    // clap could object to something unrelated, and before any update check,
+    // MDB sync, or machine detection.
+    if let Some(notice) = args::retired_flag_notice(&argv) {
+        anyhow::bail!(notice);
+    }
+    let args = Args::parse_from(argv);
     shell::set_trace(args.globals.trace);
     // The `-K` overlay (§5.1): every DB snapshot this command reads carries
     // these values, nothing persists them.
@@ -128,17 +137,27 @@ fn main() -> Res<()> {
     // Never on a compute node (D11), never for `cactup knob` (above), and
     // `cactup update` does it itself.
     if !compute_node && !updating && !configuring {
+        // An update re-execs into the new build, which prints its own timing;
+        // this process's part of it is not reported.
+        let span = timing::span("auto-update check");
         update::maybe_auto_update(&ctx);
+        drop(span);
         if gix::interrupt::is_triggered() {
+            timing::report();
             anyhow::bail!("interrupted");
         }
     }
     // §17: a binary pinned to an older MDB generation keeps working on the
     // last revision of that generation; say so loudly until it is updated.
     // `cactup update` reports it after its own sync instead.
-    if build_info::is_dist() && !compute_node && !updating && ctx.globals.mdb_path.is_none()
-        && let Some(notice) = update::mdb_generation_notice()
-    {
+    let notice = (build_info::is_dist() && !compute_node && !updating
+        && ctx.globals.mdb_path.is_none())
+    .then(|| {
+        let _span = timing::span("mdb generation notice");
+        update::mdb_generation_notice()
+    })
+    .flatten();
+    if let Some(notice) = notice {
         use colored::Colorize;
         eprintln!("\n{}\n", notice.yellow().bold());
     }
@@ -162,6 +181,7 @@ fn main() -> Res<()> {
         _ => false,
     };
 
+    let command_span = timing::span("command");
     let result = match args.command {
         Commands::Releases { all } => commands::releases::dispatch(&ctx, all),
         Commands::List => commands::list::dispatch(&ctx),
@@ -183,11 +203,14 @@ fn main() -> Res<()> {
         Commands::Update { check, prune } => commands::update::dispatch(&ctx, check, prune),
         Commands::Cache(cmd) => commands::cache::dispatch(&ctx, cmd),
     };
+    drop(command_span);
 
     // Wisdom after failure would be flippant — and gating on Ok also keeps
     // anyhow's after-main `Error:` print from landing below decoration.
     if result.is_ok() && !suppress_wisdom {
+        let _span = timing::span("wisdom");
         commands::wisdom::maybe_print(&ctx);
     }
+    timing::report();
     result
 }

@@ -1,5 +1,5 @@
 #! /bin/bash
-# db1.hpc.lsu.edu runscript (variant "default"), ported from simfactory2
+# db1.hpc.lsu.edu runscript (script "default"), ported from simfactory2
 # mdb/runscripts/db-new.run (upstream's native rewrite — no more Singularity
 # image; module-loads gcc/cuda/mpich and srun-launches the binary directly).
 #

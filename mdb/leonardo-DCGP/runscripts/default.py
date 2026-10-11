@@ -1,7 +1,7 @@
-# LEONARDO DCGP runscript (variant "default"), ported from simfactory2
+# LEONARDO DCGP runscript (script "default"), ported from simfactory2
 # mdb/runscripts/leonardo-DCGP.run.
 #
-# This is a .py variant (design §6.1): the old script used computed float
+# This is a .py script (design §6.1): the old script used computed float
 # templates that the literal-only @NAME@ engine (D7) cannot express —
 #   @(1.0*@NUM_PROCS@/@NODES@)@                       (MPI processes per node)
 #   @(1.0*(@NUM_PROCS@*@NUM_THREADS@)/(@NODES@*@MAX_CPUS_PER_NODE@))@ (OpenMP threads per core)
@@ -11,7 +11,7 @@
 # NUM_PROCS -> TASKS, NUM_THREADS -> CPUS_PER_TASK. Metadata dir SIMFACTORY/
 # -> .cactup/ (design §9.3).
 #
-# env-setup is NOT auto-prepended for .py variants (design §6.1); it is
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); it is
 # emitted right after the shebang, where cactup would have placed it for a
 # .sh runscript.
 

@@ -1,9 +1,9 @@
-# et-juphub optionlist (variant "default"), ported from simfactory2
+# et-juphub optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/et-juphub.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["local"]
+[cactup.runs-on]
+queues = ["local"]
+gpu    = false
 
 [options]
 # generic

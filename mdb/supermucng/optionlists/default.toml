@@ -1,9 +1,9 @@
-# SuperMUC-NG optionlist (variant "default"), ported from simfactory2
+# SuperMUC-NG optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/supermucng.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["general"]
+[cactup.runs-on]
+queues = ["general"]
+gpu    = false
 
 [options]
 VERSION = "supermuc_ng_intel-2021-09-30"

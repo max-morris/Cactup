@@ -3,7 +3,7 @@
 # cluster"). Upstream simfactory fragments Deep Bayou into four machine defs —
 # db1.hpc.lsu.edu (native), db-sing-nv (Singularity+CUDA), db-sing-cpu
 # (Singularity CPU), etworkshop-db (workshop image) — an artifact of
-# simfactory having no build-variant/universe concept. Cactup folds them back
+# simfactory having no build-flavor/universe concept. Cactup folds them back
 # into this single machine:
 #
 #   build flavor        optionlist   build universe   run/submit scripts
@@ -17,7 +17,7 @@
 # implicit default (§4.2). What used to be three cactup queues (gpu, sing-nv,
 # sing-cpu) impersonating partition names purely to route a built config to
 # its matching run/submit scripts is now first-class: each submitscript/
-# runscript variant below carries a `universes` compatibility list, and
+# runscript below carries a `build-universes` compatibility list, and
 # selection is filtered by the CONFIG's build universe (host / et-sing /
 # et-sing-cpu), defaulting to "host" when unset (§4.8, "implicit host
 # universe"). This relies on the one-directional D12 cross-check (§4.4): the
@@ -26,7 +26,7 @@
 # The upstream "etworkshop-db" workflow (build from
 # *inside* the workshop container) is still just the sing-nv flavor built with
 # `--no-universe` (its optionlist and run/submit scripts were byte-identical
-# to db-sing-nv); no separate variant is needed.
+# to db-sing-nv); no separate machine is needed.
 #
 # The dir name stays "db1.hpc.lsu.edu" (the login-node ini filename) even
 # though the native config self-names "db".
@@ -157,20 +157,16 @@ gpu = true
 # or with no universe recorded, which resolves to "host"); both Singularity
 # flavors share the "sing" scripts, gated on the et-sing/et-sing-cpu build
 # universes (upstream db-sing-cpu reused db-sing-nv's run/submit). build-universes
-# on the "default"/"test" variants keep them from also matching Singularity
+# on the "default"/"test" scripts keep them from also matching Singularity
 # builds now that there is only one queue to filter on.
-[variants.submitscript]
+[submitscripts]
 "default"   = { queues = ["gpu"], build-universes = ["host"] }
 "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
 "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
 "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
 
-[variants.runscript]
+[runscripts]
 "default"   = { queues = ["gpu"], build-universes = ["host"] }
 "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
 "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
 "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
-
-[variants.optionlist]
-# Three build flavors; `config build` must pick one with --variant (§4.4).
-variants = ["native", "sing-nv", "sing-cpu"]

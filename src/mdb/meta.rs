@@ -1,4 +1,4 @@
-//! `<machine>/meta.toml` model, load-time validation, and variant/queue/
+//! `<machine>/meta.toml` model, load-time validation, and script/queue/
 //! universe resolution (spec §4.2, §4.4, §4.8, §11.2).
 //!
 //! Every table below is `deny_unknown_fields`: a key cactup does not model is
@@ -43,9 +43,9 @@ pub enum Phase {
     Run,
 }
 
-/// The per-queue script kinds (§4.4). `BuildSubmit` is the `build submit`
-/// groundwork (not yet wired to a command): no machine declares its variant
-/// table today, so it must validate and display as cleanly absent everywhere.
+/// The per-queue script kinds (§4.4). `BuildSubmit` is opt-in: a machine
+/// that never queues a build declares no `[buildsubmitscripts]`, so it must
+/// validate and display as cleanly absent everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptKind {
     Submit,
@@ -54,7 +54,7 @@ pub enum ScriptKind {
 }
 
 impl ScriptKind {
-    /// The `[variants.<kind>]` table name / script directory stem.
+    /// The script directory stem, which is also the kind's `meta.toml` table.
     pub fn dir_name(&self) -> &'static str {
         match self {
             ScriptKind::Submit => "submitscripts",
@@ -64,10 +64,15 @@ impl ScriptKind {
     }
 
     fn table_name(&self) -> &'static str {
+        self.dir_name()
+    }
+
+    /// What one script of this kind is called in a message.
+    pub fn noun(&self) -> &'static str {
         match self {
-            ScriptKind::Submit => "variants.submitscript",
-            ScriptKind::Run => "variants.runscript",
-            ScriptKind::BuildSubmit => "variants.buildsubmitscript",
+            ScriptKind::Submit => "submit script",
+            ScriptKind::Run => "run script",
+            ScriptKind::BuildSubmit => "build-submit script",
         }
     }
 }
@@ -88,7 +93,13 @@ pub struct Meta {
     pub scheduler: Scheduler,
     #[serde(default)]
     pub queues: IndexMap<String, Queue>,
-    pub variants: Variants,
+    /// Script routes per kind (§4.4): which script file serves which queue.
+    #[serde(default = "ScriptTable::submit", deserialize_with = "ScriptTable::de_submit")]
+    pub submitscripts: ScriptTable,
+    #[serde(default = "ScriptTable::run", deserialize_with = "ScriptTable::de_run")]
+    pub runscripts: ScriptTable,
+    #[serde(default = "ScriptTable::build_submit", deserialize_with = "ScriptTable::de_build_submit")]
+    pub buildsubmitscripts: ScriptTable,
     #[serde(default)]
     pub universes: IndexMap<String, Universe>,
     /// cactup-written metadata; today only the `machine create --from-existing`
@@ -356,7 +367,7 @@ pub struct Queue {
     /// Build-universe compatibility list (§4.4): the queue only serves configs
     /// whose build universe is listed. `None` = compatible with ALL universes;
     /// an explicitly empty list is a validation error. Gates purely on the
-    /// config's *build* universe, exactly like the same-named script-variant
+    /// config's *build* universe, exactly like the same-named script-route
     /// key — hence the `build-` prefix.
     pub build_universes: Option<Vec<String>>,
     /// Per-queue hardware overrides (§4.2): each falls back to the top-level
@@ -383,63 +394,43 @@ impl Queue {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Variants {
-    #[serde(default)]
-    pub submitscript: ScriptVariants,
-    #[serde(default)]
-    pub runscript: ScriptVariants,
-    #[serde(default)]
-    pub buildsubmitscript: ScriptVariants,
-    #[serde(default)]
-    pub optionlist: OptionlistVariants,
+/// One script kind's table — `[submitscripts]`, `[runscripts]` or
+/// `[buildsubmitscripts]` (§4.2, §4.4). Every key names a script file in the
+/// kind's directory, and its entry is that script's route: the queues it
+/// serves, plus optional selection and wrapping facts. There are no reserved
+/// keys, so a script may be named anything, `default` included. A script
+/// serves exactly the queues it lists; there is no fallback script.
+#[derive(Debug)]
+pub struct ScriptTable {
+    /// Which table this is, so its errors can say which kind of script is
+    /// missing.
+    pub kind: ScriptKind,
+    pub routes: IndexMap<String, Route>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OptionlistVariants {
-    /// Names of `optionlists/<variant>.toml` files; selected at build time
-    /// via --variant (§4.4). Their gpu/queue/test flags live in each file's
-    /// `[cactup]` header (§7.8), not here.
-    #[serde(default)]
-    pub variants: Vec<String>,
-}
-
-/// One `[variants.submitscript]` / `[variants.runscript]` table (§4.2, §4.4).
-///
-/// Every key names a variant — except the single reserved *setting*
-/// `default-universe` (§4.8 step 4), distinguishable because a variant entry
-/// is an array or table while the setting is a string.
-#[derive(Debug, Default)]
-pub struct ScriptVariants {
-    pub variants: IndexMap<String, VariantEntry>,
-    /// Universe for variants that don't name their own (§4.8 step 4).
-    pub default_universe: Option<String>,
-}
-
-/// A variant entry, normalized from the array shorthand (queues only) or the
+/// A script's route, normalized from the array shorthand (queues only) or the
 /// inline-table form (§4.2).
 #[derive(Debug, Clone)]
-pub struct VariantEntry {
+pub struct Route {
     pub queues: Vec<String>,
     pub universe: Option<String>,
-    /// Build-universe compatibility list (§4.4): the variant only serves configs
-    /// whose build universe is listed. `None` = compatible with ALL universes;
+    /// Build-universe compatibility list (§4.4): the script only serves configs
+    /// whose build universe is listed — for a run or submit script, configs
+    /// whose binary it can run; for a buildsubmitscript, builds whose `make`
+    /// runs in that universe. `None` = compatible with ALL universes;
     /// an explicitly empty list is a validation error. Gates purely on the
     /// config's *build* universe (never the run/submit universe) — hence the
     /// `build-` prefix on the TOML key.
     pub build_universes: Option<Vec<String>>,
     pub test: bool,
-    pub default: bool,
     /// Default total task count for runs launched through this script when no
     /// process-layout flag (-n/-T/-t) is given; overrides the fill-the-node
     /// default of §8.5.
     pub tasks: Option<u32>,
 }
 
-impl VariantEntry {
-    /// Whether this variant may serve a config built in `universe` (§4.4).
+impl Route {
+    /// Whether this script may serve a config built in `universe` (§4.4).
     pub fn compatible_with(&self, universe: &str) -> bool {
         self.build_universes
             .as_ref()
@@ -448,73 +439,86 @@ impl VariantEntry {
     }
 }
 
-/// The inline-table form of a variant entry. Deserialized on its own (rather
+/// The inline-table form of a route. Deserialized on its own (rather
 /// than as one arm of an untagged enum) so that a mistyped key reports as
 /// serde's own "unknown field" error instead of a shapeless no-variant-matched
 /// one.
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct VariantEntryRaw {
+struct RouteRaw {
     queues: Vec<String>,
     universe: Option<String>,
     build_universes: Option<Vec<String>>,
     #[serde(default)]
     test: bool,
-    #[serde(default)]
-    default: bool,
     tasks: Option<u32>,
 }
 
-impl From<VariantEntryRaw> for VariantEntry {
-    fn from(raw: VariantEntryRaw) -> Self {
-        let VariantEntryRaw { queues, universe, build_universes, test, default, tasks } = raw;
-        VariantEntry { queues, universe, build_universes, test, default, tasks }
+impl From<RouteRaw> for Route {
+    fn from(raw: RouteRaw) -> Self {
+        let RouteRaw { queues, universe, build_universes, test, tasks } = raw;
+        Route { queues, universe, build_universes, test, tasks }
     }
 }
 
 /// The array shorthand: queues only, every other field defaulted.
-impl From<Vec<String>> for VariantEntry {
+impl From<Vec<String>> for Route {
     fn from(queues: Vec<String>) -> Self {
-        VariantEntry { queues, universe: None, build_universes: None, test: false, default: false, tasks: None }
+        Route { queues, universe: None, build_universes: None, test: false, tasks: None }
     }
 }
 
-impl<'de> Deserialize<'de> for ScriptVariants {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl ScriptTable {
+    fn empty(kind: ScriptKind) -> ScriptTable {
+        ScriptTable { kind, routes: IndexMap::new() }
+    }
+    fn submit() -> ScriptTable {
+        ScriptTable::empty(ScriptKind::Submit)
+    }
+    fn run() -> ScriptTable {
+        ScriptTable::empty(ScriptKind::Run)
+    }
+    fn build_submit() -> ScriptTable {
+        ScriptTable::empty(ScriptKind::BuildSubmit)
+    }
+    fn de_submit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ScriptTable, D::Error> {
+        ScriptTable::deserialize_as(ScriptKind::Submit, d)
+    }
+    fn de_run<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ScriptTable, D::Error> {
+        ScriptTable::deserialize_as(ScriptKind::Run, d)
+    }
+    fn de_build_submit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ScriptTable, D::Error> {
+        ScriptTable::deserialize_as(ScriptKind::BuildSubmit, d)
+    }
+
+    fn deserialize_as<'de, D>(kind: ScriptKind, deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error;
         let raw = IndexMap::<String, toml::Value>::deserialize(deserializer)?;
-        let mut out = ScriptVariants::default();
+        let mut out = ScriptTable::empty(kind);
         for (key, value) in raw {
-            if key == "default-universe" {
-                let name = value
-                    .as_str()
-                    .ok_or_else(|| D::Error::custom("default-universe must be a string"))?;
-                out.default_universe = Some(name.to_owned());
-            } else {
-                // Dispatch on the shape first so the error can be specific:
-                // a wrong *shape* names both accepted forms, while a wrong key
-                // inside the table form is serde's own "unknown field" list.
-                let entry: VariantEntry = match &value {
-                    toml::Value::Array(_) => value
-                        .try_into::<Vec<String>>()
-                        .map(VariantEntry::from)
-                        .map_err(|e| D::Error::custom(format!("variant \"{key}\": {e}")))?,
-                    toml::Value::Table(_) => value
-                        .try_into::<VariantEntryRaw>()
-                        .map(VariantEntry::from)
-                        .map_err(|e| D::Error::custom(format!("variant \"{key}\": {e}")))?,
-                    _ => {
-                        return Err(D::Error::custom(format!(
-                            "variant \"{key}\" must be a [\"queue\", …] array or a \
-                             {{ queues = […], universe = \"…\", build-universes = […], test = …, default = …, tasks = … }} table"
-                        )))
-                    }
-                };
-                out.variants.insert(key, entry);
-            }
+            // Dispatch on the shape first so the error can be specific: a
+            // wrong *shape* names both accepted forms, while a wrong key
+            // inside the table form is serde's own "unknown field" list.
+            let entry: Route = match &value {
+                toml::Value::Array(_) => value
+                    .try_into::<Vec<String>>()
+                    .map(Route::from)
+                    .map_err(|e| D::Error::custom(format!("script \"{key}\": {e}")))?,
+                toml::Value::Table(_) => value
+                    .try_into::<RouteRaw>()
+                    .map(Route::from)
+                    .map_err(|e| D::Error::custom(format!("script \"{key}\": {e}")))?,
+                _ => {
+                    return Err(D::Error::custom(format!(
+                        "script \"{key}\" must be a [\"queue\", …] array or a \
+                         {{ queues = […], universe = \"…\", build-universes = […], test = …, tasks = … }} table"
+                    )))
+                }
+            };
+            out.routes.insert(key, entry);
         }
         Ok(out)
     }
@@ -692,118 +696,85 @@ pub struct Origin {
     pub hash: String,
 }
 
-impl ScriptVariants {
-    /// The variants of one partition — test-marked or normal (§11.2) —
+impl ScriptTable {
+    /// The scripts of one partition — test-marked or normal (§11.2) —
     /// regardless of universe compatibility (validation-side view).
-    fn partition_all(&self, test: bool) -> impl Iterator<Item = (&str, &VariantEntry)> {
-        self.variants
+    fn partition_all(&self, test: bool) -> impl Iterator<Item = (&str, &Route)> {
+        self.routes
             .iter()
             .filter(move |(_, e)| e.test == test)
             .map(|(n, e)| (n.as_str(), e))
     }
 
-    /// The variants of one partition that are compatible with `universe`
+    /// The scripts of one partition that are compatible with `universe`
     /// (§4.4/§11.2) — every selection candidate set is filtered this way.
     pub fn partition<'s>(
         &'s self,
         test: bool,
         universe: &str,
-    ) -> impl Iterator<Item = (&'s str, &'s VariantEntry)> {
+    ) -> impl Iterator<Item = (&'s str, &'s Route)> {
         self.partition_all(test).filter(move |(_, e)| e.compatible_with(universe))
     }
 
-    /// The default variant of a (universe-filtered) partition: the
-    /// `default = true` entry, or the sole variant of the partition (§4.2).
-    pub fn partition_default<'s>(&'s self, test: bool, universe: &str) -> Option<(&'s str, &'s VariantEntry)> {
-        let mut iter = self.partition(test, universe);
-        let first = iter.next()?;
-        if iter.next().is_none() {
-            return Some(first);
-        }
-        self.partition(test, universe).find(|(_, e)| e.default)
-    }
-
-    /// Select the variant serving `queue` for a config built in `universe`
-    /// (§4.4) — pass `HOST_UNIVERSE` when the config records none — honoring
-    /// the §11.2 test partitioning (`prefer_test` = this is a `test …`
-    /// command) and the `--variant` escape hatch.
-    pub fn select(&self, queue: &str, universe: &str, prefer_test: bool, explicit: Option<&str>) -> Res<(&str, &VariantEntry)> {
-        let test_set_nonempty = self.partition(true, universe).next().is_some();
-        let use_test = prefer_test && test_set_nonempty;
-
-        if let Some(name) = explicit {
-            let (name, entry) = self
-                .variants
-                .get_key_value(name)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "no variant named \"{name}\" (known: {})",
-                        self.variants.keys().cloned().collect::<Vec<_>>().join(", ")
-                    )
-                })?;
-            if use_test && !entry.test {
-                bail!("variant \"{name}\" is not test-marked, but this machine has test variants"); // §11.2
-            }
-            if !prefer_test && entry.test {
-                bail!("variant \"{name}\" is test-only (test = true) and cannot serve a normal run"); // §11.2
-            }
-            if !entry.compatible_with(universe) {
-                bail!(
-                    "variant \"{name}\" is not compatible with build universe \"{universe}\" \
-                     (build-universes = [{}])",
-                    entry.build_universes.as_deref().unwrap_or_default().join(", ")
-                ); // §4.4
-            }
-            return Ok((name.as_str(), entry));
-        }
-
-        if let Some(found) = self
-            .partition(use_test, universe)
-            .find(|(_, e)| e.queues.iter().any(|q| q == queue))
-        {
+    /// Route `queue` to the script serving it for a config built in
+    /// `universe` (§4.4) — pass `HOST_UNIVERSE` when the config records none.
+    /// `test` picks the partition (§11.2): a `test …` command looks only at
+    /// test-marked scripts, a normal one only at the rest, and neither ever
+    /// borrows from the other — a testsuite needs a script written to run it,
+    /// and a normal script lacks the variables a test run defines anyway. The
+    /// queue is the only thing that picks a script: nothing a user names for
+    /// some other purpose (an optionlist flavor) can reach this, and there is
+    /// no fallback script — a queue no script lists is an error naming the
+    /// queues that are served.
+    pub fn route(&self, queue: &str, universe: &str, test: bool) -> Res<(&str, &Route)> {
+        if let Some(found) = self.partition(test, universe).find(|(_, e)| e.queues.iter().any(|q| q == queue)) {
             return Ok(found);
         }
-        self.partition_default(use_test, universe).ok_or_else(|| {
-            anyhow!(
-                "no {}variant compatible with universe \"{universe}\" serves queue \"{queue}\" \
-                 and none is a compatible default",
-                if use_test { "test " } else { "" }
-            )
-        })
+        let mut served: Vec<&str> =
+            self.partition(test, universe).flat_map(|(_, e)| e.queues.iter().map(String::as_str)).collect();
+        served.sort();
+        served.dedup();
+        let what = format!("{}{}", if test { "test " } else { "" }, self.kind.noun());
+        let context = if universe == HOST_UNIVERSE {
+            String::new()
+        } else {
+            format!(" for configs built in universe \"{universe}\"")
+        };
+        if served.is_empty() {
+            bail!("no {what} serves queue \"{queue}\"{context}, nor any other queue");
+        }
+        bail!("no {what} serves queue \"{queue}\"{context} (served: {}); pick one of those with -q", served.join(", "));
     }
 }
 
 impl Meta {
-    pub fn script_variants(&self, kind: ScriptKind) -> &ScriptVariants {
+    pub fn scripts(&self, kind: ScriptKind) -> &ScriptTable {
         match kind {
-            ScriptKind::Submit => &self.variants.submitscript,
-            ScriptKind::Run => &self.variants.runscript,
-            ScriptKind::BuildSubmit => &self.variants.buildsubmitscript,
+            ScriptKind::Submit => &self.submitscripts,
+            ScriptKind::Run => &self.runscripts,
+            ScriptKind::BuildSubmit => &self.buildsubmitscripts,
         }
     }
 
     /// Whether this machine can hand a BUILD to its scheduler: it needs both a
-    /// buildsubmitscript variant to generate and a submit command to run.
-    // Pinned foundation API (build submit groundwork); only tests call this
-    // so far — the command that consumes it lands later.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// buildsubmitscript to generate and a submit command to run.
     pub fn can_submit_builds(&self) -> bool {
-        !self.variants.buildsubmitscript.variants.is_empty() && self.scheduler.submit.is_some()
+        !self.buildsubmitscripts.routes.is_empty() && self.scheduler.submit.is_some()
     }
 
-    /// The queue used when -q is omitted, restricted to queues compatible with
-    /// the config's build `universe` (§4.4): the `default = true` queue among
-    /// them, or the sole compatible queue.
-    pub fn default_queue(&self, universe: &str) -> Option<&str> {
-        let mut compatible = self.queues.iter().filter(|(_, q)| q.compatible_with(universe));
+    /// The queue used when -q is omitted: the `default = true` queue, or the
+    /// sole queue. A sim/test job passes the config's build `universe` to
+    /// restrict the pick to queues that serve its binary (§4.4); a build job
+    /// passes `None`, since where `make` runs says nothing about where the
+    /// binary may (§7.9).
+    pub fn default_queue(&self, universe: Option<&str>) -> Option<&str> {
+        let serves = |q: &Queue| universe.is_none_or(|u| q.compatible_with(u));
+        let mut compatible = self.queues.iter().filter(|(_, q)| serves(q));
         let first = compatible.next()?;
         if compatible.next().is_none() {
             return Some(first.0.as_str());
         }
-        self.queues
-            .iter()
-            .find(|(_, q)| q.default && q.compatible_with(universe))
-            .map(|(n, _)| n.as_str())
+        self.queues.iter().find(|(_, q)| q.default && serves(q)).map(|(n, _)| n.as_str())
     }
 
     /// The scheduler-facing name of queue `key` (what `@QUEUE@` resolves to):
@@ -933,7 +904,7 @@ impl Meta {
             bail!("more than one queue is marked default = true: {}", defaults.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         }
 
-        // Queue build-universe gates (§4.4), mirroring the script-variant lists:
+        // Queue build-universe gates (§4.4), mirroring the script-route lists:
         // non-empty and naming known universes.
         for (name, queue) in &self.queues {
             if let Some(universes) = &queue.build_universes {
@@ -949,10 +920,6 @@ impl Meta {
                     }
                 }
             }
-        }
-
-        if self.variants.optionlist.variants.is_empty() {
-            bail!("[variants.optionlist] lists no variants; at least one optionlist is required");
         }
 
         // §10: `blocking-submit` is an extra *flavour* of `submit`, never a
@@ -999,10 +966,8 @@ impl Meta {
         // legal reference (§4.8), declared or implicit.
         let mut refs: Vec<(String, &Option<String>)> = vec![("[build].universe".into(), &self.build.universe)];
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
-            let sv = self.script_variants(kind);
-            refs.push((format!("[{}].default-universe", kind.table_name()), &sv.default_universe));
-            for (vname, entry) in &sv.variants {
-                refs.push((format!("[{}] variant \"{vname}\"", kind.table_name()), &entry.universe));
+            for (name, entry) in &self.scripts(kind).routes {
+                refs.push((format!("[{}] script \"{name}\"", kind.table_name()), &entry.universe));
             }
         }
         for (what, reference) in refs {
@@ -1025,39 +990,48 @@ impl Meta {
     }
 
     /// Per-kind §4.2 checks, applied per §11.2 partition: sane queue and
-    /// universe refs, at most one default (GLOBAL per partition, not
-    /// per-universe), per-universe-unambiguous queue mappings, and full queue
-    /// coverage for the host context only — for other universes a miss is a
-    /// selection-time error (§4.4). The test partition is only checked when
-    /// it is non-empty.
+    /// universe refs, and per-universe-unambiguous queue mappings. Full queue
+    /// coverage is owed only by the normal submit and run scripts, and only
+    /// for the host context — those are what a plain `sim submit` reaches for
+    /// on every queue. Test scripts and buildsubmitscripts may serve just some
+    /// queues (tests or builds offered on some partitions only), and so may a
+    /// non-host universe's scripts; there a queue without a script is a
+    /// selection-time error naming the queues that have one (§4.4, §11.2).
     fn validate_script_kind(&self, kind: ScriptKind) -> Res<()> {
-        let sv = self.script_variants(kind);
+        let sv = self.scripts(kind);
 
-        // buildsubmitscript is opt-in: a machine that never hands builds to a
-        // scheduler declares no variants for it and owes no queue coverage, so
-        // an empty table is "not adopted", not "fails to cover its queues".
-        // Submit and Run stay mandatory — a machine that cannot run anything
-        // must still fail at load rather than at the first `sim run`.
-        if sv.variants.is_empty() && kind == ScriptKind::BuildSubmit {
+        // buildsubmitscripts are opt-in: a machine that never hands builds to
+        // a scheduler declares none. Submit and Run stay mandatory — a machine
+        // that cannot run anything must fail at load rather than at the first
+        // `sim run`.
+        if sv.routes.is_empty() && kind == ScriptKind::BuildSubmit {
             return Ok(());
         }
 
-        for (name, entry) in &sv.variants {
+        for (name, entry) in &sv.routes {
             for queue in &entry.queues {
                 if !self.queues.contains_key(queue) {
-                    bail!("variant \"{name}\" maps unknown queue \"{queue}\"");
+                    bail!("script \"{name}\" maps unknown queue \"{queue}\"");
                 }
+            }
+            // A build job is never a test and takes its shape from [build],
+            // so these would only ever be silently ignored there.
+            if kind == ScriptKind::BuildSubmit && (entry.test || entry.tasks.is_some()) {
+                bail!(
+                    "build-submit script \"{name}\" sets `test` or `tasks`, which a build job \
+                     never reads (its shape comes from [build])"
+                );
             }
             if let Some(universes) = &entry.build_universes {
                 if universes.is_empty() {
                     bail!(
-                        "variant \"{name}\" declares an empty build-universes list; omit the key \
+                        "script \"{name}\" declares an empty build-universes list; omit the key \
                          to be compatible with all universes" // §4.4
                     );
                 }
                 for u in universes {
                     if !self.is_known_universe(u) {
-                        bail!("variant \"{name}\" lists unknown build universe \"{u}\"");
+                        bail!("script \"{name}\" lists unknown build universe \"{u}\"");
                     }
                 }
             }
@@ -1070,26 +1044,19 @@ impl Meta {
 
         for test in [false, true] {
             let partition: Vec<_> = sv.partition_all(test).collect();
+            let owes_coverage = !test && kind != ScriptKind::BuildSubmit;
             if partition.is_empty() {
-                if !test && !self.queues.is_empty() {
-                    bail!("no {} variants declared", if test { "test" } else { "normal" });
+                if owes_coverage && !self.queues.is_empty() {
+                    bail!("no normal scripts declared");
                 }
-                continue; // empty test partition: tests borrow the normal one (§11.2)
+                continue;
             }
-            let label = if test { "test-partition " } else { "" };
-
-            let defaults: Vec<_> = partition.iter().filter(|(_, e)| e.default).collect();
-            if defaults.len() > 1 {
-                bail!(
-                    "more than one {label}variant is marked default = true: {}",
-                    defaults.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
-                );
-            }
+            let label = if test { "test " } else { "" };
 
             for universe in &contexts {
                 for (queue, qdef) in &self.queues {
                     // A queue gated to other build universes cannot be reached
-                    // in this context — no variant coverage is owed for it.
+                    // in this context — no script coverage is owed for it.
                     if !qdef.compatible_with(universe) {
                         continue;
                     }
@@ -1099,20 +1066,13 @@ impl Meta {
                         .collect();
                     if serving.len() > 1 {
                         bail!(
-                            "queue \"{queue}\" is mapped by more than one {label}variant \
+                            "queue \"{queue}\" is mapped by more than one {label}script \
                              compatible with universe \"{universe}\": {}",
                             serving.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
                         );
                     }
-                    // Coverage is a load-time obligation only for the host
-                    // context (§4.4).
-                    if *universe == HOST_UNIVERSE
-                        && serving.is_empty()
-                        && sv.partition_default(test, universe).is_none()
-                    {
-                        bail!(
-                            "queue \"{queue}\" is served by no {label}variant and none is marked default = true" // §4.2
-                        );
+                    if owes_coverage && *universe == HOST_UNIVERSE && serving.is_empty() {
+                        bail!("queue \"{queue}\" is served by no script"); // §4.2
                     }
                 }
             }
@@ -1227,7 +1187,7 @@ pub fn validate_path_knob(key: &str, value: &str) -> Res<String> {
 mod tests {
     use super::*;
 
-    /// A multi-queue, multi-variant machine exercising the §4.2 features
+    /// A multi-queue, multi-script machine exercising the §4.2 features
     /// (modeled on the spec's `mike` example).
     const MIKE: &str = r#"
         [machine]
@@ -1267,18 +1227,16 @@ mod tests {
         max-gpus-per-node = 4
         threads-per-cpu = 2
 
-        [variants.submitscript]
-        "slurm-cpu" = { queues = ["checkpt", "single"], default = true }
+        [submitscripts]
+        "slurm-cpu" = { queues = ["checkpt", "single"] }
         "slurm-gpu" = ["gpu"]
-        "slurm-test" = { queues = ["checkpt", "single"], test = true, default = true }
+        "slurm-test" = { queues = ["checkpt", "single"], test = true }
 
-        [variants.runscript]
-        "cpu" = { queues = ["checkpt", "single"], default = true }
+        [runscripts]
+        "cpu" = { queues = ["checkpt", "single"] }
         "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }
-        "test-cpu" = { queues = ["checkpt", "single"], test = true, default = true, tasks = 2 }
+        "test-cpu" = { queues = ["checkpt", "single"], test = true, tasks = 2 }
 
-        [variants.optionlist]
-        variants = ["cpu", "gpu", "test-cpu"]
 
         [universes.et-sif]
         kind = "apptainer"
@@ -1295,14 +1253,13 @@ mod tests {
     fn parses_and_validates_the_spec_example() {
         let meta = mike();
         assert_eq!(meta.machine.name.as_deref(), Some("mike"));
-        assert_eq!(meta.default_queue(HOST_UNIVERSE), Some("checkpt"));
+        assert_eq!(meta.default_queue(Some(HOST_UNIVERSE)), Some("checkpt"));
         assert!(meta.queues["gpu"].gpu);
-        assert_eq!(meta.variants.optionlist.variants, ["cpu", "gpu", "test-cpu"]);
         // Array shorthand and inline-table forms normalize identically.
-        let sv = &meta.variants.submitscript.variants;
+        let sv = &meta.submitscripts.routes;
         assert_eq!(sv["slurm-gpu"].queues, ["gpu"]);
-        assert!(!sv["slurm-gpu"].test && !sv["slurm-gpu"].default);
-        assert!(sv["slurm-test"].test && sv["slurm-test"].default);
+        assert!(!sv["slurm-gpu"].test);
+        assert!(sv["slurm-test"].test);
     }
 
     /// §4.2's schema is closed: a key cactup does not model is a parse error
@@ -1321,8 +1278,8 @@ mod tests {
         // Per-queue.
         let msg = err(MIKE.replace("[queues.single]", "[queues.single]\n        ppn = 16"));
         assert!(msg.contains("unknown field `ppn`"), "{msg}");
-        // Inside a variant's inline table: the message names the variant too,
-        // since the table itself is keyed by variant name.
+        // Inside a script's inline table: the message names the script too,
+        // since the table itself is keyed by script name.
         let msg = err(MIKE.replace(r#""slurm-gpu" = ["gpu"]"#, r#""slurm-gpu" = { queues = ["gpu"], tets = true }"#));
         assert!(msg.contains("unknown field `tets`") && msg.contains("slurm-gpu"), "{msg}");
         // A wrong *shape* still reports as a shape problem, not a key one.
@@ -1411,50 +1368,72 @@ mod tests {
     }
 
     #[test]
-    fn script_selection_follows_queue_then_default() {
+    fn script_selection_follows_the_queue() {
         let meta = mike();
-        let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", "host", false, None).unwrap().0, "gpu-sing");
-        assert_eq!(rs.select("single", "host", false, None).unwrap().0, "cpu");
+        let rs = meta.scripts(ScriptKind::Run);
+        assert_eq!(rs.route("gpu", "host", false).unwrap().0, "gpu-sing");
+        assert_eq!(rs.route("single", "host", false).unwrap().0, "cpu");
         // Test commands get the test partition; normal never does (§11.2).
-        assert_eq!(rs.select("single", "host", true, None).unwrap().0, "test-cpu");
-        assert!(rs.select("single", "host", false, Some("test-cpu")).is_err());
-        // With a non-empty test set, --variant must name a test variant.
-        assert!(rs.select("single", "host", true, Some("cpu")).is_err());
-        assert!(rs.select("single", "host", false, Some("nope")).is_err());
+        assert_eq!(rs.route("single", "host", true).unwrap().0, "test-cpu");
         // gpu-sing carries its universe association (§4.8 step 3).
-        assert_eq!(rs.select("gpu", "host", false, None).unwrap().1.universe.as_deref(), Some("et-sif"));
+        assert_eq!(rs.route("gpu", "host", false).unwrap().1.universe.as_deref(), Some("et-sif"));
         // test-cpu carries its default-tasks setting (§4.2); cpu has none.
-        assert_eq!(rs.select("single", "host", true, None).unwrap().1.tasks, Some(2));
-        assert_eq!(rs.select("single", "host", false, None).unwrap().1.tasks, None);
+        assert_eq!(rs.route("single", "host", true).unwrap().1.tasks, Some(2));
+        assert_eq!(rs.route("single", "host", false).unwrap().1.tasks, None);
     }
 
+    /// A test never borrows a normal script (§11.2): a testsuite needs a
+    /// script written to run it, and a normal one references variables a
+    /// test run does not define. A queue no test script lists is an error
+    /// naming the queues that have one; with no test script at all, every
+    /// queue is.
     #[test]
-    fn test_partition_falls_back_to_normal_when_empty() {
+    fn tests_never_borrow_normal_scripts() {
+        let meta = mike();
+        let rs = meta.scripts(ScriptKind::Run);
+        let err = format!("{:#}", rs.route("gpu", "host", true).unwrap_err());
+        assert!(err.contains("no test run script serves queue \"gpu\" (served: checkpt, single)"), "{err}");
+
         let mut meta = mike();
-        meta.variants.runscript.variants.shift_remove("test-cpu");
-        let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("single", "host", true, None).unwrap().0, "cpu");
-        // And --variant may then name a normal variant.
-        assert_eq!(rs.select("gpu", "host", true, Some("gpu-sing")).unwrap().0, "gpu-sing");
+        meta.runscripts.routes.shift_remove("test-cpu");
+        let rs = meta.scripts(ScriptKind::Run);
+        let err = format!("{:#}", rs.route("single", "host", true).unwrap_err());
+        assert!(err.contains("nor any other queue"), "{err}");
     }
 
     #[test]
     fn validation_rejects_uncovered_queue() {
-        let broken = MIKE.replace("\"slurm-cpu\" = { queues = [\"checkpt\", \"single\"], default = true }",
+        let broken = MIKE.replace("\"slurm-cpu\" = { queues = [\"checkpt\", \"single\"] }",
                                   "\"slurm-cpu\" = [\"checkpt\"]");
         let meta: Meta = toml::from_str(&broken).unwrap();
         let err = format!("{:#}", meta.validate("mike").unwrap_err());
         assert!(err.contains("\"single\""), "unexpected error: {err}");
     }
 
+    /// Only the normal submit and run scripts owe every queue a script at
+    /// load: test scripts and buildsubmitscripts may serve some partitions
+    /// only, and a queue they skip is refused when it is chosen.
     #[test]
-    fn validation_rejects_double_default_and_double_mapping() {
-        let double_default = MIKE.replace("\"slurm-gpu\" = [\"gpu\"]",
-                                          "\"slurm-gpu\" = { queues = [\"gpu\"], default = true }");
-        let meta: Meta = toml::from_str(&double_default).unwrap();
-        assert!(meta.validate("mike").is_err());
+    fn only_normal_scripts_must_cover_every_queue() {
+        let partial = format!("{MIKE}\n[buildsubmitscripts]\n\"b\" = [\"gpu\"]\n");
+        let meta: Meta = toml::from_str(&partial).unwrap();
+        meta.validate("mike").unwrap();
+        let err = format!("{:#}", meta.scripts(ScriptKind::BuildSubmit).route("single", "host", false).unwrap_err());
+        assert!(err.contains("no build-submit script serves queue \"single\" (served: gpu)"), "{err}");
+    }
 
+    #[test]
+    fn build_submit_routes_reject_test_and_tasks() {
+        for extra in ["test = true", "tasks = 2"] {
+            let text = format!("{MIKE}\n[buildsubmitscripts]\n\"b\" = {{ queues = [\"gpu\"], {extra} }}\n");
+            let meta: Meta = toml::from_str(&text).unwrap();
+            let err = format!("{:#}", meta.validate("mike").unwrap_err());
+            assert!(err.contains("never reads"), "{extra}: {err}");
+        }
+    }
+
+    #[test]
+    fn validation_rejects_double_mapping() {
         let double_map = MIKE.replace("\"slurm-gpu\" = [\"gpu\"]",
                                       "\"slurm-gpu\" = [\"gpu\", \"single\"]");
         let meta: Meta = toml::from_str(&double_map).unwrap();
@@ -1553,17 +1532,14 @@ mod tests {
         assert_eq!(cmd, "ssh headnode 'cd /src && ''echo it'\\''s here'");
     }
 
+    /// A script table has no reserved keys: the old `default-universe`
+    /// setting (generation 1) is just a malformed script entry now, and is
+    /// refused naming both accepted entry shapes rather than silently taken.
     #[test]
-    fn default_universe_key_is_a_setting_not_a_variant() {
-        let with_default = MIKE.replace(
-            "[variants.runscript]",
-            "[variants.runscript]\ndefault-universe = \"et-sif\"",
-        );
-        let meta: Meta = toml::from_str(&with_default).unwrap();
-        meta.validate("mike").unwrap();
-        let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.default_universe.as_deref(), Some("et-sif"));
-        assert!(!rs.variants.contains_key("default-universe"));
+    fn default_universe_is_no_longer_a_setting() {
+        let with_default = MIKE.replace("[runscripts]", "[runscripts]\ndefault-universe = \"et-sif\"");
+        let err = toml::from_str::<Meta>(&with_default).unwrap_err().to_string();
+        assert!(err.contains("script \"default-universe\" must be a"), "{err}");
     }
 
     /// buildsubmitscript is the only OPTIONAL script kind. Skipping validation
@@ -1572,36 +1548,36 @@ mod tests {
     /// fail here at load rather than much later at the first `sim run`.
     #[test]
     fn only_buildsubmitscript_may_be_absent() {
-        // mike() itself declares no [variants.buildsubmitscript] and validates
+        // mike() itself declares no [buildsubmitscripts] and validates
         // fine — that is the opt-in kind doing its job.
         mike();
 
         // Empty its runscript table and the machine must be rejected.
         let no_runscripts = MIKE
-            .replace("\"cpu\" = { queues = [\"checkpt\", \"single\"], default = true }", "")
+            .replace("\"cpu\" = { queues = [\"checkpt\", \"single\"] }", "")
             .replace("\"gpu-sing\" = { queues = [\"gpu\"], universe = \"et-sif\" }", "")
             .replace(
-                "\"test-cpu\" = { queues = [\"checkpt\", \"single\"], test = true, default = true, tasks = 2 }",
+                "\"test-cpu\" = { queues = [\"checkpt\", \"single\"], test = true, tasks = 2 }",
                 "",
             );
         let meta: Meta = toml::from_str(&no_runscripts).unwrap();
-        assert!(meta.variants.runscript.variants.is_empty(), "fixture edit missed the runscript table");
+        assert!(meta.runscripts.routes.is_empty(), "fixture edit missed the runscript table");
         let err = format!("{:#}", meta.validate("mike").unwrap_err());
-        assert!(err.contains("no normal variants declared"), "unexpected error: {err}");
-        assert!(err.contains("variants.runscript"), "unexpected error: {err}");
+        assert!(err.contains("no normal scripts declared"), "unexpected error: {err}");
+        assert!(err.contains("in [runscripts]"), "unexpected error: {err}");
     }
 
     /// `build submit` groundwork (not yet wired to a command): a machine that
-    /// opts into [variants.buildsubmitscript] and the new [build] keys parses,
+    /// opts into [buildsubmitscripts] and the new [build] keys parses,
     /// validates, and reports itself able to submit builds.
     #[test]
     fn build_submit_keys_parse_and_validate() {
         let with_build_submit = MIKE
             .replace(
-                "[variants.submitscript]",
-                "[variants.buildsubmitscript]\n\
-                 \"slurm-build\" = { queues = [\"checkpt\", \"single\"], default = true }\n\n\
-                 [variants.submitscript]",
+                "[submitscripts]",
+                "[buildsubmitscripts]\n\
+                 \"slurm-build\" = { queues = [\"checkpt\", \"single\"] }\n\n\
+                 [submitscripts]",
             )
             .replace(
                 "[queues.checkpt]",
@@ -1627,8 +1603,8 @@ mod tests {
     }
 
     #[test]
-    fn can_submit_builds_is_false_without_a_buildsubmitscript_variant() {
-        // MIKE never declares [variants.buildsubmitscript]; an empty table is
+    fn can_submit_builds_is_false_without_a_buildsubmitscript() {
+        // MIKE never declares [buildsubmitscripts]; an empty table is
         // exactly the state of all 37 bundled machines today, and must load
         // and validate cleanly (it does — see `parses_and_validates_the_spec_example`).
         assert!(!mike().can_submit_builds());
@@ -1689,17 +1665,17 @@ mod tests {
     fn can_submit_builds_is_false_without_a_scheduler_submit_command() {
         let with_build_submit = MIKE
             .replace(
-                "[variants.submitscript]",
-                "[variants.buildsubmitscript]\n\
-                 \"slurm-build\" = { queues = [\"checkpt\", \"single\"], default = true }\n\n\
-                 [variants.submitscript]",
+                "[submitscripts]",
+                "[buildsubmitscripts]\n\
+                 \"slurm-build\" = { queues = [\"checkpt\", \"single\"] }\n\n\
+                 [submitscripts]",
             )
-            // Drop [scheduler].submit: a buildsubmitscript variant with nothing
+            // Drop [scheduler].submit: a buildsubmitscript with nothing
             // to run it is not actually submit-capable.
             .replace("submit = \"sbatch @SCRIPTFILE@ 2>&1\"\n        ", "");
         let meta: Meta = toml::from_str(&with_build_submit).unwrap();
         meta.validate("mike").unwrap();
-        assert!(!meta.variants.buildsubmitscript.variants.is_empty());
+        assert!(!meta.buildsubmitscripts.routes.is_empty());
         assert!(meta.scheduler.submit.is_none());
         assert!(!meta.can_submit_builds());
     }
@@ -1789,18 +1765,15 @@ mod tests {
         [queues.gpu]
         gpu = true
 
-        [variants.submitscript]
+        [submitscripts]
         "default"   = { queues = ["gpu"], build-universes = ["host"] }
         "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
         "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
         "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
 
-        [variants.runscript]
+        [runscripts]
         "default"   = { queues = ["gpu"], build-universes = ["host"] }
         "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
-
-        [variants.optionlist]
-        variants = ["native"]
 
         # Identity universe (§4.8): no wrapper, just a build-env override.
         [universes.host]
@@ -1822,22 +1795,22 @@ mod tests {
     #[test]
     fn universes_lists_filter_selection() {
         let meta = db();
-        let sv = meta.script_variants(ScriptKind::Submit);
-        // One queue, four variants: the build universe picks the script (§4.4).
-        assert_eq!(sv.select("gpu", "host", false, None).unwrap().0, "default");
-        assert_eq!(sv.select("gpu", "et-sing", false, None).unwrap().0, "sing");
-        assert_eq!(sv.select("gpu", "et-sing-cpu", false, None).unwrap().0, "sing");
-        assert_eq!(sv.select("gpu", "host", true, None).unwrap().0, "test");
-        assert_eq!(sv.select("gpu", "et-sing", true, None).unwrap().0, "sing-test");
-        // Runscripts have no test partition: tests borrow normal (§11.2),
-        // still universe-filtered.
-        let rs = meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing");
+        let sv = meta.scripts(ScriptKind::Submit);
+        // One queue, four scripts: the build universe picks the script (§4.4).
+        assert_eq!(sv.route("gpu", "host", false).unwrap().0, "default");
+        assert_eq!(sv.route("gpu", "et-sing", false).unwrap().0, "sing");
+        assert_eq!(sv.route("gpu", "et-sing-cpu", false).unwrap().0, "sing");
+        assert_eq!(sv.route("gpu", "host", true).unwrap().0, "test");
+        assert_eq!(sv.route("gpu", "et-sing", true).unwrap().0, "sing-test");
+        // These runscripts have no test partition, and a test never borrows
+        // a normal script (§11.2).
+        let rs = meta.scripts(ScriptKind::Run);
+        assert!(rs.route("gpu", "et-sing-cpu", true).is_err());
     }
 
     #[test]
     fn universe_miss_is_a_selection_time_error() {
-        // A declared universe no variant lists: loads fine (coverage is a
+        // A declared universe no script lists: loads fine (coverage is a
         // load-time obligation only for host — §4.4)…
         let extra = format!("{DB}\n[universes.other]\nwrapper-argv = [\"env\"]\n");
         let meta: Meta = toml::from_str(&extra).unwrap();
@@ -1845,28 +1818,17 @@ mod tests {
         // …but selecting under it fails, naming universe and queue.
         let err = format!(
             "{:#}",
-            meta.script_variants(ScriptKind::Run).select("gpu", "other", false, None).unwrap_err()
+            meta.scripts(ScriptKind::Run).route("gpu", "other", false).unwrap_err()
         );
         assert!(err.contains("\"other\"") && err.contains("\"gpu\""), "{err}");
 
         // Missing HOST coverage is still a load-time error.
         let no_host = DB
-            .replace("\"default\"   = { queues = [\"gpu\"], build-universes = [\"host\"] }\n        \"sing\"      = { queues = [\"gpu\"], build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]",
-                     "\"sing\"      = { queues = [\"gpu\"], build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        [variants.optionlist]");
+            .replace("\"default\"   = { queues = [\"gpu\"], build-universes = [\"host\"] }\n        \"sing\"      = { queues = [\"gpu\"], build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        # Identity",
+                     "\"sing\"      = { queues = [\"gpu\"], build-universes = [\"et-sing\", \"et-sing-cpu\"] }\n\n        # Identity");
         let meta: Meta = toml::from_str(&no_host).unwrap();
         let err = format!("{:#}", meta.validate("db").unwrap_err());
         assert!(err.contains("served by no"), "{err}");
-    }
-
-    #[test]
-    fn explicit_variant_incompatible_with_universe_errors() {
-        let meta = db();
-        let sv = meta.script_variants(ScriptKind::Submit);
-        // --variant may pick any compatible variant…
-        assert_eq!(sv.select("gpu", "et-sing", false, Some("sing")).unwrap().0, "sing");
-        // …but naming an incompatible one is a hard error naming the universe.
-        let err = format!("{:#}", sv.select("gpu", "host", false, Some("sing")).unwrap_err());
-        assert!(err.contains("\"host\"") && err.contains("et-sing"), "{err}");
     }
 
     #[test]
@@ -1874,8 +1836,8 @@ mod tests {
         // Making the runscript "default" compatible with ALL universes (list
         // omitted) makes queue gpu doubly served in the et-sing context.
         let ambiguous = DB.replace(
-            "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"], build-universes = [\"host\"] }",
-            "[variants.runscript]\n        \"default\"   = { queues = [\"gpu\"] }",
+            "[runscripts]\n        \"default\"   = { queues = [\"gpu\"], build-universes = [\"host\"] }",
+            "[runscripts]\n        \"default\"   = { queues = [\"gpu\"] }",
         );
         let meta: Meta = toml::from_str(&ambiguous).unwrap();
         let err = format!("{:#}", meta.validate("db").unwrap_err());
@@ -1912,14 +1874,12 @@ mod tests {
         gpu = true
         build-universes = ["et-sing"]
 
-        [variants.submitscript]
+        [submitscripts]
         "s" = { queues = ["host-only", "sing"] }
 
-        [variants.runscript]
+        [runscripts]
         "r" = { queues = ["host-only", "sing"] }
 
-        [variants.optionlist]
-        variants = ["native"]
 
         [universes.et-sing]
         wrapper-argv = ["apptainer", "exec", "et.sif"]
@@ -1938,8 +1898,8 @@ mod tests {
         // The default queue is chosen among the universe-compatible queues:
         // "host-only" for host builds, and (as the sole compatible one) "sing"
         // for et-sing builds even though it is not marked default.
-        assert_eq!(meta.default_queue("host"), Some("host-only"));
-        assert_eq!(meta.default_queue("et-sing"), Some("sing"));
+        assert_eq!(meta.default_queue(Some("host")), Some("host-only"));
+        assert_eq!(meta.default_queue(Some("et-sing")), Some("sing"));
     }
 
     #[test]
@@ -1981,7 +1941,11 @@ mod tests {
         let err = format!("{:#}", meta.universe("ghost").unwrap_err());
         assert!(err.contains("host") && err.contains("et-sif"), "{err}");
         // "host" is a legal reference even when undeclared.
-        let with_ref = MIKE.replace("[variants.runscript]", "[variants.runscript]\ndefault-universe = \"host\"");
+        let with_ref = MIKE.replace(
+            "\"cpu\" = { queues = [\"checkpt\", \"single\"] }",
+            "\"cpu\" = { queues = [\"checkpt\", \"single\"], universe = \"host\" }",
+        );
+        assert_ne!(with_ref, MIKE, "fixture edit missed the cpu runscript");
         let meta: Meta = toml::from_str(&with_ref).unwrap();
         meta.validate("mike").unwrap();
         // A declared host is returned as-is.

@@ -1,5 +1,5 @@
 #! /bin/bash
-# athena submitscript (variant "default"), written 2026-09-29 as a copy of
+# athena submitscript (script "default"), written 2026-09-29 as a copy of
 # mdb/et-juphub/submitscripts/default.sh (itself ported from simfactory2
 # generic.sub): athena has no batch system either (see meta.toml). It does not
 # depend on the GPU, CUDA or compiler facts; it serves both queues.
@@ -8,7 +8,7 @@
 #
 # No batch scheduler: chaining is emulated by waiting for the previous job's PID
 # to exit. Plain bash conditional (the NAME engine does literal substitution
-# only — §6/§D7), so a .sh variant suffices.
+# only — §6/§D7), so a .sh script suffices.
 
 cd @SOURCEDIR@ || exit 1
 

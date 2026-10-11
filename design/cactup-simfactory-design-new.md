@@ -23,16 +23,16 @@ These were settled during design review and are treated as fixed below.
 |---|----------|----------|
 | D1 | Remote execution / source sync / `login` | **Dropped.** cactup is a local, per-machine tool. No `rsync` sync, no `--remote` SSH dispatch, no `login`, no trampoline/iomachine tunneling. You run cactup on the machine where the work happens. |
 | D2 | Archive subsystem (petashare/uberftp) | **Dropped entirely.** No archive command, no drivers. |
-| D3 | Cactus test-suite support | **Kept, as a first-class `cactup test run`/`test submit` command tree** separate from `sim` (§11). A testsuite runs against any built config — default the active config, or `--config C` — with **no separate test-config kind**. Test output lives under a dedicated, configurable **test-home** (`tests/`), *not* inside `simulations/`. Test run/submitscripts are marked `test = true` in the MDB and resolved by the §11.2 rules (this is the only test-marking; optionlists just use the §4.4 `default = true` picker). simfactory's overloading of `sim` (empty-parfile sentinel, monster `output-NNNN/exe/` copytree) is *not* ported. |
+| D3 | Cactus test-suite support | **Kept, as a first-class `cactup test run`/`test submit` command tree** separate from `sim` (§11). A testsuite runs against any built config — default the active config, or `--config C` — with **no separate test-config kind**. Test output lives under a dedicated, configurable **test-home** (`tests/`), *not* inside `simulations/`. Test run/submitscripts are marked `test = true` in the MDB and resolved by the §11.2 rules (this is the only test-marking; optionlists just use the §4.4 `default = true` flavor marker). simfactory's overloading of `sim` (empty-parfile sentinel, monster `output-NNNN/exe/` copytree) is *not* ported. |
 | D4 | Restart / chaining & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. Checkpoint recovery is **out of scope**: the parfile and Cactus own it end to end (§8.8). |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
-| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. Comments (as the target file kind spells them) are copied through untouched. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
+| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. Comments (as the target file kind spells them) are copied through untouched. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` escape hatch (see §6). |
 | D8 | Machine-level thorn enable/disable toggles | **Kept** (see §7.5). |
 | D9 | Optionlist on-disk format | **TOML + render step.** Optionlists are authored as TOML; cactup renders them to the native Cactus `NAME = value` optionlist before `make`. Render rules, the `VERSION` semantics, and ordering are specified in §7.8. |
 | D10 | Pre-existing simfactory simulation dirs | **Greenfield / ignore.** cactup manages only simulations it created. A directory is recognized as a cactup simulation **iff** it contains `.cactup/simulation.toml`. cactup neither reads nor migrates legacy `SIMFACTORY/` simulations. |
 | D11 | Global-DB locking | **Brief lock around DB access only.** The exclusive lock is held only while reading/mutating/persisting the database — never across a compile or a simulation run. Per-simulation coordination uses the simulation's own on-disk state, not the global lock (see §2.3). |
-| D12 | OptionList-variant ↔ queue compatibility | **The optionlist variant declares its compatible queues** (and therefore which run/submit variants it can pair with). `sim submit`/`sim run` enforce it (see §4.4, §7.4). |
+| D12 | Optionlist flavor ↔ queue compatibility | **The optionlist flavor declares where its binary may run** (`[cactup.runs-on]`: `queues` and `gpu`). `sim submit`/`sim run` and `test run`/`test submit` enforce it; a `build submit` job's queue is never checked against it, since that job runs `make`, not the binary (see §4.4, §7.4, §7.9). |
 | D13 | Linking & system libraries | **Fully static MUSL binary.** cactup deploys to clusters as a single copyable binary: the release artifact targets `x86_64-unknown-linux-musl` and must stay fully statically linked (`ldd`: "statically linked"). No crate that binds a system shared library (no openssl/native-tls — reqwest uses rustls; no libgit2 — git is pure-Rust gix; no pkg-config'd C deps); C code a dependency compiles in statically at cargo-build time is fine. Our own code never uses the `libc` crate directly — OS facts come from `/proc` or std (e.g. §2.3's pid probing). The one thing neither offers is sending a signal to another process and waiting on it by pid, which the build cache's compiler wrapper must do (§18.4); it uses `rustix` for exactly `kill(2)` and `waitpid(2)`. `rustix` makes Linux system calls itself, without libc, so the binary stays static. |
 | D14 | Distribution, self-update & MDB generations | **CI builds, publishes and deploys; installed binaries keep themselves current.** Every passing `master` push builds static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (reused unchanged when no build input changed), publishes `mdb/` as the `mdb` git branch, and deploys docs + binaries + `cactup-init.sh` + `latest.json` to GitHub Pages. A binary is a **dist** build iff CI stamped it (`CACTUP_DIST=1`, build id, date); any local cargo build is a **dev** build (repo `mdb/`, no sync, no self-update). Dist builds clone the MDB into `~/.cactup/mdb`, sync the newest commit of their own **MDB generation** (warning loudly when a newer generation exists), and update themselves per the `autoupdate` knob (`auto`/`notify`/`off`). Each build lives at `~/.cactup/bin/cactup-<build>` behind a `bin/cactup` symlink and substitutes that path for `@CACTUP@`, so a job runs the exact build it was submitted with. The published MDB is the one on-disk artifact with a compatibility promise, and the generation is its only mechanism (§17). |
 | D15 | Shared build cache | **A compiler wrapper inside cactup, over an instance-wide store.** Objects one installation or configuration of an instance built are reused by the others whenever, and only when, compiling afresh would produce the same bytes. No existing compiler cache fits (none handles Fortran module files, and none shares a directory between hosts over NFS without POSIX locks), so cactup is its own: it stands in front of Cactus's object compiles, injected by a makefile fragment that leaves the optionlist and `config-data` untouched. The cache may only ever cost a miss: anything it does not fully understand compiles as if it were not there. Objects will be keyed by the cactup machine and by the host that compiles them, so that one filesystem spanning several architectures never mixes them, and nothing will be evicted automatically. Being brought up in stages (§18); so far only the interposition exists: nothing is keyed, stored or served. |
@@ -203,8 +203,8 @@ multi-writer story.
 
 Required model (D11):
 
-1. The global DB lock is acquired, the DB is read (and possibly mutated +
-   persisted), and the lock is **released before** any long-running work begins.
+1. A mutation acquires the global DB lock, re-reads the DB, mutates and
+   persists it, and **releases the lock before** any long-running work begins.
    A command that needs to write a result at the end **re-acquires the lock,
    re-reads the on-disk DB, and applies a field-scoped write** (mutating only the
    specific keys it owns — e.g. one `installations` entry or one `knobs` entry —
@@ -214,6 +214,30 @@ Required model (D11):
    the reason the persist path must re-read first: the whole-file
    `serde_json::to_string_pretty(self)` in `src/database.rs` is replaced by
    read-modify-write under the held lock.
+
+   **Reads take no lock.** A plain read (`Db::read`, a snapshot nothing will
+   persist) opens `database.json` directly. That is safe because the only
+   writer is the locked read-modify-write above, which renames a complete,
+   fsynced temp file into place: the path always names one whole version, so
+   a reader sees either it or its successor, never a torn mix, and the lock
+   would only have serialized readers against writers that rename already
+   keeps apart. Locking each read cost every command several synchronous
+   round trips on NFS (create, link, fstat, unlink, read back, remove) and
+   made a read that raced an update fail outright. Fallbacks keep the worst
+   case at the locked behavior: a missing file goes straight to the locked
+   read (before the first write ever, every read takes it — the old cost); a
+   stale NFS file handle (`ESTALE`, the file renamed over mid-read) or an
+   unparsable file is retried a few times first; the schema guard's verdict
+   is final. Freshness: a read returns a complete version, normally the
+   current one — NFSv4 opens by name, and on a default (close-to-open)
+   NFSv3 mount a renamed-over file's handle goes stale and the kernel looks
+   the name up again. It can be a *previous* version only on a `nocto` mount
+   (cached attributes and pages, up to `acregmax`), or on NFSv3 when a
+   process on the writing host still had the old file open during the rename
+   (that client keeps the old inode alive by silly-renaming it), until the reader's
+   cached lookup revalidates (about `acdirmax`). That is harmless here,
+   since a snapshot is never persisted and every mutation re-reads under the
+   lock.
 2. **`cactup sim run --restart-id N` (the compute-node path) does not depend on
    the global DB at all.** Everything it needs — the Cactus root, the
    executable, the config, the parfile, topology — is read from
@@ -428,7 +452,7 @@ cactup inst …                      (short form of `installation`, a duplicate
 cactup list [--all]                (top-level equivalent of `installation list`)
 cactup use <alias>                 (top-level equivalent of `installation use`)
 
-cactup build [<name>] [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [BUILD FLAGS] [BUILD TOPOLOGY]
+cactup build [<name>] [-f] [--thornlist P] [--flavor F] [--universe U | --no-universe] [BUILD FLAGS] [BUILD TOPOLOGY]
                                     (auto-selects foreground vs. queued per the
                                     machine's MDB entry — §7.9)
 cactup build run    [<name>] …    [--config-dir P --attempt-id N]
@@ -465,8 +489,8 @@ cactup sim show [<sim>] [--long] [--all]           (--all: across every installa
 cactup sim output-dir <sim> [--restart-id N]      (prints active/Nth restart dir)
 cactup sim log <sim>                              (tail stdout/err / formaline)
 
-cactup test run    [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]   (§11)
-cactup test submit [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test run    [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]   (§11)
+cactup test submit [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
 cactup test list       [--long] [--all]
 cactup test show       <name>
 cactup test stop       <name> [-f]
@@ -481,7 +505,7 @@ cactup update [--check] [--prune]                 (D14, §17.3: install the newe
                                                    builds retired > 30 days, §17.2;
                                                    dev builds refuse)
 
-cactup machine show [<name>]                      (replaces print-mdb / list-machines)
+cactup machine show [<name>] [--flavors]         (replaces print-mdb / list-machines)
 cactup machine whoami                             (which machine am I on)
 cactup machine create [<name>] [--from-existing [B]] [--silent] [--no-discover]   (§4.7)
 cactup machine delete <name>                      (§4.7; user-MDB machines only)
@@ -491,6 +515,18 @@ cactup machine forget                             (clear the cached detected mac
 Most simulation/config commands operate on the **active installation** and its
 **active config** unless overridden. `config`/`sim` commands fail fast if no
 installation is active.
+
+**Retired flags.** A flag that has been renamed stays *reserved* where it was
+once accepted: it is never declared to clap — so no help text, completion, or
+user doc ever shows it — and it is caught on the raw command line before clap
+parses anything, stopping the command with a rename notice and the corrected
+command line, whatever else is on it. A flag removed with nothing in its
+place gets a notice saying why, and the suggested command simply drops it.
+Retired so far: `--variant` on `build` (and `build run`/`build submit`), now
+`--flavor`; `--variant` on `test run`/`test submit`, removed — the queue picks
+test scripts, as it picks every script (§11.2); `--variants` on `machine
+show`, now `--flavors`. They are kept indefinitely (`args::RETIRED_FLAGS`). This
+paragraph is the one place they are documented: user docs never mention them.
 
 ### 3.1 Command mapping from simfactory
 
@@ -723,11 +759,14 @@ mdb/
     hostname.regexp                 # one Rust regex claiming this machine's hosts (optional)
     discover.py                     # def is_machine(hostname: str) -> bool (optional)
     optionlists/
-      <variant>.toml                # build option lists (TOML + @templating@)
+      <flavor>.toml                 # build option lists (TOML + @templating@);
+                                    # each file IS one flavor (§4.4)
     runscripts/
-      <variant>.sh                  # or <variant>.py
+      <script>.sh                   # or <script>.py
     submitscripts/
-      <variant>.sh                  # or <variant>.py
+      <script>.sh                   # or <script>.py
+    buildsubmitscripts/             # optional (§7.9)
+      <script>.sh                   # or <script>.py
 ```
 
 **No top-level index (D1).** There is no `mdb/meta.toml`; the authoritative data
@@ -770,8 +809,9 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   `hostname.regexp` / `discover.py` matcher files (§4.3).
 - `submitscript` / `runscript` / `optionlist` single-filename keys are
   **replaced** by the per-machine `optionlists/`, `runscripts/`,
-  `submitscripts/` directories and the **variant→queue mapping** described in
-  §4.4. (This is the headline MDB change.)
+  `submitscripts/` directories: optionlist **flavors** discovered from the
+  directory, and the **queue→script routes** of `[submitscripts]` /
+  `[runscripts]` described in §4.4. (This is the headline MDB change.)
 - `env-setup` (shell setup, usually module loads) is kept verbatim. Unlike
   simfactory (where it fed only submit/run scripts), cactup applies `env-setup`
   to **all three** execution phases by default — **build**, **submit**, and
@@ -917,15 +957,14 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   already tunes `make-jobs` for its node size gets a matching job shape for
   free), and **`gpus-per-task`**. None of the six affect a foreground build.
   Alongside them, a machine that can submit builds declares a
-  **`buildsubmitscript`** script kind — a fourth sibling of `optionlist` /
-  `submitscript` / `runscript`, with its own `buildsubmitscripts/<variant>.{sh,py}`
-  directory and `[variants.buildsubmitscript]` table (identical shape to
-  `[variants.submitscript]`: queues, an optional `universe`/`build-universes`,
-  a `default` marker — §4.4). It is the **only** optional script kind — a
-  machine that never hands a build to the scheduler declares no
-  `buildsubmitscript` variants at all, and MDB load validation skips the usual
-  queue-coverage check for a kind with none (§7.9 states the precise rule for
-  when submitting is even possible).
+  **build-submit script** kind — a third sibling of the submit and run
+  scripts, with its own `buildsubmitscripts/<script>.{sh,py}` directory and
+  `[buildsubmitscripts]` table (identical route shape to `[submitscripts]`:
+  queues, an optional `universe`/`build-universes`, a `default` marker —
+  §4.4). It is the **only** optional script kind — a machine that never hands
+  a build to the scheduler declares no `[buildsubmitscripts]` routes at all,
+  and MDB load validation skips the usual queue-coverage check for a kind with
+  none (§7.9 states the precise rule for when submitting is even possible).
 
 **Key-naming convention (kebab-case everywhere).** Every user- and disk-facing
 identifier is **kebab-case**: TOML keys (`meta.toml`, optionlists, and cactup's
@@ -942,7 +981,7 @@ spellings are normalized on port (`getstatus` → `get-status`, `submitpattern` 
 `max-walltime`, `scratchbasedir` → `scratch-home`, …), and cactup's own keys
 use hyphens too
 (`config-id`, `build-id`, `job-id`, `chained-job-id`,
-`simulation-id`, `compatible-queues`). The **only** identifiers that keep
+`simulation-id`, `runs-on`). The **only** identifiers that keep
 underscores are **template substitution variables**, which stay `UPPER_SNAKE`
 inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME@`,
 `@TASKS_PER_NODE@`).
@@ -958,9 +997,9 @@ pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
 phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
-`*-pattern`s, `exec-host`, `max-walltime`), then `[queues.*]`, `[variants.*]`
-(`optionlist`, `submitscript`, `runscript`, and — only on a machine that
-submits builds — `buildsubmitscript`, §7.9),
+`*-pattern`s, `exec-host`, `max-walltime`), then `[queues.*]`, the script
+route tables `[submitscripts]`, `[runscripts]` and — only on a machine that
+submits builds — `[buildsubmitscripts]` (§4.4, §7.9),
 and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
 `env-*-setup` overrides; the always-available `"host"` universe needs no table
 at all unless it is being customized).
@@ -995,10 +1034,10 @@ make = "make -j@MAKEJOBS@"
 make-jobs = 16
 # default-action = "submit"    # optional (§7.9): force `cactup build` to
                                 # submit even where running is also possible;
-                                # requires [variants.buildsubmitscript] below
+                                # requires [buildsubmitscripts] below
                                 # AND [scheduler].submit — the queued-build job
                                 # shape a submitted build uses:
-# queue         = "checkpt"    # optional; else -q, else the default queue
+# queue         = "checkpt"    # optional; -q, then the `build-queue` knob, then this, then the default queue
 # walltime      = "4:00:00"    # optional; else -w, else the queue's ceiling
 # nodes         = 1            # optional; else -n, else 1
 # tasks         = 1            # optional; else -T
@@ -1031,54 +1070,57 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
 # name = "gpu_part"            # optional: the scheduler's REAL queue/partition
                                # name when it differs from the table key. @QUEUE@
                                # resolves to it (default: the key itself). Lets
-                               # several cactup queues — e.g. cpu/gpu build
-                               # flavors with different D12 gpu flags — map onto
-                               # one real queue without hardcoding it in scripts.
+                               # several cactup queues — e.g. queues with
+                               # different D12 gpu flags or build-universes —
+                               # map onto one real queue without hardcoding it
+                               # in scripts.
 
-# Variant → queue association (§4.4). Every key names a variant; there are no
-# reserved keys. A variant is either the array shorthand (queues only) or the
-# inline-table form `{ queues = [...], universe = "…", build-universes = […],
-# test = …, default = …, tasks = … }` when it carries a universe to run *in*
-# (§4.8 step 3), a build-universe COMPATIBILITY list for selection (below),
-# a test marker (§11.2), the default flag, or a default task count (`tasks =
-# N`: the TASKS used when no -n/-T/-t flag is given, instead of filling the
-# node — §8.5). `universe` and `build-universes` are independent and may both be
-# set: `universe` is what THIS variant's own execution is wrapped in;
-# `build-universes` is which configs' BUILD universes this variant is compatible
-# with (omitted = all — the common case).
-# `default = true` marks the fallback variant within its partition (see below).
-[variants.submitscript]
-"slurm-cpu" = { queues = ["checkpt", "single"], default = true }   # normal default: serves these queues + any queue with no explicit mapping
+# Queue → script routes (§4.4). Every key names a script file
+# (submitscripts/<key>.{sh,py}); there are no reserved keys. A route is either
+# the array shorthand (queues only) or the inline-table form `{ queues = [...],
+# universe = "…", build-universes = […], test = …, tasks = … }`
+# when it carries a universe to run *in* (§4.8 step 3), a build-universe
+# COMPATIBILITY list for routing (below), a test marker (§11.2), or a default
+# task count (`tasks = N`: the TASKS used when no -n/-T/-t
+# flag is given, instead of filling the node — §8.5). `universe` and
+# `build-universes` are independent and may both be set: `universe` is what
+# THIS script's own execution is wrapped in; `build-universes` is which configs'
+# BUILD universes this script serves (omitted = all — the common case).
+# A script serves exactly the queues it lists; there is no fallback script.
+# Scripts are never chosen by the user; the queue routes them (§4.4, §11.2).
+[submitscripts]
+"slurm-cpu" = ["checkpt", "single"]
 "slurm-gpu" = ["gpu"]
-"slurm-test" = { queues = ["checkpt", "single"], test = true, default = true }   # testsuite submit + test-partition default (§11.2)
+"slurm-test" = { queues = ["checkpt", "single"], test = true }   # testsuite submit (§11.2); no testsuite runs on gpu
 
-[variants.runscript]
-"cpu" = { queues = ["checkpt", "single"], default = true }
+[runscripts]
+"cpu" = ["checkpt", "single"]
 "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }   # runs inside a universe (§4.8)
 "sing" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
                                # selected only for configs whose BUILD universe
                                # (§7.4) is "et-sing" or "et-sing-cpu" (§4.4,
                                # §4.8); replaces the old trick of minting a
-                               # synthetic queue per build flavor purely to
+                               # synthetic queue per build universe purely to
                                # route script selection (see the db1 MDB port)
-"test-cpu" = { queues = ["checkpt", "single"], test = true, default = true }   # drives make <config>-testsuite (§11.6)
-# default-universe = "et-sif"          # optional: universe for runscript variants that omit one
+"test-cpu" = { queues = ["checkpt", "single"], test = true }   # drives make <config>-testsuite (§11.6)
+                               # no machine-wide universe fallback: a route that
+                               # runs inside a universe names it itself
 
 # OPTIONAL — only on a machine that hands builds to the scheduler (§7.9): same
-# shape as [variants.submitscript], one buildsubmitscripts/<variant>.{sh,py}
-# per key. Omitted entirely (no table at all) ⇒ this machine can never submit a
-# build; `cactup build`/`build submit` always run in the foreground.
-[variants.buildsubmitscript]
-"slurm-cpu" = { queues = ["checkpt", "single"], default = true }
+# route shape as [submitscripts], one buildsubmitscripts/<key>.{sh,py} per key.
+# Routed by the BUILD JOB's queue; `build-universes = ["X"]` here means "serves
+# builds of configs whose build universe is X". Omitted entirely (no table at
+# all) ⇒ this machine can never submit a build; `cactup build`/`build submit`
+# always run in the foreground.
+[buildsubmitscripts]
+"slurm-cpu" = { queues = ["checkpt", "single"] }
 
-# Each variant just names the optionlist file under optionlists/<variant>.toml;
-# that file declares its own gpu flag, compatible queues, and an optional
-# `default = true` marker in its [cactup] header (D12, §7.8, §4.4). With one
-# variant that variant is implicit; with several, the default-marked one is the
-# implicit pick and the rest need --variant.
-[variants.optionlist]
-variants = ["cpu", "gpu", "cpu-debug"]   # selected at build time via --variant;
-                                         # cpu.toml carries [cactup].default = true (§4.4)
+# No table for optionlists: the machine's flavors are the *.toml files under
+# optionlists/ (here cpu.toml, gpu.toml, cpu-debug.toml). Each declares where
+# its binary may run ([cactup.runs-on]: queues, gpu) and an optional
+# `default = true` marker in its own [cactup] header (D12, §7.8, §4.4). With
+# one flavor it is implicit; with several, the default-marked one is the
+# implicit pick and the rest need --flavor.
 ```
 
 **Hardware keys.** `[hardware]` carries **only** the keys cactup actually
@@ -1111,64 +1153,77 @@ entirely per-queue — and a queue with no overrides simply inherits everything.
 Topology derivation (§8.5) and the machine-derived script variables (§6.3) use
 the **queue-effective** values for the queue the job targets.
 
-The default variant. Instead of a reserved `default = "<name>"` pointer key
-(which would collide with a variant literally named `default` and force the
-token `default` to serve as both a variant name and a directive), the fallback
-variant is marked in place with `default = true` inside its own inline table —
-exactly parallel to `test = true`. `default = true` designates the fallback
-**within its partition**: an un-marked variant is the *normal-partition* default;
-a variant carrying both `test = true` and `default = true` is the *test-partition*
-default (the old `test-default`). **At most one** variant per partition may carry
-`default = true`; a partition with exactly one variant makes that variant the
-implicit default, so the flag is optional there (it may still be stated for
-clarity, as mel5 does). Because every key names a variant, a variant may now be
-named `default` with no special meaning.
+**No fallback script.** **DEVIATION (from the original design note, which
+gave submit and run scripts a default for queues no script names).** A script
+serves exactly the queues its route lists.
+Generation 1 had a fallback — a `default = true` route, or a partition's
+sole route, served every queue no route listed — and generation 2 removed it:
+every in-repo flag was redundant (each machine listed every queue anyway),
+and the one fallback actually exercised was the implicit sole-script one,
+which handed qbd's and saturn's GPU-only test scripts the CPU queues. A queue
+must be named to be served.
 
-Queue/variant consistency requirement: every queue listed in `[queues.*]` must
-be served by some `submitscript` variant and some `runscript` variant (an
-explicit mapping or the `default = true` variant). cactup validates this at MDB
-load and errors on a queue with no resolvable script variant, rather than failing
-cryptically at submit time. When a machine defines any **test-marked** variants
-of a kind (`test = true`), the same coverage check is applied **within the test
-partition** (against the test-partition default); a kind with no test variants is
-fine — tests borrow the normal partition (§11.2).
+**No reserved keys.** Every key of `[submitscripts]`, `[runscripts]` and
+`[buildsubmitscripts]` names a script file, so a script may be named `default`
+(or anything else) with no special meaning. The former table-level
+`default-universe` key — a universe for every route that named none — is
+**removed**: a route that runs inside a universe says so with its own
+`universe = "…"`, so the table holds nothing but routes (§4.8).
+
+Queue/script consistency requirement: every queue listed in `[queues.*]` must
+be listed by some normal (not test-marked) `[submitscripts]` route and some
+normal `[runscripts]` route. cactup validates this at MDB load and errors on a
+queue with no script, rather than failing cryptically at submit time. Test
+scripts and buildsubmitscripts owe no such coverage: a machine may offer
+testsuites, or queued builds, on some partitions only, and choosing a queue
+none of them lists is a **selection-time** error naming the queues that are
+served ("no build-submit script serves queue \"bigmem\" (served: single,
+gpu2); pick one of those with -q"; a test command narrows the list to the
+queues the config's binary may run on, §11.2). Each key must name an existing `<kind>/<key>.sh` or `.py`,
+and every queue a route lists must be a declared `[queues.*]` table.
 
 **Build-universe compatibility list (`build-universes`).** The inline-table
-variant form may carry `build-universes = ["name", …]` — the set of build
-universes this variant is compatible with (§4.8). Omitted (the default) means
+route form may carry `build-universes = ["name", …]` — the set of build
+universes this script serves (§4.8). Omitted (the default) means
 compatible with every universe. An explicitly empty list (`build-universes =
 []`) is a validation error (omit the key instead). Every name listed must be a
 declared `[universes.<name>]` or the literal `"host"` (§4.8's always-available
 implicit universe). Selection filters on the **config's build universe** —
 `"host"` when the config records none — never on the run/submit universe
 context; this is the parity `build-universes` enforces: a config built in
-universe X gets X-compatible run/submit scripts (§4.4). The `build-` prefix on
+universe X gets X-compatible run/submit scripts (§4.4) — e.g. a binary built
+inside apptainer image A must run in A, or in an image B designed to run
+A-built binaries. On a `[buildsubmitscripts]` route the same key filters on the
+build universe of the config being built, i.e. the universe the build job's
+own `make` runs in (§7.9). The `build-` prefix on
 the key name records exactly this: the gate is on the universe a config was
 *built* in, not the one it is run or submitted in.
 
 **Queues carry the same key.** A `[queues.<name>]` table may likewise declare
 `build-universes = ["name", …]` (same semantics, same validation), so a machine
 that unifies several upstream clusters behind one set of scheduler queues can
-restrict a queue to the build flavors it serves. When `-q` is omitted, the
-default-queue pick is restricted to the queues compatible with the config's
-build universe; naming an incompatible queue explicitly (via `-q`, the `queue`
-knob, or a config's compatible-queues) is a **hard error** naming the universe
-— there is no `--force-queue` escape, since the gate is structural (like
-variant compatibility) rather than advisory (like the GPU / compatible-queues
+restrict a queue to the configs whose build universes it serves. When `-q` is
+omitted, the default-queue pick is restricted to the queues compatible with the
+config's build universe; naming an incompatible queue explicitly (via `-q`, the
+`queue` knob, or a config's `runs-on` queues) is a **hard error** naming the
+universe — there is no `--force-queue` escape, since the gate is structural
+(like script routing) rather than advisory (like the GPU / `runs-on` queue
 guards). A queue with no `build-universes` list serves every build universe.
+The gate applies to `sim` and `test` only: a `build submit` job's queue is
+never checked against it (§7.9).
 
 Validation adds an **ambiguity check per universe context**: for each *u* in
 {`"host"`} ∪ the machine's declared universes, and separately within each
 partition (normal/test, §11.2), no queue *compatible with u* may be served by
-more than one *u*-compatible variant (a variant with no `build-universes` list
+more than one *u*-compatible route (a route with no `build-universes` list
 is compatible with every *u*, and so counts toward every *u*'s check; a queue
 gated away from *u* is skipped in that context). Queue **coverage** (every
 queue served-or-default, above) is enforced at MDB load time only for *u* =
 `"host"`, exactly as before, and only for the queues compatible with host; for
 any other declared universe, a queue left unserved by that universe's compatible
-variants is instead a **selection-time** error — "no `<kind>` variant
-compatible with universe \"X\" serves queue \"Y\" and none is a compatible
-default" — since exhaustively checking every declared universe against every
+routes is instead a **selection-time** error — "no script compatible with
+universe \"X\" serves queue \"Y\" and none is a compatible default" ("no
+test script …" in the test partition) — since exhaustively checking every declared universe against every
 queue at load time would reject machines that intentionally scope a universe
 to a subset of queues. A machine with no `build-universes` lists anywhere
 validates and selects **byte-identically to today**.
@@ -1258,10 +1313,10 @@ A does not claim B's host, and discovers B. `cactup machine forget` clears the
 record.
 
 **ASSUMPTION (Python runtime):** cactup shells out to a `python3` on `PATH` to
-evaluate `discover.py` and `.py` script variants (cactup is Rust; embedding
+evaluate `discover.py` and `.py` scripts (cactup is Rust; embedding
 CPython is heavier than needed).
 
-**Security & cost note.** `discover.py` (and `.py` script variants) are arbitrary
+**Security & cost note.** `discover.py` (and `.py` scripts) are arbitrary
 code from the MDB git repo, executed on the user's machine. The MDB repo is
 therefore a **trust boundary**: cactup runs only the MDB it cloned from the
 configured `manifest`/MDB URL, and the spec assumes that repo is trusted. Cost:
@@ -1276,35 +1331,46 @@ only on a stamp miss (step 3 above), never on the steady-state command. The
 `.py` calling convention (§6.1) likewise batches all variable injection into a
 single `python3` invocation per script.
 
-### 4.4 Variants (the headline new feature)
+### 4.4 Flavors and scripts (the headline new feature)
 
 From `cactup-simfactory-design.txt`. simfactory faked variants with separate
 machine definitions (e.g. `db-sing-cpu.run` / `db-sing-nv.run`); cactup makes
-them first-class within one machine.
+them first-class within one machine, as two distinct concepts that the user
+meets in different ways: **flavors** (optionlists, which the user picks) and
+**scripts** (submit/run/build-submit scripts, which the queue routes and the
+user never picks). (Both were once called "variants" and shared one CLI flag;
+that is how `build submit --variant` came to pick a build-submit script. The
+word is retired for both.)
 
-- **OptionList variants** select compile configuration. If a machine has exactly
-  one optionlist variant, it is used implicitly. If it has more than one, the
-  user **must** pick one at `cactup build` time via `--variant`; there is no
-  default. The chosen variant is recorded in the config metadata (§7.4) and is
+- **Flavors** select compile configuration. A flavor is an optionlist file,
+  `optionlists/<flavor>.toml`; the machine's flavors are exactly the `*.toml`
+  files in that directory — there is no table in `meta.toml` listing them. If a
+  machine has exactly one flavor, it is used implicitly. If it has more than
+  one, the one whose `[cactup]` header says `default = true` is the implicit
+  pick, and the user picks any other at `cactup build` time via `--flavor`;
+  with several flavors and none marked default, `--flavor` is required. The
+  chosen flavor is recorded in the config metadata (§7.4) and is
   **sticky**: later rebuilds of that config reuse it without the flag, and
-  `--variant` is repeated only to switch flavors, or to move a config back off a
-  `--optionlist` file (§7.8). A recorded variant the machine has since dropped is
+  `--flavor` is repeated only to switch flavors, or to move a config back off a
+  `--optionlist` file (§7.8). A recorded flavor the machine has since dropped is
   a hard error naming it, never a silent fallback.
   `cactup build --optionlist PATH` displaces this selection entirely, building
   from a file outside the MDB — an MDB-shaped `.toml`, an `[options]`-only
-  `.toml`, or a native Cactus `.cfg`. It is mutually exclusive with `--variant`,
+  `.toml`, or a native Cactus `.cfg`. It is mutually exclusive with `--flavor`,
   and a file that carries a `[cactup]` header is validated by it exactly as an
-  MDB variant would be; §7.8 has the forms, the detection rule, and what gets
-  recorded.
-- **OptionList variant ↔ queue compatibility (D12).** Each optionlist TOML
-  declares, in its `[cactup]` header (§7.8), a `compatible-queues` list and a
-  `gpu` flag. At `sim submit`/`sim run`, cactup checks the chosen queue against
-  the built config's `compatible-queues`; a mismatch is a **hard error**
+  MDB flavor would be; §7.8 has the forms, the detection rule, and what gets
+  recorded. `--flavor` never selects a script, for any command.
+- **Runs-on: where a flavor's binary may run (D12).** Each optionlist TOML
+  declares, in its `[cactup.runs-on]` table (§7.8), a `queues` list and a
+  `gpu` flag, snapshotted into the config record's `[runs-on]` (§7.4). At
+  `sim submit`/`sim run` and `test run`/`test submit`, cactup checks the chosen
+  queue against the built config's `runs-on.queues` (empty = any queue); a
+  mismatch is a **hard error**
   (overridable with `--force-queue`/`-f` for experts). This is what prevents
   submitting a GPU binary to a CPU queue. The **gpu/binary cross-check is
   one-directional**: refuse (absent `--force-queue`/`-f`) only when the
-  config's `gpu` flag is set and the effective context (`-g/--gpu`, or else the
-  chosen queue's `gpu` flag) is **not** — a GPU-built config on a non-GPU queue
+  config's `runs-on.gpu` flag is set and the effective context (`-g/--gpu`, or
+  else the chosen queue's `gpu` flag) is **not** — a GPU-built config on a non-GPU queue
   is refused, but a non-GPU config on a GPU queue is **allowed**: nothing about
   running a CPU-only binary on GPU hardware is wrong, and some machines' only
   real partition is GPU-flagged (a cluster like this makes GPU flags on
@@ -1313,39 +1379,66 @@ them first-class within one machine.
   an advisory note in that (allowed) case only when the machine has at least
   one non-GPU queue the user could have used instead; a machine with no
   non-GPU queue at all never sees it. `-g/--gpu` itself still defaults from
-  the chosen queue's `gpu` flag when not passed explicitly.
-- **SubmitScript and RunScript variants** are each associated with one or more
-  **queues** (the `[variants.*]` tables in §4.2) and, optionally, a
+  the chosen queue's `gpu` flag when not passed explicitly. An optional
+  `runs-on.default-queue` names where a sim or test of the binary goes when
+  neither `-q` nor a usable `queue` knob names a queue, ahead of the
+  machine's default queue (§8.5) — which matters exactly when the machine
+  default is a queue this binary may not use (a CPU flavor on a machine whose
+  default partition is GPU-flagged). It must be one of `runs-on.queues` when
+  that list is non-empty (checked when the optionlist is parsed) and a queue
+  of the machine (checked at build). Unlike the rest of `runs-on`, it is read
+  from the flavor's **current** header when the job is submitted, for a
+  config built from one of the machine's flavors: `queues` and `gpu` describe
+  the compiled binary, but which allowed queue a job lands on is a routing
+  preference, so an MDB edit reaches existing configs without a rebuild. A
+  config built from an `--optionlist` file, or from a flavor the machine has
+  since dropped, uses the recorded one.
+
+  **The queue chain for a sim or test** is `-q` → the `queue` knob → the
+  flavor's `default-queue` → the machine default. The knob is only ever set
+  by the user (`cactup knob set`, or `-K` for one command), so it outranks the
+  MDB's suggestion — but a knob naming a queue this binary may not run on (by
+  the checks below) is passed over, with a one-line note, rather than failing
+  every submit of a flavor it cannot serve; `--force-queue` keeps it. Build
+  jobs never read the `queue` knob; they have their own, `build-queue`
+  (§7.9).
+
+  `runs-on` describes the binary only: a `build submit` job's queue (where
+  `make` runs) is never checked against it, nor defaulted from it (§7.9).
+- **Submit, run and build-submit scripts** are each associated with one or more
+  **queues** by a **route** (the `[submitscripts]` / `[runscripts]` /
+  `[buildsubmitscripts]` tables in §4.2) and, optionally, a
   **build-universe compatibility list** (`build-universes = […]`, §4.8) — a
   second, orthogonal routing dimension alongside queue: queue narrows *which
-  partition* a variant serves; `build-universes` narrows *which build
+  partition* a script serves; `build-universes` narrows *which build
   universe's* configs it serves. At submit/run time cactup first filters the
-  queue's candidate variants to those compatible with the config's **build
+  routes to those compatible with the config's **build
   universe** (§4.8 — `"host"` when the config records none), then picks among the
-  survivors exactly as before: the variant mapped to the chosen `-q/--queue`,
-  or (absent an explicit mapping) the variant marked `default = true`.
-  Omitting `build-universes` (the common case, and the only case before this
-  mechanism existed) means "compatible with every universe," so a machine with
-  no universe-routing need is unaffected. An explicit `--variant` naming a
-  variant incompatible with the build universe is a **hard error** naming the
-  universe. The **queues** themselves (`[queues.*]`, §4.2) accept the same
-  `build-universes` key with identical semantics, gating which build flavors may
-  target a queue at all. (A machine with a single variant makes it the implicit
-  default, so the `default` flag is optional there.) The submit-script and
-  run-script variant maps are independent of each other but must each cover
-  every queue, for every universe context in play — validated at MDB **load**
-  time for `"host"`; for any other declared universe, an uncovered queue is
-  instead a **selection-time** error (§4.2). A variant entry is written either
-  as the **array shorthand** (`"<v>" = ["q1", "q2"]` — queues only) or, when it
+  survivors: the script whose route lists the chosen `-q/--queue`. There is
+  no fallback script; a queue no surviving route lists is an error. `test`
+  commands route among test-marked scripts only, and never borrow a normal
+  one (§11.2). Scripts are never chosen by the user, by name or otherwise:
+  the queue alone routes them, so choosing a different script means choosing
+  a different queue. Omitting `build-universes` (the common case, and the
+  only case before this mechanism existed) means "compatible with every
+  universe," so a machine with no universe-routing need is unaffected. The
+  **queues** themselves (`[queues.*]`, §4.2) accept the same
+  `build-universes` key with identical semantics, gating which configs' binaries may
+  target a queue at all (for `sim`/`test`; never for a build job). The
+  normal submit-script and run-script routes are independent of each other
+  but must each cover every queue, for every universe context in play —
+  validated at MDB **load** time for `"host"`; for any other declared
+  universe, an uncovered queue is instead a **selection-time** error (§4.2). A route is written either
+  as the **array shorthand** (`"<script>" = ["q1", "q2"]` — queues only) or, when it
   must carry a field beyond its queues, the **inline-table form**
-  `"<v>" = { queues = ["q1", …], universe = "<name>", build-universes = ["…"], test = true, default = true }`
-  where `universe` (the universe this variant's *own* execution runs inside,
+  `"<script>" = { queues = ["q1", …], universe = "<name>", build-universes = ["…"], test = true, tasks = N }`
+  where `universe` (the universe this script's *own* execution runs inside,
   §4.8), `build-universes` (the build-universe compatibility list, above), `test`
-  (§11.2), and `default` are each optional and independent of one another; a
+  (§11.2), and `tasks` (§8.5) are each optional and independent of one another; a
   table entry with only `queues` is equivalent to the shorthand. Every key names
-  a variant — there are no reserved keys — so a variant may be named `default`
-  with no special meaning; defaultness is carried solely by `default = true`.
-- Script variants may be `.sh` (literal `@NAME@` templating) or `.py` (emits a
+  a script file — there are no reserved keys (`default-universe` is gone; §4.8) — so a script may be named `default`
+  with no special meaning.
+- Scripts may be `.sh` (literal `@NAME@` templating) or `.py` (emits a
   shell script to stdout; variables are injected per the §6.1 calling
   convention).
 
@@ -1361,11 +1454,11 @@ end-to-end test target (you can actually build and run locally). The port:
 mdb/
   mel5/
     meta.toml                    # grouped tables (§4.2); single "local" queue;
-                                 #   normal + test-marked script/optionlist variants (§11.2);
+                                 #   normal + test-marked script routes (§11.2);
                                  #   test-home under [paths] (§11.5)
     hostname.regexp              # ^melete05(\.cct\.lsu\.edu)?$
-    optionlists/default.toml     # ported from mel5.cfg; [cactup] gpu=false + [options]
-    optionlists/debug.toml       # DEBUG optionlist; reached with cactup build --variant debug (§4.4)
+    optionlists/default.toml     # ported from mel5.cfg; [cactup.runs-on] gpu=false + [options]
+    optionlists/debug.toml       # DEBUG optionlist; reached with cactup build --flavor debug (§4.4)
     runscripts/default.sh        # @NUM_PROCS@→@TASKS@, @NUM_THREADS@→@CPUS_PER_TASK@
     runscripts/test.sh           # test=true; drives make <config>-testsuite → test-home (§11.6)
     submitscripts/default.sh     # @SIMFACTORY@→@CACTUP@, +--installation, PID-wait chaining
@@ -1373,14 +1466,14 @@ mdb/
 ```
 
 It exercises every load-bearing new mechanism: discovery matcher, grouped
-`meta.toml`, single-queue/single-variant resolution, the optionlist
+`meta.toml`, single-queue/single-script resolution, the optionlist
 TOML→native render (§7.8), the renamed topology variables (§6.3), the
 compute-node re-invocation locator (§8.3.1), and — via the `test`-marked
-variants — the whole `cactup test` subsystem (§11): the `test = true` marking and
+scripts — the whole `cactup test` subsystem (§11): the `test = true` marking and
 its respective-defaults resolution (§11.2), the testsuite-only variables (§11.9),
 and the results-into-test-home redirect (§11.6). Because mel5 has no scheduler,
 its `submit` backgrounds the script and echoes a PID; chaining is emulated by
-waiting on that PID in plain bash (no `.py` variant needed), and the testsuite
+waiting on that PID in plain bash (no `.py` script needed), and the testsuite
 `submit` re-invokes `cactup test run` directly (a testsuite is one-shot — no
 chaining, §11.6).
 
@@ -1392,8 +1485,8 @@ It describes a single-node workstation with **no batch system**:
 
 - `submit` = `exec nohup @SCRIPTFILE@ … & echo $!` (background, echo PID as job
   id), `get-status` = `ps @JOB_ID@`, `stop` = `pkill` the process group.
-- A single `local` queue (`gpu = false`, `default = true`) and single `default`
-  variant of each script.
+- A single `local` queue (`gpu = false`, `default = true`) and a single
+  `default` script of each kind, plus a single `default` flavor.
 - It ships no matcher file — `generic` is never auto-matched; it is the
   explicit zero-match fallback (§4.3) and is always selectable via
   `--machine generic`.
@@ -1512,7 +1605,7 @@ the seams where *cactup itself* spawns a process:
 
 The mechanism is phase-agnostic by construction — nothing below is
 phase-specific except which seam consults the resolved universe. Discovery and
-`.py` variant evaluation (cactup's own plumbing) are never wrapped.
+`.py` script evaluation (cactup's own plumbing) are never wrapped.
 
 **Registry (`meta.toml`, machine-level).** Universes are declared per machine
 (images/contexts are machine-specific) and are user-MDB-overridable like anything
@@ -1582,8 +1675,8 @@ falling back to `scontrol show job <id>`) rather than the shim's exit code. The
 **The implicit `host` universe.** `"host"` always exists as a universe name —
 even on a machine whose `meta.toml` has no `[universes.host]` table at all —
 as cactup's name for "the invoking context, unwrapped." Any reference to a
-universe name (`[build].universe`, a variant's `universe`, `default-universe`,
-or a variant's `build-universes` compatibility list, §4.4) may say `"host"` and it is
+universe name (`[build].universe`, a flavor's or script route's `universe`,
+or a route's `build-universes` compatibility list, §4.4) may say `"host"` and it is
 never an unknown-universe error, declared or not. A machine may *optionally*
 declare `[universes.host]` to **customize** host — almost always to attach the
 env-setup overrides below, since host is by definition the identity case and
@@ -1597,7 +1690,7 @@ declare it (see step 5).
 **`env-setup` runs *inside* the universe.** The `<inner>` snippet cactup wraps is
 the phase's effective env-setup followed by the phase command — build:
 `<ENV_SETUP>\n<make …>`; run: the substituted runscript (with its `ENV_SETUP`
-already prepended for a `.sh` variant, §6.1); submit: the `submit` command — so
+already prepended for a `.sh` script, §6.1); submit: the `submit` command — so
 the phase's `env-<phase>-setup` module loads resolve against the universe's
 environment (e.g. the container's modules), which is almost always what a
 containerized phase wants. Authors needing host-then-universe ordering use a
@@ -1643,18 +1736,18 @@ step below — **even when the machine declares `[universes.host]`**.
    re-expands its wrapper with the **run** variable set, so run-specific binds
    (e.g. `@RUNDIR@`) are correct — it does not reuse the build-time expanded
    wrapper. It is deliberately stronger than the per-script/machine defaults below
-   (only an explicit CLI flag or the optionlist opt-out escapes it). If a runscript
-   variant *also* names a universe that differs from the coerced one, cactup uses
+   (only an explicit CLI flag or the optionlist opt-out escapes it). If the routed
+   runscript *also* names a universe that differs from the coerced one, cactup uses
    the coerced (build) universe and notes the override under `-v`.
-3. **Per-script association.** For **build**, the optionlist variant's
-   `[cactup].universe` (§7.8). For **run** / **submit**, the selected script
-   variant's `universe` field in `[variants.runscript]` / `[variants.submitscript]`
-   (§4.4) — the inline-table variant form `"<v>" = { queues = [...], universe = "…" }`.
+3. **Per-script association.** For **build**, the flavor's
+   `[cactup].universe` (§7.8). For **run** / **submit**, the routed script's
+   `universe` field in `[runscripts]` / `[submitscripts]`
+   (§4.4) — the inline-table route form `"<script>" = { queues = [...], universe = "…" }`.
    This is where "an optionlist/script that only works in a given image names that
    image" lives.
-4. **Machine phase default.** build: `[build].universe`; run/submit: the
-   `default-universe` key of `[variants.runscript]` / `[variants.submitscript]`.
-   Applies to any variant that does not name its own.
+4. **Machine phase default.** build: `[build].universe`; run/submit: none.
+   (The former table-level `default-universe` key is gone: the script tables
+   hold only routes, so a route that needs a universe names it in step 3.)
 5. **The machine's declared `[universes.host]`, if present.** The final
    fallback of every chain is now the machine's own customization of `host`
    (above) — but only *materially* when the machine actually declares
@@ -1677,23 +1770,23 @@ universe no longer exists on this machine; the error names it and points at
 
 **Universe-compatibility routing is a separate mechanism from resolution.**
 Everything above answers "which universe does this phase run *in*." A
-different question — "which run/submit **script variant** does a config get
+different question — "which run/submit **script** does a config get
 routed to, given the universe it was *built* in" — is answered by each
-variant's optional `build-universes` compatibility list (§4.4), not by this
-precedence chain: `sim run`/`sim submit` filter the candidate script variants
+route's optional `build-universes` compatibility list (§4.4), not by this
+precedence chain: `sim run`/`sim submit` filter the candidate routes
 for the chosen queue down to those whose `build-universes` list (if set) includes
 the config's build universe (default `"host"`), before applying the usual
-queue → variant / `default = true` selection (§4.2). This is what lets one
+queue → script selection (§4.2). This is what lets one
 machine ship, say, a native run/submit script and a Singularity run/submit
 script over the **same** queue, distinguished purely by the build universe of
 the config being run/submitted — replacing the older trick of minting a
-synthetic queue per build flavor purely to multiplex script selection (the MDB
+synthetic queue per build universe purely to multiplex script selection (the MDB
 porting guide's db1 write-up documents exactly this collapse). `build-universes` is
-orthogonal to the `universe` / `default-universe` keys used by this
-resolution chain: a variant's `build-universes` list says what build universes it is
+orthogonal to the `universe` key used by this
+resolution chain: a route's `build-universes` list says what build universes it is
 *compatible with* (a selection filter); its own `universe` key (if any, step
 3) says what universe *its execution runs inside* (a wrapper choice) — a
-variant may set either, both, or neither.
+route may set either, both, or neither.
 
 **Where the resolved universe is recorded, and when it is applied.**
 
@@ -1712,7 +1805,7 @@ variant may set either, both, or neither.
   compute node. Note that "resolved" here includes the build-universe coercion
   (step 2): a config built in a universe gets that universe frozen into every
   restart's `restart.toml` by default, so its simulations run in the build image
-  even with no `--universe` flag and no runscript-variant universe.
+  even with no `--universe` flag and no runscript-route universe.
 - **submit:** resolved at `sim submit` time and applied around the `submit`
   command on the spot; nothing about it needs persisting (it affects only the
   one-shot `sbatch`-equivalent invocation).
@@ -1852,7 +1945,8 @@ simfactory's two-file config DB and its merge/layering engine
 (`simfactory-docs.txt` §10) are **removed**. Their responsibilities are
 redistributed:
 
-- `user` / `email` / `allocation` / `queue` defaults → **knobs** (§5).
+- `user` / `email` / `allocation` / `queue` defaults → **knobs** (§5);
+  build jobs take theirs from a separate `build-queue` knob (§7.9).
 - `sync-sources` / `sync-parfiles` → gone (no sync, D1).
 - `default-configuration-name` → cactup's **active config** per installation
   (§7).
@@ -1898,7 +1992,7 @@ not at MDB load, so entries for other machines still load and validate
 everywhere. There is no expression evaluation and no ternary sugar. Any MDB
 script that needs conditional logic (e.g. simfactory's
 `@("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@`) is
-rewritten as a Python `.py` variant.
+rewritten as a Python `.py` script.
 
 **Submit-time check (`VarSet::check`).** `sim submit`/`sim run` dry-run a
 `.par` parfile against the assembled variable set *before* creating the
@@ -1956,9 +2050,9 @@ environment can judge. `.py` parfiles are not checked.
    substitution errors name the **line**, not a byte offset. The bundled
    MDB comments that had doubled their `@` to survive the old rule were
    un-doubled when this landed.
-2. **`.py` script variants**: the escape hatch for conditional/computed logic.
+2. **`.py` scripts**: the escape hatch for conditional/computed logic.
    **Calling convention (interface contract for MDB authors):** cactup invokes
-   `python3 <variant>.py` once, passing the entire variable set as a single JSON
+   `python3 <script>.py` once, passing the entire variable set as a single JSON
    object on **stdin**. cactup prepends a small fixed preamble that reads stdin
    and binds every variable as a module global, so the author's code sees plain
    globals (`NODES`, `QUEUE`, `CHAINED_JOB_ID`, …). The script writes the final
@@ -1974,14 +2068,14 @@ environment can judge. `.py` parfiles are not checked.
    The JSON-on-stdin choice keeps values out of the process table and argv
    length limits.
 
-   **Refusing the run.** A `.py` variant may `raise CactupError("…")` (the class
+   **Refusing the run.** A `.py` script may `raise CactupError("…")` (the class
    is provided by the preamble) to reject the request outright: cactup prints the
    message as its own error and stops, so nothing is submitted and no restart
    directory is left behind. This is for a request the machine genuinely cannot
    serve — a scheduler rule the topology violates, a combination of variables the
    site rejects — which cactup cannot check itself because the rule lives in the
    script's own arithmetic. Any **other** exception is treated as a bug in the
-   variant and reported with its full Python traceback, so a typo stays
+   script and reported with its full Python traceback, so a typo stays
    debuggable instead of masquerading as a site policy. Multi-line messages are
    preserved; say what to change, not just what is wrong.
 
@@ -2024,21 +2118,21 @@ depends on the artifact:
   env-setup block appended at the end instead. A scheduler-less submitscript
   (no directive lines at all — `generic`, mel5) reduces to "right after the
   shebang," identical to the runscript rule above.
-- **`.py` submit/run variants:** cactup does **not** auto-prepend — the `.py`
+- **`.py` submit/run scripts:** cactup does **not** auto-prepend — the `.py`
   author has full control over the emitted script and is responsible for placing
   env-setup where they want it. cactup makes the combined value available as the
   global **`ENV_SETUP`** (string) — and, like every variable, as a literal
   `@ENV_SETUP@` token — so the author typically emits `print(ENV_SETUP)` near the
   top of the generated script. (This is the deliberate consequence of the `.py`
-  variant being the "cactup gets out of the way" escape hatch.)
+  form being the "cactup gets out of the way" escape hatch.)
 
 ### 6.2 Substituted artifacts
 
-- Optionlist (selected variant) → substituted and written into the config's
+- Optionlist (selected flavor) → substituted and written into the config's
   build inputs (§7).
-- SubmitScript (queue-selected variant) → substituted at submit time, written
+- SubmitScript (queue-routed script) → substituted at submit time, written
   into the restart metadata, and handed to the scheduler.
-- RunScript (queue-selected variant) → substituted at run time.
+- RunScript (queue-routed script) → substituted at run time.
 - Parfile → resolved at **run** time (when the topology and restart are known),
   in one of the two template kinds above — exactly like submit/run scripts, and
   chosen by the parfile's extension (§8.2):
@@ -2060,7 +2154,7 @@ depends on the artifact:
     is written as `<basename>.par` and used **as-is**: cactup does **not**
     post-substitute it (the author already has every variable as a global —
     including the typed companions — and interpolates in Python). Unlike
-    submit/run `.py` variants there is no `env-setup` to place; `ENV_SETUP` is a
+    submit/run `.py` scripts there is no `env-setup` to place; `ENV_SETUP` is a
     submit/run-script concern only.
 
 ### 6.3 The canonical variable set
@@ -2142,7 +2236,7 @@ already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
 
 **Build-time only** (optionlists/build): `MAKEJOBS`, `DEBUGGER`, `RUNDEBUG`.
 
-**Build-submit-only** (§7.9; present only for `buildsubmitscript` variants and
+**Build-submit-only** (§7.9; present only for build-submit scripts and
 the frozen var set a build attempt carries — never leaked into normal
 sim/config substitution): `CONFIG_DIR` (the config's absolute on-disk
 directory, `<Cactus root>/configs/<name>` — passed to the compute-node
@@ -2172,7 +2266,7 @@ existing §6.3 variables a test runscript uses for `make @CONFIGURATION@-testsui
 and `CCTK_TESTSUITE_RUN_PROCESSORS`.)
 
 Dropped (no longer produced): the simfactory proc-layout names above, the bare
-`SUBMITSCRIPT` machine key (variants replace it), and every remote/archive
+`SUBMITSCRIPT` machine key (queue-routed scripts replace it), and every remote/archive
 variable.
 
 ---
@@ -2185,7 +2279,7 @@ Local to the active installation. Replaces `sim-build` (`simfactory-docs.txt`
 ### 7.1 Commands
 
 ```
-cactup build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [flags…]
+cactup build <name> [-f] [--thornlist P] [--flavor F] [--universe U | --no-universe] [flags…]
                                     # foreground or queued, auto-selected — §7.9
 cactup config show [<name>]
 cactup config use <name>
@@ -2201,8 +2295,8 @@ cactup config delta [<name>]       # divergence from the last build (§3.3)
   subcommand. `--thornlist` defaults to the thornlist the config was last
   built from (§7.5), falling back to
   `<Cactus root>/thornlists/installation-default.th` for a fresh config.
-  `--variant` selects the optionlist variant (required iff the machine has >1
-  optionlist variant — §4.4).
+  `--flavor` selects the optionlist flavor (required iff the machine has >1
+  flavor and none is marked default — §4.4).
   `--universe <U>` runs the build inside a declared universe (e.g. an Apptainer
   image), `--no-universe` forces the host context; both override the
   optionlist/machine defaults (§4.8).
@@ -2212,8 +2306,8 @@ cactup config delta [<name>]       # divergence from the last build (§3.3)
   CLI > stored config metadata > default.
 - `show` (no arg): list configs with `[built <date>]` / `[incomplete]` status
   (port of `list-configurations`).
-- `show <name>`: print stored metadata (variant, thornlist, flags, build/config
-  IDs, optionlist).
+- `show <name>`: print stored metadata (flavor, where the binary runs,
+  thornlist, flags, build/config IDs, optionlist).
 - `use <name>`: set the installation's active config.
 - `delete <name>`: remove the config build and its metadata, and GC any now-orphaned
   `CACHE/exe/<build-id>` (§8.1). If `<name>` is the active config, the installation
@@ -2265,11 +2359,11 @@ locate the right attempt automatically; there is nothing to `tail` by hand.
 
 - **Submit/Run scripts are no longer baked into the config** at build time.
   simfactory copied a `SubmitScript`/`RunScript` into `configs/<name>/`; cactup
-  resolves the correct *variant* at submit/run time based on the chosen queue
-  (§4.4). The config only owns the **optionlist variant** (which genuinely
+  routes the correct *script* at submit/run time based on the chosen queue
+  (§4.4). The config only owns the **optionlist flavor** (which genuinely
   affects the binary). This removes `remove-submitscript` and the
   `--no-submitscript` dance.
-- The OptionList variant is chosen via `--variant` and recorded in metadata.
+- The optionlist flavor is chosen via `--flavor` and recorded in metadata.
 
 ### 7.4 Config metadata (per-installation on-disk TOML — D6)
 
@@ -2280,18 +2374,16 @@ Stored next to the build, **not** in the global DB:
 ```
 
 ```toml
-schema = 1
+schema = 2
 name = "sim-gpu"
-variant = "gpu"                 # which optionlist this config is built from: EXACTLY ONE of
-# optionlist = "/home/me/my.cfg"  # `variant` (an MDB variant) or `optionlist` (the file a
-                                 # --optionlist build came from), never both and never
-                                 # neither, and the one a bare rebuild uses (§7.8)
-gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
-compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
+flavor = "gpu"                  # which optionlist this config is built from: EXACTLY ONE of
+# optionlist = "/home/me/my.cfg"  # `flavor` (one of the machine's flavors) or `optionlist`
+                                 # (the file a --optionlist build came from), never both and
+                                 # never neither, and the one a bare rebuild uses (§7.8)
 thornlist = "thornlists/installation-default.th"
 universe = "et-sif"             # resolved build universe; omitted when built bare/in host —
                                  # treated as "host" wherever a build universe is consulted
-                                 # (script-variant `build-universes` filtering, §4.4; run coercion, §4.8)
+                                 # (script `build-universes` filtering, §4.4; run coercion, §4.8)
 coerce-run-universe = true      # snapshotted from optionlist [cactup]; default true (§4.8, §7.8)
 config-id = "…"                 # replaces CONFIG-ID
 build-id = "…"                  # replaces BUILD-ID
@@ -2300,11 +2392,39 @@ debug = false
 optimize = true
 unsafe = false
 profile = false
+[runs-on]                       # where the binary may run, copied from the flavor's header (D12)
+queues = ["gpu"]
+gpu = true
+# default-queue = "gpu"         # present only when the flavor names one (§4.4)
 ```
 
-`gpu` and `compatible-queues` are snapshotted from the chosen optionlist
-variant's `[cactup]` header at build time (§7.8) so that `sim submit` can
-enforce queue compatibility (§4.4) without re-reading the MDB. The machine the
+`[runs-on]` is snapshotted from the chosen flavor's `[cactup.runs-on]` at build
+time (§7.8) so that `sim submit` can enforce queue compatibility (§4.4) without
+re-reading the MDB. It constrains the config's simulations and test runs only,
+never the queue a build of it is submitted to (§7.9).
+
+**Schema 2, and the first read-side upgrade.** Schema 2 renamed `variant` to
+`flavor` and grouped the flat `gpu`/`compatible-queues` keys as `[runs-on]`
+(`queues`/`gpu`). A schema-1 record — or one predating the `schema` key — is
+upgraded **in memory on every read**, in one place (`ConfigMeta::from_table`),
+and that covers both copies on disk: `cactup-config.toml` and the record
+embedded in each build attempt's `build.toml` (whose own top-level `variant`
+key is renamed the same way when the attempt is opened). A read never rewrites
+the file — rewriting on read could race a concurrent build storing a newer
+record — so a file reaches schema 2 the next time it is stored. The upgrade is
+kept indefinitely: a build queued by an older cactup runs that older binary on
+the compute node (`@CACTUP@`, §17.2) and writes a schema-1 record when it
+finishes. An older binary cannot read a schema-2 record, and one path reaches
+that without anyone running mixed versions on purpose: a build queued by an
+older cactup reads the config's record when its compute-node `execute`
+starts, so if the newer cactup stored that record in the meantime, the queued
+build fails to parse it. The newer binary stores a record only when it builds
+the config — which `build` refuses while an attempt of it is queued or
+running, unless forced with `-f` — or in the one-time legacy thornlist
+retarget, so the window is narrow and accepted. This is the
+"migration story designed when a breaking bump happens" that §2.1 defers to,
+and the pattern for the next one: a read-side upgrade in one place, the
+record's own `schema` bumped, never a rewrite on read. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
 portable across machines) and **enforced**: `build` of an existing config,
 `sim create`/`submit`/`run` and `test run`/`submit` refuse a config whose
@@ -2326,11 +2446,21 @@ run-time wrapper is re-resolved and re-expanded from the current MDB (§4.8).
 **source optionlist TOML** verbatim to `configs/<name>/cactup-optionlist.toml`,
 and the chosen **source thornlist** verbatim to
 `configs/<name>/cactup-thornlist.src.th` (§7.5).
-The rebuild decision (§7.8 rule 5) diffs the freshly-selected source TOML against
-this stored copy; *any* difference triggers a full realclean + reconfigure +
-rebuild. This is the source-of-truth for "did the optionlist change?" — the
-rendered native file is never diffed (it exists only for the Cactus build system
-to consume, §7.8). The recorded **`universe`** is compared the same way (its value
+The rebuild decision (§7.8 rule 5) compares the freshly-selected optionlist
+against this stored copy **as what reaches the build**: both are reduced to
+their rendered native options, with the `[cactup]` header dropped, and any
+difference triggers a full realclean + reconfigure + rebuild. A comment,
+layout or header edit therefore rebuilds nothing — the header's universe and
+thorn toggles have their own checks (below, §7.5), and the rest of it
+(`runs-on`, `coerce-run-universe`, `default`, `description`) describes the
+binary or the flavor, not the compile. (An earlier revision diffed the
+verbatim text; the generation-2 migration, which rewrote every shipped
+optionlist's header, would have cost every existing config a from-scratch
+rebuild.) A stored copy that no longer parses counts as changed. Because a
+header edit no longer reaches the record through a rebuild, every `cactup
+build` — an up-to-date one included — refreshes the record's header snapshot
+(`runs-on`, `coerce-run-universe`), the optionlist it is on record as built
+from, and this stored copy. The recorded **`universe`** is compared the same way (its value
 can come from CLI/machine default, not just the optionlist TOML, so it is checked
 separately): a resolved universe that differs from the stored one also forces a
 full realclean + rebuild, since a host build and an in-container build are not
@@ -2418,7 +2548,7 @@ thorn (an uncommented thorn line — a line the list already carries as
 `#DISABLED` is not a conflict) that a `disabled-thorns` array then switches
 back off, `build prepare` prints a loud yellow warning naming each such thorn,
 the `disabled-thorns` entry that matched it, and which layer that entry came
-from: the machine (§7.5) or the selected optionlist variant (§7.8). Without it
+from: the machine (§7.5) or the selected optionlist flavor (§7.8). Without it
 the drop is completely silent — the user asked for the thorn, the processed
 list quietly omits it, and the absence only surfaces much later as a missing
 thorn at runtime. The warning is informational; it never fails the build.
@@ -2490,17 +2620,25 @@ first line a `VERSION` date), consumed directly by
 `make <config>-config options=<file>`. cactup authors optionlists as **TOML**
 and **renders** them to that native format before invoking make.
 
-**TOML schema** (`mdb/<m>/optionlists/<variant>.toml`):
+**TOML schema** (`mdb/<m>/optionlists/<flavor>.toml`). The machine's flavors
+are exactly the `*.toml` files in `optionlists/`, named by file stem; nothing
+in `meta.toml` lists them (the former `[variants.optionlist]` table is gone).
 
 ```toml
 [cactup]                         # cactup-only metadata; NOT emitted to the native file
-gpu = true                       # binary capability (D12)
-compatible-queues = ["gpu"]      # which queues this build may be submitted to (D12)
+description = "CUDA build"       # optional: shown by `machine show --flavors`
 default = false                  # optional, default false: marks the implicit choice when the
-                                 # machine lists several optionlist variants (§4.4)
-universe = "et-sif"              # optional: build this variant inside this universe (§4.8)
+                                 # machine has several flavors (§4.4)
+universe = "et-sif"              # optional: build this flavor inside this universe (§4.8)
 coerce-run-universe = true       # optional, default true: sims of this config run in `universe` too (§4.8);
                                  # set false to opt out (run resolves normally, no build-universe inheritance)
+# enabled-thorns / disabled-thorns = [...]   # optional per-flavor thorn toggles (§7.5)
+
+[cactup.runs-on]                 # optional: where the BUILT BINARY may run (D12)
+queues = ["gpu"]                 # which queues; empty/omitted = any queue
+gpu = true                       # binary needs a GPU context; default false
+default-queue = "gpu"            # optional: a sim/test's queue when neither -q nor the
+                                 # `queue` knob names one; one of `queues` (§4.4, §8.5)
 
 [options]                        # rendered to native NAME = value lines
 VERSION = "2024-06-01"           # first emitted line; a change forces full rebuild
@@ -2510,11 +2648,19 @@ CFLAGS = "-O2 -g @SOME_TEMPLATED_VALUE@"
 # … one key per native option …
 ```
 
-**Render rules (deterministic; the rendered native file is fed to Cactus only —
-it is never diffed for the rebuild decision):**
+**The header is closed.** `[cactup]` and `[cactup.runs-on]` reject keys they
+do not model, exactly like `meta.toml` (§4.2): a typo'd or leftover key (a flat
+`gpu` or `compatible-queues` from before `runs-on` existed, say) is a load-time
+error naming it, never a silently skipped check. `runs-on` describes the
+binary, so it is consulted by `sim submit`/`sim run` and `test run`/`test
+submit` only (escapable with `--force-queue`, §4.4) — never by `build submit`,
+whose job queue is only where `make` runs (§7.9).
 
-1. Only the `[options]` table is rendered. `[cactup]` is stripped (`gpu`,
-   `compatible-queues`, and `coerce-run-universe` snapshotted verbatim into the
+**Render rules (deterministic; the rendered options are what Cactus is fed,
+and also what the rebuild decision compares, §7.4):**
+
+1. Only the `[options]` table is rendered. `[cactup]` is stripped
+   (`[cactup.runs-on]` and `coerce-run-universe` snapshotted verbatim into the
    config metadata, §7.4; `[cactup].universe` feeds universe resolution —
    precedence in §4.8 — and the *resolved* value is what lands in the metadata).
 2. Emit `VERSION` first, then the remaining keys in **TOML document order**
@@ -2544,21 +2690,21 @@ it is never diffed for the rebuild decision):**
 **User-supplied optionlists (`cactup build --optionlist PATH`).** A build may be
 made from a file outside the MDB entirely. The porting loop (edit a `.cfg`,
 rebuild, read the error, repeat) and the one-off experiment both want an
-optionlist that does not yet deserve to be a machine variant, and requiring one
+optionlist that does not yet deserve to be a machine flavor, and requiring one
 to be installed into `mdb/<m>/optionlists/` first turns a two-minute iteration
-into an MDB edit. `--optionlist` displaces variant selection completely and is
-therefore mutually exclusive with `--variant`. Three spellings are accepted,
+into an MDB edit. `--optionlist` displaces flavor selection completely and is
+therefore mutually exclusive with `--flavor`. Three spellings are accepted,
 auto-detected, and never intermixed within one file:
 
 1. **The MDB shape above** — a `[cactup]` table plus an `[options]` table. The
-   `[cactup]` keys are honored exactly as if the file sat in the MDB: `gpu` and
-   `compatible-queues` feed the D12 queue cross-check (§4.4), `universe` feeds
+   `[cactup]` keys are honored exactly as if the file sat in the MDB:
+   `[cactup.runs-on]` feeds the D12 queue cross-check (§4.4), `universe` feeds
    §4.8 resolution, and `enabled-thorns`/`disabled-thorns` apply on top of the
    machine's. (`default` is meaningless here — the file was named explicitly —
    and is ignored.)
 2. **The `[options]` table alone**, with or without its header line. There is no
-   `[cactup]` table, so the header defaults apply: no `gpu` claim, and an empty
-   `compatible-queues`, i.e. no queue restriction at all.
+   `[cactup]` table, so the header defaults apply: no `gpu` claim, and empty
+   `runs-on` queues, i.e. no queue restriction at all.
 3. **A native Cactus `.cfg`** — `NAME = value` lines with `#` comments, the
    format simfactory consumed directly and the format every existing optionlist
    in the wild is already written in. Header defaults as in (2). Every value is
@@ -2581,46 +2727,48 @@ silently build the wrong binary. A `[cactup]` table decides form 1; an
 is an error, as is a file that declares no options at all.
 
 The config metadata (§7.4) records **which optionlist, of one kind or the
-other** — a `variant = "cuda"` naming an MDB variant, or an `optionlist =
+other** — a `flavor = "cuda"` naming an MDB flavor, or an `optionlist =
 "/abs/path"` naming a user file, never both and never neither. The two are
 alternatives, not a fallback chain, because the flags that set them are mutually
 exclusive; the metadata is modeled as a sum so a config that is somehow both
 cannot be written down. The recorded path is canonicalized, so `config show`
 names the file the build came from wherever a later rebuild runs. The rebuild
 trigger's first input — the source snapshot — is the user's file text verbatim,
-exactly as it is for an MDB variant, so editing that file forces the same full
-rebuild an MDB optionlist edit does.
+exactly as it is for an MDB flavor, so editing that file's options forces the
+same full rebuild an MDB optionlist edit does.
 
 **Stickiness.** A later bare `cactup build` rebuilds from whichever the config
 records — the flag does not have to be repeated, exactly as `--thornlist` does
-not (§7.5). This is true of `--variant` too: **all three** of the flags that say
+not (§7.5). This is true of `--flavor` too: **all three** of the flags that say
 what a config is made of are remembered, so there is no rule to learn about
 which ones are. The resolution order is:
 
 1. `--optionlist PATH` — explicit; a hard error if unreadable.
-2. `--variant NAME` — explicit; how a config is deliberately moved onto, or
-   between, the machine's own variants.
+2. `--flavor NAME` — explicit; how a config is deliberately moved onto, or
+   between, the machine's own flavors.
 3. whichever of the two the config already records, since it records exactly
    one:
-   - a **variant**, when the machine still lists it. When the machine has since
-     renamed or dropped it, this is a **hard error** naming the missing variant
-     and listing what the machine now offers — there is nothing to fall back on,
-     because a snapshot records the text one build used, not a standing
-     definition of a variant.
+   - a **flavor**, when the machine still has it. When the machine has since
+     renamed or dropped it, this is a **hard error** naming the missing flavor
+     and listing what the machine now offers ("config \"c\" was built with
+     optionlist flavor \"X\", which machine \"m\" no longer has (it now offers:
+     …) — pass --flavor to pick one of those, or --optionlist to build from a
+     file") — there is nothing to fall back on, because a snapshot records the
+     text one build used, not a standing definition of a flavor.
    - the **`--optionlist` path**, falling back to that config's verbatim
      snapshot when the path has since moved or been deleted, so the config stays
      rebuildable and the file going away cannot quietly change what gets built.
      Preferring the live file is deliberate: editing an optionlist in place and
      rebuilding is the whole point of naming one.
-4. the machine's own variant selection (§4.4).
+4. the machine's own flavor selection (§4.4).
 
 Steps 1 and 2 are alternatives, and so are the two halves of step 3. Supplying
-either flag **displaces** what the config was on record as being — `--variant`
+either flag **displaces** what the config was on record as being — `--flavor`
 on a config built from a file moves it onto the MDB, `--optionlist` on a config
-built from a variant moves it off. Whichever flag was passed most recently is
+built from a flavor moves it off. Whichever flag was passed most recently is
 what sticks, in both directions; neither ever falls back to the other.
 
-This replaces an earlier guard that refused a bare rebuild whenever the variant
+This replaces an earlier guard that refused a bare rebuild whenever the flavor
 a config recorded differed from what the machine would now resolve to. The guard
 was there to stop a bare rebuild silently building a different flavor; step 3
 stops that by construction instead, by rebuilding what the config actually
@@ -2661,7 +2809,7 @@ the reconfigure step copies into place. Adding a thorn is routine, so charging a
 from-scratch rebuild for it would be a poor trade; `-f` still forces one.
 Diffing the *processed* text (not the source) makes this one comparison cover a
 source-thornlist edit, a switch to a different thornlist file, and a change to
-the machine's or variant's `enabled-thorns`/`disabled-thorns` — none of which the
+the machine's or flavor's `enabled-thorns`/`disabled-thorns` — none of which the
 optionlist diff can see.
 
 A thorn whose provider or shape differs also triggers a reconfigure + `make`
@@ -2692,6 +2840,30 @@ Only when all five inputs match does a complete config short-circuit as up to
 date. The baseline for all five is recorded on **every** build, including under
 `-f`: a config that always rebuilds with `-f` could otherwise never acquire one
 to diff a later plain rebuild against.
+
+The processed thornlist may be a CRL list or a plain Cactus `ThornList`. A
+plain list is resolved through the tree: each `arrangements/<A>/<T>` that links
+into `repos/<repo>/…` counts as that repo, and the flesh is whatever repo the
+root `Makefile` links into. A thorn that is no such link keeps its provider and
+shape entries but has no source state, and neither the up-to-date line nor
+`config delta` may then claim "same sources" without naming it (nor the flesh,
+when the `Makefile` is not a link). Resolving reads the tree rather than the
+installation's CRL list, because the links are what the build compiles from.
+
+A source tree cactup cannot read at all yields no reading. That happens when the
+processed thornlist is neither kind of list, a CRL list names no git repo, no
+thorn of a plain list is a link into `repos/`, none of the repos is on disk, or
+none of them opens. No reading means no baseline and no source diff: the
+config behaves as it did before source tracking. That is never silent. Every
+build of such a config says why there is no reading, the up-to-date line does
+not claim "same sources", and `config delta` names the cause rather than
+advising a rebuild that cannot record a baseline either.
+
+Two flags override the short-circuit. `-f` forces `Full` (realclean +
+reconfigure + build). `--reconfig` forces `Incremental` (reconfigure + `make`,
+no realclean), but only in place of `UpToDate`: any decision the diffs reached
+on their own stands. `--reconfig` is the only incremental rebuild available
+for a config whose sources cactup cannot track.
 
 ---
 
@@ -2763,7 +2935,7 @@ native route has no polling.
 `--block` is an error when the submit path is not taken at all: on `cactup
 build run`; and on a bare `cactup build` that resolves to the foreground
 because `[build].default-action = "run"`, because the machine cannot submit
-builds (no `[variants.buildsubmitscript]` variant and/or no
+builds (no `[buildsubmitscripts]` route and/or no
 `[scheduler].submit`), or because `--virtual-executable` was given (which is
 never queued regardless of what the machine would otherwise pick). The error
 names *which* of those decided it, since the fix differs in each case — drop
@@ -2780,7 +2952,7 @@ worse than one that simply never combines. `--follow` already waits for the
 build; `--block` is what you use when you want the wait without the output.
 
 **Auto-selection.** Submitting a build is *possible* on a machine iff it
-declares at least one `[variants.buildsubmitscript]` entry **and**
+declares at least one `[buildsubmitscripts]` route **and**
 `[scheduler].submit` (§4.2) — both are required, since a buildsubmitscript with
 nothing to hand it to is as useless as a submit command with nothing to run.
 `[build].default-action` then decides what an unqualified `cactup build` does:
@@ -2799,12 +2971,34 @@ a hard error for the same reason, rather than a silent fallback to the
 foreground — a user who explicitly asked to submit should not be surprised by
 a login-node compile.
 
+**The build job's queue is not the binary's.** A build job runs `make`, not
+the binary it produces, so nothing that describes where a *binary* may run
+constrains it: the flavor's `[cactup.runs-on]` `queues` and `gpu` (D12), and a
+queue's `build-universes` list (§4.4), are checked by `sim` and `test` jobs
+only. A CPU-only optionlist may be compiled on a GPU partition and a CUDA one
+on a CPU partition; the build queue is `-q`, else the `build-queue` knob,
+else `[build].queue`, else the machine's default queue, checked against the
+machine alone. `build-queue` is the build-job counterpart of the `queue` knob
+(which build jobs never read) and follows the same rule: the user's standing
+choice outranks the MDB's `[build].queue`, but a knob naming a queue this
+machine cannot queue a build on — no such queue, or no build-submit script
+serves it — is passed over with a one-line note. (That check cannot see the
+scripts' `build-universes` lists: the config's build universe is resolved
+later, in `prepare`. A knob naming a queue served only by another universe's
+build-submit script is therefore kept, and stops at routing with the usual
+"no build-submit script serves queue" error rather than being passed over.) The
+buildsubmitscript is then routed by that queue exactly as a submitscript is —
+filtered by its `build-universes` list against the config's build universe,
+which here is the universe the job's own `make` runs in — and by nothing
+else: `--flavor` names the optionlist being built, never the script that
+queues it.
+
 **The prepare/execute split, and what is frozen at submit time.** A build's
 work splits into two phases with different privileges (D11):
 
 - **`prepare`** — everything that needs the MDB, the installation's git repos,
-  or the knobs: resolving the optionlist variant and universe, resolving the
-  thornlist and its machine/variant thorn toggles, making the rebuild decision
+  or the knobs: resolving the optionlist flavor and universe, resolving the
+  thornlist and its machine/flavor thorn toggles, making the rebuild decision
   (§7.8), and staging the rendered optionlist, processed thornlist, and
   assembled `make` step list. This runs **only on the login node**, whether the
   build that follows is a foreground `build run` or a queued `build submit`.
@@ -2945,7 +3139,7 @@ the attempt (`@CONFIG_DIR@/.cactup-builds/<ATTEMPT_ID>`) with no registry
 lookup, exactly as `--sim-dir`/`--restart-id` locate a restart. `--installation`
 and `--machine` supply the alias and machine name without touching the global
 DB. `cactup build run --config-dir --attempt-id` reads everything else —
-variant, universe, the resolved `make` invocation, the full frozen variable
+flavor, universe, the resolved `make` invocation, the full frozen variable
 set — from that attempt's on-disk `build.toml` (§7.9), satisfying the same D11
 rule §8.3.1 states for a compute-node `sim run`: the path a generated script
 takes never touches the global DB, the installation registry, the MDB, or
@@ -3052,7 +3246,7 @@ Port of `create()` (`simfactory-docs.txt` §14.1):
    have been built for the resolved machine (§7.4); `--ignore-machine`/`-f`
    overrides.
 2. **Validate `<parfile>`'s name (collision guard).** The parfile must end
-   in `.par` (literal `@NAME@` substitution) or `.py` (Python variant —
+   in `.par` (literal `@NAME@` substitution) or `.py` (Python form —
    §6.1/§6.2). cactup strips that one extension to derive the working-directory
    name (so intra-name dots are fine — `q1.5.par` → working dir `q1.5/`,
    `q1.5.py` → `q1.5/`). Create is rejected only if the extension-stripped
@@ -3094,8 +3288,8 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   `create-submit` fusion). If `<sim>` **does** exist and a parfile is *also*
   given, that is an **error** unless `--overwrite`/`-f` is passed — cactup
   will not silently ignore a parfile that contradicts an existing sim.
-- Validate the built config's `compatible-queues` against the chosen queue
-  (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`. Before that,
+- Validate the built config's `runs-on` queues and `gpu` flag against the
+  chosen queue (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`. Before that,
   the config and the simulation must both have been built for the resolved
   machine (§7.4); error on mismatch unless `--ignore-machine`/`-f`.
 - **Reap a stale active restart (port of simfactory `initRestart`).** Before
@@ -3112,12 +3306,12 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   never reaping. Without reaping, the lingering `-active` symlink would make
   `makeActive` refuse (§9.2).
 - Allocate the next restart id, create `output-NNNN/` + its `.cactup/` dir.
-- Compute the topology variable set (§8.5), select the submit/run script
-  variants for the chosen queue (§4.4), substitute, and write the substituted
+- Compute the topology variable set (§8.5), route the submit/run scripts
+  for the chosen queue (§4.4), substitute, and write the substituted
   SubmitScript into the restart metadata.
 - **Resolve universes (§4.8).** Resolve the **run** universe (following the §4.8
   precedence: `--universe` → the config's coerced build universe unless the
-  optionlist opted out → runscript variant / `default-universe` → none) and record
+  optionlist opted out → routed runscript's `universe` → none) and record
   it in `restart.toml` so the compute-node `sim run` applies it (§8.3.1); resolve the
   **submit** universe and, if any, wrap the `submit` command below in it. The
   run-universe resolution happens here, on the login node, because the compute
@@ -3132,7 +3326,7 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   effective walltime ceiling (§4.2), cactup transparently pre-submits
   `ceil(walltime / ceiling)` chained restarts, each scheduler-dependent on the
   prior job id. There is no user-facing chaining command; the dependency flag is
-  emitted by the submit-script variant (a `.py` variant, since this is
+  emitted by the submit script (a `.py` script, since this is
   conditional — §6). Each segment continues from the prior one only insofar as
   its **parfile** recovers the newest checkpoint — cactup does not arrange that
   and takes no position on it (§8.8).
@@ -3218,11 +3412,11 @@ resolved **run** universe, if any. In the compute-node path the universe is read
 from `restart.toml` (frozen at submit time, §8.3.1); in the interactive path
 (`--restart-id` absent) it is resolved on the spot per the §4.8 precedence:
 `--universe` → the config's coerced build universe (unless the optionlist opted
-out) → runscript variant / `default-universe` → none. `--no-universe` forces the
+out) → routed runscript's `universe` → none. `--no-universe` forces the
 host context. The whole runscript — mpirun/`srun` line included — runs inside the
 universe (the per-rank-container boundary of §4.8 applies).
 
-Computed parfiles use the **`.py` variant** (§6.2), replacing simfactory's
+Computed parfiles use the **`.py` form** (§6.2), replacing simfactory's
 executable `.rpar`: the `.py` parfile's master copy (§8.2) is invoked per the
 §6.1 calling convention (the full §6.3 variable set as JSON on stdin, bound as
 globals), and its stdout is written into the restart as the ready-to-run
@@ -3238,7 +3432,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | Flag | Meaning | Default |
 |------|---------|---------|
 | `-a/--allocation` * | account | knob |
-| `-q/--queue` * | scheduler queue | knob → machine default queue |
+| `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
 | `-n/--nodes` * | node count | 1 |
@@ -3306,14 +3500,14 @@ facts fill any topology the user left unset.
   (`--tasks=1` is 1 rank on 1 node, not `TASKS = 1, TASKS_PER_NODE = 2`); an
   explicit `--tpn` is authoritative and never capped. This is a no-op in the
   default case, where `TASKS == NODES * TASKS_PER_NODE` already.
-- **Script-variant default tasks (§4.2).** When *no* process-layout flag
-  (`-n`/`-T`/`-t`) was given, the selected script variant's optional `tasks = N`
+- **Script-route default tasks (§4.2).** When *no* process-layout flag
+  (`-n`/`-T`/`-t`) was given, the routed script's optional `tasks = N`
   setting replaces the fill-the-node `TASKS` (capping `TASKS_PER_NODE` to keep
   the layout self-consistent); for a submit the submitscript entry is consulted
   first, then the runscript entry. Testsuite runs additionally fall back to
-  `TASKS = 2` when no variant sets it (§11.6).
+  `TASKS = 2` when no route sets it (§11.6).
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0` — checked
-  **one-directionally** against the built binary's `gpu` flag (§4.4 / D12):
+  **one-directionally** against the built binary's `runs-on.gpu` flag (§4.4 / D12):
   refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
   set and this computed `GPU` is `0`; a non-GPU binary with `GPU = 1` is
   allowed (advisory note only when a non-GPU queue exists on the machine).
@@ -3685,7 +3879,7 @@ output-%04d/.cactup/               restart-level metadata              [cactup-o
   submit-script  run-script        substituted scripts for this restart
                                    (cactup-owned `.cactup/` files → kebab-case per §4.2;
                                     the CamelCase `SubmitScript`/`RunScript` elsewhere in
-                                    this doc name the MDB *variant* artifacts, not these)
+                                    this doc name the MDB *script* artifacts, not these)
   running.lock                     per-restart liveness marker held by a live run
   heartbeat                        mtime touched periodically by a live run
 ```
@@ -3822,7 +4016,7 @@ test-config kind** and **no separate active pointer** — only two concepts:
 
   A config built with a DEBUG optionlist (to surface assertion/bounds errors the
   testsuite is meant to catch) is just a config built with `cactup build
-  --variant <debug>` — see §4.4 optionlist selection; the old test-optionlist
+  --flavor <debug>` — see §4.4 optionlist selection; the old test-optionlist
   partition is gone.
 - **test run** (a.k.a. **test-sim**) — one execution of a config's testsuite
   against a chosen topology and test selection. It is the analog of a
@@ -3837,59 +4031,62 @@ A machine typically needs **different** runscripts and submitscripts for
 testsuites than for production (a test runscript drives `make <config>-testsuite`
 and exports `CCTK_TESTSUITE_RUN_*`, §11.6, rather than `mpirun`-ing a parfile).
 cactup lets one machine ship both, keyed by a single `test = true` marker on the
-script variant, and resolves the right one by the rules the requirements specify.
-(Optionlists are **not** part of this: they are chosen purely by §4.4 — a config
-under test uses whatever optionlist its `cactup build` selected.)
+script's route, and resolves the right one by the rules the requirements specify.
+(Flavors are **not** part of this: they are chosen purely by §4.4 — a config
+under test uses whatever flavor its `cactup build` selected.)
 
 **Where the marker lives.** Run/submitscripts have no header of their own, so
-the marker goes on the `meta.toml` variant entry, using the inline-table form
-(§4.2):
+the marker goes on the script's route in `[runscripts]` / `[submitscripts]`,
+using the inline-table form (§4.2):
 
 ```toml
-[variants.runscript]
-"cpu"      = { queues = ["checkpt", "single"], default = true }              # normal default
-"test-cpu" = { queues = ["checkpt", "single"], test = true, default = true } # test-partition default (see resolution below)
+[runscripts]
+"cpu"      = ["checkpt", "single"]                            # normal: sim run/submit
+"test-cpu" = { queues = ["checkpt", "single"], test = true }  # testsuite: test run/submit
 ```
-(`test = true` and `default = true` compose with each other and with
-`universe = "…"` / `build-universes = […]` in the same inline table.)
+(`test = true` composes with `universe = "…"` / `build-universes = […]` /
+`tasks = N` in the same inline table.)
 
 **Partitioning.** For each script kind (runscript / submitscript) cactup splits
-the machine's variants into a **normal** set (no marker) and a **test** set
+the machine's routes into a **normal** set (no marker) and a **test** set
 (`test = true`). Normal commands (`sim run`, `sim submit`) consider **only the
-normal set** — a test variant is *never* used for a normal run. Test commands
-(`test run`, `test submit`) prefer the **test set** but **fall back to the normal
-set when the test set is empty**. This is the asymmetry the requirements call
-out: *"if there is no testsuite script but there is a regular one, use that for
-tests, but not vice versa."*
+normal set** — a test script is *never* used for a normal run — and test
+commands (`test run`, `test submit`) consider **only the test set**: a normal
+script is never used for a testsuite either. (An earlier revision let tests
+fall back to the normal set when the test set was empty. That never worked:
+a testsuite needs a script written for it — a test runscript `cd`s into the
+source tree and runs `make <config>-testsuite` with `CCTK_TESTSUITE_RUN_*`
+set, while a normal one `mpirun`s a parfile in a run directory — and a test
+run deliberately defines none of `RUNDIR`, `PARFILE` or `SIMULATION_NAME`
+(§11.9), so a borrowed normal script failed at substitution anyway.)
 
-**Resolution within the chosen set** (selected at `test run`/`test submit` time,
-per the chosen queue **and** the config's build universe): the chosen set (test,
-or normal on fallback) is first filtered to variants compatible with the
-config's build universe — `"host"` when the config records none — using the
-same `build-universes` compatibility list and filtering rule that governs `sim
-run`/`sim submit` (§4.4, §4.8); then cactup picks, among the survivors, the
-variant whose `queues` include the chosen queue, or (absent a mapping) the
-test-partition default (the `test = true`, `default = true` variant, or the
-sole test variant). If the test set is empty, resolve against the normal set
-exactly as a sim does (§4.4: filter by universe, then queue → variant, else
-the `default = true` variant). `--variant V` on `test run`/`test submit` is
-the escape hatch that forces the entry named `V` in each map (it must be a
-test-marked variant when the test set is non-empty, and compatible with the
-build universe, or `V`'s resolution errors naming the universe); the
-runscript and submitscript maps are resolved independently, and `V` names the
-entry in each.
+**Resolution within the test set** (at `test run`/`test submit` time, per the
+chosen queue **and** the config's build universe): the test set is first
+filtered to routes compatible with the config's build universe — `"host"`
+when the config records none — using the same `build-universes` compatibility
+list and filtering rule that governs `sim run`/`sim submit` (§4.4, §4.8); then
+cactup picks the survivor whose route's `queues` include the chosen queue. A
+queue no test script lists is an error naming the queues where this config
+*can* run its testsuite — the test scripts' queues narrowed to its
+`runs-on.queues`, since suggesting any other would only lead into the runs-on
+refusal ("no test run script serves queue \"bigmem\"; config \"sim\" can run
+its testsuite on gpu2, gpu4; pick one of those with -q"), or, when that list
+is empty, that the machine cannot run this config's testsuite at all.
 
-**Validation at MDB load** extends §4.2's "every queue is served" check
-**per-partition** — and, within each partition, per the same **per-universe-context**
-rules §4.2 defines for `build-universes` lists: if a machine defines *any* test
-runscript (or submitscript) variant, then every queue in `[queues.*]` must be
-served, for universe context `"host"`, by some test variant of that kind or by
-the test-partition default; a machine that defines **no** test variants of a
-kind is fine (tests borrow the normal partition, already validated). As with
-the normal partition, coverage for a declared non-host universe is *not*
-checked at load time — a gap there instead surfaces as the same
-selection-time error (§4.2) the first time a `test run`/`test submit` actually
-needs it.
+There is no way to pick a test script by name. Validation allows at most one
+test script per queue in each universe context, so a name could only ever
+repeat what routing chose, or force a script onto a queue it does not serve
+— the GPU-test-script-on-a-CPU-partition mistake the routing rules exist to
+prevent. (An earlier revision had a `--script` escape hatch; it was dropped
+for that reason, and `test --variant`, the spelling before it, is retired
+with a notice saying the queue picks the scripts.) `cactup build`'s
+`--flavor` names an optionlist and never reaches script routing.
+
+**Validation at MDB load** checks test routes the way it checks normal ones
+— known queues and universes, and no queue served twice within a universe
+context — but owes **no coverage**: a machine may offer testsuites on some
+partitions only (qbd and saturn run them on their GPU partitions alone), and
+the queues it skips surface as the selection-time error above.
 
 ### 11.3 CLI surface
 
@@ -3897,8 +4094,8 @@ Added to §3 (all operate on the **active installation**; the run/submit topolog
 flags are the §8.5 set):
 
 ```
-cactup test run    [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
-cactup test submit [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test run    [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test submit [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
 
 cactup test list       [--long] [--all]           # list test runs (--all: across installations)
 cactup test show       <name>                      # show one test run in detail
@@ -3931,10 +4128,10 @@ layout (§7.2), the make flow, the optionlist render (§7.8), and the metadata
 
 If you want the testsuite to run against a DEBUG binary (assertions / bounds
 checking, to surface errors the tests exist to catch), build the config with a
-DEBUG optionlist variant: `cactup build <name> --variant <debug>` (§4.4).
+DEBUG optionlist flavor: `cactup build <name> --flavor <debug>` (§4.4).
 mel5, for example, ships `default` (OPTIMISE, the implicit pick) and `debug`
-(DEBUG + OPTIMISE); the latter is just a normal variant reached with
-`--variant debug`.
+(DEBUG + OPTIMISE); the latter is just a normal flavor reached with
+`--flavor debug`.
 
 Deleting a config that test runs reference: `config delete` (§7.1) warns and
 refuses without `-f` when registered test runs point at it — unlike simulations
@@ -4009,11 +4206,11 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
 1. Resolve config = `--config` or the active config (fatal in null-config).
    Locate its built binary in `<Cactus root>/configs/<config>/` (fatal if the
    config is incomplete — no `config-data/cctk_Config.h`, §7.2).
-2. Enforce the built config's `compatible-queues` against the chosen queue (§4.4 /
+2. Enforce the built config's `runs-on` queues and `gpu` flag against the chosen queue (§4.4 /
    D12) exactly as a sim does; `--force-queue`/`-f` overrides. The config
    must have been built for the resolved machine (§7.4);
    `--ignore-machine`/`-f` overrides.
-3. Resolve the **test** submit/run script variants for the chosen queue (§11.2)
+3. Route the **test** submit/run scripts for the chosen queue (§11.2)
    and the **run universe** (§4.8, same precedence as §8.3), recording the run
    universe in the test-run metadata so a queued run applies it on the compute
    node without touching the MDB (D11).
@@ -4026,7 +4223,7 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
    PROMPT=no`, with the effective **run** env-setup applied (auto-prepended for
    `.sh`, author-emitted via `@ENV_SETUP@` for `.py` — §6.1). Because thorn
    tests are written for 1–2 MPI ranks, a testsuite run does NOT fill the node:
-   with no `-n`/`-T`/`-t` flag, `TASKS` is the selected script variant's
+   with no `-n`/`-T`/`-t` flag, `TASKS` is the routed script's
    `tasks` setting (§4.2, mode-relevant script first), else **2**. cactup
    exposes the values the script needs: `@TASKS@` (→
    `CCTK_TESTSUITE_RUN_PROCESSORS`), the
@@ -4153,7 +4350,7 @@ reads), the test subsystem adds:
 ### 11.9 Variables added
 
 The §6.3 canonical variable set gains a small **test-only** group, available to
-test runscripts/submitscripts (and their `.py` variants) — never leaked into
+test runscripts/submitscripts (and their `.py` forms) — never leaked into
 normal sim/config substitution:
 
 - `TEST_HOME` — the per-alias test output root (§11.5), the test analog of
@@ -4213,11 +4410,11 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Machine def | `mdb/machines/<m>.ini` | `mdb/<m>/meta.toml` (TOML) |
 | Machine discovery | `aliaspattern` regex | `mdb/<m>/hostname.regexp` (Rust regex), then `mdb/<m>/discover.py` |
 | Config DB / defs | `etc/defs.ini` + `etc/defs.local.ini` | **removed**; → knobs + machine meta |
-| OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<variant>.toml` (rendered to native `.cfg` before make — §7.8) |
-| SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<variant>.{sh,py}` |
-| RunScript | `mdb/runscripts/<m>.run` | `mdb/<m>/runscripts/<variant>.{sh,py}` |
-| BuildSubmitScript | n/a (`cactup build` always ran on the login node) | `mdb/<m>/buildsubmitscripts/<variant>.{sh,py}` — optional; only on machines that hand builds to the scheduler (§7.9) |
-| Parfile | user-supplied `.par` / executable `.rpar` | user-supplied `.par` (literal `@NAME@`) / `.py` variant (JSON-on-stdin, emits `.par` to stdout — §6.1/§6.2) |
+| OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<flavor>.toml` (rendered to native `.cfg` before make — §7.8) |
+| SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<script>.{sh,py}`, routed by `[submitscripts]` |
+| RunScript | `mdb/runscripts/<m>.run` | `mdb/<m>/runscripts/<script>.{sh,py}`, routed by `[runscripts]` |
+| BuildSubmitScript | n/a (`cactup build` always ran on the login node) | `mdb/<m>/buildsubmitscripts/<script>.{sh,py}`, routed by `[buildsubmitscripts]` — optional; only on machines that hand builds to the scheduler (§7.9) |
+| Parfile | user-supplied `.par` / executable `.rpar` | user-supplied `.par` (literal `@NAME@`) / `.py` form (JSON-on-stdin, emits `.par` to stdout — §6.1/§6.2) |
 | Config metadata | `configs/<name>/properties.ini` | `configs/<name>/cactup-config.toml` |
 | Build attempt | n/a (build output went to `cactup-build.log` in the config dir) | `configs/<name>/.cactup-builds/%04d/build.toml` + frozen `build-script` (and `submit-script` when queued) + `build.out`/`build.err` — one per build, foreground or queued (§7.9) |
 | Sim metadata | `SIMFACTORY/properties.ini` | `.cactup/simulation.toml`, `.cactup/restart.toml` (schema-versioned) |
@@ -4233,11 +4430,11 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |
 | Config under test | n/a (a `testsuite` property on a sim) | any built config; `--config C` defaults to the active config (no separate test-config kind) — §11.1 |
 | Test run metadata | sim `properties.ini` + `output-NNNN/exe/` copytree | `<test-home>/…/<name>/.cactup/test.toml` + `tests.toml` registry (§11.8); no copytree (§11.10) |
-| Test-script marking | separate faked machine defs | `test = true` on the meta.toml run/submitscript variant entry (§11.2) |
+| Test-script marking | separate faked machine defs | `test = true` on the script's route in `[runscripts]`/`[submitscripts]` (§11.2) |
 | Install root key | machine `sourcebasedir` (source base; also sync/disambiguation) | machine `install-home` (optional default install prefix; falls back to `~/.cactup/cacti`; `--install-prefix` overrides) — §4.2 |
 | Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock + per-installation lock + per-installation fetch lock (heartbeat) (D11, §2.3) |
 | Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `cactup build`, `sim run`, and `sim submit` (§4.8) |
-| Queue-submitted build | faked via a `[universes.*]` wrapper around `make` (the qbd hack this design retires — §7.9) | first-class: `[build].default-action`/`queue`/`walltime`/… + `[variants.buildsubmitscript]` (§4.2); `build submit` goes through the same `Scheduler` abstraction as `sim submit` (§10) |
+| Queue-submitted build | faked via a `[universes.*]` wrapper around `make` (the qbd hack this design retires — §7.9) | first-class: `[build].default-action`/`queue`/`walltime`/… + `[buildsubmitscripts]` (§4.2); `build submit` goes through the same `Scheduler` abstraction as `sim submit` (§10) |
 
 ---
 
@@ -4250,7 +4447,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
    sync the `mdb` branch into `~/.cactup/mdb/{repo,<sha>,gen-<N>}`; dev builds
    read the repo's `mdb/`.
 2. Python runtime: shell out to `python3` for `discover.py` (one process for
-   all of them) and `.py` script variants rather than embedding CPython (§4.3).
+   all of them) and `.py` scripts rather than embedding CPython (§4.3).
 3. `interactive` command dropped for v1 (§3.1).
 4. `--virtual` prebuilt-executable build kept (§7.7).
 5. `sim delete` moves to `TRASH/` by default; permanent removal behind an
@@ -4259,7 +4456,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
 7. SMT not exposed as a topology flag in v1 (§8.5).
 8. `user`/`email` auto-derived (like simfactory `setup`) and overridable as
    knobs (§5).
-9. `.py` variant calling convention is JSON-on-stdin with a fixed preamble
+9. `.py` script calling convention is JSON-on-stdin with a fixed preamble
    binding globals (§6.1) — flag if you'd prefer env vars or a generated
    assignment preamble instead.
 10. Checkpoint buffer defaults to `max(reserved-walltime/24, 10 min)`, overridable
@@ -4271,7 +4468,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
     (default the active config), with no separate test-config kind (D3, §11).
     Softer choices inside §11 to confirm:
     (a) a testsuite runs the config's normal binary; a DEBUG run is just `config
-        build --variant <debug>` (§4.4, §11.4);
+        build --flavor <debug>` (§4.4, §11.4);
     (b) a test run uses the config's **live** built binary rather than freezing a
         private copy, since it is one-shot (§11.5);
     (c) results are redirected into test-home via the flesh testsuite target's
@@ -4309,7 +4506,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
 | 9 machine detection | `hostname.regexp` / `discover.py` (§4.3) |
 | 10 defs layering | removed; → knobs/meta (§5.2) |
 | 11 `@VAR@` engine | literal `@NAME@` + `.py` escape hatch (§6) |
-| 12 optionlists/run/submit | variants (§4.4, §6.2); test-marked variants (§11.2) |
+| 12 optionlists/run/submit | flavors and queue-routed scripts (§4.4, §6.2); test-marked scripts (§11.2) |
 | 13 on-disk layout | **preserved** (§9) |
 | 13.7 testsuite layout / `copyTestsuiteData` | `cactup test` subsystem: test-home output root + `test.toml`; monster `output-NNNN/exe/` copytree **not** ported (§11) |
 | 14 lifecycle | §8 |
@@ -4393,7 +4590,7 @@ latest.json                          # the version manifest below
 for `<target>` ∈ {`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`}.
 
 ```json
-{ "build": "a1b2c3d", "date": "2026-09-24T12:00:00-05:00", "mdb_generation": 1,
+{ "build": "a1b2c3d", "date": "2026-09-24T12:00:00-05:00", "mdb_generation": 2,
   "targets": { "x86_64-unknown-linux-musl":
                { "path": "x86_64-unknown-linux-musl/cactup-a1b2c3d",
                  "sha256": "…", "size": 11534336 }, … } }
@@ -4407,8 +4604,8 @@ Cargo.toml Cargo.lock resources mdb/GENERATION mdb/generic`), abbreviated to
 7 hex; `date` is that commit's committer date (`%cI`). A docs- or MDB-only
 push therefore has the same id, and CI republishes the live binaries (fetched
 from the current site and verified against `latest.json`) instead of
-rebuilding. `--version` prints `0.1.0 (a1b2c3d 2026-09-24, mdb generation 1)`,
-or `0.1.0 (dev build, mdb generation 1)` for an unstamped build.
+rebuilding. `--version` prints `0.1.0 (a1b2c3d 2026-09-24, mdb generation 2)`,
+or `0.1.0 (dev build, mdb generation 2)` for an unstamped build.
 
 **Ordering and caching.** `publish-mdb` (push `git subtree split --prefix=mdb`
 to `refs/heads/mdb`) runs before `deploy`, so a binary of a new generation is
@@ -4506,10 +4703,27 @@ generation, or (b) an overlay written for the current generation would fail
 or behave differently in the new binary. Adding optional `meta.toml` keys
 counts (the schema is closed). The `mdb-compat` CI job loads every machine in
 both directions against the last commit that raised `mdb/GENERATION` to the
-current number (a bump reverted later does not move it); the
-rest (template variables, `.py` protocol, ignored optionlist header keys)
-needs review. A unit test requires a `GENERATIONS.md` entry for every
+current number (a bump reverted later does not move it); the rest (template
+variables, `.py` protocol) needs review. (Optionlist header keys needed
+review too while a generation-1 binary silently ignored unknown ones; since
+Generation 2 `[cactup]` and `[cactup.runs-on]` are closed, so loading
+catches them.) A unit test requires a `GENERATIONS.md` entry for every
 generation up to N.
+
+**Generations so far.** *Generation 1* is the first published format.
+*Generation 2* is the flavor/script split (§4.2, §4.4, §7.8): the
+`[variants.submitscript]`/`[variants.runscript]`/`[variants.buildsubmitscript]`
+tables are renamed `[submitscripts]`/`[runscripts]`/`[buildsubmitscripts]`
+(same route shape); `[variants.optionlist]` is deleted (flavors are discovered
+from `optionlists/*.toml`); the table-level `default-universe` key is removed
+(each route that relied on it gets its own `universe`); script routes lose
+`default = true` (a script serves exactly the queues it lists, and tests never
+borrow normal scripts); each optionlist
+header's flat `gpu`/`compatible-queues` move into `[cactup.runs-on]` as
+`gpu`/`queues` (alongside a new optional `default-queue`), and the header
+rejects unknown keys; overlays set
+`[cactup] mdb-generation = 2`. `mdb/GENERATIONS.md` carries the step-by-step
+overlay recipe.
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a

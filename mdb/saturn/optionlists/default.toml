@@ -1,6 +1,6 @@
-# saturn optionlist (variant "default"): native CUDA build for CarpetX/AMReX
+# saturn optionlist (flavor "default"): native CUDA build for CarpetX/AMReX
 # on Frank's saturn node. Written 2026-09-29, modeled on mdb/qbd's default
-# variant and adapted to what was measured on saturn that day:
+# flavor and adapted to what was measured on saturn that day:
 #   GPU      3 x NVIDIA A100 PCIe -> sm_80 / AMReX CUDA architecture 80
 #   CUDA     13.2.1 (/packages/cuda/13.2.1, nvcc 13.2; driver API 13.3)
 #   gcc      13.2.0 (/packages/gcc/13.2.0) for C, C++, Fortran AND as nvcc's
@@ -33,9 +33,11 @@
 # Cactus flesh's own option names and must be spelled exactly that way.
 
 [cactup]
-gpu               = true
-default           = true      # `cpu` is the other variant; this one stays the implicit choice
-compatible-queues = ["local"]
+default           = true      # `cpu` is the other flavor; this one stays the implicit choice
+
+[cactup.runs-on]
+queues = ["local"]
+gpu    = true
 
 [options]
 # -mf16c (CFLAGS/CXXFLAGS/F90FLAGS only): hardware binary16<->binary32
@@ -139,8 +141,11 @@ HWLOC_DIR  = "BUILD"
 BOOST_DIR  = "BUILD"
 LIBJPEG_DIR = "BUILD"
 
-ZLIB_DIR  = "/usr"
-ZLIB_LIBS = "z"
+# Ubuntu multiarch: libz.so lives in /usr/lib/x86_64-linux-gnu, and the
+# thorn's detect.sh hands ZLIB_DIR to find_lib, which probes only lib and
+# lib64 under it and ignores ZLIB_LIB_DIRS ("ZLIB not found at /usr").
+# Building the thorn's own zlib takes a minute and sidesteps the probe.
+ZLIB_DIR = "BUILD"
 
 # OpenSSL 3.0.2 (libssl-dev): found in system paths.
 

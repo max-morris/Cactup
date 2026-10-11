@@ -1,11 +1,11 @@
-# db1.hpc.lsu.edu TEST submitscript (variant "sing-test") — marked test = true
+# db1.hpc.lsu.edu TEST submitscript (script "sing-test") — marked test = true
 # in meta.toml (design §11.2). Same #SBATCH header as submitscripts/sing.py
 # (including the verbatim GPU directives) but WITHOUT restart chaining (a
 # testsuite is one-shot — no recovery, no chain, design §11.6); the payload
 # re-invokes `cactup test run` on the compute node with the §11.6 locator
 # flags (--test-dir + --results-id) instead of `sim run`.
 #
-# .py variant (design §6.1): the --gres=gpu:{typed["NODES"] * typed["TASKS"]}
+# .py script (design §6.1): the --gres=gpu:{typed["NODES"] * typed["TASKS"]}
 # directive is computed, and the mail directives are guarded by `if EMAIL:`
 # (cactup's @NAME@ engine is literal-only, D7, so both move into Python).
 
@@ -24,7 +24,7 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1).
+# env-setup is NOT auto-prepended for .py scripts (design §6.1).
 lines.append(ENV_SETUP)
 
 lines.append("cd {0}".format(SOURCEDIR))

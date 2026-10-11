@@ -1,5 +1,5 @@
 #! /bin/bash
-# delta runscript (variant "default"), ported from simfactory2
+# delta runscript (script "default"), ported from simfactory2
 # mdb/runscripts/delta.run.
 #
 # Variable renames vs. simfactory (design §6.3):

@@ -1,5 +1,5 @@
 #! /bin/bash
-# saturn runscript (variant "default"): CUDA/CarpetX runs on Frank's saturn
+# saturn runscript (script "default"): CUDA/CarpetX runs on Frank's saturn
 # node. Written 2026-09-29. Launch logic from mdb/et-juphub (no scheduler:
 # direct exec for one task, a local `mpirun -np @TASKS@` otherwise); the
 # profiler block and the nvidia-smi bracket are carried over from

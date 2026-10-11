@@ -73,13 +73,10 @@ exec-host-pattern = '^(\S+)'
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["rossw"], default = true }
+[submitscripts]
+"default" = { queues = ["rossw"] }
 "test"    = { queues = ["rossw"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["rossw"], default = true }
+[runscripts]
+"default" = { queues = ["rossw"] }
 "test"    = { queues = ["rossw"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

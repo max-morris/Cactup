@@ -1,7 +1,7 @@
-# graham submitscript (variant "default"), ported from simfactory2
+# graham submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/graham.sub.
 #
-# .py variant (design §6.1): the old script used expression templates —
+# .py script (design §6.1): the old script used expression templates —
 #   --cpus-per-task=@(int(32/@NODE_PROCS@))@   (== CPUS_PER_TASK)
 #   @("@CHAINED_JOB_ID@" != "" ? "--dependency=afterany:…" : "")@
 # — cactup's @NAME@ engine is literal-only (D7); the first equals the
@@ -32,7 +32,7 @@ if EMAIL:
 lines.append("#SBATCH --output={0}".format(STDOUT_FILE))
 lines.append("#SBATCH --error={0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

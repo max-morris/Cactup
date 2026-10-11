@@ -1,5 +1,5 @@
-# qbd BUILD submitscript (variant "cpu"): compile a CPU-only config on one of
-# the CPU partitions (`cactup build submit <cfg> -q single`). QB4 makes you
+# qbd BUILD submitscript for the CPU partitions: chosen by the queue, for any
+# config built there (`cactup build submit <cfg> -q single`). QB4 makes you
 # compile on a compute node; on these partitions no GPU reservation is needed,
 # so this is the GPU script without the --gres derivation. Batch header plus
 # the compute-node re-invocation, nothing else.
@@ -17,7 +17,7 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header. The build itself re-applies the build-phase
 # env-setup from its own frozen script, so this only has to be enough to
 # reach the cactup binary.

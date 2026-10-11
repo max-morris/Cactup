@@ -382,7 +382,9 @@ const REAP_RECLEAN_SECS: u64 = 30;
 fn age_secs(path: &Path) -> Option<u64> {
     let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()?;
     let temp = tempfile::Builder::new().prefix(".cactup-age.").tempfile_in(path.parent()?).ok()?;
-    let fs_now = temp.as_file().metadata().and_then(|m| m.modified()).ok()?;
+    let fs_now = temp.as_file().metadata().and_then(|m| m.modified());
+    crate::lock::discard(temp);
+    let fs_now = fs_now.ok()?;
     Some(fs_now.duration_since(mtime).map(|d| d.as_secs()).unwrap_or(0))
 }
 

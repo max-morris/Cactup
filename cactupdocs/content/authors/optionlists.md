@@ -8,15 +8,15 @@ description = "Define compiler flags, optimizations, and enabled thorns for your
 An **optionlist** is a TOML file that specifies how to build Cactus on your machine.
 It has two parts:
 
-- A `[cactup]` header — cactup-only metadata (GPU capability, compatible queues,
-  default flag, build universe, per-variant thorn toggles). This is **never** written
+- A `[cactup]` header — cactup-only metadata (where the binary may run, default
+  flag, build universe, per-flavor thorn toggles). This is **never** written
   to the native Cactus optionlist.
 - An `[options]` table — the raw Cactus optionlist `NAME = value` entries (compilers,
   flags, feature switches). cactup renders these back to Cactus's native
   `NAME = value` format before building, then substitutes any `@NAME@` tokens.
 
-Each machine can have multiple optionlist **variants** (e.g., `default`, `cuda`,
-`debug`). Users choose which variant when building with `--variant`.
+Each machine can have multiple optionlists, called **flavors** (e.g., `default`,
+`cuda`, `debug`). Users choose which flavor when building with `--flavor`.
 
 > [!NOTE]
 > While porting a machine you do not have to install an optionlist into the MDB
@@ -29,7 +29,7 @@ Each machine can have multiple optionlist **variants** (e.g., `default`, `cuda`,
 
 > [!NOTE]
 > An optionlist's `universe` field (below) and a machine's queue-submitted
-> builds (`[build].default-action`/`[variants.buildsubmitscript]`, covered in
+> builds (`[build].default-action`/`[buildsubmitscripts]`, covered in
 > [meta.toml Reference](meta-toml.html)) are independent. A universe says
 > *where* `make` runs — a container, a module-loaded shell, the bare host.
 > Queue submission says *how the build reaches a machine* — through the
@@ -54,17 +54,40 @@ entirely (all fields default):
 
 ```toml
 [cactup]
-gpu = false                       # binary GPU capability; cross-checked vs the queue's gpu flag
-compatible-queues = ["cpu"]       # queues this build may be submitted to
-default = true                    # the implicit choice among this machine's variants
+default = true                    # the implicit choice among this machine's flavors
 description = "Default optimized build for my cluster"
-universe = "et-sif"               # build this variant inside this universe (optional)
-enabled-thorns = ["ExternalLibraries/OpenBLAS"]   # per-variant thorn toggles, on top of [build]
+universe = "et-sif"               # build this flavor inside this universe (optional)
+enabled-thorns = ["ExternalLibraries/OpenBLAS"]   # per-flavor thorn toggles, on top of [build]
 disabled-thorns = ["ExternalLibraries/LORENE"]
+
+[cactup.runs-on]                  # where the built binary may run
+queues = ["cpu"]                  # queues its simulations may be submitted to; omit for any
+gpu = false                       # binary GPU capability; cross-checked vs the queue's gpu flag
+default-queue = "cpu"             # where its simulations go without -q (optional; one of queues)
 ```
 
-None of these keys are emitted to the native optionlist. The header fields are
-documented in full below:
+None of these keys are emitted to the native optionlist. Both `[cactup]` and
+`[cactup.runs-on]` reject keys they do not know, so a misspelling fails the
+load instead of being ignored. `runs-on` describes the *binary*: it is checked
+when a simulation or test is submitted or run, never against the queue a
+`cactup build submit` job compiles on.
+
+`default-queue` is where a simulation or test of this flavor goes when the
+user passes no `-q` and has no `queue` knob this flavor can use. Without it,
+that is the machine's default queue, which a flavor may not be allowed to
+use. A CPU-only flavor on a machine whose default partition is a GPU one is
+the usual case, and setting `default-queue` saves its users from typing `-q`
+on every submit. It must be one of `queues` when that list is given, and a
+queue the machine has; the build refuses it otherwise. Unlike the rest of
+`runs-on`, which is recorded with each config when it is built, cactup reads
+`default-queue` from the flavor's current file whenever a job is submitted,
+so changing it takes effect for existing configs without a rebuild.
+
+A change to the `[options]`, to `universe`, or to the thorn toggles rebuilds
+a config built from the flavor. Editing anything else in the header
+(`runs-on`, `default`, `description`, `coerce-run-universe`), or any comment,
+does not: those never reach the compiler, and the next `cactup build` just
+records the new values. The header fields are documented in full below:
 
 ## Generated reference
 
@@ -118,10 +141,12 @@ Booleans render as Cactus's `yes`/`no`, integers as plain decimals, strings verb
 
 ```toml
 [cactup]
-gpu = false
-compatible-queues = ["cpu", "long"]
 default = true
 description = "Optimized build for SLURM cluster with GCC"
+
+[cactup.runs-on]
+queues = ["cpu", "long"]
+gpu = false
 
 [options]
 VERSION = "2024-06-01"
@@ -150,9 +175,9 @@ CPP_OPENMP_FLAGS = "-fopenmp"
 MPI = "MPICH"
 ```
 
-## Multiple variants on one machine
+## Multiple flavors on one machine
 
-A machine can offer variants for different build environments:
+A machine can offer flavors for different build environments:
 
 ```
 optionlists/
@@ -161,32 +186,31 @@ optionlists/
   debug.toml            # Debug symbols
 ```
 
-Declare them in meta.toml:
-
-```toml
-[variants.optionlist]
-variants = ["default", "cuda", "debug"]
-```
+There is nothing to declare in meta.toml: a machine's flavors are simply the
+`*.toml` files in its `optionlists/` directory.
 
 Users choose with:
 
 ```sh
-cactup build myconfig --variant cuda
+cactup build myconfig --flavor cuda
 ```
 
-Exactly one variant should be marked `default = true` in its `[cactup]` header; that
-is the implicit choice when `--variant` is omitted.
+With several flavors, exactly one should be marked `default = true` in its
+`[cactup]` header; that is the implicit choice when `--flavor` is omitted. A
+machine with a single flavor uses it implicitly.
 
 ## GPU optionlists
 
-For GPU builds, mark the header `gpu = true` (so it is only offered on GPU queues) and
-add the CUDA-specific options:
+For GPU builds, mark `gpu = true` under `[cactup.runs-on]` (so its simulations only
+run on GPU queues) and add the CUDA-specific options:
 
 ```toml
 [cactup]
-gpu = true
-compatible-queues = ["gpu"]
 description = "CUDA GPU build"
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu = true
 
 [options]
 VERSION = "2024-06-01"
@@ -203,17 +227,19 @@ OPENMP   = "yes"
 MPI      = "MPICH"
 ```
 
-## Per-variant thorn toggles
+## Per-flavor thorn toggles
 
-Different build flavors sometimes compile different thorns — e.g. a CUDA variant that
+Different flavors sometimes compile different thorns — e.g. a CUDA flavor that
 drops a thorn nvcc cannot build. Put those toggles in the `[cactup]` header; they are
 merged on top of the machine-level `[build].enabled-thorns`/`disabled-thorns`:
 
 ```toml
 [cactup]
-gpu = true
 disabled-thorns = ["ExternalLibraries/LORENE", "EinsteinInitialData/Meudon_Bin_BH"]
 enabled-thorns  = ["ExternalLibraries/OpenBLAS"]
+
+[cactup.runs-on]
+gpu = true
 ```
 
 ## Container vs native
@@ -259,8 +285,8 @@ set false in the header) also becomes the default universe its simulations run i
 ## Validating optionlists
 
 ```sh
-cactup machine show --variants          # list variants and their headers
-cactup build myconfig --variant <name>  # try building with it
+cactup machine show --flavors          # list flavors and their headers
+cactup build myconfig --flavor <name>  # try building with it
 ```
 
 ## Common issues
@@ -277,5 +303,5 @@ dotted value as a string if you need it.
 ## Next steps
 
 - [Scripts & Variables](scripts-and-variables.html) — define submit/run scripts
-- [meta.toml Reference](meta-toml.html) — declare variants in the machine definition
+- [meta.toml Reference](meta-toml.html) — route scripts to queues in the machine definition
 - [Porting a Cluster](porting-a-cluster.html) — complete example

@@ -1,5 +1,5 @@
 #! /bin/bash
-# mel5 TEST submitscript (variant "test") — marked test = true in meta.toml
+# mel5 TEST submitscript (script "test") — marked test = true in meta.toml
 # (design §11.2). It re-invokes cactup on the "compute node" to run the
 # testsuite, analogous to submitscripts/default.sh but for `cactup test run`
 # and WITHOUT restart chaining: a testsuite is one-shot (no recovery, no chain,

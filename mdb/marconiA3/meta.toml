@@ -122,13 +122,10 @@ max-walltime    = "24:00:00"
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["skl_usr_prod"], default = true }
+[submitscripts]
+"default" = { queues = ["skl_usr_prod"] }
 "test"    = { queues = ["skl_usr_prod"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["skl_usr_prod"], default = true }
+[runscripts]
+"default" = { queues = ["skl_usr_prod"] }
 "test"    = { queues = ["skl_usr_prod"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

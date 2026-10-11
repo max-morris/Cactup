@@ -59,13 +59,10 @@ disabled-thorns = [
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["NO_QUEUE"], default = true }
+[submitscripts]
+"default" = { queues = ["NO_QUEUE"] }
 "test"    = { queues = ["NO_QUEUE"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["NO_QUEUE"], default = true }
+[runscripts]
+"default" = { queues = ["NO_QUEUE"] }
 "test"    = { queues = ["NO_QUEUE"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

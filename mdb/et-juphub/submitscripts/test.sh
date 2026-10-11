@@ -1,5 +1,5 @@
 #! /bin/bash
-# et-juphub TEST submitscript (variant "test") — marked test = true in meta.toml
+# et-juphub TEST submitscript (script "test") — marked test = true in meta.toml
 # (design §11.2). Re-invokes cactup on the "compute node" to run the testsuite;
 # one-shot, no restart chaining (design §11.6). Mirrors
 # mdb/mel5/submitscripts/test.sh.

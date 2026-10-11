@@ -8,39 +8,73 @@
 use crate::Res;
 use anyhow::{bail, Context};
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::path::Path;
 
-/// The `[cactup]` header: cactup-only metadata, never emitted to the native
-/// file (§7.8, D12, §4.4, §4.8).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct OptionlistHeader {
-    /// Binary capability (D12); cross-checked against the queue's gpu flag.
+/// Where a flavor's *binary* may run (D12, §4.4): the queues it may be
+/// submitted to (empty = any) and whether it needs a GPU. Checked by sim and
+/// test jobs only — never by the build job that produces the binary (§7.9).
+/// Snapshotted into the config record at build time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RunsOn {
+    #[serde(default)]
+    pub queues: Vec<String>,
     #[serde(default)]
     pub gpu: bool,
-    /// Queues this build may be submitted to (D12).
+    /// The queue a sim or test of this binary lands on when neither `-q`
+    /// nor the `queue` knob names one, ahead of the machine's default queue
+    /// (§4.4, §8.5). One of `queues` whenever that list is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_queue: Option<String>,
+}
+
+impl RunsOn {
+    /// The header-local consistency check: a default queue outside the
+    /// flavor's own allowed list could only ever be refused.
+    pub fn validate(&self) -> Res<()> {
+        if let Some(queue) = &self.default_queue
+            && !self.queues.is_empty()
+            && !self.queues.contains(queue)
+        {
+            bail!(
+                "[cactup.runs-on] default-queue \"{queue}\" is not one of its queues ({})",
+                self.queues.join(", ")
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The `[cactup]` header: cactup-only metadata, never emitted to the native
+/// file (§7.8, D12, §4.4, §4.8). Unknown keys are an error, as everywhere in
+/// the MDB: a misspelled or outdated key (a pre-generation-2 `gpu` or
+/// `compatible-queues` left at the top level) must fail loudly rather than
+/// silently drop the check it was meant to configure.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct OptionlistHeader {
+    /// Where the flavor's binary may run (D12): `[cactup.runs-on]`.
     #[serde(default)]
-    pub compatible_queues: Vec<String>,
-    /// Marks the implicit choice when a machine lists several optionlist
-    /// variants (§4.4), mirroring the script variants' `default = true`.
+    pub runs_on: RunsOn,
+    /// Marks the implicit choice when a machine has several flavors (§4.4).
     #[serde(default)]
     pub default: bool,
-    /// Free-form, informational description of this variant. Purely
+    /// Free-form, informational description of this flavor. Purely
     /// documentary — never emitted to the native file.
     pub description: Option<String>,
-    /// Build this variant inside this universe (§4.8 step 3).
+    /// Build this flavor inside this universe (§4.8 step 3).
     pub universe: Option<String>,
     /// Sims of this config default to running in `universe` too (§4.8 step 2);
     /// false opts out of the build-universe coercion.
     #[serde(default = "default_true")]
     pub coerce_run_universe: bool,
-    /// Per-variant thorn toggles (§7.5), applied ON TOP of the machine-level
+    /// Per-flavor thorn toggles (§7.5), applied ON TOP of the machine-level
     /// `[build].enabled-thorns`/`disabled-thorns`. This is how one machine
     /// carries build flavors that differ in which thorns compile — e.g. a CUDA
-    /// (nvcc) variant disabling thorns the CPU variant keeps. Merged with the
-    /// machine lists at build time (the variant augments the machine).
+    /// (nvcc) flavor disabling thorns the CPU flavor keeps. Merged with the
+    /// machine lists at build time (the flavor augments the machine).
     #[serde(default)]
     pub enabled_thorns: Vec<String>,
     #[serde(default)]
@@ -79,7 +113,7 @@ struct RawOptionlist {
     options: IndexMap<String, toml::Value>,
 }
 
-/// A parsed optionlist (`mdb/<m>/optionlists/<variant>.toml`).
+/// A parsed optionlist (`mdb/<m>/optionlists/<flavor>.toml`).
 #[derive(Debug, Clone)]
 pub struct Optionlist {
     pub header: OptionlistHeader,
@@ -138,11 +172,11 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             let name = trimmed[1..trimmed.len() - 1].trim();
             match name {
-                "cactup" => seen_cactup_header = true,
+                "cactup" | "cactup.runs-on" => seen_cactup_header = true,
                 "options" => seen_options_header = true,
                 other => bail!(
-                    "unknown table header [{other}] at line {lineno}; only [cactup] and \
-                     [options] are recognized in an optionlist"
+                    "unknown table header [{other}] at line {lineno}; only [cactup], \
+                     [cactup.runs-on] and [options] are recognized in an optionlist"
                 ),
             }
             i += 1;
@@ -402,6 +436,7 @@ impl Optionlist {
     }
 
     pub fn parse(source: &str) -> Res<Optionlist> {
+        reject_generation_1_header(source)?;
         let raw: RawOptionlist = toml::from_str(source).context("Failed to parse optionlist TOML")?;
 
         let mut options = IndexMap::new();
@@ -422,6 +457,7 @@ impl Optionlist {
             options.insert(key, value);
         }
 
+        raw.cactup.runs_on.validate()?;
         if !options.contains_key("VERSION") {
             bail!("[options] must declare VERSION (emitted first; a change forces a full rebuild)");
         }
@@ -449,8 +485,45 @@ impl Optionlist {
     }
 }
 
+/// What of an optionlist reaches the build: its options, rendered to the
+/// native form Cactus is handed (§7.8). The `[cactup]` header is dropped
+/// first — it never reaches Cactus (its universe and thorn toggles have their
+/// own rebuild checks, and the rest describes the binary or the flavor), and
+/// a stored copy may carry an older generation's header the closed schema
+/// would refuse. Comments and layout do not survive either, so editing them
+/// rebuilds nothing. The rebuild decision compares two of these, both made
+/// by this function, so they agree on everything but content.
+pub fn build_relevant(source: &str) -> Res<String> {
+    let without_header = match source.parse::<toml::Table>() {
+        Ok(mut table) if table.contains_key("cactup") => {
+            table.remove("cactup");
+            toml::to_string(&table).context("Failed to re-serialize optionlist options")?
+        }
+        _ => source.to_owned(),
+    };
+    Ok(Optionlist::parse_any(&without_header)?.render())
+}
+
+/// The closed header would already refuse a generation-1 `gpu` or
+/// `compatible-queues` directly under `[cactup]`, but as a bare "unknown
+/// field"; this says where each key went, since every pre-generation-2 file a
+/// user wrote (an overlay's, or one built from with `--optionlist`) has them.
+fn reject_generation_1_header(source: &str) -> Res<()> {
+    let Ok(table) = source.parse::<toml::Table>() else { return Ok(()) };
+    let Some(header) = table.get("cactup").and_then(toml::Value::as_table) else { return Ok(()) };
+    for (old, new) in [("gpu", "gpu"), ("compatible-queues", "queues")] {
+        if header.contains_key(old) {
+            bail!(
+                "[cactup] {old} is no longer read there: since MDB generation 2 it lives in \
+                 [cactup.runs-on] as `{new}`; move it and rebuild"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Parse only the `[cactup]` header — used to pick among a machine's
-/// optionlist variants (§4.4) without demanding every listed file parses in
+/// flavors (§4.4) without demanding every listed file parses in
 /// full.
 pub fn load_header(path: &Path) -> Res<OptionlistHeader> {
     #[derive(Deserialize)]
@@ -460,8 +533,10 @@ pub fn load_header(path: &Path) -> Res<OptionlistHeader> {
     }
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read optionlist {}", path.display()))?;
+    reject_generation_1_header(&source).with_context(|| format!("invalid optionlist {}", path.display()))?;
     let raw: HeaderOnly = toml::from_str(&source)
         .with_context(|| format!("invalid optionlist {}", path.display()))?;
+    raw.cactup.runs_on.validate().with_context(|| format!("invalid optionlist {}", path.display()))?;
     Ok(raw.cactup)
 }
 
@@ -471,9 +546,11 @@ mod tests {
 
     const BASIC: &str = r#"
         [cactup]
-        gpu = true
-        compatible-queues = ["gpu"]
         universe = "et-sif"
+
+        [cactup.runs-on]
+        queues = ["gpu"]
+        gpu = true
 
         [options]
         VERSION = "2024-06-01"
@@ -487,8 +564,8 @@ mod tests {
     #[test]
     fn parses_header_and_renders_native_format() {
         let ol = Optionlist::parse(BASIC).unwrap();
-        assert!(ol.header.gpu);
-        assert_eq!(ol.header.compatible_queues, ["gpu"]);
+        assert!(ol.header.runs_on.gpu);
+        assert_eq!(ol.header.runs_on.queues, ["gpu"]);
         assert!(!ol.header.default);
         assert_eq!(ol.header.universe.as_deref(), Some("et-sif"));
         assert!(ol.header.coerce_run_universe); // defaults true
@@ -513,17 +590,18 @@ mod tests {
         .unwrap();
         assert!(ol.render().starts_with("VERSION = 2020-01-01\nCC = gcc\n"));
         // And [cactup] may be omitted entirely (all defaults).
-        assert!(!ol.header.gpu && ol.header.compatible_queues.is_empty());
+        assert!(!ol.header.runs_on.gpu && ol.header.runs_on.queues.is_empty());
     }
 
     #[test]
-    fn header_carries_per_variant_thorn_toggles() {
-        // §7.8: an optionlist variant may disable/enable thorns on top of the
-        // machine lists (e.g. a CUDA variant dropping thorns nvcc can't build).
+    fn header_carries_per_flavor_thorn_toggles() {
+        // §7.8: a flavor may disable/enable thorns on top of the machine
+        // lists (e.g. a CUDA flavor dropping thorns nvcc can't build).
         let ol = Optionlist::parse(
-            "[cactup]\ngpu = true\n\
+            "[cactup]\n\
              disabled-thorns = [\"ExternalLibraries/LORENE\", \"EinsteinInitialData/Meudon_Bin_BH\"]\n\
              enabled-thorns = [\"ExternalLibraries/OpenBLAS\"]\n\
+             [cactup.runs-on]\ngpu = true\n\
              [options]\nVERSION = \"1\"\nCC = \"gcc\"\n",
         )
         .unwrap();
@@ -550,12 +628,12 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("mdb/mel5/optionlists");
         let default = Optionlist::load(&root.join("default.toml")).unwrap();
         assert!(default.header.default, "mel5 default.toml is the implicit choice (§4.4)");
-        assert!(!default.header.gpu);
-        assert_eq!(default.header.compatible_queues, ["local"]);
+        assert!(!default.header.runs_on.gpu);
+        assert_eq!(default.header.runs_on.queues, ["local"]);
         assert!(default.render().starts_with("VERSION = 2018-12-13\n"));
 
         let debug = load_header(&root.join("debug.toml")).unwrap();
-        assert!(!debug.default, "mel5 debug.toml needs an explicit --variant");
+        assert!(!debug.default, "mel5 debug.toml needs an explicit --flavor");
     }
 
     const OPTIONS_ONLY_HEADER: &str = r#"
@@ -599,8 +677,8 @@ mod tests {
         assert_eq!(with_header.render(), "VERSION = 2024-06-01\nCC = gcc\n");
 
         // No [cactup] header in either input -> all defaults.
-        assert!(!with_header.header.gpu && with_header.header.compatible_queues.is_empty());
-        assert!(!no_header.header.gpu && no_header.header.compatible_queues.is_empty());
+        assert!(!with_header.header.runs_on.gpu && with_header.header.runs_on.queues.is_empty());
+        assert!(!no_header.header.runs_on.gpu && no_header.header.runs_on.queues.is_empty());
 
         // `source` is the verbatim input, not the header-prepended rewrite
         // used internally to parse the headerless form.
@@ -611,7 +689,7 @@ mod tests {
     #[test]
     fn parses_a_realistic_cfg_snippet() {
         let ol = Optionlist::parse_any(CFG_SNIPPET).unwrap();
-        assert!(!ol.header.gpu && ol.header.compatible_queues.is_empty()); // default header
+        assert!(!ol.header.runs_on.gpu && ol.header.runs_on.queues.is_empty()); // default header
         assert_eq!(
             ol.render(),
             "VERSION = 2024-06-01\n\
@@ -624,6 +702,33 @@ mod tests {
         // bool and come back as `false`.
         assert!(ol.render().contains("DEBUG = no"));
         assert_eq!(ol.source, CFG_SNIPPET);
+    }
+
+    /// The generation-1 spelling of the binary facts — `gpu` and
+    /// `compatible-queues` directly under `[cactup]` — is refused, not
+    /// ignored: silently dropping it would silently drop the queue check.
+    #[test]
+    fn generation_1_header_keys_are_refused() {
+        for key in ["gpu = true", "compatible-queues = [\"gpu\"]"] {
+            let text = format!("[cactup]\n{key}\n[options]\nVERSION = \"1\"\n");
+            let err = format!("{:#}", Optionlist::parse(&text).unwrap_err());
+            assert!(err.contains("it lives in [cactup.runs-on]"), "{key}: {err}");
+        }
+        let text = "[cactup.runs-on]\nqueue = [\"gpu\"]\n[options]\nVERSION = \"1\"\n";
+        let err = format!("{:#}", Optionlist::parse(text).unwrap_err());
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    /// `default-queue` must be one of the flavor's own `queues` when it
+    /// lists any; with no list (any queue), any name is header-consistent.
+    #[test]
+    fn runs_on_default_queue_must_be_an_allowed_queue() {
+        let header = |runs_on: &str| format!("[cactup.runs-on]\n{runs_on}\n[options]\nVERSION = \"1\"\n");
+        let ok = Optionlist::parse(&header("queues = [\"a\", \"b\"]\ndefault-queue = \"b\"")).unwrap();
+        assert_eq!(ok.header.runs_on.default_queue.as_deref(), Some("b"));
+        Optionlist::parse(&header("default-queue = \"anything\"")).unwrap();
+        let err = format!("{:#}", Optionlist::parse(&header("queues = [\"a\"]\ndefault-queue = \"b\"")).unwrap_err());
+        assert!(err.contains("default-queue \"b\" is not one of its queues (a)"), "{err}");
     }
 
     #[test]
@@ -678,7 +783,6 @@ mod tests {
     // neither a table header nor a `=`.
     const MULTILINE_ARRAY: &str = r#"
         [cactup]
-        gpu = true
         disabled-thorns = [
             # CTThorns: code is CUDA-aware but lacks __host__ annotations
             "CTThorns/CT_Analytic",
@@ -686,6 +790,9 @@ mod tests {
             # LORENE does not link
             "ExternalLibraries/LORENE",
         ]
+
+        [cactup.runs-on]
+        gpu = true
 
         [options]
         VERSION = "graham-gpu-2021-03-11"
@@ -697,7 +804,7 @@ mod tests {
         assert_eq!(sniff(MULTILINE_ARRAY).unwrap(), OptionlistFormat::MdbToml);
 
         let ol = Optionlist::parse_any(MULTILINE_ARRAY).unwrap();
-        assert!(ol.header.gpu);
+        assert!(ol.header.runs_on.gpu);
         assert_eq!(
             ol.header.disabled_thorns,
             ["CTThorns/CT_Analytic", "CTThorns/CT_MultiLevel", "ExternalLibraries/LORENE"]

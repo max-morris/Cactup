@@ -1,5 +1,5 @@
 #! /bin/bash
-# athena runscript (variant "default"): CUDA/CarpetX runs on the node's four
+# athena runscript (script "default"): CUDA/CarpetX runs on the node's four
 # A100s. Written 2026-09-29. It combines mdb/et-juphub's scheduler-less launch
 # with mdb/qbd's GPU runscript (profiler wrapper, CACTUP_NSYS_UM, CACTUP_NCU_*,
 # nvidia-smi bracket), with the srun launch replaced by mpirun.

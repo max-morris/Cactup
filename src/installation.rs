@@ -236,6 +236,7 @@ impl Installation {
     /// The installation a command targets: `--installation <alias>` or the
     /// active installation; fail fast otherwise (§3).
     pub fn resolve(ctx: &Ctx) -> Res<Installation> {
+        let _span = crate::timing::span("installation resolve");
         let db = ctx.db.read()?;
         let alias = match &ctx.globals.installation {
             Some(alias) => alias.clone(),
@@ -584,7 +585,7 @@ mod tests {
         std::fs::write(
             cfg.join("cactup-config.toml"),
             format!(
-                "name = \"sim\"\nvariant = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
+                "name = \"sim\"\nflavor = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
                  config-id = \"c1\"\nbuild-id = \"b1\"\n",
                 inst.legacy_live_thornlist().display()
             ),

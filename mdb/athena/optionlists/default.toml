@@ -1,4 +1,4 @@
-# athena optionlist (variant "default"): native CUDA build for CarpetX/AMReX
+# athena optionlist (flavor "default"): native CUDA build for CarpetX/AMReX
 # on the node's four A100s. Written 2026-09-29, modeled on
 # mdb/qbd/optionlists/default.toml (QB4 is also A100, so the device flags
 # carry over unchanged). Measured facts it depends on:
@@ -39,9 +39,11 @@
 # as a TOML string so the render is faithful.
 
 [cactup]
-gpu               = true
-default           = true      # `cpu` is the other variant; this one stays the implicit choice
-compatible-queues = ["local"]
+default           = true      # `cpu` is the other flavor; this one stays the implicit choice
+
+[cactup.runs-on]
+queues = ["local"]
+gpu    = true
 
 [options]
 VERSION = "athena-2026-09-29"
