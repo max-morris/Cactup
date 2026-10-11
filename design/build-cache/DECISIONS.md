@@ -315,6 +315,29 @@ Asked as seven questions with options; the answers, in Max's numbering.
     `$ORIGIN` in `LD_PRELOAD` are expanded as the loader says, not refused
     (the refusal was too broad).
 
+19. **Adversarial reviews go on, within accidents** (2026-10-11). In
+    review 6 after M3a a safety classifier stopped both reviewers (and the
+    author) while they built attack programs: fake compiler programs that
+    covertly change what they emit, injected libraries, self-deleting
+    helpers, swaps timed to a process. Max: "I kinda want continued
+    adversary rounds, but maybe try to limit techniques to what could
+    reasonably happen by accident/incidentally". Narrowing decision 17:
+    reviewers keep hunting, and anything reproducible within that scope
+    blocks; in scope is what happens on clusters without anyone meaning
+    harm (a package upgrade or an administrator's reinstall during a build,
+    `module load` and `unload`, a `current` link turned to a new version,
+    two builds or users sharing a store, a user's own scripts and
+    environment idioms, network filesystem caching and clock skew,
+    leftovers of earlier builds, editors' temporary files, interrupted
+    copies, another real version of a tool on the search path). Out of
+    scope: what only an attacker would build. Evidence uses real,
+    unmodified tools; where two real versions are not at hand, the event
+    log showing the same key and identity across a change the cache
+    should have seen is enough. Everything found so far stays fixed. The
+    spec states the limit: the cache guards against accidents, not against
+    someone with write access to the toolchain or the search paths who
+    means to plant a wrong object.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

@@ -5191,7 +5191,12 @@ fixed parts, so that the key does not change by accident:
   entry of `LIBRARY_PATH` (where the driver finds a `specs` file) and a
   compiler named by a relative path. The loader's tunables
   (`GLIBC_TUNABLES`) are among the variables a change of which has the
-  identity worked out again. Left: a flag that selects a multilib under
+  identity worked out again. All of this guards against accidents
+  (upgrades, reinstalls, module loads, links turned to new versions,
+  shared stores, leftovers), not against someone with write access to the
+  toolchain or the search paths who means to plant a wrong object: a
+  program built to change what it emits while saying it is GNU's, timed to
+  a compile, is out of reach (decision 19). Left: a flag that selects a multilib under
   another name than `-print-multi-lib` gives (GCC targets with aliases,
   such as some Arm and RISC-V builds); a file passed over on a `noexec`
   filesystem that is remounted to allow it; a wrapper that says in its own

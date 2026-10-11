@@ -2104,10 +2104,9 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-Review 5 of the changes after M3a (the compiler identity's watched places
-and what reviews 1–4 found), with the Einstein Toolkit gate on that commit;
-the bar stays absolute (decision 17).
-Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
+Review 7 of the changes after M3a, adversarial within accidents (decision
+19): every earlier reproduction re-run, new hunting with real tools, and
+the Einstein Toolkit gate on that commit. Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
 miss, summed over compiles; about 2100 s of compiling): the cache's own time
 was 472 s at `a14f279` and 442 s with M3a, the Fortran check 32 s down to
 3.4 s; what is left is the C and C++ key and check, a preprocessor run each
