@@ -358,6 +358,9 @@ fn memo_of(cc_dir: &Path, program: &OsStr) -> Res<(PathBuf, PathBuf)> {
     Ok((path, cc_dir.join("compilers").join(format!("{}.toml", memo_name.hex()))))
 }
 
+/// Directories, each as it looked (`None`: not there).
+pub(super) type Stamps = Vec<(PathBuf, Option<Seen>)>;
+
 /// The directories that hold what the identity of `program` watches (by
 /// absolute names), each as it looks now: the nearest that is there for a
 /// place whose directory is not. Compiles do not write in them, so one
@@ -366,7 +369,7 @@ fn memo_of(cc_dir: &Path, program: &OsStr) -> Res<(PathBuf, PathBuf)> {
 /// again by the check after it (tried: an assembler that deletes itself).
 /// Relative places are not among them: they lead into the working
 /// directory, which the compile writes.
-pub(super) fn directories(cc_dir: &Path, program: &OsStr) -> Vec<(PathBuf, Option<Seen>)> {
+pub(super) fn directories(cc_dir: &Path, program: &OsStr) -> Stamps {
     let Ok((_, memo)) = memo_of(cc_dir, program) else { return Vec::new() };
     let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok()) else {
         return Vec::new();

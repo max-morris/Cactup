@@ -291,7 +291,7 @@ pub struct Keyed {
     cc_dir: PathBuf,
     /// Right before the compile: did the identity still hold, and how did
     /// the directories it watches look ([`identity::directories`])?
-    before: Option<(bool, Vec<(PathBuf, Option<identity::Seen>)>)>,
+    before: Option<(bool, identity::Stamps)>,
     map: Option<PathMap>,
     /// What the files looked like when they were read for the key.
     seen: String,
