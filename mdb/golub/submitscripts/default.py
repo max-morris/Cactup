@@ -1,8 +1,8 @@
-# golub submitscript (variant "default"), ported from simfactory2
+# golub submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/golub.sub (PBS directives consumed by sbatch's
 # compatibility mode — see meta.toml [scheduler].submit).
 #
-# .py variant (design §6.1): the old script used THREE expression templates —
+# .py script (design §6.1): the old script used THREE expression templates —
 #   #PBS -q @(ifthen(":" in "@QUEUE@", <before-colon>, "@QUEUE@"))@
 #   #SBATCH @(ifthen(":" in "@QUEUE@", "--constraint="+<after-colon>, ""))@
 #   #PBS @('@CHAINED_JOB_ID@' != '' ? '-W depend=afterany:…' : '')@
@@ -40,7 +40,7 @@ lines.append("#PBS -m abe")
 lines.append("#PBS -o {0}".format(STDOUT_FILE))
 lines.append("#PBS -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

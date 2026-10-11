@@ -1,5 +1,5 @@
 #! /bin/bash
-# minerva runscript (variant "default"), ported from simfactory2
+# minerva runscript (script "default"), ported from simfactory2
 # mdb/runscripts/minerva.run.
 #
 # Variable renames vs. simfactory (design §6.3):

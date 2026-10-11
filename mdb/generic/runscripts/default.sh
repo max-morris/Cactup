@@ -1,5 +1,5 @@
 #!/bin/bash
-# generic runscript (variant "default"), ported from simfactory2 generic.run.
+# generic runscript (script "default"), ported from simfactory2 generic.run.
 # Variable renames vs simfactory (design §6.3): NUM_PROCS→@TASKS@,
 # NUM_THREADS→@CPUS_PER_TASK@; metadata dir SIMFACTORY/→.cactup/ (§9.3).
 

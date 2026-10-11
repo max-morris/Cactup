@@ -1,11 +1,13 @@
-# spine optionlist (variant "default"), ported from simfactory2
+# spine optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/debian-cuda.cfg.
 
 [cactup]
-gpu               = false
-compatible-queues = ["local"]
 # gpu stays false: the build links cudart (LIBS) but compiles no device code
 # (no CUCC/nvcc), and the old definition had no GPU queue semantics.
+
+[cactup.runs-on]
+queues = ["local"]
+gpu    = false
 
 [options]
 # Configuration for a Debian installation, assuming the following list of

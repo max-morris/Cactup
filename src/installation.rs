@@ -578,7 +578,7 @@ mod tests {
         std::fs::write(
             cfg.join("cactup-config.toml"),
             format!(
-                "name = \"sim\"\nvariant = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
+                "name = \"sim\"\nflavor = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
                  config-id = \"c1\"\nbuild-id = \"b1\"\n",
                 inst.legacy_live_thornlist().display()
             ),

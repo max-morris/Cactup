@@ -94,20 +94,25 @@ pub fn introspect(repo_root: &Path) -> Result<MdbModel> {
         }
     }
 
-    // Find OptionlistHeader in optionlist.rs
+    // Find OptionlistHeader and its RunsOn sub-table in optionlist.rs
     let mut optionlist_header = MdbTable::default();
+    let mut optionlist_runs_on = MdbTable::default();
     for item in &optionlist_file.items {
         if let syn::Item::Struct(s) = item
-            && s.ident == "OptionlistHeader" && is_public_deserialize(s)
+            && is_public_deserialize(s)
         {
-            optionlist_header =
-                process_struct_to_table(s, "OptionlistHeader", Some("[cactup]"))?;
+            if s.ident == "OptionlistHeader" {
+                optionlist_header = process_struct_to_table(s, "OptionlistHeader", Some("[cactup]"))?;
+            } else if s.ident == "RunsOn" {
+                optionlist_runs_on = process_struct_to_table(s, "RunsOn", Some("[cactup.runs-on]"))?;
+            }
         }
     }
 
     Ok(MdbModel {
         meta_tables,
         optionlist_header,
+        optionlist_runs_on,
         template_vars: Vec::new(),
     })
 }
@@ -136,8 +141,6 @@ fn map_struct_to_toml_path(struct_name: &str) -> Option<&'static str> {
         "Environment" => Some("[environment]"),
         "Scheduler" => Some("[scheduler]"),
         "Queue" => Some("[queues.<name>]"),
-        "Variants" => Some("[variants]"),
-        "OptionlistVariants" => Some("[variants.optionlist]"),
         "Universe" => Some("[universes.<name>]"),
         "CactupMeta" => Some("[cactup]"),
         _ => None,

@@ -372,12 +372,10 @@ mod tests {
             running-pattern = " R"
             [queues.local]
             default = true
-            [variants.submitscript]
+            [submitscripts]
             "default" = ["local"]
-            [variants.runscript]
+            [runscripts]
             "default" = ["local"]
-            [variants.optionlist]
-            variants = ["default"]
             "#,
             log.display()
         ))

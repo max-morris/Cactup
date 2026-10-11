@@ -12,14 +12,15 @@
 #       (worktree at HEAD, mdb/ taken from $base).
 #
 # Each direction runs the MDB sweep tests of the mdb module:
-# every in-repo machine must load and validate (meta.toml schema, variant
+# every in-repo machine must load and validate (meta.toml schema, script
 # files, optionlists) and every hostname.regexp must compile. A direction is
 # skipped when it would only re-run $base itself (nothing on its side changed).
 #
 # What this cannot catch, and needs human judgment (see the docs page
 # cactupdocs/content/authors/mdb-generations.md, "What counts as breaking"):
 # template variables a binary substitutes differently, the .py script
-# protocol, optionlist [cactup] header keys an older binary silently ignores,
+# protocol, optionlist [cactup] header keys a generation-1 binary silently
+# ignores (the header is closed from generation 2 on, so new keys now fail),
 # and any other change in meaning that still loads. The regexp test
 # also hard-codes which machines are undiscoverable, so adding a new
 # undiscoverable machine trips direction (a) even though older binaries cope.

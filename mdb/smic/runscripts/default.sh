@@ -1,5 +1,5 @@
 #!/bin/bash
-# smic runscript (variant "default"), ported from simfactory2
+# smic runscript (script "default"), ported from simfactory2
 # mdb/runscripts/smic-openmpi.run.
 #
 # Variable renames vs. simfactory (design §6.3):

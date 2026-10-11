@@ -1,9 +1,9 @@
-# golub optionlist (variant "default"), ported from simfactory2
+# golub optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/golub.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["secondary"]
+[cactup.runs-on]
+queues = ["secondary"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

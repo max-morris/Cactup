@@ -1,10 +1,10 @@
-# sunrise TEST submitscript (variant "test") — marked test = true in meta.toml
+# sunrise TEST submitscript (script "test") — marked test = true in meta.toml
 # (design §11.2). Same #SBATCH header as submitscripts/default.py but WITHOUT
 # restart chaining (a testsuite is one-shot — no recovery, no chain, design
 # §11.6); the payload re-invokes `cactup test run` on the compute node with
 # the §11.6 locator flags (--test-dir + --results-id) instead of `sim run`.
 #
-# .py variant (design §6.1): the mail directives are guarded by `if EMAIL:`
+# .py script (design §6.1): the mail directives are guarded by `if EMAIL:`
 # (cactup's @NAME@ engine is literal-only, D7, so the conditional moves into
 # Python).
 
@@ -24,7 +24,7 @@ lines.append("#SBATCH --get-user-env")
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1).
+# env-setup is NOT auto-prepended for .py scripts (design §6.1).
 lines.append(ENV_SETUP)
 
 lines.append("cd {0}".format(SOURCEDIR))

@@ -93,7 +93,7 @@ propagating, wait a few minutes and run it again.
 
 Each build has an id: the short hash of the source commit it was built from.
 `cactup --version` shows it with the build date and the machine database
-generation, for example `cactup 0.1.0 (a1b2c3d 2026-09-24, mdb generation 1)`.
+generation, for example `cactup 0.1.0 (a1b2c3d 2026-09-24, mdb generation 2)`.
 
 Every build is kept under its own name, and `cactup` on your `PATH` is a
 symbolic link to the current one:
@@ -135,7 +135,7 @@ cactup keeps its own git clone of the machine database under `~/.cactup/mdb`:
 
 - It is refreshed **at most every 6 hours**, when a command needs machine
   information. A progress line (`machine database`) appears only while the
-  refresh runs, and a line such as `updated to generation 1 (4e5f6a7)` is
+  refresh runs, and a line such as `updated to generation 2 (4e5f6a7)` is
   left behind only when something actually changed.
 - Each revision is exported to its own directory and switched in with one
   link change, so a command that is already running never sees a
@@ -156,8 +156,8 @@ your build keeps using the last revision of its own generation and says so,
 loudly, on every command:
 
 ```
-the machine database has moved to generation 2; this cactup (generation 1)
-keeps using the last generation-1 revision. Run `cactup update` (if that
+the machine database has moved to generation 3; this cactup (generation 2)
+keeps using the last generation-2 revision. Run `cactup update` (if that
 reports up to date, a release is still propagating; retry later)
 ```
 
@@ -178,6 +178,9 @@ Machines in your overlay record the generation they were written for, as
 
 How to bring an overlay machine forward is described in
 [MDB Generations](../authors/mdb-generations.html#updating-an-overlay-machine).
+An optionlist file of your own that you build from with `--optionlist` follows
+the same format: if its `[cactup]` header uses keys a newer generation moved,
+the next rebuild of that config stops and says where each key went.
 
 ## Offline hosts and firewalls
 

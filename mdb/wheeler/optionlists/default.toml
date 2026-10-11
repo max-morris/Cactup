@@ -1,9 +1,9 @@
-# Wheeler optionlist (variant "default"), ported from simfactory2
+# Wheeler optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/wheeler-intel.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["NOQUEUE"]
+[cactup.runs-on]
+queues = ["NOQUEUE"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

@@ -1,5 +1,5 @@
 #! /bin/bash
-# saturn TEST runscript (variant "test") -- marked test = true in meta.toml
+# saturn TEST runscript (script "test") -- marked test = true in meta.toml
 # (design §11.2). Written 2026-09-29. Drives `make <config>-testsuite` and
 # lets the Cactus flesh harness launch each test (design §11.6), as in
 # mdb/et-juphub and mdb/qbd; the launcher is a local mpirun (no scheduler, so

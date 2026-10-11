@@ -1,10 +1,12 @@
-# Frontier optionlist (variant "default"), ported from simfactory2
+# Frontier optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/frontier.cfg.
 
 [cactup]
-gpu               = true
-compatible-queues = ["batch"]
 # HIP/ROCm build for the MI250X GPUs (hipcc --amdgpu-target=gfx90a).
+
+[cactup.runs-on]
+queues = ["batch"]
+gpu    = true
 
 [options]
 # Option list for the Einstein Toolkit

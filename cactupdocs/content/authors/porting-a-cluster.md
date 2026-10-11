@@ -214,22 +214,23 @@ Get queue info:
 sinfo -o "%P %l %D" | head -5
 ```
 
-### Variants section
+### Script routes
 
-Declare available variants:
+Tell cactup which submit and run script serves each queue. Each key names a
+script file (`submitscripts/default.sh`, `runscripts/test.sh`, ...):
 
 ```toml
-[variants.optionlist]
-variants = ["default", "cuda"]
-
-[variants.submitscript]
-"default" = { queues = ["default", "gpu"], default = true }
+[submitscripts]
+"default" = { queues = ["default", "gpu"] }
 "test" = { queues = ["default"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["default", "gpu"], default = true }
+[runscripts]
+"default" = { queues = ["default", "gpu"] }
 "test" = { queues = ["default"], test = true }
 ```
+
+Optionlists need no table here: every `*.toml` file you put in `optionlists/`
+(next step) is one of the machine's flavors.
 
 ## Step 3: Create optionlists
 
@@ -243,9 +244,11 @@ Edit `optionlists/default.toml` with your cluster's compilers and flags:
 
 ```toml
 [cactup]
-compatible-queues = ["default", "long"]
 default = true
 description = "Default build on myclu"
+
+[cactup.runs-on]
+queues = ["default", "long"]     # where the binary may run; omit for any queue
 
 [options]
 VERSION = "2024-06-01"
@@ -269,14 +272,16 @@ OPENMP = "yes"
 MPI    = "MPICH"
 ```
 
-If your cluster has CUDA, create `optionlists/cuda.toml` and mark it `gpu = true`
-so it is only offered on GPU queues:
+If your cluster has CUDA, create `optionlists/cuda.toml` and mark its binary
+`gpu = true` so its simulations only run on GPU queues:
 
 ```toml
 [cactup]
-gpu = true
-compatible-queues = ["gpu"]
 description = "CUDA GPU build on myclu"
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu = true
 
 [options]
 VERSION = "2024-06-01"
@@ -364,13 +369,18 @@ alongside the three above:
     default.sh
 ```
 
-It's declared in meta.toml exactly like `submitscript`/`runscript`, as its
-own variant table:
+It's routed in meta.toml exactly like `[submitscripts]`/`[runscripts]`, in
+its own table:
 
 ```toml
-[variants.buildsubmitscript]
-"default" = { queues = ["default", "gpu"], default = true }
+[buildsubmitscripts]
+"default" = { queues = ["default", "gpu"] }
 ```
+
+The queue a build job lands on only decides where `make` runs, so any queue
+may build any flavor: the CUDA flavor can compile on `default`, and the CPU
+flavor on `gpu`. Neither the flavor's `[cactup.runs-on]` nor a queue's
+`build-universes` is checked for a build job.
 
 And in `[build]`, tell cactup an unqualified `cactup build` should go to the
 queue rather than trying (and failing) to compile on the login node:
@@ -420,7 +430,7 @@ cactup itself when it generates the script, not from anything you configure.
 If your cluster needs the same GPU-reservation logic your run submitscript
 has (see the qbd example in [Scripts & Variables](scripts-and-variables.html)),
 write `buildsubmitscripts/default.py` instead of `.sh` — the calling
-convention is identical to a `submitscript` `.py` variant.
+convention is identical to a `.py` submit script.
 
 ## Step 5: Update run scripts
 
@@ -518,7 +528,7 @@ cactup install ET_2025_05 --silent
 Build a test config:
 
 ```sh
-cactup build testconfig --variant default
+cactup build testconfig --flavor default
 ```
 
 Run the test suite:
@@ -574,7 +584,7 @@ Test the key workflows:
 # Build with different options
 cactup build config1 --optimize
 cactup build config2 --debug
-cactup build config3 --variant cuda
+cactup build config3 --flavor cuda
 
 # Run simulations
 cactup sim submit mysim mysim.par -n 4 -w 2:00:00 -q default

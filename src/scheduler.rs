@@ -542,12 +542,10 @@ mod tests {
             {scheduler_toml}
             [queues.local]
             default = true
-            [variants.submitscript]
+            [submitscripts]
             "default" = ["local"]
-            [variants.runscript]
+            [runscripts]
             "default" = ["local"]
-            [variants.optionlist]
-            variants = ["default"]
             "#
         ))
         .unwrap()

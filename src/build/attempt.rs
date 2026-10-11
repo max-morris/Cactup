@@ -86,7 +86,7 @@ pub struct BuildMeta {
     pub schema: u32,
     pub attempt_id: u32,
     pub config: String,
-    /// Which optionlist this attempt was built from — the machine variant, or
+    /// Which optionlist this attempt was built from — the machine's flavor, or
     /// the `--optionlist` file (§7.8). Flattened, as in [`ConfigMeta`].
     #[serde(flatten)]
     pub optionlist_source: OptionlistSource,
@@ -150,6 +150,7 @@ pub struct BuildMeta {
     pub universe: Option<UniverseSpec>,
     /// The fully-formed config metadata to store on success — `built` is
     /// unset until then (execute stamps it).
+    #[serde(deserialize_with = "ConfigMeta::deserialize_upgrading")]
     pub config_meta: ConfigMeta,
     #[serde(default)]
     pub vars: IndexMap<String, toml::Value>,
@@ -300,8 +301,19 @@ impl BuildAttempt {
         let path = Self::meta_path(&dir);
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let meta: BuildMeta =
+        let mut table: toml::Table =
             toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+        // An attempt recorded before the optionlist "variant" was renamed
+        // "flavor" (config record schema 2): its embedded `config-meta` is
+        // upgraded by `ConfigMeta::deserialize_upgrading`; this is the same
+        // rename for the attempt's own copy of the key. Kept indefinitely,
+        // for the reason `ConfigMeta::from_table` gives.
+        if let Some(flavor) = table.remove("variant") {
+            table.insert("flavor".to_owned(), flavor);
+        }
+        let meta: BuildMeta = toml::Value::Table(table)
+            .try_into()
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
         if meta.schema > SCHEMA {
             bail!(
                 "{} has schema {} but this cactup understands at most schema {SCHEMA}; \
@@ -360,7 +372,7 @@ mod tests {
             schema: SCHEMA,
             attempt_id: 0,
             config: "sim".to_owned(),
-            optionlist_source: OptionlistSource::Variant("generic".to_owned()),
+            optionlist_source: OptionlistSource::Flavor("generic".to_owned()),
             machine: "mike".to_owned(),
             alias: "et-dev".to_owned(),
             config_dir: PathBuf::from("/home/user/Cactus/configs/sim"),
@@ -405,9 +417,9 @@ mod tests {
     fn sample_config_meta() -> ConfigMeta {
         toml::from_str(
             r#"
-            schema = 1
+            schema = 2
             name = "sim"
-            variant = "generic"
+            flavor = "generic"
             thornlist = "sim.th"
             machine = "mike"
             coerce-run-universe = true
@@ -416,6 +428,40 @@ mod tests {
             "#,
         )
         .unwrap()
+    }
+
+    /// An attempt recorded by a cactup from before the flavor rename — its
+    /// own `variant` key and its embedded schema-1 config record — opens as
+    /// the current shape, so `build list/show/log` keep working on it.
+    #[test]
+    fn opens_an_attempt_recorded_before_the_flavor_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path();
+        let meta = sample_meta();
+        let dir = BuildAttempt::attempt_dir(config_dir, meta.attempt_id);
+        BuildAttempt::create(dir.clone(), meta).unwrap();
+
+        // Rewrite what was stored into the old shape.
+        let path = BuildAttempt::meta_path(&dir);
+        let mut table: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let flavor = table.remove("flavor").unwrap();
+        table.insert("variant".to_owned(), flavor);
+        let cfg = table.get_mut("config-meta").unwrap().as_table_mut().unwrap();
+        cfg.insert("schema".to_owned(), toml::Value::Integer(1));
+        let flavor = cfg.remove("flavor").unwrap();
+        cfg.insert("variant".to_owned(), flavor);
+        cfg.remove("runs-on");
+        cfg.insert("gpu".to_owned(), toml::Value::Boolean(true));
+        cfg.insert("compatible-queues".to_owned(), toml::Value::Array(vec!["gpu".into()]));
+        fs::write(&path, toml::to_string(&table).unwrap()).unwrap();
+
+        let reopened = BuildAttempt::open(config_dir, 0).unwrap();
+        assert_eq!(reopened.meta.optionlist_source, OptionlistSource::Flavor("generic".to_owned()));
+        let cfg = &reopened.meta.config_meta;
+        assert_eq!(cfg.schema, crate::build::CONFIG_SCHEMA);
+        assert_eq!(cfg.optionlist_source, OptionlistSource::Flavor("generic".to_owned()));
+        assert_eq!(cfg.runs_on.queues, ["gpu"]);
+        assert!(cfg.runs_on.gpu);
     }
 
     #[test]

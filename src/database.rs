@@ -71,6 +71,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::free_form("mail"),
     KnobSpec::free_form("mail-type"),
     KnobSpec::free_form("queue"),
+    KnobSpec::free_form("build-queue"),
     KnobSpec::free_form("user"),
     KnobSpec::free_form("email"),
     KnobSpec {

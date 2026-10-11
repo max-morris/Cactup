@@ -50,13 +50,10 @@ holding-pattern  = '\(JobHeldUser\)'
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["debug"], default = true }
+[submitscripts]
+"default" = { queues = ["debug"] }
 "test"    = { queues = ["debug"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["debug"], default = true }
+[runscripts]
+"default" = { queues = ["debug"] }
 "test"    = { queues = ["debug"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

@@ -1,19 +1,21 @@
-# qbd optionlist (variant "default"), ported from simfactory2
+# qbd optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/qbd.cfg — regenerated upstream by simfactory-configure.py on
 # 2026-07-07 (native CUDA build: nvcc CUCC/LD, AMREX_ENABLE_CUDA = yes, built
 # against the prebuilt externals under /ddnB/project/sbrandt/externals-qbd).
 # The old Singularity-image build is gone. The build still runs in the queue —
 # QB4 requires it — but as a queued build in its own right (§7.9), not inside a
-# universe, so this variant needs no universe key at all.
+# universe, so this flavor needs no universe key at all.
 #
 # The [options] table is rendered back to the native Cactus "NAME = value"
 # optionlist before `make <config>-config` (design §7.8); every value is kept
 # as a TOML string so the render is faithful to the original.
 
 [cactup]
-gpu               = true
-default           = true      # `cpu` is the other variant; this one stays the implicit choice
-compatible-queues = ["gpu2", "gpu4"]
+default           = true      # `cpu` is the other flavor; this one stays the implicit choice
+
+[cactup.runs-on]
+queues = ["gpu2", "gpu4"]
+gpu    = true
 
 [options]
 # -mf16c (CFLAGS/CXXFLAGS/F90FLAGS only): hardware binary16<->binary32

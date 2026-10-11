@@ -100,7 +100,14 @@ fn main() -> Res<()> {
     }
 
     // `-K NAME VALUE` is folded into `-K NAME=VALUE` before clap parses.
-    let args = Args::parse_from(args::normalize_knob_args(std::env::args_os()));
+    let argv = args::normalize_knob_args(std::env::args_os());
+    // A retired flag stops the command before anything else happens — before
+    // clap could object to something unrelated, and before any update check,
+    // MDB sync, or machine detection.
+    if let Some(notice) = args::retired_flag_notice(&argv) {
+        anyhow::bail!(notice);
+    }
+    let args = Args::parse_from(argv);
     shell::set_trace(args.globals.trace);
     // The `-K` overlay (§5.1): every DB snapshot this command reads carries
     // these values, nothing persists them.

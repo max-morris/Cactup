@@ -1,5 +1,5 @@
 #! /bin/bash
-# athena runscript (variant "cpu"): CPU-only runs on the `cpu` queue
+# athena runscript (script "cpu"): CPU-only runs on the `cpu` queue
 # (`-q cpu`). Written 2026-09-29, mirroring mdb/qbd/runscripts/cpu.sh with its
 # srun launch replaced by mpirun. Measured facts it depends on: 2 x AMD EPYC
 # 7662, 128 cores, SMT off; HPC-X 2.24 Open MPI (env-setup in meta.toml,

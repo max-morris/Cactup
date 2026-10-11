@@ -1,8 +1,8 @@
-# athena optionlist (variant "cpu"): a CPU-only build for the Carpet-based
+# athena optionlist (flavor "cpu"): a CPU-only build for the Carpet-based
 # Einstein Toolkit stack (McLachlan, IllinoisGRMHD, AHFinderDirect, Fuka/Kadath
-# initial data, ...), run on the `cpu` queue (`-q cpu`). Written 2026-09-29,
+# initial data, ...), run on the `cpu` queue (its default-queue below). Written 2026-09-29,
 # mirroring mdb/qbd/optionlists/cpu.toml the way that file mirrors qbd's
-# default: this variant's "default" twin minus everything that exists only
+# default: this flavor's "default" twin minus everything that exists only
 # for nvcc/AMReX (CUCC*, the nvcc LD, cudart libs, AMREX_*).
 #
 # Measured facts it depends on: gcc-toolset-13 (gcc/g++/gfortran 13.3.1);
@@ -14,9 +14,14 @@
 # and Boost: all four are built from source below.
 
 [cactup]
-gpu               = false
 description       = "CPU-only build (Carpet/McLachlan/IllinoisGRMHD, Fuka) for the cpu queue"
-compatible-queues = ["cpu"]
+
+[cactup.runs-on]
+queues = ["cpu"]
+gpu    = false
+# Without -q, a sim of this flavor goes here rather than to the GPU-flagged
+# machine default `local`.
+default-queue = "cpu"
 
 [options]
 VERSION = "athena-cpu-2026-09-29"

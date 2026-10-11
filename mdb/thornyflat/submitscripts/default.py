@@ -1,7 +1,7 @@
-# thornyflat submitscript (variant "default"), ported from simfactory2
+# thornyflat submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/thornyflat.sub (PBS/Torque).
 #
-# .py variant (design §6.1): the old script used the chained-job ternary
+# .py script (design §6.1): the old script used the chained-job ternary
 # @('@CHAINED_JOB_ID@' != '' ? '-hold_jid @CHAINED_JOB_ID@' : '')@ — note the
 # SGE-style -hold_jid dependency type, kept — cactup's @NAME@ engine is
 # literal-only (D7), so the conditional moves into Python.
@@ -28,7 +28,7 @@ if EMAIL:
 lines.append("#PBS -o {0}".format(STDOUT_FILE))
 lines.append("#PBS -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

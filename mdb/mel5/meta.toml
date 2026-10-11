@@ -2,7 +2,7 @@
 # Ported from simfactory2 mdb/machines/mel5.ini for cactup development/testing.
 # There is no batch scheduler here: "submit" just backgrounds the script and
 # echoes its PID; status/stop use ps/kill. It is modeled with a single queue
-# ("local") and a single variant of each script.
+# ("local") and a single script of each kind.
 
 [machine]
 name        = "Melete 05"
@@ -65,27 +65,23 @@ gpu          = false
 max-walltime = "8760:00:00"     # 1 year (effectively unlimited; no scheduler)
 default      = true
 
-# One NORMAL variant of each script, plus one TESTSUITE variant marked
-# test = true (design §11.2). Every key names a variant; the fallback is marked
-# in place with default = true (§4.2, §4.4) rather than via a reserved pointer
-# key. With a single normal variant "default" is the implicit normal default and
-# with a single test variant "test" is the implicit test default, so the flag is
-# optional here — we state default = true on "default" for clarity. Each partition
-# must still cover every queue (here just "local").
-# A variant may also set tasks = N — the default TASKS when no -n/-T/-t flag is
+# One NORMAL script of each kind, plus one TESTSUITE script marked
+# test = true (design §11.2). Every key names a script, and each script serves
+# exactly the queues it lists — there is no fallback script. The normal
+# scripts must cover every queue (here just "local"); a queue with no test
+# script simply cannot run the testsuite.
+# A script may also set tasks = N — the default TASKS when no -n/-T/-t flag is
 # given, instead of filling the node (§8.5); testsuite runs already default to
 # 2 without it (§11.6), which is right for this machine.
-[variants.submitscript]
-"default" = { queues = ["local"], default = true }
+[submitscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true }
+[runscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test run`
 
-# Two optionlists: the normal "default" (marked [cactup].default = true, the
-# implicit pick) and "debug" (DEBUG on). A bare `config build` uses "default";
-# `config build --variant debug` builds the DEBUG binary — e.g. to run the
-# testsuite against it (design §4.4).
-[variants.optionlist]
-variants = ["default", "debug"]
+# Two flavors, one per file in optionlists/: the normal "default" (marked
+# [cactup].default = true, the implicit pick) and "debug" (DEBUG on). A bare
+# `cactup build` uses "default"; `cactup build --flavor debug` builds the
+# DEBUG binary — e.g. to run the testsuite against it (design §4.4).
