@@ -1,0 +1,2 @@
+# No SITE_PROXY: the rest of the site leads to the hub.
+redir * {$HUB_PATH}/ 302

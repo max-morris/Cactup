@@ -47,13 +47,16 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # caddy/run.sh: SITE_PROXY split up for the Caddyfiles, then Caddy.
+    entrypoint: [/bin/sh, /etc/caddy/run.sh]
+    command: []
     environment:
+      CADDY_MODE: ${TLS:-auto}
       DOMAIN: ${DOMAIN:-}
       HUB_PATH: ${HUB_PATH-/tutorial}
-      ROOT_REDIRECT: ${ROOT_REDIRECT:-${HUB_PATH-/tutorial}/}
+      SITE_PROXY: ${SITE_PROXY:-}
     volumes:
-      - ./caddy/Caddyfile.${TLS:-auto}:/etc/caddy/Caddyfile:ro
-      - ./caddy/hub.caddy:/etc/caddy/hub.caddy:ro
+      - ./caddy:/etc/caddy:ro
       - ${TLS_CERT_DIR:-./caddy/certs}:/certs:ro
       - caddy-data:/data
       - caddy-config:/config
@@ -67,12 +70,14 @@ services:
     depends_on: [hub]
     ports:
       - "${PLAIN_BIND:-127.0.0.1}:${PLAIN_PORT:-8000}:80"
+    entrypoint: [/bin/sh, /etc/caddy/run.sh]
+    command: []
     environment:
+      CADDY_MODE: plain
       HUB_PATH: ${HUB_PATH-/tutorial}
-      ROOT_REDIRECT: ${ROOT_REDIRECT:-${HUB_PATH-/tutorial}/}
+      SITE_PROXY: ${SITE_PROXY:-}
     volumes:
-      - ./caddy/Caddyfile.plain:/etc/caddy/Caddyfile:ro
-      - ./caddy/hub.caddy:/etc/caddy/hub.caddy:ro
+      - ./caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     networks: [front]

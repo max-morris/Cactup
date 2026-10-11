@@ -9,3 +9,4 @@ jupyter/labext/tsconfig.tsbuildinfo
 # Screenshots and logs the browser checks leave by default.
 tests/browser/out/
 tests/hub/out/
+.venv/

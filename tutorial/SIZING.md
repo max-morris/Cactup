@@ -39,9 +39,10 @@ attendee. For **N** simultaneous attendees it needs:
   setting up, outbound access to the package repositories, quay.io, Docker
   Hub and PyPI (the hub's and Caddy's images); with Let's Encrypt
   certificates, outbound access to Let's Encrypt from then on. During the
-  workshop the tutorial needs nothing else outbound: the attendees'
-  containers have no route out at all, and the 18.5 GB tutorial image is
-  copied onto the machine once beforehand (README, "Deploying").
+  workshop, outbound HTTPS to `max-morris.github.io` (the site's front page
+  shows the project's docs from there; `SITE_PROXY` in README, "Deploying")
+  and nothing else: the attendees' containers have no route out at all, and
+  the 18.5 GB tutorial image is copied onto the machine once beforehand.
 - A GPU is optional: notebook 4b shows a GPU queue only when the VM passes
   an NVIDIA GPU through, and never runs a GPU job otherwise.
 

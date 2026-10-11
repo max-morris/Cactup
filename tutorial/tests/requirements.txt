@@ -1,0 +1,15 @@
+# What the checks run with on the host (`just test` and the other `just
+# check...` recipes make tutorial/.venv from this, pinned by
+# ../jupyter/constraints.txt where it pins a package).
+pytest==9.1.1
+jupyter_server
+jsonschema[format-nongpl]
+ipykernel
+nbclient
+nbformat
+jupytext
+matplotlib
+pygments
+pyte
+requests
+jupyterhub==5.5.2

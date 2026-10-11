@@ -1,20 +1,24 @@
 # What every site serves, whichever way attendees reach it (imported by the
-# three Caddyfiles). The hub answers under HUB_PATH (/tutorial; empty for
-# the whole site), and every other address on the site goes to ROOT_REDIRECT
-# (by default, the hub). JupyterHub's base_url is HUB_PATH too, so requests
-# go to it unchanged.
+# three Caddyfiles): the hub under HUB_PATH (/tutorial; empty for the whole
+# site), and the rest of the site from SITE_PROXY (site-proxy.caddy) or, with
+# none, a redirect to the hub (site-hub.caddy). run.sh sets SITE_MODE.
+# JupyterHub's base_url is HUB_PATH too, so requests reach it unchanged.
 
 # HUB_PATH without its slash: the hub's address, as people type it.
 @bare expression `{path} == "{$HUB_PATH}"`
 redir @bare {$HUB_PATH}/ 308
 
-# The rest of the site (nothing, with an empty HUB_PATH).
-@outside not path {$HUB_PATH}/*
-redir @outside {$ROOT_REDIRECT} 302
+@hub path {$HUB_PATH}/*
+handle @hub {
+	reverse_proxy hub:8000 {
+		# The attendee's address, for the login rate limit (JupyterHub reads
+		# X-Real-IP first; its own proxy would otherwise hide every attendee
+		# behind this one's address). Set here, so a client can't forge it.
+		header_up X-Real-IP {client_ip}
+	}
+}
 
-reverse_proxy hub:8000 {
-	# The attendee's address, for the login rate limit (JupyterHub reads
-	# X-Real-IP first; its own proxy would otherwise hide every attendee
-	# behind this one's address). Set here, so a client can't forge it.
-	header_up X-Real-IP {client_ip}
+# The rest of the site (nothing, with an empty HUB_PATH).
+handle {
+	import site-{$SITE_MODE}.caddy
 }

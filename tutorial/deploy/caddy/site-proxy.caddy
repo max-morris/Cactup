@@ -1,0 +1,12 @@
+# SITE_PROXY: the rest of the site is that site's, fetched on each request
+# (say https://max-morris.github.io/Cactup/, the project's docs). Its pages
+# link to its own path (/Cactup/...), which passes unchanged; any other
+# address gets that path put in front, so / is its front page.
+@outside_site not path {$SITE_PROXY_PATH} {$SITE_PROXY_PATH}/*
+rewrite @outside_site {$SITE_PROXY_PATH}{uri}
+reverse_proxy {$SITE_PROXY_ORIGIN} {
+	# The name the site answers to, not this one.
+	header_up Host {upstream_hostport}
+	# Its redirects name itself: keep them on this site.
+	header_down Location ^{$SITE_PROXY_ORIGIN} ""
+}

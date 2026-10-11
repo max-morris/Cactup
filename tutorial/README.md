@@ -8,6 +8,35 @@ tutorial server (`einsteintoolkit/jupyter-et`), with one notebook per topic.
 Attendees never see this file. Everything below is about how the image works
 and how to maintain, rebuild and deploy it.
 
+## Quick start
+
+Everything runs through [`just`](https://github.com/casey/just) (`apt install
+just` on Debian 13), from `tutorial/` or any directory under it; `just`
+alone lists the recipes. Docker is the only other requirement.
+
+On your own machine:
+
+```sh
+just build        # the image (an hour or more the first time; then only what changed)
+just lab          # the tutorial in a container, as one attendee: prints the address to open
+just lab-stop     # remove it
+just test         # the pytest suites (two minutes)
+just check        # every notebook, headless (an hour; `just check --only 3` for one)
+just check-hub    # a whole hub on this machine, checked end to end and in a browser
+just check-all    # all the checks
+```
+
+On the server (a checkout of this repository, Docker; see Deploying for the
+one-time setup):
+
+```sh
+just ship user@server   # on your machine: copy the image there (or `just build` on the server)
+just up                 # first time: makes deploy/.env to edit; then starts or updates the hub
+just account ada        # an admin's account (each name in HUB_ADMINS), before showing the token
+just token              # the session token, big, for the room
+just status             # the hub, Caddy and every attendee's container
+```
+
 ## Layout
 
 | Path | What it is |
@@ -18,7 +47,8 @@ and how to maintain, rebuild and deploy it.
 | `bake/` | Drives real installs and builds inside a bake container and harvests their results. |
 | `mirrors/` | Turns thornlists into local bare git mirrors, a lock file of mirrored commits, and per-repository `insteadOf` rules. |
 | `deploy/` | JupyterHub + DockerSpawner + Caddy compose file, the choose-your-own-login authenticator, the session-token tool; see Deploying. |
-| `tests/` | pytest suites, the headless notebook runner `run_all.py`, and `hub/`: a hub brought up and checked end to end. |
+| `tests/` | pytest suites, the headless notebook runner `run_all.py`, and `hub/`: a hub brought up and checked end to end. `requirements.txt`: what the checks run with on the host. |
+| `justfile` | Every build, run, check and deploy command (`just` lists them); see Quick start. |
 | `cactup.pin` | The cactup commit the image is built from (binaries, installer, MDB); see `UPDATING.md`. |
 | `UPDATING.md` | How to move the pin to a newer cactup, and everything in the tutorial that depends on cactup's behavior. |
 | `tools/` | `check-cactup-usage.py`: checks every cactup command the tutorial runs against a cactup build. |
@@ -1041,27 +1071,19 @@ The two cactup builds get their stamps from git: "current" is the last commit
 that touched cactup's inputs, "previous" the one before, so a build needs two
 such commits.
 
-Checks:
+Checks (the `just` recipes, and what each runs):
 
-```sh
-PYTHONPATH=tutorial/jupyter python -m pytest tutorial/tests   # magics, lexers, session, mirrors, make shim, hub logins
-tutorial/tests/browser/run.sh cactup-tutorial:lab             # the frontend, in headless Chromium
-tutorial/tests/platform/smoke.sh cactup-tutorial:lab          # install, update, SLURM, a simulation
-tutorial/tests/platform/replay.sh cactup-tutorial:tutorial    # a replayed build, its executable, real rebuilds
-tutorial/tests/run_all.py                                     # every notebook, headless, in order and alone
-tutorial/tests/hub/run.sh                                     # a hub on this machine, checked end to end (see Deploying)
-```
+| Recipe | Runs | What it checks |
+|---|---|---|
+| `just test` | `pytest tests`, in `tutorial/.venv` (made from `tests/requirements.txt` on first use) | magics, lexers, session, mirrors, make shim, hub logins |
+| `just check-platform` | `tests/platform/smoke.sh`, `tests/platform/replay.sh` | install, update, SLURM, a simulation; a replayed build, its executable, real rebuilds |
+| `just check` | `tests/run_all.py` | every notebook, headless, in order and alone |
+| `just check-hub` | `tests/hub/run.sh --keep`, `tests/hub/browse.sh`, `run.sh --down` | a hub on this machine, end to end and in a browser (see Deploying) |
 
-To try the image locally as one attendee:
-
-```sh
-docker run --rm -p 8888:8888 --hostname cactup-tutorial \
-    --cpuset-cpus 0-3 --memory 8g --shm-size 1g cactup-tutorial:tutorial
-```
-
-(Rootless Docker ignores `--cpuset-cpus` unless the cpuset cgroup controller
-is delegated to the user's systemd slice; without it the container sees every
-host CPU.)
+(`tests/browser/run.sh cactup-tutorial:lab` checks the frontend alone, on the
+lab image.) `just lab` runs the image as `run_all.py` does, with a CPU quota
+of 4 and 8 GB of memory, publishing it on 127.0.0.1:8888 (`just lab 9999`
+for another port).
 
 ## Deploying
 
@@ -1179,12 +1201,12 @@ forwards it to the containers' IPv4 network) everyone has Docker's address.
 
 The account tools run in the hub's container, so they need Docker access on
 the machine (which is root's power: the hub's Docker socket can do anything
-Docker can). From `tutorial/deploy`:
+Docker can):
 
 ```sh
-docker compose exec -it hub python3 -m cactup_cyol.make_users --name ada    # one account: asks for its password
-docker compose exec hub python3 -m cactup_cyol.make_users 30 --prefix attendee   # prepared accounts, printed as username,password
-docker compose exec -it hub python3 -m cactup_cyol.set_password ada         # a forgotten password: asks for the new one
+just account ada        # one account: asks for its password
+just accounts 30        # prepared accounts (attendee01, ...), printed as username,password
+just password ada       # a forgotten password: asks for the new one
 ```
 
 The hub's admin page lists the usernames, for someone who forgot theirs.
@@ -1203,9 +1225,9 @@ account database.
   intermediates) and `key.pem` (unencrypted) in `TLS_CERT_DIR`. Copy the
   files in: links (certbot's `live/` directory holds links into
   `../../archive`) don't resolve inside Caddy's container. Caddy doesn't
-  watch the files: after the site renews them, `docker compose exec caddy
-  caddy reload --force --config /etc/caddy/Caddyfile` (without `--force`,
-  Caddy sees an unchanged Caddyfile and keeps the old certificate).
+  watch the files: after the site renews them, `just reload-caddy` (it
+  reloads with `--force`: without it, Caddy sees an unchanged Caddyfile and
+  keeps the old certificate).
 
   With either, Caddy serves HTTPS on 443 and redirects 80 to it.
 - `COMPOSE_PROFILES=plain`: plain HTTP on `PLAIN_BIND:PLAIN_PORT`
@@ -1229,13 +1251,20 @@ come over HTTPS, and a browser must not send the login cookie over a plain
 ### Where on the site
 
 The hub answers under `HUB_PATH` (`/tutorial`: `https://DOMAIN/tutorial/`;
-empty: the whole site), and every other address on the site redirects to
-`ROOT_REDIRECT` (empty: the hub; or, say, the project's web page). One
-setting moves the hub: JupyterHub's `base_url` and Caddy's routes (in
-`caddy/hub.caddy`, shared by the three modes) both follow it, and `./token`
-shows the address with it. Change it with no attendee's server running (the
-admin page stops them all): a running one keeps serving at the old address.
-Then `docker compose up -d`.
+empty: the whole site). The rest of the site shows `SITE_PROXY`'s pages,
+fetched on each request (`https://max-morris.github.io/Cactup/`, the
+project's docs: `https://DOMAIN/` is their front page, and their own links,
+to `/Cactup/...`, pass through as they are); with `SITE_PROXY` empty it
+redirects to the hub. The proxy needs the machine to reach that site during
+the workshop (HTTPS out to `max-morris.github.io`).
+
+One setting moves the hub: JupyterHub's `base_url` and Caddy's routes both
+follow `HUB_PATH`, and `just token` shows the address with it. The routes are
+in `caddy/hub.caddy` (shared by the three modes), with `site-proxy.caddy` and
+`site-hub.caddy` for the rest of the site; `caddy/run.sh`, Caddy's
+entrypoint, splits `SITE_PROXY` into the host and path they use. Change
+`HUB_PATH` with no attendee's server running (the admin page stops them
+all): a running one keeps serving at the old address. Then `just up`.
 
 ### Setting it up
 
@@ -1243,13 +1272,12 @@ On the machine (`SIZING.md` says what it needs, and has the disk and CPU
 checks to run on it first):
 
 1. Docker Engine, with cgroup v2 (`docker info -f '{{.CgroupVersion}}'`
-   prints 2), and a checkout of this repository (only `tutorial/deploy` is
-   used on the machine). The first `docker compose up --build` needs to
+   prints 2), `just`, and a checkout of this repository (only
+   `tutorial/deploy` is used on the machine). The first `just up` needs to
    reach quay.io, Docker Hub and PyPI (for the hub's image and Caddy's).
-2. The tutorial image: built there (`tutorial/image/build.sh`, an hour or
-   more the first time), or built elsewhere and copied (about 18.5 GB),
-   which needs Docker access on both sides:
-   `docker save cactup-tutorial:tutorial | zstd | ssh MACHINE 'zstd -d | docker load'`.
+2. The tutorial image: built there (`just build`, an hour or more the first
+   time), or built elsewhere and copied, `just ship user@server` from the
+   other machine (about 18.5 GB; Docker access on both sides, and `zstd`).
 3. The token's directory and group:
 
    ```sh
@@ -1264,31 +1292,29 @@ checks to run on it first):
    (your own group, seen from the container). Only you, and your group's
    members, then read the token.
 
-The commands from here on run in `tutorial/deploy`:
-
-4. `cp .env.example .env`, and set at least `COMPOSE_PROFILES` and `TLS`,
-   `DOMAIN` (with `tls`), the certificate in `TLS_CERT_DIR` (with
-   `TLS=provided`), `PLAIN_BIND` and `PLAIN_PORT` (with `plain`),
-   `HUB_PATH` and `ROOT_REDIRECT` (if not `/tutorial` and the hub),
+4. `just up` makes `deploy/.env` from `.env.example`. Set at least
+   `COMPOSE_PROFILES` and `TLS`, `DOMAIN`, the certificate in
+   `TLS_CERT_DIR` (with `TLS=provided`), `PLAIN_BIND` and `PLAIN_PORT` (with
+   `plain`), `HUB_PATH` and `SITE_PROXY` (if not `/tutorial` and the docs),
    `SHARED_GID` (`getent group cactup-tutorial | cut -d: -f3`) and
    `HUB_ADMINS`.
-5. `docker compose up -d --build`.
-6. The admins' accounts, before anyone sees the token:
-   `docker compose exec -it hub python3 -m cactup_cyol.make_users --name NAME`
+5. `just up` again: it checks the image and the token's directory are
+   there, then starts the hub and Caddy.
+6. The admins' accounts, before anyone sees the token: `just account NAME`
    for each name in `HUB_ADMINS`. They get the hub's admin page
    (`/tutorial/hub/admin`): servers to stop or start, users.
-7. `./token`, then sign up at the site with it, as an attendee would. After
+7. `just token`, then sign up at the site with it, as an attendee would. After
    that first sign-up, `docker inspect -f '{{.HostConfig.CpusetCpus}}'
    cactup-<username>` shows the container's cores (empty: Docker isn't
    applying cpusets; see `CPUSET`).
 
 ### During and after the workshop
 
-- `./token` keeps the token on a screen and follows rotations (large letters
-  need `figlet` installed; otherwise enlarge the terminal's font). To show it
-  from a laptop: `ssh -t MACHINE .../tutorial/deploy/token` (without `-t` it
-  prints once). `./token --rotate` makes a new one at once, say after the
-  room has signed up. Showing and rotating the token needs a login on the
+- `just token` keeps the token on a screen and follows rotations (large
+  letters need `figlet` installed; otherwise enlarge the terminal's font). To
+  show it from a laptop: `ssh -t MACHINE .../tutorial/deploy/token` (without
+  `-t` it prints once). `just rotate` makes a new one at once, say after the
+  room has signed up. `just logs` follows the hub's and Caddy's logs. Showing and rotating the token needs a login on the
   machine, in the group; the account tools above need Docker access.
 - The idle culler stops a server after `CULL_TIMEOUT` seconds (5 hours)
   without notebook activity, looking every 5 minutes. It judges by Jupyter
@@ -1296,7 +1322,7 @@ The commands from here on run in `tutorial/deploy`:
   4 hours): stopping a container requeues the jobs that were running in it.
   For the attendee, nothing is lost: they log in again, their server starts
   in seconds with every file as it was, and the requeued jobs run again.
-- Restarting the hub (`docker compose up -d` after changing `.env`, `docker
+- Restarting the hub (`just up` after changing `.env` or pulling, `docker
   compose restart hub`, a new hub image) leaves the attendees' servers
   running: the hub picks them up again when it is back. The hub's proxy runs
   in its container, so for the seconds it is away attendees' pages lose their
@@ -1327,10 +1353,10 @@ The commands from here on run in `tutorial/deploy`:
 
 ### Checking a hub
 
-`tutorial/tests/hub/run.sh` brings a hub up on this machine (its own compose
-project, network `cactup-hubtest-users`, and plain HTTP on
-127.0.0.1:18000/tutorial/, so it doesn't meet a real deployment; run one at a
-time) and runs `check_hub.py` against it:
+`just check-hub` runs `tutorial/tests/hub/run.sh`, which brings a hub up on
+this machine (its own compose project, network `cactup-hubtest-users`, and
+plain HTTP on 127.0.0.1:18000/tutorial/, so it doesn't meet a real
+deployment; run one at a time) and runs `check_hub.py` against it:
 
 - the hub at `/tutorial/`, and the rest of the site redirecting;
 - sign-ups through the login page with the session token, and the refusals
