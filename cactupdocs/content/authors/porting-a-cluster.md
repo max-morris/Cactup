@@ -184,7 +184,7 @@ env-setup = """
 module load gcc
 module load openmpi
 export PATH="/opt/bin:$PATH"
-export LD_LIBRARY_PATH="/opt/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/opt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 """
 ```
 

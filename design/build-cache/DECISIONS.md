@@ -308,8 +308,10 @@ Asked as seven questions with options; the answers, in Max's numbering.
     cluster (an empty entry only adds "search the working directory"). Max:
     "fix the MDB idioms and refuse them". The idioms are now
     `${VAR:+:$VAR}` and `${VAR:+$VAR:}`, which give the same list whenever
-    the variable has a value; value edits, no generation bump (generation 2,
-    merged from master). Also on Max's word (same day): `$LIB`, `$PLATFORM`,
+    the variable has a value (mike's `LD_LIBRARY_PATH` also loses the `::`
+    its old form left even then, which is the point); value edits, no
+    generation bump (generation 2, merged from master). The `CPATH` idioms
+    of the same machines and the docs' example were fixed alike. Also on Max's word (same day): `$LIB`, `$PLATFORM`,
     `$ORIGIN` in `LD_PRELOAD` are expanded as the loader says, not refused
     (the refusal was too broad).
 

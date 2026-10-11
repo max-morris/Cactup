@@ -152,7 +152,7 @@ struct Remembered {
 /// up, and whether Clang reads its configuration files. A change in one of
 /// them may mean another compiler under the same driver.
 const HELPER_ENV: &[&str] =
-    &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_LIBRARY_PATH", "LD_PRELOAD", "GLIBC_TUNABLES", "CLANG_NO_DEFAULT_CONFIG"];
+    &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LIBRARY_PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "GLIBC_TUNABLES", "CLANG_NO_DEFAULT_CONFIG"];
 
 fn helper_env() -> String {
     let mut hasher = Hasher::new("compiler-env");
@@ -261,12 +261,14 @@ fn interpreted(program: &Path) -> bool {
     (0..phnum).any(|i| bytes.get(phoff + i * phentsize..phoff + i * phentsize + 4).is_none_or(|kind| kind == 3u32.to_le_bytes()))
 }
 
-/// Does `program` start (it is asked for its version and left to it)? Not
-/// where the system refuses to run it.
+/// Does `program` start? Not where the system refuses to run it. Started
+/// is enough (the spawn says once the program is running), so it is
+/// stopped at once, and one that would hang holds nothing up.
 fn runs(program: &Path) -> bool {
     let started = Command::new(program).arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     match started {
         Ok(mut child) => {
+            let _ = child.kill();
             let _ = child.wait();
             true
         }
@@ -358,8 +360,13 @@ fn memo_of(cc_dir: &Path, program: &OsStr) -> Res<(PathBuf, PathBuf)> {
     Ok((path, cc_dir.join("compilers").join(format!("{}.toml", memo_name.hex()))))
 }
 
-/// Directories, each as it looked (`None`: not there).
-pub(super) type Stamps = Vec<(PathBuf, Option<Seen>)>;
+/// Directories, each as it looked (`None`: not there), and the digest of
+/// every entry the watched names resolve through.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Stamps {
+    dirs: Vec<(PathBuf, Option<Seen>)>,
+    ways: String,
+}
 
 /// The directories that hold what the identity of `program` watches (by
 /// absolute names), each as it looks now: the nearest that is there for a
@@ -369,19 +376,33 @@ pub(super) type Stamps = Vec<(PathBuf, Option<Seen>)>;
 /// again by the check after it (tried: an assembler that deletes itself).
 /// Relative places are not among them: they lead into the working
 /// directory, which the compile writes.
+///
+/// And the way to each watched name, entry by entry (`key::trail`: each
+/// directory and link by device, inode and birth, a link by its change time
+/// and target): a link on the way turned to another tree and back while the
+/// compile ran leaves every directory looking the same through it (tried),
+/// but is a new link. (A directory renamed away and the same one renamed
+/// back is decision 9's limit, as for the files a key reads.)
 pub(super) fn directories(cc_dir: &Path, program: &OsStr) -> Stamps {
-    let Ok((_, memo)) = memo_of(cc_dir, program) else { return Vec::new() };
+    let none = Stamps { dirs: Vec::new(), ways: String::new() };
+    let Ok((_, memo)) = memo_of(cc_dir, program) else { return none };
     let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok()) else {
-        return Vec::new();
+        return none;
     };
-    let places = remembered.files.iter().flat_map(|seen| [&seen.path, &seen.real]).chain(&remembered.absent);
-    let mut dirs: Vec<PathBuf> = places
-        .filter(|place| place.is_absolute())
-        .filter_map(|place| place.ancestors().skip(1).find(|dir| dir.exists()).map(Path::to_owned))
-        .collect();
+    let mut places: Vec<&PathBuf> = remembered.files.iter().flat_map(|seen| [&seen.path, &seen.real]).chain(&remembered.absent).collect();
+    places.retain(|place| place.is_absolute());
+    places.sort();
+    places.dedup();
+    let mut ways = Hasher::new("ways to what the identity watches");
+    let mut steps = std::collections::HashMap::new();
+    for place in &places {
+        super::key::trail(place, &mut ways, &mut steps);
+    }
+    let mut dirs: Vec<PathBuf> =
+        places.iter().filter_map(|place| place.ancestors().skip(1).find(|dir| dir.exists()).map(Path::to_owned)).collect();
     dirs.sort();
     dirs.dedup();
-    dirs.into_iter().map(|dir| (dir.clone(), Seen::of(&dir).ok())).collect()
+    Stamps { dirs: dirs.into_iter().map(|dir| (dir.clone(), Seen::of(&dir).ok())).collect(), ways: ways.hex() }
 }
 
 /// Run `program` with `args` and return its standard output, if it succeeds.
@@ -689,15 +710,22 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
             // `COMPILER_PATH`'s entries, each with the target's directories
             // first): a program put at a place before the one found would
             // run instead.
-            let dirs = ask(path, &["-print-search-dirs"])?;
-            let dirs: Vec<PathBuf> = dirs
-                .lines()
-                .find_map(|line| line.strip_prefix("programs: ="))
-                .with_context(|| format!("{} does not say where it looks for its programs", path.display()))?
-                .split(':')
-                .filter(|dir| !dir.is_empty())
-                .map(PathBuf::from)
-                .collect();
+            let said = ask(path, &["-print-search-dirs"])?;
+            let listed = |what: &str| -> Res<Vec<PathBuf>> {
+                Ok(said
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&format!("{what}: =")))
+                    .with_context(|| format!("{} does not say where it looks for its {what}", path.display()))?
+                    .split(':')
+                    .filter(|dir| !dir.is_empty())
+                    .map(PathBuf::from)
+                    .collect())
+            };
+            let dirs = listed("programs")?;
+            // Where it looks for a `specs` file (its library prefixes,
+            // `LIBRARY_PATH`'s entries among them): one that appears there
+            // has the compile read it (tried).
+            let libraries = listed("libraries")?;
             for helper in helpers {
                 let named = ask(path, &[&format!("-print-prog-name={helper}")])?;
                 answers.push((helper, named.clone()));
@@ -765,6 +793,8 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
             // compiler is.
             let file = ask(path, &["-print-file-name=specs"])?;
             let file = Path::new(file.trim());
+            let before = libraries.iter().position(|dir| dir.join("specs") == file).unwrap_or(libraries.len());
+            libraries[..before].iter().for_each(|dir| watched.passed(&dir.join("specs")));
             if file.is_absolute() {
                 watched.files.extend(Seen::of(file));
                 let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;

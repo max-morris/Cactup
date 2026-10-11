@@ -326,10 +326,19 @@ The `[environment]` section can define machine-wide environment setup:
 [environment]
 env-setup = """
 export PATH="/opt/bin:$PATH"
-export LD_LIBRARY_PATH="/opt/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/opt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 module load gcc
 """
 ```
+
+Write path lists so they never get an empty entry: `${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}`
+adds a colon and the old value only when there is one. An empty entry (a
+trailing `:` when the variable was unset, or `::`) means "the current
+directory" to the loader, the compiler and the shell. The build cache does
+not cache compiles under such an environment, since a file appearing in the
+build's own directory could change what the compiler runs. The same goes for
+`PATH`, `LIBRARY_PATH` and `CPATH`: for a list built in front of an old
+value, use `${LIBRARY_PATH:+$LIBRARY_PATH:}`.
 
 This is sourced before every build, submit, and run command.
 

@@ -1292,7 +1292,7 @@ fn a_compiler_given_flags_behind_its_command_line_is_not_keyed() {
     // Clang reads `clang.cfg` beside its driver, unasked. (A copy of the
     // driver that cannot run where it is put — one that finds its libraries
     // relative to itself — leaves this part untried.)
-    let bin = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let bin = fs::canonicalize(bin.path()).unwrap();
     let own = bin.join("clang").display().to_string();
     let copy_runs = have("clang")
@@ -1300,7 +1300,8 @@ fn a_compiler_given_flags_behind_its_command_line_is_not_keyed() {
         && Command::new(&own).arg("--version").output().is_ok_and(|out| out.status.success());
     if copy_runs {
         let build = Build::new("record");
-        assert!(compile(&build, &own, &[]).contains("\"key\""), "a copy of the driver is a compiler like the original");
+        let event = compile(&build, &own, &[]);
+        assert!(event.contains("\"key\""), "a copy of the driver is a compiler like the original: {event}");
         fs::write(bin.join("clang.cfg"), "-grecord-command-line\n").unwrap();
         // Every compile says for itself whether it reads one: no waiting
         // for the next attempt.
@@ -1582,12 +1583,12 @@ fn audit_mode_tells_a_wrong_hit() {
     assert!(strays.is_empty(), "{strays:?}");
 }
 
-/// A compile that converts character sets keeps the locale in its key
-/// whatever the compiler's locale trial said: GCC's `ASCII//TRANSLIT`
-/// follows the locale (`cafe` in a UTF-8 one, `caf?` in C), and the trial
-/// compiles without such flags.
+/// A compile that converts character sets is not cached: the conversion
+/// follows the locale, its data and the converters loaded (GCC's
+/// `ASCII//TRANSLIT` gives `cafe` in a UTF-8 locale, `caf?` in C), none of
+/// which the key follows. It compiles as it would without the cache.
 #[test]
-fn a_charset_conversion_keeps_the_locale_in_the_key() {
+fn a_charset_conversion_is_not_cached() {
     if !have("gcc") {
         eprintln!("skipped: no GCC on this host");
         return;
@@ -1598,31 +1599,22 @@ fn a_charset_conversion_keeps_the_locale_in_the_key() {
     let source = build.config.join("build/Thorn/translit.c");
     fs::write(&source, "const char *word = \"caf\u{e9}\";\n").unwrap();
     let object = build.config.join("build/Thorn/translit.c.o");
-    let compile = |locale: &str| {
-        let cwd = build.config.join("scratch");
-        let args = ["-O2", "-fexec-charset=ASCII//TRANSLIT", "-c", "-o", object.to_str().unwrap(), source.to_str().unwrap()];
-        let out = build.wrap("gcc", &args).current_dir(&cwd).env("PWD", &cwd).env("LC_ALL", locale).output().unwrap();
-        assert!(out.status.success(), "{}", text(&out.stderr));
-        (build.last_event(), fs::read(&object).unwrap())
-    };
-    // A host without the C.UTF-8 locale compiles both alike: nothing to show.
-    let plain = |locale: &str| {
-        let out = Command::new("gcc")
-            .args(["-O2", "-fexec-charset=ASCII//TRANSLIT", "-c", "-o", "-", source.to_str().unwrap()])
-            .env("LC_ALL", locale)
-            .output()
-            .unwrap();
-        out.stdout
-    };
-    if plain("C.UTF-8") == plain("C") {
-        eprintln!("skipped: the two locales compile alike on this host");
-        return;
-    }
-    let (first, utf8) = compile("C.UTF-8");
-    assert_eq!(first["published"].as_bool(), Some(true), "{first}");
-    let (second, c) = compile("C");
-    assert_eq!(second["outcome"].as_str(), Some("miss"), "the C session was served the UTF-8 session's object: {second}");
-    assert_ne!(utf8, c, "the two locales were meant to compile differently here");
+    let cwd = build.config.join("scratch");
+    let args = ["-O2", "-fexec-charset=ASCII//TRANSLIT", "-c", "-o", object.to_str().unwrap(), source.to_str().unwrap()];
+    let out = build.wrap("gcc", &args).current_dir(&cwd).env("PWD", &cwd).env("LC_ALL", "C.UTF-8").output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let event = build.last_event();
+    assert!(event["not_cached"].as_str().is_some_and(|why| why.contains("converts character sets")), "{event}");
+    assert!(event.get("key").is_none(), "{event}");
+    let plain = shared.join("plain.o");
+    let status = Command::new("gcc")
+        .args(["-O2", "-fexec-charset=ASCII//TRANSLIT", "-c", "-o", plain.to_str().unwrap(), source.to_str().unwrap()])
+        .current_dir(&cwd)
+        .env("LC_ALL", "C.UTF-8")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(fs::read(&object).unwrap(), fs::read(&plain).unwrap(), "the compile was not the one asked for");
 }
 
 /// A compile whose output comes through the wrapper (a serving build's

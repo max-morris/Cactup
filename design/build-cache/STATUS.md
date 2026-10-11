@@ -55,6 +55,7 @@ the last milestone, for when that host is not at hand.
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
 | M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), in review |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
+| M4 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; the build's summary line counts compiles kept out and points at it; a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others | **planned** (Max, 2026-10-11), after the current review closes; independent of M3b |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -1855,6 +1856,37 @@ musl `as`); `$LIB`, `$PLATFORM`, `$ORIGIN` in `LD_PRELOAD` are expanded as
 the program's own loader says (`--list-diagnostics`) instead of refused
 (Max: the refusal was too broad); a compile that converts character sets
 while `GCONV_PATH` is set is refused (B ran it: a wrong object served).
+
+### After M3a, review 6 (on `b011058`): BLOCKED by both
+
+A safety classifier stopped both reviewers partway (and, once, the
+author): after that they built no new attack programs and judged by
+reading; B re-ran review 5's 31 reproductions (all closed at `b011058`, all
+open at `6ba57f8`), A ran none. Found:
+- Both, run end to end with a wrong object served: a link on the way to a
+  watched place (a `PATH` or `LD_LIBRARY_PATH` entry) turned to another
+  tree while the compile ran and turned back before the check left every
+  stamped directory looking the same through it. Fixed: every entry on
+  the way to each watched place is stamped too (`trail`).
+- B, run: `LOCPATH` (and the system's converter modules) not keyed for a
+  compile that converts character sets. Fixed: every such compile is
+  refused (Cactus asks for none).
+- B, inferred: a hit is served on the key's preprocessor runs with no
+  check after them. Fixed: the identity and the stamps are checked again
+  at the end of the key.
+- A, inferred: a `specs` file the compile's driver finds only while it
+  runs. Fixed: the identity watches the places a GCC looks for one (its
+  library prefixes), and `LIBRARY_PATH` has the identity worked out again.
+Also: a `PATH` candidate is only started, not waited for (A); the docs
+taught the faulty `LD_LIBRARY_PATH` idiom (B), now fixed with a note on
+why; the `CPATH` idioms of generic, mike, et-juphub and sunrise (A); a
+test whose copied `clang` sat in `/tmp`, whose missing `../lib` put `/tmp`
+under watch, moved under `target/` (Max made that edit); the character-set
+test rewritten (it had skipped itself: `-o -` writes a file named `-`).
+Cost noted: a missing place has its nearest existing ancestor watched, so
+a missing `~/bin` on `PATH` puts the home directory under watch (lost
+stores only). Open for Max: whether reviews go on hunting with new
+attack programs, which the classifier now stops.
 
 ## Decisions
 

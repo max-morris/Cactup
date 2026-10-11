@@ -419,7 +419,7 @@ The `@ENV_SETUP@` variable expands to shell commands that set up the build envir
 ```bash
 export PATH="/opt/bin:$PATH"
 module load gcc
-export LD_LIBRARY_PATH="/opt/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/opt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 This comes from the machine's `[environment]` section in meta.toml, with optional overrides from `[universes.*]`.

@@ -311,7 +311,23 @@ pub struct Keyed {
 /// under a temporary name ([`Keyed::keep_depend`] gives it the compile's):
 /// what a hit needs, since no compile runs; and a Fortran compile's copy is
 /// written, which the compile for the store reads (§18.10).
+///
+/// The compiler's identity must hold from the start of the key to its end:
+/// the key's own preprocessor runs use the compiler's programs, and a hit
+/// is served on what they read (an assembler or compiler proper put where
+/// they are searched for and gone again by the end is seen there).
 pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -> Result<Keyed, String> {
+    let (keyed, identified) = key_made(conf, cc_dir, argv, serving)?;
+    let holds = identity::identify(cc_dir, &argv[0]).ok().as_ref() == Some(&keyed.compiler);
+    if !holds || identity::directories(cc_dir, &argv[0]) != identified {
+        return Err("the compiler's programs or libraries changed while the key was made".to_owned());
+    }
+    Ok(keyed)
+}
+
+/// [`key`], and how what the compiler's identity watches looked right after
+/// it was identified.
+fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -> Result<(Keyed, identity::Stamps), String> {
     let whole = |e: anyhow::Error| format!("{e:#}");
     // Before anything else: a variable that rules the compile out says so
     // whatever the compiler.
@@ -324,6 +340,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
         return Err(why);
     }
     let compiler = identity::identify(cc_dir, &argv[0]).map_err(whole)?;
+    let identified = identity::directories(cc_dir, &argv[0]);
     let compile = compile::parse(&argv[1..])?;
     if let Some(flag) = compile.keyed.iter().find(|argument| compiler.multilib.iter().any(|flag| argument.as_bytes() == flag.as_bytes())) {
         return Err(format!(
@@ -341,11 +358,12 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
     // wherever the compile converts character sets: the trial does not, and
     // a conversion such as `ASCII//TRANSLIT` follows the locale (§18.8).
     let environment = environment::digest(!compiler.locale_neutral || compile.charset)?;
-    // A compile that converts character sets loads the converters `GCONV_PATH`
-    // names, which nothing here follows (tried: two such directories, one
-    // charset name, two objects).
-    if compile.charset && std::env::var_os("GCONV_PATH").is_some_and(|value| !value.is_empty()) {
-        return Err("it converts character sets with converters GCONV_PATH names, which the cache does not follow".to_owned());
+    // A compile that converts character sets loads converters and locale
+    // data nothing here follows (`GCONV_PATH`, `LOCPATH`, the system's
+    // converter modules; tried: one charset name, two converters or two
+    // locales, two objects). Cactus asks for none.
+    if compile.charset {
+        return Err("it converts character sets, with converters and locale data the cache does not follow".to_owned());
     }
     if compiler.family == Family::Clang && compile.forced_include {
         // Clang takes `<file>.pch` or `<file>.gch` in place of a file given
@@ -413,7 +431,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
             text: read.text,
             files: read.files,
         };
-        return Ok(Keyed {
+        return Ok((Keyed {
             compile,
             compiler,
             parts,
@@ -426,7 +444,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
             seen: read.seen,
             depend: None,
             fortran: Some(read.fortran),
-        });
+        }, identified));
     }
     let depend = match serving {
         true => depend_flags(&compile).map_err(whole)?,
@@ -444,7 +462,8 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
         files: read.files,
     };
     let cc_dir = cc_dir.to_owned();
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, cc_dir, before: None, map, seen: read.seen, depend, fortran: None })
+    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, cc_dir, before: None, map, seen: read.seen, depend, fortran: None };
+    Ok((keyed, identified))
 }
 
 /// The dependency flags of `compile` for the key's preprocessor run, if it

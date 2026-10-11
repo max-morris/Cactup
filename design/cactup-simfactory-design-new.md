@@ -5134,7 +5134,9 @@ fixed parts, so that the key does not change by accident:
   (or what they held) for a compile to reuse it. For GCC's programs, the
   places it says it looks (`-print-search-dirs`; none for an assembler it
   was built to run, `--with-as`), then `PATH`'s for a program it leaves to
-  `PATH` (the assembler); along `PATH`, as `execvp` does, a file the system
+  `PATH` (the assembler), and the places it looks for a `specs` file (its
+  library prefixes, `LIBRARY_PATH`'s entries among them: one that appears
+  there is read; tried); along `PATH`, as `execvp` does, a file the system
   refuses to run (no permission, `noexec`; tried by starting it) is passed
   over, and one that fails to start otherwise rules the compiler out. For
   libraries, the places the loader says it tried (glibc's `LD_DEBUG=libs`,
@@ -5154,14 +5156,22 @@ fixed parts, so that the key does not change by accident:
   Once the places are looked at, the driver is asked again where its
   programs are and the libraries are listed again; a different answer
   rules the compiler out (something appeared between the search and the
-  look). The identity is worked out again right before the compile and
-  after it, before what it made is stored, and must be the same each time;
-  and the directories that hold what it watches must look the same after
-  the compile as right before it (compiles do not write there, so one that
-  changed means something came or went while the compile ran, even if it
-  is gone again; tried, an assembler that deletes itself, also one put
-  there during the key's preprocessor run). Each compile looks at all of
-  this, a hit once and a miss three times: a few hundred lookups with a
+  look). The identity is worked out again at the end of the key (whose
+  preprocessor runs use the compiler's programs too, and on whose reading
+  a hit is served), right before the compile and after it, before what it
+  made is stored, and must be the same each time. Across the key, and
+  across the compile, the directories that hold what it watches must look
+  the same (compiles do not write there, so one that changed means
+  something came or went meanwhile, even if it is gone again; tried, an
+  assembler that deletes itself), and so must every entry on the way to
+  each watched place, links by their change time and target (`trail`, as
+  for the files a key reads: a link turned to another tree and back leaves
+  every directory looking the same through it, tried; a directory renamed
+  away and the same one renamed back is decision 9's limit here too). A
+  missing place has its nearest existing ancestor watched, so a missing
+  `PATH` entry such as `~/bin` puts the home directory under watch: what
+  changes there during a compile keeps it out of the store. Each compile
+  looks at all of this, a hit twice and a miss four times: a few hundred lookups with a
   long `PATH`, about a millisecond on a local disk, and one round trip each
   on a network filesystem that caches no negative lookups
   (`lookupcache=positive`). What leads the driver elsewhere from one
@@ -5173,8 +5183,10 @@ fixed parts, so that the key does not change by accident:
   preloaded by a relative path, `LD_AUDIT`, a flag that selects another of
   a GCC's sets of programs and libraries (`-print-multi-lib`: `-m32`,
   `-mx32`; the driver looks for its programs elsewhere then, tried), a
-  compile that converts character sets while `GCONV_PATH` names converters
-  (tried: one name, two converters, two objects); and for Fortran, whose
+  compile that converts character sets (its converters and locale data,
+  `GCONV_PATH`, `LOCPATH` and the system's modules, are not followed;
+  tried, two converters and two locales, each two objects; Cactus asks for
+  none); and for Fortran, whose
   dependency run runs in a directory of its own (§18.10), also such an
   entry of `LIBRARY_PATH` (where the driver finds a `specs` file) and a
   compiler named by a relative path. The loader's tunables
@@ -5402,8 +5414,9 @@ nobody has to find out:
   that are named nowhere above — a plugin directory, lists in Clang's
   resource directory, whatever a later version adds — are not hashed. The
   remembered identity watches where programs and libraries are searched
-  for (above); a Clang configuration file or a GCC `specs` file added
-  while a build attempt runs is reported by each compile, and seen there.
+  for (above), the places a GCC looks for a `specs` file among them; a
+  Clang configuration file added while a build attempt runs is reported
+  by each compile's preprocessor run, and seen there.
 - *The path map.* The trial shows the map holds for the trial's compile. A
   flag on the list that makes the compiler put an unmapped path *it worked
   out itself* into the object, where the trial does not look, would give
