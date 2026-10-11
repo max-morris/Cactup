@@ -289,6 +289,9 @@ pub struct Keyed {
     /// Where the compiler's identity is remembered, for the check after the
     /// compile.
     cc_dir: PathBuf,
+    /// Right before the compile: did the identity still hold, and how did
+    /// the directories it watches look ([`identity::directories`])?
+    before: Option<(bool, Vec<(PathBuf, Option<identity::Seen>)>)>,
     map: Option<PathMap>,
     /// What the files looked like when they were read for the key.
     seen: String,
@@ -338,6 +341,12 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
     // wherever the compile converts character sets: the trial does not, and
     // a conversion such as `ASCII//TRANSLIT` follows the locale (§18.8).
     let environment = environment::digest(!compiler.locale_neutral || compile.charset)?;
+    // A compile that converts character sets loads the converters `GCONV_PATH`
+    // names, which nothing here follows (tried: two such directories, one
+    // charset name, two objects).
+    if compile.charset && std::env::var_os("GCONV_PATH").is_some_and(|value| !value.is_empty()) {
+        return Err("it converts character sets with converters GCONV_PATH names, which the cache does not follow".to_owned());
+    }
     if compiler.family == Family::Clang && compile.forced_include {
         // Clang takes `<file>.pch` or `<file>.gch` in place of a file given
         // with `-include`, and its `-E` does not say so.
@@ -412,6 +421,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
             files: read.count,
             name,
             cc_dir: cc_dir.to_owned(),
+            before: None,
             map,
             seen: read.seen,
             depend: None,
@@ -434,7 +444,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
         files: read.files,
     };
     let cc_dir = cc_dir.to_owned();
-    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, cc_dir, map, seen: read.seen, depend, fortran: None })
+    Ok(Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, cc_dir, before: None, map, seen: read.seen, depend, fortran: None })
 }
 
 /// The dependency flags of `compile` for the key's preprocessor run, if it
@@ -503,6 +513,11 @@ impl Keyed {
         if identity::identify(&self.cc_dir, &self.name).ok().as_ref() != Some(&self.compiler) {
             return false;
         }
+        // As right before the compile, and nothing came or went meanwhile.
+        match &self.before {
+            Some((true, dirs)) if *dirs == identity::directories(&self.cc_dir, &self.name) => {}
+            _ => return false,
+        }
         if let Some(fortran) = &mut self.fortran {
             return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
         }
@@ -515,6 +530,11 @@ impl Keyed {
     /// check can look at them instead of running the dependency run again
     /// (§18.10). C and C++ are checked by a second preprocessor run.
     pub fn before_compile(&mut self) {
+        // The compiler's identity, as for the key: what appeared since then
+        // where its programs are searched for would run (tried: put there
+        // during the key's preprocessor run, gone by the check after).
+        let holds = identity::identify(&self.cc_dir, &self.name).ok().as_ref() == Some(&self.compiler);
+        self.before = Some((holds, identity::directories(&self.cc_dir, &self.name)));
         if let Some(fortran) = &mut self.fortran {
             fortran.before_compile(&self.compiler, &self.name);
         }
@@ -1084,11 +1104,12 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
 /// prefixes named relatively (an empty entry is the working directory) lead
 /// to programs the compiler's identity does not watch, from one directory
 /// to the next; a library loaded or audited by a relative path is one no
-/// search shows. The places the identity passed over along `PATH` and the
-/// loader's search path are watched from each compile's own directory, but
-/// a Fortran compile's dependency run runs in a directory of its own: for
-/// it, also where its driver finds itself (by the name it is run by, or
-/// along `PATH` for a bare one) and its `specs` file (`LIBRARY_PATH`). A hit
+/// search shows. A relative entry of `PATH` or the loader's search path
+/// leads into the compile's working directory, which the compile writes:
+/// what appears there while it runs and is gone after cannot be told from
+/// the compile's own writing. A Fortran compile's dependency run runs in a
+/// directory of its own: for it, also where its driver finds itself (by
+/// the name it is run by) and its `specs` file (`LIBRARY_PATH`). A hit
 /// compares nothing after the key: so these keep the compile out of the
 /// cache.
 fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
@@ -1099,25 +1120,23 @@ fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Optio
     if fortran && !bare && !name.as_bytes().starts_with(b"/") {
         return Some("the compiler is named by a relative path".to_owned());
     }
-    let mut variables = vec!["COMPILER_PATH", "GCC_EXEC_PREFIX"];
+    // `PATH` and `LD_LIBRARY_PATH` too, for every compile: a relative entry
+    // leads into the compile's working directory, which the compile writes,
+    // so what appears there during it and is gone after cannot be seen
+    // (decision 17).
+    let mut variables = vec!["COMPILER_PATH", "GCC_EXEC_PREFIX", "PATH", "LD_LIBRARY_PATH"];
     if fortran {
         variables.push("LIBRARY_PATH");
-        if bare {
-            variables.push("PATH");
-        }
     }
     if let Some(variable) = variables.into_iter().find(|variable| relative_entry(variable)) {
         return Some(format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"));
     }
-    // A preloaded library named without a `/` is searched for, as any other;
-    // one named through a token the loader expands (`$LIB`) is at a place
-    // nothing here would watch.
+    // A preloaded library named without a `/` is searched for, as any other
+    // (one named through a token the loader expands is watched where the
+    // loader would look: `identity`).
     let relative_file = |entry: &[u8]| entry.contains(&b'/') && !entry.starts_with(b"/");
     if env("LD_PRELOAD").is_some_and(|value| value.as_bytes().split(|b| *b == b':' || *b == b' ').any(relative_file)) {
         return Some("LD_PRELOAD names a library by a relative path".to_owned());
-    }
-    if env("LD_PRELOAD").is_some_and(|value| value.as_bytes().contains(&b'$')) {
-        return Some("LD_PRELOAD names a library through a name the loader expands ($LIB, $PLATFORM, $ORIGIN)".to_owned());
     }
     env("LD_AUDIT").filter(|value| !value.is_empty()).map(|_| "LD_AUDIT loads libraries the cache does not follow".to_owned())
 }
@@ -1447,8 +1466,11 @@ mod tests {
             argv
         }
 
+        /// Keyed, and got ready for the compile, as the wrapper does.
         fn key(&self, flags: &[&str]) -> Keyed {
-            key(&self.conf, &self.cc, &self.argv("gcc", flags), false).unwrap()
+            let mut keyed = key(&self.conf, &self.cc, &self.argv("gcc", flags), false).unwrap();
+            keyed.before_compile();
+            keyed
         }
 
         fn why_not(&self, flags: &[&str]) -> String {
@@ -1667,13 +1689,13 @@ mod tests {
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "./libx.so")])).is_some());
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_AUDIT", "/opt/libaudit.so")])).is_some());
             assert_eq!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "libx.so /opt/liby.so")])), None);
-            assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "/opt/$LIB/libx.so")])).is_some());
         }
-        // `PATH` is followed from each compile's directory, but not from the
-        // dependency run's, where a driver named without a `/` finds itself.
-        assert!(driver_led_elsewhere(gfortran, true, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
-        assert_eq!(driver_led_elsewhere(OsStr::new("/usr/bin/gfortran"), true, env(&[("PATH", "/usr/bin:")])), None);
-        assert_eq!(driver_led_elsewhere(gcc, false, env(&[("PATH", "/usr/bin:.")])), None);
+        // `PATH` and the loader's search path lead into the working
+        // directory, which the compile writes, for every compile.
+        for compiler in [(gfortran, true), (gcc, false), (OsStr::new("/usr/bin/gcc"), false)] {
+            assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
+            assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_LIBRARY_PATH", "/opt/lib:")])).is_some_and(|why| why.starts_with("LD_LIBRARY_PATH")));
+        }
         assert!(driver_led_elsewhere(OsStr::new("../bin/gfortran"), true, env(&[])).is_some());
         assert_eq!(driver_led_elsewhere(OsStr::new("../bin/gcc"), false, env(&[])), None);
     }

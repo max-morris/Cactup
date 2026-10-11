@@ -93,6 +93,10 @@ pub struct Compiler {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct Seen {
     path: PathBuf,
+    /// Where the name leads: a link on the way turned to a tree of the same
+    /// files (hard links) leaves everything else as it was, but a program
+    /// takes its `$ORIGIN` (and the driver its prefix) from there (tried).
+    real: PathBuf,
     size: u64,
     ctime: i64,
     ctime_nsec: i64,
@@ -105,6 +109,7 @@ impl Seen {
         let meta = fs::metadata(path).with_context(|| format!("Failed to look at {}", path.display()))?;
         Ok(Self {
             path: path.to_owned(),
+            real: fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?,
             size: meta.len(),
             // Change time, not modification time: `touch -r` and `cp -p`
             // can set the latter back.
@@ -202,6 +207,60 @@ fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
     Ok(None)
 }
 
+/// `entry` with the tokens glibc's loader expands in it (`$LIB`,
+/// `$PLATFORM`, `$ORIGIN`, also in braces) expanded as the loader of
+/// `program` expands them: it says what it takes them to be itself
+/// (`--list-diagnostics`, glibc 2.33 and later). A loader that does not
+/// say rules the compiler out.
+fn expand_tokens(program: &Path, entry: &str) -> Res<String> {
+    let loader = interpreter(program).with_context(|| format!("{} names no loader to ask what {entry} means", program.display()))?;
+    let said = ask(&loader, &["--list-diagnostics"])
+        .with_context(|| format!("the loader of {} does not say what {entry} means (glibc before 2.33?)", program.display()))?;
+    let value = |key: &str| {
+        said.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix("=\"")?.strip_suffix('"').map(str::to_owned))
+    };
+    let lib = value("dl_dst_lib").with_context(|| format!("the loader of {} does not say what $LIB means", program.display()))?;
+    let platform = value("dl_platform").with_context(|| format!("the loader of {} does not say what $PLATFORM means", program.display()))?;
+    let origin = fs::canonicalize(program)?.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned();
+    let mut expanded = entry.to_owned();
+    for (token, value) in [("LIB", &lib), ("PLATFORM", &platform), ("ORIGIN", &origin)] {
+        expanded = expanded.replace(&format!("${{{token}}}"), value).replace(&format!("${token}"), value);
+    }
+    if expanded.contains('$') {
+        bail!("{entry} names a token the loader of {} expands, which cactup does not know", program.display());
+    }
+    Ok(expanded)
+}
+
+/// The dynamic loader an ELF `program` names (`PT_INTERP`), if any.
+fn interpreter(program: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(program).ok()?;
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u64_at = |at: usize| bytes.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
+    let (phoff, phentsize, phnum) = (u64_at(0x20)?, u16_at(0x36)?, u16_at(0x38)?);
+    (0..phnum).find_map(|i| {
+        let header = phoff + i * phentsize;
+        (bytes.get(header..header + 4)? == 3u32.to_le_bytes()).then_some(())?;
+        let (offset, size) = (u64_at(header + 8)?, u64_at(header + 32)?);
+        let name = bytes.get(offset..offset + size)?;
+        Some(PathBuf::from(OsStr::from_bytes(name.split(|b| *b == 0).next()?)))
+    })
+}
+
+/// Is `program` an ELF file that names a dynamic loader (`PT_INTERP`)? Read
+/// from its program headers (64-bit, little-endian: the hosts cactup runs
+/// on); anything else is taken to name one.
+fn interpreted(program: &Path) -> bool {
+    let Ok(bytes) = fs::read(program) else { return true };
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u64_at = |at: usize| bytes.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
+    if !bytes.starts_with(b"\x7fELF") || bytes.get(4) != Some(&2) || bytes.get(5) != Some(&1) {
+        return true;
+    }
+    let (Some(phoff), Some(phentsize), Some(phnum)) = (u64_at(0x20), u16_at(0x36), u16_at(0x38)) else { return true };
+    (0..phnum).any(|i| bytes.get(phoff + i * phentsize..phoff + i * phentsize + 4).is_none_or(|kind| kind == 3u32.to_le_bytes()))
+}
+
 /// Does `program` start (it is asked for its version and left to it)? Not
 /// where the system refuses to run it.
 fn runs(program: &Path) -> bool {
@@ -241,14 +300,10 @@ impl Watched<'_> {
 /// this build attempt found if nothing has changed since. `Err` says why
 /// this is not a compiler the cache works with.
 pub fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
-    let path = find_program(program)?;
+    let (path, memo) = memo_of(cc_dir, program)?;
     // The name it is run by is part of what it is.
     let name = Path::new(program).file_name().unwrap_or(program);
     let memo_dir = cc_dir.join("compilers");
-    let mut memo_name = Hasher::new("compiler-memo");
-    memo_name.feed(path.as_os_str().as_bytes());
-    memo_name.feed(name.as_bytes());
-    let memo = memo_dir.join(format!("{}.toml", memo_name.hex()));
     let env = helper_env();
     if let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok())
         && remembered.env == env
@@ -290,6 +345,40 @@ pub fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
         let _ = temp.persist(&memo);
     }
     examined
+}
+
+/// The file `program` names from here, and where what this build attempt
+/// found out about it is remembered.
+fn memo_of(cc_dir: &Path, program: &OsStr) -> Res<(PathBuf, PathBuf)> {
+    let path = find_program(program)?;
+    let name = Path::new(program).file_name().unwrap_or(program);
+    let mut memo_name = Hasher::new("compiler-memo");
+    memo_name.feed(path.as_os_str().as_bytes());
+    memo_name.feed(name.as_bytes());
+    Ok((path, cc_dir.join("compilers").join(format!("{}.toml", memo_name.hex()))))
+}
+
+/// The directories that hold what the identity of `program` watches (by
+/// absolute names), each as it looks now: the nearest that is there for a
+/// place whose directory is not. Compiles do not write in them, so one
+/// that changes while a compile runs means something came or went where the
+/// compile's programs and libraries are searched for, even if it is gone
+/// again by the check after it (tried: an assembler that deletes itself).
+/// Relative places are not among them: they lead into the working
+/// directory, which the compile writes.
+pub(super) fn directories(cc_dir: &Path, program: &OsStr) -> Vec<(PathBuf, Option<Seen>)> {
+    let Ok((_, memo)) = memo_of(cc_dir, program) else { return Vec::new() };
+    let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok()) else {
+        return Vec::new();
+    };
+    let places = remembered.files.iter().flat_map(|seen| [&seen.path, &seen.real]).chain(&remembered.absent);
+    let mut dirs: Vec<PathBuf> = places
+        .filter(|place| place.is_absolute())
+        .filter_map(|place| place.ancestors().skip(1).find(|dir| dir.exists()).map(Path::to_owned))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs.into_iter().map(|dir| (dir.clone(), Seen::of(&dir).ok())).collect()
 }
 
 /// Run `program` with `args` and return its standard output, if it succeeds.
@@ -391,13 +480,24 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
         }
     }
     settle(&mut tries, watched)?;
+    // A loader that is not glibc's says nothing of its search (musl's
+    // ignores both variables): a dynamic program it runs is ruled out.
+    if interpreted(program) && !said.contains("find library=") {
+        bail!("{} is run by a dynamic loader cactup cannot follow (not glibc's)", program.display());
+    }
     // The system's own preload list, read by every loader that starts.
     watched.passed(Path::new("/etc/ld.so.preload"));
     // A library preloaded by its path that is not there: the loader says so
-    // and goes on, and loads it once it is there.
+    // and goes on, and loads it once it is there. Named through a token the
+    // loader expands (`$LIB`), it is watched where the loader would look.
     if let Some(preload) = std::env::var_os("LD_PRELOAD") {
         for entry in preload.as_bytes().split(|b| *b == b':' || *b == b' ').filter(|entry| entry.starts_with(b"/")) {
-            watched.passed(Path::new(OsStr::from_bytes(entry)));
+            let entry = String::from_utf8_lossy(entry);
+            let entry = match entry.contains('$') {
+                true => expand_tokens(program, &entry)?,
+                false => entry.into_owned(),
+            };
+            watched.passed(Path::new(&entry));
         }
     }
     Ok(libraries)
@@ -624,9 +724,18 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
                         let file = fs::canonicalize(&file).unwrap_or(file);
                         // A script runs some other program, which nothing
                         // here would follow (a wrapper around `as`).
-                        let mut magic = [0u8; 4];
-                        if fs::File::open(&file).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic)).is_err() || magic != *b"\x7fELF" {
-                            bail!("{} runs {} for {helper}, which is no program cactup can identify (a script, maybe)", path.display(), file.display());
+                        // Nor a program that runs another (an ELF wrapper):
+                        // its bytes must say it is the one the driver means,
+                        // as the driver's must.
+                        let marker: &[u8] = match *helper {
+                            "as" => b"GNU assembler",
+                            "f951" => b"GNU Fortran",
+                            "cc1plus" => b"GNU C++",
+                            _ => b"GNU C",
+                        };
+                        let bytes = fs::read(&file).with_context(|| format!("Failed to read {}", file.display()))?;
+                        if !bytes.starts_with(b"\x7fELF") || !bytes.windows(marker.len()).any(|window| window == marker) {
+                            bail!("{} runs {} for {helper}, which is no program cactup can identify (a script or a wrapper, maybe)", path.display(), file.display());
                         }
                         hasher.feed(file_digest(&file)?.as_bytes());
                         watched.files.push(Seen::of(&file)?);
@@ -982,6 +1091,29 @@ mod tests {
         }
     }
 
+    /// A library preloaded through a token the loader expands is watched
+    /// where the loader looks: the loader says what the tokens mean.
+    #[test]
+    fn loader_tokens_are_expanded_as_the_loader_expands_them() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let cc1 = PathBuf::from(ask(&gcc, &["-print-prog-name=cc1"]).unwrap().trim());
+        let loader = interpreter(&cc1).unwrap();
+        let Ok(said) = ask(&loader, &["--list-diagnostics"]) else {
+            eprintln!("skipped: this loader does not say what its tokens mean");
+            return;
+        };
+        let lib = said.lines().find_map(|line| line.strip_prefix("dl_dst_lib=\"")?.strip_suffix('"')).unwrap().to_owned();
+        assert_eq!(expand_tokens(&cc1, "/opt/x/$LIB/libx.so").unwrap(), format!("/opt/x/{lib}/libx.so"));
+        assert_eq!(expand_tokens(&cc1, "/opt/${LIB}/y.so").unwrap(), format!("/opt/{lib}/y.so"));
+        let origin = fs::canonicalize(&cc1).unwrap().parent().unwrap().to_string_lossy().into_owned();
+        assert_eq!(expand_tokens(&cc1, "$ORIGIN/z.so").unwrap(), format!("{origin}/z.so"));
+        assert!(!expand_tokens(&cc1, "/opt/$PLATFORM/w.so").unwrap().contains('$'));
+        assert!(expand_tokens(&cc1, "/opt/$UNKNOWN/w.so").is_err());
+    }
+
     /// Run only by `what_appears_before_a_program_or_library_found_is_seen`.
     #[test]
     #[ignore]
@@ -989,9 +1121,12 @@ mod tests {
         let memo = tempfile::tempdir().unwrap();
         let first = identify(memo.path(), OsStr::new("gcc")).unwrap();
         assert_eq!(identify(memo.path(), OsStr::new("gcc")).unwrap(), first);
-        // An assembler first on `PATH` (another program: what it is does not
-        // matter here, only that it is no script).
-        let other = fs::canonicalize(find_program(OsStr::new("true")).unwrap()).unwrap();
+        // Another assembler first on `PATH` (the same one with a byte more).
+        let mut other_bytes = fs::read(fs::canonicalize(find_program(OsStr::new("as")).unwrap()).unwrap()).unwrap();
+        other_bytes.push(0);
+        let other = std::env::current_dir().unwrap().join("other-as");
+        fs::write(&other, other_bytes).unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
         fs::copy(&other, "bin/as").unwrap();
         if identify(memo.path(), OsStr::new("gcc")).is_ok_and(|now| now.id != first.id) {
             println!("assembler seen");
@@ -1010,7 +1145,7 @@ mod tests {
         fs::remove_file("bin/as").unwrap();
         // One that is a script: what it runs is followed by nothing here.
         script(Path::new("bin"), "as", "exec /usr/bin/as \"$@\"");
-        if identify(memo.path(), OsStr::new("gcc")).is_err_and(|e| format!("{e:#}").contains("a script, maybe")) {
+        if identify(memo.path(), OsStr::new("gcc")).is_err_and(|e| format!("{e:#}").contains("a script or a wrapper, maybe")) {
             println!("script seen");
         }
         fs::remove_file("bin/as").unwrap();

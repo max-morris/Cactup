@@ -4911,60 +4911,65 @@ fixed parts, so that the key does not change by accident:
   what the driver says of itself (`--version` without the installation
   directory, and for GCC its built-in specs and target). Not its path and
   not its modification time. The identity is worked out once for a build
-  attempt and remembered with what it was computed from: the files (by
-  their physical paths and by the names they were found by, which a link
-  turned elsewhere leads elsewhere from), and the places searched and
-  passed over before each was found, which must go on holding nothing (or
-  what they held) for the next compile to reuse it; and it is worked out
-  again after the compile, before what it made is stored, and must be the
-  same (tried: an assembler that appeared first on `PATH` mid-build, also
-  while a compile ran, assembled objects stored under the real one's
-  identity). For GCC's programs, the places it says it looks
-  (`-print-search-dirs`; none for an assembler it was built to run,
-  `--with-as`), then `PATH`'s for a program it leaves to `PATH` (the
-  assembler); for libraries, the places the loader says it tried (glibc's
-  `LD_DEBUG=libs`, said where cactup reads it whatever `LD_DEBUG_OUTPUT`
-  says), each entry of its search paths that is not there or is no
-  directory (it is not tried again for the next library), a library
-  preloaded by its path that is not there, and its cache file. A relative
-  place is looked at from each compile's own working directory; a library,
-  or a program the driver runs, found by a relative name (or a library
-  its program names with a `/` but not from the root) rules the compiler
-  out. Along `PATH`, as `execvp` does, a file the system refuses to run
-  (no permission, a filesystem mounted `noexec`; tried by starting it) is
-  passed over; one that fails to start otherwise rules the compiler out.
-  The driver's physical path is remembered too: it finds its programs from
-  there, and a link on the way turned to another tree of the same files
-  (hard links) leads it to that tree's (tried). A library preloaded through
-  a name the loader expands (`$LIB`) keeps every compile out. A program the driver runs must be one, as the driver must:
-  a script runs something nothing here follows (tried, a wrapper around
-  `as`). Once the places are looked at, the driver is asked again where its
-  programs are and the libraries are listed again, and a different answer
-  rules the compiler out (something appeared at a place between the search
-  and the look). A flag that selects another of a GCC's sets of programs
-  and libraries (`-print-multi-lib`: `-m32`, `-mx32`) keeps the compile out
-  of the cache: the driver looks for its programs elsewhere then (tried).
-  Each compile looks at all these places, a hit too: a few hundred lookups
-  with a long `PATH`, about a millisecond on a local disk, and one round
-  trip each on a network filesystem that caches no negative lookups
-  (`lookupcache=positive`). The system's preload list
-  (`/etc/ld.so.preload`) is watched, and the loader's tunables
+  attempt and remembered with what it was computed from: the files (by the
+  names they were found by and by where those lead now, physical paths:
+  a link on the way turned to another tree of the same files, hard links,
+  leaves every file as it was but has a program take its `$ORIGIN`, and
+  the driver its prefix, from that tree; tried), and the places searched
+  and passed over before each was found, which must go on holding nothing
+  (or what they held) for a compile to reuse it. For GCC's programs, the
+  places it says it looks (`-print-search-dirs`; none for an assembler it
+  was built to run, `--with-as`), then `PATH`'s for a program it leaves to
+  `PATH` (the assembler); along `PATH`, as `execvp` does, a file the system
+  refuses to run (no permission, `noexec`; tried by starting it) is passed
+  over, and one that fails to start otherwise rules the compiler out. For
+  libraries, the places the loader says it tried (glibc's `LD_DEBUG=libs`,
+  read whatever `LD_DEBUG_OUTPUT` says), each entry of its search paths
+  that is not there or is no directory (it is not tried again for the next
+  library), its cache file, the system's preload list
+  (`/etc/ld.so.preload`), and a library preloaded by its path that is not
+  there (through a token the loader expands, `$LIB`, `$PLATFORM`,
+  `$ORIGIN`, where the program's own loader says it leads:
+  `--list-diagnostics`; a loader that does not say rules the compiler
+  out). A program whose loader is not glibc's (which says nothing of its
+  search) rules the compiler out, and so does a library found by a
+  relative name or named by its program with a `/` but not from the root.
+  A program the driver runs must say what it is in its own bytes, as the
+  driver must (GNU's assembler, C, C++ or Fortran compiler proper): a
+  script or a wrapper runs something nothing here follows (tried, both).
+  Once the places are looked at, the driver is asked again where its
+  programs are and the libraries are listed again; a different answer
+  rules the compiler out (something appeared between the search and the
+  look). The identity is worked out again right before the compile and
+  after it, before what it made is stored, and must be the same each time;
+  and the directories that hold what it watches must look the same after
+  the compile as right before it (compiles do not write there, so one that
+  changed means something came or went while the compile ran, even if it
+  is gone again; tried, an assembler that deletes itself, also one put
+  there during the key's preprocessor run). Each compile looks at all of
+  this, a hit once and a miss three times: a few hundred lookups with a
+  long `PATH`, about a millisecond on a local disk, and one round trip each
+  on a network filesystem that caches no negative lookups
+  (`lookupcache=positive`). What leads the driver elsewhere from one
+  directory to the next, or into the working directory (which the compile
+  writes, so what comes and goes there while it runs cannot be told from
+  its own writing), keeps the compile out of the cache: an entry of
+  `PATH`, `LD_LIBRARY_PATH`, `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is
+  not an absolute path (an empty one is the working directory), a library
+  preloaded by a relative path, `LD_AUDIT`, a flag that selects another of
+  a GCC's sets of programs and libraries (`-print-multi-lib`: `-m32`,
+  `-mx32`; the driver looks for its programs elsewhere then, tried), a
+  compile that converts character sets while `GCONV_PATH` names converters
+  (tried: one name, two converters, two objects); and for Fortran, whose
+  dependency run runs in a directory of its own (§18.10), also such an
+  entry of `LIBRARY_PATH` (where the driver finds a `specs` file) and a
+  compiler named by a relative path. The loader's tunables
   (`GLIBC_TUNABLES`) are among the variables a change of which has the
-  identity worked out again. Left: what appears during a compile and is
-  gone again after it; the character-set converters a compile that
-  converts loads (`GCONV_PATH`); the libraries of a program whose loader is
-  not glibc's (it lists none); a flag that selects a multilib under another
-  name than `-print-multi-lib` gives (GCC targets with aliases, such as
-  some Arm and RISC-V builds); a file passed over on a `noexec` filesystem
-  that is remounted to allow it. What still leads the driver elsewhere from one
-  directory to the next keeps the compile out of the cache: an entry of
-  `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute path (an empty
-  one is the working directory), a library preloaded by a relative path,
-  `LD_AUDIT`; and for Fortran, whose dependency run runs in a directory of
-  its own (§18.10), also such an entry of `LIBRARY_PATH` (where the driver
-  finds a `specs` file), a compiler named by a relative path, and, for one
-  named without a `/` (which finds its own prefix along `PATH`), such an
-  entry of `PATH`. The driver's own bytes must say it is GCC or
+  identity worked out again. Left: a flag that selects a multilib under
+  another name than `-print-multi-lib` gives (GCC targets with aliases,
+  such as some Arm and RISC-V builds); a file passed over on a `noexec`
+  filesystem that is remounted to allow it; a wrapper that says in its own
+  bytes what the program it runs is. The driver's own bytes must say it is GCC or
   Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes `--version` on
   to a compiler and is not one, and is not cached. Neither is a compiler
   that takes flags from a file of its own — a GCC with a `specs` file on

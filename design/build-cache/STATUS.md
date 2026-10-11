@@ -1828,6 +1828,34 @@ stricter); the build's summary line does not count refused compiles; the
 MDB's `${LIBRARY_PATH+$LIBRARY_PATH:}` leaves an empty entry when the
 variable is set but empty, which keeps Fortran out (A).
 
+### After M3a, review 5 (on `9fd566d`): BLOCKED by both
+
+Both re-ran every earlier reproduction (all serve a wrong object at
+`6ba57f8`, none at `9fd566d`). Found, all inherited and run end to end
+with a wrong object served:
+- Both: a helper reached through a link to a hard-linked copy of its tree
+  takes its `$ORIGIN` (and so its libraries) from the copy, while every
+  watched file looks the same; review 4's fix was for the driver only.
+  Fixed: every watched file is also watched by where its name leads now.
+- A: an ELF wrapper around the assembler passed review 3's "no script"
+  rule. Fixed: a program the driver runs must say in its own bytes what
+  it is (GNU's assembler or C, C++, Fortran compiler proper).
+- A: the identity's places were not looked at right before the compile; an
+  assembler put there during the key's preprocessor run that deleted
+  itself after assembling was stored. Fixed: the identity is worked out
+  again right before the compile, and the directories that hold what it
+  watches must look the same after the compile as before it (also closes
+  the stated "during the compile" limit for absolute places; A showed it
+  deterministic). Relative places lead into the working directory, which
+  the compile writes: Max decided (2026-10-11) that a relative or empty
+  entry of `PATH` or `LD_LIBRARY_PATH` keeps every compile out, and that
+  the MDB idioms that leave one are fixed.
+Also: a program whose loader is not glibc's is ruled out (A, run with a
+musl `as`); `$LIB`, `$PLATFORM`, `$ORIGIN` in `LD_PRELOAD` are expanded as
+the program's own loader says (`--list-diagnostics`) instead of refused
+(Max: the refusal was too broad); a compile that converts character sets
+while `GCONV_PATH` is set is refused (B ran it: a wrong object served).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
