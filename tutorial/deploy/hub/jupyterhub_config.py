@@ -2,6 +2,7 @@
 # compose.yaml fills from .env (see .env.example).
 import asyncio
 import os
+import re
 import sys
 
 import docker
@@ -13,7 +14,12 @@ c = get_config()  # noqa: F821
 env = os.environ.get
 
 # -- the hub ---------------------------------------------------------------------
-c.JupyterHub.bind_url = "http://:8000"
+# Where on the site the hub answers (HUB_PATH: "/tutorial", or "" for the
+# whole site); Caddy passes requests on unchanged.
+HUB_PATH = env("HUB_PATH", "/tutorial").strip().rstrip("/")
+if HUB_PATH and not re.fullmatch(r"(/[A-Za-z0-9._~-]+)+", HUB_PATH):
+    sys.exit(f"HUB_PATH={HUB_PATH!r}: give a path like /tutorial, or nothing for the whole site")
+c.JupyterHub.bind_url = f"http://:8000{HUB_PATH}/"
 c.JupyterHub.hub_bind_url = "http://:8081"
 # What the attendees' containers use to reach the hub: its name on their network.
 c.JupyterHub.hub_connect_url = "http://hub:8081"

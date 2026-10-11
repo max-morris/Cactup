@@ -1073,7 +1073,7 @@ for a given number of attendees, measured, is in `SIZING.md`.
 |---|---|
 | `deploy/compose.yaml` | The `hub` service, and Caddy as `caddy` (profile `tls`) or `caddy-plain` (profile `plain`). Two networks: `front` (Caddy and the hub) and `cactup-tutorial-users`, internal, for the attendees' containers. |
 | `deploy/hub/` | The hub's image: `quay.io/jupyterhub/jupyterhub:5.5.2` (the version the tutorial image's `jupyterhub-singleuser` has; they must match), DockerSpawner, the idle culler, and `cactup_cyol` (choose your own login, the token's rotator, the account tools, the cpuset assignment), all pinned. `jupyterhub_config.py` reads its settings from the environment. |
-| `deploy/caddy/` | One Caddyfile per mode: `auto`, `provided` (profile `tls`), `plain`. |
+| `deploy/caddy/` | One Caddyfile per mode: `auto`, `provided` (profile `tls`), `plain`; each imports `hub.caddy`, what every mode serves (the hub under `HUB_PATH`, redirects for the rest of the site). |
 | `deploy/.env.example` | Every setting, explained. Copy it to `deploy/.env`. |
 | `deploy/token` | Shows the session token, big, for the room; `--rotate` makes a new one. |
 | `tests/hub/` | `run.sh` brings a hub up on this machine and runs `check_hub.py` against it (`--keep` leaves it up, `--down` removes it); `browse.sh` then looks at it in headless Chromium (screenshots); `check_hub.py` also checks a deployed hub. |
@@ -1215,14 +1215,27 @@ account database.
   with the browser's `Origin`; nginx: `proxy_set_header Host $host;`,
   Apache: `ProxyPreserveHost On`), set `X-Forwarded-For` (appending) and
   `X-Forwarded-Proto: https`, allow idle connections of an hour or more and
-  uploads of 100 MB or more, and connect from a private address (Caddy
-  trusts `X-Forwarded-For` from those only). If it runs on another machine,
+  uploads of 100 MB or more, pass the path through unchanged (`/tutorial/…`
+  stays `/tutorial/…`: the hub expects its `HUB_PATH`), and connect from a
+  private address (Caddy trusts `X-Forwarded-For` from those only). If it
+  runs on another machine,
   set `PLAIN_BIND` to this machine's address on the network they share, and
   firewall `PLAIN_PORT` to the proxy alone.
 
 The hub's cookies are marked Secure (`SECURE_COOKIES=1`): attendees always
 come over HTTPS, and a browser must not send the login cookie over a plain
 `http://` request.
+
+### Where on the site
+
+The hub answers under `HUB_PATH` (`/tutorial`: `https://DOMAIN/tutorial/`;
+empty: the whole site), and every other address on the site redirects to
+`ROOT_REDIRECT` (empty: the hub; or, say, the project's web page). One
+setting moves the hub: JupyterHub's `base_url` and Caddy's routes (in
+`caddy/hub.caddy`, shared by the three modes) both follow it, and `./token`
+shows the address with it. Change it with no attendee's server running (the
+admin page stops them all): a running one keeps serving at the old address.
+Then `docker compose up -d`.
 
 ### Setting it up
 
@@ -1256,13 +1269,14 @@ The commands from here on run in `tutorial/deploy`:
 4. `cp .env.example .env`, and set at least `COMPOSE_PROFILES` and `TLS`,
    `DOMAIN` (with `tls`), the certificate in `TLS_CERT_DIR` (with
    `TLS=provided`), `PLAIN_BIND` and `PLAIN_PORT` (with `plain`),
+   `HUB_PATH` and `ROOT_REDIRECT` (if not `/tutorial` and the hub),
    `SHARED_GID` (`getent group cactup-tutorial | cut -d: -f3`) and
    `HUB_ADMINS`.
 5. `docker compose up -d --build`.
 6. The admins' accounts, before anyone sees the token:
    `docker compose exec -it hub python3 -m cactup_cyol.make_users --name NAME`
    for each name in `HUB_ADMINS`. They get the hub's admin page
-   (`/hub/admin`): servers to stop or start, users.
+   (`/tutorial/hub/admin`): servers to stop or start, users.
 7. `./token`, then sign up at the site with it, as an attendee would. After
    that first sign-up, `docker inspect -f '{{.HostConfig.CpusetCpus}}'
    cactup-<username>` shows the container's cores (empty: Docker isn't
@@ -1314,10 +1328,11 @@ The commands from here on run in `tutorial/deploy`:
 ### Checking a hub
 
 `tutorial/tests/hub/run.sh` brings a hub up on this machine (its own compose
-project, network `cactup-hubtest-users`, and plain HTTP on 127.0.0.1:18000,
-so it doesn't meet a real deployment; run one at a time) and runs
-`check_hub.py` against it:
+project, network `cactup-hubtest-users`, and plain HTTP on
+127.0.0.1:18000/tutorial/, so it doesn't meet a real deployment; run one at a
+time) and runs `check_hub.py` against it:
 
+- the hub at `/tutorial/`, and the rest of the site redirecting;
 - sign-ups through the login page with the session token, and the refusals
   (no token, a wrong token, a short password, a taken name with the wrong
   password);
@@ -1337,10 +1352,10 @@ page and its token field, a refused token, signing up, notebook 1 and a
 cell run, the File menu, a terminal), leaving screenshots, and `run.sh
 --down` removes it all. With rootless Docker, `run.sh` turns cpusets off
 (rootless Docker drops them). Against a deployed hub, `check_hub.py --url
-https://DOMAIN --shared /srv/cactup-tutorial` (it needs Python's `requests`,
-and Docker access, on the machine) checks the same, except the hub's
-settings and the restart, which `--hub-container cactup-tutorial-hub-1` adds (that
-restarts the live hub). It makes accounts named like `check1a2b-0`; remove
+https://DOMAIN/tutorial --shared /srv/cactup-tutorial` (it needs Python's
+`requests`, and Docker access, on the machine) checks the same, except the
+hub's settings and the restart, which `--hub-container
+cactup-tutorial-hub-1` adds (that restarts the live hub). It makes accounts named like `check1a2b-0`; remove
 their volumes after, `docker volume ls -q -f
 'name=^cactup-(home|slurm)-check[0-9a-f]{4}-2d[0-9]+$' | xargs -r docker
 volume rm`. The pytest suite's login tests need

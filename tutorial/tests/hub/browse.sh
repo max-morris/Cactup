@@ -13,7 +13,7 @@ mkdir -p "$out"
 docker build -q -t cactup-tutorial-playwright -f "$here/../browser/Dockerfile.playwright" "$here/../browser" > /dev/null
 status=0
 docker run --rm --network cactup-hubtest_front -v "$out:/out" -v "$here:/check:ro" cactup-tutorial-playwright \
-    python /check/browse.py http://caddy-plain "$(cat "$work/shared/session-token")" > "$out/browse.log" 2>&1 || true
+    python /check/browse.py http://caddy-plain/tutorial "$(cat "$work/shared/session-token")" > "$out/browse.log" 2>&1 || true
 cat "$out/browse.log"
 grep -q '^0 problem(s)' "$out/browse.log" || status=1
 # What the terminal ran (browse.py names the user): DockerSpawner's container

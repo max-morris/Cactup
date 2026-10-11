@@ -4,15 +4,9 @@
 	auto_https disable_certs
 }
 
-(hub) {
-	encode gzip
-	header Strict-Transport-Security "max-age=604800"
-	reverse_proxy hub:8000 {
-		header_up X-Real-IP {client_ip}
-	}
-}
-
 {$DOMAIN} {
 	tls /certs/cert.pem /certs/key.pem
-	import hub
+	encode gzip
+	header Strict-Transport-Security "max-age=604800"
+	import hub.caddy
 }

@@ -5,8 +5,8 @@
     tutorial/deploy/token --once     print it once
     tutorial/deploy/token --rotate   make a new one now, then print it
 
-Reads SHARED_DIR and DOMAIN from tutorial/deploy/.env (SHARED_DIR defaults to
-/srv/cactup-tutorial). Large letters need `figlet` (or `toilet`) installed;
+Reads SHARED_DIR, DOMAIN and HUB_PATH from tutorial/deploy/.env (SHARED_DIR
+defaults to /srv/cactup-tutorial). Large letters need `figlet` (or `toilet`) installed;
 otherwise the token is printed bold, at the terminal's own size. To show it
 from a laptop: `ssh -t MACHINE .../tutorial/deploy/token` (without -t it
 prints once and exits).
@@ -25,7 +25,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
-def setting(name: str) -> str | None:
+def setting(name: str, default: str | None = None) -> str | None:
+    """The setting as compose sees it: the environment's, else .env's, else
+    `default` (an empty value stays empty)."""
     value = os.environ.get(name)
     env_file = HERE / ".env"
     if value is None and env_file.exists():
@@ -33,11 +35,19 @@ def setting(name: str) -> str | None:
             key, sep, val = line.partition("=")
             if sep and key.strip() == name:
                 value = val.strip().strip("'\"")
-    return value or None
+    return default if value is None else value
 
 
 def shared_dir() -> Path:
     return Path(setting("SHARED_DIR") or "/srv/cactup-tutorial")
+
+
+def address() -> str | None:
+    """Where attendees sign up: DOMAIN, and the hub's path on it."""
+    domain = setting("DOMAIN")
+    if not domain:
+        return None
+    return f"https://{domain}{(setting('HUB_PATH', '/tutorial') or '').strip().rstrip('/')}/"
 
 
 def read(path: Path) -> str:
@@ -59,9 +69,8 @@ def show(token: str) -> None:
     else:
         print(f"    \033[1m{token}\033[0m")
     print("\n  (Case, spacing and punctuation don't matter.)")
-    domain = setting("DOMAIN")
-    if domain and setting("COMPOSE_PROFILES") != "plain":
-        print(f"  Sign up at https://{domain}")
+    if url := address():
+        print(f"  Sign up at {url}")
     print(flush=True)
 
 

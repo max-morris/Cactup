@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Check a running tutorial hub end to end, as attendees would use it.
 
-    tutorial/tests/hub/check_hub.py --url http://127.0.0.1:8000 --shared DIR [--users 2] [--only 1,2]
+    tutorial/tests/hub/check_hub.py --url http://127.0.0.1:8000/tutorial --shared DIR [--users 2] [--only 1,2]
 
 Against a hub brought up with tutorial/deploy/compose.yaml (see
 tutorial/tests/hub/run.sh for a local one), it:
 
+- with the hub under a path, checks that the path without its slash leads
+  to it and that the rest of the site redirects;
 - signs up the users through the login page with the session token read
   from the shared directory, and checks what must be refused (no token, a
   wrong token, a short password, a taken name with the wrong password);
@@ -29,6 +31,7 @@ import secrets
 import subprocess
 import sys
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -119,7 +122,7 @@ def refusals(url: str, token: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--url", default="http://127.0.0.1:8000")
+    parser.add_argument("--url", default="http://127.0.0.1:8000/tutorial")
     parser.add_argument("--shared", required=True, help="the hub's shared directory (SHARED_DIR)")
     parser.add_argument("--users", type=int, default=2)
     parser.add_argument("--only", default=None, help="comma-separated notebook numbers")
@@ -131,6 +134,21 @@ def main() -> int:
     token = (Path(args.shared) / "session-token").read_text().strip()
     problems = refusals(args.url, token)
     print(f"{'ok  ' if not problems else 'FAIL'} refusals", flush=True)
+
+    # A hub under a path (HUB_PATH): the site's other addresses redirect, and
+    # the path without its slash leads to the hub.
+    parts = urllib.parse.urlsplit(args.url.rstrip("/"))
+    path = parts.path.strip("/")
+    if path:
+        origin = f"{parts.scheme}://{parts.netloc}"
+        bare = requests.get(args.url.rstrip("/"), timeout=30, allow_redirects=False)
+        other = requests.get(f"{origin}/elsewhere", timeout=30, allow_redirects=False)
+        ok = (bare.status_code == 308 and bare.headers.get("Location", "").endswith(f"/{path}/")
+              and other.is_redirect)
+        if not ok:
+            problems.append(f"under /{path}: /{path} -> {bare.status_code} {bare.headers.get('Location')}, "
+                            f"/elsewhere -> {other.status_code}")
+        print(f"{'ok  ' if ok else 'FAIL'} the hub is at /{path}/, and the rest of the site redirects", flush=True)
 
     tag = secrets.token_hex(2)
     attendees = [Attendee(args.url, f"check{tag}-{i}", secrets.token_urlsafe(12)) for i in range(args.users)]

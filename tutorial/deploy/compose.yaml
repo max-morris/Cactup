@@ -17,6 +17,7 @@ services:
       TUTORIAL_IMAGE: ${TUTORIAL_IMAGE:-cactup-tutorial:tutorial}
       USER_NETWORK: ${USER_NETWORK:-cactup-tutorial-users}
       SECURE_COOKIES: ${SECURE_COOKIES:-1}
+      HUB_PATH: ${HUB_PATH-/tutorial}
       HUB_ADMINS: ${HUB_ADMINS:-}
       CPUS_PER_ATTENDEE: ${CPUS_PER_ATTENDEE:-4}
       CPUSET: ${CPUSET:-1}
@@ -48,8 +49,11 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN:-}
+      HUB_PATH: ${HUB_PATH-/tutorial}
+      ROOT_REDIRECT: ${ROOT_REDIRECT:-${HUB_PATH-/tutorial}/}
     volumes:
       - ./caddy/Caddyfile.${TLS:-auto}:/etc/caddy/Caddyfile:ro
+      - ./caddy/hub.caddy:/etc/caddy/hub.caddy:ro
       - ${TLS_CERT_DIR:-./caddy/certs}:/certs:ro
       - caddy-data:/data
       - caddy-config:/config
@@ -63,8 +67,12 @@ services:
     depends_on: [hub]
     ports:
       - "${PLAIN_BIND:-127.0.0.1}:${PLAIN_PORT:-8000}:80"
+    environment:
+      HUB_PATH: ${HUB_PATH-/tutorial}
+      ROOT_REDIRECT: ${ROOT_REDIRECT:-${HUB_PATH-/tutorial}/}
     volumes:
       - ./caddy/Caddyfile.plain:/etc/caddy/Caddyfile:ro
+      - ./caddy/hub.caddy:/etc/caddy/hub.caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     networks: [front]

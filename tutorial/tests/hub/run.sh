@@ -7,8 +7,8 @@
 #   tutorial/tests/hub/run.sh --down     (remove what a --keep run left)
 #
 # It uses a compose project, network and port of its own (cactup-hubtest,
-# cactup-hubtest-users, plain HTTP on 127.0.0.1:18000: the setup behind a
-# site's proxy), and a shared directory under ~/tmp, so it doesn't meet a real
+# cactup-hubtest-users, plain HTTP on 127.0.0.1:18000/tutorial/: the setup
+# behind a site's proxy), and a shared directory under ~/tmp, so it doesn't meet a real
 # deployment on the same machine. Run one at a time: two share all of that.
 # With rootless Docker, cpusets are off (it ignores them) and the token file's
 # group is the container's root group. Everything it made is
@@ -33,6 +33,8 @@ cat > "$work/test.env" <<EOF
 COMPOSE_PROFILES=plain
 PLAIN_BIND=127.0.0.1
 PLAIN_PORT=18000
+HUB_PATH=/tutorial
+ROOT_REDIRECT=
 SECURE_COOKIES=0
 USER_NETWORK=cactup-hubtest-users
 SHARED_DIR=$work/shared
@@ -59,8 +61,8 @@ trap cleanup EXIT
 
 compose up -d --build
 for _ in $(seq 60); do
-    [ -s "$work/shared/session-token" ] && curl -fs http://127.0.0.1:18000/hub/login > /dev/null && break
+    [ -s "$work/shared/session-token" ] && curl -fs http://127.0.0.1:18000/tutorial/hub/login > /dev/null && break
     sleep 1
 done
-python3 "$here/check_hub.py" --url http://127.0.0.1:18000 --shared "$work/shared" \
+python3 "$here/check_hub.py" --url http://127.0.0.1:18000/tutorial --shared "$work/shared" \
     --hub-container cactup-hubtest-hub-1 "$@"
