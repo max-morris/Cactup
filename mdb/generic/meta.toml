@@ -51,7 +51,7 @@ exec-host-pattern = "(.*)"
 # The configure scripts strip /usr/local and system dirs from XXX_DIR to avoid
 # choosing system libraries; re-add them last so compilers still find them.
 env-setup = """
-export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
 export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
 """
 

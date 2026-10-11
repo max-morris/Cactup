@@ -28,7 +28,7 @@ make = "make -j@MAKEJOBS@"
 # libraries; not all compilers search there by default, so re-add the filtered
 # locations last (upstream comment).
 env-setup = """
-export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
 export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
 """
 

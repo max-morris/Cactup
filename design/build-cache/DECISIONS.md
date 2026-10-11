@@ -297,6 +297,22 @@ Asked as seven questions with options; the answers, in Max's numbering.
     reproducible blocks, however contrived; rounds go on until both sign
     off.
 
+18. **Relative entries keep every compile out; the MDB stops making them**
+    (2026-10-11). A relative or empty entry of `PATH` or `LD_LIBRARY_PATH`
+    leads into the compile's working directory, which the compile writes,
+    so a program or library that comes and goes there while it runs cannot
+    be seen (review 5 after M3a; decision 17 makes that blocking). Such an
+    entry now keeps every compile out of the cache. Five MDB machines made
+    one by their `export` idioms (mike, sunrise, omnia in `LD_LIBRARY_PATH`;
+    generic, mike, et-juphub in `LIBRARY_PATH`), none of them needed by the
+    cluster (an empty entry only adds "search the working directory"). Max:
+    "fix the MDB idioms and refuse them". The idioms are now
+    `${VAR:+:$VAR}` and `${VAR:+$VAR:}`, which give the same list whenever
+    the variable has a value; value edits, no generation bump (generation 2,
+    merged from master). Also on Max's word (same day): `$LIB`, `$PLATFORM`,
+    `$ORIGIN` in `LD_PRELOAD` are expanded as the loader says, not refused
+    (the refusal was too broad).
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
