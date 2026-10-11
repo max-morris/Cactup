@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), in review |
+| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews) |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | M4 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; the build's summary line counts compiles kept out and points at it; a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others | **planned** (Max, 2026-10-11), after the current review closes; independent of M3b |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
@@ -1887,6 +1887,27 @@ Cost noted: a missing place has its nearest existing ancestor watched, so
 a missing `~/bin` on `PATH` puts the home directory under watch (lost
 stores only). Open for Max: whether reviews go on hunting with new
 attack programs, which the classifier now stops.
+
+### After M3a, review 7 (on `95f7ec6`): SIGN-OFF by both
+
+Within decision 19's scope. A re-ran 37 earlier reproductions, B 31 plus
+19 others: every one serves or stores a wrong object at `6ba57f8`, none at
+`95f7ec6` (one timed swap of a module file, out of scope, still publishes:
+§18.10's stated limit). The Einstein Toolkit gate on `95f7ec6`: 0 wrong in
+the audit, 594 of 594 Fortran checks by lookups, no refusal. Non-blocking,
+for the follow-up: a `PATH` entry whose name is not UTF-8 leaves the memo
+unwritten, and then the stamps are empty both times and pass (fails open;
+also a hit costs about 600 ms); `LD_LIBRARY_PATH` split on `:` only (the
+loader splits on `;` too); NFS attribute caching (a reinstall by rename on
+another host, seen by `stat` up to a minute late on a hit; inferred);
+hits with a long `PATH` cost about twice what they did at `b011058` (the
+memo parsed and `PATH` searched four times); a `TMPDIR` that is the
+nearest existing ancestor of a missing place refuses every Fortran compile
+(the key's own preprocessor run writes there), with a misleading reason;
+refusals broader than needed (`PATH=$PATH:.`, `LD_LIBRARY_PATH=""`, an
+empty entry after every library is found); spec text (the cost sentence,
+a second `specs` place, §18.8 on character sets); `KEY_LABEL` to bump at
+landing.
 
 ## Decisions
 
