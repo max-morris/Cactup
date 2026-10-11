@@ -401,6 +401,18 @@ impl Fortran {
             let named_module = input.extension().is_some_and(|ext| ext == "mod" || ext == "smod");
             if named_module && is_gzip(input) {
                 self.count += 1;
+                // Where the compile looks for it before the place it is
+                // (tried: one put in an earlier `-I` directory right before
+                // the compile, gone after it, was read).
+                let physical = std::fs::canonicalize(input).ok();
+                let file_name = input.file_name().unwrap_or_default();
+                for dir in &self.module_dirs {
+                    let candidate = dir.join(file_name);
+                    if physical.is_some() && std::fs::canonicalize(&candidate).ok() == physical {
+                        break;
+                    }
+                    places.push(candidate);
+                }
                 continue;
             }
             let mut placed = false;
@@ -1663,6 +1675,15 @@ mod tests {
         std::fs::remove_file(real.build.join("i.inc")).unwrap();
         let mut keyed = looked();
         assert!(check(&mut keyed));
+        // One put beside the source right before the compile (gone again
+        // after it): the place is looked at then.
+        let mut keyed = real.key("t.f90", &[&include]).unwrap();
+        std::fs::copy(elsewhere.join("m.mod"), real.build.join("m.mod")).unwrap();
+        keyed.fortran.before_compile(&real.compiler, OsStr::new("gfortran"));
+        assert!(keyed.fortran.check_made().is_err_and(|why| why.contains("looks first")), "{:?}", keyed.fortran.check_made());
+        std::fs::remove_file(real.build.join("m.mod")).unwrap();
+        assert!(!check(&mut keyed), "a module file put where the compile looks first right before it passed the check");
+        let mut keyed = looked();
         // A module file in the working directory, where the compile looks
         // first.
         std::fs::copy(elsewhere.join("m.mod"), real.scratch.join("m.mod")).unwrap();

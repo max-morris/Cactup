@@ -4930,9 +4930,13 @@ fixed parts, so that the key does not change by accident:
   place is looked at from each compile's own working directory; a library,
   or a program the driver runs, found by a relative name (or a library
   its program names with a `/` but not from the root) rules the compiler
-  out. Along `PATH`, as `execvp` does, a file the system will not run (no
-  permission, a filesystem mounted `noexec`; tried by starting it) is
-  passed over. A program the driver runs must be one, as the driver must:
+  out. Along `PATH`, as `execvp` does, a file the system refuses to run
+  (no permission, a filesystem mounted `noexec`; tried by starting it) is
+  passed over; one that fails to start otherwise rules the compiler out.
+  The driver's physical path is remembered too: it finds its programs from
+  there, and a link on the way turned to another tree of the same files
+  (hard links) leads it to that tree's (tried). A library preloaded through
+  a name the loader expands (`$LIB`) keeps every compile out. A program the driver runs must be one, as the driver must:
   a script runs something nothing here follows (tried, a wrapper around
   `as`). Once the places are looked at, the driver is asked again where its
   programs are and the libraries are listed again, and a different answer
@@ -4943,11 +4947,16 @@ fixed parts, so that the key does not change by accident:
   Each compile looks at all these places, a hit too: a few hundred lookups
   with a long `PATH`, about a millisecond on a local disk, and one round
   trip each on a network filesystem that caches no negative lookups
-  (`lookupcache=positive`). Left: what appears during a compile and is
-  gone again after it, a preload list the system keeps
-  (`/etc/ld.so.preload`), the loader's tunables, the character-set
-  converters a compile that converts loads (`GCONV_PATH`), and the
-  libraries of a program whose loader is not glibc's (it lists none). What still leads the driver elsewhere from one
+  (`lookupcache=positive`). The system's preload list
+  (`/etc/ld.so.preload`) is watched, and the loader's tunables
+  (`GLIBC_TUNABLES`) are among the variables a change of which has the
+  identity worked out again. Left: what appears during a compile and is
+  gone again after it; the character-set converters a compile that
+  converts loads (`GCONV_PATH`); the libraries of a program whose loader is
+  not glibc's (it lists none); a flag that selects a multilib under another
+  name than `-print-multi-lib` gives (GCC targets with aliases, such as
+  some Arm and RISC-V builds); a file passed over on a `noexec` filesystem
+  that is remounted to allow it. What still leads the driver elsewhere from one
   directory to the next keeps the compile out of the cache: an entry of
   `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is no absolute path (an empty
   one is the working directory), a library preloaded by a relative path,
@@ -5675,7 +5684,10 @@ included file named by an absolute path is opened by that name first, and
 only where nothing is there searched for under each directory as
 `<dir>//<name>` (the dependency run prints the double `/`, tried): found so,
 the name itself is a place before it.
-These places are looked at right before the compile (one already taken
+So are the places the compile looks for each module file it reads before
+the one it reads it from (tried: one put in an earlier `-I` directory right
+before the compile, gone after it, was read). These places are looked at
+right before the compile (one already taken
 fails the check: what appeared there since the key's dependency run may be
 gone again before a second one could see it, tried) and again after it. Module files
 keep their order check, when the key is made and after the compile, along

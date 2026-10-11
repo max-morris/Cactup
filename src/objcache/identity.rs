@@ -129,6 +129,11 @@ struct Remembered {
     /// The environment that decides which helper programs the driver runs,
     /// as it was.
     env: String,
+    /// The driver's physical path: it finds its own programs from there,
+    /// and a link on the way turned to a tree of the same files (hard
+    /// links) leads it to that tree's (tried).
+    #[serde(default)]
+    driver: PathBuf,
     files: Vec<Seen>,
     /// The places searched before each file was found (by the driver for
     /// its programs, along `PATH`, by the loader for libraries) that held
@@ -142,7 +147,7 @@ struct Remembered {
 /// up, and whether Clang reads its configuration files. A change in one of
 /// them may mean another compiler under the same driver.
 const HELPER_ENV: &[&str] =
-    &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_LIBRARY_PATH", "LD_PRELOAD", "CLANG_NO_DEFAULT_CONFIG"];
+    &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_LIBRARY_PATH", "LD_PRELOAD", "GLIBC_TUNABLES", "CLANG_NO_DEFAULT_CONFIG"];
 
 fn helper_env() -> String {
     let mut hasher = Hasher::new("compiler-env");
@@ -247,6 +252,7 @@ pub fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
     let env = helper_env();
     if let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok())
         && remembered.env == env
+        && fs::canonicalize(&path).is_ok_and(|driver| driver == remembered.driver)
         && remembered.files.iter().all(|seen| Seen::of(&seen.path).is_ok_and(|now| now == *seen))
         && remembered.absent.iter().all(|place| fs::metadata(place).is_err())
     {
@@ -273,6 +279,7 @@ pub fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
         compiler: examined.as_ref().ok().cloned(),
         rejected: examined.as_ref().err().map(|e| format!("{e:#}")),
         env,
+        driver: fs::canonicalize(&path).unwrap_or_default(),
         files,
         absent,
     };
@@ -384,6 +391,8 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
         }
     }
     settle(&mut tries, watched)?;
+    // The system's own preload list, read by every loader that starts.
+    watched.passed(Path::new("/etc/ld.so.preload"));
     // A library preloaded by its path that is not there: the loader says so
     // and goes on, and loads it once it is there.
     if let Some(preload) = std::env::var_os("LD_PRELOAD") {

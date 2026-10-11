@@ -1109,10 +1109,15 @@ fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Optio
     if let Some(variable) = variables.into_iter().find(|variable| relative_entry(variable)) {
         return Some(format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"));
     }
-    // A preloaded library named without a `/` is searched for, as any other.
+    // A preloaded library named without a `/` is searched for, as any other;
+    // one named through a token the loader expands (`$LIB`) is at a place
+    // nothing here would watch.
     let relative_file = |entry: &[u8]| entry.contains(&b'/') && !entry.starts_with(b"/");
     if env("LD_PRELOAD").is_some_and(|value| value.as_bytes().split(|b| *b == b':' || *b == b' ').any(relative_file)) {
         return Some("LD_PRELOAD names a library by a relative path".to_owned());
+    }
+    if env("LD_PRELOAD").is_some_and(|value| value.as_bytes().contains(&b'$')) {
+        return Some("LD_PRELOAD names a library through a name the loader expands ($LIB, $PLATFORM, $ORIGIN)".to_owned());
     }
     env("LD_AUDIT").filter(|value| !value.is_empty()).map(|_| "LD_AUDIT loads libraries the cache does not follow".to_owned())
 }
@@ -1662,6 +1667,7 @@ mod tests {
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "./libx.so")])).is_some());
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_AUDIT", "/opt/libaudit.so")])).is_some());
             assert_eq!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "libx.so /opt/liby.so")])), None);
+            assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("LD_PRELOAD", "/opt/$LIB/libx.so")])).is_some());
         }
         // `PATH` is followed from each compile's directory, but not from the
         // dependency run's, where a driver named without a `/` finds itself.

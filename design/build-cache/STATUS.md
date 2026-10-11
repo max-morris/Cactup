@@ -1797,6 +1797,37 @@ only); Fortran with an empty `LIBRARY_PATH` entry, or `.` in `PATH` with
 `gfortran` named bare, is still refused (B suggests the dependency run
 could be given the identified path as its name instead).
 
+### After M3a, review 4 (on `67b1014`): A SIGN-OFF, B BLOCKED
+
+The first attempt of both reviewers ended on a network error and was run
+again. A re-ran every earlier reproduction (all closed at `67b1014`, all
+open at `6ba57f8`) and signed off; a safety classifier stopped one of A's
+responses, after which A ran no new attack programs and judged by reading
+(stated in A's report). B re-ran all 31 (closed; one more, an `as` whose
+ELF interpreter is missing, closed in passing) and blocked on three, all
+inherited and run end to end with a wrong object served:
+- A module file put right before the compile at a place the compile looks
+  first, gone after it: module files had only the order check, made when
+  the key is made and after the compile. Fixed: the places before each
+  module file are looked at right before the compile, as an included
+  file's are.
+- A library preloaded through `$LIB` was watched under the literal name.
+  Fixed: such an `LD_PRELOAD` keeps every compile out.
+- A driver behind a link turned to a hard-linked copy of its tree (one
+  with another `as`): every watched file looked the same. Fixed: the
+  driver's physical path is remembered and compared.
+Also: `/etc/ld.so.preload` watched and `GLIBC_TUNABLES` among the
+variables that have the identity worked out again (B); the spec's `execvp`
+wording; multilib aliases and a `noexec` remount stated as limits.
+
+Gate on `67b1014`: 0 wrong in all three audits; no refusal, no fallback,
+no place taken; the Fortran check 2.3 s summed (median 3–4 ms).
+Non-blocking, for landing: bump `KEY_LABEL` (entries stored by the
+review binaries since `970f26a` share `key-6` while the identity got
+stricter); the build's summary line does not count refused compiles; the
+MDB's `${LIBRARY_PATH+$LIBRARY_PATH:}` leaves an empty entry when the
+variable is set but empty, which keeps Fortran out (A).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
