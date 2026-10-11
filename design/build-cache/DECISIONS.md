@@ -284,6 +284,19 @@ Asked as seven questions with options; the answers, in Max's numbering.
     the branch `feature/build-cache-m3a-cxx` at `d76f6a0`, with round 6's
     findings open (`STATUS.md`); decision 15 applies to it.
 
+17. **The review bar stays absolute** (2026-10-11). After M3a signed off
+    (`6ba57f8`), four review rounds on the changes made right after it
+    (the compiler identity watching where it searched, and what each round
+    found) each found new ways to a wrong object served, all inherited from
+    before M3a and almost all deliberately built (an assembler timed to
+    appear mid-compile, hard-linked compiler trees behind a link turned
+    mid-build, `$LIB` in `LD_PRELOAD`). Asked whether reviewers should from
+    then on block only on holes reachable through ordinary operations
+    (installs, upgrades, module loads, concurrent builds), keep the absolute
+    bar, or land as it stood; answer: "Keep the absolute bar". Anything
+    reproducible blocks, however contrived; rounds go on until both sign
+    off.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
