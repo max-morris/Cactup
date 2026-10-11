@@ -33,7 +33,7 @@ make-jobs = 64
 env-setup = """
 # No modules detected — adjust if needed.
 export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
-export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+export CPATH="${CPATH:+$CPATH:}/usr/local/include:/usr/include:/include"
   export PATH="/ddnA/project/sbrandt/externals-mike/install/mpi/bin:$PATH"
   export LD_LIBRARY_PATH="/ddnA/project/sbrandt/externals-mike/install/mpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 """

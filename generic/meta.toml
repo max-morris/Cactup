@@ -52,7 +52,7 @@ exec-host-pattern = "(.*)"
 # choosing system libraries; re-add them last so compilers still find them.
 env-setup = """
 export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
-export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+export CPATH="${CPATH:+$CPATH:}/usr/local/include:/usr/include:/include"
 """
 
 [queues.local]
