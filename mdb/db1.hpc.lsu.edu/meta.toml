@@ -62,7 +62,21 @@ memory                = 191000   # MB per node (`scontrol show node`: RealMemory
 
 [build]
 make      = "make -j@MAKEJOBS@"
-make-jobs = 8
+# A build goes to a compute node (buildsubmitscripts/native.py, §7.9): the
+# auto-choice picks `submit` because this machine can submit builds. There it
+# has a whole node's 48 cores. `cactup build run` still builds on the login
+# node; pass -j there to stay polite on a shared login node.
+make-jobs = 48
+
+# The build job's shape: one node, one task, all 48 cores. `make -j` is
+# shared-memory, so extra nodes buy nothing. It requests no GPU: the gpu
+# partition bills only GPUs (TRESBillingWeights=CPU=0,GRES/gpu=48), so a build
+# costs no SUs, and compiling needs none.
+queue         = "gpu"
+walltime      = "4:00:00"
+nodes         = 1
+tasks         = 1
+cpus-per-task = 48
 # No machine default build universe key here (§4.8 "implicit host universe"):
 # the native flavor's optionlist names no universe, so it falls back to the
 # declared [universes.host] below without needing `universe = "host"` spelled
@@ -167,6 +181,14 @@ gpu = true
 "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
 "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
 "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
+
+# Serves builds in the host universe, which is the native flavor, so the
+# script is named after it. The route is picked by the build job's queue
+# ([build].queue) and the config's build universe, never by `--flavor` (§7.9).
+# No route serves the Singularity flavors' et-sing/et-sing-cpu universes: build
+# those with `cactup build run`.
+[buildsubmitscripts]
+"native" = { queues = ["gpu"], build-universes = ["host"] }
 
 [runscripts]
 "default"   = { queues = ["gpu"], build-universes = ["host"] }
