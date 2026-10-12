@@ -359,6 +359,16 @@ Asked as seven questions with options; the answers, in Max's numbering.
     (an entry after what is found keeps nothing out, `LD_LIBRARY_PATH=""`
     neither), which narrows decision 18's refusal.
 
+21. **Landing, and what comes after** (2026-10-12). Asked how to land:
+    "Quick review, then land" (a short two-reviewer pass on `86a840c`,
+    then master fast-forwarded and pushed); the contract into `CLAUDE.md`
+    in that step (decision 10): "Yes"; the refusal of an empty or relative
+    `LIBRARY_PATH` entry for C and C++ (a `specs` search through the
+    working directory): "Keep it". After landing: "Make CUDA the next
+    milestone after landing, and then hip/non-nvidia gpu compiles after
+    that", with `cactup cache doctor` "Between them": M4 CUDA, M5 cache
+    doctor, M6 HIP and other GPU compiles.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
