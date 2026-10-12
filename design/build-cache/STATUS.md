@@ -2204,6 +2204,20 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M4, CUDA (decision 21): start with review 10's follow-ups above, then
-`nvcc` (decision 2), proved with audit mode on the GPU machines' builds
-(saturn, athena, mike).
+M4 (CUDA) in progress, `cuda.rs` and `parse_cuda` written (latest `38de576`).
+Tested on qbd in a separate instance (`/work/mmorris/cactup-m4/`, its own
+`CACTUP_HOME`, installation `m4` at `/ddnB/work/mmorris/m4`, builds submitted
+to `single` by the MDB's build default; script `pair.sh` there). Serve
+`m4a` then audit `m4b` into `store3`, 2026-10-12: C, C++, Fortran all hits,
+`same` (the trial fix below works); **nvcc: 86 of 99 "not deterministic",
+13 "wrong-hit"** (audit caught them; nothing served). Next: find what
+differs between two `nvcc` compiles of a real CarpetX file in this build
+(the tiny probes were identical with `--objdir-as-tempdir`): compare two
+objects of one unit from the audit (`-g`, `-x cu` on `.cxx`, `-O3`,
+`--diag-suppress`, the path map's `-Xcompiler` flags, parallel `make`); the
+key may also miss an input (the 13 wrong hits). Found and fixed on the way:
+trials ran a compiler by its bare name, so a GCC found another GCC's
+installation along `PATH` (qbd's gcc 13.2 never relocated, since M1);
+`nvcc` without `--objdir-as-tempdir` is not the same twice (refused);
+`nvcc`'s identity compared dry runs word for word (temporary names). Not
+yet reviewed. Then M4b Cray, M5 cache doctor, M6 HIP.
