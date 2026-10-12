@@ -341,8 +341,13 @@ impl Recorded {
     }
 }
 
-/// The source language of a unit, by the object's name (`a.c.o`, `b.F90.o`).
+/// The source language of a unit, by the object's name (`a.c.o`, `b.F90.o`);
+/// CUDA by the compiler too (`nvcc` compiles CarpetX's `.cxx` files as
+/// CUDA, `-x cu`).
 fn language(event: &Event) -> &'static str {
+    if event.compiler.rsplit('/').next().is_some_and(|name| name == "nvcc") {
+        return "CUDA";
+    }
     let name = event.unit.as_deref().unwrap_or_default();
     let suffix = name.strip_suffix(".o").and_then(|stem| stem.rsplit_once('.')).map(|(_, suffix)| suffix);
     match suffix {

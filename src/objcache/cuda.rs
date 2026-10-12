@@ -61,6 +61,12 @@ impl DryRun {
         run
     }
 
+    /// What decides which programs `nvcc` runs and how they find their
+    /// own: the programs, and the environment it gives them.
+    pub fn toolchain(&self) -> (Vec<&str>, Vec<&(String, String)>) {
+        (self.programs(), self.env.iter().collect())
+    }
+
     /// The value `nvcc` gives `name`, if it gives one.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.env.iter().rev().find(|(set, _)| set == name).map(|(_, value)| value.as_str())
@@ -225,7 +231,9 @@ pub(super) fn examine(path: &Path, driver: &Path, hasher: &mut Hasher, watched: 
         hasher.feed(file_digest(&file)?.as_bytes());
         watched.files.push(Seen::of(&file)?);
     }
-    if dry_run(path, name, &plain_compile(), None)? != run {
+    // (Not word for word: without `--objdir-as-tempdir` its intermediate
+    // files have names of their own each time, `tmpxft_…`; seen.)
+    if dry_run(path, name, &plain_compile(), None)?.toolchain() != run.toolchain() {
         bail!("{} would run other programs than it said a moment ago", path.display());
     }
     Ok(())
