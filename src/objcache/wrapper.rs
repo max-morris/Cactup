@@ -505,12 +505,27 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
             }
         }
     }
+    // Asked to say why (`CACTUP_CC_DEBUG`): the objects kept beside the
+    // build's, to be compared (`<object>.cactup-first`, `-again`, `-stored`).
+    let keep = |verdict: Audit| {
+        if std::env::var_os(DEBUG_ENV).is_some() {
+            let named = |suffix: &str| {
+                let mut name = object.as_os_str().to_owned();
+                name.push(suffix);
+                PathBuf::from(name)
+            };
+            let _ = std::fs::copy(&first, named(".cactup-first"));
+            let _ = std::fs::copy(object, named(".cactup-again"));
+            let _ = std::fs::copy(checked.stored, named(".cactup-stored"));
+        }
+        verdict
+    };
     match again {
         Some((again, _)) if again.success() && !keyed.still_holds() => Audit::InputsChanged,
         Some((again, _)) if again.success() && read(object).is_some() && read(object) == read(&first) && modules_now() == fresh_modules => {
-            Audit::WrongHit
+            keep(Audit::WrongHit)
         }
-        Some((again, _)) if again.success() => Audit::NotDeterministic,
+        Some((again, _)) if again.success() => keep(Audit::NotDeterministic),
         // The second compile failed, was killed, or could not run: the
         // first object is the build's.
         _ => {
