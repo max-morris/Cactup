@@ -33,35 +33,41 @@ the pin to the commit that carries the same tree.
 
 ## The procedure
 
+Run the `just` commands from `tutorial/` or any directory below it. In
+short:
+
+```sh
+just pin NEW      # steps 1 to 3: read, check the commands, move the pin
+just build        # step 3: the image, rebaking what the new cactup needs
+just check-all    # step 4
+```
+
+then steps 5 to 7 by hand.
+
 1. **Pick the commit, and read what changed.** It must be in this repository
-   (fetch it if it's on another branch). Then read every commit since the
-   old pin that touched cactup's inputs:
+   (fetch it if it's on another branch, and push it before committing the
+   pin). `just pin NEW` starts by listing every commit since the old pin
+   that touched cactup's inputs. Read each (`git show --stat ID`), and list
+   the changes that touch anything in "What the tutorial depends on" below.
+   That list is what you check by hand in step 5.
 
-   ```sh
-   git log --stat OLD..NEW -- src build.rs Cargo.toml Cargo.lock resources mdb cactup-init.sh cactupdocs
-   ```
-
-   List the changes that touch anything in "What the tutorial depends on"
-   below. That list is what you check by hand in step 5.
-
-2. **Check the commands still parse.** Build the new cactup outside the
-   checkout and run the usage check against it. It takes seconds, and it
+2. **Check the commands still parse.** `just pin` then builds the new cactup
+   outside the checkout (in `~/.cache/cactup-tutorial/pin`; a few minutes
+   the first time, about a minute after) and runs
+   `tools/check-cactup-usage.py` against it. That takes seconds, and it
    catches renamed or removed subcommands and options before the hour-long
-   run:
+   run. If it reports any, the pin stays where it was: fix each command in
+   the notebooks or the image's scripts, and run `just pin NEW` again.
 
-   ```sh
-   git worktree add ~/tmp/cactup-NEW NEW
-   (cd ~/tmp/cactup-NEW && cargo build --release)
-   python3 tutorial/tools/check-cactup-usage.py --cactup ~/tmp/cactup-NEW/target/release/cactup
-   git worktree remove ~/tmp/cactup-NEW
-   ```
+   (`python3 tools/check-cactup-usage.py --image cactup-tutorial:tutorial`
+   checks an already built image instead.)
 
-   Fix each command it reports in the notebooks or the image's scripts.
-   `--image cactup-tutorial:tutorial` checks an already built image instead.
-
-3. **Move the pin and build.** Write the new commit's full hash into
-   `tutorial/cactup.pin`, then run `sh tutorial/image/build.sh`. Watch its
-   `bake:` lines:
+3. **Move the pin and build.** Once the check passes, `just pin` writes the
+   new commit's full hash into `tutorial/cactup.pin`, and renames the cactup
+   build the notebooks' prose names (`cactup-` and the last commit that
+   touched the binary's inputs, in notebook 7). It lists anything else
+   under `tutorial/` that still names the old cactup, to check by hand.
+   Then run `just build`, and watch its `bake:` lines:
 
    - "is cached" for every bake means the precomputed builds still match.
    - "building" means cactup changed something a bake's fingerprint reads
@@ -69,20 +75,18 @@ the pin to the commit that carries the same tree.
      by itself. That takes about five minutes per partial bake, about
      twenty-five for B1 and the CUDA bake each, so allow an hour or more.
 
-4. **Run everything.**
-
-   ```sh
-   python3 tutorial/tests/run_all.py
-   PYTHONPATH=tutorial/jupyter python3 -m pytest -q tutorial/tests
-   ```
+4. **Run everything:** `just check-all` (the pytest suites, the platform
+   smoke test and the replayed build, every notebook, and a whole hub). The
+   parts on their own: `just test`, `just check-platform`, `just check`
+   (`just check --only 5,7` for some notebooks), `just check-hub`.
 
    Run them on a quiet host. When other heavy Docker work shares the host,
-   run_all fails in ways that have nothing to do with the tutorial (SLURM
-   socket timeouts, runs hitting their walltime). Sort the failures:
+   the notebook run fails in ways that have nothing to do with the tutorial
+   (SLURM socket timeouts, runs hitting their walltime). Sort the failures:
 
-   - **An expected pattern isn't found** (`run_all.py`'s EXPECT and RERUN).
-     If cactup only reworded something, update the pattern, and the prose
-     that quotes it.
+   - **An expected pattern isn't found** (`tests/run_all.py`'s EXPECT and
+     RERUN). If cactup only reworded something, update the pattern, and the
+     prose that quotes it.
    - **Forbidden output** ("not precomputed", "the source tree has moved", a
      traceback, an `error:` in a cell not marked `--expect-fail`). That is a
      real problem: a bake miss, a catch-up mismatch, or a cactup regression.
@@ -93,8 +97,9 @@ the pin to the commit that carries the same tree.
 5. **Read the notebooks against the new outputs.** A passing run proves the
    commands work and the key lines appear. It doesn't prove the prose is
    still true. For every item on step 1's list, find the notebooks it
-   touches (the table below says where) and read their executed copies
-   (run_all's `in-order/`).
+   touches (the table below says where) and read their executed copies:
+   `in-order/` in the directory `just check` names at the end ("executed
+   notebooks:"; `just check --out DIR` picks it).
 
 6. **Review.** A notebook whose prose or cells changed goes through the
    tutorial's review: Reviewer A (fidelity and engineering) and Reviewer B

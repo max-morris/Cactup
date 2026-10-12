@@ -16,6 +16,11 @@ default:
 build *args:
     sh image/build.sh {{args}}
 
+# Move tutorial/cactup.pin to another cactup: `just pin master` (see UPDATING.md).
+[group('build')]
+pin commit:
+    sh tools/move-pin.sh {{commit}}
+
 # --- try it -----------------------------------------------------------------
 
 # Start the tutorial in a fresh container, as one attendee has it, and print its address.

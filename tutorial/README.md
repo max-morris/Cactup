@@ -24,6 +24,7 @@ just test         # the pytest suites (two minutes)
 just check        # every notebook, headless (an hour; `just check --only 3` for one)
 just check-hub    # a whole hub on this machine, checked end to end and in a browser
 just check-all    # all the checks
+just pin master   # move the tutorial to a newer cactup (needs cargo; see UPDATING.md)
 ```
 
 On the server (a checkout of this repository, Docker; see Deploying for the
@@ -50,8 +51,8 @@ just status             # the hub, Caddy and every attendee's container
 | `tests/` | pytest suites, the headless notebook runner `run_all.py`, and `hub/`: a hub brought up and checked end to end. `requirements.txt`: what the checks run with on the host. |
 | `justfile` | Every build, run, check and deploy command (`just` lists them); see Quick start. |
 | `cactup.pin` | The cactup commit the image is built from (binaries, installer, MDB); see `UPDATING.md`. |
-| `UPDATING.md` | How to move the pin to a newer cactup, and everything in the tutorial that depends on cactup's behavior. |
-| `tools/` | `check-cactup-usage.py`: checks every cactup command the tutorial runs against a cactup build. |
+| `UPDATING.md` | How to move the pin to a newer cactup (`just pin COMMIT`), and everything in the tutorial that depends on cactup's behavior. |
+| `tools/` | `check-cactup-usage.py`: checks every cactup command the tutorial runs against a cactup build. `move-pin.sh` (`just pin`): builds a new cactup, runs that check, and moves the pin. |
 | `SIZING.md` | What the machine needs per attendee, as measured, and how to check a provisioned one (`tools/sizing/`). |
 
 The tutorial machine itself is a regular MDB entry, `mdb/cactup-tutorial/`
