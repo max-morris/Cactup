@@ -53,7 +53,7 @@ the last milestone, for when that host is not at hand.
 | M1b | Serving, the locale trial, dependency file on a hit, audit mode, two-installation audit build | **passed the gate** at `6b8efb1` (four review rounds; audit builds GCC and Clang, 0 wrong) |
 | M1c | `cache stats/gc/verify`, size notice, the cache beside the installations, a knob per `[paths]` key; contract into `CLAUDE.md` with the merge | **passed the gate** at `01bd00a` (three review rounds) |
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
-| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews) and its follow-up at `05c67a3` |
+| M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews), its follow-ups at `05c67a3` and `e29e593` |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | M4 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; the build's summary line counts compiles kept out and points at it; a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others | **planned** (Max, 2026-10-11), after the current review closes; independent of M3b |
 | later | the CUDA compilers; the narrower key revisited with audit mode | not started |
@@ -1949,6 +1949,26 @@ sentence (about 30 opens a check, 1–2 ms a hit, 4–6 ms with a long
 without a reason (for `cache doctor`, M4); `PATH` is searched three times
 a hit.
 
+### After M3a, review 9 (on `e29e593`): SIGN-OFF by both
+
+A short review of the fixes after review 8. Both re-ran every earlier
+reproduction at `05c67a3` and `e29e593` (same outcomes, reason texts
+aside) and checked each change directly: a relative `LIBRARY_PATH` entry
+now keeps C and C++ out (GCC reads `./specs` through it); a bare
+`gfortran` with `.` after its place on `PATH` is cached, before it refused;
+the relocated GCC's `specs` place is watched; untried relative loader
+entries keep nothing out; a FIFO named `as` early on `PATH`, which hung
+the compile at `05c67a3`, does not. Taken right after, from the
+non-blocking findings: the reason names the variable whose entry the
+search went through (it said `PATH` or `LD_LIBRARY_PATH` for a
+`LIBRARY_PATH` entry); the configured machine directory from `--libdir`,
+`--exec-prefix`, `--prefix` and autoconf's defaults; one open without
+waiting (`O_NONBLOCK`) in place of a `stat` and an open; tests for both
+new behaviors; spec and comments. For Max: the `LIBRARY_PATH` refusal now
+keeps C and C++ out under `export LIBRARY_PATH=/x/lib:$LIBRARY_PATH` with
+the variable unset (only a `specs` file appearing and gone within one
+compile in the build's own directory is guarded; B).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -2165,8 +2185,7 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-A short review of the last fixes after review 8; then landing the branch
-on master (Max's go). Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
+Landing the branch on master (Max's go). Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
 miss, summed over compiles; about 2100 s of compiling): the cache's own time
 was 472 s at `a14f279` and 442 s with M3a, the Fortran check 32 s down to
 3.4 s; what is left is the C and C++ key and check, a preprocessor run each

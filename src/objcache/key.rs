@@ -1118,9 +1118,10 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
 /// prefixes named relatively (an empty entry is the working directory) lead
 /// to programs the compiler's identity does not watch, from one directory
 /// to the next; a library loaded or audited by a relative path is one no
-/// search shows. (A search for the compiler's programs or libraries that
-/// passes through the working directory, by a relative entry of `PATH` or
-/// `LD_LIBRARY_PATH`, rules the compiler out in `identity`.) A Fortran
+/// search shows. (A search for the compiler's programs, libraries or
+/// `specs` file that passes through the working directory, by a relative
+/// entry of `PATH`, `LD_LIBRARY_PATH` or `LIBRARY_PATH`, rules the compiler
+/// out in `identity`.) A Fortran
 /// compile's dependency run runs in a directory of its own: for it, also
 /// where its driver finds itself (by the name it is run by, or along `PATH`
 /// before it is found) and its `specs` file (`LIBRARY_PATH`). A hit
@@ -1715,8 +1716,8 @@ mod tests {
         let (gfortran, gcc) = (OsStr::new("gfortran"), OsStr::new("gcc"));
         assert_eq!(driver_led_elsewhere(gfortran, true, env(&[("PATH", "/usr/bin:/bin"), ("LIBRARY_PATH", "/opt/lib")])), None);
         assert!(driver_led_elsewhere(gfortran, true, env(&[("LIBRARY_PATH", ":/opt/lib")])).is_some_and(|why| why.starts_with("LIBRARY_PATH")));
-        // C and C++ read no `specs` file the key does not see: `LIBRARY_PATH`
-        // only finds that.
+        // For C and C++ the search for a `specs` file is judged by where it
+        // goes (`identity`), not here.
         assert_eq!(driver_led_elsewhere(gcc, false, env(&[("LIBRARY_PATH", ":/opt/lib")])), None);
         for compiler in [(gfortran, true), (gcc, false)] {
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("COMPILER_PATH", "/opt:lib")])).is_some());

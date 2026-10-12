@@ -5139,7 +5139,8 @@ fixed parts, so that the key does not change by accident:
   `PATH` (the assembler), and the places it looks for a `specs` file (its
   library prefixes, `LIBRARY_PATH`'s entries among them, and its machine's
   directory, which it does not list, both above the directory it is
-  installed in and under the prefix it was configured with, which a
+  installed in and under the library directory it was configured with
+  (`--libdir`, else `lib` under `--exec-prefix` or `--prefix`), which a
   relocated GCC still reads: one that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
   refuses to run (no permission, `noexec`; tried by starting it) is passed
   over, and one that fails to start otherwise rules the compiler out. For
@@ -5184,9 +5185,10 @@ fixed parts, so that the key does not change by accident:
   one on a local disk; on a network filesystem each open is a round trip,
   and so is each lookup of a place that is not there where negative
   lookups are not cached (`lookupcache=positive`). A search for a program the
-  driver runs, or for a library, that passes through the working
-  directory (an empty or relative entry of `PATH` or `LD_LIBRARY_PATH`
-  before what it finds) rules the compiler out: the compile writes that
+  driver runs, for a library or for a `specs` file that passes through the
+  working directory (an empty or relative entry of `PATH`,
+  `LD_LIBRARY_PATH` or `LIBRARY_PATH` before what it finds; the reason
+  names the variable) rules the compiler out: the compile writes that
   directory, so what comes and goes there cannot be told from its own
   writing (decision 18); one after what is found is never searched and
   keeps nothing out. (The loader searches all of `LD_LIBRARY_PATH` before
@@ -5204,9 +5206,9 @@ fixed parts, so that the key does not change by accident:
   `GCONV_PATH`, `LOCPATH` and the system's modules, are not followed;
   tried, two converters and two locales, each two objects; Cactus asks for
   none); and for Fortran, whose
-  dependency run runs in a directory of its own (§18.10), also such an
-  entry of `LIBRARY_PATH` (where the driver finds a `specs` file), a
-  compiler named by a relative path, and, for one named without a `/`
+  dependency run runs in a directory of its own (§18.10), also any such
+  entry of `LIBRARY_PATH` (where the driver finds a `specs` file, from that
+  directory too), a compiler named by a relative path, and, for one named without a `/`
   (which finds its own prefix along `PATH` from that directory too), such
   an entry of `PATH` before the compiler. The loader's tunables
   (`GLIBC_TUNABLES`) are among the variables a change of which has the
