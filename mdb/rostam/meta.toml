@@ -137,21 +137,34 @@ export PERL5LIB=$perl_stub${PERL5LIB:+:$PERL5LIB}
 # (conda-forge gcc, g++ and gfortran 13) and every ExternalLibrary come from a
 # conda-forge environment each user keeps at /work/$USER/spark-deps/env (the
 # flavor's optionlist names the same place as /work/@USER@/spark-deps/env).
-# Create it once, on a spark node, since it must be linux-aarch64:
-#
-#   mkdir -p /work/$USER/spark-deps && cd /work/$USER/spark-deps
-#   curl -Ls https://micro.mamba.pm/api/micromamba/linux-aarch64/latest \
-#       | tar -xj bin/micromamba
-#   export MAMBA_ROOT_PREFIX=/work/$USER/spark-deps/mamba
-#   ./bin/micromamba create -y -p /work/$USER/spark-deps/env -c conda-forge \
-#       gcc=13 gxx=13 gfortran=13 mpich 'hdf5=1.14.*=mpi_mpich*' gsl fftw \
-#       openblas liblapack yaml-cpp zlib libboost-devel libhwloc openssl \
-#       libjpeg-turbo cmake make perl pkg-config
-#
-# HDF5 is pinned to 1.14, the series the ET's HDF5 thorn knows.
+# The first build creates it, on the spark node it runs on, since it must be
+# linux-aarch64: env-build-setup fetches micromamba and solves the packages
+# below, which takes a few minutes. The packages it was made from are recorded
+# in env/.cactup-spec; when they change here, the next build installs them into
+# the environment in place (never removing it, since runs may be using it). A
+# lock keeps concurrent builds from doing this twice. HDF5 is pinned to 1.14,
+# the series the ET's HDF5 thorn knows.
 env-setup = """
 export PATH=/work/$USER/spark-deps/env/bin:/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/work/$USER/spark-deps/env/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+"""
+env-build-setup = """
+deps=/work/$USER/spark-deps
+spec='gcc=13 gxx=13 gfortran=13 mpich hdf5=1.14.*=mpi_mpich* gsl fftw openblas liblapack yaml-cpp zlib libboost-devel libhwloc openssl libjpeg-turbo cmake make perl pkg-config'
+if [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" != "$spec" ]; then
+    mkdir -p $deps || exit 1
+    (
+        flock 9
+        [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" = "$spec" ] && exit 0
+        if [ ! -x $deps/bin/micromamba ]; then
+            curl -fsSL https://micro.mamba.pm/api/micromamba/linux-aarch64/latest | tar -xj -C $deps bin/micromamba || exit 1
+        fi
+        if [ -d $deps/env/conda-meta ]; then verb=install; else verb=create; fi
+        echo "Setting up the conda-forge environment $deps/env ($verb; a few minutes)..."
+        MAMBA_ROOT_PREFIX=$deps/mamba $deps/bin/micromamba $verb -y -q -p $deps/env -c conda-forge $spec || exit 1
+        printf '%s' "$spec" > $deps/env/.cactup-spec
+    ) 9> $deps/.cactup-lock || exit 1
+fi
 """
 
 [scheduler]

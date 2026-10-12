@@ -1,8 +1,8 @@
 # rostam flavor "arm-cuda-native": a native aarch64 build for the DGX Spark
 # nodes (one NVIDIA GB10, sm_121, per node; CUDA 13.0 from the system).
 # Compilers and ExternalLibraries come from the conda-forge environment the
-# arm-conda universe puts first on PATH, /work/@USER@/spark-deps/env (see
-# [universes.arm-conda] in meta.toml for how to create it). Build on a spark
+# arm-conda universe puts first on PATH, /work/@USER@/spark-deps/env, which the
+# first build creates (see [universes.arm-conda] in meta.toml). Build on a spark
 # node, with an aarch64 cactup: `cactup build run --flavor arm-cuda-native`.
 #
 # The CUDA settings follow x86-cuda-image.toml (see the comments there for
