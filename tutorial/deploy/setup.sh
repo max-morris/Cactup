@@ -6,7 +6,8 @@
 # - deploy/.env: made from .env.example, with DOMAIN (this machine's name)
 #   and the way attendees reach it: when something already serves HTTPS here
 #   (port 443 taken), COMPOSE_PROFILES=plain behind it; otherwise Caddy does
-#   TLS itself (TLS=auto, Let's Encrypt).
+#   TLS itself (TLS=auto, Let's Encrypt). It asks for HUB_ADMINS while that
+#   is empty.
 # - Docker access for you (the docker group).
 # - The session token's directory and group (SHARED_DIR, SHARED_GID).
 # - With plain behind Apache (Debian's apache2): `sh setup.sh apache` (on
@@ -18,6 +19,8 @@ set -eu
 
 deploy=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$deploy"
+# a2enmod and apache2ctl live there, off a user's PATH on Debian.
+PATH=$PATH:/usr/sbin:/sbin
 sudo=sudo
 [ "$(id -u)" -ne 0 ] || sudo=
 user=$(id -un)
@@ -141,6 +144,21 @@ if [ ! -f .env ]; then
     fi
 fi
 
+# The hub's admins: usernames on the hub (the authenticator's rule), whose
+# accounts `just account` makes.
+while [ -z "$(get HUB_ADMINS)" ] && [ -t 0 ]; do
+    suggest=$(printf '%s' "$user" | tr 'A-Z' 'a-z')
+    printf '%s\n' "$suggest" | grep -Eqx '[a-z][a-z0-9-]{1,31}' || suggest=
+    printf 'The hub'"'"'s admins: usernames on the hub, comma-separated [%s]: ' "$suggest"
+    read -r admins || break
+    admins=$(printf '%s' "${admins:-$suggest}" | sed 's/^ *//; s/ *$//; s/ *, */,/g' | tr 'A-Z' 'a-z')
+    if printf '%s\n' "$admins" | grep -Eqx '[a-z][a-z0-9-]{1,31}(,[a-z][a-z0-9-]{1,31})*'; then
+        put HUB_ADMINS "$admins"
+    else
+        echo "  each: a lowercase letter, then 1 to 31 lowercase letters, digits or dashes"
+    fi
+done
+
 # -- Docker ---------------------------------------------------------------------------
 rootless=no
 if docker info > /dev/null 2>&1; then
@@ -178,14 +196,23 @@ fi
 echo "setup: the session token lives in $shared"
 
 # -- the web server in front --------------------------------------------------------------
+front=ok
 if [ "$(get COMPOSE_PROFILES)" = plain ] && systemctl is-active -q apache2 2>/dev/null; then
     # A process of its own: in a function called before ||, set -e is off.
-    sh "$deploy/setup.sh" apache || echo "setup: the rest is done; Apache's part is left (above)" >&2
+    sh "$deploy/setup.sh" apache || front=failed
 elif [ "$(get COMPOSE_PROFILES)" = plain ]; then
     echo "setup: COMPOSE_PROFILES=plain: point the web server in front at 127.0.0.1:$(get PLAIN_PORT) (README: TLS)"
 fi
 
 echo
-echo "Check deploy/.env (HUB_ADMINS, at least), then:"
+if [ "$front" = failed ]; then
+    echo "setup: all done but Apache's part, which failed (above): fix that, then 'sh deploy/setup.sh apache'" >&2
+fi
+echo "Check deploy/.env, then:"
 [ "$relogin" = no ] || echo "  log out and in again (new groups)"
 echo "  just up"
+for admin in $(get HUB_ADMINS | tr ',' ' '); do
+    echo "  just account $admin"
+done
+echo "  just token"
+[ "$front" = ok ]
