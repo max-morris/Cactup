@@ -1,0 +1,96 @@
+# rostam flavor "arm-cuda-native": a native aarch64 build for the DGX Spark
+# nodes (one NVIDIA GB10, sm_121, per node; CUDA 13.0 from the system).
+# Compilers and ExternalLibraries come from the conda-forge environment the
+# arm-conda universe puts first on PATH, /work/@USER@/spark-deps/env (see
+# [universes.arm-conda] in meta.toml for how to create it). Build on a spark
+# node, with an aarch64 cactup: `cactup build run --flavor arm-cuda-native`.
+#
+# The CUDA settings follow x86-cuda-image.toml (see the comments there for
+# why each flag is needed); what differs is the architecture, and that AMReX
+# is built by Cactus for it rather than prebuilt.
+
+[cactup]
+universe    = "arm-conda"
+description = "native aarch64 build for the GB10 (sm_121) spark nodes"
+
+[cactup.runs-on]
+queues = ["spark"]
+gpu    = true
+
+[options]
+# cactup requires VERSION (emitted first; a change forces a full rebuild).
+VERSION = "arm-cuda-native-2026-10-12"
+
+CPP = "cpp"
+CC  = "gcc"
+CXX = "g++"
+F90 = "gfortran"
+F77 = "gfortran"
+# The device link of the relocatable device code goes through nvcc.
+LD  = "nvcc --forward-unknown-to-host-compiler -ccbin=g++"
+
+CXXFLAGS = "-O2 -g -std=c++17"
+CFLAGS   = "-O2 -g"
+F90FLAGS = "-O2 -g -fallow-argument-mismatch -fallow-invalid-boz -ffixed-line-length-none -fcray-pointer"
+F77FLAGS = "-O2 -g -fallow-argument-mismatch -fallow-invalid-boz -ffixed-line-length-none -fcray-pointer"
+
+LDFLAGS = "-rdynamic"
+LIBS    = "curand gfortran"
+# Cactus turns LIBDIRS into -L and -Wl,-rpath, so the executable finds the
+# environment's libraries (MPICH, HDF5, its newer libstdc++) without
+# LD_LIBRARY_PATH.
+LIBDIRS = "/usr/local/cuda/lib64 /work/@USER@/spark-deps/env/lib"
+PTHREADS_DIR = "NO_BUILD"
+
+ac_cv_prog_cc_c23 = "no"
+LD_OPENMP_FLAGS   = "-fopenmp"
+OPENMP = "yes"
+
+DEBUG   = "no"
+PROFILE = "no"
+
+CUCC      = "nvcc"
+CUCCFLAGS = "-x cu -ccbin=g++ -std=c++17 -O2 -g -gencode=arch=compute_121,code=sm_121 -diag-suppress=20012 -Xcompiler -fopenmp --expt-relaxed-constexpr --extended-lambda --relocatable-device-code=true"
+
+CPPFLAGS       = "-DSIMD_DISABLE"
+DISABLE_INT16  = "yes"
+DISABLE_REAL16 = "yes"
+
+AMREX_DIR         = "BUILD"
+AMREX_ENABLE_CUDA = "yes"
+# AMReX 25.11's CMake drops any architecture of 10.0 or above (it goes through
+# FindCUDA's single-digit arch parser) and then falls back to its "Common"
+# list, which starts at compute_60, which CUDA 13 no longer supports. So it
+# is told sm_90, which CUDA 13 accepts, and gets sm_121 from CUCCFLAGS, which
+# it compiles with as well.
+AMREX_CMAKE_CUDA_ARCHITECTURES = "90"
+
+MPI_DIR      = "/work/@USER@/spark-deps/env"
+MPI_HOME     = "/work/@USER@/spark-deps/env"
+MPI_INC_DIRS = "/work/@USER@/spark-deps/env/include"
+MPI_LIB_DIRS = "/work/@USER@/spark-deps/env/lib"
+MPI_LIBS     = "mpicxx mpifort mpi"
+
+# Given explicitly: the thorn's detect.sh otherwise asks h5cc for a static
+# link line, and conda-forge ships HDF5 (pinned to 1.14) as shared libraries
+# only.
+HDF5_DIR            = "/work/@USER@/spark-deps/env"
+HDF5_INC_DIRS       = "/work/@USER@/spark-deps/env/include"
+HDF5_LIB_DIRS       = "/work/@USER@/spark-deps/env/lib"
+HDF5_LIBS           = "hdf5_hl_fortran hdf5_fortran hdf5_hl hdf5"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_ENABLE_CXX     = "no"
+
+ZLIB_DIR     = "/work/@USER@/spark-deps/env"
+GSL_DIR      = "/work/@USER@/spark-deps/env"
+FFTW3_DIR    = "/work/@USER@/spark-deps/env"
+BOOST_DIR    = "/work/@USER@/spark-deps/env"
+HWLOC_DIR    = "/work/@USER@/spark-deps/env"
+LIBJPEG_DIR  = "/work/@USER@/spark-deps/env"
+OPENSSL_DIR  = "/work/@USER@/spark-deps/env"
+YAML_CPP_DIR = "/work/@USER@/spark-deps/env"
+
+BLAS_DIR    = "/work/@USER@/spark-deps/env/lib"
+BLAS_LIBS   = "openblas"
+LAPACK_DIR  = "/work/@USER@/spark-deps/env/lib"
+LAPACK_LIBS = "lapack"
