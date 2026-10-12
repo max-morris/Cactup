@@ -189,7 +189,7 @@ fn helper_env() -> String {
 /// executable regular file of that name on `PATH` — relative entries and
 /// empty ones (the working directory) included, as `execvp` includes them.
 pub fn find_program(program: &OsStr) -> Res<PathBuf> {
-    search_path(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: false, through_cwd: None, searching: "PATH" })?
+    search_path(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: false, through_cwd: None })?
         .with_context(|| format!("{} is not on PATH", program.to_string_lossy()))
 }
 
@@ -198,7 +198,6 @@ pub fn find_program(program: &OsStr) -> Res<PathBuf> {
 /// one: the working directory) is another program, or none, from each
 /// compile's directory: a helper found so rules the compiler out.
 fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
-    watched.searching = "PATH";
     let absolute = |path: &Path| std::path::absolute(path).with_context(|| format!("Failed to resolve {}", path.display()));
     if program.as_bytes().contains(&b'/') {
         return absolute(Path::new(program)).map(Some);
@@ -215,7 +214,7 @@ fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
             }
             return absolute(&place).map(Some);
         }
-        watched.passed(&place);
+        watched.passed(&place, "PATH");
     }
     Ok(None)
 }
@@ -283,9 +282,55 @@ fn configured_libdir(driver: &Path) -> PathBuf {
     super::key::in_english(&mut command);
     let said = command.arg("-v").stdin(Stdio::null()).stdout(Stdio::null()).output().map(|out| out.stderr).unwrap_or_default();
     let said = String::from_utf8_lossy(&said);
-    let line = said.lines().find(|line| line.starts_with("Configured with: ")).unwrap_or_default();
-    let option = |name: &str| line.split_whitespace().find_map(|word| word.strip_prefix(name)).map(PathBuf::from);
-    option("--libdir=").unwrap_or_else(|| option("--exec-prefix=").or_else(|| option("--prefix=")).unwrap_or_else(|| PathBuf::from("/usr/local")).join("lib"))
+    let line = said.lines().find_map(|line| line.strip_prefix("Configured with: ")).unwrap_or_default();
+    libdir_from_configure(line)
+}
+
+/// The library directory a configure command line `line` sets, as configure
+/// reads it: `--name=value` or `--name value`, the last one given winning,
+/// values in the shell's quotes, `${prefix}` and `${exec_prefix}` in them
+/// standing for what those are.
+fn libdir_from_configure(line: &str) -> PathBuf {
+    // The words, as the shell split them.
+    let mut words = Vec::new();
+    let (mut word, mut quote, mut any) = (String::new(), None, false);
+    for c in line.chars() {
+        match (quote, c) {
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                any = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (None, c) if c.is_whitespace() => {
+                if any {
+                    words.push(std::mem::take(&mut word));
+                }
+                any = false;
+            }
+            (_, c) => {
+                word.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        words.push(word);
+    }
+    let option = |name: &str| {
+        let mut value = None;
+        for (at, word) in words.iter().enumerate() {
+            if let Some(given) = word.strip_prefix(&format!("{name}=")) {
+                value = Some(given.to_owned());
+            } else if word == name {
+                value = words.get(at + 1).cloned();
+            }
+        }
+        value
+    };
+    let prefix = option("--prefix").unwrap_or_else(|| "/usr/local".to_owned());
+    let exec_prefix = option("--exec-prefix").unwrap_or_else(|| "${prefix}".to_owned()).replace("${prefix}", &prefix);
+    let libdir = option("--libdir").unwrap_or_else(|| "${exec_prefix}/lib".to_owned());
+    PathBuf::from(libdir.replace("${exec_prefix}", &exec_prefix).replace("${prefix}", &prefix))
 }
 
 /// Does `program` start? Not where the system refuses to run it. Started
@@ -312,20 +357,19 @@ pub(super) struct Watched<'a> {
     /// which each compile finds again from its own directory).
     helper: bool,
     /// The first place passed over by a relative name: the search went
-    /// through the working directory, by an entry of the variable named.
-    through_cwd: Option<(PathBuf, &'static str)>,
-    /// The variable whose entries the search going on walks.
-    searching: &'static str,
+    /// through the working directory, by an entry of what is named.
+    through_cwd: Option<(PathBuf, String)>,
 }
 
 impl Watched<'_> {
     /// A place searched and passed over: one that holds nothing must go on
     /// holding nothing, and anything there (a directory, a file the search
     /// rejected) must stay as it is.
-    fn passed(&mut self, place: &Path) {
+    /// `via`: what the search walked (`PATH`, `LD_LIBRARY_PATH`, a
+    /// program's `RUNPATH`), for the reason a relative place gives.
+    fn passed(&mut self, place: &Path, via: &str) {
         if place.is_relative() {
-            let searching = self.searching;
-            self.through_cwd.get_or_insert_with(|| (place.to_owned(), searching));
+            self.through_cwd.get_or_insert_with(|| (place.to_owned(), via.to_owned()));
         }
         match Seen::of(place) {
             Ok(seen) => self.files.push(seen),
@@ -436,7 +480,7 @@ pub(super) fn identify_watching(cc_dir: &Path, program: &OsStr) -> Res<(Compiler
     let mut absent = Vec::new();
     let examined = fs::create_dir_all(&memo_dir)
         .with_context(|| format!("Failed to create {}", memo_dir.display()))
-        .and_then(|()| examine(&path, name, &memo_dir, &mut Watched { files: &mut files, absent: &mut absent, helper: true, through_cwd: None, searching: "PATH" }));
+        .and_then(|()| examine(&path, name, &memo_dir, &mut Watched { files: &mut files, absent: &mut absent, helper: true, through_cwd: None }));
     // Each looked at by every compile: once is enough.
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files.dedup();
@@ -526,7 +570,6 @@ fn ask(program: &Path, args: &[&str]) -> Res<String> {
 /// working directory) is one each compile's directory may have another of:
 /// that compiler is not one the cache works with.
 fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> {
-    watched.searching = "LD_LIBRARY_PATH";
     let out = Command::new(program)
         .arg("--version")
         .env("LD_TRACE_LOADED_OBJECTS", "1")
@@ -559,18 +602,21 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
     // `  1234:\t find library=libz.so.1 [0]; searching`, then its search
     // paths and tries, the last try the one found.
     let said = String::from_utf8_lossy(&out.stderr);
-    let mut tries: Vec<PathBuf> = Vec::new();
-    let settle = |tries: &mut Vec<PathBuf>, watched: &mut Watched| -> Res<()> {
-        if let Some(found) = tries.pop() {
+    // Each try with what the loader said it was walking: `search path=…
+    // (LD_LIBRARY_PATH)`, `(RUNPATH from file=…)`, `(RPATH from file=…)`.
+    let mut tries: Vec<(PathBuf, String)> = Vec::new();
+    let mut via = String::from("the loader's search path");
+    let settle = |tries: &mut Vec<(PathBuf, String)>, watched: &mut Watched| -> Res<()> {
+        if let Some((found, found_via)) = tries.pop() {
             // Found nowhere (a preloaded library that is not there): the
             // last try was passed over too.
             if fs::metadata(&found).is_err() {
-                watched.passed(&found);
+                watched.passed(&found, &found_via);
             } else if found.is_relative() {
                 bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), found.display());
             }
-            for place in tries.drain(..) {
-                watched.passed(&place);
+            for (place, place_via) in tries.drain(..) {
+                watched.passed(&place, &place_via);
             }
         }
         Ok(())
@@ -580,18 +626,25 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
         if line.starts_with("find library=") {
             settle(&mut tries, watched)?;
         } else if let Some(file) = line.strip_prefix("trying file=") {
-            tries.push(PathBuf::from(file));
-        } else if let Some(paths) = line.strip_prefix("search path=") {
-            let paths = paths.split('\t').next().unwrap_or_default();
+            tries.push((PathBuf::from(file), via.clone()));
+        } else if let Some(said) = line.strip_prefix("search path=") {
+            let (paths, label) = said.split_once('\t').unwrap_or((said, ""));
+            via = match label.trim().trim_start_matches('(').trim_end_matches(')') {
+                "" => String::from("the loader's search path"),
+                label => match label.split_once(" from file=") {
+                    Some((kind, file)) => format!("the {kind} of {file}"),
+                    None => label.to_owned(),
+                },
+            };
             // One that is no directory is not tried again either. (A relative
             // one is judged by whether the loader tries it: `trying file=`.)
             for dir in paths.split(':').filter(|dir| !dir.is_empty() && Path::new(dir).is_absolute()) {
                 if !fs::metadata(dir).is_ok_and(|meta| meta.is_dir()) {
-                    watched.passed(Path::new(dir));
+                    watched.passed(Path::new(dir), &via);
                 }
             }
         } else if let Some(cache) = line.strip_prefix("search cache=") {
-            watched.passed(Path::new(cache));
+            watched.passed(Path::new(cache), "the loader's cache");
         }
     }
     settle(&mut tries, watched)?;
@@ -601,7 +654,7 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
         bail!("{} is run by a dynamic loader cactup cannot follow (not glibc's)", program.display());
     }
     // The system's own preload list, read by every loader that starts.
-    watched.passed(Path::new("/etc/ld.so.preload"));
+    watched.passed(Path::new("/etc/ld.so.preload"), "the loader's preload list");
     // A library preloaded by its path that is not there: the loader says so
     // and goes on, and loads it once it is there. Named through a token the
     // loader expands (`$LIB`), it is watched where the loader would look.
@@ -612,7 +665,7 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
                 true => expand_tokens(program, &entry)?,
                 false => entry.into_owned(),
             };
-            watched.passed(Path::new(&entry));
+            watched.passed(Path::new(&entry), "LD_PRELOAD");
         }
     }
     Ok(libraries)
@@ -828,14 +881,14 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
                         // A GCC built `--with-as` runs that assembler,
                         // looking nowhere first.
                         match dirs.iter().position(|dir| dir.join(helper) == file) {
-                            Some(at) => dirs[..at].iter().for_each(|dir| watched.passed(&dir.join(helper))),
+                            Some(at) => dirs[..at].iter().for_each(|dir| watched.passed(&dir.join(helper), "the driver's program prefixes")),
                             None if *helper == "as" => {}
                             None => bail!("{} finds {} where it does not say it looks", path.display(), file.display()),
                         }
                         Some(file.to_owned())
                     }
                     name => {
-                        dirs.iter().for_each(|dir| watched.passed(&dir.join(helper)));
+                        dirs.iter().for_each(|dir| watched.passed(&dir.join(helper), "the driver's program prefixes"));
                         search_path(name.as_os_str(), watched)?
                     }
                 };
@@ -897,14 +950,13 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
             machines.push(configured_libdir(path).join("gcc").join(ask(path, &["-dumpmachine"])?.trim()));
             for machine in machines.iter().filter(|dir| dir.is_absolute()) {
                 if machine.join("specs") != file {
-                    watched.passed(&machine.join("specs"));
+                    watched.passed(&machine.join("specs"), "the driver's own prefix");
                 }
             }
             let before = libraries.iter().position(|dir| dir.join("specs") == file).unwrap_or(libraries.len());
             // (A relative one, from a relative entry of `LIBRARY_PATH`, is a
             // search through the working directory: below.)
-            watched.searching = "LIBRARY_PATH";
-            libraries[..before].iter().for_each(|dir| watched.passed(&dir.join("specs")));
+            libraries[..before].iter().for_each(|dir| watched.passed(&dir.join("specs"), "LIBRARY_PATH"));
             if file.is_absolute() {
                 watched.files.extend(Seen::of(file));
                 let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;
@@ -938,7 +990,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
     }
     let mut again = Vec::new();
     for program in &programs {
-        again.extend(loaded_libraries(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true, through_cwd: None, searching: "PATH" })?);
+        again.extend(loaded_libraries(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true, through_cwd: None })?);
     }
     again.sort();
     again.dedup();
@@ -962,9 +1014,9 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
     // compile writes: what appears there while it runs would not be seen
     // (decision 18). One that comes after what is found is never searched,
     // and keeps nothing out.
-    if let Some((place, variable)) = &watched.through_cwd {
+    if let Some((place, via)) = &watched.through_cwd {
         bail!(
-            "{} looks in the working directory first ({}: an empty or relative entry of {variable})",
+            "{} looks in the working directory first ({}: an empty or relative entry of {via})",
             path.display(),
             place.display()
         );
@@ -1294,9 +1346,23 @@ mod tests {
         assert!(expand_tokens(&cc1, "/opt/$UNKNOWN/w.so").is_err());
     }
 
+    /// The library directory a configure line sets, as configure reads it.
+    #[test]
+    fn a_configure_line_says_where_the_libraries_go() {
+        let at = |line: &str| libdir_from_configure(line).display().to_string();
+        assert_eq!(at("../src/configure -v --prefix=/usr --libdir=/usr/lib"), "/usr/lib");
+        assert_eq!(at("configure --prefix=/opt/gcc-14"), "/opt/gcc-14/lib");
+        assert_eq!(at("configure --prefix /opt/gcc-14 --exec-prefix=/opt/x"), "/opt/x/lib");
+        assert_eq!(at("configure --prefix=/a --libdir='${exec_prefix}/lib64'"), "/a/lib64");
+        assert_eq!(at("configure --prefix=/a --prefix=/b"), "/b/lib", "the last one given wins");
+        assert_eq!(at("configure --with-pkgversion='Debian 14.2.0-19' --prefix=\"/opt/my gcc\""), "/opt/my gcc/lib");
+        assert_eq!(at("configure"), "/usr/local/lib");
+    }
+
     /// GCC reads a `specs` file from its machine's directory under the
     /// library directory it was configured with, even relocated, without
-    /// listing it: that place is watched.
+    /// listing it: that place is watched, for a relocated copy too (where it
+    /// is not the directory above the one the copy is installed in).
     #[test]
     fn the_configured_machine_directory_is_watched_for_a_specs_file() {
         let Some(gcc) = gcc() else {
@@ -1309,7 +1375,11 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let (_, watch) = identify_watching(tmp.path(), OsStr::new("gcc")).unwrap();
+        let driver = gcc_under(&gcc, &tmp.path().join("prefix"), None);
+        assert!(!machine.starts_with(tmp.path()));
+        let memo = tmp.path().join("memo");
+        fs::create_dir(&memo).unwrap();
+        let (_, watch) = identify_watching(&memo, driver.as_os_str()).unwrap();
         assert!(watch.absent.contains(&machine), "{} not among {:?}", machine.display(), watch.absent);
     }
 
@@ -1352,7 +1422,7 @@ mod tests {
         // loader tries before the one it found.
         let (_, watch) = identify_watching(memo.path(), OsStr::new("gcc")).unwrap();
         let cc1 = PathBuf::from(ask(&first.path, &["-print-prog-name=cc1"]).unwrap().trim());
-        let mut tried = Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true, through_cwd: None, searching: "PATH" };
+        let mut tried = Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true, through_cwd: None };
         let libraries = loaded_libraries(&cc1, &mut tried).unwrap();
         let library = libraries.iter().find(|library| !library.to_string_lossy().contains("ld-linux") && !library.to_string_lossy().contains("libc.so")).unwrap();
         fs::create_dir("libs").unwrap();

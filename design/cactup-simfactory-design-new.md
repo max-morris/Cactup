@@ -5140,8 +5140,9 @@ fixed parts, so that the key does not change by accident:
   library prefixes, `LIBRARY_PATH`'s entries among them, and its machine's
   directory, which it does not list, both above the directory it is
   installed in and under the library directory it was configured with
-  (`--libdir`, else `lib` under `--exec-prefix` or `--prefix`), which a
-  relocated GCC still reads: one that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
+  (`--libdir`, else `lib` under `--exec-prefix` or `--prefix`, else
+  `/usr/local/lib`, as configure reads its line), which a relocated GCC
+  still reads: one that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
   refuses to run (no permission, `noexec`; tried by starting it) is passed
   over, and one that fails to start otherwise rules the compiler out. For
   libraries, the places the loader says it tried (glibc's `LD_DEBUG=libs`,
@@ -5188,7 +5189,8 @@ fixed parts, so that the key does not change by accident:
   driver runs, for a library or for a `specs` file that passes through the
   working directory (an empty or relative entry of `PATH`,
   `LD_LIBRARY_PATH` or `LIBRARY_PATH` before what it finds; the reason
-  names the variable) rules the compiler out: the compile writes that
+  names what the search walked, a program's `RPATH` or `RUNPATH` too) rules
+  the compiler out: the compile writes that
   directory, so what comes and goes there cannot be told from its own
   writing (decision 18); one after what is found is never searched and
   keeps nothing out. (The loader searches all of `LD_LIBRARY_PATH` before
