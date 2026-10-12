@@ -1,8 +1,9 @@
-# db1.hpc.lsu.edu BUILD submitscript (script "native"), chosen by the gpu
-# queue for configs built in the host universe, i.e. the native flavor.
+# db1.hpc.lsu.edu BUILD submitscript (script "default"), chosen by the gpu
+# queue for every flavor.
 #
-# Builds the native flavor on a compute node rather than the shared login
-# node: a whole node's 48 cores instead of a polite -j8. Mirrors qbd's
+# Builds on a compute node rather than the shared login node: a whole node's
+# 48 cores instead of a polite -j8. A Singularity flavor's build universe
+# wraps make in its own srun, which runs as a step of this job. Mirrors qbd's
 # buildsubmitscripts/gpu-partition.py, minus its --gres derivation: the gpu
 # partition bills only GPUs and caps nothing per GPU, so a build reserves
 # none.
@@ -22,7 +23,7 @@ lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
 # env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header. The build itself re-applies the build-phase
-# env-setup ([universes.host]) from its own frozen script, so this only has
+# env-setup (its build universe's) from its own frozen script, so this only has
 # to be enough to reach the cactup binary.
 lines.append(ENV_SETUP)
 
