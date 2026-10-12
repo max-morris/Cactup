@@ -1096,7 +1096,7 @@ for a given number of attendees, measured, is in `SIZING.md`.
 |---|---|
 | `deploy/compose.yaml` | The `hub` service, and Caddy as `caddy` (profile `tls`) or `caddy-plain` (profile `plain`). Two networks: `front` (Caddy and the hub) and `cactup-tutorial-users`, internal, for the attendees' containers. |
 | `deploy/hub/` | The hub's image: `quay.io/jupyterhub/jupyterhub:5.5.2` (the version the tutorial image's `jupyterhub-singleuser` has; they must match), DockerSpawner, the idle culler, and `cactup_cyol` (choose your own login, the token's rotator, the account tools, the cpuset assignment), all pinned. `jupyterhub_config.py` reads its settings from the environment. |
-| `deploy/caddy/` | One Caddyfile per mode: `auto`, `provided` (profile `tls`), `plain`; each imports `hub.caddy`, what every mode serves (the hub under `HUB_PATH`, redirects for the rest of the site). |
+| `deploy/caddy/` | One Caddyfile per mode: `auto`, `provided` (profile `tls`), `plain`; each imports `hub.caddy`, what every mode serves (the hub under `HUB_PATH`; the rest of the site proxied to `SITE_PROXY`, or redirected to the hub). |
 | `deploy/.env.example` | Every setting, explained. Copy it to `deploy/.env`. |
 | `deploy/token` | Shows the session token, big, for the room; `--rotate` makes a new one. |
 | `tests/hub/` | `run.sh` brings a hub up on this machine and runs `check_hub.py` against it (`--keep` leaves it up, `--down` removes it); `browse.sh` then looks at it in headless Chromium (screenshots); `check_hub.py` also checks a deployed hub. |
