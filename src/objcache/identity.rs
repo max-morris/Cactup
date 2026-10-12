@@ -91,8 +91,8 @@ pub struct Compiler {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub multilib: Vec<String>,
     /// For `nvcc`: a compile can run in a user and PID namespace of its own
-    /// here (`unshare` works), which makes its objects the same each time
-    /// (decision 24).
+    /// here (unprivileged user namespaces are allowed), which makes its
+    /// objects the same each time (decision 24).
     #[serde(default)]
     pub isolates: bool,
 }
@@ -1061,7 +1061,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
         hasher.feed(file_digest(&library)?.as_bytes());
         watched.files.push(Seen::of(&library)?);
     }
-    let isolates = family == Family::Nvcc && super::cuda::isolation().is_some();
+    let isolates = family == Family::Nvcc && super::cuda::isolation();
     let (relocates, locale_neutral) = match family {
         Family::Gfortran => (super::fortran::relocates(path, program, trial_dir), super::fortran::locale_neutral(path, program, trial_dir)),
         // The locale stays in the key: no trial for it here.

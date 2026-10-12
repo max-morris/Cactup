@@ -265,9 +265,9 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
         args.push(root.join("trial.o").into_os_string());
         args.push(root.join("src/trial.cu").into_os_string());
         args.extend(map_flags(&root.join("src/trial.cu"), &map));
-        let mut command = match isolate.then(isolation).flatten() {
-            Some(unshare) => isolated(&unshare, path, name, &args),
-            None => {
+        let mut command = match isolate {
+            true => isolated(path, name, &args),
+            false => {
                 let mut command = Command::new(path);
                 command.arg0(name).args(&args);
                 command
@@ -301,56 +301,139 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
     objects[0] == objects[1]
 }
 
-/// `unshare` (util-linux), where it can start a program in a user and PID
-/// namespace of its own here: tried once, by starting `true` so.
-pub fn isolation() -> Option<PathBuf> {
-    let unshare = identity::find_program(OsStr::new("unshare")).ok()?;
-    let works = Command::new(&unshare)
-        .args(ISOLATED)
-        .arg("true")
+/// Can a program be started in a user and PID namespace of its own here
+/// ([`isolated`])? Tried once, by starting `true` so.
+pub fn isolation() -> bool {
+    std::env::current_exe().is_ok_and(|me| isolation_by(&me))
+}
+
+/// [`isolation`], with `me` the cactup that is the namespace's init.
+fn isolation_by(me: &Path) -> bool {
+    let Ok(truth) = identity::find_program(OsStr::new("true")) else { return false };
+    isolated_by(me, &truth, OsStr::new("true"), &[])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success());
-    works.then_some(unshare)
+        .is_ok_and(|status| status.success())
 }
 
-/// How `unshare` is asked to start a CUDA compile: a user namespace (the
-/// user mapped to its root, which needs no privilege), a PID namespace with
-/// the first process forked into it, and that process killed if `unshare`
-/// is (a stop signal for the compile ends it all).
-const ISOLATED: &[&str] = &["--user", "--pid", "--fork", "--map-root-user", "--kill-child"];
-
 /// `program`, run as `arg0` with `args`, in a user and PID namespace of its
-/// own (decision 24): `unshare` starts this cactup as the namespace's first
-/// process ([`init`]), which starts `program`.
-pub fn isolated(unshare: &Path, program: &Path, arg0: &OsStr, args: &[OsString]) -> Command {
-    let mut command = Command::new(unshare);
-    command.args(ISOLATED);
-    command.arg(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cactup")));
+/// own (decision 24), through this cactup as the namespace's init
+/// ([`init`]). The namespaces are made in the child between fork and exec
+/// (`unshare(2)` by `rustix`: a raw system call, no C library): a user
+/// namespace mapping this user and group to themselves (needs no
+/// privilege), and a PID namespace, which the next process the child starts
+/// is the first of.
+pub fn isolated(program: &Path, arg0: &OsStr, args: &[OsString]) -> Command {
+    isolated_by(&std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cactup")), program, arg0, args)
+}
+
+/// [`isolated`], with `me` the cactup that is the namespace's init.
+fn isolated_by(me: &Path, program: &Path, arg0: &OsStr, args: &[OsString]) -> Command {
+    let (uid, gid) = (rustix::process::getuid().as_raw(), rustix::process::getgid().as_raw());
+    // Made before the fork: nothing is allocated after it.
+    let uid_map = format!("{uid} {uid} 1\n").into_bytes();
+    let gid_map = format!("{gid} {gid} 1\n").into_bytes();
+    let mut command = Command::new(me);
     command.arg(super::INIT_VERB).arg(program).arg(arg0).args(args);
+    let write = |path: &std::ffi::CStr, bytes: &[u8]| -> std::io::Result<()> {
+        let file = rustix::fs::open(path, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())?;
+        rustix::io::write(&file, bytes)?;
+        Ok(())
+    };
+    // SAFETY: runs in the forked child before exec, where only
+    // async-signal-safe work may be done: raw system calls (rustix makes
+    // them without the C library) on buffers made before the fork. The
+    // child has one thread, which `unshare` of a user namespace needs, and
+    // no file descriptor table is unshared.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWUSER | rustix::thread::UnshareFlags::NEWPID)?;
+            write(c"/proc/self/setgroups", b"deny")?;
+            write(c"/proc/self/uid_map", &uid_map)?;
+            write(c"/proc/self/gid_map", &gid_map)?;
+            Ok(())
+        });
+    }
     command
 }
 
-/// Be the first process of a CUDA compile's PID namespace: start the
-/// program (`<program> <arg0> <args…>`), reap whatever it leaves behind (the
-/// first process adopts every orphan), and end as it ended. A signal it
-/// died of becomes the exit status `128 + n`: the first process of a PID
-/// namespace cannot be ended by a signal it has no handler for.
-pub fn init(mut args: impl Iterator<Item = OsString>) -> i32 {
+/// What [`init`] tells the process it starts that it is the namespace's
+/// first.
+const FIRST_ARG: &str = "--first";
+
+/// The first process of the PID namespace, while it runs (to end it).
+static FIRST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Run a CUDA compile's program in its PID namespace: `<program> <arg0>
+/// <args…>`, as [`isolated`] starts this. Outside the namespace (the
+/// process [`isolated`] made it in), start this again, which is the
+/// namespace's first process, and end as it ends; a stop signal kills it,
+/// and with it everything in the namespace. As the first process, start the
+/// program, reap whatever it leaves (the first process adopts every
+/// orphan), and end as it ended: a signal it died of becomes the exit
+/// status `128 + n`, since the first process of a PID namespace cannot be
+/// ended by a signal it has no handler for.
+pub fn init(args: impl Iterator<Item = OsString>) -> i32 {
+    let mut args: Vec<OsString> = args.collect();
+    let first = args.first().is_some_and(|arg| arg == FIRST_ARG);
+    if first {
+        args.remove(0);
+        // Only the namespace's first process may go on: anything else would
+        // start itself again, and again.
+        if rustix::process::getpid().as_raw_nonzero().get() != 1 {
+            eprintln!("cactup: the init of a CUDA compile is not the first process of its namespace");
+            return 127;
+        }
+    } else {
+        let Ok(me) = std::env::current_exe() else { return 127 };
+        let child = match Command::new(me).arg(super::INIT_VERB).arg(FIRST_ARG).args(&args).spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                eprintln!("cactup: cannot start a CUDA compile in its namespace: {e}");
+                return 127;
+            }
+        };
+        FIRST.store(child.id() as i32, Ordering::SeqCst);
+        for signal in [libc_signal::SIGHUP, libc_signal::SIGINT, libc_signal::SIGQUIT, libc_signal::SIGTERM] {
+            let on_signal = || {
+                if let Some(first) = rustix::process::Pid::from_raw(FIRST.load(Ordering::SeqCst)) {
+                    let _ = rustix::process::kill_process(first, rustix::process::Signal::KILL);
+                }
+            };
+            // SAFETY: the handler reads an atomic and makes a raw `kill`
+            // system call: async-signal-safe.
+            let _ = unsafe { signal_hook::low_level::register(signal, on_signal) };
+        }
+        return wait_for(child.id() as i32);
+    }
+    let mut args = args.into_iter();
     let (Some(program), Some(arg0)) = (args.next(), args.next()) else {
         eprintln!("cactup: the init of a CUDA compile was run without a program");
         return 2;
     };
-    let child = match Command::new(&program).arg0(&arg0).args(args).spawn() {
-        Ok(child) => child,
+    match Command::new(&program).arg0(&arg0).args(args).spawn() {
+        Ok(child) => wait_for(child.id() as i32),
         Err(e) => {
             eprintln!("cactup: {}: {e}", Path::new(&program).display());
-            return 127;
+            127
         }
-    };
-    let ours = rustix::process::Pid::from_raw(child.id() as i32);
+    }
+}
+
+/// Signal numbers, without the C library.
+mod libc_signal {
+    pub const SIGHUP: i32 = 1;
+    pub const SIGINT: i32 = 2;
+    pub const SIGQUIT: i32 = 3;
+    pub const SIGTERM: i32 = 15;
+}
+
+/// Wait for the process `pid`, reaping any other child on the way, and say
+/// how it ended as an exit status.
+fn wait_for(pid: i32) -> i32 {
+    let ours = rustix::process::Pid::from_raw(pid);
     loop {
         match rustix::process::waitpid(None, rustix::process::WaitOptions::empty()) {
             Ok(Some((pid, status))) if Some(pid) == ours => {
@@ -567,6 +650,40 @@ mod tests {
         assert!(passes[0].iter().any(|word| word == "-I/packages/cuda/13.2.1/bin/../targets/x86_64-linux/include"));
         // `cicc` by the path `nvcc` gives it, `$CICC_PATH` taken from above.
         assert_eq!(run.programs(), ["/packages/cuda/13.2.1/bin/../nvvm/bin/cicc", "cudafe++", "fatbinary", "ptxas"]);
+    }
+
+    /// The built cactup, where `cargo test` has built it beside the tests.
+    fn cactup() -> Option<PathBuf> {
+        let me = std::env::current_exe().ok()?;
+        let built = me.parent()?.parent()?.join("cactup");
+        built.is_file().then_some(built)
+    }
+
+    /// A program run isolated is the second process of a PID namespace of
+    /// its own, as this user; and the init refuses to be anything but the
+    /// first process of one (else it would start itself again, and again).
+    #[test]
+    fn runs_a_program_in_a_namespace_of_its_own() {
+        let Some(me) = cactup() else {
+            eprintln!("skipped: no built cactup beside the tests");
+            return;
+        };
+        if !isolation_by(&me) {
+            eprintln!("skipped: no user namespaces here");
+            return;
+        }
+        let sh = identity::find_program(OsStr::new("sh")).unwrap();
+        let out = isolated_by(&me, &sh, OsStr::new("sh"), &["-c".into(), "echo $$ $(id -u)".into()]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(said.trim(), format!("2 {}", rustix::process::getuid().as_raw()));
+        // Its exit status passes through.
+        let out = isolated_by(&me, &sh, OsStr::new("sh"), &["-c".into(), "exit 3".into()]).status().unwrap();
+        assert_eq!(out.code(), Some(3));
+        // Run plainly, outside any namespace: it stops at once.
+        let out = Command::new(&me).arg(super::super::INIT_VERB).arg(&sh).arg("sh").arg("-c").arg("true").output().unwrap();
+        assert_eq!(out.status.code(), Some(127));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("not the first process"));
     }
 
     #[test]

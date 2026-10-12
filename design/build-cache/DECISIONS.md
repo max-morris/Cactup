@@ -415,7 +415,15 @@ Asked as seven questions with options; the answers, in Max's numbering.
     sites), `nvcc` compiles are not cached (the fallback first proposed,
     storing an object whose module ID shows no process ID, does not hold:
     the ID can lack it while internal names elsewhere carry it, tried).
-    Audit mode checks byte for byte.
+    Audit mode checks byte for byte. The namespaces are made by `unshare(2)`
+    through `rustix`, in the compile's child between fork and exec, mapping
+    the user to itself; cactup is the namespace's init. Max (same day):
+    "I think that rule is too narrow; the idea is to not rely on the system
+    glibc version ... Let's do rustix. Keep the unshare version stashed": the
+    contract's "`rustix` for `kill`/`waitpid` only" became "for the system
+    calls std lacks" (`CLAUDE.md`, D13), and the first version, by
+    util-linux's `unshare` (mapping the user to root), is kept on the branch
+    `feature/build-cache-m4-unshare` (`bfc016a`).
 
 ## Still open
 

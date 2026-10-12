@@ -910,13 +910,10 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
 
     // The handlers above do not survive becoming the shell that runs what
     // cannot be started here.
+    // (A namespace that cannot be made fails the start: the recipe's shell
+    // then runs the compile, and nothing of it is stored.)
     let mut command = match (isolate, identified) {
-        (true, Some(program)) => match super::identity::find_program(OsStr::new("unshare")) {
-            Ok(unshare) => super::cuda::isolated(&unshare, program, &argv[0], &argv[1..]),
-            // Gone since the identity was made: the recipe's shell runs the
-            // compile, and nothing of it is stored.
-            Err(_) => return None,
-        },
+        (true, Some(program)) => super::cuda::isolated(program, &argv[0], &argv[1..]),
         _ => direct(argv, identified),
     };
     // Through this process: the pipes, and the threads that read them, are
