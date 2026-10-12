@@ -24,8 +24,13 @@ Run only specific tests:
 ```sh
 cactup test run TestArrangement   # All tests in an arrangement
 cactup test run McLachlan/ML_BSSN # All tests in a thorn
+cactup test run ML_BSSN           # The same thorn, without its arrangement
 cactup test run some-test-name    # A specific test
+cactup test run ML_BSSN/some-test # A specific test of one thorn
 ```
+
+Where a name is both an arrangement and a thorn (CarpetX, for one), the bare
+name selects the whole arrangement; write `CarpetX/CarpetX` for just the thorn.
 
 Combine multiple selections:
 
@@ -283,7 +288,7 @@ cactup test submit -q workq          # the queue picks that partition's test scr
 
 **"Cannot allocate job"**: `test submit` requires running inside an allocation. Try `test run` instead, or request an interactive allocation first.
 
-**"Test not found"**: test/arrangement/thorn names come from the built config's thorns; double-check the exact `Arrangement`, `Arrangement/Thorn`, or test name (they are case-sensitive).
+**"test selection … matches nothing"**: test/arrangement/thorn names come from the built config's thorns (its `ThornList`); double-check the exact `Arrangement`, `Arrangement/Thorn`, `Thorn`, or test name (they are case-sensitive). A thorn without tests cannot be selected either.
 
 **"Permission denied on test-home"**: Check that you have write access to your machine's `test-home` directory (see `cactup machine show`).
 

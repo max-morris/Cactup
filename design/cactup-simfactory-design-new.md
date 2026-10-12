@@ -4065,8 +4065,14 @@ cactup test delete     <name> [-f] [--purge]      # move a test run to test-home
 Notes:
 - `[<test>…]` is the optional test selection (`test run` / `test submit`). Omitted
   ⇒ run **all** tests (the successor to simfactory's `--select-tests all`
-  default). A selector is a test name, a thorn (`arrangement/Thorn`), or an
-  arrangement; cactup passes the resolved selection to the flesh harness (§11.6).
+  default). A selector is a test name, a thorn (`Thorn` or `arrangement/Thorn`),
+  a `Thorn/test` pair, or an arrangement; a bare name that is both an
+  arrangement and a thorn means the arrangement (`arrangement/Thorn` spells the
+  thorn). cactup resolves the selection against the config's `ThornList` at
+  submit time into the flesh's `CCTK_TESTSUITE_RUN_TESTS` format, which knows
+  only `Thorn` and `Thorn/test`, and freezes that into `@TESTSUITE_SELECT@`
+  (§11.6, D11). A selector naming nothing with tests is an error before any
+  job is queued.
 - `--config C` defaults to the **active config** (§7.4); both `test run` and
   `test submit` fail fast in the null-config state with guidance to
   `cactup build`. The config must be a complete build.
