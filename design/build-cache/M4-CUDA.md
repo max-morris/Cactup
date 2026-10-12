@@ -69,21 +69,25 @@ writes are removed by `nvcc` itself, and none is an output of the recipe.
 
 ## Open questions
 
-1. **Determinism and the path map** *(to check; needs a real compile, so
-   writing a scratch directory on saturn)*: is the object the same when
-   compiled twice, and the same from two directories under the path map?
-   The module ID (`--gen_module_id_file`, needed by `-rdc`) and the
-   `--orig_src_*` names may embed a random number, a time, or the source's
-   path. If the module ID is random, `-rdc` objects cannot be cached as
-   they are; if it embeds the path, only within one configuration.
-2. **The empty `LD_LIBRARY_PATH` entry `nvcc.profile` adds**: with
-   decision 18's rule, every `nvcc` compile would be refused whenever the
-   user's `LD_LIBRARY_PATH` is unset. Either the identity follows `nvcc`'s
-   own environment and watches that search from each compile's directory
-   (decision 20 would then cover a library appearing there within one
-   compile), or such compiles are refused. A decision for Max.
-3. **Host compilers other than GCC**: delta and perlmutter name Cray's `CC`
-   wrapper as the host compiler, which the cache refuses today; those
-   machines would stay uncached unless the wrapper is seen through.
-4. **Audit mode**: audit builds on saturn and athena (sm_80) prove it, as
-   for GCC; mike's NVIDIA nodes (by Slurm) after.
+1. **Determinism and the path map: answered** *(seen, CUDA 12.2.1 with
+   GCC 11.4 on qbd, Max's go for writing probes, 2026-10-12)*. The same
+   compile twice gives the same object, with and without `-g`. From two
+   directories the objects differ in the module ID symbol
+   (`_ba9d5637_4_a_cu_8e450714` against `_71c18592_4_a_cu_8e450714`):
+   its first part is a hash of the name `nvcc` hands `cudafe++` as
+   `--orig_src_path_name`, the source's resolved path (the working
+   directory, the output name and a symlink on the way change nothing).
+   With `-Xcudafe --orig_src_path_name=/fixed/a.cu` and the host compiler's
+   `-ffile-prefix-map` (through `-Xcompiler`), the objects compiled from
+   two directories are identical, with and without `-g`. So a compile the
+   cache runs passes the source's mapped name that way, as the path map
+   does for GCC, and CUDA objects are shared across installations.
+2. **The empty `LD_LIBRARY_PATH` entry `nvcc.profile` adds: answered**
+   (decision 22): such entries are watched from each compile's directory,
+   not refused. The identity follows `nvcc`'s own environment for the
+   programs it runs.
+3. **Host compilers other than GCC**: Cray's `CC` (delta, perlmutter) is
+   M4b (decision 23).
+4. **Audit mode**: audit builds on qbd's compute nodes (A100, `gpu2`, by
+   Slurm; Max, 2026-10-12: no load to worry about), then saturn and
+   athena.
