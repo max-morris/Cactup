@@ -1,6 +1,10 @@
 # The Cactup tutorial's commands. `just` lists them; they work from anywhere
 # under tutorial/. See README.md for what is behind each.
 
+# Arguments reach the commands as "$@", each one word as typed: `just test -k
+# "a or b"` keeps its quotes.
+set positional-arguments
+
 image := "cactup-tutorial:tutorial"
 venv := justfile_directory() / ".venv"
 lab := "cactup-tutorial-lab"
@@ -14,7 +18,7 @@ default:
 # Build the tutorial image (an hour or more the first time; then only what changed).
 [group('build')]
 build *args:
-    sh image/build.sh {{args}}
+    sh image/build.sh "$@"
 
 # Move tutorial/cactup.pin to another cactup: `just pin master` (see UPDATING.md).
 [group('build')]
@@ -53,12 +57,12 @@ lab-stop:
 # The pytest suites (two minutes): `just test -k cyol`.
 [group('check')]
 test *args: _venv
-    PYTHONPATH={{justfile_directory()}}/jupyter:{{justfile_directory()}}/deploy/hub {{venv}}/bin/python -m pytest tests {{args}}
+    PYTHONPATH={{justfile_directory()}}/jupyter:{{justfile_directory()}}/deploy/hub {{venv}}/bin/python -m pytest tests "$@"
 
 # Every notebook, headless, in fresh containers (about an hour): `just check --only 2,3`.
 [group('check')]
 check *args: _venv
-    {{venv}}/bin/python tests/run_all.py {{args}}
+    {{venv}}/bin/python tests/run_all.py "$@"
 
 # The image's platform (install, update, SLURM) and a replayed build (ten minutes).
 [group('check')]
@@ -73,7 +77,7 @@ check-hub *args: _venv
     set -u
     export PATH="{{venv}}/bin:$PATH"
     status=0
-    tests/hub/run.sh --keep {{args}} && tests/hub/browse.sh || status=1
+    tests/hub/run.sh --keep "$@" && tests/hub/browse.sh || status=1
     tests/hub/run.sh --down
     exit $status
 
@@ -97,6 +101,11 @@ _venv:
 ship host:
     docker save {{image}} | zstd -T0 | ssh {{host}} 'zstd -d | docker load'
 
+# Set the server up, once: deploy/.env, Docker access, the token's directory, Apache in front (asks sudo).
+[group('deploy')]
+setup:
+    sh deploy/setup.sh
+
 # Start the hub, or bring it up to date after editing deploy/.env or pulling.
 [group('deploy')]
 up:
@@ -104,8 +113,11 @@ up:
     set -eu
     cd deploy
     if [ ! -f .env ]; then
-        cp .env.example .env
-        echo "made deploy/.env from .env.example: edit it, then run 'just up' again"
+        echo "no deploy/.env yet: run 'just setup' first" >&2
+        exit 1
+    fi
+    if ! docker info > /dev/null 2>&1; then
+        echo "no access to Docker: 'just setup' (then log in again), or start Docker" >&2
         exit 1
     fi
     get() { sed -n "s/^$1=//p" .env | tail -1; }
@@ -116,9 +128,7 @@ up:
     fi
     shared=$(get SHARED_DIR); shared=${shared:-/srv/cactup-tutorial}
     if [ ! -d "$shared" ]; then
-        echo "no $shared (SHARED_DIR) yet; see 'Setting it up' in tutorial/README.md:" >&2
-        echo "  sudo groupadd cactup-tutorial && sudo usermod -aG cactup-tutorial \"\$USER\"" >&2
-        echo "  sudo install -d -m 2770 -g cactup-tutorial $shared" >&2
+        echo "no $shared (SHARED_DIR) yet: run 'just setup'" >&2
         exit 1
     fi
     docker compose up -d --build
@@ -143,7 +153,7 @@ logs:
 # Show the session token, big, for the room (follows rotations; Ctrl-C ends).
 [group('deploy')]
 token *args:
-    deploy/token {{args}}
+    deploy/token "$@"
 
 # Make a new session token now (say, once the room has signed up).
 [group('deploy')]

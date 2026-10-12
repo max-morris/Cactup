@@ -27,12 +27,13 @@ just check-all    # all the checks
 just pin master   # move the tutorial to a newer cactup (needs cargo; see UPDATING.md)
 ```
 
-On the server (a checkout of this repository, Docker; see Deploying for the
-one-time setup):
+On the server (a checkout of this repository, Docker and `just`; see
+Deploying):
 
 ```sh
+just setup              # once: deploy/.env, Docker access, the token's directory, Apache in front
 just ship user@server   # on your machine: copy the image there (or `just build` on the server)
-just up                 # first time: makes deploy/.env to edit; then starts or updates the hub
+just up                 # start the hub, or bring it up to date
 just account ada        # an admin's account (each name in HUB_ADMINS), before showing the token
 just token              # the session token, big, for the room
 just status             # the hub, Caddy and every attendee's container
@@ -1232,8 +1233,18 @@ account database.
 
   With either, Caddy serves HTTPS on 443 and redirects 80 to it.
 - `COMPOSE_PROFILES=plain`: plain HTTP on `PLAIN_BIND:PLAIN_PORT`
-  (127.0.0.1:8000), for the site's own proxy to put HTTPS in front of. That
-  proxy must pass WebSocket upgrades (kernels and terminals use them), pass
+  (127.0.0.1:8000), for the site's own proxy to put HTTPS in front of: a
+  web server already on the machine, say, that has the site's certificate
+  and renews it. For Debian's Apache, `just setup` does the proxy's part:
+  it writes the settings below to `/etc/apache2/cactup-tutorial-proxy.conf`
+  and adds an `Include` of it to the virtual host that serves
+  `https://DOMAIN/` (the original file is kept beside it as
+  `*.before-cactup-tutorial`), enables `proxy`, `proxy_http` and `headers`,
+  and reloads Apache once `apache2ctl configtest` passes (it puts back what
+  it changed otherwise). It leaves `/.well-known/acme-challenge/` to Apache,
+  so certbot's renewals keep working. `sh deploy/setup.sh apache` runs that
+  part alone (after changing `DOMAIN` or `PLAIN_PORT`). Any other proxy
+  must pass WebSocket upgrades (kernels and terminals use them), pass
   the `Host` header through unchanged (JupyterLab and the hub compare it
   with the browser's `Origin`; nginx: `proxy_set_header Host $host;`,
   Apache: `ProxyPreserveHost On`), set `X-Forwarded-For` (appending) and
@@ -1279,28 +1290,32 @@ checks to run on it first):
 2. The tutorial image: built there (`just build`, an hour or more the first
    time), or built elsewhere and copied, `just ship user@server` from the
    other machine (about 18.5 GB; Docker access on both sides, and `zstd`).
-3. The token's directory and group:
+3. `just setup` (as yourself; it asks sudo for what needs root, and running
+   it again is harmless; the script is `deploy/setup.sh`):
 
-   ```sh
-   sudo groupadd cactup-tutorial
-   sudo usermod -aG cactup-tutorial "$USER"   # and whoever else may see the token; log in again for it to apply
-   sudo install -d -m 2770 -g cactup-tutorial /srv/cactup-tutorial
-   ```
+   - makes `deploy/.env` from `.env.example`, with `DOMAIN` set to the
+     machine's name (`hostname -f`) and the TLS mode chosen: when something
+     already serves port 443 on the machine, Caddy goes behind it
+     (`COMPOSE_PROFILES=plain`); otherwise Caddy gets a Let's Encrypt
+     certificate itself (`TLS=auto`);
+   - adds you to the `docker` group, if Docker refuses you;
+   - makes the token's group `cactup-tutorial` (with you in it; add whoever
+     else may see the token) and its directory `/srv/cactup-tutorial`, and
+     writes `SHARED_GID`. Under rootless Docker the hub can't write a
+     directory it reaches through a group (its container keeps none of
+     yours), so it uses `~/.local/share/cactup-tutorial` with
+     `SHARED_GID=0` instead: only you, and your group's members, read the
+     token;
+   - with `plain` behind Debian's Apache: points the virtual host that
+     serves `https://DOMAIN/` at Caddy (see TLS: three ways).
 
-   With rootless Docker the hub can't write there (its container keeps
-   none of your groups): use a directory of your own, say `install -d -m
-   0750 ~/cactup-tutorial-shared` as `SHARED_DIR`, with `SHARED_GID=0`
-   (your own group, seen from the container). Only you, and your group's
-   members, then read the token.
-
-4. `just up` makes `deploy/.env` from `.env.example`. Set at least
-   `COMPOSE_PROFILES` and `TLS`, `DOMAIN`, the certificate in
-   `TLS_CERT_DIR` (with `TLS=provided`), `PLAIN_BIND` and `PLAIN_PORT` (with
-   `plain`), `HUB_PATH` and `SITE_PROXY` (if not `/tutorial` and the docs),
-   `SHARED_GID` (`getent group cactup-tutorial | cut -d: -f3`) and
-   `HUB_ADMINS`.
-5. `just up` again: it checks the image and the token's directory are
-   there, then starts the hub and Caddy.
+   Log in again if it says to (new groups apply to new logins).
+4. Check `deploy/.env`: `HUB_ADMINS` at least, and anything the guesses
+   above got wrong (`DOMAIN`, the TLS mode; `TLS=provided` and its
+   certificate; `HUB_PATH` and `SITE_PROXY` if not `/tutorial` and the
+   docs).
+5. `just up`: it checks Docker, the image and the token's directory, then
+   starts the hub and Caddy.
 6. The admins' accounts, before anyone sees the token: `just account NAME`
    for each name in `HUB_ADMINS`. They get the hub's admin page
    (`/tutorial/hub/admin`): servers to stop or start, users.
