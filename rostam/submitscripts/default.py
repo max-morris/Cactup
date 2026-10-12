@@ -1,7 +1,7 @@
-# rostam submitscript for every partition.
-# --gres is per node (TASKS_PER_NODE × GPUS_PER_TASK). --mpi=pmi2 is an
-# srun option (this cluster's sbatch does not accept it) and lives on
-# the runscript launch line.
+# rostam submitscript for every partition. A GPU run asks for its GPUs:
+# --gres is per node (TASKS_PER_NODE × GPUS_PER_TASK); a CPU run on medusa
+# or buran asks for none. --mpi=pmi2/pmix is an srun option (this cluster's
+# sbatch does not accept it) and lives on the runscript launch line.
 #
 # .py variant (design §6.1): chaining and the mail / allocation directives
 # are conditionals (cactup's @NAME@ engine is literal-only, D7).
@@ -13,9 +13,10 @@ lines.append("#SBATCH -p {0}".format(QUEUE))
 lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
-lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
-lines.append("#SBATCH --gres=gpu:{0}".format(
-    typed["TASKS_PER_NODE"] * typed["GPUS_PER_TASK"]))
+if typed["GPU"]:
+    lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
+    lines.append("#SBATCH --gres=gpu:{0}".format(
+        typed["TASKS_PER_NODE"] * typed["GPUS_PER_TASK"]))
 if CHAINED_JOB_ID:
     lines.append("#SBATCH -d afterany:{0}".format(CHAINED_JOB_ID))
 lines.append("#SBATCH -J {0}".format(SHORT_SIMULATION_NAME))

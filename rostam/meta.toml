@@ -10,6 +10,7 @@
 #   x86-cuda-native  x86-modules     login node, Lmod       the x86 CUDA
 #                                                           partitions
 #   arm-cuda-native  arm-conda       a spark node           spark
+#   x86-cpu-image    cactus-cpu      login node, Apptainer  medusa, buran
 #
 #   The x86 CUDA partitions hold A100s (sm_80) and V100s (sm_70), and both
 #   x86 CUDA flavors compile for both; their compile flags name no -march,
@@ -29,12 +30,31 @@
 #     there: use an aarch64 cactup with its own CACTUP_HOME on a spark node
 #     (e.g. `CACTUP_HOME=$HOME/.cactup-arm`), and build there with `cactup
 #     build run`.
+#   - x86-cpu-image builds and runs inside docker://stevenrbrandt/cactus,
+#     Steve Brandt's CPU-only sibling of the cactus-cuda image, for x86-64-v3
+#     (AVX2), which every medusa and buran node has.
+#
+# Partitions this entry leaves out, on purpose:
+#   - marvin (16 × Sandy Bridge-EP nodes: 16 cores, 37 GB, 10-day limit):
+#     Sandy Bridge has AVX but not AVX2 or FMA, so the x86-cpu-image build
+#     cannot run there. Covering it takes one more flavor: a copy of
+#     x86-cpu-image.toml with -march=sandybridge and runs-on marvin, plus
+#     marvin in the cpu queues' script routes below.
+#   - mi100 (kamand[0-1]: 2 × AMD MI100, gfx908, ROCm 5.4 to 7.x installed):
+#     it needs a HIP flavor, which nothing here has built or run yet, and the
+#     partition has no GPU GRES configured, so Slurm cannot hand a job its
+#     own GPUs.
+#   - risc5 (sven[0-1]: 64-core rv64imafdcv, Fedora 38): cactup ships no
+#     riscv64 build, and the nodes have no HDF5 or Apptainer image to build
+#     against.
+#   - jenkins-compute, jenkins-cuda, jenkins-A100, jenkins-amdgpu: the
+#     project CI's partitions, over nodes the queues below already cover.
 
 [machine]
 name        = "rostam"
 nickname    = "rostam"
 location    = "LSU CCT"
-description = "LSU CCT Rostam cluster (Slurm): A100, V100 and DGX Spark GPU nodes"
+description = "LSU CCT Rostam cluster (Slurm): x86 CPU, A100, V100 and DGX Spark GPU nodes"
 status      = "production"
 hostname    = "rostam1.rostam.cct.lsu.edu"
 
@@ -61,6 +81,22 @@ wrapper-argv = [
     "apptainer", "exec", "--nv", "--no-pid",
     "--bind", "/work", "--bind", "/dev/shm",
     "docker://stevenrbrandt/cactus-cuda",
+]
+# The image's /usr/bin/mpirun is OpenMPI; the optionlist builds against MPICH.
+env-setup = """
+export MPI_FLAVOR=mpich
+export PATH=/opt/mpi/mpich/bin:$PATH
+"""
+
+[universes.cactus-cpu]
+kind = "apptainer"
+# Steve Brandt's CPU-only image (Debian trixie, gcc 14, MPICH, and the CarpetX
+# I/O stack prebuilt), bound like cactus-cuda but without --nv. Every Rostam
+# x86 node has Apptainer.
+wrapper-argv = [
+    "apptainer", "exec", "--no-pid",
+    "--bind", "/work", "--bind", "/dev/shm",
+    "docker://stevenrbrandt/cactus",
 ]
 # The image's /usr/bin/mpirun is OpenMPI; the optionlist builds against MPICH.
 env-setup = """
@@ -233,18 +269,42 @@ max-gpus-per-node     = 1
 default-cpus-per-task = 20
 memory                = 120000
 
+# The x86 CPU partitions, for flavor x86-cpu-image. Rostam's default partition
+# is medusa, but this machine's default queue stays cuda-A100, the default
+# flavor's; x86-cpu-image names medusa as its own default-queue. On these
+# queues `default-cpus-per-task` gives four ranks per node, two per socket.
+# medusa[00-15]: 2 × 20-core Intel Xeon Gold 6148 (Skylake), 92 GB.
+[queues.medusa]
+gpu                   = false
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cpu"]
+max-cpus-per-node     = 40
+default-cpus-per-task = 10
+memory                = 92697
+
+# buran[00-15]: 2 × 24-core AMD EPYC Rome, 252 GB.
+[queues.buran]
+gpu                   = false
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cpu"]
+max-cpus-per-node     = 48
+default-cpus-per-task = 12
+memory                = 252909
+
 # One submit script for every queue. The run scripts are picked by the
 # config's build universe, since each flavor launches differently: the image
 # through Apptainer, the native builds directly, OpenMPI with PMIx and MPICH
 # with PMI-2.
 [submitscripts]
-"default" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark"] }
-"test"    = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark"], test = true }
+"default" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark", "medusa", "buran"] }
+"test"    = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark", "medusa", "buran"], test = true }
 
 [runscripts]
 "x86-cuda-image"       = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["cactus-cuda"] }
 "x86-cuda-native"      = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["x86-modules"] }
 "arm-cuda-native"      = { queues = ["spark"], build-universes = ["arm-conda"] }
+"x86-cpu-image"        = { queues = ["medusa", "buran"], build-universes = ["cactus-cpu"] }
 "test-x86-cuda-image"  = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["cactus-cuda"], test = true }
 "test-x86-cuda-native" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["x86-modules"], test = true }
 "test-arm-cuda-native" = { queues = ["spark"], build-universes = ["arm-conda"], test = true }
+"test-x86-cpu-image"   = { queues = ["medusa", "buran"], build-universes = ["cactus-cpu"], test = true }
