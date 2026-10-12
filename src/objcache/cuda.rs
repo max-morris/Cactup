@@ -258,21 +258,32 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path) -> bool {
         let mut command = Command::new(path);
         command
             .arg0(name)
-            .args(["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "-c", "-o"])
+            .args(["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "--objdir-as-tempdir", "-c", "-o"])
             .arg(root.join("trial.o"))
             .arg(root.join("src/trial.cu"))
             .args(map_flags(&root.join("src/trial.cu"), &map))
             .current_dir(&root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if !command.status().is_ok_and(|status| status.success()) {
-            return false;
+            .stderr(Stdio::piped());
+        match command.output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                identity::trial_says(&format!("{} failed the trial compile ({}): {}", path.display(), out.status, String::from_utf8_lossy(&out.stderr)));
+                return false;
+            }
+            Err(e) => {
+                identity::trial_says(&format!("{} could not run the trial compile: {e}", path.display()));
+                return false;
+            }
         }
         match fs::read(root.join("trial.o")) {
             Ok(object) => objects.push(object),
             Err(_) => return false,
         }
+    }
+    if objects[0] != objects[1] {
+        identity::trial_says(&format!("{} made two objects of the trial in two places", path.display()));
     }
     objects[0] == objects[1]
 }

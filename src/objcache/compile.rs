@@ -558,6 +558,12 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
     if !language_given && source.extension().is_none_or(|ext| ext != "cu") {
         return Err("an nvcc compile of a source that is not CUDA (no -x cu, no .cu)".to_owned());
     }
+    // Without it `nvcc` writes its intermediate files under names of their
+    // own each time, and those go into the object: two compiles, two
+    // objects (tried, with and without `-g`).
+    if !keyed.iter().any(|arg| arg == "--objdir-as-tempdir" || arg == "-objdir-as-tempdir") {
+        return Err("nvcc compiles without --objdir-as-tempdir are not the same twice".to_owned());
+    }
     // Without forwarding, `nvcc` stops at an option it does not know; with
     // it, the host compiler gets it, and the GCC reader has to know it.
     for flag in &unknown {
@@ -637,18 +643,19 @@ mod tests {
         assert!(compile.debug && !compile.native);
         assert!(!compile.keyed.iter().any(|arg| arg.to_string_lossy().contains("/packages/gcc")), "the host compiler is keyed by its identity");
         assert!(!compile.keyed.iter().any(|arg| arg == "-DSIMD_DISABLE" || arg == "/c/build/T/a.cu"));
-        let et = "--compiler-bindir /usr/bin/g++ -forward-unknown-to-host-compiler -std=c++17 --expt-relaxed-constexpr --extended-lambda -x cu --relocatable-device-code=true -Xcudafe --diag_suppress=20012 --ptxas-options=-v";
+        let et = "--objdir-as-tempdir --compiler-bindir /usr/bin/g++ -forward-unknown-to-host-compiler -std=c++17 --expt-relaxed-constexpr --extended-lambda -x cu --relocatable-device-code=true -Xcudafe --diag_suppress=20012 --ptxas-options=-v";
         assert!(cuda(et).is_ok(), "{:?}", cuda(et));
         let delta = "-pipe -g --compiler-options -march=native -std=c++17 --compiler-options -std=gnu++17 --expt-relaxed-constexpr --extended-lambda --gpu-architecture sm_80 --forward-unknown-to-host-compiler --Werror ext-lambda-captures-this --relocatable-device-code=true --objdir-as-tempdir -x cu";
         let compile = cuda(delta).unwrap();
         assert!(compile.native, "-march=native for the host compiler");
         // An option neither list knows: not cached, forwarded or not.
-        assert!(cuda("-x cu --keep").is_err());
-        assert!(cuda("-x cu --forward-unknown-to-host-compiler -fplugin=x.so").is_err());
-        assert!(cuda("-x cu -funroll-loops").is_err(), "not forwarded");
-        assert!(cuda("-x cu --forward-unknown-to-host-compiler -funroll-loops").is_ok());
-        assert!(cuda("-x cu -Xcompiler -fplugin=x.so").is_err());
-        assert!(cuda("-x cu -Xcudafe --gen_c_file_name=x").is_err());
+        assert!(cuda("-x cu --objdir-as-tempdir --keep").is_err());
+        assert!(cuda("-x cu").is_err_and(|why| why.contains("--objdir-as-tempdir")));
+        assert!(cuda("-x cu --objdir-as-tempdir --forward-unknown-to-host-compiler -fplugin=x.so").is_err());
+        assert!(cuda("-x cu --objdir-as-tempdir -funroll-loops").is_err(), "not forwarded");
+        assert!(cuda("-x cu --objdir-as-tempdir --forward-unknown-to-host-compiler -funroll-loops").is_ok());
+        assert!(cuda("-x cu --objdir-as-tempdir -Xcompiler -fplugin=x.so").is_err());
+        assert!(cuda("-x cu --objdir-as-tempdir -Xcudafe --gen_c_file_name=x").is_err());
         assert!(cuda("-x c++").is_err());
     }
 

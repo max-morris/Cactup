@@ -508,7 +508,7 @@ pub(super) fn identify_watching(cc_dir: &Path, program: &OsStr) -> Res<(Compiler
     let mut absent = Vec::new();
     let examined = fs::create_dir_all(&memo_dir)
         .with_context(|| format!("Failed to create {}", memo_dir.display()))
-        .and_then(|()| examine(&path, name, &memo_dir, &mut Watched { files: &mut files, absent: &mut absent, helper: true }));
+        .and_then(|()| examine(&path, name, program, &memo_dir, &mut Watched { files: &mut files, absent: &mut absent, helper: true }));
     // Each looked at by every compile: once is enough.
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files.dedup();
@@ -742,10 +742,21 @@ fn trial_object(compiler: &Path, name: &OsStr, root: &Path, config: &str) -> Opt
         .env("PWD", &scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .ok()?;
-    status.success().then(|| fs::read(&object).ok()).flatten()
+    if !status.status.success() {
+        trial_says(&format!("{} failed the trial compile ({}): {}", compiler.display(), status.status, String::from_utf8_lossy(&status.stderr)));
+    }
+    status.status.success().then(|| fs::read(&object).ok()).flatten()
+}
+
+/// Say `what` on stderr when the wrapper is asked to say why it passes
+/// compiles through (`CACTUP_CC_DEBUG`): why a compiler's trial failed.
+pub(super) fn trial_says(what: &str) {
+    if std::env::var_os("CACTUP_CC_DEBUG").is_some() {
+        eprintln!("cactup: {what}");
+    }
 }
 
 /// Does `compiler`, run as `name`, make one object of the same sources in
@@ -765,6 +776,9 @@ fn relocates(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
     let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
     let one = trial_object(compiler, name, &trial_dir.join("one/Cactus"), "a");
     let other = trial_object(compiler, name, &trial_dir.join("another/deeper/Cactus"), "bb");
+    if one.is_some() && other.is_some() && one != other {
+        trial_says(&format!("{} made two objects of the trial in two places", compiler.display()));
+    }
     one.is_some() && one == other
 }
 
@@ -811,7 +825,11 @@ fn locale_neutral(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
 /// Every file the answer was computed from goes into `files`, also when the
 /// answer is "not one the cache works with". `trial_dir` is a directory for
 /// [`relocates`] to try the compiler in.
-fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -> Res<Compiler> {
+/// `name` is the name `program` (as the recipe gave it) runs by; the trials
+/// run the compiler as the recipe does, by `program` (a GCC driver finds its
+/// installation from the name it is run by, along `PATH` for a bare one, and
+/// on qbd a bare `gcc` found another GCC's: tried).
+fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched: &mut Watched) -> Res<Compiler> {
     // The file that runs, behind whatever links name it (`cc` -> `gcc` ->
     // `x86_64-linux-gnu-gcc-14`).
     let driver = fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?;
@@ -1039,10 +1057,10 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
         watched.files.push(Seen::of(&library)?);
     }
     let (relocates, locale_neutral) = match family {
-        Family::Gfortran => (super::fortran::relocates(path, name, trial_dir), super::fortran::locale_neutral(path, name, trial_dir)),
+        Family::Gfortran => (super::fortran::relocates(path, program, trial_dir), super::fortran::locale_neutral(path, program, trial_dir)),
         // The locale stays in the key: no trial for it here.
-        Family::Nvcc => (super::cuda::relocates(path, name, trial_dir), false),
-        _ => (relocates(path, name, trial_dir), locale_neutral(path, name, trial_dir)),
+        Family::Nvcc => (super::cuda::relocates(path, program, trial_dir), false),
+        _ => (relocates(path, program, trial_dir), locale_neutral(path, program, trial_dir)),
     };
     Ok(Compiler {
         path: path.to_owned(),
