@@ -57,6 +57,11 @@ pub const WRAP_VERB: &str = "__cc";
 /// <config.toml>`.
 pub const PROBE_VERB: &str = "__cc-probe";
 
+/// The hidden verb of the init process a CUDA compile runs under, in a PID
+/// namespace of its own (decision 24): `cactup __cc-init <program> <arg0>
+/// <args…>`.
+pub const INIT_VERB: &str = "__cc-init";
+
 /// The probe's exit status for "the cache cannot be used here, and the
 /// reason is already printed" — as opposed to the probe not running at all
 /// (126/127 from the shell), which the build script reports itself.

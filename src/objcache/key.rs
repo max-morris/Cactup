@@ -356,6 +356,12 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     };
     // `nvcc`'s host compiler, for this compile: what it would run says
     // which (M4); its identity is watched with `nvcc`'s.
+    // `cudafe++` puts its process ID into the names of a file's internal
+    // device entities: only in a PID namespace of its own is a compile the
+    // same twice (decision 24).
+    if compiler.family == Family::Nvcc && !compiler.isolates {
+        return Err("nvcc's objects are not the same twice outside a namespace of their own, which this machine does not allow (unshare)".to_owned());
+    }
     let (cuda_run, watch) = match compiler.family {
         Family::Nvcc => {
             let run = cuda::dry_run(&compiler.path, &argv[0], &argv[1..], None).map_err(whole)?;
@@ -609,6 +615,12 @@ impl Keyed {
         if let Some(fortran) = &mut self.fortran {
             fortran.before_compile(&self.compiler, &self.name);
         }
+    }
+
+    /// Does the compile run in a namespace of its own (`nvcc` where that
+    /// works, decision 24)?
+    pub fn isolated(&self) -> bool {
+        self.cuda.is_some() && self.compiler.isolates
     }
 
     /// How the check after a Fortran compile was made: by lookups in place
@@ -1347,7 +1359,7 @@ mod tests {
         let compile = compile::parse(&args).unwrap();
         assert_eq!(compile.depend, os(&depend));
         for family in [Family::Gcc, Family::Clang] {
-            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None };
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None, isolates: false };
             let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None, None);
             let given: Vec<&OsStr> = command.get_args().collect();
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");

@@ -395,6 +395,28 @@ Asked as seven questions with options; the answers, in Max's numbering.
     milestone after CUDA (M4b). No Cray machine to probe yet ("Not yet"):
     designed from Cray's documentation first, verified later.
 
+24. **`nvcc` runs in a PID namespace of its own; a fallback where there is
+    none** (2026-10-12). `cudafe++` mixes its process ID (`getpid()`, in
+    `make_module_id`) into the module ID and the names of internal-linkage
+    device entities, so a CUDA file with any (an anonymous namespace, a
+    `static __device__` variable, Thrust's placeholders: 86 of 99 CarpetX
+    compiles on qbd) never compiles to the same bytes twice; no option of
+    `nvcc` or `cudafe++` changes it (tried). Asked how to handle it, Max
+    first chose "Equivalent up to the ID" (rule 1 amended, audit comparing
+    objects with the ID taken out); then, offered a way to keep rule 1 as
+    it is, "Yes, but is it possible that a cluster won't support
+    namespaces? We should find out, and have a fallback if so." So: on a
+    miss the cache runs `nvcc` in a fresh user and PID namespace, where the
+    process IDs of the programs it starts are fixed by the order it starts
+    them (tried on qbd: byte-identical objects, also from two directories
+    under the path map). Unprivileged user namespaces were available on
+    every machine checked (plato, qbd, saturn, athena, orthus, mike;
+    2026-10-12); where they are not (RHEL 7's default, some hardened
+    sites), `nvcc` compiles are not cached (the fallback first proposed,
+    storing an object whose module ID shows no process ID, does not hold:
+    the ID can lack it while internal names elsewhere carry it, tried).
+    Audit mode checks byte for byte.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

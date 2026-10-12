@@ -23,7 +23,7 @@
 use super::event::{Audit, Event, Outcome};
 use super::store::{About, Miss, ModulesTo, NewEntry, Published, Store};
 use super::probe::SELFTEST_COMPILER;
-use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
+use super::{events_path, key, BuildConf, Mode, INIT_VERB, PROBE_VERB, WRAP_VERB};
 use crate::Res;
 use anyhow::Context;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
@@ -54,6 +54,7 @@ pub fn run_if_invoked() {
     match args.next() {
         Some(verb) if verb == WRAP_VERB => wrap(args),
         Some(verb) if verb == PROBE_VERB => std::process::exit(super::probe::run(args.next())),
+        Some(verb) if verb == INIT_VERB => std::process::exit(super::cuda::init(args)),
         _ => {}
     }
 }
@@ -355,8 +356,10 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     };
     // The file that was identified is the file that runs.
     let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.clone());
+    // `nvcc` in a PID namespace of its own (decision 24).
+    let isolate = keyed.as_ref().is_ok_and(|keyed| keyed.isolated());
     let streams = if publishing { Output::PassOn(rewrite.clone()) } else { Output::Inherit };
-    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams));
+    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams, isolate));
     let Some((status, captured)) = ran else {
         drop(audited);
         if let Ok(keyed) = &mut keyed {
@@ -387,7 +390,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
 
     if let (Some((stored, modules)), Ok(keyed)) = (&audited, &mut keyed) {
         let checked = Checked { status, stable, stored, modules, cwd: &cwd };
-        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed));
+        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed, isolate));
         keyed.drop_depend();
     }
     drop(audited);
@@ -457,7 +460,7 @@ struct Checked<'a> {
 /// the second compile ends it by that signal, as it would have the compile;
 /// a second compile that ends any other way (killed by the kernel, crashed,
 /// failed) leaves the first compile's object the build's, and no verdict.
-fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed) -> Audit {
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed, isolate: bool) -> Audit {
     if !checked.status.success() {
         return Audit::CompileFailed;
     }
@@ -491,7 +494,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
     let again_as = std::env::var_os("CACTUP_CC_TEST_SECOND_COMPILER").map(PathBuf::from);
     #[cfg(debug_assertions)]
     let identified = again_as.as_deref().or(identified);
-    let again = run(job, argv, identified, Output::Swallow(rewrite));
+    let again = run(job, argv, identified, Output::Swallow(rewrite), isolate);
     // Asked to stop, however the second compile then ended (a driver may
     // exit with a status rather than by the signal): the compile would have
     // been stopped.
@@ -868,7 +871,7 @@ static HANDLERS: OnceLock<bool> = OnceLock::new();
 /// `None`: the compiler could not be started this way, and nothing has
 /// run. The recipe's shell may still know how (a keyword such as `time`, a
 /// function, a script without an interpreter line).
-fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) -> Option<(ExitStatus, Option<Captured>)> {
+fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, isolate: bool) -> Option<(ExitStatus, Option<Captured>)> {
     // The build script's self-test has checked that this can be read here.
     let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
@@ -907,7 +910,15 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output) 
 
     // The handlers above do not survive becoming the shell that runs what
     // cannot be started here.
-    let mut command = direct(argv, identified);
+    let mut command = match (isolate, identified) {
+        (true, Some(program)) => match super::identity::find_program(OsStr::new("unshare")) {
+            Ok(unshare) => super::cuda::isolated(&unshare, program, &argv[0], &argv[1..]),
+            // Gone since the identity was made: the recipe's shell runs the
+            // compile, and nothing of it is stored.
+            Err(_) => return None,
+        },
+        _ => direct(argv, identified),
+    };
     // Through this process: the pipes, and the threads that read them, are
     // made before the compiler starts, so that what cannot be made costs
     // the keeping (the streams are then the recipe's), never the compile.

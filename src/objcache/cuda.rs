@@ -245,13 +245,15 @@ pub(super) fn examine(path: &Path, driver: &Path, hasher: &mut Hasher, watched: 
 /// the relocatable device code Cactus asks for, as a GCC is tried
 /// (`identity::relocates`): the module ID `cudafe++` makes is a hash of the
 /// source's name, which the map's flags fix (tried).
-pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path) -> bool {
+pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) -> bool {
     let Ok(trial) = tempfile::Builder::new().prefix("cuda-trial-").tempdir_in(dir) else { return false };
     // By its physical path, and with `PWD` naming it, as the GCC trial: the
     // host compiler records `$PWD` where it names the working directory
     // (tried: a `/work` link on qbd left the physical path unmapped).
     let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
-    let source = "__device__ int twice(int v) { return 2 * v; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n";
+    // With an entity of internal linkage, whose name `cudafe++` makes from
+    // its process ID (decision 24).
+    let source = "namespace { __device__ int hidden; }\n__device__ int twice(int v) { return 2 * v + hidden; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n";
     let mut objects = Vec::new();
     for place in ["a", "b"] {
         let root = trial_dir.join(place);
@@ -259,13 +261,19 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path) -> bool {
             return false;
         }
         let map = [(root.clone(), "/cactup-root")];
-        let mut command = Command::new(path);
+        let mut args: Vec<OsString> = ["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "--objdir-as-tempdir", "-c", "-o"].map(OsString::from).to_vec();
+        args.push(root.join("trial.o").into_os_string());
+        args.push(root.join("src/trial.cu").into_os_string());
+        args.extend(map_flags(&root.join("src/trial.cu"), &map));
+        let mut command = match isolate.then(isolation).flatten() {
+            Some(unshare) => isolated(&unshare, path, name, &args),
+            None => {
+                let mut command = Command::new(path);
+                command.arg0(name).args(&args);
+                command
+            }
+        };
         command
-            .arg0(name)
-            .args(["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "--objdir-as-tempdir", "-c", "-o"])
-            .arg(root.join("trial.o"))
-            .arg(root.join("src/trial.cu"))
-            .args(map_flags(&root.join("src/trial.cu"), &map))
             .current_dir(&root)
             .env("PWD", &root)
             .stdin(Stdio::null())
@@ -291,6 +299,72 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path) -> bool {
         identity::trial_says(&format!("{} made two objects of the trial in two places", path.display()));
     }
     objects[0] == objects[1]
+}
+
+/// `unshare` (util-linux), where it can start a program in a user and PID
+/// namespace of its own here: tried once, by starting `true` so.
+pub fn isolation() -> Option<PathBuf> {
+    let unshare = identity::find_program(OsStr::new("unshare")).ok()?;
+    let works = Command::new(&unshare)
+        .args(ISOLATED)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    works.then_some(unshare)
+}
+
+/// How `unshare` is asked to start a CUDA compile: a user namespace (the
+/// user mapped to its root, which needs no privilege), a PID namespace with
+/// the first process forked into it, and that process killed if `unshare`
+/// is (a stop signal for the compile ends it all).
+const ISOLATED: &[&str] = &["--user", "--pid", "--fork", "--map-root-user", "--kill-child"];
+
+/// `program`, run as `arg0` with `args`, in a user and PID namespace of its
+/// own (decision 24): `unshare` starts this cactup as the namespace's first
+/// process ([`init`]), which starts `program`.
+pub fn isolated(unshare: &Path, program: &Path, arg0: &OsStr, args: &[OsString]) -> Command {
+    let mut command = Command::new(unshare);
+    command.args(ISOLATED);
+    command.arg(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cactup")));
+    command.arg(super::INIT_VERB).arg(program).arg(arg0).args(args);
+    command
+}
+
+/// Be the first process of a CUDA compile's PID namespace: start the
+/// program (`<program> <arg0> <args…>`), reap whatever it leaves behind (the
+/// first process adopts every orphan), and end as it ended. A signal it
+/// died of becomes the exit status `128 + n`: the first process of a PID
+/// namespace cannot be ended by a signal it has no handler for.
+pub fn init(mut args: impl Iterator<Item = OsString>) -> i32 {
+    let (Some(program), Some(arg0)) = (args.next(), args.next()) else {
+        eprintln!("cactup: the init of a CUDA compile was run without a program");
+        return 2;
+    };
+    let child = match Command::new(&program).arg0(&arg0).args(args).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("cactup: {}: {e}", Path::new(&program).display());
+            return 127;
+        }
+    };
+    let ours = rustix::process::Pid::from_raw(child.id() as i32);
+    loop {
+        match rustix::process::waitpid(None, rustix::process::WaitOptions::empty()) {
+            Ok(Some((pid, status))) if Some(pid) == ours => {
+                return match (status.exit_status(), status.terminating_signal()) {
+                    (Some(code), _) => code,
+                    (None, Some(signal)) => 128 + signal,
+                    (None, None) => 1,
+                };
+            }
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => {}
+            Err(_) => return 1,
+        }
+    }
 }
 
 /// The flags that have an `nvcc` compile of `source` honor the path map
