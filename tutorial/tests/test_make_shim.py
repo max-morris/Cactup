@@ -252,6 +252,16 @@ def test_targets_skips_options_and_assignments():
     assert make_shim.targets(["-C", "dir", "all"]) == ["all"]
 
 
+def test_with_jobs_replaces_the_job_count():
+    assert make_shim.with_jobs(["-j4", "demo"], "30") == ["-j30", "demo"]
+    assert make_shim.with_jobs(["-j", "4", "demo"], "30") == ["-j30", "demo"]
+    assert make_shim.with_jobs(["--jobs=4", "demo-config", "options=/x"], "30") == ["-j30", "demo-config", "options=/x"]
+    assert make_shim.with_jobs(["--jobs", "4", "demo"], "30") == ["-j30", "demo"]
+    # A bare -j (no limit) followed by a goal keeps the goal.
+    assert make_shim.with_jobs(["-j", "demo"], "30") == ["-j30", "demo"]
+    assert make_shim.with_jobs(["demo-clean"], "30") == ["-j30", "demo-clean"]
+
+
 def test_step_of():
     assert [make_shim.step_of(t, "demo") for t in
             ("demo-config", "demo", "demo-utils", "demo-clean", "demo-realclean", "other")] == \
@@ -371,6 +381,15 @@ def test_an_incremental_build_after_a_restore_is_real_and_small(tree):
     assert "COMPILING B/x.c" not in got.stdout.decode()
     assert any(c.endswith(f"{NAME}") for c in tree.make_calls())
     assert json.loads((tree.cfg / make_shim.MARKER).read_text())["state"] == "built-on"
+
+
+def test_a_recording_runs_make_with_the_bake_job_count(tree):
+    att = tree.attempt()
+    got = tree.run(att, CACTUP_TUTORIAL_SHIM="record", CACTUP_TUTORIAL_RECORD=str(tree.tmp / "record"),
+                   CACTUP_TUTORIAL_BAKE_JOBS="30")
+    assert got.returncode == 0, got.stderr
+    calls = tree.make_calls()
+    assert calls and all(c.split()[0] == "-j30" and "-j4" not in c.split() for c in calls), calls
 
 
 def test_a_from_scratch_miss_says_what_differs(tree):

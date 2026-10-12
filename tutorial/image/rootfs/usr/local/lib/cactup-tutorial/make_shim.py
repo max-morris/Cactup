@@ -136,6 +136,25 @@ def targets(args: list[str]) -> list[str]:
     return out
 
 
+def with_jobs(args: list[str], jobs: str) -> list[str]:
+    """make's command line with its job count replaced by `jobs` (-jN, -j N,
+    --jobs=N and --jobs N alike), or given it when it had none."""
+    out = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            if a.isdigit():
+                continue
+        if a in ("-j", "--jobs"):
+            skip = True
+            continue
+        if re.fullmatch(r"-j\d+|--jobs=\d*", a):
+            continue
+        out.append(a)
+    return [f"-j{jobs}", *out]
+
+
 def step_of(target: str, name: str) -> str | None:
     for step, suffix in (("config", "-config"), ("clean", "-clean"), ("realclean", "-realclean"),
                          ("utils", "-utils"), ("build", "")):
@@ -1035,7 +1054,15 @@ def record_dir(config: str, attempt_name: str) -> Path:
 
 def record_step(args: list[str], step: str, out_dir: Path) -> int:
     """Run the real make, pass its output through and record it with timings,
-    in line-sized events (so a path is never split between two)."""
+    in line-sized events (so a path is never split between two).
+
+    In a bake container, CACTUP_TUTORIAL_BAKE_JOBS replaces the machine's job
+    count (bake.py: every CPU there): the recording only keeps the order and
+    shape of the output, which a replay compresses anyway, and the job count
+    is in neither the fingerprint nor the output."""
+    jobs = os.environ.get("CACTUP_TUTORIAL_BAKE_JOBS", "")
+    if jobs.isdigit() and int(jobs) > 0:
+        args = with_jobs(args, jobs)
     # (Popen restores SIGPIPE and SIGXFSZ itself; SIGINT as the caller had it.)
     proc = subprocess.Popen(["make", *args], executable=REAL_MAKE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             preexec_fn=reset_signals)

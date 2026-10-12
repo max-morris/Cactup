@@ -480,6 +480,21 @@ def interrupt(root: str, out: str, delay: float, args: list[str]) -> int:
     return 0
 
 
+def bake_jobs(gb_per_job: int = 2) -> int:
+    """Every CPU this container may use, but no more jobs than there are
+    2 GB of memory for (the CarpetX and AMReX compiles are big): the
+    available memory, or the container's limit if that is lower."""
+    cpus = len(os.sched_getaffinity(0))
+    mem = int(re.search(r"^MemAvailable:\s*(\d+)", Path("/proc/meminfo").read_text(), re.M).group(1)) * 1024
+    try:
+        limit = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        if limit.isdigit():
+            mem = min(mem, int(limit))
+    except OSError:
+        pass
+    return max(1, min(cpus, mem // (gb_per_job << 30)))
+
+
 def cuda_toolkit(root: Path = Path("/usr/local")) -> Path | None:
     """The CUDA toolkit mounted into this bake container, if any."""
     found = sorted(root.glob("cuda-*/version.json"))
@@ -539,6 +554,11 @@ def main() -> int:
     if "CACTUP_TUTORIAL_CPUS" not in os.environ:
         status = Path("/proc/self/status").read_text()
         os.environ["CACTUP_TUTORIAL_CPUS"] = re.search(r"^Cpus_allowed_list:\s*(\S+)", status, re.M).group(1)
+    # The recorded builds' make runs this many jobs, not the machine's 4 (the
+    # shim swaps it in; see make_shim.record_step).
+    jobs = os.environ.get("CACTUP_TUTORIAL_BAKE_JOBS") or str(bake_jobs())
+    os.environ["CACTUP_TUTORIAL_BAKE_JOBS"] = jobs
+    log(f"builds run make -j{jobs} (CACTUP_TUTORIAL_BAKE_JOBS)")
     set_up_home()
     tool = toolchain()
     cache = Path(args.cache) / tool

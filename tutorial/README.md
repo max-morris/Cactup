@@ -822,7 +822,11 @@ with the shim in probe mode: the config step records the fingerprint and
 fails the build on purpose, and the config is removed again. If the cache
 already has that fingerprint for this toolchain, that's all. Otherwise it
 runs the build for real with the shim recording every step's output with its
-timings (and cactup's whole transcript beside it), and harvests the result
+timings (and cactup's whole transcript beside it; make runs there with
+every CPU the bake container has, at most one job per 2 GB of memory, or
+`CACTUP_TUTORIAL_BAKE_JOBS` jobs, in place of the machine's `-j4`: neither
+the fingerprint nor the output holds the job count, and a replay compresses
+the timings anyway), and harvests the result
 into `<toolchain>/<fingerprint>/` in the bake cache: the config's tree, the
 executable, the recordings, and a manifest the restore copies from. The
 cache lives outside Docker (`$CACTUP_TUTORIAL_BAKES`, default

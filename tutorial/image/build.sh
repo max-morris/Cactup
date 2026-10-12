@@ -20,6 +20,10 @@
 # upstream's tips instead and rewrites the lock (commit it on purpose: it
 # changes what the bakes were built from).
 #
+# The bakes' builds run make with every CPU there is (at most one job per
+# 2 GB of memory), not the attendee's -j4; CACTUP_TUTORIAL_BAKE_JOBS=N sets
+# the job count instead.
+#
 # DEBIAN_SNAPSHOT overrides the Dockerfile's snapshot.debian.org date.
 #
 # cactup itself comes from the commit tutorial/cactup.pin names, not from the
@@ -119,7 +123,7 @@ build lab "$@" "$repo"
 # Only what the bakes need; no network (installs come from the mirrors).
 echo "build.sh: baking"
 bake() {
-    docker run --rm --hostname cactup-tutorial --network none \
+    docker run --rm --hostname cactup-tutorial --network none -e CACTUP_TUTORIAL_BAKE_JOBS \
         --mount type=volume,dst=/home/cactus,volume-nocopy \
         -v "$here/../bake:/bake:ro" -v "$bakes:/bakes" \
         "$@"
