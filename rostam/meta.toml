@@ -5,11 +5,16 @@
 #
 #   flavor           build universe  where it builds        queues
 #   ---------------  --------------  ---------------------  ------------------
-#   x86-cuda-image   cactus-cuda     login node, Apptainer  the A100 partitions
-#   (default)
-#   x86-cuda-native  x86-modules     login node, Lmod       the A100 partitions
+#   x86-cuda-image   cactus-cuda     login node, Apptainer  the x86 CUDA
+#   (default)                                               partitions
+#   x86-cuda-native  x86-modules     login node, Lmod       the x86 CUDA
+#                                                           partitions
 #   arm-cuda-native  arm-conda       a spark node           spark
 #
+#   The x86 CUDA partitions hold A100s (sm_80) and V100s (sm_70), and both
+#   x86 CUDA flavors compile for both; their compile flags name no -march,
+#   so one binary also runs on every host CPU (Haswell to Ice Lake, EPYC
+#   Rome).
 #   - x86-cuda-image builds and runs inside Steve Brandt's
 #     docker://stevenrbrandt/cactus-cuda image under Apptainer, which carries
 #     CUDA 12.9, MPICH and every ExternalLibrary prebuilt; ported from his
@@ -29,7 +34,7 @@
 name        = "rostam"
 nickname    = "rostam"
 location    = "LSU CCT"
-description = "LSU CCT Rostam cluster (Slurm): A100 and DGX Spark GPU nodes"
+description = "LSU CCT Rostam cluster (Slurm): A100, V100 and DGX Spark GPU nodes"
 status      = "production"
 hostname    = "rostam1.rostam.cct.lsu.edu"
 
@@ -171,6 +176,51 @@ max-gpus-per-node     = 4
 default-cpus-per-task = 16
 memory                = 252763
 
+# cuda is every NVIDIA x86 node behind one 1-day partition: anvil, nasrin,
+# toranj, bahram and diablo (below). Its intersection is bahram's.
+[queues.cuda]
+gpu                   = true
+max-walltime          = "1-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 2
+default-cpus-per-task = 10
+memory                = 124200
+
+# cuda-V100 spans bahram (2 × V100 PCIe 32GB, 20 cores, Intel Haswell,
+# 124 GB) and diablo (4 × V100 SXM2 32GB, 40 cores, Intel Skylake, 368 GB);
+# the intersection is bahram's. sc15 is bahram alone, under a partition name
+# kept from SC15.
+[queues.cuda-V100]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 2
+default-cpus-per-task = 10
+memory                = 124200
+
+[queues.sc15]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 2
+default-cpus-per-task = 10
+memory                = 124200
+
+# DGX-A100 is anvil: 8 × A100 SXM4 80GB and 2 × 64-core AMD EPYC Rome with
+# hyperthreading on, so Slurm counts 256 CPUs, two per core; 2 TB.
+[queues.DGX-A100]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 256
+max-gpus-per-node     = 8
+default-cpus-per-task = 32
+threads-per-cpu       = 2
+memory                = 2030746
+
 # spark-[00-03]: one GB10 (sm_121) and 20 Arm cores (10 Cortex-X925, 10
 # Cortex-A725) sharing 128 GB of unified memory. Only an aarch64 build can run
 # here, which build-universes enforces.
@@ -188,13 +238,13 @@ memory                = 120000
 # through Apptainer, the native builds directly, OpenMPI with PMIx and MPICH
 # with PMI-2.
 [submitscripts]
-"default" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "spark"] }
-"test"    = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "spark"], test = true }
+"default" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark"] }
+"test"    = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark"], test = true }
 
 [runscripts]
-"x86-cuda-image"       = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel"], build-universes = ["cactus-cuda"] }
-"x86-cuda-native"      = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel"], build-universes = ["x86-modules"] }
+"x86-cuda-image"       = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["cactus-cuda"] }
+"x86-cuda-native"      = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["x86-modules"] }
 "arm-cuda-native"      = { queues = ["spark"], build-universes = ["arm-conda"] }
-"test-x86-cuda-image"  = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel"], build-universes = ["cactus-cuda"], test = true }
-"test-x86-cuda-native" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel"], build-universes = ["x86-modules"], test = true }
+"test-x86-cuda-image"  = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["cactus-cuda"], test = true }
+"test-x86-cuda-native" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["x86-modules"], test = true }
 "test-arm-cuda-native" = { queues = ["spark"], build-universes = ["arm-conda"], test = true }

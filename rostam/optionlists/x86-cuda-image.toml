@@ -15,7 +15,7 @@ default           = true
 description       = "x86 + CUDA (sm_70, sm_80): Steve Brandt's cactus-cuda image, MPICH"
 
 [cactup.runs-on]
-queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel"]
+queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"]
 gpu    = true
 
 [options]
