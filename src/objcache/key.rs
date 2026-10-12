@@ -29,7 +29,7 @@
 //! while the cache only records.
 
 use super::compile::{self, Compile};
-use super::fortran;
+use super::{cuda, fortran};
 use super::hash::{bytes_digest, Hasher};
 use super::identity::{self, Compiler, Family};
 use super::{environment, platform, BuildConf};
@@ -128,6 +128,13 @@ impl PathMap {
         }
         from_to.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
         Some(Self { from_to })
+    }
+
+    /// Each directory the map knows and the name it is mapped to, longest
+    /// first.
+    pub fn pairs(&self) -> Vec<(PathBuf, &'static str)> {
+        let strip = |from: &[u8]| PathBuf::from(OsStr::from_bytes(from.strip_suffix(b"/").unwrap_or(from)));
+        self.from_to.iter().map(|(from, to)| (strip(from), *to)).collect()
     }
 
     /// The compiler flags that make a compile honor the map, for `__FILE__`
@@ -299,6 +306,8 @@ pub struct Keyed {
     depend: Option<(tempfile::TempPath, PathBuf)>,
     /// A Fortran compile's copy, module files and dependency run (§18.10).
     fortran: Option<fortran::Fortran>,
+    /// A CUDA compile's host compiler and preprocessor passes (M4).
+    cuda: Option<cuda::Cuda>,
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
@@ -341,8 +350,21 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         return Err(why);
     }
     let (compiler, watch) = identity::identify_watching(cc_dir, &argv[0]).map_err(whole)?;
+    let compile = match compiler.family {
+        Family::Nvcc => compile::parse_cuda(&argv[1..])?,
+        _ => compile::parse(&argv[1..])?,
+    };
+    // `nvcc`'s host compiler, for this compile: what it would run says
+    // which (M4); its identity is watched with `nvcc`'s.
+    let (cuda_run, watch) = match compiler.family {
+        Family::Nvcc => {
+            let run = cuda::dry_run(&compiler.path, &argv[0], &argv[1..], None).map_err(whole)?;
+            let (host, host_watch) = cuda::host(&run, cc_dir).map_err(whole)?;
+            (Some((run, host)), watch.and(host_watch))
+        }
+        _ => (None, watch),
+    };
     let identified = watch.stamps();
-    let compile = compile::parse(&argv[1..])?;
     if let Some(flag) = compile.keyed.iter().find(|argument| compiler.multilib.iter().any(|flag| argument.as_bytes() == flag.as_bytes())) {
         return Err(format!(
             "{} has the compiler use another of its sets of programs and libraries (a multilib), which the cache does not follow",
@@ -376,7 +398,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         // Seen for real: one compile of one file, run twice, two objects.
         return Err("it targets the processor it runs on (native), and this host's processors are not all alike".to_owned());
     }
-    let map = PathMap::new(conf, &compiler, &compile);
+    // Both of a CUDA compile's compilers must make one object in two places.
+    let map = PathMap::new(conf, &compiler, &compile).filter(|_| cuda_run.as_ref().is_none_or(|(_, host)| host.relocates));
     let mapped = |text: &[u8]| map.as_ref().map_or_else(|| text.to_vec(), |map| map.apply(text));
 
     let mut arguments = Hasher::new("arguments");
@@ -445,7 +468,38 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             seen: read.seen,
             depend: None,
             fortran: Some(read.fortran),
+            cuda: None,
         }, identified));
+    }
+    if let Some((run, host)) = cuda_run {
+        let read = cuda::key(&run, host, &compile, map.as_ref()).map_err(whole)?;
+        let mut both = Hasher::new("nvcc and its host compiler");
+        both.feed(compiler.id.as_bytes());
+        both.feed(read.cuda.host.id.as_bytes());
+        let parts = Parts {
+            platform: platform.digest,
+            compiler: both.hex(),
+            arguments: arguments.hex(),
+            environment,
+            text: read.text,
+            files: read.files,
+        };
+        let keyed = Keyed {
+            compile,
+            compiler,
+            parts,
+            text_bytes: read.text_bytes,
+            files: read.count,
+            name,
+            watch,
+            before: None,
+            map,
+            seen: read.seen,
+            depend: None,
+            fortran: None,
+            cuda: Some(read.cuda),
+        };
+        return Ok((keyed, identified));
     }
     let depend = match serving {
         true => depend_flags(&compile).map_err(whole)?,
@@ -462,7 +516,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         text: read.text,
         files: read.files,
     };
-    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None };
+    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None, cuda: None };
     Ok((keyed, identified))
 }
 
@@ -536,6 +590,9 @@ impl Keyed {
         if let Some(fortran) = &mut self.fortran {
             return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
         }
+        if let Some(cuda) = &self.cuda {
+            return cuda::still_holds(cuda, &self.compile, self.map.as_ref(), &self.parts.text, &self.parts.files, &self.seen);
+        }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
     }
@@ -572,7 +629,15 @@ impl Keyed {
             Some(fortran) => out.extend(fortran.arguments(&argv[1..], self.compile.source_at)),
             None => out.extend(argv[1..].iter().cloned()),
         }
-        out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default());
+        match &self.cuda {
+            // `nvcc`'s own form of them, and the name `cudafe++` makes the
+            // module ID from (M4), mapped where the map holds.
+            Some(_) => {
+                let source = std::env::current_dir().map(|cwd| cwd.join(&self.compile.source)).unwrap_or_else(|_| self.compile.source.clone());
+                out.extend(cuda::map_flags(&source, &self.map.as_ref().map(PathMap::pairs).unwrap_or_default()));
+            }
+            None => out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default()),
+        }
         out
     }
 
@@ -1012,6 +1077,8 @@ pub(super) fn flags_from_elsewhere(family: Family, specs: Option<&Path>, said: &
             None if said.lines().any(|line| line.starts_with("InstalledDir: ")) && said.lines().any(runs_cc1) => Ok(()),
             None => Err("the compiler does not say whether it reads a configuration file".to_owned()),
         },
+        // `nvcc`'s preprocessor passes are its host compiler's, asked of that.
+        Family::Nvcc => Err("nvcc is asked for the flags it takes from elsewhere by its host compiler".to_owned()),
         Family::Gcc | Family::Gfortran => {
             let read: Vec<&str> = said.lines().filter_map(|line| line.strip_prefix("Reading specs from ")).collect();
             let accepted = |file: &str| specs.is_some_and(|specs| std::fs::canonicalize(file).is_ok_and(|file| file == specs));
@@ -1068,7 +1135,7 @@ pub(super) type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
 
 /// Digest the preprocessor's output as it comes, and collect the files it
 /// names.
-fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
+pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
     let mut output = BufReader::new(child.stdout.take().context("the preprocessor has no output")?);
     let mut hasher = Hasher::new("text");
     let mut named = Named::new();

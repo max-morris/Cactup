@@ -2,8 +2,8 @@
 //! know: is it a compile the cache understands *completely*, and if so,
 //! which arguments decide the object and which only feed the preprocessor.
 //!
-//! This reader is for the GCC and Clang drivers, gfortran's included. It
-//! works from a list of
+//! This reader is for the GCC and Clang drivers, gfortran's included;
+//! [`parse_cuda`] reads NVIDIA's `nvcc` (M4). Each works from a list of
 //! what it knows (§18.1 rule 1): a flag that is not on it makes the whole
 //! command line "not cached", whatever the flag would have done. A miss
 //! costs a compile; a flag misread could cost a wrong object.
@@ -28,6 +28,8 @@ pub enum Language {
     /// gfortran the copies it has preprocessed itself. Fixed or free form,
     /// by the suffix.
     Fortran { fixed: bool },
+    /// CUDA, compiled by `nvcc` (`-x cu`, or a `.cu` source).
+    Cuda,
 }
 
 impl Language {
@@ -37,6 +39,7 @@ impl Language {
             Self::Cxx => "c++",
             Self::Fortran { fixed: true } => "fortran-fixed",
             Self::Fortran { fixed: false } => "fortran-free",
+            Self::Cuda => "cuda",
         }
     }
 
@@ -107,6 +110,9 @@ pub struct Compile {
     /// which would write the file too. (A cache that serves an object has
     /// to see that file written: that is what they are kept for.)
     pub depend: Vec<OsString>,
+    /// For `nvcc`: the host compiler it is told to use
+    /// (`--compiler-bindir`), as given.
+    pub host: Option<OsString>,
 }
 
 /// Flags that take their value as the next argument, and go into the key.
@@ -383,7 +389,204 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     if !depend.is_empty() && !depend_file {
         return Err("a dependency file is asked for without -MF to say where".to_owned());
     }
-    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend })
+    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend, host: None })
+}
+
+/// `nvcc`'s options that take no value and only change the object or the
+/// diagnostics, by name without their dashes (`nvcc` takes `-name` and
+/// `--name` alike).
+const CUDA_SETTINGS: &[&str] = &[
+    "expt-relaxed-constexpr", "extended-lambda", "expt-extended-lambda", "forward-unknown-to-host-compiler",
+    "objdir-as-tempdir", "generate-line-info", "lineinfo", "use_fast_math", "m64", "display-error-number",
+    "no-display-error-number", "Wno-deprecated-gpu-targets", "restrict",
+];
+
+/// `nvcc`'s options that take a value (`--name=value`, `--name value`,
+/// `-name value`) and only change the object or the diagnostics.
+const CUDA_WITH_VALUE: &[&str] = &[
+    "std", "relocatable-device-code", "rdc", "gpu-architecture", "arch", "gpu-code", "code", "generate-code",
+    "gencode", "diag-suppress", "Werror", "ftz", "prec-div", "prec-sqrt", "fmad", "maxrregcount", "default-stream",
+];
+
+/// Read an `nvcc` command line (everything after the program's name), as
+/// [`parse`] reads a GCC one: what is not on the lists is not cached. Host
+/// compiler flags, given with `-Xcompiler` (or forwarded with
+/// `--forward-unknown-to-host-compiler`), must be on the GCC reader's list.
+pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
+    let total = args.len();
+    let mut args = args.iter();
+    let mut compile_only = false;
+    let (mut source, mut output, mut source_at, mut host) = (None, None, 0, None);
+    let mut output_at = Vec::new();
+    let (mut preprocess, mut keyed) = (Vec::new(), Vec::new());
+    let (mut level, mut native, mut language_given, mut forward) = (0, false, false, false);
+    let mut unknown = Vec::new();
+    // Host compiler flags: on the GCC reader's list, or not cached.
+    let host_flag = |flag: &str| -> Result<(), String> {
+        match NOT_CACHED.iter().any(|prefix| flag.starts_with(prefix)) || !is_setting(flag) {
+            true => Err(format!("{flag}, for the host compiler, is not a flag the cache knows")),
+            false => Ok(()),
+        }
+    };
+
+    while let Some(arg) = args.next() {
+        let at = total - args.len() - 1;
+        let Some(flag) = arg.to_str() else {
+            return Err("an argument is not valid UTF-8".to_owned());
+        };
+        // An option's name without its dashes, and a value given with `=`.
+        let bare = flag.strip_prefix("--").or_else(|| flag.strip_prefix('-'));
+        let (name, joined) = match bare {
+            Some(bare) => match bare.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (bare, None),
+            },
+            None => ("", None),
+        };
+        let mut value = |what: &str| -> Result<OsString, String> {
+            match joined {
+                Some(value) => Ok(OsString::from(value)),
+                None => args.next().cloned().ok_or_else(|| format!("{what} has nothing after it")),
+            }
+        };
+
+        if flag == "-c" {
+            compile_only = true;
+            output_at.push(at);
+        } else if flag == "-o" || name == "output-file" {
+            if output.replace(PathBuf::from(value(flag)?)).is_some() {
+                return Err("-o is given more than once".to_owned());
+            }
+            output_at.push(at);
+            if joined.is_none() {
+                output_at.push(at + 1);
+            }
+        } else if let Some(rest) = ["-I", "-D", "-U"].iter().find_map(|short| flag.strip_prefix(short).map(|rest| (*short, rest))) {
+            // Their whole effect is in the preprocessed text.
+            let (short, rest) = rest;
+            let value = match rest {
+                "" => args.next().cloned().ok_or_else(|| format!("{short} has nothing after it"))?,
+                rest => OsString::from(rest),
+            };
+            preprocess.push(OsString::from(short));
+            preprocess.push(value);
+        } else if flag == "-isystem" {
+            let value = args.next().cloned().ok_or("-isystem has nothing after it")?;
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(arg.clone());
+                list.push(value.clone());
+            }
+        } else if name == "x" {
+            if value(flag)? != "cu" {
+                return Err("-x names a language other than CUDA".to_owned());
+            }
+            language_given = true;
+        } else if name == "compiler-bindir" || name == "ccbin" {
+            // Identified as a compiler of its own: the key has its identity.
+            host = Some(value(flag)?);
+        } else if name == "compiler-options" || name == "Xcompiler" {
+            let given = value(flag)?;
+            let given = given.to_str().ok_or("an argument is not valid UTF-8")?;
+            for host in given.split(',').filter(|host| !host.is_empty()) {
+                host_flag(host)?;
+                native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| host.starts_with(native));
+            }
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(OsString::from("-Xcompiler"));
+                list.push(OsString::from(given));
+            }
+        } else if name == "Xcudafe" {
+            // Only the numbers of diagnostics to keep quiet.
+            let given = value(flag)?;
+            if !given.to_str().is_some_and(|given| given.split(',').all(|part| part.starts_with("--diag_suppress="))) {
+                return Err(format!("-Xcudafe {} is not a flag the cache knows", given.to_string_lossy()));
+            }
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(OsString::from("-Xcudafe"));
+                list.push(given.clone());
+            }
+        } else if name == "ptxas-options" || name == "Xptxas" {
+            // Only `-v`, which prints what each kernel uses.
+            let given = value(flag)?;
+            if given != "-v" {
+                return Err(format!("{flag} {} is not a flag the cache knows", given.to_string_lossy()));
+            }
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(OsString::from("-Xptxas"));
+                list.push(given.clone());
+            }
+        } else if CUDA_WITH_VALUE.contains(&name) {
+            let given = value(flag)?;
+            for list in [&mut preprocess, &mut keyed] {
+                list.push(OsString::from(format!("--{name}")));
+                list.push(given.clone());
+            }
+        } else if CUDA_SETTINGS.contains(&name) || matches!(flag, "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-G" | "--device-debug") || debug_level(flag).is_some() {
+            forward |= name == "forward-unknown-to-host-compiler";
+            // As for GCC: a bare `-g` turns debug information on, an
+            // explicit level sets it; `-G` is the device's own.
+            match debug_level(flag) {
+                Some(2) if flag == "-g" => level = level.max(2),
+                Some(asked) => level = asked,
+                None if matches!(flag, "-G" | "--device-debug") => level = level.max(2),
+                None => {}
+            }
+            preprocess.push(arg.clone());
+            keyed.push(arg.clone());
+        } else if flag == "-" {
+            return Err("the source comes from standard input".to_owned());
+        } else if flag.starts_with('-') {
+            // `nvcc`'s own, or the host compiler's when forwarded.
+            unknown.push(flag.to_owned());
+            native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| flag.starts_with(native));
+            preprocess.push(arg.clone());
+            keyed.push(arg.clone());
+        } else {
+            if source.replace(PathBuf::from(arg)).is_some() {
+                return Err("there is more than one input file".to_owned());
+            }
+            source_at = at;
+            preprocess.push(arg.clone());
+        }
+    }
+
+    if !compile_only {
+        return Err("it is not a compile to an object (no -c)".to_owned());
+    }
+    let source: PathBuf = source.ok_or("there is no input file")?;
+    let output = output.ok_or("there is no -o")?;
+    if !language_given && source.extension().is_none_or(|ext| ext != "cu") {
+        return Err("an nvcc compile of a source that is not CUDA (no -x cu, no .cu)".to_owned());
+    }
+    // Without forwarding, `nvcc` stops at an option it does not know; with
+    // it, the host compiler gets it, and the GCC reader has to know it.
+    for flag in &unknown {
+        match forward {
+            true => host_flag(flag)?,
+            false => return Err(format!("{flag} is not a flag the cache knows")),
+        }
+    }
+    if source.as_os_str().as_bytes().contains(&b'\n') {
+        return Err("the source file's name has a line break in it".to_owned());
+    }
+    let (debug, macros_in_debug) = (level > 0, level == 3);
+    Ok(Compile {
+        language: Language::Cuda,
+        source,
+        source_at,
+        output_at,
+        output,
+        preprocess,
+        keyed,
+        debug,
+        macros_in_debug,
+        openmp: false,
+        forced_include: false,
+        native,
+        charset: false,
+        depend: Vec::new(),
+        host,
+    })
 }
 
 impl Compile {
@@ -409,11 +612,45 @@ mod tests {
         parse(&os(args))
     }
 
+    /// A Cactus CUDA compile, with the `CUCCFLAGS` a machine gives.
+    fn cuda(flags: &str) -> Result<Compile, String> {
+        let mut args: Vec<String> = flags.split_whitespace().map(str::to_owned).collect();
+        args.extend(["-c", "-o", "/c/build/T/a.cu.o", "/c/build/T/a.cu", "-I/src/T", "-I", "/c/bindings", "-DCCODE"].map(str::to_owned));
+        parse_cuda(&args.iter().map(OsString::from).collect::<Vec<_>>())
+    }
+
     /// The shape of a Cactus compile line.
     const CACTUS: &[&str] = &[
         "-g", "-std=gnu99", "-O3", "-c", "-o", "/c/build/T/a.c.o", "/c/build/T/a.c", "-I/src/T", "-I", "/c/bindings",
         "-DCCODE", "-DX=1",
     ];
+
+    /// The `CUCCFLAGS` of the MDB's GPU machines are read, and what they
+    /// hand the host compiler is held to the GCC reader's list.
+    #[test]
+    fn reads_the_cuda_compiles_of_the_mdb() {
+        let saturn = "--compiler-bindir /packages/gcc/13.2.0/bin/g++ -x cu -g -std=c++17 --expt-relaxed-constexpr --extended-lambda --forward-unknown-to-host-compiler --relocatable-device-code=true --objdir-as-tempdir --gpu-architecture sm_80 --diag-suppress=20012 -DSIMD_DISABLE -O3";
+        let compile = cuda(saturn).unwrap();
+        assert_eq!(compile.language, Language::Cuda);
+        assert_eq!(compile.host.as_deref(), Some(OsStr::new("/packages/gcc/13.2.0/bin/g++")));
+        assert_eq!(compile.output, Path::new("/c/build/T/a.cu.o"));
+        assert!(compile.debug && !compile.native);
+        assert!(!compile.keyed.iter().any(|arg| arg.to_string_lossy().contains("/packages/gcc")), "the host compiler is keyed by its identity");
+        assert!(!compile.keyed.iter().any(|arg| arg == "-DSIMD_DISABLE" || arg == "/c/build/T/a.cu"));
+        let et = "--compiler-bindir /usr/bin/g++ -forward-unknown-to-host-compiler -std=c++17 --expt-relaxed-constexpr --extended-lambda -x cu --relocatable-device-code=true -Xcudafe --diag_suppress=20012 --ptxas-options=-v";
+        assert!(cuda(et).is_ok(), "{:?}", cuda(et));
+        let delta = "-pipe -g --compiler-options -march=native -std=c++17 --compiler-options -std=gnu++17 --expt-relaxed-constexpr --extended-lambda --gpu-architecture sm_80 --forward-unknown-to-host-compiler --Werror ext-lambda-captures-this --relocatable-device-code=true --objdir-as-tempdir -x cu";
+        let compile = cuda(delta).unwrap();
+        assert!(compile.native, "-march=native for the host compiler");
+        // An option neither list knows: not cached, forwarded or not.
+        assert!(cuda("-x cu --keep").is_err());
+        assert!(cuda("-x cu --forward-unknown-to-host-compiler -fplugin=x.so").is_err());
+        assert!(cuda("-x cu -funroll-loops").is_err(), "not forwarded");
+        assert!(cuda("-x cu --forward-unknown-to-host-compiler -funroll-loops").is_ok());
+        assert!(cuda("-x cu -Xcompiler -fplugin=x.so").is_err());
+        assert!(cuda("-x cu -Xcudafe --gen_c_file_name=x").is_err());
+        assert!(cuda("-x c++").is_err());
+    }
 
     #[test]
     fn reads_a_cactus_compile() {

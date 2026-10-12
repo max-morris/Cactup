@@ -55,6 +55,9 @@ pub enum Family {
     Clang,
     /// GCC's Fortran driver (§18.10).
     Gfortran,
+    /// NVIDIA's CUDA driver (M4): its own toolchain, and a host compiler
+    /// identified for each compile.
+    Nvcc,
 }
 
 /// An identified compiler.
@@ -198,12 +201,25 @@ pub fn find_program(program: &OsStr) -> Res<PathBuf> {
 /// one: the working directory) is another program, or none, from each
 /// compile's directory: a helper found so rules the compiler out.
 fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
+    let path = std::env::var_os("PATH").context("PATH is not set")?;
+    search_along(program, &path, watched)
+}
+
+/// [`search_along`], the places passed over not kept: for a program that is
+/// then identified, and watched, on its own.
+pub(super) fn find_along(program: &OsStr, path: &OsStr) -> Res<Option<PathBuf>> {
+    let (mut files, mut absent) = (Vec::new(), Vec::new());
+    search_along(program, path, &mut Watched { files: &mut files, absent: &mut absent, helper: false })
+}
+
+/// [`search_path`] along `path`, a value of `PATH` (one a driver gives the
+/// programs it runs: `nvcc`'s).
+pub(super) fn search_along(program: &OsStr, path: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
     let absolute = |path: &Path| std::path::absolute(path).with_context(|| format!("Failed to resolve {}", path.display()));
     if program.as_bytes().contains(&b'/') {
         return absolute(Path::new(program)).map(Some);
     }
     let executable = |path: &PathBuf| path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    let path = std::env::var_os("PATH").context("PATH is not set")?;
     let dirs = path.as_bytes().split(|b| *b == b':').map(|dir| if dir.is_empty() { Path::new(".") } else { Path::new(OsStr::from_bytes(dir)) });
     for place in dirs.map(|dir| dir.join(program)) {
         // `execvp` goes on past a file it may not run (no permission for
@@ -365,7 +381,7 @@ impl Watched<'_> {
     /// A relative one (an empty or relative entry of `PATH`,
     /// `LD_LIBRARY_PATH` or `LIBRARY_PATH`) is looked at from each compile's
     /// own directory (decision 22).
-    fn passed(&mut self, place: &Path) {
+    pub(super) fn passed(&mut self, place: &Path) {
         match Seen::of(place) {
             Ok(seen) => self.files.push(seen),
             Err(_) => self.absent.push(place.to_owned()),
@@ -393,9 +409,18 @@ pub(super) struct Watch {
     driver: PathBuf,
     files: Vec<Seen>,
     absent: Vec<PathBuf>,
+    /// Other compilers' identities this compile depends on as well (`nvcc`'s
+    /// host compiler), watched alike.
+    also: Vec<Watch>,
 }
 
 impl Watch {
+    /// This watch, and `other`'s too.
+    pub(super) fn and(mut self, other: Watch) -> Watch {
+        self.also.push(other);
+        self
+    }
+
     /// Does the identity still hold: the same file found for the program,
     /// the same environment, every file as it was, every place passed over
     /// still empty?
@@ -405,6 +430,7 @@ impl Watch {
             && fs::canonicalize(&self.path).is_ok_and(|driver| driver == self.driver)
             && self.files.iter().all(|seen| Seen::of(&seen.path).is_ok_and(|now| now == *seen))
             && self.absent.iter().all(|place| fs::metadata(place).is_err())
+            && self.also.iter().all(Watch::holds)
     }
 
     /// The directories that hold the files the identity watches (by
@@ -439,7 +465,13 @@ impl Watch {
             .collect();
         dirs.sort();
         dirs.dedup();
-        Stamps { dirs: dirs.into_iter().map(|dir| (dir.to_owned(), Seen::of(dir).ok())).collect(), ways: ways.hex() }
+        let mut dirs: Vec<(PathBuf, Option<Seen>)> = dirs.into_iter().map(|dir| (dir.to_owned(), Seen::of(dir).ok())).collect();
+        for other in &self.also {
+            let theirs = other.stamps();
+            dirs.extend(theirs.dirs);
+            ways.feed(theirs.ways.as_bytes());
+        }
+        Stamps { dirs, ways: ways.hex() }
     }
 }
 
@@ -457,6 +489,7 @@ pub(super) fn identify_watching(cc_dir: &Path, program: &OsStr) -> Res<(Compiler
         driver: remembered.driver.clone(),
         files: remembered.files.clone(),
         absent: remembered.absent.clone(),
+        also: Vec::new(),
     };
     if let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok())
         && remembered.env == env
@@ -534,7 +567,7 @@ impl Stamps {
 }
 
 /// Run `program` with `args` and return its standard output, if it succeeds.
-fn ask(program: &Path, args: &[&str]) -> Res<String> {
+pub(super) fn ask(program: &Path, args: &[&str]) -> Res<String> {
     // In English: what a driver says of itself goes into its identity, and
     // must not depend on the language of the session that asked first.
     let mut command = Command::new(program);
@@ -564,8 +597,19 @@ fn ask(program: &Path, args: &[&str]) -> Res<String> {
 /// library found by a relative name (an empty `LD_LIBRARY_PATH` entry is the
 /// working directory) is one each compile's directory may have another of:
 /// that compiler is not one the cache works with.
+#[cfg(test)]
 fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> {
-    let out = Command::new(program)
+    loaded_libraries_with(program, None, watched)
+}
+
+/// [`loaded_libraries`], in the library path a driver gives the programs it
+/// runs (`nvcc`'s `LD_LIBRARY_PATH`), where it gives one.
+fn loaded_libraries_with(program: &Path, library_path: Option<&str>, watched: &mut Watched) -> Res<Vec<PathBuf>> {
+    let mut command = Command::new(program);
+    if let Some(library_path) = library_path {
+        command.env("LD_LIBRARY_PATH", library_path);
+    }
+    let out = command
         .arg("--version")
         .env("LD_TRACE_LOADED_OBJECTS", "1")
         .env("LD_DEBUG", "libs")
@@ -793,6 +837,8 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
             true => Family::Gfortran,
             false => Family::Gcc,
         }
+    } else if says.contains("Cuda compilation tools") && contains(b"nvcc.profile") {
+        Family::Nvcc
     } else {
         bail!("{} is not a compiler cactup knows (or is a wrapper around one)", path.display());
     };
@@ -804,7 +850,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
     hasher.feed(name.as_bytes());
     hasher.feed(bytes_digest(&bytes).as_bytes());
     // The programs that do the work, each with the libraries it loads.
-    let mut programs = vec![driver.clone()];
+    let mut programs: Vec<(PathBuf, Option<String>)> = vec![(driver.clone(), None)];
     match family {
         Family::Clang => {
             // What it says, without where it is installed. A configuration
@@ -827,6 +873,10 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
                     _ => hasher.feed(line.as_bytes()),
                 }
             }
+        }
+        Family::Nvcc => {
+            hasher.feed(says.as_bytes());
+            super::cuda::examine(path, &driver, &mut hasher, watched, &mut programs)?;
         }
         Family::Gcc | Family::Gfortran => {
             hasher.feed(says.as_bytes());
@@ -899,7 +949,7 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
                         }
                         hasher.feed(file_digest(&file)?.as_bytes());
                         watched.files.push(Seen::of(&file)?);
-                        programs.push(file);
+                        programs.push((file, None));
                     }
                     None if *helper == "cc1plus" => hasher.feed(b"absent"),
                     None => bail!("{} names no {helper} cactup can find", path.display()),
@@ -959,8 +1009,8 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
         }
     }
     let mut libraries = Vec::new();
-    for program in &programs {
-        libraries.extend(loaded_libraries(program, watched)?);
+    for (program, library_path) in &programs {
+        libraries.extend(loaded_libraries_with(program, library_path.as_deref(), watched)?);
     }
     libraries.sort();
     libraries.dedup();
@@ -974,8 +1024,8 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
         }
     }
     let mut again = Vec::new();
-    for program in &programs {
-        again.extend(loaded_libraries(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true })?);
+    for (program, library_path) in &programs {
+        again.extend(loaded_libraries_with(program, library_path.as_deref(), &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true })?);
     }
     again.sort();
     again.dedup();
@@ -990,6 +1040,8 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
     }
     let (relocates, locale_neutral) = match family {
         Family::Gfortran => (super::fortran::relocates(path, name, trial_dir), super::fortran::locale_neutral(path, name, trial_dir)),
+        // The locale stays in the key: no trial for it here.
+        Family::Nvcc => (super::cuda::relocates(path, name, trial_dir), false),
         _ => (relocates(path, name, trial_dir), locale_neutral(path, name, trial_dir)),
     };
     Ok(Compiler {

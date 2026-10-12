@@ -25,6 +25,7 @@
 //!   nothing of its own to a compile that runs.
 
 pub mod compile;
+pub mod cuda;
 pub mod environment;
 pub mod event;
 pub mod fortran;
