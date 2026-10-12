@@ -20,7 +20,7 @@ universe    = "x86-modules"
 description = "native host build (gcc 11.5, CUDA 12.8, OpenMPI 5) for the x86 CUDA partitions"
 
 [cactup.runs-on]
-queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel"]
+queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"]
 gpu    = true
 
 [options]
