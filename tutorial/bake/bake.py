@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -134,9 +135,8 @@ def drop_to_user() -> list[str]:
     return ["setpriv", f"--reuid={USER}", f"--regid={USER}", "--init-groups"] if os.geteuid() == 0 else []
 
 
-def as_user(cmd: list[str], env: dict | None = None, check: bool = True,
-            transcript: Path | None = None) -> int:
-    full_env = {
+def user_env(env: dict | None = None) -> dict:
+    return {
         **{k: v for k, v in os.environ.items() if k.startswith("CACTUP_TUTORIAL_")},
         "HOME": str(HOME),
         "USER": USER,
@@ -146,6 +146,11 @@ def as_user(cmd: list[str], env: dict | None = None, check: bool = True,
         "LC_ALL": "C.UTF-8",
         **(env or {}),
     }
+
+
+def as_user(cmd: list[str], env: dict | None = None, check: bool = True,
+            transcript: Path | None = None) -> int:
+    full_env = user_env(env)
     drop = drop_to_user()
     if transcript is None:
         status = subprocess.run([*drop, *cmd], env=full_env, cwd=HOME, stdin=subprocess.DEVNULL).returncode
@@ -174,6 +179,24 @@ def as_user(cmd: list[str], env: dict | None = None, check: bool = True,
     return status
 
 
+def output_as_user(cmd: list[str], env: dict | None = None) -> tuple[int, bytes]:
+    """Run as the tutorial user, keeping the output (stdout and stderr
+    together) instead of showing it."""
+    proc = subprocess.run([*drop_to_user(), *cmd], env=user_env(env), cwd=HOME, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return proc.returncode, proc.stdout
+
+
+def quietly_as_user(cmd: list[str]) -> None:
+    """Run as the tutorial user, showing the output only if the command fails:
+    the setup before each bake prints pages that matter only then."""
+    status, out = output_as_user(cmd)
+    if status != 0:
+        sys.stdout.flush()
+        sys.stderr.buffer.write(out)
+        raise SystemExit(f"bake: {' '.join(cmd)} failed ({status})")
+
+
 def toolchain() -> str:
     """The toolchain's identity: every package and version in this container."""
     pkgs = subprocess.run(["dpkg-query", "-W"], capture_output=True, text=True, check=True).stdout
@@ -191,7 +214,7 @@ def set_up_home() -> None:
     binary = next(UPDATE_ROOT.glob(f"*/cactup-{current}"))
     as_user(["mkdir", "-p", f"{HOME}/.cactup/bin"])
     as_user(["cp", str(binary), f"{HOME}/.cactup/bin/cactup"])
-    as_user(["cactup", "knob", "wisdom-frequency", "off"])
+    quietly_as_user(["cactup", "knob", "wisdom-frequency", "off"])
     as_user(["cp", "/opt/cactup-tutorial/skel/.cactup/cactupignore", f"{HOME}/.cactup/cactupignore"])
 
 
@@ -207,12 +230,14 @@ def remove_config(spec: dict) -> None:
 
 def probe(spec: dict) -> dict:
     """Run the bake's build up to the config step, which records the
-    fingerprint and stops."""
+    fingerprint and stops. The build then fails, on purpose: its output is
+    shown only when it recorded no fingerprint."""
     remove_config(spec)
-    as_user(spec["build"], env={"CACTUP_TUTORIAL_SHIM": "probe", "CACTUP_TUTORIAL_RECORD": str(RECORD)},
-            check=False)
+    _, out = output_as_user(spec["build"], env={"CACTUP_TUTORIAL_SHIM": "probe", "CACTUP_TUTORIAL_RECORD": str(RECORD)})
     found = sorted(RECORD.glob(f"{spec['config']}/*/fingerprint.json"))
     if not found:
+        sys.stdout.flush()
+        sys.stderr.buffer.write(out)
         raise SystemExit("bake: the probe build recorded no fingerprint")
     doc = json.loads(found[-1].read_text())
     remove_config(spec)
@@ -529,7 +554,8 @@ def main() -> int:
         for cmd in spec["install"] + spec.get("prepare", []):
             key = json.dumps(cmd)
             if key not in installed:
-                as_user(cmd)
+                log(f"{bake_id}: {shlex.join(cmd)}")
+                quietly_as_user(cmd)
                 installed.add(key)
         fp = make_shim.fingerprint(probe(spec))
         wanted.append(fp)
