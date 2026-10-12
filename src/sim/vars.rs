@@ -1248,9 +1248,11 @@ mod tests {
         assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (8, 4, 16, 1));
     }
 
-    /// db1 (Deep Bayou) declares no `max-gpus-per-node` at all, so both the
-    /// GPU bound on a derived tpn and the §8.5 ceiling are inert there: the
-    /// CPU rule alone fills the node, with or without explicit rank flags.
+    /// db1 (Deep Bayou) has 2 GPUs per node and fills a node as 2 ranks of 24
+    /// cores, one GPU each, so the GPU bound on a derived tpn and the §8.5
+    /// ceiling leave its usual layouts alone: the CPU rule fills the node,
+    /// with or without explicit rank flags. Only a layout that puts more
+    /// ranks on a node than it has GPUs is refused.
     #[test]
     fn db1_layouts_are_untouched_by_the_gpu_bound() {
         let mdb = crate::mdb::Mdb::with_roots(
@@ -1266,18 +1268,23 @@ mod tests {
         .unwrap();
         let fit = BinaryFit::from_config(&cfg);
         let hw = machine.meta.effective_hardware("gpu").unwrap();
-        assert_eq!(hw.max_gpus_per_node, None);
+        assert_eq!(hw.max_gpus_per_node, Some(2));
 
-        // No flags: 48 cores at 24/task = 2 ranks, one GPU each, no ceiling.
+        // No flags: 48 cores at 24/task = 2 ranks, one GPU each.
         let t = resolve_topology(&flags(), &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn, t.cpus, t.gpus_per_task), (2, 2, 24, 1));
 
-        // Explicit rank counts resolve as they always did, never refused on
-        // GPU grounds (nothing is declared to check against).
+        // Explicit rank counts resolve as they always did: 2 per node.
         let mut f = flags();
         f.tasks = Some(4);
         let t = resolve_topology(&f, &machine, &db, Some(&fit), false).unwrap();
         assert_eq!((t.tasks, t.tpn), (4, 2));
+
+        // 4 ranks of 12 cores on one node would put 4 ranks on its 2 GPUs.
+        let mut f = flags();
+        f.cpus = Some(12);
+        f.tpn = Some(4);
+        assert!(resolve_topology(&f, &machine, &db, Some(&fit), false).is_err());
     }
 
     /// The mirror case of `qbd_defaults_fill_each_partition`: a machine that

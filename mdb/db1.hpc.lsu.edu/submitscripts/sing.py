@@ -1,14 +1,14 @@
 # db1.hpc.lsu.edu submitscript (script "sing"), ported from simfactory2
 # mdb/submitscripts/db-sing-nv.sub. Serves the Singularity build flavors (the
 # et-sing and et-sing-cpu build universes; upstream db-sing-cpu reused
-# db-sing-nv's submitscript). The GPU directives (--gpus-per-task, --gres=gpu:2)
-# apply to both; --gres stays verbatim, while --gpus-per-task now carries the
-# §8.5 GPUS_PER_TASK topology variable (still 1 by default — see default.py).
+# db-sing-nv's submitscript). The GPU directives (--gpus-per-task, --gres)
+# apply to both; --gres is per node, as in default.py, and --gpus-per-task
+# carries the §8.5 GPUS_PER_TASK topology variable (see default.py).
 #
 # .py script (design §6.1): the old script used simfactory's ternary
 # expression @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@
 # — cactup's @NAME@ engine is literal-only (D7), so the conditional moves into
-# Python, alongside the computed --gres=gpu:{typed["NODES"] * typed["TASKS"]}
+# Python, alongside the computed per-node --gres=gpu:{TASKS_PER_NODE × GPUS_PER_TASK}
 # directive and the `if EMAIL:` mail guard below.
 #
 # Calling convention: cactup binds every §6.3 variable as a module global and
@@ -28,7 +28,7 @@ lines.append("#SBATCH -t {0}".format(WALLTIME))
 lines.append("#SBATCH -N {0} -n {1}".format(NODES, TASKS))
 lines.append("#SBATCH --cpus-per-task {0}".format(CPUS_PER_TASK))
 lines.append("#SBATCH --gpus-per-task {0}".format(GPUS_PER_TASK))
-lines.append("#SBATCH --gres=gpu:{0}".format(typed["NODES"] * typed["TASKS"]))
+lines.append("#SBATCH --gres=gpu:{0}".format(typed["TASKS_PER_NODE"] * typed["GPUS_PER_TASK"]))
 if CHAINED_JOB_ID:
     lines.append("#SBATCH -d afterany:{0}".format(CHAINED_JOB_ID))
 lines.append("#SBATCH -J {0}".format(SHORT_SIMULATION_NAME))

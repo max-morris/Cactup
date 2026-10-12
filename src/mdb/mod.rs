@@ -765,6 +765,11 @@ mod tests {
         assert_eq!(rs.route("gpu", "host", false).unwrap().0, "default");
         assert_eq!(rs.route("gpu", "et-sing", false).unwrap().0, "sing");
         assert_eq!(rs.route("gpu", "et-sing-cpu", true).unwrap().0, "sing-test");
+        // Every flavor's build is queued through the one build-submit script.
+        let bs = db1.meta.scripts(ScriptKind::BuildSubmit);
+        for u in ["host", "et-sing", "et-sing-cpu"] {
+            assert_eq!(bs.route("gpu", u, false).unwrap().0, "default");
+        }
 
         // qbd (LSU/LONI Queen Bee 4) runs SLURM, though upstream's 2026-07-07
         // regeneration flipped it to PBS with a blank queue: the port keeps
