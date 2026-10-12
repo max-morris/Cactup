@@ -109,10 +109,13 @@ impl Seen {
         // Opened, where it can be: on NFS an open fetches the file's
         // attributes afresh, where a bare `stat` may answer from a cache up
         // to a minute old (a toolchain reinstalled from another host).
-        let meta = fs::File::open(path)
-            .and_then(|file| file.metadata())
-            .or_else(|_| fs::metadata(path))
-            .with_context(|| format!("Failed to look at {}", path.display()))?;
+        // (Only a file or a directory: opening a FIFO would wait for a
+        // writer.)
+        let stated = fs::metadata(path).with_context(|| format!("Failed to look at {}", path.display()))?;
+        let meta = match stated.is_file() || stated.is_dir() {
+            true => fs::File::open(path).and_then(|file| file.metadata()).unwrap_or(stated),
+            false => stated,
+        };
         Ok(Self {
             path: path.to_owned(),
             real: fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?,
@@ -265,6 +268,17 @@ fn interpreted(program: &Path) -> bool {
     }
     let (Some(phoff), Some(phentsize), Some(phnum)) = (u64_at(0x20), u16_at(0x36), u16_at(0x38)) else { return true };
     (0..phnum).any(|i| bytes.get(phoff + i * phentsize..phoff + i * phentsize + 4).is_none_or(|kind| kind == 3u32.to_le_bytes()))
+}
+
+/// The prefix a GCC driver says it was configured with (`--prefix=`, in
+/// what `-v` prints), if it says one.
+fn configured_prefix(driver: &Path) -> Option<PathBuf> {
+    let mut command = Command::new(driver);
+    super::key::in_english(&mut command);
+    let out = command.arg("-v").stdin(Stdio::null()).stdout(Stdio::null()).output().ok()?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    let line = said.lines().find(|line| line.starts_with("Configured with: "))?;
+    line.split_whitespace().find_map(|word| word.strip_prefix("--prefix=")).map(PathBuf::from)
 }
 
 /// Does `program` start? Not where the system refuses to run it. Started
@@ -558,8 +572,9 @@ fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> 
             tries.push(PathBuf::from(file));
         } else if let Some(paths) = line.strip_prefix("search path=") {
             let paths = paths.split('\t').next().unwrap_or_default();
-            // One that is no directory is not tried again either.
-            for dir in paths.split(':').filter(|dir| !dir.is_empty()) {
+            // One that is no directory is not tried again either. (A relative
+            // one is judged by whether the loader tries it: `trying file=`.)
+            for dir in paths.split(':').filter(|dir| !dir.is_empty() && Path::new(dir).is_absolute()) {
                 if !fs::metadata(dir).is_ok_and(|meta| meta.is_dir()) {
                     watched.passed(Path::new(dir));
                 }
@@ -858,19 +873,28 @@ fn examine(path: &Path, name: &OsStr, trial_dir: &Path, watched: &mut Watched) -
             // compiler is.
             let file = ask(path, &["-print-file-name=specs"])?;
             let file = Path::new(file.trim());
-            // Also its machine's directory, above the one it is installed in
-            // (`/usr/lib/gcc/<machine>/`), which it reads one from without
-            // listing it (tried).
-            if let Some(machine) = said.lines().find_map(|line| line.strip_prefix("install: ")).map(|dir| Path::new(dir.trim()))
-                && let Some(machine) = machine.parent().filter(|dir| dir.is_absolute())
-                && machine.join("specs") != file
+            // Also its machine's directory (`/usr/lib/gcc/<machine>/`), which
+            // it reads one from without listing it (tried): above the
+            // directory it is installed in, and under the prefix it was
+            // configured with, which a relocated GCC still reads (tried).
+            let mut machines: Vec<PathBuf> = Vec::new();
+            if let Some(installed) = said.lines().find_map(|line| line.strip_prefix("install: ")).map(|dir| Path::new(dir.trim()))
+                && let Some(machine) = installed.parent()
             {
-                watched.passed(&machine.join("specs"));
+                machines.push(machine.to_owned());
+            }
+            if let Some(prefix) = configured_prefix(path) {
+                machines.push(prefix.join("lib/gcc").join(ask(path, &["-dumpmachine"])?.trim()));
+            }
+            for machine in machines.iter().filter(|dir| dir.is_absolute()) {
+                if machine.join("specs") != file {
+                    watched.passed(&machine.join("specs"));
+                }
             }
             let before = libraries.iter().position(|dir| dir.join("specs") == file).unwrap_or(libraries.len());
-            // (A relative one is not: a C or C++ compile says which `specs`
-            // file it reads each time, and a Fortran one is refused it.)
-            libraries[..before].iter().filter(|dir| dir.is_absolute()).for_each(|dir| watched.passed(&dir.join("specs")));
+            // (A relative one, from a relative entry of `LIBRARY_PATH`, is a
+            // search through the working directory: below.)
+            libraries[..before].iter().for_each(|dir| watched.passed(&dir.join("specs")));
             if file.is_absolute() {
                 watched.files.extend(Seen::of(file));
                 let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;

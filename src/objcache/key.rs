@@ -321,7 +321,7 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
         return Err("the compiler's programs or libraries changed while the key was made".to_owned());
     }
     if let Some(what) = identified.changed(&keyed.watch.stamps()) {
-        return Err(format!("{what} changed while the key was made, where the compiler's programs or libraries are"));
+        return Err(format!("{what} changed while the key was made"));
     }
     Ok(keyed)
 }
@@ -1118,12 +1118,12 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
 /// prefixes named relatively (an empty entry is the working directory) lead
 /// to programs the compiler's identity does not watch, from one directory
 /// to the next; a library loaded or audited by a relative path is one no
-/// search shows. A relative entry of `PATH` or the loader's search path
-/// leads into the compile's working directory, which the compile writes:
-/// what appears there while it runs and is gone after cannot be told from
-/// the compile's own writing. A Fortran compile's dependency run runs in a
-/// directory of its own: for it, also where its driver finds itself (by
-/// the name it is run by) and its `specs` file (`LIBRARY_PATH`). A hit
+/// search shows. (A search for the compiler's programs or libraries that
+/// passes through the working directory, by a relative entry of `PATH` or
+/// `LD_LIBRARY_PATH`, rules the compiler out in `identity`.) A Fortran
+/// compile's dependency run runs in a directory of its own: for it, also
+/// where its driver finds itself (by the name it is run by, or along `PATH`
+/// before it is found) and its `specs` file (`LIBRARY_PATH`). A hit
 /// compares nothing after the key: so these keep the compile out of the
 /// cache.
 fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
@@ -1141,8 +1141,19 @@ fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Optio
     let mut variables = vec!["COMPILER_PATH", "GCC_EXEC_PREFIX"];
     if fortran {
         variables.push("LIBRARY_PATH");
-        if bare {
-            variables.push("PATH");
+    }
+    // A driver named without a `/` walks `PATH` for itself, in order, up to
+    // the first file of its name: a relative entry before that is another
+    // place from the dependency run's directory.
+    if fortran && bare && let Some(path) = env("PATH") {
+        for entry in path.as_bytes().split(|b| *b == b':') {
+            if !entry.starts_with(b"/") {
+                return Some("PATH has an entry that is not an absolute path (an empty one is the working directory) before the compiler".to_owned());
+            }
+            let candidate = Path::new(OsStr::from_bytes(entry)).join(name);
+            if candidate.metadata().is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0) {
+                break;
+            }
         }
     }
     // A name that is not UTF-8 cannot be remembered with the identity, which
@@ -1717,7 +1728,11 @@ mod tests {
         // `PATH` and the loader's search path are judged by where the
         // searches go (`identity`), but for a Fortran driver named without
         // a `/`, which finds itself along `PATH` from another directory.
-        assert!(driver_led_elsewhere(gfortran, true, env(&[("PATH", "/usr/bin:.")])).is_some_and(|why| why.starts_with("PATH")));
+        assert!(driver_led_elsewhere(gfortran, true, env(&[("PATH", ".:/usr/bin")])).is_some_and(|why| why.starts_with("PATH")));
+        // After the driver's own place, it is never walked.
+        if Path::new("/usr/bin/gfortran").is_file() {
+            assert_eq!(driver_led_elsewhere(gfortran, true, env(&[("PATH", "/usr/bin:.")])), None);
+        }
         assert_eq!(driver_led_elsewhere(OsStr::new("/usr/bin/gfortran"), true, env(&[("PATH", "/usr/bin:.")])), None);
         assert_eq!(driver_led_elsewhere(gcc, false, env(&[("PATH", "/usr/bin:."), ("LD_LIBRARY_PATH", "/opt/lib:")])), None);
         assert!(driver_led_elsewhere(OsStr::new("../bin/gfortran"), true, env(&[])).is_some());

@@ -5138,8 +5138,9 @@ fixed parts, so that the key does not change by accident:
   was built to run, `--with-as`), then `PATH`'s for a program it leaves to
   `PATH` (the assembler), and the places it looks for a `specs` file (its
   library prefixes, `LIBRARY_PATH`'s entries among them, and its machine's
-  directory above the one it is installed in, which it does not list: one
-  that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
+  directory, which it does not list, both above the directory it is
+  installed in and under the prefix it was configured with, which a
+  relocated GCC still reads: one that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
   refuses to run (no permission, `noexec`; tried by starting it) is passed
   over, and one that fails to start otherwise rules the compiler out. For
   libraries, the places the loader says it tried (glibc's `LD_DEBUG=libs`,
@@ -5177,17 +5178,21 @@ fixed parts, so that the key does not change by accident:
   people and compiles write in all the time (the home directory for a
   missing `~/bin`, the temporary one), so what appears there and is gone
   again within one compile is decision 20's limit. Each compile looks at
-  all of this, a hit twice and a miss four times: a few hundred lookups
-  with dozens of `PATH` and `LD_LIBRARY_PATH` entries, from about a
-  millisecond with a short `PATH` to 10–20 ms with a long one on a local
-  disk, and one round trip each on a network filesystem that caches no
-  negative lookups (`lookupcache=positive`). A search for a program the
+  all of this, a hit twice and a miss four times: some 30 files opened and
+  a few hundred lookups with dozens of `PATH` and `LD_LIBRARY_PATH`
+  entries, about 1–2 ms a hit with a short `PATH` and 4–6 ms with a long
+  one on a local disk; on a network filesystem each open is a round trip,
+  and so is each lookup of a place that is not there where negative
+  lookups are not cached (`lookupcache=positive`). A search for a program the
   driver runs, or for a library, that passes through the working
   directory (an empty or relative entry of `PATH` or `LD_LIBRARY_PATH`
   before what it finds) rules the compiler out: the compile writes that
   directory, so what comes and goes there cannot be told from its own
   writing (decision 18); one after what is found is never searched and
-  keeps nothing out. What leads the driver elsewhere from one directory to
+  keeps nothing out. (The loader searches all of `LD_LIBRARY_PATH` before
+  its cache, where the system libraries are found, so a trailing empty
+  entry, as `export LD_LIBRARY_PATH=/x/lib:$LD_LIBRARY_PATH` leaves when the
+  variable was unset, is searched and keeps the compile out.) What leads the driver elsewhere from one directory to
   the next keeps the compile out of the cache: an entry of
   `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is not an absolute path (an
   empty one is the working directory), a name in one of the search
@@ -5203,7 +5208,7 @@ fixed parts, so that the key does not change by accident:
   entry of `LIBRARY_PATH` (where the driver finds a `specs` file), a
   compiler named by a relative path, and, for one named without a `/`
   (which finds its own prefix along `PATH` from that directory too), such
-  an entry of `PATH`. The loader's tunables
+  an entry of `PATH` before the compiler. The loader's tunables
   (`GLIBC_TUNABLES`) are among the variables a change of which has the
   identity worked out again. All of this guards against accidents
   (upgrades, reinstalls, module loads, links turned to new versions,
