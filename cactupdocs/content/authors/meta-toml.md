@@ -334,10 +334,10 @@ module load gcc
 Write path lists so they never get an empty entry: `${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}`
 adds a colon and the old value only when there is one. An empty entry (a
 trailing `:` when the variable was unset, or `::`) means "the current
-directory" to the loader, the compiler and the shell. The build cache does
-not cache a compile whose compiler's programs or libraries are searched for
-there, since a file appearing in the build's own directory could change what
-the compiler runs. The same goes for
+directory" to the loader, the compiler and the shell: every program and
+library is then looked for in whatever directory a command runs in, the
+build's own included, which is never what is meant (the build cache watches
+those places, at a cost on every compile). The same goes for
 `PATH`, `LIBRARY_PATH` and `CPATH`: for a list built in front of an old
 value, use `${LIBRARY_PATH:+$LIBRARY_PATH:}`.
 

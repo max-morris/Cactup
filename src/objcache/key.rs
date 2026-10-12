@@ -1119,12 +1119,11 @@ fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<
 /// to programs the compiler's identity does not watch, from one directory
 /// to the next; a library loaded or audited by a relative path is one no
 /// search shows. (A search for the compiler's programs, libraries or
-/// `specs` file that passes through the working directory, by a relative
-/// entry of `PATH`, `LD_LIBRARY_PATH` or `LIBRARY_PATH`, rules the compiler
-/// out in `identity`.) A Fortran
-/// compile's dependency run runs in a directory of its own: for it, also
-/// where its driver finds itself (by the name it is run by, or along `PATH`
-/// before it is found) and its `specs` file (`LIBRARY_PATH`). A hit
+/// `specs` file through a relative entry of `PATH`, `LD_LIBRARY_PATH` or
+/// `LIBRARY_PATH` is watched from each compile's own directory, decision
+/// 22.) A Fortran compile's dependency run runs in a directory of its own:
+/// for it, also where its driver finds itself (by the name it is run by, or
+/// along `PATH` before it is found). A hit
 /// compares nothing after the key: so these keep the compile out of the
 /// cache.
 fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
@@ -1139,10 +1138,7 @@ fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Optio
     // compiler's programs or libraries passes through rules the compiler
     // out: `identity`.) A Fortran driver named without a `/` finds its own
     // prefix along `PATH` from the dependency run's directory too.
-    let mut variables = vec!["COMPILER_PATH", "GCC_EXEC_PREFIX"];
-    if fortran {
-        variables.push("LIBRARY_PATH");
-    }
+    let variables = ["COMPILER_PATH", "GCC_EXEC_PREFIX"];
     // A driver named without a `/` walks `PATH` for itself, in order, up to
     // the first file of its name: a relative entry before that is another
     // place from the dependency run's directory.
@@ -1715,9 +1711,9 @@ mod tests {
         let env = |pairs: &'static [(&'static str, &'static str)]| move |variable: &str| pairs.iter().find(|(name, _)| *name == variable).map(|(_, value)| OsString::from(value));
         let (gfortran, gcc) = (OsStr::new("gfortran"), OsStr::new("gcc"));
         assert_eq!(driver_led_elsewhere(gfortran, true, env(&[("PATH", "/usr/bin:/bin"), ("LIBRARY_PATH", "/opt/lib")])), None);
-        assert!(driver_led_elsewhere(gfortran, true, env(&[("LIBRARY_PATH", ":/opt/lib")])).is_some_and(|why| why.starts_with("LIBRARY_PATH")));
-        // For C and C++ the search for a `specs` file is judged by where it
-        // goes (`identity`), not here.
+        // A relative `LIBRARY_PATH` entry is watched, not refused (decision
+        // 22), for Fortran too.
+        assert_eq!(driver_led_elsewhere(gfortran, true, env(&[("LIBRARY_PATH", ":/opt/lib")])), None);
         assert_eq!(driver_led_elsewhere(gcc, false, env(&[("LIBRARY_PATH", ":/opt/lib")])), None);
         for compiler in [(gfortran, true), (gcc, false)] {
             assert!(driver_led_elsewhere(compiler.0, compiler.1, env(&[("COMPILER_PATH", "/opt:lib")])).is_some());

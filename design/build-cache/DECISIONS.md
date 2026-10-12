@@ -369,6 +369,32 @@ Asked as seven questions with options; the answers, in Max's numbering.
     that", with `cactup cache doctor` "Between them": M4 CUDA, M5 cache
     doctor, M6 HIP and other GPU compiles.
 
+22. **Empty and relative search entries are watched, not refused**
+    (2026-10-12). `nvcc`'s own profile appends `<cuda>/lib:` to
+    `LD_LIBRARY_PATH` for every program it runs, which leaves an empty
+    entry (the working directory) whenever the user's is unset: decision
+    18's refusal would have kept every such CUDA compile out. Max: "Our
+    empty path rule clearly needs to be revised, as we can't afford to not
+    have a working build cache for nvcc." Answer to the proposed revision:
+    "Yes, revise it". A place an empty or relative entry of `PATH`,
+    `LD_LIBRARY_PATH` or `LIBRARY_PATH` leads to is watched by its own name
+    from each compile's own directory, before and after, as any place that
+    is not there (decision 20): a leftover program, library or `specs`
+    file there has the identity worked out again; one that appears and is
+    gone within one compile is decision 20's limit. Supersedes decision
+    18's refusal (the MDB idiom fixes stand). Still refused: a relative
+    `COMPILER_PATH` or `GCC_EXEC_PREFIX` entry (the driver's own program
+    prefixes), a Fortran driver named without a `/` that finds itself
+    through a relative `PATH` entry (its dependency run would find
+    another), and a program or library actually found by a relative name.
+
+23. **Cray compilers, all of them** (2026-10-12). Max: "I also want to
+    allow Cray compilers." Asked how far: "All Cray compiles": C, C++ and
+    Fortran through Cray's `cc`, `CC` and `ftn` wrappers (delta,
+    perlmutter, ...), and Cray's `CC` as `nvcc`'s host compiler. Its own
+    milestone after CUDA (M4b). No Cray machine to probe yet ("Not yet"):
+    designed from Cray's documentation first, verified later.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

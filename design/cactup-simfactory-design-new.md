@@ -5188,15 +5188,14 @@ fixed parts, so that the key does not change by accident:
   lookups are not cached (`lookupcache=positive`). A search for a program the
   driver runs, for a library or for a `specs` file that passes through the
   working directory (an empty or relative entry of `PATH`,
-  `LD_LIBRARY_PATH` or `LIBRARY_PATH` before what it finds; the reason
-  names what the search walked, a program's `RPATH` or `RUNPATH` too) rules
-  the compiler out: the compile writes that
-  directory, so what comes and goes there cannot be told from its own
-  writing (decision 18); one after what is found is never searched and
-  keeps nothing out. (The loader searches all of `LD_LIBRARY_PATH` before
-  its cache, where the system libraries are found, so a trailing empty
-  entry, as `export LD_LIBRARY_PATH=/x/lib:$LD_LIBRARY_PATH` leaves when the
-  variable was unset, is searched and keeps the compile out.) What leads the driver elsewhere from one directory to
+  `LD_LIBRARY_PATH` or `LIBRARY_PATH`, as `export X=/a:$X` leaves when `X`
+  was unset, and as `nvcc` itself appends to `LD_LIBRARY_PATH`) is watched
+  there by name, from each compile's own directory, before and after, as
+  any place that is not there (decision 22): a program, library or `specs`
+  file left there has the identity worked out again; one that appears and
+  is gone within one compile is decision 20's limit (the compile writes
+  that directory, so its change time cannot tell). A program or library
+  actually found by a relative name rules the compiler out. What leads the driver elsewhere from one directory to
   the next keeps the compile out of the cache: an entry of
   `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is not an absolute path (an
   empty one is the working directory), a name in one of the search
@@ -5208,9 +5207,8 @@ fixed parts, so that the key does not change by accident:
   `GCONV_PATH`, `LOCPATH` and the system's modules, are not followed;
   tried, two converters and two locales, each two objects; Cactus asks for
   none); and for Fortran, whose
-  dependency run runs in a directory of its own (§18.10), also any such
-  entry of `LIBRARY_PATH` (where the driver finds a `specs` file, from that
-  directory too), a compiler named by a relative path, and, for one named without a `/`
+  dependency run runs in a directory of its own (§18.10), also a compiler
+  named by a relative path, and, for one named without a `/`
   (which finds its own prefix along `PATH` from that directory too), such
   an entry of `PATH` before the compiler. The loader's tunables
   (`GLIBC_TUNABLES`) are among the variables a change of which has the
