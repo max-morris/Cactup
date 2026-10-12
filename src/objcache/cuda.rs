@@ -247,10 +247,14 @@ pub(super) fn examine(path: &Path, driver: &Path, hasher: &mut Hasher, watched: 
 /// source's name, which the map's flags fix (tried).
 pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path) -> bool {
     let Ok(trial) = tempfile::Builder::new().prefix("cuda-trial-").tempdir_in(dir) else { return false };
+    // By its physical path, and with `PWD` naming it, as the GCC trial: the
+    // host compiler records `$PWD` where it names the working directory
+    // (tried: a `/work` link on qbd left the physical path unmapped).
+    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
     let source = "__device__ int twice(int v) { return 2 * v; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n";
     let mut objects = Vec::new();
     for place in ["a", "b"] {
-        let root = trial.path().join(place);
+        let root = trial_dir.join(place);
         if fs::create_dir_all(root.join("src")).is_err() || fs::write(root.join("src/trial.cu"), source).is_err() {
             return false;
         }
@@ -263,6 +267,7 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path) -> bool {
             .arg(root.join("src/trial.cu"))
             .args(map_flags(&root.join("src/trial.cu"), &map))
             .current_dir(&root)
+            .env("PWD", &root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
