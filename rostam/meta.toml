@@ -38,17 +38,17 @@
 #   - marvin (16 × Sandy Bridge-EP nodes: 16 cores, 37 GB, 10-day limit):
 #     Sandy Bridge has AVX but not AVX2 or FMA, so the x86-cpu-image build
 #     cannot run there. Covering it takes one more flavor: a copy of
-#     x86-cpu-image.toml with -march=sandybridge and runs-on marvin, plus
-#     marvin in the cpu queues' script routes below.
+#     x86-cpu-image.toml with -march=sandybridge and runs-on marvin, a
+#     marvin queue, and marvin in the routes of the x86-cpu-image scripts.
 #   - mi100 (kamand[0-1]: 2 × AMD MI100, gfx908, ROCm 5.4 to 7.x installed):
 #     it needs a HIP flavor, which nothing here has built or run yet, and the
 #     partition has no GPU GRES configured, so Slurm cannot hand a job its
 #     own GPUs.
 #   - risc5 (sven[0-1]: 64-core rv64imafdcv, Fedora 38): cactup ships no
-#     riscv64 build, and the nodes have no HDF5 or Apptainer image to build
-#     against.
-#   - jenkins-compute, jenkins-cuda, jenkins-A100, jenkins-amdgpu: the
-#     project CI's partitions, over nodes the queues below already cover.
+#     riscv64 build, and there is neither an HDF5 module nor a riscv64
+#     image to build against.
+#   - jenkins-compute, jenkins-cuda, jenkins-A100, jenkins-amdgpu: CI
+#     partitions over nodes of the partitions above.
 
 [machine]
 name        = "rostam"
@@ -99,9 +99,12 @@ wrapper-argv = [
     "docker://stevenrbrandt/cactus",
 ]
 # The image's /usr/bin/mpirun is OpenMPI; the optionlist builds against MPICH.
+# Unlike cactus-cuda, this image has no en_US.UTF-8 locale, which Rostam's
+# LANG names, so every Perl step of a build would warn about it.
 env-setup = """
 export MPI_FLAVOR=mpich
 export PATH=/opt/mpi/mpich/bin:$PATH
+export LANG=C.UTF-8
 """
 
 [universes.x86-modules]
@@ -282,7 +285,7 @@ max-cpus-per-node     = 40
 default-cpus-per-task = 10
 memory                = 92697
 
-# buran[00-15]: 2 × 24-core AMD EPYC Rome, 252 GB.
+# buran[00-15]: 2 × 24-core AMD EPYC 7352 (Rome), 252 GB.
 [queues.buran]
 gpu                   = false
 max-walltime          = "3-00:00:00"
