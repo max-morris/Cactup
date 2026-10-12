@@ -145,7 +145,12 @@ toolchain=$(cat "$bakes/last-toolchain")
 rm -rf "$context"
 mkdir -p "$context"
 cat "$bakes/$toolchain/wanted-cpu" "$bakes/$toolchain/wanted-cuda" | while read -r fp; do
-    cp -al "$bakes/$toolchain/$fp" "$context/$fp"
+    # Links if the files are ours (bake.py hands them to the cache's owner);
+    # the kernel refuses links to another user's files, so then a copy.
+    if ! cp -al "$bakes/$toolchain/$fp" "$context/$fp" 2> /dev/null; then
+        rm -rf "${context:?}/$fp"
+        cp -a "$bakes/$toolchain/$fp" "$context/$fp"
+    fi
 done
 
 build tutorial "$@" "$repo"

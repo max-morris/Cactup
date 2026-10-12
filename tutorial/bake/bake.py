@@ -595,7 +595,20 @@ def main() -> int:
         log(f"{bake_id} ({fp}) baked")
     (cache / args.wanted).write_text("".join(f"{fp}\n" for fp in wanted))
     (Path(args.cache) / "last-toolchain").write_text(f"{tool}\n")
+    give_back(Path(args.cache), tool)
     return 0
+
+
+def give_back(cache: Path, tool: str) -> None:
+    """Hand what this wrote to the cache's owner. Under rootful Docker the
+    harvest writes as the host's root, and build.sh, as the host user,
+    hard-links the bakes into the image's build context: the kernel refuses
+    links to another user's files (fs.protected_hardlinks). Under rootless
+    Docker the owner is this root already."""
+    st = cache.stat()
+    if os.geteuid() == 0 and st.st_uid != 0:
+        subprocess.run(["chown", "-R", f"{st.st_uid}:{st.st_gid}", str(cache / tool),
+                        str(cache / "last-toolchain")], check=True)
 
 
 if __name__ == "__main__":
