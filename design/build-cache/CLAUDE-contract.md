@@ -1,4 +1,4 @@
-# Contract text for `CLAUDE.md` (not applied yet)
+# Contract text for `CLAUDE.md` (applied when the cache landed, 2026-10-12)
 
 `CLAUDE.md` is not tracked by git: it lives only in the main checkout
 (`/home/max/src/Cactup/CLAUDE.md`, listed in `.git/info/exclude`) and every
@@ -7,6 +7,8 @@ would put a contract in front of sessions whose tree does not have the code
 it describes. So the text below waits here until the build cache lands on
 master, and is then added to `CLAUDE.md` before the "On-disk formats"
 section, with Max's go-ahead. The spec carries the same seven rules now (§18.1).
+It was added on 2026-10-12, when the branch landed (decisions 10, 21); a
+change to the rules goes into both.
 
 ---
 

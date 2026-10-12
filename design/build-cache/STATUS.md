@@ -1971,6 +1971,22 @@ keeps C and C++ out under `export LIBRARY_PATH=/x/lib:$LIBRARY_PATH` with
 the variable unset (only a `specs` file appearing and gone within one
 compile in the build's own directory is guarded; B).
 
+### After M3a, review 10 (on `86a840c`): SIGN-OFF by both; landed
+
+A quick review of the last fixes before landing (decision 21). Both re-ran
+review 9's set at `e29e593` and `86a840c`: the same outcomes, the reason
+now naming the right variable in every case, no FIFO hang, 0 objects
+published with a site `specs` file added mid-build. Gate on `e29e593`: 0
+wrong in all three audits. The branch then landed on master, and the
+contract went into `CLAUDE.md` (decision 10). Follow-ups, non-blocking,
+for M4's start: the test of the configured machine directory does not
+test a relocated GCC (it passes with the code it should test removed; use
+`gcc_under`); `configured_libdir` parses the configure line loosely (the
+first occurrence where configure honors the last; `--prefix /x`, quoted
+values); the reason's variable is set as a side effect of each search (a
+relative RPATH try would be blamed on `LD_LIBRARY_PATH`: pass it to
+`passed` instead); the spec omits the `/usr/local` default.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -2187,13 +2203,6 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-Landing the branch on master (Max's go). Then Max decides what to cut next. The clean timings on `saturn` (local disk, every compile a
-miss, summed over compiles; about 2100 s of compiling): the cache's own time
-was 472 s at `a14f279` and 442 s with M3a, the Fortran check 32 s down to
-3.4 s; what is left is the C and C++ key and check, a preprocessor run each
-(about 390 s; for C, 220 s against 530 s of compiling). Storing cost 9 s
-there (the `fsync` cost was `melete05`'s spinning disk). M3b would remove
-that preprocessor run (decision 14), and needs the `__has_include` knowledge
-the C and C++ half of M3a could not make sound (decision 16). After that,
-the CUDA compilers (decision 2), with audit mode to prove them; the narrower
-key of decision 4 can be revisited with audit mode too.
+M4, CUDA (decision 21): start with review 10's follow-ups above, then
+`nvcc` (decision 2), proved with audit mode on the GPU machines' builds
+(saturn, athena, mike).
