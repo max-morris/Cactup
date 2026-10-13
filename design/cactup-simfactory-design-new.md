@@ -5087,7 +5087,20 @@ fixed parts, so that the key does not change by accident:
   the compiler does not. Spacing and comments move the columns that debug
   information, `__builtin_COLUMN` and `std::source_location` record; Clang's
   debug information carries a checksum of each file. So an edit to a
-  comment, or to text inside `#if 0`, changes the key. The names are read
+  comment, or to text inside `#if 0`, changes the key. One kind of line is
+  left out (decision 26): with GCC (and `nvcc`'s GCC passes) and without
+  `-g3`, the preprocessor is asked which macros the text expands or tests
+  (`-dU`, whose definitions then stand in the text), and in every file but
+  the unit's own source a line that defines or undefines any other macro is
+  keyed as its line breaks alone, unless the macro is defined more than
+  once in the unit (a warning that it is redefined), is given on the
+  command line, or has a reserved name. Such a definition changes nothing
+  the compiler makes of the unit, and Cactus's headers that list every
+  thorn of a configuration (`cctk_DefineThorn.h`,
+  `CParameterStructNames.h`) are nothing else for nearly every unit: two
+  configurations a few thorns apart share their objects. Clang, whose
+  debug information checksums each file, and `-g3`, whose debug
+  information has every macro, keep whole files. The names are read
   as the compilers write them, as C strings (Clang writes a tab or a byte
   outside ASCII in octal); a marker whose name cannot be read leaves the
   compile without a key. So does a file the preprocessor *entered* (marker

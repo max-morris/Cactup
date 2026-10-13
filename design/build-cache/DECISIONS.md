@@ -445,6 +445,21 @@ Asked as seven questions with options; the answers, in Max's numbering.
     anything but one file, no `cudafe++` making one ID in a file), or
     that does not take the ID in the identity's trial, is not cached.
 
+26. **A definition of a macro the unit never uses is not keyed**
+    (2026-10-13). Measured on qbd: two CarpetX configurations three thorns
+    apart each way shared 184 of 389 objects, 5 of 96 CUDA ones, and the
+    second build took as long as one with the cache off (8:47 against
+    8:28). Of the 359 units they share, 167 differed only in the key's files
+    part: Cactus's `cctk_DefineThorn.h` and `CParameterStructNames.h` list
+    every thorn of the configuration, one `#define` each, and almost no
+    unit uses those macros. Asked whether the key should leave out the
+    definition lines of macros a unit never uses, Max: "Leave unused ones
+    out". GCC says which macros a unit's text expands or tests (`-dU`); a
+    file's other `#define`/`#undef` lines are keyed as their line breaks,
+    but for a macro defined more than once in the unit, one the command line
+    gives, and a reserved name; the unit's own source, Clang (checksums of
+    whole files in its debug information) and `-g3` keep whole files.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

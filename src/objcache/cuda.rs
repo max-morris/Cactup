@@ -12,9 +12,10 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{digest_output, flags_from_elsewhere, read_files, Named, Parts, PathMap, PREPROCESSOR};
+use super::key::{digest_output, flags_from_elsewhere, read_files, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -775,6 +776,10 @@ pub struct Cuda {
     /// `nvcc` gives them.
     passes: Vec<Vec<String>>,
     env: Vec<(String, String)>,
+    /// The passes say which macros the text expands or tests (`-dU`), and
+    /// the definitions of the others are not keyed (decision 26): a GCC host
+    /// compiler, without `-g3`.
+    used: Option<Used>,
 }
 
 /// The key's text and files for a CUDA compile: what its preprocessor
@@ -796,21 +801,25 @@ pub struct Read {
 /// they read, as for C and C++.
 pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
     let passes: Vec<Vec<String>> = run.preprocessor_passes().cloned().collect();
-    let cuda = Cuda { host, passes, env: run.env.clone() };
-    let (text, text_bytes, named) = run_passes(&cuda, map)?;
+    let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), compile));
+    let mut cuda = Cuda { host, passes, env: run.env.clone(), used };
+    let (text, text_bytes, named, names) = run_passes(&cuda, map)?;
+    if let Some(used) = &mut cuda.used {
+        *used = Used::new(names, compile);
+    }
     let mut named = named;
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
-    let (files, seen) = read_files(&named, map)?;
+    let (files, seen) = read_files(&named, map, cuda.used.as_ref())?;
     Ok(Read { text, text_bytes, files, count: named.len(), seen, cuda })
 }
 
 /// Run the passes of `cuda` again, and digest them: the text of each pass in
 /// turn, and every file any of them names.
-fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
+fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named, BTreeSet<Vec<u8>>)> {
     let mut text = Hasher::new("cuda passes");
-    let (mut bytes, mut named) = (0u64, Named::new());
+    let (mut bytes, mut named, mut used) = (0u64, Named::new(), BTreeSet::new());
     for pass in &cuda.passes {
         let mut args: Vec<&String> = Vec::new();
         let mut words = pass.iter().skip(1);
@@ -825,6 +834,9 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
         }
         let mut command = Command::new(&cuda.host.path);
         command.args(args).arg("-v");
+        if cuda.used.is_some() {
+            command.arg("-dU");
+        }
         if let Some(map) = map {
             command.args(map.flags());
         }
@@ -850,7 +862,8 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
         let status = child.wait();
         PREPROCESSOR.store(0, Ordering::SeqCst);
         let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-        let (pass_text, pass_bytes, pass_named) = read?;
+        let (pass_text, pass_bytes, pass_named, pass_used) = read?;
+        used.extend(pass_used);
         if !status.context("Failed to wait for nvcc's preprocessor")?.success() {
             bail!("nvcc's preprocessor failed");
         }
@@ -861,7 +874,7 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
             *named.entry(name).or_default() |= entered;
         }
     }
-    Ok((text.hex(), bytes, named))
+    Ok((text.hex(), bytes, named, used))
 }
 
 /// Does the key of a CUDA compile still hold after it: the same passes print
@@ -877,7 +890,7 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
         },
         false => Vec::new(),
     };
-    let Ok((now_text, _, mut named)) = run_passes(cuda, map) else { return false };
+    let Ok((now_text, _, mut named, _)) = run_passes(cuda, map) else { return false };
     let passes: std::collections::HashSet<&Path> = named.keys().map(|(_, real)| real.as_path()).collect();
     let covered = |read: &PathBuf| {
         passes.contains(read.as_path()) || fs::canonicalize(read).is_ok_and(|real| host_reads.contains(&real) || passes.contains(real.as_path()))
@@ -887,7 +900,7 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
     }
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
-    now_text == text && read_files(&named, map).is_ok_and(|(now_files, now_seen)| now_files == files && now_seen == seen)
+    now_text == text && read_files(&named, map, cuda.used.as_ref()).is_ok_and(|(now_files, now_seen)| now_files == files && now_seen == seen)
 }
 
 #[cfg(test)]

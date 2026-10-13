@@ -805,7 +805,7 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
     if copy.is_none() {
         named.insert((b"source".to_vec(), fortran.source.clone()), true);
     }
-    let (files, mut seen) = key::read_files(&named, map)?;
+    let (files, mut seen) = key::read_files(&named, map, None)?;
     // Only looked at, for the check after the compile: the file the compile
     // reads by the name it gives it (what that resolves through may change
     // where the physical path does not). Where a copy is compiled, its bytes
@@ -826,7 +826,7 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
             }
         }
     }
-    let (bytes, also_seen) = key::read_files(&looked_at, map)?;
+    let (bytes, also_seen) = key::read_files(&looked_at, map, None)?;
     let mut hasher = Hasher::new("seen with what the compile reads");
     for part in [&seen, &bytes, &also_seen] {
         hasher.feed(part.as_bytes());

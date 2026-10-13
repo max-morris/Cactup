@@ -36,7 +36,7 @@ use super::{environment, platform, BuildConf};
 use crate::Res;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, ErrorKind, Read as _};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-10";
+pub const KEY_LABEL: &str = "key-11";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -1039,6 +1039,10 @@ fn preprocessor(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Optio
     }
     if compile.macros_in_debug {
         command.arg("-dD");
+    } else if compiler.family == Family::Gcc {
+        // The macros the text expands or tests, where it first does
+        // (decision 26: the others' definitions are not keyed).
+        command.arg("-dU");
     }
     if compiler.family == Family::Gcc {
         command.arg("-fpch-preprocess");
@@ -1097,7 +1101,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
     let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-    let (text, text_bytes, mut named) = read?;
+    let (text, text_bytes, mut named, used) = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
@@ -1107,7 +1111,8 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    let (files, seen) = read_files(&named, map)?;
+    let used = (compiler.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(used, compile));
+    let (files, seen) = read_files(&named, map, used.as_ref())?;
     Ok(Read { text, text_bytes, files, count: named.len(), seen })
 }
 
@@ -1120,12 +1125,19 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// `#line` gave (generated code names its origin so) may be of no file at
 /// all; the bytes compiled are those of the file the directive stands in,
 /// which was entered.
-pub(super) fn read_files(named: &Named, map: Option<&PathMap>) -> Res<(String, String)> {
+///
+/// With `used` (GCC, without `-g3`: decision 26), the lines of a file but
+/// the unit's own source that define or undefine a macro the text neither
+/// expands nor tests are left out of its bytes ([`Used::droppable`]): such a
+/// definition changes nothing the compiler makes of the unit. Cactus's
+/// headers that list every thorn of a configuration (`cctk_DefineThorn.h`,
+/// `CParameterStructNames.h`) are of that kind for nearly every unit.
+pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Used>) -> Res<(String, String)> {
     let mut files = Hasher::new("files");
     let mut seen = Hasher::new("seen");
     let mut steps = HashMap::new();
+    let mut reads = Vec::with_capacity(named.len());
     for ((mapped, path), entered) in named {
-        files.feed(mapped);
         // What the name resolves through, and the file it leads to as the
         // open file is (after the open, which on NFS revalidates what the
         // client knows of it), before its bytes are read: a change after
@@ -1149,12 +1161,33 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>) -> Res<(String, S
             }
             Err(_) => seen.feed(b"absent"),
         }
+        reads.push((mapped, path, *entered, read.map(|(_, bytes)| bytes)));
+    }
+    // How often each macro is defined or undefined across the unit's files:
+    // one defined twice may draw a warning that it is redefined, which the
+    // compile says, and so stays in.
+    let mut defined: HashMap<&[u8], usize> = HashMap::new();
+    if used.is_some() {
+        for (_, _, _, read) in &reads {
+            for name in read.iter().flat_map(|bytes| definitions(bytes)) {
+                *defined.entry(name).or_default() += 1;
+            }
+        }
+    }
+    for (mapped, path, entered, read) in &reads {
+        files.feed(mapped);
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
         match read {
-            Ok((_, bytes)) => files.feed(content_digest(&bytes, map).as_bytes()),
-            Err(_) if !entered && absent() => files.feed(b"no such file"),
+            Ok(bytes) => match used {
+                Some(used) if **path != used.source => {
+                    let kept = without_definitions(bytes, |name| used.droppable(name) && defined.get(name) == Some(&1));
+                    files.feed(content_digest(&kept, map).as_bytes());
+                }
+                _ => files.feed(content_digest(bytes, map).as_bytes()),
+            },
+            Err(_) if !*entered && absent() => files.feed(b"no such file"),
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         }
     }
@@ -1245,10 +1278,13 @@ pub(super) type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
 
 /// Digest the preprocessor's output as it comes, and collect the files it
 /// names.
-pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
+pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named, BTreeSet<Vec<u8>>)> {
     let mut output = BufReader::new(child.stdout.take().context("the preprocessor has no output")?);
     let mut hasher = Hasher::new("text");
     let mut named = Named::new();
+    // What `-dU` says the text expands or tests: no other line of `-E`'s
+    // output begins so.
+    let mut used = BTreeSet::new();
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -1283,11 +1319,110 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
             None if assembler_include(&line) => {
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
-            None => feed(&line),
+            None => {
+                if let Some(name) = definitions(&line).next() {
+                    used.insert(name.to_vec());
+                }
+                feed(&line)
+            }
         }
     }
     hasher.end_stream(bytes);
-    Ok((hasher.hex(), bytes, named))
+    Ok((hasher.hex(), bytes, named, used))
+}
+
+/// The macros a unit's text expands or tests (`-dU`), and what keeps a
+/// definition of another in the key all the same (decision 26).
+#[derive(Debug, Clone)]
+pub(super) struct Used {
+    names: BTreeSet<Vec<u8>>,
+    /// Defined or undefined on the command line (`-D`, `-U`): a header's
+    /// definition of one draws a warning.
+    given: BTreeSet<Vec<u8>>,
+    /// The unit's own source, keyed whole (`-Wunused-macros` speaks of its
+    /// macros).
+    pub source: PathBuf,
+}
+
+impl Used {
+    pub(super) fn new(names: BTreeSet<Vec<u8>>, compile: &Compile) -> Self {
+        let mut given = BTreeSet::new();
+        let mut args = compile.preprocess.iter();
+        while let Some(arg) = args.next() {
+            if arg == "-D" || arg == "-U" {
+                let value = args.next().map(|value| value.as_bytes()).unwrap_or_default();
+                let name = value.split(|b| *b == b'=' || *b == b'(').next().unwrap_or_default();
+                given.insert(name.to_vec());
+            }
+        }
+        Self { names, given, source: compile.source.clone() }
+    }
+
+    /// May a definition of `name` be left out of a file's bytes? Not if the
+    /// text uses it, the command line gives it, or the name is reserved
+    /// (the compiler's own, which a header redefines with a warning).
+    pub(super) fn droppable(&self, name: &[u8]) -> bool {
+        let reserved = name.starts_with(b"__") || (name.first() == Some(&b'_') && name.get(1).is_some_and(u8::is_ascii_uppercase));
+        !reserved && !self.names.contains(name) && !self.given.contains(name)
+    }
+}
+
+/// The logical lines of `bytes` (physical lines joined where a backslash
+/// ends one), each with its line breaks.
+fn logical_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        if at >= bytes.len() {
+            return None;
+        }
+        let start = at;
+        loop {
+            let end = bytes[at..].iter().position(|b| *b == b'\n').map_or(bytes.len(), |nl| at + nl + 1);
+            let continued = end > start + 1 && bytes[end - 1] == b'\n' && bytes[end - 2] == b'\\';
+            at = end;
+            if !continued || at >= bytes.len() {
+                break;
+            }
+        }
+        Some(&bytes[start..at])
+    })
+}
+
+/// The macro a line defines or undefines (`#define NAME`, `#undef NAME`,
+/// blanks allowed around the `#`), if it is such a line.
+fn definition(line: &[u8]) -> Option<&[u8]> {
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let skip = |bytes: &[u8]| -> usize { bytes.iter().take_while(|b| blank(b)).count() };
+    let rest = &line[skip(line)..];
+    let rest = rest.strip_prefix(b"#")?;
+    let rest = &rest[skip(rest)..];
+    let rest = rest.strip_prefix(b"define").or_else(|| rest.strip_prefix(b"undef"))?;
+    let gap = skip(rest);
+    if gap == 0 {
+        return None;
+    }
+    let rest = &rest[gap..];
+    let len = rest.iter().take_while(|b| b.is_ascii_alphanumeric() || **b == b'_').count();
+    (len > 0 && !rest[0].is_ascii_digit()).then(|| &rest[..len])
+}
+
+/// Every macro `bytes` defines or undefines, once per line that does.
+fn definitions(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    logical_lines(bytes).filter_map(definition)
+}
+
+/// `bytes` with each line that defines or undefines a macro `drop` says
+/// to leave out reduced to its line breaks: the lines after it keep their
+/// numbers.
+fn without_definitions(bytes: &[u8], drop: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for line in logical_lines(bytes) {
+        match definition(line) {
+            Some(name) if drop(name) => out.extend(line.iter().filter(|b| **b == b'\n')),
+            _ => out.extend_from_slice(line),
+        }
+    }
+    out
 }
 
 /// Why the driver, run as `name` with the environment `env` gives, could
@@ -1512,7 +1647,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "a7528af9c7950e53a65c8528404688439d2fe5281123805bed061797d1c2318f");
+        assert_eq!(parts.key(), "d8353dce3839a5cbb91e32af7b3267c90dcab235ba7a893a13dc26de4589a2d1");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -1815,6 +1950,70 @@ mod tests {
         let there = key(&elsewhere, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap();
         assert_ne!(there.parts.platform, base.parts.platform);
         assert_eq!(there.parts.text, base.parts.text);
+    }
+
+    #[test]
+    fn the_definitions_of_macros_a_unit_never_uses_are_not_keyed() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        // As Cactus's `cctk_DefineThorn.h`: one line per thorn of the
+        // configuration, which nearly every unit includes and none uses.
+        let tree = Tree::new();
+        let with = |thorns: &str| format!("#define ANSWER 42 /* the answer */\n{thorns}");
+        std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_B\n")).unwrap();
+        let base = tree.key(&["-O2"]);
+        std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_C 1\n")).unwrap();
+        assert_eq!(tree.key(&["-O2"]).parts, base.parts, "another thorn's line");
+        // A line broken with a backslash is one line (its two line breaks
+        // stay, as a blank line's would).
+        std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_B\n\n")).unwrap();
+        let blank = tree.key(&["-O2"]);
+        std::fs::write(tree.header(), with("#define THORN_A\n# define THORN_D \\\n  2\n")).unwrap();
+        assert_eq!(tree.key(&["-O2"]).parts, blank.parts, "a definition over two lines");
+        // Line numbers stay: a line less moves what follows.
+        std::fs::write(tree.header(), with("#define THORN_A\n")).unwrap();
+        assert_ne!(tree.key(&["-O2"]).parts.files, base.parts.files, "one line fewer");
+        // What stays: a macro the text tests, one defined twice (a warning
+        // that it is redefined), one the command line gives, a reserved name.
+        for (what, thorns, flags) in [
+            ("tested", "#ifdef THORN_B\n#endif\n#define THORN_A\n#define THORN_C 1\n", &["-O2"][..]),
+            ("defined twice", "#define THORN_A\n#define THORN_A 2\n", &["-O2"]),
+            ("given on the command line", "#define THORN_A\n#define THORN_C 1\n", &["-O2", "-DTHORN_C=1"]),
+            ("reserved", "#define THORN_A\n#define __THORN_C\n", &["-O2"]),
+        ] {
+            std::fs::write(tree.header(), with(thorns)).unwrap();
+            let one = tree.key(flags);
+            std::fs::write(tree.header(), with(&thorns.replace("THORN_A", "THORN_A_ELSE").replace("THORN_C 1", "THORN_C 9").replace("__THORN_C", "__THORN_C 9"))).unwrap();
+            let other = tree.key(flags);
+            match what {
+                // THORN_A is never used: renaming it changes nothing.
+                "tested" => assert_eq!(one.parts.files, other.parts.files, "{what}"),
+                _ => assert_ne!(one.parts.files, other.parts.files, "{what}"),
+            }
+        }
+        // A used macro's definition is keyed whole, comment and all.
+        std::fs::write(tree.header(), "#define ANSWER 42 /* another comment */\n#define THORN_A\n#define THORN_B\n").unwrap();
+        assert_ne!(tree.key(&["-O2"]).parts.files, base.parts.files);
+        // With -g3 the object has every macro: whole files.
+        std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_B\n")).unwrap();
+        let debug = tree.key(&["-g3"]);
+        std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_C 1\n")).unwrap();
+        assert_ne!(tree.key(&["-g3"]).parts.files, debug.parts.files);
+        std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn reads_definitions_as_the_preprocessor_does() {
+        assert_eq!(definition(b"#define A 1\n"), Some(&b"A"[..]));
+        assert_eq!(definition(b"  #  undef  B_2\n"), Some(&b"B_2"[..]));
+        assert_eq!(definition(b"#define F(x) x\n"), Some(&b"F"[..]));
+        for not in [&b"#defineX\n"[..], b"#include <a.h>\n", b"int a; #define A\n", b"#define 1A\n", b"// #define A\n"] {
+            assert_eq!(definition(not), None, "{}", String::from_utf8_lossy(not));
+        }
+        let lines: Vec<&[u8]> = logical_lines(b"a\n#define B \\\n 1\nc").collect();
+        assert_eq!(lines, [&b"a\n"[..], b"#define B \\\n 1\n", b"c"]);
+        assert_eq!(without_definitions(b"#define A \\\n 1\nint x;\n#define B\n", |name| name == b"A"), b"\n\nint x;\n#define B\n");
     }
 
     #[test]
