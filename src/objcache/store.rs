@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 /// The entry format, and the name of the directory its entries live in. A
 /// cactup with another format writes beside this one and never reads it
 /// (no backward compatibility, §2.4).
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// An entry's first line.
 const MAGIC: &[u8] = b"cactup build cache entry\n";
@@ -185,6 +185,28 @@ impl std::fmt::Display for Miss {
             Self::SaidElsewhere => write!(f, "the entry's messages speak of its files as they were, not as they are"),
         }
     }
+}
+
+/// Do a compile's messages speak of macros, or suggest a name? Those are
+/// the only ones that can quote a definition the key leaves out, say where
+/// one stands ("in definition of macro"), or name an unused one ("did you
+/// mean"); compilers are run with their messages in English (decision 30).
+pub fn speak_of_definitions(stdout: &[u8], stderr: &[u8]) -> bool {
+    [stdout, stderr].iter().any(|text| {
+        let text = String::from_utf8_lossy(text).to_lowercase();
+        ["macro", "did you mean", "suggest"].iter().any(|word| text.contains(word))
+    })
+}
+
+/// The key an entry is stored under when its messages speak of definitions
+/// (decision 30): its key with its files whole, so that each configuration
+/// whose files differ only where the key does not look gets an entry of its
+/// own, and none is shut out by another's.
+pub fn whole_key(key: &str, whole: &str) -> String {
+    let mut hasher = super::hash::Hasher::new("key with its files whole");
+    hasher.feed(key.as_bytes());
+    hasher.feed(whole.as_bytes());
+    hasher.hex()
 }
 
 /// One machine's part of the store: `<root>/v<FORMAT>/<machine>`.
@@ -565,7 +587,9 @@ fn read_into(file: File, meta: &Metadata, key: &str, outputs: Option<(&Path, Mod
     if header.label != KEY_LABEL {
         return Err(Fault::Foreign(format!("its key was made under the label {}", header.label)));
     }
-    if header.key != key || header.parts.key() != key {
+    // Under its key, or under that key with its files whole ([`whole_key`]).
+    let parts_key = header.parts.key();
+    if header.key != key || (parts_key != key && whole_key(&parts_key, &header.whole) != key) {
         return Err(invalid("it is the entry of another key"));
     }
     let names_ok = header.modules.len() == module_lens.len()
@@ -577,10 +601,10 @@ fn read_into(file: File, meta: &Metadata, key: &str, outputs: Option<(&Path, Mod
     if object.is_some() && !header.modules.is_empty() && module_dir.is_none() {
         return Err(Fault::Output("the entry has module files, and nowhere to put them".to_owned()));
     }
-    // Messages name the places of definitions, which the key leaves out:
-    // they are this compile's only where its files are whole what the
-    // entry's were (decision 29).
-    if whole.is_some_and(|whole| whole != header.whole) && !(stdout.is_empty() && stderr.is_empty()) {
+    // Messages that speak of macros or suggest names may name a definition
+    // the key leaves out, or where it stands: they are this compile's only
+    // where its files are whole what the entry's were (decisions 29, 30).
+    if whole.is_some_and(|whole| whole != header.whole) && speak_of_definitions(&stdout, &stderr) {
         return Err(Fault::SaidElsewhere);
     }
     let messages = Messages { stdout, stderr };
@@ -738,6 +762,24 @@ mod tests {
             left.retain(|path| !keep.contains(&path.as_path()));
             left
         }
+    }
+
+    #[test]
+    fn an_entry_whose_messages_speak_of_definitions_has_a_key_of_its_own() {
+        assert!(speak_of_definitions(b"", b"t.h:3: note: in definition of macro 'X'\n"));
+        assert!(speak_of_definitions(b"", b"a.c:1: warning: implicit declaration of 'f'; did you mean 'g'?\n"));
+        assert!(!speak_of_definitions(b"", b"a.c:7:12: warning: 'attribute' attribute directive ignored [-Wattributes]\n"));
+        // Stored under the key with its files whole, and read back there.
+        let fx = Fixture::new();
+        let object = fx.object("a.c.o", b"object");
+        let key = whole_key(&fx.key, "whole");
+        let entry = NewEntry { key: &key, parts: &fx.parts, whole: "whole", object: &object, stdout: b"", stderr: b"note: in definition of macro 'X'\n", modules: &[], about: about() };
+        fx.store.publish(&entry).unwrap();
+        let restored = fx.tmp.path().join("build/restored.c.o");
+        assert!(fx.store.restore_with(&key, &restored, ModulesTo::Nowhere, "whole").is_ok());
+        // Not under a whole digest it was not made with.
+        let other = whole_key(&fx.key, "other");
+        assert!(matches!(fx.store.restore_with(&other, &restored, ModulesTo::Nowhere, "other"), Err(Miss::Absent)));
     }
 
     #[test]

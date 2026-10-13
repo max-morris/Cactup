@@ -21,7 +21,7 @@
 //! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
 use super::event::{Audit, Event, Outcome};
-use super::store::{About, Miss, ModulesTo, NewEntry, Published, Store};
+use super::store::{speak_of_definitions, whole_key, About, Miss, ModulesTo, NewEntry, Published, Store};
 use super::probe::SELFTEST_COMPILER;
 use super::cuda::{self, Step};
 use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
@@ -282,6 +282,10 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // Module files go where the compile writes them: its working directory
     // (§18.10).
     let cwd = std::env::current_dir().unwrap_or_default();
+    // The key of the entry served, if one was: the key, or, for an entry
+    // whose messages speak of definitions, the key with the files whole
+    // (decision 30).
+    let mut served_key = None;
     if let Some((store, keyed)) = serving {
         let key = keyed.parts.key();
         event.outcome = Some(Outcome::Miss);
@@ -296,10 +300,26 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             (true, Mode::Audit) => ModulesTo::Aside(&cwd),
             (true, _) => ModulesTo::Into(&cwd),
         };
-        let (restored, serve_ms) = timed(|| match &into {
-            Ok(into) => store.restore_with(&key, into.as_deref().unwrap_or(&keyed.compile.output), modules_to, keyed.whole()),
-            Err(why) => Err(Miss::CannotWrite(why.clone())),
+        let ((restored, from), serve_ms) = timed(|| match &into {
+            Ok(into) => {
+                let object = into.as_deref().unwrap_or(&keyed.compile.output);
+                match store.restore_with(&key, object, modules_to, keyed.whole()) {
+                    // Messages for other files whole: perhaps one of its own.
+                    Err(Miss::SaidElsewhere) => {
+                        let whole_key = whole_key(&key, keyed.whole());
+                        match store.restore_with(&whole_key, object, modules_to, keyed.whole()) {
+                            Err(Miss::Absent) => (Err(Miss::SaidElsewhere), whole_key),
+                            restored => (restored, whole_key),
+                        }
+                    }
+                    restored => (restored, key.clone()),
+                }
+            }
+            Err(why) => (Err(Miss::CannotWrite(why.clone())), key.clone()),
         });
+        if restored.is_ok() {
+            served_key = Some(from);
+        }
         let into = into.ok().flatten();
         event.serve_ms = serve_ms;
         match restored {
@@ -401,7 +421,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // takes its place.
     let wrong = event.audit == Some(Audit::WrongHit);
     if wrong
-        && let (Ok(store), Some(key)) = (&store, &event.key)
+        && let (Ok(store), Some(key)) = (&store, &served_key)
         && let Err(e) = store.remove(key)
     {
         event.store = Some(format!("the wrong entry could not be removed: {e:#}"));
@@ -544,6 +564,13 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
 /// Publish the object of a compile that succeeded and whose key held, with
 /// the messages it wrote (§18.7, §18.8).
 fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event, cwd: &Path) -> Result<Published, String> {
+    // Messages that may speak of a definition the key leaves out go under
+    // the key with the files whole (decision 30).
+    let key = event.key.clone().unwrap_or_default();
+    let key = match speak_of_definitions(&captured.stdout, &captured.stderr) && keyed.narrowed() {
+        true => whole_key(&key, keyed.whole()),
+        false => key,
+    };
     if captured.kept_open {
         return Err("a process the compiler started kept its output open, so not all of it could be stored".to_owned());
     }
@@ -557,7 +584,7 @@ fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event
     let (stdout, stderr) = (stored(&captured.stdout), stored(&captured.stderr));
     let modules = super::fortran::module_files(cwd, keyed.modules());
     let entry = NewEntry {
-        key: event.key.as_deref().unwrap_or_default(),
+        key: &key,
         parts: &keyed.parts,
         whole: keyed.whole(),
         object: &keyed.compile.output,

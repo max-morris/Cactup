@@ -1694,7 +1694,7 @@ fn a_build_that_does_not_relocate_compiles_as_written() {
 /// Change one byte of the object in the store's entry for `key`, with the
 /// entry's checksum made to match: a wrong entry that looks whole.
 fn corrupt_entry(store: &Path, key: &str) {
-    let entry = store.join("v3/test").join(&key[..2]).join(key);
+    let entry = store.join("v4/test").join(&key[..2]).join(key);
     let bytes = fs::read(&entry).unwrap();
     let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
     let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;
@@ -1963,7 +1963,7 @@ fn fortran_the_cache_cannot_follow_is_passed_through() {
 /// 3 stderr, 4 and on the module files) of the store's entry for `key`,
 /// with the entry's checksum made to match.
 fn corrupt_entry_part(store: &Path, key: &str, part: usize) {
-    let entry = store.join("v3/test").join(&key[..2]).join(key);
+    let entry = store.join("v4/test").join(&key[..2]).join(key);
     let bytes = fs::read(&entry).unwrap();
     let line_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
     let lengths_end = line_end + bytes[line_end..].iter().position(|b| *b == b'\n').unwrap() + 1;

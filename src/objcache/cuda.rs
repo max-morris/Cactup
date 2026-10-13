@@ -375,19 +375,17 @@ impl Plan {
         }
         let id_file = id_file.context("it would run no cudafe++ that makes a module ID")?;
         let last = last.context("it would run no host compile of what it generates")?;
-        let mut reads = id_file.clone().into_os_string();
-        reads.push(".cactup-reads");
+        // Short names of this process's own beside the object (one made of
+        // the object's could pass the longest name a directory takes).
+        let dir = id_file.parent().map(Path::to_owned).unwrap_or_default();
+        let reads = dir.join(format!(".cactup-{}-last.d", std::process::id()));
         let said = run.said.iter().flat_map(|line| [line.as_bytes(), b"\n"].concat()).collect();
         let pass_reads = pass_steps
             .into_iter()
             .enumerate()
-            .map(|(n, at)| {
-                let mut file = id_file.clone().into_os_string();
-                file.push(format!(".cactup-pass{n}"));
-                (at, PathBuf::from(file))
-            })
+            .map(|(n, at)| (at, dir.join(format!(".cactup-{}-pass{n}.d", std::process::id()))))
             .collect();
-        Ok(Self { env: run.env, steps, id_file, id, said, last, reads: PathBuf::from(reads), pass_reads, ran: std::cell::Cell::new(false) })
+        Ok(Self { env: run.env, steps, id_file, id, said, last, reads, pass_reads, ran: std::cell::Cell::new(false) })
     }
 
     /// Find each program the plan runs along the `PATH` `nvcc` gives it, as
@@ -557,7 +555,12 @@ impl Plan {
                 let mut gch = name.clone().into_os_string();
                 gch.push(".gch");
                 for dir in &dirs[..found] {
-                    places.push(dir.join(&name));
+                    // (CUDA's own directory given twice finds the file itself
+                    // first: no other file stands ahead of it there.)
+                    let place = dir.join(&name);
+                    if fs::canonicalize(&place).ok().as_ref() != Some(read) {
+                        places.push(place);
+                    }
                     places.push(dir.join(&gch));
                 }
                 if let Some(dir) = dirs.get(found) {
@@ -790,10 +793,15 @@ pub struct Cuda {
     /// `nvcc` gives them.
     passes: Vec<Vec<String>>,
     env: Vec<(String, String)>,
-    /// The passes say which macros the text expands or tests (`-dU`), and
-    /// the definitions of the others are not keyed (decision 26): a GCC host
-    /// compiler, without `-g3`.
+    /// The passes say which macros the text expands or tests (`-dU`): a
+    /// GCC host compiler, without `-g3`; the same in the check after the
+    /// compile as in the key.
+    macro_use: bool,
+    /// Where they do and say nothing of the text, the definitions of the
+    /// others are not keyed (decisions 26, 30).
     used: Option<Used>,
+    /// What the key's passes said they read (`-MD`, decision 28).
+    keyed_reads: BTreeSet<PathBuf>,
 }
 
 /// The key's text and files for a CUDA compile: what its preprocessor
@@ -817,16 +825,18 @@ pub struct Read {
 /// they read, as for C and C++.
 pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
     let passes: Vec<Vec<String>> = run.preprocessor_passes().cloned().collect();
-    let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), compile));
-    let mut cuda = Cuda { host, passes, env: run.env.clone(), used };
-    let Passes { text, bytes: text_bytes, named, used: names, diagnosed } = run_passes(&cuda, map)?;
+    let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), Default::default(), compile));
+    let macro_use = used.is_some();
+    let mut cuda = Cuda { host, passes, env: run.env.clone(), macro_use, used, keyed_reads: BTreeSet::new() };
+    let Passes { text, bytes: text_bytes, named, used: names, with_code, diagnosed, reads } = run_passes(&cuda, map, true)?;
+    cuda.keyed_reads = reads.into_iter().collect();
     // Narrowed only where the passes said nothing of the text (as for C
     // and C++); a macro the passes are given on their own command lines
     // (`-DCUDA_DOUBLE_MATH_FUNCTIONS`) counts as given (a header's
     // definition of it draws a warning).
     cuda.used = match (cuda.used.take(), diagnosed) {
         (Some(_), false) => {
-            let mut used = Used::new(names, compile);
+            let mut used = Used::new(names, with_code, compile);
             for pass in &cuda.passes {
                 used.also_given(pass);
             }
@@ -842,22 +852,29 @@ pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap
     Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, cuda })
 }
 
-/// Run the passes of `cuda` again, and digest them: the text of each pass in
-/// turn, and every file any of them names.
 /// What [`run_passes`] found: the passes' text digested and its length, the
-/// files they named, the macros they say the text uses (`-dU`), and whether
-/// they said anything of the text.
+/// files they named, the macros they say the text uses (`-dU`), the files
+/// the text has code of, whether they said anything of the text, and what
+/// they said they read.
 struct Passes {
     text: String,
     bytes: u64,
     named: Named,
     used: BTreeSet<Vec<u8>>,
+    with_code: BTreeSet<PathBuf>,
     diagnosed: bool,
+    /// What the passes said they read (`-MD`), where asked.
+    reads: Vec<PathBuf>,
 }
 
-fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<Passes> {
+/// Run the passes of `cuda` again, and digest them: the text of each pass in
+/// turn, and every file any of them names; with `list`, each also says what
+/// it read (`-MD`).
+fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
     let mut text = Hasher::new("cuda passes");
     let (mut bytes, mut named, mut used, mut diagnosed) = (0u64, Named::new(), BTreeSet::new(), false);
+    let mut with_code = BTreeSet::new();
+    let mut reads = Vec::new();
     for pass in &cuda.passes {
         let mut args: Vec<&String> = Vec::new();
         let mut words = pass.iter().skip(1);
@@ -872,8 +889,17 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<Passes> {
         }
         let mut command = Command::new(&cuda.host.path);
         command.args(args).arg("-v");
-        if cuda.used.is_some() {
+        if cuda.macro_use {
             command.arg("-dU");
+        }
+        // What the pass reads, as the compile's own passes will say it
+        // (decision 28).
+        let listed = match list {
+            true => Some(tempfile::Builder::new().prefix(".cactup-").suffix(".d").tempfile()?.into_temp_path()),
+            false => None,
+        };
+        if let Some(listed) = &listed {
+            command.args(["-MD", "-MF"]).arg(listed.to_path_buf());
         }
         if let Some(map) = map {
             command.args(map.flags());
@@ -900,20 +926,24 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<Passes> {
         let status = child.wait();
         PREPROCESSOR.store(0, Ordering::SeqCst);
         let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-        let (pass_text, pass_bytes, pass_named, pass_used) = read?;
+        let super::key::Output { text: pass_text, bytes: pass_bytes, named: pass_named, used: pass_used, with_code: pass_code } = read?;
         used.extend(pass_used);
+        with_code.extend(pass_code);
         if !status.context("Failed to wait for nvcc's preprocessor")?.success() {
             bail!("nvcc's preprocessor failed");
         }
         flags_from_elsewhere(cuda.host.family, cuda.host.specs.as_deref(), &said).map_err(anyhow::Error::msg)?;
         diagnosed |= diagnoses(&said);
+        if let Some(listed) = listed {
+            reads.extend(fs::read(&listed).ok().as_deref().and_then(depend_files).context("nvcc's preprocessor did not say what it read")?);
+        }
         text.feed(pass_text.as_bytes());
         bytes += pass_bytes;
         for (name, entered) in pass_named {
             *named.entry(name).or_default() |= entered;
         }
     }
-    Ok(Passes { text: text.hex(), bytes, named, used, diagnosed })
+    Ok(Passes { text: text.hex(), bytes, named, used, with_code, diagnosed, reads })
 }
 
 /// Does the key of a CUDA compile still hold after it: the same passes print
@@ -931,15 +961,10 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
         },
         false => (Vec::new(), None),
     };
-    let Ok(Passes { text: now_text, mut named, .. }) = run_passes(cuda, map) else { return false };
-    if let Some(pass_read) = pass_read {
-        // (The source too, which a pass reads first and enters by no marker.)
-        let mut entered: BTreeSet<PathBuf> = named.iter().filter(|(_, entered)| **entered).map(|((_, path), _)| path.clone()).collect();
-        entered.insert(compile.source.clone());
-        if !reads_match(&pass_read, &entered) {
-            return false;
-        }
+    if pass_read.is_some_and(|pass_read| !reads_match(&pass_read, &cuda.keyed_reads)) {
+        return false;
     }
+    let Ok(Passes { text: now_text, mut named, .. }) = run_passes(cuda, map, false) else { return false };
     let passes: std::collections::HashSet<&Path> = named.keys().map(|(_, real)| real.as_path()).collect();
     let covered = |read: &PathBuf| {
         passes.contains(read.as_path()) || fs::canonicalize(read).is_ok_and(|real| host_reads.contains(&real) || passes.contains(real.as_path()))
@@ -1011,7 +1036,7 @@ mod tests {
         assert_eq!(plan.id_file, Path::new("/w/t.o.module_id"));
         // The last host compile says what it read.
         assert_eq!(plan.last, 3);
-        assert_eq!(plan.reads, Path::new("/w/t.o.module_id.cactup-reads"));
+        assert_eq!(plan.reads, Path::new(&format!("/w/.cactup-{}-last.d", std::process::id())));
         assert_eq!(plan.env, [("_NVVM_BRANCH_".to_owned(), "nvvm".to_owned()), ("PATH".to_owned(), "/cuda/bin/../nvvm/bin:/cuda/bin:/usr/bin".to_owned())]);
         let words: Vec<String> = plan
             .steps()

@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-12";
+pub const KEY_LABEL: &str = "key-13";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -339,8 +339,9 @@ pub struct Keyed {
     /// not empty must match besides the key (decision 29).
     whole: String,
     /// Where a C or C++ compile says what it read, to be held to what the
-    /// key's run entered (decision 28).
+    /// key's run said it read (decision 28).
     own_reads: OwnReads,
+    keyed_reads: BTreeSet<PathBuf>,
 }
 
 /// Where a C or C++ compile says what it read (decision 28).
@@ -578,6 +579,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             ahead: Vec::new(),
             whole: files_whole,
             own_reads: OwnReads::Nowhere,
+            keyed_reads: BTreeSet::new(),
         }, identified));
     }
     if let Some((run, host)) = cuda_run {
@@ -615,6 +617,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             ahead,
             whole: read.whole,
             own_reads: OwnReads::Nowhere,
+            keyed_reads: BTreeSet::new(),
         };
         return Ok((keyed, identified));
     }
@@ -622,8 +625,51 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         true => depend_flags(&compile).map_err(whole)?,
         false => None,
     };
-    let read = preprocess(&compiler, &name, &compile, map.as_ref(), depend.as_ref().map(|(_, flags)| flags.as_slice()))
-        .map_err(whole)?;
+    // What the compile reads must be what this run reads (decision 28): it
+    // says so in its own dependency file where it writes one listing every
+    // file (not `-MMD`'s, which leaves out system headers), else in one
+    // cactup asks for; and this run says so alike, as the same compiler
+    // words it (Clang lists what `__has_include` found, GCC does not).
+    let own_reads = match (serving, compile.depend.is_empty()) {
+        (false, _) => OwnReads::Nowhere,
+        (true, true) => OwnReads::Ours(reads_file(&compile.output), std::cell::Cell::new(false)),
+        (true, false) => {
+            let full = compile.depend.iter().any(|flag| flag == "-MD") && !compile.depend.iter().any(|flag| flag == "-MMD");
+            let file = compile.depend.iter().rposition(|flag| flag == "-MF").and_then(|at| compile.depend.get(at + 1));
+            match (full, file) {
+                (true, Some(file)) => OwnReads::Theirs(PathBuf::from(file)),
+                _ => return Err("its dependency flags do not list every file it reads (-MMD leaves out system headers; without -MF the file has no name of its own)".to_owned()),
+            }
+        }
+    };
+    // This run's list: beside the dependency file it writes for the
+    // compile, or in one of its own.
+    let ours = match own_reads {
+        OwnReads::Ours(..) => Some(tempfile::Builder::new().prefix(".cactup-").suffix(".d").tempfile().map_err(|e| format!("cannot make a file for the preprocessor's list of what it reads: {e}"))?.into_temp_path()),
+        _ => None,
+    };
+    let mut flags: Vec<OsString> = depend.as_ref().map(|(_, flags)| flags.clone()).unwrap_or_default();
+    if let Some(ours) = &ours {
+        flags.extend(["-MD", "-MF"].map(OsString::from));
+        flags.push(ours.to_path_buf().into_os_string());
+    }
+    let read = preprocess(&compiler, &name, &compile, map.as_ref(), (!flags.is_empty()).then_some(flags.as_slice())).map_err(whole)?;
+    let listed = match (&ours, &depend) {
+        (Some(ours), _) => Some(ours.to_path_buf()),
+        (None, Some(((temp, _), _))) => Some(temp.to_path_buf()),
+        _ => None,
+    };
+    let keyed_reads = match listed {
+        Some(listed) => std::fs::read(&listed)
+            .ok()
+            .as_deref()
+            .and_then(depend_files)
+            .ok_or("the preprocessor did not say what it read")?
+            .into_iter()
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    drop(ours);
     let depend = depend.map(|(files, _)| files);
     let parts = Parts {
         platform: platform.digest,
@@ -632,26 +678,6 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         environment,
         text: read.text,
         files: read.files,
-    };
-    // What the compile reads must be what this run entered: it says so in
-    // its own dependency file where it writes one listing every file (not
-    // `-MMD`'s, which leaves out system headers), else in one cactup asks
-    // for (decision 28).
-    let own_reads = match (serving, compile.depend.is_empty()) {
-        (false, _) => OwnReads::Nowhere,
-        (true, true) => {
-            let mut file = compile.output.clone().into_os_string();
-            file.push(".cactup-reads");
-            OwnReads::Ours(PathBuf::from(file), std::cell::Cell::new(false))
-        }
-        (true, false) => {
-            let full = compile.depend.iter().any(|flag| flag == "-MD") && !compile.depend.iter().any(|flag| flag == "-MMD");
-            let file = compile.depend.iter().rposition(|flag| flag == "-MF").and_then(|at| compile.depend.get(at + 1));
-            match (full, file) {
-                (true, Some(file)) => OwnReads::Theirs(PathBuf::from(file)),
-                _ => return Err("its dependency file leaves out files it reads (system headers, with -MMD), so the compile cannot be held to its key".to_owned()),
-            }
-        }
     };
     let keyed = Keyed {
         compile,
@@ -671,6 +697,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         ahead: Vec::new(),
         whole: read.whole,
         own_reads,
+        keyed_reads,
     };
     Ok((keyed, identified))
 }
@@ -769,13 +796,7 @@ impl Keyed {
             read.text == self.parts.text
                 && read.files == self.parts.files
                 && read.seen == self.seen
-                && said_read.is_none_or(|said| {
-                    // (The source too, which the compile reads first and
-                    // the run enters by no marker.)
-                    let mut entered = read.entered;
-                    entered.insert(self.compile.source.clone());
-                    reads_match(&said, &entered)
-                })
+                && said_read.is_none_or(|said| reads_match(&said, &self.keyed_reads))
         })
     }
 
@@ -800,9 +821,14 @@ impl Keyed {
     }
 
     /// The files read, whole: what an entry keeps besides the key, for a hit
-    /// whose messages are not empty (decision 29).
+    /// whose messages speak of definitions (decisions 29, 30).
     pub fn whole(&self) -> &str {
         &self.whole
+    }
+
+    /// Does the key leave out anything of the files read (decision 26)?
+    pub fn narrowed(&self) -> bool {
+        self.whole != self.parts.files
     }
 
     /// Is every place a CUDA compile's last step looks in before CUDA's own
@@ -863,8 +889,6 @@ impl Keyed {
         self.fortran.as_ref()?.renamed.as_ref().map(|renamed| renamed.rewrite(conf))
     }
 
-    /// Remove what keying made: the copy and the dependency runs' module
-    /// files. (The process ends by `exit`, which runs no destructor.)
     /// Remove what a compile that failed was asked to say it read
     /// (decision 28): nothing checks it.
     pub fn forget_reads(&self) {
@@ -876,6 +900,8 @@ impl Keyed {
         }
     }
 
+    /// Remove what keying made: the copy and the dependency runs' module
+    /// files. (The process ends by `exit`, which runs no destructor.)
     pub fn clean_up(&mut self) {
         drop(self.fortran.take());
         if let OwnReads::Ours(file, _) = &self.own_reads {
@@ -924,8 +950,6 @@ struct Read {
     files: String,
     whole: String,
     count: usize,
-    /// The files the run entered, and the source (decision 28).
-    entered: BTreeSet<PathBuf>,
     /// Digest of what each of those files looked like when it was read
     /// (device, inode, size, modification and change time, of the name and
     /// of what it leads to): not part of the key, but of the check after the
@@ -1222,7 +1246,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
     let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-    let (text, text_bytes, mut named, used) = read?;
+    let Output { text, bytes: text_bytes, mut named, used, with_code } = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
@@ -1235,10 +1259,9 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // Narrowed only where the run said nothing of the text: a warning about
     // a definition (a stray quote, `/*` in a comment, a name redefined) is
     // the compile's too, and would be about a line the key leaves out.
-    let used = (compiler.family == Family::Gcc && !compile.macros_in_debug && !diagnoses(&said)).then(|| Used::new(used, compile));
+    let used = (compiler.family == Family::Gcc && !compile.macros_in_debug && !diagnoses(&said)).then(|| Used::new(used, with_code, compile));
     let (files, whole, seen) = read_files(&named, map, used.as_ref())?;
-    let entered = named.iter().filter(|(_, entered)| **entered).map(|((_, path), _)| path.clone()).collect();
-    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, entered })
+    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen })
 }
 
 /// Digest the files `named`, each under its mapped name: their bytes (the
@@ -1320,7 +1343,7 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                 let all = content_digest(bytes, map);
                 whole.feed(all.as_bytes());
                 match used {
-                    Some(used) if **path != used.source => {
+                    Some(used) if **path != used.source && !used.with_code.contains(*path) => {
                         let kept = without_definitions(bytes, |name| used.droppable(name) && defined.get(name) == Some(&1));
                         files.feed(content_digest(&kept, map).as_bytes());
                     }
@@ -1421,13 +1444,17 @@ pub(super) type Named = BTreeMap<(Vec<u8>, PathBuf), bool>;
 
 /// Digest the preprocessor's output as it comes, and collect the files it
 /// names.
-pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<(String, u64, Named, BTreeSet<Vec<u8>>)> {
+pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMap>) -> Res<Output> {
     let mut output = BufReader::new(child.stdout.take().context("the preprocessor has no output")?);
     let mut hasher = Hasher::new("text");
     let mut named = Named::new();
     // What `-dU` says the text expands or tests: no other line of `-E`'s
     // output begins so.
     let mut used = BTreeSet::new();
+    // The files the text has code of (decision 30), by the name the line
+    // markers give them; and the file the lines now come from.
+    let mut with_code = BTreeSet::new();
+    let mut current: Option<PathBuf> = None;
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -1451,6 +1478,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
                 // name (a header may be called `<odd>.h`); and a name
                 // ending in `//`, GCC's note of the working directory.
                 let pseudo = NOT_FILES.contains(&marker.name.as_slice()) || marker.name.ends_with(b"//") || marker.name.is_empty();
+                current = Some(PathBuf::from(OsString::from_vec(marker.name.clone())));
                 if !pseudo {
                     let entered = marker.enters();
                     *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
@@ -1459,19 +1487,42 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
             None if line.starts_with(b"#pragma GCC pch_preprocess") => {
                 bail!("a precompiled header would be used, which the cache does not follow")
             }
+            // Its warning depends on when files were last changed.
+            None if line.starts_with(b"#pragma GCC dependency") => {
+                bail!("#pragma GCC dependency compares when files were last changed, which the cache does not follow")
+            }
             None if assembler_include(&line) => {
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
             None => {
-                if let Some(name) = definitions(&line).next() {
-                    used.insert(name.to_vec());
+                match definitions(&line).next() {
+                    Some(name) => {
+                        used.insert(name.to_vec());
+                    }
+                    None if !line.iter().all(u8::is_ascii_whitespace) => {
+                        if let Some(current) = &current {
+                            with_code.insert(current.clone());
+                        }
+                    }
+                    None => {}
                 }
                 feed(&line)
             }
         }
     }
     hasher.end_stream(bytes);
-    Ok((hasher.hex(), bytes, named, used))
+    Ok(Output { text: hasher.hex(), bytes, named, used, with_code })
+}
+
+/// What [`digest_output`] read of a preprocessor's output: its text
+/// digested and its length, the files its markers name, the macros `-dU`
+/// says it uses, and the files it has code of.
+pub(super) struct Output {
+    pub text: String,
+    pub bytes: u64,
+    pub named: Named,
+    pub used: BTreeSet<Vec<u8>>,
+    pub with_code: BTreeSet<PathBuf>,
 }
 
 /// Did a preprocessor run (with `-v`) say anything of the text: a warning,
@@ -1495,14 +1546,18 @@ pub(super) struct Used {
     /// Defined or undefined on the command line (`-D`, `-U`): a header's
     /// definition of one draws a warning.
     given: BTreeSet<Vec<u8>>,
+    /// The files the text has code of, kept whole (decision 30): what the
+    /// compiler checks line by line (indentation between statements, the
+    /// columns of declarations) reads their raw lines, definitions too.
+    with_code: BTreeSet<PathBuf>,
     /// The unit's own source, keyed whole (`-Wunused-macros` speaks of its
     /// macros).
     pub source: PathBuf,
 }
 
 impl Used {
-    pub(super) fn new(names: BTreeSet<Vec<u8>>, compile: &Compile) -> Self {
-        let mut used = Self { names, given: BTreeSet::new(), source: compile.source.clone() };
+    pub(super) fn new(names: BTreeSet<Vec<u8>>, with_code: BTreeSet<PathBuf>, compile: &Compile) -> Self {
+        let mut used = Self { names, given: BTreeSet::new(), with_code, source: compile.source.clone() };
         let args: Vec<&[u8]> = compile.preprocess.iter().map(|arg| arg.as_bytes()).collect();
         used.given_in(&args);
         used
@@ -1638,6 +1693,15 @@ fn lex_line(line: &[u8], mut state: Lex) -> Lex {
                         }
                     }
                 }
+                // A digit separator (`1'024`, `0xff'ff`): the quote stands in
+                // a number, which begins with a digit.
+                b'\'' if {
+                    let token = line[..at].iter().rev().take_while(|b| ident(**b) || **b == b'\'').count();
+                    line[at - token..at].first().is_some_and(u8::is_ascii_digit)
+                } =>
+                {
+                    at += 1
+                }
                 b'\'' => {
                     at += 1;
                     while at < line.len() && line[at] != b'\'' {
@@ -1722,6 +1786,15 @@ pub(super) fn depend_files(said: &[u8]) -> Option<Vec<PathBuf>> {
         files.push(PathBuf::from(file));
     }
     Some(files)
+}
+
+/// Where a compile says what it read (decision 28): beside its object, so
+/// that it can write there, under a short name of this process's own (one
+/// made of the object's name could pass the longest name a directory takes
+/// where the object's does not).
+pub(super) fn reads_file(output: &Path) -> PathBuf {
+    let dir = output.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    dir.join(format!(".cactup-{}.d", std::process::id()))
 }
 
 /// Did a compile read what its key read? `read`, what it says it read
@@ -1966,7 +2039,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "5476a202a276c3d956b70504855a8460280890e3e47c69a5b4edbd0ee4955059");
+        assert_eq!(parts.key(), "ab2d32b55c36f5523f3d024abbbd7efe18e55da4a77c75e63b982573f72f3ccd");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2323,6 +2396,23 @@ mod tests {
     }
 
     #[test]
+    fn a_header_with_code_keeps_its_definitions_in_the_key() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        // GCC's `-Wmisleading-indentation` reads the raw lines between an
+        // `if`'s body and what follows, a definition there too (decision
+        // 30): a header with code is keyed whole.
+        let tree = Tree::new();
+        let with = |line: &str| format!("#define ANSWER 42 /* the answer */\nstatic inline int f(int a)\n{{\n  if (a)\n    a++;\n{line}\n    a--;\n  return a;\n}}\n");
+        std::fs::write(tree.header(), with("#define UNUSED_X 1")).unwrap();
+        let one = tree.key(&["-O2", "-Wall"]);
+        std::fs::write(tree.header(), with("    #define UNUSED_X 1")).unwrap();
+        assert_ne!(tree.key(&["-O2", "-Wall"]).parts.files, one.parts.files);
+        std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
     fn a_definition_the_preprocessor_warns_of_stays_in_the_key() {
         if !have("gcc", Family::Gcc) {
             return;
@@ -2346,6 +2436,11 @@ mod tests {
         assert_eq!(names("const char *s = R\"x(\n#define D\n)x\";\n#define E\n"), ["E"]);
         assert_eq!(names("// #define F\nint a = '\"'; /* \"*/\n#define G\n"), ["G"]);
         assert_eq!(names("#define H \"/*\"\n#define I\n"), ["H", "I"]);
+        // A digit separator is no character constant: the comment after it
+        // is one.
+        assert_eq!(names("constexpr int K = 1'024; /* old\n#define J 1 */ int y;\n#define K\n"), ["K"]);
+        assert_eq!(names("int a = 0xff'ff, b = u8'x'; /* c\n#define L */\n"), Vec::<String>::new());
+        assert_eq!(names("char c = 'x'; /* c\n#define M */\n"), Vec::<String>::new());
         // What is left out is the definition alone; code beside a comment's
         // end stays.
         let kept = without_definitions(b"/* a\n#define B 1 */ int x;\n#define C\n", |_| true);

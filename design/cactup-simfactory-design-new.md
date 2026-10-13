@@ -5088,29 +5088,34 @@ fixed parts, so that the key does not change by accident:
   information, `__builtin_COLUMN` and `std::source_location` record; Clang's
   debug information carries a checksum of each file. So an edit to a
   comment, or to text inside `#if 0`, changes the key. One kind of line is
-  left out (decisions 26 and 29): with GCC (and `nvcc`'s GCC passes),
+  left out (decisions 26, 29, 30): with GCC (and `nvcc`'s GCC passes),
   without `-g3`, and where the preprocessor run said nothing of the text (no
   warning, error or note: a stray quote in a definition, `/*` in a comment,
   a name redefined are warnings about the very lines left out), the
   preprocessor is asked which macros the text expands or tests (`-dU`,
-  whose definitions then stand in the text), and in every file but the
-  unit's own source a line that defines or undefines any other macro is
-  left out, line breaks and all, unless the macro is defined more than once
-  in the unit, is given on a command line (the compile's, or one of
-  `nvcc`'s passes'), or has a reserved name. A line counts as a definition
-  only where it begins in code, not inside a block comment or a raw string.
-  Such a definition changes nothing in the object, and Cactus's headers that
-  list every thorn of a configuration (`cctk_DefineThorn.h`,
-  `CParameterStructNames.h`) are nothing else for nearly every unit: two
+  whose definitions then stand in the text), and in each file the text has
+  no code of (a header of definitions alone; not the unit's own source) a
+  line that defines or undefines any other macro is left out, line breaks
+  and all, unless the macro is defined more than once in the unit, is
+  given on a command line (the compile's, or one of `nvcc`'s passes'), or
+  has a reserved name. A line counts as a definition only where it begins
+  in code, not inside a block comment or a raw string. A file with code is
+  keyed whole: what the compiler checks line by line reads its raw lines,
+  definitions too (`-Wmisleading-indentation` looks at the lines between an
+  `if`'s body and what follows). Such a definition changes nothing in the
+  object, and Cactus's headers that list every thorn of a configuration
+  (`cctk_DefineThorn.h`, `CParameterStructNames.h`) are nothing else: two
   configurations a few thorns apart share their objects. Where what is
-  compiled stands is in the text (`-E` keeps its lines where they were);
-  where a definition stands, and what it says, can show in the compiler's
-  messages ("in definition of macro", a spelling hint), which are stored
-  with the object. So an entry also keeps the digest of its files whole,
-  and a hit whose stored messages are not empty must match it too, or the
-  compile runs (`Miss::SaidElsewhere`). Clang, whose debug information
-  checksums each file, and `-g3`, whose debug information has every macro,
-  keep whole files. The names are read
+  compiled stands is in the text (`-E` keeps its lines where they were,
+  and its markers say where each `#include` stands); a definition left out,
+  or where a definition stands, can show only in messages that speak of
+  macros or suggest a name ("in definition of macro", "did you mean"). An
+  entry keeps the digest of its files whole; one whose messages speak so is
+  stored under its key with its files whole (`store::whole_key`), so that
+  each set of files gets its own, and a hit with such messages must match
+  them (`Miss::SaidElsewhere`). Clang, whose debug information checksums
+  each file, and `-g3`, whose debug information has every macro,
+keep whole files. The names are read
   as the compilers write them, as C strings (Clang writes a tab or a byte
   outside ASCII in octal); a marker whose name cannot be read leaves the
   compile without a key. So does a file the preprocessor *entered* (marker
@@ -5121,12 +5126,14 @@ fixed parts, so that the key does not change by accident:
   in, which was entered.
 - **What the compile read** (decision 28). A compile run to store its
   result says what it read: GCC and Clang are given `-MD -MF
-  <object>.cactup-reads` (or, where the compile writes a full dependency
-  file of its own, `-MD -MF <file>`, that one is read; with `-MMD`, which
-  leaves out system headers, the compile is not cached), and `nvcc`'s
-  preprocessing steps and last step likewise. After the compile, those
-  files must be just the ones the key's run entered (and the source; for
-  `nvcc`'s last step, what its identity's trial saw): a compile that could
+  <file>` (a short name of the wrapper's own beside the object; or, where
+  the compile writes a full dependency file of its own, that one is read;
+  with `-MMD`, which leaves out system headers, the compile is not cached),
+  and `nvcc`'s preprocessing steps and last step likewise. The key's
+  preprocessor runs say what they read the same way, worded by the same
+  compiler (Clang lists what `__has_include` found; GCC does not). After the
+  compile, the lists must name the same files (for `nvcc`'s last step, no
+  file but the passes' and what its identity's trial saw): a compile that could
   not see a file for a moment (a node whose file system stalled: seen on
   qbd) takes another branch of a `__has_include`, makes another object,
   and is not stored, though the key's runs before and after saw the file.

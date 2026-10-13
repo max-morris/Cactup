@@ -2097,6 +2097,38 @@ a status of its own). Left: `read_files` holds a unit's files in memory at
 once (about 20 MB for a CarpetX CUDA unit); the C/C++ own-reads check
 canonicalizes only where names differ.
 
+### M4, round 4 (on `5e31789`): BLOCKED by both
+
+Round 3's fixes held. Blocking, fixed (decision 30 and the commit after
+this record):
+- (A, B) a CUDA unit whose passes print anything was never stored: the
+  check ran the passes without `-dU` once the key had stopped narrowing
+  (CarpetX's `#warning "TODO"` units, about 250 s each build). `-dU` is
+  now decided once.
+- (A) an entry with messages shut every other configuration out of its key
+  (`SaidElsewhere`, then "another build published it first"): the
+  prolongation units, a rebuild's critical path. Now such entries have a
+  key of their own (decision 30), and only messages that speak of macros
+  or suggest a name need the files whole.
+- (A) Clang lists what `__has_include` found in `-MD`; the markers do not:
+  any Clang unit including `<memory>` was never stored (and a header under
+  two spellings). Now the compile's list is compared with the key run's
+  own `-MD` list.
+- (A, B) a C++14 digit separator (`1'024`) read as a character constant
+  hid a `/*`: a stale object. Fixed in the scanner; and (B) a definition
+  line between statements decides `-Wmisleading-indentation`: files with
+  code are keyed whole now (decision 30).
+- (B) `#pragma GCC dependency` makes messages depend on when files changed
+  (inherited since M1b): not cached now.
+- (B) `-MD -MF <object>.cactup-reads` could pass the longest name a
+  directory takes: short names of the wrapper's own now (for `nvcc`'s
+  steps too).
+Non-blocking, done: CUDA's own include directory given with `-I` no longer
+counts as ahead of itself; doc comments put back; the `-MF` refusal
+worded. Left: the contract file's line on `-MMD` (updated with this
+record); decision 28 cannot see a `__has_include` branch that includes
+nothing different.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

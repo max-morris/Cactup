@@ -501,6 +501,20 @@ Asked as seven questions with options; the answers, in Max's numbering.
     `/*` in a comment, `unix` redefined): no line is dropped where the
     key's preprocessor run says anything of the text.
 
+30. **Warnings share; definitions are left out of headers with no code**
+    (2026-10-13). With decision 29, the benchmark served 336 of 389
+    compiles (CUDA 65 of 96), all audited right, but the second build took
+    8:16 against 8:39: CarpetX's prolongation units (100 to 400 s each)
+    print warnings about code, any message forced the files whole, and the
+    one entry per key shut the second configuration out. Max: "Why are we
+    skipping files that print warnings in the first place?"; review 4 also
+    showed `-Wmisleading-indentation` reading a definition line between
+    statements. Offered the rework, Max: "Yes, rework so". Definitions are
+    left out only in files the text has no code of; the files must match
+    whole only for messages that speak of macros or suggest a name; and an
+    entry with such messages is stored under its key with its files whole,
+    so each set of files gets its own.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
