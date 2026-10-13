@@ -5163,10 +5163,13 @@ fixed parts, so that the key does not change by accident:
   printed anything is checked after the compile by running it again. What
   was said is read without the terminal's escape sequences
   (`-fdiagnostics-color=always`), and with the locale's curly quotes as
-  plain ones. GCC before 13 ignores `#pragma GCC diagnostic` under `-E`, so
-  where the text has one (and the run names no GCC 13 or later) the files
-  are not narrowed: the compile may print, or fail on, a warning the run
-  did not say. With `build-cache-preserve-exact-warnings = true` the key
+  plain ones. GCC's `-E` ignores `#pragma GCC diagnostic` (before GCC 13),
+  or acts on it only for an option the preprocessor knows (`-Wcomment`, not
+  `-Wall`), where the C compile acts on it; so where a C unit's text has
+  one, the files are not narrowed: the compile may print, or fail on, a
+  warning the run did not say. (The C++ compile ignores the pragma for the
+  preprocessor's warnings as `-E` does, and libstdc++'s headers are full of
+  it.) With `build-cache-preserve-exact-warnings = true` the key
   also has how the compiler (for CUDA, its host compiler) words a warning
   in the compile's environment, from a small run of its own: the language
   and quotes follow the locale as the host resolves it.

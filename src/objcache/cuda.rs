@@ -12,7 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, said_as_compiled, said_of_the_text, Named, Parts, PathMap, Used, PREPROCESSOR};
+use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, said_of_the_text, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::BTreeSet;
@@ -928,14 +928,16 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
         let status = child.wait();
         PREPROCESSOR.store(0, Ordering::SeqCst);
         let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-        let super::key::Output { text: pass_text, bytes: pass_bytes, named: pass_named, used: pass_used, with_code: pass_code, diagnostic_pragma } = read?;
+        // (`nvcc`'s passes are C++: `-E` hears what the compile does of a
+        // `#pragma GCC diagnostic`, `key::said_as_compiled`.)
+        let super::key::Output { text: pass_text, bytes: pass_bytes, named: pass_named, used: pass_used, with_code: pass_code, .. } = read?;
         used.extend(pass_used);
         with_code.extend(pass_code);
         if !status.context("Failed to wait for nvcc's preprocessor")?.success() {
             bail!("nvcc's preprocessor failed");
         }
         flags_from_elsewhere(cuda.host.family, cuda.host.specs.as_deref(), &said).map_err(anyhow::Error::msg)?;
-        match (&mut diagnosed, diagnosed_files(&said).filter(|_| said_as_compiled(&said, diagnostic_pragma))) {
+        match (&mut diagnosed, diagnosed_files(&said)) {
             (Some(all), Some(these)) => all.extend(these),
             _ => diagnosed = None,
         }

@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-17";
+pub const KEY_LABEL: &str = "key-18";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -1305,7 +1305,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // line the key leaves out; the files a diagnostic names are kept whole
     // (decision 30). Not narrowed where the run may not have said all the
     // compile will ([`said_as_compiled`]).
-    let diagnosed = diagnosed_files(&said).filter(|_| said_as_compiled(&said, diagnostic_pragma));
+    let diagnosed = diagnosed_files(&said).filter(|_| said_as_compiled(compile.language, diagnostic_pragma));
     let used = match (narrow && compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed) {
         (true, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
         _ => None,
@@ -1583,18 +1583,16 @@ pub(super) struct Output {
     pub diagnostic_pragma: bool,
 }
 
-/// Does what a preprocessor run `said` hold every warning of the text the
-/// compile would print? Not where the text has a `#pragma GCC diagnostic`
-/// and GCC is older than 13 (or says no version): `-E` then ignores the
-/// pragma, so a warning it makes an error, or turns on, is said by the
-/// compile alone (seen with GCC 11.4 on qbd).
-pub(super) fn said_as_compiled(said: &[u8], diagnostic_pragma: bool) -> bool {
-    let major = || {
-        let said = String::from_utf8_lossy(said);
-        let version = said.lines().find_map(|line| line.strip_prefix("gcc version "))?.to_owned();
-        version.split('.').next()?.parse::<u32>().ok()
-    };
-    !diagnostic_pragma || major().is_some_and(|major| major >= 13)
+/// Does what a C or C++ compile's preprocessor run said hold every warning
+/// of the text the compile would print? Not for C where the text has a
+/// `#pragma GCC diagnostic`: GCC's `-E` ignores the pragma (before GCC 13),
+/// or acts on it only for an option the preprocessor knows (`-Wcomment`,
+/// not `-Wall` or `-Wcomments`), so a warning it turns on, or makes an
+/// error, is said by the compile alone. The C++ compile ignores it for the
+/// preprocessor's warnings as `-E` does (GCC 11 and 14 tried), and
+/// libstdc++'s headers are full of it.
+pub(super) fn said_as_compiled(language: compile::Language, diagnostic_pragma: bool) -> bool {
+    !(diagnostic_pragma && language == compile::Language::C)
 }
 
 /// `said` without the terminal's escape sequences (colors, by
@@ -2251,7 +2249,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "6ba9de45bb3cffe98418992fb323c44c7d44949efc8f67663a4509ad00ad4c06");
+        assert_eq!(parts.key(), "51cdb21cd50baebc9ed7b284be01523d829bfff1a068488586dcb27e9d0f67e3");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2701,6 +2699,14 @@ mod tests {
         std::fs::write(tree.header(), HEADER).unwrap();
         assert_ne!(tree.key(&["-O2"]).parts.text, defined.text, "poisoning a defined name");
         assert_ne!(tree.key(&["-O2", "-fdiagnostics-color=always"]).parts.text, colored.text, "in colors too");
+        // A C unit with a `#pragma GCC diagnostic`, which GCC 14's `-E`
+        // ignores for `-Wall`: a definition with `/*` in its comment draws
+        // an error from the compile alone, so the files are not narrowed.
+        std::fs::write(tree.source(), format!("#pragma GCC diagnostic error \"-Wall\"\n{SOURCE}")).unwrap();
+        let quiet = tree.key(&["-O2"]).parts;
+        std::fs::write(tree.header(), format!("{HEADER}#define THORN_IS_X 1 /* from arrangements/* */\n")).unwrap();
+        assert_ne!(tree.key(&["-O2"]).parts.files, quiet.files, "narrowed under a diagnostic pragma");
+        std::fs::write(tree.header(), HEADER).unwrap();
         std::fs::write(tree.source(), SOURCE).unwrap();
         // The run's `-v` lines are not what it said of the text.
         let said = b"Using built-in specs.\nignoring nonexistent directory \"/x\"\n/r/configs/c/build/T/a.c:2:2: warning: #warning hi [-Wcpp]\n";
@@ -2710,15 +2716,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_diagnostics_in_colors_and_knows_when_e_heeds_diagnostic_pragmas() {
+    fn reads_diagnostics_in_colors_and_knows_where_e_ignores_diagnostic_pragmas() {
         let colored = b"\x1b[01m\x1b[Ka.c:2:9:\x1b[m\x1b[K \x1b[01;35m\x1b[Kwarning: \x1b[m\x1b[Kpoisoning existing macro \xe2\x80\x98\x1b[01m\x1b[KX\x1b[m\x1b[K\xe2\x80\x99 [\x1b]8;;https://gcc.gnu.org/x\x1b\\-Wfoo\x1b]8;;\x1b\\]\n";
         assert_eq!(plain(colored), "a.c:2:9: warning: poisoning existing macro \u{2018}X\u{2019} [-Wfoo]\n");
         assert_eq!(said_of_the_text(colored, None), b"a.c:2:9: warning: poisoning existing macro 'X' [-Wfoo]");
-        let said = |version: &str| format!("Using built-in specs.\ngcc version {version} (GCC)\n");
-        assert!(said_as_compiled(said("11.4.0").as_bytes(), false));
-        assert!(!said_as_compiled(said("11.4.0").as_bytes(), true));
-        assert!(said_as_compiled(said("13.1.0").as_bytes(), true));
-        assert!(!said_as_compiled(b"no version", true));
+        use compile::Language;
+        assert!(said_as_compiled(Language::C, false) && !said_as_compiled(Language::C, true));
+        assert!(said_as_compiled(Language::Cxx, true));
     }
 
     #[test]
