@@ -5089,7 +5089,7 @@ fixed parts, so that the key does not change by accident:
   debug information carries a checksum of each file. So an edit to a
   comment, or to text inside `#if 0`, changes the key. One kind of line is
   left out (decisions 26, 29, 30): with GCC (and `nvcc`'s GCC passes),
-  without `-g3`, and but in the files the preprocessor run's diagnostics
+  without `-g3`, except in the files the preprocessor run's diagnostics
   name (a stray quote in a definition, `/*` in a comment, a name redefined
   are warnings about the very lines left out; a `#warning` in the source
   names the source, which is whole anyway; a diagnostic that names no file
@@ -5116,8 +5116,11 @@ fixed parts, so that the key does not change by accident:
   stored under its key with its files whole (`store::whole_key`), so that
   each set of files gets its own, and a hit with such messages must match
   them (`Miss::SaidElsewhere`). Clang, whose debug information checksums
-  each file, and `-g3`, whose debug information has every macro,
-keep whole files. The names are read
+  each file, and `-g3`, whose debug information has every macro, and
+  builds with `build-cache-preserve-exact-warnings = true` (decision 31:
+  by default a served object's warnings are best effort, and in rare cases
+  name a line or a macro of another configuration's headers),
+  keep whole files. The names are read
   as the compilers write them, as C strings (Clang writes a tab or a byte
   outside ASCII in octal); a marker whose name cannot be read leaves the
   compile without a key. So does a file the preprocessor *entered* (marker
@@ -5139,6 +5142,12 @@ keep whole files. The names are read
   not see a file for a moment (a node whose file system stalled: seen on
   qbd) takes another branch of a `__has_include`, makes another object,
   and is not stored, though the key's runs before and after saw the file.
+- **What decides a warning or a failure besides the files.** Whether each
+  include directory (`-I`, `-isystem`, `-iquote`, `-idirafter`) is there
+  (gfortran warns of one that is not, GCC and Clang with
+  `-Wmissing-include-dirs`; with `-Werror` the compile fails); and a unit
+  that reads a `#pragma GCC dependency` is not cached (its warning compares
+  modification times).
 - **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
   and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
   order, plus the language by the source's suffix, and with debug

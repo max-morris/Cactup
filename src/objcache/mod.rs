@@ -145,6 +145,23 @@ pub fn relocate_from_db(db: &Database) -> bool {
     db.knob("build-cache-relocate") != Some("no")
 }
 
+/// Knob validator (§5): `build-cache-preserve-exact-warnings` is `true` or
+/// `false`.
+pub fn validate_exact_warnings(value: &str) -> Res<String> {
+    match value.trim() {
+        "true" => Ok("true".to_owned()),
+        "false" => Ok("false".to_owned()),
+        other => bail!("invalid build-cache-preserve-exact-warnings value \"{other}\" (valid: true, false)"),
+    }
+}
+
+/// The effective `build-cache-preserve-exact-warnings`, read leniently:
+/// anything but `true` is the default, `false`. Resolved on the login node
+/// only (D11).
+pub fn exact_warnings_from_db(db: &Database) -> bool {
+    db.knob("build-cache-preserve-exact-warnings") == Some("true")
+}
+
 /// The store's directory in an install home: beside the installations,
 /// whose builds already do their I/O there, and hidden, as no alias is.
 const STORE_NAME: &str = ".cactup-build-cache";
@@ -223,6 +240,11 @@ pub struct BuildConf {
     /// Are keys made with the path map where it holds (§18.8, knob
     /// `build-cache-relocate`)?
     pub relocate: bool,
+    /// Must a hit's warnings be exactly the compile's (knob
+    /// `build-cache-preserve-exact-warnings`, decision 31)? Then no key
+    /// leaves out the definitions a unit never uses (decision 26).
+    #[serde(default)]
+    pub exact_warnings: bool,
     /// Above this many bytes, the store is said to be large (§18.9, knob
     /// `build-cache-size`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +336,7 @@ pub struct StageInputs<'a> {
     pub build_env: &'a str,
     pub store: &'a Path,
     pub relocate: bool,
+    pub exact_warnings: bool,
     pub size_limit: Option<u64>,
 }
 
@@ -344,6 +367,7 @@ pub fn stage(cc_dir: &Path, mode: Mode, inputs: &StageInputs) -> Res<Option<Stag
         build_env_digest: hash::bytes_digest(inputs.build_env.as_bytes()),
         store: inputs.store.to_owned(),
         relocate: inputs.relocate,
+        exact_warnings: inputs.exact_warnings,
         size_limit: inputs.size_limit,
     };
     fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create {}", cc_dir.display()))?;
@@ -483,6 +507,7 @@ mod tests {
             build_env: "module load gcc\n",
             store: Path::new("/work/cache"),
             relocate: true,
+            exact_warnings: false,
             size_limit: None,
         }
     }
@@ -610,6 +635,7 @@ mod tests {
                 build_env_digest: hash::bytes_digest(b"module load gcc\n"),
                 store: PathBuf::from("/work/cache"),
                 relocate: true,
+                exact_warnings: false,
                 size_limit: None,
             }
         );

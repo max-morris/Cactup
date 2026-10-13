@@ -620,6 +620,19 @@ cactup -K build-cache=serve -K build-cache-relocate=no build myconfig
 Its objects then keep the full paths, and are shared only between builds of
 the same configuration.
 
+A served object comes with the warnings its compile printed, shown again as
+if it had compiled. Two configurations a few thorns apart share most of their
+objects, because the cache does not look at the lines of Cactus's generated
+headers that only list the thorns of a configuration. In rare cases a warning
+shown again then names a line or a macro of the other configuration's
+headers (a "did you mean" suggestion, for one). The objects themselves are
+exact either way. To have every warning exactly this build's own, at the
+cost of sharing fewer objects between configurations:
+
+```sh
+cactup -K build-cache=serve -K build-cache-preserve-exact-warnings=true build myconfig
+```
+
 With `record`, each compile of a Cactus source file adds one line to
 `cc/events.jsonl` in the build attempt's directory (see "Where build output
 goes" above), and the build output ends its compile step with a count:
@@ -735,7 +748,8 @@ cactup knob build-cache-size 200G
 ```
 
 Like the knobs that control updating, `build-cache`, `build-cache-home`,
-`build-cache-relocate` and `build-cache-size` describe your cactup
+`build-cache-relocate`, `build-cache-size` and
+`build-cache-preserve-exact-warnings` describe your cactup
 installation rather than a job.
 
 ## Full build command reference

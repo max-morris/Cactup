@@ -336,7 +336,7 @@ pub(crate) enum Commands {
     Config(ConfigCommand),
     /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
     ///
-    /// Four machine-global knobs control the build cache, which reuses the
+    /// Five machine-global knobs control the build cache, which reuses the
     /// objects earlier builds compiled:
     ///
     ///   build-cache          off (the default); serve: compile only what no
@@ -354,6 +354,13 @@ pub(crate) enum Commands {
     ///   build-cache-size     a size (200G): a build says when the cache
     ///                        has grown past it. Nothing is removed but by
     ///                        `cactup cache gc`.
+    ///   build-cache-preserve-exact-warnings
+    ///                        false (the default): a served object's
+    ///                        warnings are the ones its compile printed,
+    ///                        which in rare cases name a line or a macro
+    ///                        of another configuration's headers; true:
+    ///                        exactly this build's, at the cost of fewer
+    ///                        objects shared between configurations.
     ///
     /// Set them with `cactup knob`, or for one build with -K:
     ///

@@ -93,6 +93,7 @@ pub const KNOWN_KNOBS: &[KnobSpec] = &[
     KnobSpec::maintenance("mdb-url", crate::update::validate_mdb_url),
     KnobSpec::maintenance("build-cache", crate::objcache::validate_mode),
     KnobSpec::maintenance("build-cache-relocate", crate::objcache::validate_relocate),
+    KnobSpec::maintenance("build-cache-preserve-exact-warnings", crate::objcache::validate_exact_warnings),
     KnobSpec::maintenance("build-cache-size", crate::objcache::validate_size),
     // One knob per `[paths]` key (`mdb::meta::path_fields`), over the
     // machine's value (§4.2, §5).
@@ -341,6 +342,7 @@ impl Database {
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
             "build-cache" => Some(crate::objcache::Mode::Off.name().to_owned()),
             "build-cache-relocate" => Some("yes".to_owned()),
+            "build-cache-preserve-exact-warnings" => Some("false".to_owned()),
             _ => None,
         }
     }

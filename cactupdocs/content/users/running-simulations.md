@@ -257,7 +257,8 @@ Three more standard knobs configure how cactup updates itself —
 `autoupdate` (`auto`, the default, `notify` or `off`), `update-url` and
 `mdb-url`. They are described in [Updating cactup](updating.html) and, unlike
 the others, are not frozen into the simulations you submit. The same goes for
-`build-cache`, `build-cache-relocate` and `build-cache-size`, described in
+`build-cache`, `build-cache-relocate`, `build-cache-size` and
+`build-cache-preserve-exact-warnings`, described in
 [Building Configs](building-configs.html), and for the path knobs:
 `install-home`, `simulation-home`, `test-home`, `scratch-home` and
 `build-cache-home`, each an absolute path that wins over your machine's

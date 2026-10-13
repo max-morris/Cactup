@@ -371,8 +371,9 @@ impl Store {
     }
 
     /// [`Store::restore`], with a place for the entry's module files, for a
-    /// compile whose files whole digest to `whole`: an entry with messages
-    /// gives its object only if its files did too (decision 29).
+    /// compile whose files whole digest to `whole`: an entry whose messages
+    /// speak of definitions gives its object only if its files did too
+    /// (decisions 29, 30).
     pub fn restore_with(&self, key: &str, object: &Path, modules: ModulesTo, whole: &str) -> Result<Restored, Miss> {
         self.read(key, Some((object, modules)), Some(whole))
     }

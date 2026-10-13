@@ -1267,6 +1267,7 @@ mod tests {
             build_env_digest: String::new(),
             store: PathBuf::from("/nonexistent/cache"),
             relocate: true,
+            exact_warnings: false,
             size_limit: None,
         };
         let name = |output: &str| unit(&conf, Path::new(output));

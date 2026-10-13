@@ -1961,6 +1961,7 @@ fn prepare_with_cache(
         }
     };
     let cache_relocate = db.as_ref().map_or(true, crate::objcache::relocate_from_db);
+    let cache_exact_warnings = db.as_ref().is_ok_and(crate::objcache::exact_warnings_from_db);
     let cache_size_limit = db.as_ref().ok().and_then(crate::objcache::size_limit_from_db);
     // The effective knobs (`-K` overlay included) for @KNOB(…)@ in the
     // optionlist, make command and a build submit script — frozen into
@@ -2093,6 +2094,7 @@ fn prepare_with_cache(
                 build_env: &build_env,
                 store: &cache_store,
                 relocate: cache_relocate,
+                exact_warnings: cache_exact_warnings,
                 size_limit: cache_size_limit,
             },
         );

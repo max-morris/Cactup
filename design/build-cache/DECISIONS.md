@@ -515,6 +515,24 @@ Asked as seven questions with options; the answers, in Max's numbering.
     entry with such messages is stored under its key with its files whole,
     so each set of files gets its own.
 
+31. **A served object's warnings are best effort by default**
+    (2026-10-13). Review 5 found more ways for a replayed warning to differ
+    from the compile's own under decision 26's narrowed key: a "did you
+    mean" naming an unused macro of the current headers, messages in
+    another language than English. Max, before: "if all else fails, add a
+    knob build-cache-preserve-exact-output true/false (default false, best
+    effort warnings)", then "make that build-cache-preserve-exact-warnings".
+    So `build-cache-preserve-exact-warnings`: `false` (the default) keeps
+    the narrowed key and decision 30's guards, and a replayed warning may
+    in rare cases name a line or a macro of another configuration's
+    headers; `true` keys whole files. The object and the exit status stay
+    exact either way: whatever decides whether a warning exists at all
+    (and with `-Werror` whether the compile fails) is keyed or refused
+    (include directories' existence keyed, `#pragma GCC dependency` not
+    cached). Max's other idea, warnings stored with the conditions that
+    make them and replayed by condition, is not needed so far: the
+    benchmark's remaining misses were not about replayed warnings.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

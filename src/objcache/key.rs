@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-14";
+pub const KEY_LABEL: &str = "key-15";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -342,6 +342,9 @@ pub struct Keyed {
     /// key's run said it read (decision 28).
     own_reads: OwnReads,
     keyed_reads: BTreeSet<PathBuf>,
+    /// The key leaves out definitions a unit never uses where it can (not
+    /// with `build-cache-preserve-exact-warnings`, decision 31).
+    narrow: bool,
 }
 
 /// Where a C or C++ compile says what it read (decision 28).
@@ -506,6 +509,19 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             }
         }
     }
+    // Whether each directory searched for headers is there: a compiler
+    // warns of one that is not (gfortran always, GCC and Clang with
+    // `-Wmissing-include-dirs`), and with `-Werror` fails.
+    let mut words = compile.preprocess.iter().chain(&compile.keyed);
+    while let Some(word) = words.next() {
+        if ["-I", "-isystem", "-iquote", "-idirafter"].iter().any(|option| word == option)
+            && let Some(dir) = words.next()
+        {
+            arguments.feed(b"include directory");
+            arguments.feed(&mapped(dir.as_bytes()));
+            arguments.feed(if Path::new(dir).is_dir() { b"there" } else { b"not there" });
+        }
+    }
     // A CUDA object records where it was compiled with or without debug
     // information, and the names of `nvcc`'s files beside the object, made
     // from the object's own (`--objdir-as-tempdir`; seen on qbd).
@@ -580,10 +596,11 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             whole: files_whole,
             own_reads: OwnReads::Nowhere,
             keyed_reads: BTreeSet::new(),
+            narrow: false,
         }, identified));
     }
     if let Some((run, host)) = cuda_run {
-        let read = cuda::key(&run, host, &compile, map.as_ref()).map_err(whole)?;
+        let read = cuda::key(&run, host, &compile, map.as_ref(), !conf.exact_warnings).map_err(whole)?;
         let mut both = Hasher::new("nvcc and its host compiler");
         both.feed(compiler.id.as_bytes());
         both.feed(read.cuda.host.id.as_bytes());
@@ -618,6 +635,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             whole: read.whole,
             own_reads: OwnReads::Nowhere,
             keyed_reads: BTreeSet::new(),
+            narrow: !conf.exact_warnings,
         };
         return Ok((keyed, identified));
     }
@@ -653,7 +671,9 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         flags.extend(["-MD", "-MF"].map(OsString::from));
         flags.push(ours.to_path_buf().into_os_string());
     }
-    let read = preprocess(&compiler, &name, &compile, map.as_ref(), (!flags.is_empty()).then_some(flags.as_slice())).map_err(whole)?;
+    // (Unless every warning must be the compile's own: decision 31.)
+    let narrow = !conf.exact_warnings;
+    let read = preprocess(&compiler, &name, &compile, map.as_ref(), (!flags.is_empty()).then_some(flags.as_slice()), narrow).map_err(whole)?;
     let listed = match (&ours, &depend) {
         (Some(ours), _) => Some(ours.to_path_buf()),
         (None, Some(((temp, _), _))) => Some(temp.to_path_buf()),
@@ -698,6 +718,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         whole: read.whole,
         own_reads,
         keyed_reads,
+        narrow,
     };
     Ok((keyed, identified))
 }
@@ -792,7 +813,7 @@ impl Keyed {
             },
             _ => None,
         };
-        preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None).is_ok_and(|read| {
+        preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None, self.narrow).is_ok_and(|read| {
             read.text == self.parts.text
                 && read.files == self.parts.files
                 && read.seen == self.seen
@@ -1224,7 +1245,7 @@ pub fn in_english(command: &mut Command) {
 /// map's flags). It does not map the file names in its line markers, so
 /// those are mapped here, the way the compiler maps names; and each named
 /// file's bytes are digested under its mapped name.
-fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>, depend: Option<&[OsString]>) -> Res<Read> {
+fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<&PathMap>, depend: Option<&[OsString]>, narrow: bool) -> Res<Read> {
     let mut command = preprocessor(compiler, name, compile, map, depend);
     let mut child = command
         .stdin(Stdio::null())
@@ -1264,7 +1285,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // comment, a name redefined) is the compile's too, and would be about a
     // line the key leaves out; the files a diagnostic names are kept whole
     // (decision 30).
-    let used = match (compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed_files(&said)) {
+    let used = match (narrow && compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed_files(&said)) {
         (true, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
         _ => None,
     };
@@ -1294,7 +1315,8 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// ("in definition of macro" names its line). So the files part does not
 /// have the definitions' places, and the second digest returned does:
 /// every file's bytes whole, which an entry keeps beside its messages, and
-/// a hit whose messages are not empty must match ([`Store::restore_with`]).
+/// a hit whose messages speak of definitions must match
+/// ([`Store::restore_with`], decision 30).
 ///
 /// [`Store::restore_with`]: super::store::Store::restore_with
 pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Used>) -> Res<(String, String, String)> {
@@ -1326,6 +1348,13 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                 }
             }
             Err(_) => seen.feed(b"absent"),
+        }
+        // Its warning, and with `-Werror` its failure, depends on when files
+        // were last changed; `-E` does not show it.
+        if let Ok((_, bytes)) = &read
+            && pragma_dependency(bytes)
+        {
+            bail!("#pragma GCC dependency compares when files were last changed, which the cache does not follow");
         }
         reads.push((mapped, path, *entered, read.map(|(_, bytes)| bytes)));
     }
@@ -1495,10 +1524,6 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
             None if line.starts_with(b"#pragma GCC pch_preprocess") => {
                 bail!("a precompiled header would be used, which the cache does not follow")
             }
-            // Its warning depends on when files were last changed.
-            None if line.starts_with(b"#pragma GCC dependency") => {
-                bail!("#pragma GCC dependency compares when files were last changed, which the cache does not follow")
-            }
             None if assembler_include(&line) => {
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
@@ -1654,6 +1679,21 @@ fn logical_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
             }
         }
         Some(&bytes[start..at])
+    })
+}
+
+/// Does `bytes` hold a `#pragma GCC dependency` (blanks allowed between
+/// its words)?
+fn pragma_dependency(bytes: &[u8]) -> bool {
+    logical_lines(bytes).any(|line| {
+        let mut words = line.split(|b| b.is_ascii_whitespace()).filter(|word| !word.is_empty());
+        let first = words.next().unwrap_or_default();
+        let rest: Vec<&[u8]> = match first {
+            b"#" => words.take(3).collect(),
+            _ if first.starts_with(b"#") => std::iter::once(&first[1..]).chain(words.take(2)).collect(),
+            _ => return false,
+        };
+        rest == [&b"pragma"[..], b"GCC", b"dependency"]
     })
 }
 
@@ -2083,7 +2123,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "11157ce2957af8b8fc05cffe012e6f21f920c6c21e9181e469e2a29df54dbf9a");
+        assert_eq!(parts.key(), "c5356e2b9983c3d9518955c58b60f04275cb4bebb3dc0ae9b81c4f8d63230ee5");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2108,6 +2148,7 @@ mod tests {
             build_env_digest: String::new(),
             store: PathBuf::from("/s"),
             relocate: true,
+            exact_warnings: false,
             size_limit: None,
         };
         assert_eq!(
@@ -2235,6 +2276,7 @@ mod tests {
                 build_env_digest: String::new(),
                 store: PathBuf::from("/nonexistent/cache"),
                 relocate: true,
+                exact_warnings: false,
                 size_limit: None,
             };
             let tree = Self { _tmp: tmp, conf, cc };
@@ -2454,6 +2496,41 @@ mod tests {
         std::fs::write(tree.header(), with("    #define UNUSED_X 1")).unwrap();
         assert_ne!(tree.key(&["-O2", "-Wall"]).parts.files, one.parts.files);
         std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn with_exact_warnings_the_definitions_stay_in_the_key() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        let exact = BuildConf { exact_warnings: true, ..tree.conf.clone() };
+        let keyed = |conf: &BuildConf| key(conf, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap().parts;
+        std::fs::write(tree.header(), "#define ANSWER 42\n#define THORN_A\n").unwrap();
+        let (narrow, whole) = (keyed(&tree.conf), keyed(&exact));
+        std::fs::write(tree.header(), "#define ANSWER 42\n#define THORN_B 1\n").unwrap();
+        assert_eq!(keyed(&tree.conf), narrow, "narrowed by default");
+        assert_ne!(keyed(&exact).files, whole.files, "whole with the knob");
+        std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn what_decides_a_warning_or_a_failure_is_keyed_or_refused() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        // An include directory that is not there draws a warning.
+        let missing = tree.cc.join("no-such-dir").display().to_string();
+        let without = tree.key(&["-O2", "-I", &missing]).parts;
+        std::fs::create_dir_all(&missing).unwrap();
+        assert_ne!(tree.key(&["-O2", "-I", &missing]).parts.arguments, without.arguments);
+        // `#pragma GCC dependency` compares modification times.
+        std::fs::write(tree.header(), format!("{HEADER}#  pragma  GCC dependency \"t.h\"\n")).unwrap();
+        assert!(key(&tree.conf, &tree.cc, &tree.argv("gcc", &["-O2"]), false).is_err_and(|why| why.contains("dependency")));
+        std::fs::write(tree.header(), HEADER).unwrap();
+        assert!(pragma_dependency(b"#pragma GCC dependency \"a\"\n") && pragma_dependency(b" # pragma GCC dependency x\n"));
+        assert!(!pragma_dependency(b"#pragma GCC poison x\n") && !pragma_dependency(b"// #pragma GCC dependency\n"));
     }
 
     #[test]

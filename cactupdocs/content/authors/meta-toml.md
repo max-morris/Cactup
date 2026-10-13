@@ -389,7 +389,8 @@ The standard knobs are `allocation`, `mail`, `mail-type`, `queue`, `user`, `emai
 derived defaults when unset), plus twelve that configure cactup itself
 rather than a job — `autoupdate`, `update-url` and `mdb-url` (see
 [Updating cactup](../users/updating.html)), `build-cache`,
-`build-cache-relocate` and `build-cache-size` (see
+`build-cache-relocate`, `build-cache-size` and
+`build-cache-preserve-exact-warnings` (see
 [Building Configs](../users/building-configs.html)), and one per `[paths]`
 key, `install-home`, `simulation-home`, `test-home`, `scratch-home` and
 `build-cache-home`, an absolute path that wins over the machine's value;

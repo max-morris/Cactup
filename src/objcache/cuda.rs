@@ -823,9 +823,9 @@ pub struct Read {
 /// but printing (no `-o`), saying where it takes flags from (`-v`), and
 /// with the path map's flags; and digest what they print and the files
 /// they read, as for C and C++.
-pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
+pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap>, narrow: bool) -> Res<Read> {
     let passes: Vec<Vec<String>> = run.preprocessor_passes().cloned().collect();
-    let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), Default::default(), Default::default(), compile));
+    let used = (narrow && host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), Default::default(), Default::default(), compile));
     let macro_use = used.is_some();
     let mut cuda = Cuda { host, passes, env: run.env.clone(), macro_use, used, keyed_reads: BTreeSet::new() };
     let Passes { text, bytes: text_bytes, named, used: names, with_code, diagnosed, reads } = run_passes(&cuda, map, true)?;
