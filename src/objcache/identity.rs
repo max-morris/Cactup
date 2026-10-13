@@ -90,11 +90,11 @@ pub struct Compiler {
     /// did not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub multilib: Vec<String>,
-    /// For `nvcc`: a compile can run in a user and PID namespace of its own
-    /// here (unprivileged user namespaces are allowed), which makes its
-    /// objects the same each time (decision 24).
+    /// For `nvcc`: it takes the module ID it is given in place of making
+    /// one of where and when it compiles, which makes its objects the same
+    /// each time (`cuda::Plan`, decision 25).
     #[serde(default)]
-    pub isolates: bool,
+    pub takes_module_id: bool,
 }
 
 /// One file an identity was computed from, as it looked then.
@@ -1061,11 +1061,15 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
         hasher.feed(file_digest(&library)?.as_bytes());
         watched.files.push(Seen::of(&library)?);
     }
-    let isolates = family == Family::Nvcc && super::cuda::isolation();
+    let mut takes_module_id = false;
     let (relocates, locale_neutral) = match family {
         Family::Gfortran => (super::fortran::relocates(path, program, trial_dir), super::fortran::locale_neutral(path, program, trial_dir)),
         // The locale stays in the key: no trial for it here.
-        Family::Nvcc => (super::cuda::relocates(path, program, trial_dir, isolates), false),
+        Family::Nvcc => {
+            let (relocates, takes) = super::cuda::trial(path, program, trial_dir);
+            takes_module_id = takes;
+            (relocates, false)
+        }
         _ => (relocates(path, program, trial_dir), locale_neutral(path, program, trial_dir)),
     };
     Ok(Compiler {
@@ -1076,7 +1080,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
         id: hasher.hex(),
         specs,
         multilib,
-        isolates,
+        takes_module_id,
     })
 }
 

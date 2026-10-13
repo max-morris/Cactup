@@ -23,7 +23,8 @@
 use super::event::{Audit, Event, Outcome};
 use super::store::{About, Miss, ModulesTo, NewEntry, Published, Store};
 use super::probe::SELFTEST_COMPILER;
-use super::{events_path, key, BuildConf, Mode, INIT_VERB, PROBE_VERB, WRAP_VERB};
+use super::cuda::{self, Step};
+use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
 use crate::Res;
 use anyhow::Context;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
@@ -54,7 +55,6 @@ pub fn run_if_invoked() {
     match args.next() {
         Some(verb) if verb == WRAP_VERB => wrap(args),
         Some(verb) if verb == PROBE_VERB => std::process::exit(super::probe::run(args.next())),
-        Some(verb) if verb == INIT_VERB => std::process::exit(super::cuda::init(args)),
         _ => {}
     }
 }
@@ -349,6 +349,22 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // The compile, as the key describes it when its result is to be stored
     // (the path map's flags; for Fortran, the renamed copy, §18.10): the
     // stored object must be the one the key describes.
+    // A CUDA compile runs as `nvcc` would run it, with the module ID
+    // given (decision 25); one that cannot is not cached.
+    let mut plan = None;
+    if let Ok(keyed_now) = &keyed
+        && store.is_ok()
+        && let Some(made) = keyed_now.plan(&keyed_now.compile_argv(argv))
+    {
+        match made {
+            Ok(made) => plan = Some(made),
+            Err(e) => {
+                let why = format!("{e:#}");
+                event.not_cached = Some(why.clone());
+                keyed = Err(why);
+            }
+        }
+    }
     let publishing = store.is_ok() && keyed.is_ok();
     let (compile_argv, rewrite) = match (&keyed, publishing) {
         (Ok(keyed), true) => (keyed.compile_argv(argv), keyed.rewrite(conf)),
@@ -356,10 +372,8 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     };
     // The file that was identified is the file that runs.
     let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.clone());
-    // `nvcc` in a PID namespace of its own (decision 24).
-    let isolate = keyed.as_ref().is_ok_and(|keyed| keyed.isolated());
     let streams = if publishing { Output::PassOn(rewrite.clone()) } else { Output::Inherit };
-    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams, isolate));
+    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams, plan.as_ref()));
     let Some((status, captured)) = ran else {
         drop(audited);
         if let Ok(keyed) = &mut keyed {
@@ -390,7 +404,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
 
     if let (Some((stored, modules)), Ok(keyed)) = (&audited, &mut keyed) {
         let checked = Checked { status, stable, stored, modules, cwd: &cwd };
-        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed, isolate));
+        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed, plan.as_ref()));
         keyed.drop_depend();
     }
     drop(audited);
@@ -460,7 +474,7 @@ struct Checked<'a> {
 /// the second compile ends it by that signal, as it would have the compile;
 /// a second compile that ends any other way (killed by the kernel, crashed,
 /// failed) leaves the first compile's object the build's, and no verdict.
-fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed, isolate: bool) -> Audit {
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed, plan: Option<&cuda::Plan>) -> Audit {
     if !checked.status.success() {
         return Audit::CompileFailed;
     }
@@ -494,7 +508,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
     let again_as = std::env::var_os("CACTUP_CC_TEST_SECOND_COMPILER").map(PathBuf::from);
     #[cfg(debug_assertions)]
     let identified = again_as.as_deref().or(identified);
-    let again = run(job, argv, identified, Output::Swallow(rewrite), isolate);
+    let again = run(job, argv, identified, Output::Swallow(rewrite), plan);
     // Asked to stop, however the second compile then ended (a driver may
     // exit with a status rather than by the signal): the compile would have
     // been stopped.
@@ -588,6 +602,13 @@ fn direct(argv: &[OsString], identified: Option<&Path>) -> Command {
         None => Command::new(&argv[0]),
     };
     command.args(&argv[1..]);
+    underscore(&mut command, argv, identified);
+    command
+}
+
+/// `$_` as a shell sets it for the program it runs: the compiler's, where
+/// the recipe's shell set it to this program.
+fn underscore(command: &mut Command, argv: &[OsString], identified: Option<&Path>) {
     let set_for_us = std::env::var_os("_").zip(std::env::args_os().next()).is_some_and(|(set, me)| {
         set == me || std::env::current_exe().is_ok_and(|exe| Path::new(&set) == exe)
     });
@@ -597,7 +618,6 @@ fn direct(argv: &[OsString], identified: Option<&Path>) -> Command {
             Err(_) => command.env_remove("_"),
         };
     }
-    command
 }
 
 /// Pass a compile through that the cache stays out of for a reason worth
@@ -871,7 +891,7 @@ static HANDLERS: OnceLock<bool> = OnceLock::new();
 /// `None`: the compiler could not be started this way, and nothing has
 /// run. The recipe's shell may still know how (a keyword such as `time`, a
 /// function, a script without an interpreter line).
-fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, isolate: bool) -> Option<(ExitStatus, Option<Captured>)> {
+fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, plan: Option<&cuda::Plan>) -> Option<(ExitStatus, Option<Captured>)> {
     // The build script's self-test has checked that this can be read here.
     let Ok(ignored) = ignored_signals() else {
         debug("cannot tell which signals to leave ignored");
@@ -910,11 +930,22 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
 
     // The handlers above do not survive becoming the shell that runs what
     // cannot be started here.
-    // (A namespace that cannot be made fails the start: the recipe's shell
-    // then runs the compile, and nothing of it is stored.)
-    let mut command = match (isolate, identified) {
-        (true, Some(program)) => super::cuda::isolated(program, &argv[0], &argv[1..]),
-        _ => direct(argv, identified),
+    // What runs: the compiler; or for a CUDA compile, `nvcc`'s steps, each
+    // a program (`None`: a file `nvcc` removes) (decision 25).
+    let mut commands: Vec<Option<Command>> = match plan {
+        Some(plan) => plan
+            .steps()
+            .iter()
+            .map(|step| match step {
+                Step::Run(words) => {
+                    let mut command = plan.command(words);
+                    underscore(&mut command, argv, identified);
+                    Some(command)
+                }
+                Step::Remove(_) => None,
+            })
+            .collect(),
+        None => vec![Some(direct(argv, identified))],
     };
     // Through this process: the pipes, and the threads that read them, are
     // made before the compiler starts, so that what cannot be made costs
@@ -930,11 +961,16 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
     if let Some((pass_on, rewrite)) = through
         && let (Ok((out_from, out_to)), Ok((err_from, err_to))) = (std::io::pipe(), std::io::pipe())
     {
-        if let (Ok(stdout), Ok(stderr)) = (
+        // Every program writes to the same two pipes.
+        let ends: Option<Vec<_>> = commands.iter().flatten().map(|_| Some((out_to.try_clone().ok()?, err_to.try_clone().ok()?))).collect();
+        if let (Some(ends), Ok(stdout), Ok(stderr)) = (
+            ends,
             Passing::new(out_from, std::io::stdout(), pass_on, rewrite.clone()),
             Passing::new(err_from, std::io::stderr(), pass_on, rewrite),
         ) {
-            command.stdout(Stdio::from(out_to)).stderr(Stdio::from(err_to));
+            for (command, (out_to, err_to)) in commands.iter_mut().flatten().zip(ends) {
+                command.stdout(Stdio::from(out_to)).stderr(Stdio::from(err_to));
+            }
             passing = Some((stdout, stderr));
         }
     }
@@ -944,56 +980,102 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
     if renamed && passing.is_none() {
         // Audit mode's second compile is not shown at all.
         if !shown {
-            command.stdout(Stdio::null()).stderr(Stdio::null());
+            for command in commands.iter_mut().flatten() {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
         } else {
             debug("its messages cannot be passed on, and they would name its files otherwise");
             pass_through(job)
         }
     }
     PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
-    let spawned = command.spawn();
-    // This process's copies of the pipes' writing ends: the compiler has
-    // its own, and the readers see the end of each stream when it ends.
-    drop(command);
-    let Ok(mut child) = spawned else {
-        // Asked to stop before there was a compile to stop: becoming the
-        // shell now would lose that signal and run the compile after all.
+    // Asked to stop before there was a compile to stop: becoming the shell
+    // now would lose that signal and run the compile after all.
+    let stop_now = || {
         if let signal @ 1.. = PENDING.load(Ordering::SeqCst) {
             let _ = signal_hook::low_level::emulate_default_handler(signal);
             std::process::exit(128 + signal);
         }
-        return None;
     };
-    CHILD.store(child.id() as i32, Ordering::SeqCst);
-    PHASE.store(COMPILING, Ordering::SeqCst);
-    // One that arrived after the handlers were in place and before the
-    // compiler was: it would otherwise be lost, and the compile would run
-    // on after `make` asked for it to stop.
-    match PENDING.load(Ordering::SeqCst) {
-        0 => {}
-        signal => pass_on(signal),
+    if let Some(plan) = plan
+        && plan.give_id().is_err()
+    {
+        stop_now();
+        return None;
     }
-
-    match child.wait() {
-        Ok(status) => {
-            EXIT_CODE.store(exit_code(status), Ordering::SeqCst);
-            // The pid is free to be someone else's from here on.
-            CHILD.store(0, Ordering::SeqCst);
-            PHASE.store(AFTER_COMPILE, Ordering::SeqCst);
-            let captured = passing.map(|(stdout, stderr)| {
-                let deadline = Instant::now() + std::time::Duration::from_secs(2);
-                let (stdout, stderr) = (stdout.finish(deadline), stderr.finish(deadline));
-                let kept_open = stdout.is_none() || stderr.is_none();
-                let ((stdout, over_out), (stderr, over_err)) = (stdout.unwrap_or_default(), stderr.unwrap_or_default());
-                Captured { stdout, stderr, overflow: over_out || over_err, kept_open }
-            });
-            Some((status, captured))
+    let mut ended = None;
+    let mut steps = commands.into_iter().enumerate();
+    while let Some((at, command)) = steps.next() {
+        let Some(mut command) = command else {
+            if let Some(Step::Remove(file)) = plan.and_then(|plan| plan.steps().get(at)) {
+                let _ = std::fs::remove_file(file);
+            }
+            continue;
+        };
+        // Asked to stop between two of `nvcc`'s steps: no more of them,
+        // ended as by the signal.
+        if let (Some(plan), signal @ 1..) = (plan, PENDING.load(Ordering::SeqCst))
+            && ended.is_some()
+        {
+            plan.tidy_from(at);
+            ended = Some(ExitStatus::from_raw(signal));
+            break;
         }
-        Err(e) => {
-            eprintln!("cactup: lost track of the compiler it was wrapping ({}): {e}", argv[0].to_string_lossy());
-            std::process::exit(1);
+        let spawned = command.spawn();
+        // This process's copies of the pipes' writing ends: the compiler has
+        // its own, and the readers see the end of each stream when it ends.
+        drop(command);
+        let Ok(mut child) = spawned else {
+            stop_now();
+            // (Past `nvcc`'s first step, the recipe's shell runs the whole
+            // compile again: what the steps before said, it says twice.)
+            if let Some(plan) = plan {
+                plan.tidy_from(at);
+            }
+            return None;
+        };
+        CHILD.store(child.id() as i32, Ordering::SeqCst);
+        PHASE.store(COMPILING, Ordering::SeqCst);
+        // One that arrived after the handlers were in place and before the
+        // compiler was: it would otherwise be lost, and the compile would run
+        // on after `make` asked for it to stop.
+        match PENDING.load(Ordering::SeqCst) {
+            0 => {}
+            signal => pass_on(signal),
+        }
+        match child.wait() {
+            Ok(status) => {
+                // The pid is free to be someone else's from here on.
+                CHILD.store(0, Ordering::SeqCst);
+                ended = Some(status);
+                // `nvcc` stops at the first step that fails, and ends as it
+                // ended (tried).
+                if !status.success() {
+                    if let Some(plan) = plan {
+                        plan.tidy_from(at + 1);
+                    }
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("cactup: lost track of the compiler it was wrapping ({}): {e}", argv[0].to_string_lossy());
+                std::process::exit(1);
+            }
         }
     }
+    drop(steps);
+    // A plan runs one program at least.
+    let status = ended?;
+    EXIT_CODE.store(exit_code(status), Ordering::SeqCst);
+    PHASE.store(AFTER_COMPILE, Ordering::SeqCst);
+    let captured = passing.map(|(stdout, stderr)| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let (stdout, stderr) = (stdout.finish(deadline), stderr.finish(deadline));
+        let kept_open = stdout.is_none() || stderr.is_none();
+        let ((stdout, over_out), (stderr, over_err)) = (stdout.unwrap_or_default(), stderr.unwrap_or_default());
+        Captured { stdout, stderr, overflow: over_out || over_err, kept_open }
+    });
+    Some((status, captured))
 }
 
 /// The exit status a shell reports for `status`.

@@ -264,7 +264,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-7";
+pub const KEY_LABEL: &str = "key-8";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -349,11 +349,10 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     };
     // `nvcc`'s host compiler, for this compile: what it would run says
     // which (M4); its identity is watched with `nvcc`'s.
-    // `cudafe++` puts its process ID into the names of a file's internal
-    // device entities: only in a PID namespace of its own is a compile the
-    // same twice (decision 24).
-    if compiler.family == Family::Nvcc && !compiler.isolates {
-        return Err("nvcc's objects are not the same twice outside a namespace of their own, which this machine does not allow (unshare)".to_owned());
+    // Its compiles are the same twice only with the module ID given
+    // (decision 25).
+    if compiler.family == Family::Nvcc && !compiler.takes_module_id {
+        return Err("this nvcc does not take the module ID it is given, and the one it makes differs from compile to compile".to_owned());
     }
     let (cuda_run, watch) = match compiler.family {
         Family::Nvcc => {
@@ -624,10 +623,13 @@ impl Keyed {
         }
     }
 
-    /// Does the compile run in a namespace of its own (`nvcc` where that
-    /// works, decision 24)?
-    pub fn isolated(&self) -> bool {
-        self.cuda.is_some() && self.compiler.isolates
+    /// For a CUDA compile, what runs in place of `argv` (the command line
+    /// [`Self::compile_argv`] makes): `nvcc`'s own steps, with the module ID
+    /// made of the key (decision 25).
+    pub fn plan(&self, argv: &[OsString]) -> Option<Res<cuda::Plan>> {
+        self.cuda.as_ref()?;
+        let id = cuda::module_id(&self.parts.key(), &self.compile.source);
+        Some(cuda::Plan::new(&self.compiler.path, &argv[0], &argv[1..], id))
     }
 
     /// How the check after a Fortran compile was made: by lookups in place
@@ -1368,7 +1370,7 @@ mod tests {
         let compile = compile::parse(&args).unwrap();
         assert_eq!(compile.depend, os(&depend));
         for family in [Family::Gcc, Family::Clang] {
-            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None, isolates: false };
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None, takes_module_id: false };
             let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None, None);
             let given: Vec<&OsStr> = command.get_args().collect();
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");
@@ -1410,7 +1412,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "cf50c3d8d34326175229c53c0b0e74ad60fb97a8ccc1a764f8e7d708128dd314");
+        assert_eq!(parts.key(), "cef8fc6cac7db289c0c531cffe2d533b3065386eed1cccb2dbb2e6cfb119f4dd");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 

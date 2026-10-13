@@ -239,21 +239,150 @@ pub(super) fn examine(path: &Path, driver: &Path, hasher: &mut Hasher, watched: 
     Ok(())
 }
 
-/// Does `nvcc` (at `path`, run as `name`) make one object of the same CUDA
-/// source in two places, under the path map's flags as the cache gives
-/// them ([`map_flags`])? Tried in `dir`, with its default host compiler and
-/// the relocatable device code Cactus asks for, as a GCC is tried
-/// (`identity::relocates`): the module ID `cudafe++` makes is a hash of the
-/// source's name, which the map's flags fix (tried).
-pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) -> bool {
-    let Ok(trial) = tempfile::Builder::new().prefix("cuda-trial-").tempdir_in(dir) else { return false };
+/// A CUDA compile as the cache runs it (decision 25): what `nvcc` would
+/// run for it, run here, step by step, with the module ID given rather than
+/// made. `cudafe++` makes a translation unit's module ID, which names its
+/// registration, its fat binary and every entity of internal linkage, from
+/// the name of a routine or variable it defines where one serves; where none
+/// does, from the working directory, the time its source was last changed (as
+/// local time) and its process ID (all seen on qbd, decision 25). Not told to
+/// make one (`--gen_module_id_file`), it reads the one in the file it is
+/// given, as `cicc` does after it (tried); nothing else of the compile
+/// changes.
+#[derive(Debug)]
+pub struct Plan {
+    env: Vec<(String, String)>,
+    steps: Vec<Step>,
+    /// The file the module ID is read from, and the ID.
+    id_file: PathBuf,
+    id: String,
+}
+
+/// One line of what `nvcc` would run.
+#[derive(Debug)]
+pub enum Step {
+    /// A program and its arguments (the program by the name `nvcc` runs it
+    /// by, found along the `PATH` it gives).
+    Run(Vec<String>),
+    /// An intermediate file `nvcc` removes.
+    Remove(PathBuf),
+}
+
+impl Plan {
+    /// What `nvcc` (at `path`, run as `name`) would run for `args` in the
+    /// working directory, with the module ID `id`.
+    pub fn new(path: &Path, name: &OsStr, args: &[OsString], id: String) -> Res<Self> {
+        Self::from_dry_run(dry_run(path, name, args, None)?, id).with_context(|| format!("{} would compile in a way cactup cannot repeat", path.display()))
+    }
+
+    fn from_dry_run(run: DryRun, id: String) -> Res<Self> {
+        let mut steps = Vec::new();
+        let mut id_file = None;
+        for mut words in run.commands {
+            let base = words[0].rsplit('/').next().unwrap_or(&words[0]).to_owned();
+            if base == "rm" {
+                let [_, file] = words.as_slice() else { bail!("it would run rm otherwise than on one file") };
+                steps.push(Step::Remove(PathBuf::from(file)));
+                continue;
+            }
+            if base == "cudafe++" {
+                let made = words.iter().filter(|word| *word == "--gen_module_id_file").count();
+                let file = words.iter().position(|word| word == "--module_id_file_name").and_then(|at| words.get(at + 1)).cloned();
+                match (made, file) {
+                    (1, Some(file)) if id_file.is_none() => id_file = Some(PathBuf::from(file)),
+                    _ => bail!("its cudafe++ would not make one module ID in a file"),
+                }
+                words.retain(|word| word != "--gen_module_id_file");
+            }
+            steps.push(Step::Run(words));
+        }
+        let id_file = id_file.context("it would run no cudafe++ that makes a module ID")?;
+        Ok(Self { env: run.env, steps, id_file, id })
+    }
+
+    /// Put the module ID where `cudafe++` will read it.
+    pub fn give_id(&self) -> std::io::Result<()> {
+        fs::write(&self.id_file, &self.id)
+    }
+
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// The command of a step that runs a program, in the environment `nvcc`
+    /// gives it (its `PATH` is where the program is found).
+    pub fn command(&self, words: &[String]) -> Command {
+        let mut command = Command::new(&words[0]);
+        command.args(&words[1..]).envs(self.env.iter().map(|(name, value)| (name, value)));
+        command
+    }
+
+    /// Remove what `nvcc` would have removed, from step `from` on: what a
+    /// compile that failed or was stopped leaves behind otherwise.
+    pub fn tidy_from(&self, from: usize) {
+        for step in self.steps.iter().skip(from) {
+            if let Step::Remove(file) = step {
+                let _ = fs::remove_file(file);
+            }
+        }
+    }
+
+    /// Run every step in turn, in `dir`, without a word to the terminal:
+    /// for a trial. `Err` says what failed.
+    fn run_quietly(&self, dir: &Path) -> Result<(), String> {
+        self.give_id().map_err(|e| format!("cannot write {}: {e}", self.id_file.display()))?;
+        for (at, step) in self.steps.iter().enumerate() {
+            match step {
+                Step::Remove(file) => {
+                    let _ = fs::remove_file(file);
+                }
+                Step::Run(words) => {
+                    let out = self.command(words).current_dir(dir).env("PWD", dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output();
+                    match out {
+                        Ok(out) if out.status.success() => {}
+                        Ok(out) => {
+                            self.tidy_from(at);
+                            return Err(format!("{} failed ({}): {}", words[0], out.status, String::from_utf8_lossy(&out.stderr)));
+                        }
+                        Err(e) => {
+                            self.tidy_from(at);
+                            return Err(format!("{} could not run: {e}", words[0]));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The module ID the cache gives a compile with the key `key` of the source
+/// `source`: in the shape `cudafe++` gives its own (`_<hash>_<length>_<name>_
+/// <hash>`), with the hashes from the key. The key differs where the
+/// compile does (it names the source and the object, mapped), so two
+/// translation units of one link never share an ID.
+pub fn module_id(key: &str, source: &Path) -> String {
+    let base = source.file_name().unwrap_or_default().as_bytes();
+    let name: String = base.iter().map(|&b| if b.is_ascii_alphanumeric() { b as char } else { '_' }).collect();
+    format!("_{}_{}_{}_{}", &key[..8], base.len(), name, &key[8..16])
+}
+
+/// Does `nvcc` (at `path`, run as `name`) take the module ID it is given
+/// ([`Plan`]), and does it then make one object of the same CUDA source in
+/// two places, under the path map's flags as the cache gives them
+/// ([`map_flags`])? Tried in `dir`, with its default host compiler and the
+/// relocatable device code Cactus asks for, as a GCC is tried
+/// (`identity::relocates`).
+pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> (bool, bool) {
+    let Ok(trial) = tempfile::Builder::new().prefix("cuda-trial-").tempdir_in(dir) else { return (false, false) };
     // By its physical path, and with `PWD` naming it, as the GCC trial: the
     // host compiler records `$PWD` where it names the working directory
     // (tried: a `/work` link on qbd left the physical path unmapped).
-    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
-    // With an entity of internal linkage, whose name `cudafe++` makes from
-    // its process ID (decision 24).
-    let text = "namespace { __device__ int hidden; }\n__device__ int twice(int v) { return 2 * v + hidden; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n";
+    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return (false, false) };
+    // Without a routine or variable of external linkage to name the module
+    // by: `cudafe++` would make the ID of where and when it compiles.
+    let text = "namespace {\n__device__ int hidden;\n__device__ int twice(int v) { return 2 * v + hidden; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n}\n";
+    let id = module_id("cac7c0de5eed0f1d00000000", Path::new("trial.cu"));
     // Laid out as Cactus lays out a compile (the source copied into the
     // configuration's build directory, run from its scratch directory),
     // in trees and configurations of names of other lengths: the map has
@@ -266,7 +395,7 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
         let source = build.join("trial.cu");
         let made = [&build, &scratch, &config.join("bindings/include")].iter().all(|dir| fs::create_dir_all(dir).is_ok());
         if !made || fs::write(&source, text).is_err() {
-            return false;
+            return (false, false);
         }
         let object = build.join("trial.cu.o");
         let mut args: Vec<OsString> = ["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "--objdir-as-tempdir", "-c", "-o"].map(OsString::from).to_vec();
@@ -275,189 +404,30 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
         args.push(OsString::from("-I"));
         args.push(config.join("bindings/include").into_os_string());
         args.extend(map_flags(&source, &PathMap::for_trial(&root, &config)));
-        let mut command = match isolate {
-            true => isolated(path, name, &args),
-            false => {
-                let mut command = Command::new(path);
-                command.arg0(name).args(&args);
-                command
-            }
+        let mut command = Command::new(path);
+        command.arg0(name).arg("-dryrun").args(&args).current_dir(&scratch).env("PWD", &scratch).stdin(Stdio::null()).stdout(Stdio::null());
+        super::key::in_english(&mut command);
+        let plan = match command.output() {
+            Ok(out) => Plan::from_dry_run(DryRun::read(&String::from_utf8_lossy(&out.stderr)), id.clone()),
+            Err(e) => Err(e.into()),
         };
-        command
-            .current_dir(&scratch)
-            .env("PWD", &scratch)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        match command.output() {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => {
-                identity::trial_says(&format!("{} failed the trial compile ({}): {}", path.display(), out.status, String::from_utf8_lossy(&out.stderr)));
-                return false;
-            }
-            Err(e) => {
-                identity::trial_says(&format!("{} could not run the trial compile: {e}", path.display()));
-                return false;
-            }
+        let ran = plan.map_err(|e| format!("{e:#}")).and_then(|plan| plan.run_quietly(&scratch));
+        if let Err(why) = ran {
+            identity::trial_says(&format!("{}: the trial compile: {why}", path.display()));
+            return (false, false);
         }
         match fs::read(&object) {
             Ok(object) => objects.push(object),
-            Err(_) => return false,
+            Err(_) => return (false, false),
         }
     }
-    if objects[0] != objects[1] {
+    let takes_id = objects.iter().all(|object| object.windows(id.len()).any(|window| window == id.as_bytes()));
+    if !takes_id {
+        identity::trial_says(&format!("{} did not take the module ID it was given", path.display()));
+    } else if objects[0] != objects[1] {
         identity::trial_says(&format!("{} made two objects of the trial in two places", path.display()));
     }
-    objects[0] == objects[1]
-}
-
-/// Can a program be started in a user and PID namespace of its own here
-/// ([`isolated`])? Tried once, by starting `true` so.
-pub fn isolation() -> bool {
-    std::env::current_exe().is_ok_and(|me| isolation_by(&me))
-}
-
-/// [`isolation`], with `me` the cactup that is the namespace's init.
-fn isolation_by(me: &Path) -> bool {
-    let Ok(truth) = identity::find_program(OsStr::new("true")) else { return false };
-    isolated_by(me, &truth, OsStr::new("true"), &[])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-/// `program`, run as `arg0` with `args`, in a user and PID namespace of its
-/// own (decision 24), through this cactup as the namespace's init
-/// ([`init`]). The namespaces are made in the child between fork and exec
-/// (`unshare(2)` by `rustix`: a raw system call, no C library): a user
-/// namespace mapping this user and group to themselves (needs no
-/// privilege), and a PID namespace, which the next process the child starts
-/// is the first of.
-pub fn isolated(program: &Path, arg0: &OsStr, args: &[OsString]) -> Command {
-    isolated_by(&std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cactup")), program, arg0, args)
-}
-
-/// [`isolated`], with `me` the cactup that is the namespace's init.
-fn isolated_by(me: &Path, program: &Path, arg0: &OsStr, args: &[OsString]) -> Command {
-    let (uid, gid) = (rustix::process::getuid().as_raw(), rustix::process::getgid().as_raw());
-    // Made before the fork: nothing is allocated after it.
-    let uid_map = format!("{uid} {uid} 1\n").into_bytes();
-    let gid_map = format!("{gid} {gid} 1\n").into_bytes();
-    let mut command = Command::new(me);
-    command.arg(super::INIT_VERB).arg(program).arg(arg0).args(args);
-    let write = |path: &std::ffi::CStr, bytes: &[u8]| -> std::io::Result<()> {
-        let file = rustix::fs::open(path, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())?;
-        rustix::io::write(&file, bytes)?;
-        Ok(())
-    };
-    // SAFETY: runs in the forked child before exec, where only
-    // async-signal-safe work may be done: raw system calls (rustix makes
-    // them without the C library) on buffers made before the fork. The
-    // child has one thread, which `unshare` of a user namespace needs, and
-    // no file descriptor table is unshared.
-    unsafe {
-        command.pre_exec(move || {
-            rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWUSER | rustix::thread::UnshareFlags::NEWPID)?;
-            write(c"/proc/self/setgroups", b"deny")?;
-            write(c"/proc/self/uid_map", &uid_map)?;
-            write(c"/proc/self/gid_map", &gid_map)?;
-            Ok(())
-        });
-    }
-    command
-}
-
-/// What [`init`] tells the process it starts that it is the namespace's
-/// first.
-const FIRST_ARG: &str = "--first";
-
-/// The first process of the PID namespace, while it runs (to end it).
-static FIRST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-/// Run a CUDA compile's program in its PID namespace: `<program> <arg0>
-/// <args…>`, as [`isolated`] starts this. Outside the namespace (the
-/// process [`isolated`] made it in), start this again, which is the
-/// namespace's first process, and end as it ends; a stop signal kills it,
-/// and with it everything in the namespace. As the first process, start the
-/// program, reap whatever it leaves (the first process adopts every
-/// orphan), and end as it ended: a signal it died of becomes the exit
-/// status `128 + n`, since the first process of a PID namespace cannot be
-/// ended by a signal it has no handler for.
-pub fn init(args: impl Iterator<Item = OsString>) -> i32 {
-    let mut args: Vec<OsString> = args.collect();
-    let first = args.first().is_some_and(|arg| arg == FIRST_ARG);
-    if first {
-        args.remove(0);
-        // Only the namespace's first process may go on: anything else would
-        // start itself again, and again.
-        if rustix::process::getpid().as_raw_nonzero().get() != 1 {
-            eprintln!("cactup: the init of a CUDA compile is not the first process of its namespace");
-            return 127;
-        }
-    } else {
-        let Ok(me) = std::env::current_exe() else { return 127 };
-        let child = match Command::new(me).arg(super::INIT_VERB).arg(FIRST_ARG).args(&args).spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                eprintln!("cactup: cannot start a CUDA compile in its namespace: {e}");
-                return 127;
-            }
-        };
-        FIRST.store(child.id() as i32, Ordering::SeqCst);
-        for signal in [libc_signal::SIGHUP, libc_signal::SIGINT, libc_signal::SIGQUIT, libc_signal::SIGTERM] {
-            let on_signal = || {
-                if let Some(first) = rustix::process::Pid::from_raw(FIRST.load(Ordering::SeqCst)) {
-                    let _ = rustix::process::kill_process(first, rustix::process::Signal::KILL);
-                }
-            };
-            // SAFETY: the handler reads an atomic and makes a raw `kill`
-            // system call: async-signal-safe.
-            let _ = unsafe { signal_hook::low_level::register(signal, on_signal) };
-        }
-        return wait_for(child.id() as i32);
-    }
-    let mut args = args.into_iter();
-    let (Some(program), Some(arg0)) = (args.next(), args.next()) else {
-        eprintln!("cactup: the init of a CUDA compile was run without a program");
-        return 2;
-    };
-    match Command::new(&program).arg0(&arg0).args(args).spawn() {
-        Ok(child) => wait_for(child.id() as i32),
-        Err(e) => {
-            eprintln!("cactup: {}: {e}", Path::new(&program).display());
-            127
-        }
-    }
-}
-
-/// Signal numbers, without the C library.
-mod libc_signal {
-    pub const SIGHUP: i32 = 1;
-    pub const SIGINT: i32 = 2;
-    pub const SIGQUIT: i32 = 3;
-    pub const SIGTERM: i32 = 15;
-}
-
-/// Wait for the process `pid`, reaping any other child on the way, and say
-/// how it ended as an exit status.
-fn wait_for(pid: i32) -> i32 {
-    let ours = rustix::process::Pid::from_raw(pid);
-    loop {
-        match rustix::process::waitpid(None, rustix::process::WaitOptions::empty()) {
-            Ok(Some((pid, status))) if Some(pid) == ours => {
-                return match (status.exit_status(), status.terminating_signal()) {
-                    (Some(code), _) => code,
-                    (None, Some(signal)) => 128 + signal,
-                    (None, None) => 1,
-                };
-            }
-            Ok(_) => {}
-            Err(rustix::io::Errno::INTR) => {}
-            Err(_) => return 1,
-        }
-    }
+    (takes_id && objects[0] == objects[1], takes_id)
 }
 
 /// The flags that have an `nvcc` compile of `source` honor the path map
@@ -651,38 +621,62 @@ mod tests {
         assert_eq!(run.programs(), ["/packages/cuda/13.2.1/bin/../nvvm/bin/cicc", "cudafe++", "fatbinary", "ptxas"]);
     }
 
-    /// The built cactup, where `cargo test` has built it beside the tests.
-    fn cactup() -> Option<PathBuf> {
-        let me = std::env::current_exe().ok()?;
-        let built = me.parent()?.parent()?.join("cactup");
-        built.is_file().then_some(built)
+    /// What qbd's `nvcc` 12.2 would run for a compile with
+    /// `--objdir-as-tempdir` (shortened).
+    const QBD: &str = r#"#$ _NVVM_BRANCH_=nvvm
+#$ PATH=/cuda/bin/../nvvm/bin:/cuda/bin:/usr/bin
+#$ g++ -D__CUDA_ARCH__=800 -E -x c++ "/w/t.cxx" -o "/w/t.o.cpp1.ii"
+#$ cudafe++ --c++17 --orig_src_path_name "/w/t.cxx" --gen_c_file_name "/w/t.o.cudafe1.cpp" --gen_module_id_file --module_id_file_name "/w/t.o.module_id" "/w/t.o.cpp4.ii"
+#$ cicc --c++17 --module_id_file_name "/w/t.o.module_id" "/w/t.o.cpp1.ii" -o "/w/t.o.ptx"
+#$ g++ -c -x c++ "/w/t.o.cudafe1.cpp" -o "/w/t.o"
+#$ rm /w/t.o.cudafe1.cpp
+#$ rm /w/t.o.module_id
+"#;
+
+    #[test]
+    fn repeats_what_nvcc_would_run_with_the_module_id_given() {
+        let plan = Plan::from_dry_run(DryRun::read(QBD), "_x".to_owned()).unwrap();
+        assert_eq!(plan.id_file, Path::new("/w/t.o.module_id"));
+        assert_eq!(plan.env, [("_NVVM_BRANCH_".to_owned(), "nvvm".to_owned()), ("PATH".to_owned(), "/cuda/bin/../nvvm/bin:/cuda/bin:/usr/bin".to_owned())]);
+        let words: Vec<String> = plan
+            .steps()
+            .iter()
+            .map(|step| match step {
+                Step::Run(words) => words.join(" "),
+                Step::Remove(file) => format!("remove {}", file.display()),
+            })
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "g++ -D__CUDA_ARCH__=800 -E -x c++ /w/t.cxx -o /w/t.o.cpp1.ii",
+                // Told to read the ID, not to make one: nothing else changes.
+                "cudafe++ --c++17 --orig_src_path_name /w/t.cxx --gen_c_file_name /w/t.o.cudafe1.cpp --module_id_file_name /w/t.o.module_id /w/t.o.cpp4.ii",
+                "cicc --c++17 --module_id_file_name /w/t.o.module_id /w/t.o.cpp1.ii -o /w/t.o.ptx",
+                "g++ -c -x c++ /w/t.o.cudafe1.cpp -o /w/t.o",
+                "remove /w/t.o.cudafe1.cpp",
+                "remove /w/t.o.module_id",
+            ]
+        );
+        // What it cannot repeat as it is: no module ID made in a file, or
+        // two, or an `rm` of anything but one file.
+        for (from, to) in [
+            (" --gen_module_id_file", ""),
+            (" --module_id_file_name \"/w/t.o.module_id\" \"/w/t.o.cpp4.ii\"", " \"/w/t.o.cpp4.ii\""),
+            ("#$ rm /w/t.o.module_id", "#$ rm -f /w/t.o.module_id"),
+        ] {
+            assert!(QBD.contains(from), "{from}");
+            assert!(Plan::from_dry_run(DryRun::read(&QBD.replace(from, to)), "_x".to_owned()).is_err(), "{from}");
+        }
+        let twice = QBD.replace("#$ cicc", "#$ cudafe++ --gen_module_id_file --module_id_file_name \"/w/u\" x\n#$ cicc");
+        assert!(Plan::from_dry_run(DryRun::read(&twice), "_x".to_owned()).is_err());
     }
 
-    /// A program run isolated is the second process of a PID namespace of
-    /// its own, as this user; and the init refuses to be anything but the
-    /// first process of one (else it would start itself again, and again).
     #[test]
-    fn runs_a_program_in_a_namespace_of_its_own() {
-        let Some(me) = cactup() else {
-            eprintln!("skipped: no built cactup beside the tests");
-            return;
-        };
-        if !isolation_by(&me) {
-            eprintln!("skipped: no user namespaces here");
-            return;
-        }
-        let sh = identity::find_program(OsStr::new("sh")).unwrap();
-        let out = isolated_by(&me, &sh, OsStr::new("sh"), &["-c".into(), "echo $$ $(id -u)".into()]).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let said = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(said.trim(), format!("2 {}", rustix::process::getuid().as_raw()));
-        // Its exit status passes through.
-        let out = isolated_by(&me, &sh, OsStr::new("sh"), &["-c".into(), "exit 3".into()]).status().unwrap();
-        assert_eq!(out.code(), Some(3));
-        // Run plainly, outside any namespace: it stops at once.
-        let out = Command::new(&me).arg(super::super::INIT_VERB).arg(&sh).arg("sh").arg("-c").arg("true").output().unwrap();
-        assert_eq!(out.status.code(), Some(127));
-        assert!(String::from_utf8_lossy(&out.stderr).contains("not the first process"));
+    fn gives_a_module_id_in_the_shape_of_cudafes() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(module_id(key, Path::new("/w/build/T/init.cxx")), "_01234567_8_init_cxx_89abcdef");
+        assert_eq!(module_id(key, Path::new("a-b.cu")), "_01234567_6_a_b_cu_89abcdef");
     }
 
     #[test]
