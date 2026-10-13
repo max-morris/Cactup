@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-18";
+pub const KEY_LABEL: &str = "key-19";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -1288,7 +1288,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
     let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-    let Output { text, bytes: text_bytes, mut named, used, with_code, diagnostic_pragma } = read?;
+    let Output { text, bytes: text_bytes, mut named, used, with_code, front_end_pragma } = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
@@ -1305,7 +1305,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // line the key leaves out; the files a diagnostic names are kept whole
     // (decision 30). Not narrowed where the run may not have said all the
     // compile will ([`said_as_compiled`]).
-    let diagnosed = diagnosed_files(&said).filter(|_| said_as_compiled(compile.language, diagnostic_pragma));
+    let diagnosed = diagnosed_files(&said).filter(|_| said_as_compiled(compile.language, front_end_pragma));
     let used = match (narrow && compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed) {
         (true, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
         _ => None,
@@ -1513,7 +1513,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
     // markers give them; and the file the lines now come from.
     let mut with_code = BTreeSet::new();
     let mut current: Option<PathBuf> = None;
-    let mut diagnostic_pragma = false;
+    let mut front_end_pragma = false;
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -1550,7 +1550,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
             None => {
-                diagnostic_pragma |= line.trim_ascii_start().starts_with(b"#pragma GCC diagnostic");
+                front_end_pragma |= acted_on_by_the_front_end(&line);
                 match definitions(&line).next() {
                     Some(name) => {
                         used.insert(name.to_vec());
@@ -1567,7 +1567,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
         }
     }
     hasher.end_stream(bytes);
-    Ok(Output { text: hasher.hex(), bytes, named, used, with_code, diagnostic_pragma })
+    Ok(Output { text: hasher.hex(), bytes, named, used, with_code, front_end_pragma })
 }
 
 /// What [`digest_output`] read of a preprocessor's output: its text
@@ -1580,19 +1580,32 @@ pub(super) struct Output {
     pub named: Named,
     pub used: BTreeSet<Vec<u8>>,
     pub with_code: BTreeSet<PathBuf>,
-    pub diagnostic_pragma: bool,
+    pub front_end_pragma: bool,
 }
 
-/// Does what a C or C++ compile's preprocessor run said hold every warning
-/// of the text the compile would print? Not for C where the text has a
-/// `#pragma GCC diagnostic`: GCC's `-E` ignores the pragma (before GCC 13),
-/// or acts on it only for an option the preprocessor knows (`-Wcomment`,
-/// not `-Wall` or `-Wcomments`), so a warning it turns on, or makes an
-/// error, is said by the compile alone. The C++ compile ignores it for the
-/// preprocessor's warnings as `-E` does (GCC 11 and 14 tried), and
-/// libstdc++'s headers are full of it.
-pub(super) fn said_as_compiled(language: compile::Language, diagnostic_pragma: bool) -> bool {
-    !(diagnostic_pragma && language == compile::Language::C)
+/// Does a C or C++ compile's preprocessor run see the text as the compile
+/// does: its macros and every warning it would print? Not for C where the
+/// text has a `#pragma GCC` the C front end acts on as it reads on
+/// ([`acted_on_by_the_front_end`]), which `-E` ignores or follows only in
+/// part: `optimize` and `target` (with `push_options` and the like) redefine
+/// `__OPTIMIZE__`, `__FAST_MATH__`, `__AVX2__` and their kind for the rest
+/// of the unit, so `-dU` misses a macro the compile uses (a stale object
+/// where its definition is left out); `diagnostic` turns a warning on, or
+/// into an error, for the compile alone (`-E` ignores it before GCC 13, and
+/// for an option it does not know, `-Wall`, after). The C++ front end reads
+/// the whole unit before it acts on any pragma, as `-E` does (GCC 11 and 14
+/// tried), and libstdc++'s headers are full of them.
+pub(super) fn said_as_compiled(language: compile::Language, front_end_pragma: bool) -> bool {
+    !(front_end_pragma && language == compile::Language::C)
+}
+
+/// Is `line`, of `-E`'s output (which writes every pragma, `_Pragma` too,
+/// as `#pragma` at a line's start), a `#pragma GCC` but one of those the
+/// preprocessor alone handles, or that change nothing a later line reads?
+fn acted_on_by_the_front_end(line: &[u8]) -> bool {
+    const LEFT_TO_THE_PREPROCESSOR: [&[u8]; 9] = [b"system_header", b"poison", b"warning", b"error", b"dependency", b"ivdep", b"unroll", b"novector", b"visibility"];
+    let mut words = line.split(|b| b.is_ascii_whitespace() || *b == b'(').filter(|word| !word.is_empty());
+    words.next() == Some(b"#pragma") && words.next() == Some(b"GCC") && words.next().is_none_or(|word| !LEFT_TO_THE_PREPROCESSOR.contains(&word))
 }
 
 /// `said` without the terminal's escape sequences (colors, by
@@ -2249,7 +2262,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "51cdb21cd50baebc9ed7b284be01523d829bfff1a068488586dcb27e9d0f67e3");
+        assert_eq!(parts.key(), "4c996124dea19d194cf2d14205cdacd60986f15684f21f33e08b368ba813ee78");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2705,7 +2718,15 @@ mod tests {
         std::fs::write(tree.source(), format!("#pragma GCC diagnostic error \"-Wall\"\n{SOURCE}")).unwrap();
         let quiet = tree.key(&["-O2"]).parts;
         std::fs::write(tree.header(), format!("{HEADER}#define THORN_IS_X 1 /* from arrangements/* */\n")).unwrap();
-        assert_ne!(tree.key(&["-O2"]).parts.files, quiet.files, "narrowed under a diagnostic pragma");
+        assert_ne!(tree.key(&["-O2"]).parts.files, quiet.files, "narrowed under #pragma GCC diagnostic");
+        std::fs::write(tree.header(), HEADER).unwrap();
+        // And `#pragma GCC optimize`, after which the C compile defines
+        // `__OPTIMIZE__` otherwise than `-E` does: SCALE is the compile's.
+        std::fs::write(tree.source(), format!("#pragma GCC optimize(\"O0\")\n{SOURCE}int f(void) {{\n#ifdef __OPTIMIZE__\n  return 1;\n#else\n  return SCALE;\n#endif\n}}\n")).unwrap();
+        std::fs::write(tree.header(), format!("{HEADER}#define SCALE 5\n")).unwrap();
+        let five = tree.key(&["-O2"]).parts;
+        std::fs::write(tree.header(), format!("{HEADER}#define SCALE 6\n")).unwrap();
+        assert_ne!(tree.key(&["-O2"]).parts.files, five.files, "a macro only the compile uses");
         std::fs::write(tree.header(), HEADER).unwrap();
         std::fs::write(tree.source(), SOURCE).unwrap();
         // The run's `-v` lines are not what it said of the text.
@@ -2716,13 +2737,19 @@ mod tests {
     }
 
     #[test]
-    fn reads_diagnostics_in_colors_and_knows_where_e_ignores_diagnostic_pragmas() {
+    fn reads_diagnostics_in_colors_and_knows_where_e_ignores_pragmas() {
         let colored = b"\x1b[01m\x1b[Ka.c:2:9:\x1b[m\x1b[K \x1b[01;35m\x1b[Kwarning: \x1b[m\x1b[Kpoisoning existing macro \xe2\x80\x98\x1b[01m\x1b[KX\x1b[m\x1b[K\xe2\x80\x99 [\x1b]8;;https://gcc.gnu.org/x\x1b\\-Wfoo\x1b]8;;\x1b\\]\n";
         assert_eq!(plain(colored), "a.c:2:9: warning: poisoning existing macro \u{2018}X\u{2019} [-Wfoo]\n");
         assert_eq!(said_of_the_text(colored, None), b"a.c:2:9: warning: poisoning existing macro 'X' [-Wfoo]");
         use compile::Language;
         assert!(said_as_compiled(Language::C, false) && !said_as_compiled(Language::C, true));
         assert!(said_as_compiled(Language::Cxx, true));
+        for line in ["#pragma GCC diagnostic error \"-Wall\"\n", "#pragma GCC optimize(\"O0\")\n", "#pragma GCC target(\"avx2\")\n", "#pragma GCC push_options\n", "#pragma GCC\n"] {
+            assert!(acted_on_by_the_front_end(line.as_bytes()), "{line}");
+        }
+        for line in ["#pragma GCC system_header\n", "#pragma GCC poison X\n", "#pragma omp parallel\n", "int x;\n", "#pragma GCC unroll 4\n"] {
+            assert!(!acted_on_by_the_front_end(line.as_bytes()), "{line}");
+        }
     }
 
     #[test]

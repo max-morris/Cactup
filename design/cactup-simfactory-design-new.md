@@ -5163,13 +5163,19 @@ fixed parts, so that the key does not change by accident:
   printed anything is checked after the compile by running it again. What
   was said is read without the terminal's escape sequences
   (`-fdiagnostics-color=always`), and with the locale's curly quotes as
-  plain ones. GCC's `-E` ignores `#pragma GCC diagnostic` (before GCC 13),
-  or acts on it only for an option the preprocessor knows (`-Wcomment`, not
-  `-Wall`), where the C compile acts on it; so where a C unit's text has
-  one, the files are not narrowed: the compile may print, or fail on, a
-  warning the run did not say. (The C++ compile ignores the pragma for the
-  preprocessor's warnings as `-E` does, and libstdc++'s headers are full of
-  it.) With `build-cache-preserve-exact-warnings = true` the key
+  plain ones. GCC's C front end acts on some pragmas as it reads on, where
+  `-E` ignores them or follows them only in part: `#pragma GCC optimize`
+  and `target` (with `push_options` and the like) redefine `__OPTIMIZE__`,
+  `__FAST_MATH__`, `__AVX2__` and their kind for the rest of the unit, so
+  `-dU` misses a macro the compile uses; `#pragma GCC diagnostic` turns a
+  warning on, or into an error, for the compile alone (`-E` ignores it
+  before GCC 13, and for an option it does not know, `-Wall`, after). So a C
+  unit whose text has a `#pragma GCC` other than those the preprocessor
+  alone handles or that change nothing later lines read (`system_header`,
+  `poison`, `warning`, `error`, `dependency`, `ivdep`, `unroll`,
+  `novector`, `visibility`) is not narrowed. (The C++ front end reads the
+  whole unit before it acts on a pragma, as `-E` does, and libstdc++'s
+  headers are full of them.) With `build-cache-preserve-exact-warnings = true` the key
   also has how the compiler (for CUDA, its host compiler) words a warning
   in the compile's environment, from a small run of its own: the language
   and quotes follow the locale as the host resolves it.
