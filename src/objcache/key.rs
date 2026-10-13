@@ -106,13 +106,14 @@ impl PathMap {
     /// The map for a compile, if it is known to hold for it: the compiler
     /// was tried and made one object of the same sources in two places
     /// (`Compiler::relocates`), and the compile uses nothing known to put
-    /// unmapped paths into the object (Clang's OpenMP source locations).
+    /// unmapped paths into the object (Clang's OpenMP source locations,
+    /// `nvcc`'s device line information).
     ///
     /// Both the spelling cactup has for each directory and its physical
     /// path are mapped: make reports one, a shell's `pwd` may report the
     /// other.
     pub fn new(conf: &BuildConf, compiler: &Compiler, compile: &Compile) -> Option<Self> {
-        let unmapped_paths = compiler.family == Family::Clang && compile.openmp;
+        let unmapped_paths = (compiler.family == Family::Clang && compile.openmp) || compile.device_lines;
         if !conf.relocate || !compiler.relocates || unmapped_paths {
             return None;
         }
@@ -160,6 +161,35 @@ impl PathMap {
         let mut from_to = vec![(dir(config), CONFIG_NAME), (dir(root), ROOT_NAME)];
         from_to.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
         Self { from_to }
+    }
+
+    /// `text` (a word of a command line, a value of the environment) with
+    /// each directory the map knows replaced where a name begins: at the
+    /// start, after a character no name has, or after a short option's
+    /// letters (`-I/w/Cactus/…`, also quoted, as `INCLUDES` has them).
+    pub fn in_text(&self, text: &[u8]) -> Vec<u8> {
+        let in_a_path = |byte: u8| byte.is_ascii_alphanumeric() || b"._-+~@/".contains(&byte);
+        // A short option's letters, from where a name could begin.
+        let after_option = |at: usize| {
+            let start = text[..at].iter().rposition(|byte| !in_a_path(*byte)).map_or(0, |before| before + 1);
+            text[start] == b'-' && at > start + 1 && text[start + 1..at].iter().all(u8::is_ascii_alphabetic)
+        };
+        let mut out = Vec::with_capacity(text.len());
+        let mut at = 0;
+        while at < text.len() {
+            let begins = at == 0 || !in_a_path(text[at - 1]) || after_option(at);
+            match self.from_to.iter().find(|(from, _)| begins && text[at..].starts_with(from)) {
+                Some((from, to)) => {
+                    out.extend_from_slice(to.as_bytes());
+                    at += from.len();
+                }
+                None => {
+                    out.push(text[at]);
+                    at += 1;
+                }
+            }
+        }
+        out
     }
 
     /// The file name `name` as a mapped compile records it.
@@ -264,7 +294,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-8";
+pub const KEY_LABEL: &str = "key-9";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -301,6 +331,8 @@ pub struct Keyed {
     fortran: Option<fortran::Fortran>,
     /// A CUDA compile's host compiler and preprocessor passes (M4).
     cuda: Option<cuda::Cuda>,
+    /// What a CUDA compile runs, as keyed (decision 25).
+    plan: Option<cuda::Plan>,
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
@@ -354,6 +386,12 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     if compiler.family == Family::Nvcc && !compiler.takes_module_id {
         return Err("this nvcc does not take the module ID it is given, and the one it makes differs from compile to compile".to_owned());
     }
+    // Flags `nvcc` takes from the environment, which no reader here sees.
+    if compiler.family == Family::Nvcc
+        && let Some(variable) = ["NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS"].into_iter().find(|variable| std::env::var_os(variable).is_some_and(|value| !value.is_empty()))
+    {
+        return Err(format!("{variable} adds flags to nvcc that the cache does not read"));
+    }
     let (cuda_run, watch) = match compiler.family {
         Family::Nvcc => {
             let run = cuda::dry_run(&compiler.path, &argv[0], &argv[1..], None).map_err(whole)?;
@@ -386,7 +424,9 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     if compile.charset {
         return Err("it converts character sets, with converters and locale data the cache does not follow".to_owned());
     }
-    if compiler.family == Family::Clang && compile.forced_include {
+    // For CUDA, what the host compiler does with them.
+    let host_family = cuda_run.as_ref().map_or(compiler.family, |(_, host)| host.family);
+    if host_family == Family::Clang && compile.forced_include {
         // Clang takes `<file>.pch` or `<file>.gch` in place of a file given
         // with `-include`, and its `-E` does not say so.
         return Err("-include with Clang may bring in a precompiled header, which the cache does not follow".to_owned());
@@ -403,7 +443,9 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         let source = std::env::current_dir().map(|cwd| cwd.join(&compile.source)).unwrap_or_default();
         source.as_os_str().as_bytes().contains(&b',') || map.flags().iter().any(|flag| flag.as_bytes().contains(&b','))
     };
-    let map = PathMap::new(conf, &compiler, &compile).filter(|map| cuda_run.as_ref().is_none_or(|(_, host)| host.relocates && !comma(map)));
+    // (A Clang host compiler's OpenMP source locations, as for Clang.)
+    let unmapped_host = host_family == Family::Clang && compile.openmp;
+    let map = PathMap::new(conf, &compiler, &compile).filter(|map| cuda_run.as_ref().is_none_or(|(_, host)| host.relocates && !unmapped_host && !comma(map)));
     let mapped = |text: &[u8]| map.as_ref().map_or_else(|| text.to_vec(), |map| map.apply(text));
 
     let mut arguments = Hasher::new("arguments");
@@ -454,6 +496,26 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             arguments.feed(&mapped(cwd.join(&compile.output).as_os_str().as_bytes()));
         }
     }
+    // A CUDA compile runs as `nvcc` would run it, step by step (decision
+    // 25): its steps, with the map's flags, each program the file its
+    // identities found; and the key has them, mapped. Flags `nvcc` takes
+    // from the environment through its profile (`PTXAS_FLAGS`,
+    // `CUDAFE_FLAGS`) are in them.
+    let plan = match &cuda_run {
+        Some((_, host)) => {
+            let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
+            let mut args = argv[1..].to_vec();
+            if let Some(map) = &map {
+                args.extend(cuda::map_flags(&cwd.join(&compile.source), map));
+            }
+            let mut plan = cuda::Plan::new(&compiler.path, &argv[0], &args).map_err(whole)?;
+            plan.resolve(host, &compiler.toolchain).map_err(whole)?;
+            arguments.feed(b"nvcc's steps");
+            arguments.feed(&plan.described(|text| map.as_ref().map_or_else(|| text.to_vec(), |map| map.in_text(text))));
+            Some(plan)
+        }
+        None => None,
+    };
 
     let name = argv[0].clone();
     if compile.language.is_fortran() {
@@ -481,6 +543,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             depend: None,
             fortran: Some(read.fortran),
             cuda: None,
+            plan: None,
         }, identified));
     }
     if let Some((run, host)) = cuda_run {
@@ -496,6 +559,10 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             text: read.text,
             files: read.files,
         };
+        let plan = plan.map(|mut plan| {
+            plan.set_id(cuda::module_id(&parts.key(), &compile.source));
+            plan
+        });
         let keyed = Keyed {
             compile,
             compiler,
@@ -510,6 +577,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             depend: None,
             fortran: None,
             cuda: Some(read.cuda),
+            plan,
         };
         return Ok((keyed, identified));
     }
@@ -528,7 +596,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         text: read.text,
         files: read.files,
     };
-    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None, cuda: None };
+    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None, cuda: None, plan: None };
     Ok((keyed, identified))
 }
 
@@ -602,8 +670,8 @@ impl Keyed {
         if let Some(fortran) = &mut self.fortran {
             return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
         }
-        if let Some(cuda) = &self.cuda {
-            return cuda::still_holds(cuda, &self.compile, self.map.as_ref(), &self.parts.text, &self.parts.files, &self.seen);
+        if let (Some(cuda), Some(plan)) = (&self.cuda, &self.plan) {
+            return cuda::still_holds(cuda, plan, &self.compiler.host_reads, &self.compile, self.map.as_ref(), &self.parts.text, &self.parts.files, &self.seen);
         }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
@@ -623,13 +691,10 @@ impl Keyed {
         }
     }
 
-    /// For a CUDA compile, what runs in place of `argv` (the command line
-    /// [`Self::compile_argv`] makes): `nvcc`'s own steps, with the module ID
-    /// made of the key (decision 25).
-    pub fn plan(&self, argv: &[OsString]) -> Option<Res<cuda::Plan>> {
-        self.cuda.as_ref()?;
-        let id = cuda::module_id(&self.parts.key(), &self.compile.source);
-        Some(cuda::Plan::new(&self.compiler.path, &argv[0], &argv[1..], id))
+    /// For a CUDA compile, what runs in place of the compile: `nvcc`'s own
+    /// steps, as keyed, with the module ID made of the key (decision 25).
+    pub fn plan(&self) -> Option<&cuda::Plan> {
+        self.plan.as_ref()
     }
 
     /// How the check after a Fortran compile was made: by lookups in place
@@ -680,6 +745,9 @@ impl Keyed {
     /// files. (The process ends by `exit`, which runs no destructor.)
     pub fn clean_up(&mut self) {
         drop(self.fortran.take());
+        if let Some(plan) = &self.plan {
+            plan.tidy_from(plan.steps().len());
+        }
     }
 
     /// The map the key was made with.
@@ -1279,6 +1347,19 @@ mod tests {
     }
 
     #[test]
+    fn maps_names_where_they_begin_in_a_word() {
+        let map = map(&[("/w/Cactus/", ROOT_NAME), ("/w/Cactus/configs/sim/", CONFIG_NAME)]);
+        let mapped = |text: &str| String::from_utf8(map.in_text(text.as_bytes())).unwrap();
+        assert_eq!(mapped("/w/Cactus/configs/sim/build/a.o.cpp1.ii"), "/cactup-root/configs/@config/build/a.o.cpp1.ii");
+        assert_eq!(mapped("-I/w/Cactus/configs/sim/bindings/include"), "-I/cactup-root/configs/@config/bindings/include");
+        assert_eq!(mapped("--orig_src_path_name=/w/Cactus/src/a.cu"), "--orig_src_path_name=/cactup-root/src/a.cu");
+        assert_eq!(mapped("\"-I/w/Cactus/x\" \"-I/w/Cactus/y\""), "\"-I/cactup-root/x\" \"-I/cactup-root/y\"");
+        // Not inside another name.
+        assert_eq!(mapped("/x/w/Cactus/a"), "/x/w/Cactus/a");
+        assert_eq!(mapped("-I/v/w/Cactus/a"), "-I/v/w/Cactus/a");
+    }
+
+    #[test]
     fn maps_names_as_the_compiler_does() {
         let map = map(&[("/w/Cactus/", ROOT_NAME), ("/w/Cactus/configs/sim/", CONFIG_NAME)]);
         assert_eq!(applied(&map, "/w/Cactus/arrangements/A/T/src/a.c"), "/cactup-root/arrangements/A/T/src/a.c");
@@ -1370,7 +1451,7 @@ mod tests {
         let compile = compile::parse(&args).unwrap();
         assert_eq!(compile.depend, os(&depend));
         for family in [Family::Gcc, Family::Clang] {
-            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None, takes_module_id: false };
+            let compiler = Compiler { path: PathBuf::from("/usr/bin/cc"), family, relocates: true, locale_neutral: true, id: String::new(), multilib: Vec::new(), specs: None, takes_module_id: false, toolchain: Vec::new(), host_reads: Vec::new() };
             let command = preprocessor(&compiler, OsStr::new("cc"), &compile, None, None);
             let given: Vec<&OsStr> = command.get_args().collect();
             assert!(given.contains(&OsStr::new("-E")) && given.contains(&OsStr::new("/c/build/T/a.c")), "{given:?}");
@@ -1412,7 +1493,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "cef8fc6cac7db289c0c531cffe2d533b3065386eed1cccb2dbb2e6cfb119f4dd");
+        assert_eq!(parts.key(), "6ae31331ad4b46b21c80c9c116820bfbf475a91d27712a258df59ebea948ca27");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 

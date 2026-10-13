@@ -99,6 +99,10 @@ pub struct Compile {
     /// `-march=native` or one of its like: the compiler targets the
     /// processor it finds itself running on.
     pub native: bool,
+    /// `nvcc`'s `-G` or `-lineinfo`: the device code's line information,
+    /// which names the source by its real path whatever the path map's
+    /// flags say (seen on qbd).
+    pub device_lines: bool,
     /// `-finput-charset=` or `-fexec-charset=`: character set conversion,
     /// which can follow the locale (`ASCII//TRANSLIT` does), so the locale
     /// stays in the key whatever the compiler's locale trial said.
@@ -389,7 +393,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     if !depend.is_empty() && !depend_file {
         return Err("a dependency file is asked for without -MF to say where".to_owned());
     }
-    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend, host: None })
+    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend, host: None, device_lines: false })
 }
 
 /// `nvcc`'s options that take no value and only change the object or the
@@ -408,6 +412,9 @@ const CUDA_WITH_VALUE: &[&str] = &[
     "gencode", "diag-suppress", "Werror", "ftz", "prec-div", "prec-sqrt", "fmad", "maxrregcount", "default-stream",
 ];
 
+/// The options of [`CUDA_WITH_VALUE`] that name GPU architectures.
+const ARCHITECTURE: &[&str] = &["gpu-architecture", "arch", "gpu-code", "code", "generate-code", "gencode"];
+
 /// Read an `nvcc` command line (everything after the program's name), as
 /// [`parse`] reads a GCC one: what is not on the lists is not cached. Host
 /// compiler flags, given with `-Xcompiler` (or forwarded with
@@ -419,8 +426,16 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
     let (mut source, mut output, mut source_at, mut host) = (None, None, 0, None);
     let mut output_at = Vec::new();
     let (mut preprocess, mut keyed) = (Vec::new(), Vec::new());
-    let (mut level, mut native, mut language_given, mut forward) = (0, false, false, false);
+    let (mut level, mut language_given, mut forward) = (0, false, false);
+    let (mut native, mut openmp, mut charset, mut device_lines) = (false, false, false, false);
     let mut unknown = Vec::new();
+    // What a host compiler flag says of the compile, as the GCC reader
+    // notes it.
+    let mut note = |flag: &str| {
+        native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| flag.starts_with(native));
+        openmp |= flag == "-fopenmp";
+        charset |= ["-finput-charset=", "-fexec-charset="].iter().any(|charset| flag.starts_with(charset));
+    };
     // Host compiler flags: on the GCC reader's list, or not cached.
     let host_flag = |flag: &str| -> Result<(), String> {
         match NOT_CACHED.iter().any(|prefix| flag.starts_with(prefix)) || !is_setting(flag) {
@@ -489,7 +504,7 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
             let given = given.to_str().ok_or("an argument is not valid UTF-8")?;
             for host in given.split(',').filter(|host| !host.is_empty()) {
                 host_flag(host)?;
-                native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| host.starts_with(native));
+                note(host);
             }
             for list in [&mut preprocess, &mut keyed] {
                 list.push(OsString::from("-Xcompiler"));
@@ -517,12 +532,18 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
             }
         } else if CUDA_WITH_VALUE.contains(&name) {
             let given = value(flag)?;
+            // The GPU the compile finds itself on (no GPU: an old default,
+            // seen); the key does not know the GPU.
+            if ARCHITECTURE.contains(&name) && given.as_encoded_bytes().windows(6).any(|window| window == b"native") {
+                return Err(format!("{flag} native targets the GPU of the machine it compiles on, which the cache does not follow"));
+            }
             for list in [&mut preprocess, &mut keyed] {
                 list.push(OsString::from(format!("--{name}")));
                 list.push(given.clone());
             }
         } else if CUDA_SETTINGS.contains(&name) || matches!(flag, "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-G" | "--device-debug") || debug_level(flag).is_some() {
             forward |= name == "forward-unknown-to-host-compiler";
+            device_lines |= matches!(name, "G" | "device-debug" | "lineinfo" | "generate-line-info");
             // As for GCC: a bare `-g` turns debug information on, an
             // explicit level sets it; `-G` is the device's own.
             match debug_level(flag) {
@@ -538,7 +559,7 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
         } else if flag.starts_with('-') {
             // `nvcc`'s own, or the host compiler's when forwarded.
             unknown.push(flag.to_owned());
-            native |= ["-march=native", "-mtune=native", "-mcpu=native"].iter().any(|native| flag.starts_with(native));
+            note(flag);
             preprocess.push(arg.clone());
             keyed.push(arg.clone());
         } else {
@@ -586,12 +607,13 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
         keyed,
         debug,
         macros_in_debug,
-        openmp: false,
+        openmp,
         forced_include: false,
         native,
-        charset: false,
+        charset,
         depend: Vec::new(),
         host,
+        device_lines,
     })
 }
 
@@ -657,6 +679,22 @@ mod tests {
         assert!(cuda("-x cu --objdir-as-tempdir -Xcompiler -fplugin=x.so").is_err());
         assert!(cuda("-x cu --objdir-as-tempdir -Xcudafe --gen_c_file_name=x").is_err());
         assert!(cuda("-x c++").is_err());
+        // What the host compiler is given says what the GCC reader would.
+        let base = "-x cu --objdir-as-tempdir --forward-unknown-to-host-compiler";
+        let host = |flags: &str| cuda(&format!("{base} {flags}")).unwrap();
+        assert!(host("-Xcompiler -fopenmp").openmp && host("-fopenmp").openmp);
+        assert!(host("-Xcompiler -fexec-charset=IBM1047").charset && host("-finput-charset=latin1").charset);
+        assert!(host("-Xcompiler -march=native").native);
+        // Device line information names the source by its real path.
+        for lines in ["-G", "--device-debug", "-lineinfo", "--generate-line-info"] {
+            assert!(host(lines).device_lines, "{lines}");
+        }
+        assert!(!host("-O3").device_lines);
+        // The GPU of the machine it compiles on: not keyed.
+        for native in ["-arch=native", "--gpu-architecture native", "-gencode arch=native,code=native", "--gpu-code=native"] {
+            assert!(cuda(&format!("{base} {native}")).is_err_and(|why| why.contains("GPU")), "{native}");
+        }
+        assert!(cuda(&format!("{base} -arch=sm_80")).is_ok());
     }
 
     #[test]

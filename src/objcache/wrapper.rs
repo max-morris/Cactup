@@ -349,22 +349,6 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // The compile, as the key describes it when its result is to be stored
     // (the path map's flags; for Fortran, the renamed copy, §18.10): the
     // stored object must be the one the key describes.
-    // A CUDA compile runs as `nvcc` would run it, with the module ID
-    // given (decision 25); one that cannot is not cached.
-    let mut plan = None;
-    if let Ok(keyed_now) = &keyed
-        && store.is_ok()
-        && let Some(made) = keyed_now.plan(&keyed_now.compile_argv(argv))
-    {
-        match made {
-            Ok(made) => plan = Some(made),
-            Err(e) => {
-                let why = format!("{e:#}");
-                event.not_cached = Some(why.clone());
-                keyed = Err(why);
-            }
-        }
-    }
     let publishing = store.is_ok() && keyed.is_ok();
     let (compile_argv, rewrite) = match (&keyed, publishing) {
         (Ok(keyed), true) => (keyed.compile_argv(argv), keyed.rewrite(conf)),
@@ -373,7 +357,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // The file that was identified is the file that runs.
     let identified = keyed.as_ref().ok().map(|keyed| keyed.compiler.path.clone());
     let streams = if publishing { Output::PassOn(rewrite.clone()) } else { Output::Inherit };
-    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams, plan.as_ref()));
+    let (ran, compile_ms) = timed(|| run(job, &compile_argv, identified.as_deref(), streams, keyed.as_ref().ok().filter(|_| publishing).and_then(key::Keyed::plan)));
     let Some((status, captured)) = ran else {
         drop(audited);
         if let Ok(keyed) = &mut keyed {
@@ -404,7 +388,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
 
     if let (Some((stored, modules)), Ok(keyed)) = (&audited, &mut keyed) {
         let checked = Checked { status, stable, stored, modules, cwd: &cwd };
-        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed, plan.as_ref()));
+        event.audit = Some(audit(job, &compile_argv, identified.as_deref(), rewrite.clone(), &checked, keyed));
         keyed.drop_depend();
     }
     drop(audited);
@@ -474,7 +458,7 @@ struct Checked<'a> {
 /// the second compile ends it by that signal, as it would have the compile;
 /// a second compile that ends any other way (killed by the kernel, crashed,
 /// failed) leaves the first compile's object the build's, and no verdict.
-fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed, plan: Option<&cuda::Plan>) -> Audit {
+fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Option<key::Rewrite>, checked: &Checked, keyed: &mut key::Keyed) -> Audit {
     if !checked.status.success() {
         return Audit::CompileFailed;
     }
@@ -508,7 +492,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
     let again_as = std::env::var_os("CACTUP_CC_TEST_SECOND_COMPILER").map(PathBuf::from);
     #[cfg(debug_assertions)]
     let identified = again_as.as_deref().or(identified);
-    let again = run(job, argv, identified, Output::Swallow(rewrite), plan);
+    let again = run(job, argv, identified, Output::Swallow(rewrite), keyed.plan());
     // Asked to stop, however the second compile then ended (a driver may
     // exit with a status rather than by the signal): the compile would have
     // been stopped.
@@ -933,16 +917,11 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
     // What runs: the compiler; or for a CUDA compile, `nvcc`'s steps, each
     // a program (`None`: a file `nvcc` removes) (decision 25).
     let mut commands: Vec<Option<Command>> = match plan {
-        Some(plan) => plan
-            .steps()
-            .iter()
-            .map(|step| match step {
-                Step::Run(words) => {
-                    let mut command = plan.command(words);
-                    underscore(&mut command, argv, identified);
-                    Some(command)
-                }
-                Step::Remove(_) => None,
+        Some(plan) => (0..plan.steps().len())
+            .map(|at| {
+                let mut command = plan.command(at)?;
+                underscore(&mut command, argv, identified);
+                Some(command)
             })
             .collect(),
         None => vec![Some(direct(argv, identified))],
@@ -958,19 +937,23 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
     };
     let renamed = through.as_ref().is_some_and(|(_, rewrite)| rewrite.is_some());
     let shown = through.as_ref().is_some_and(|(pass_on, _)| *pass_on);
+    // Where what `nvcc` says itself goes, for a plan: its standard error.
+    let mut note: Option<Box<dyn Write>> = None;
     if let Some((pass_on, rewrite)) = through
         && let (Ok((out_from, out_to)), Ok((err_from, err_to))) = (std::io::pipe(), std::io::pipe())
     {
         // Every program writes to the same two pipes.
         let ends: Option<Vec<_>> = commands.iter().flatten().map(|_| Some((out_to.try_clone().ok()?, err_to.try_clone().ok()?))).collect();
-        if let (Some(ends), Ok(stdout), Ok(stderr)) = (
+        if let (Some(ends), Ok(own), Ok(stdout), Ok(stderr)) = (
             ends,
+            err_to.try_clone(),
             Passing::new(out_from, std::io::stdout(), pass_on, rewrite.clone()),
             Passing::new(err_from, std::io::stderr(), pass_on, rewrite),
         ) {
             for (command, (out_to, err_to)) in commands.iter_mut().flatten().zip(ends) {
                 command.stdout(Stdio::from(out_to)).stderr(Stdio::from(err_to));
             }
+            note = Some(Box::new(own));
             passing = Some((stdout, stderr));
         }
     }
@@ -987,6 +970,8 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
             debug("its messages cannot be passed on, and they would name its files otherwise");
             pass_through(job)
         }
+    } else if passing.is_none() {
+        note = Some(Box::new(std::io::stderr()));
     }
     PHASE.store(BEFORE_COMPILE, Ordering::SeqCst);
     // Asked to stop before there was a compile to stop: becoming the shell
@@ -997,11 +982,15 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
             std::process::exit(128 + signal);
         }
     };
-    if let Some(plan) = plan
-        && plan.give_id().is_err()
-    {
-        stop_now();
-        return None;
+    if let Some(plan) = plan {
+        if plan.give_id().is_err() {
+            stop_now();
+            return None;
+        }
+        // `nvcc`'s warnings, before it runs anything.
+        if let Some(note) = &mut note {
+            let _ = note.write_all(plan.said());
+        }
     }
     let mut ended = None;
     let mut steps = commands.into_iter().enumerate();
@@ -1048,6 +1037,21 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
                 // The pid is free to be someone else's from here on.
                 CHILD.store(0, Ordering::SeqCst);
                 ended = Some(status);
+                // A step killed by a signal this process did not pass on:
+                // `nvcc` says so, and exits with the signal's number (seen:
+                // a `cicc` killed by the kernel, or hung up on).
+                if let (Some(plan), Some(signal), 0) = (plan, status.signal(), PENDING.load(Ordering::SeqCst)) {
+                    let program = match &plan.steps()[at] {
+                        Step::Run { words, .. } => words[0].rsplit('/').next().unwrap_or(&words[0]).to_owned(),
+                        Step::Remove(_) => String::new(),
+                    };
+                    if let Some(note) = &mut note {
+                        let _ = note.write_all(cuda::died(&program, signal).as_bytes());
+                    }
+                    plan.tidy_from(at + 1);
+                    ended = Some(ExitStatus::from_raw(signal << 8));
+                    break;
+                }
                 // `nvcc` stops at the first step that fails, and ends as it
                 // ended (tried).
                 if !status.success() {
@@ -1064,6 +1068,7 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
         }
     }
     drop(steps);
+    drop(note);
     // A plan runs one program at least.
     let status = ended?;
     EXIT_CODE.store(exit_code(status), Ordering::SeqCst);

@@ -565,7 +565,7 @@ cactup build native-build --no-universe
 cactup has a build cache shared by all the installations of one
 `~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
 objects an earlier build already compiled. It caches C and C++, and Fortran
-compiled with gfortran (CUDA comes later), and it is off unless you turn it
+compiled with gfortran, and CUDA compiled with `nvcc`, and it is off unless you turn it
 on with the `build-cache` knob:
 
 | Value | What a build does |

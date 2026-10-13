@@ -95,6 +95,19 @@ pub struct Compiler {
     /// each time (`cuda::Plan`, decision 25).
     #[serde(default)]
     pub takes_module_id: bool,
+    /// For `nvcc`: the programs of its own it runs (`cudafe++`, `cicc`,
+    /// `ptxas`, `fatbinary`), by physical path. A compile the cache runs
+    /// runs these, and no others of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchain: Vec<PathBuf>,
+    /// For `nvcc`: what its last step, the host compile of the code it
+    /// generates, read in its trial that is not the trial's own (CUDA's
+    /// `crt/host_runtime.h`, `fatbinary_section.h` and the like, which no
+    /// preprocessor pass reads: seen), by physical path. Part of its
+    /// identity, and watched; a compile whose last step reads anything
+    /// else its key does not cover is not stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_reads: Vec<PathBuf>,
 }
 
 /// One file an identity was computed from, as it looked then.
@@ -371,6 +384,14 @@ fn runs(program: &Path) -> bool {
 
 /// What an identity is computed from: the files it read, and the places
 /// passed over before each file was found.
+/// Find `program` along `path` as a program another runs (`nvcc`'s host
+/// compiler), with the places passed over on the way, to be watched.
+pub(super) fn search_watching(program: &OsStr, path: &OsStr) -> Res<(Option<PathBuf>, Vec<Seen>, Vec<PathBuf>)> {
+    let (mut files, mut absent) = (Vec::new(), Vec::new());
+    let found = search_along(program, path, &mut Watched { files: &mut files, absent: &mut absent, helper: true })?;
+    Ok((found, files, absent))
+}
+
 pub(super) struct Watched<'a> {
     pub(super) files: &'a mut Vec<Seen>,
     pub(super) absent: &'a mut Vec<PathBuf>,
@@ -420,6 +441,14 @@ pub(super) struct Watch {
 }
 
 impl Watch {
+    /// This watch, with more places: files as they were, places that must
+    /// stay empty.
+    pub(super) fn with_places(mut self, files: Vec<Seen>, absent: Vec<PathBuf>) -> Watch {
+        self.files.extend(files);
+        self.absent.extend(absent);
+        self
+    }
+
     /// This watch, and `other`'s too.
     pub(super) fn and(mut self, other: Watch) -> Watch {
         self.also.push(other);
@@ -874,6 +903,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
     hasher.feed(bytes_digest(&bytes).as_bytes());
     // The programs that do the work, each with the libraries it loads.
     let mut programs: Vec<(PathBuf, Option<String>)> = vec![(driver.clone(), None)];
+    let mut toolchain = Vec::new();
     match family {
         Family::Clang => {
             // What it says, without where it is installed. A configuration
@@ -900,6 +930,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
         Family::Nvcc => {
             hasher.feed(says.as_bytes());
             super::cuda::examine(path, &driver, &mut hasher, watched, &mut programs)?;
+            toolchain = programs.iter().skip(1).map(|(file, _)| file.clone()).collect();
         }
         Family::Gcc | Family::Gfortran => {
             hasher.feed(says.as_bytes());
@@ -1061,14 +1092,24 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
         hasher.feed(file_digest(&library)?.as_bytes());
         watched.files.push(Seen::of(&library)?);
     }
-    let mut takes_module_id = false;
+    let (mut takes_module_id, mut host_reads) = (false, Vec::new());
     let (relocates, locale_neutral) = match family {
         Family::Gfortran => (super::fortran::relocates(path, program, trial_dir), super::fortran::locale_neutral(path, program, trial_dir)),
         // The locale stays in the key: no trial for it here.
         Family::Nvcc => {
-            let (relocates, takes) = super::cuda::trial(path, program, trial_dir);
-            takes_module_id = takes;
-            (relocates, false)
+            let trial = super::cuda::trial(path, program, trial_dir);
+            takes_module_id = trial.takes_id;
+            for read in trial.host_reads {
+                let file = fs::canonicalize(&read).with_context(|| format!("Failed to resolve {}", read.display()))?;
+                hasher.feed(file.as_os_str().as_bytes());
+                hasher.feed(file_digest(&file)?.as_bytes());
+                watched.files.extend(Seen::of(&read));
+                watched.files.push(Seen::of(&file)?);
+                host_reads.push(file);
+            }
+            host_reads.sort();
+            host_reads.dedup();
+            (trial.relocates, false)
         }
         _ => (relocates(path, program, trial_dir), locale_neutral(path, program, trial_dir)),
     };
@@ -1081,6 +1122,8 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
         specs,
         multilib,
         takes_module_id,
+        toolchain,
+        host_reads,
     })
 }
 

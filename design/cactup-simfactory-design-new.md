@@ -4751,7 +4751,7 @@ it; `cactup cache report` (§18.6) reads the logs. With `build-cache =
 serve` it also serves objects from the store (§18.7) and publishes the ones
 it compiles (§18.8); `audit` checks every hit by compiling anyway. `cactup
 cache stats`, `gc` and `verify` look after the store (§18.9). Fortran is
-cached for gfortran (§18.10); CUDA is still to come.
+cached for gfortran (§18.10), and CUDA for `nvcc` (§18.11).
 
 ### 18.1 Rules
 
@@ -4973,7 +4973,9 @@ cannot start itself goes to a shell of the same kind:
   pass on unchanged, the first naming a program the shell would take from
   `PATH` or by its path (`gcc`, `nvcc --compiler-bindir /usr/bin/g++`). The
   wrapper starts it directly — where the cache has identified the compiler
-  (§18.5), the very file it identified, under the name the recipe gave. If
+  (§18.5), the very file it identified, under the name the recipe gave
+  (for `nvcc`, the steps of its dry run, each the file identified,
+  §18.11). If
   that fails — a script without a `#!` line,
   a name only the shell's lookup finds — the shell runs it, and its message
   and exit status are the shell's own if it cannot either.
@@ -6022,3 +6024,98 @@ with and without a line marker, with runtime checks on, and compares both
 objects and both module files. In record mode, and under
 `build-cache-relocate = no`, the compile reads the source as the recipe
 gave it.
+
+### 18.11 CUDA
+
+`nvcc` is cached (`objcache::cuda`, decisions 24 and 25; how it was found
+out: `design/build-cache/M4-CUDA.md`), with GCC or Clang as its host
+compiler; HIP and Cray's compilers are later milestones. `nvcc` is a driver
+of its own: for one `-c` it runs the host compiler's preprocessor twice (the
+host pass, and the device pass with `__CUDA_ARCH__`), `cudafe++`, `cicc`,
+`ptxas`, `fatbinary`, and the host compiler on the code `cudafe++`
+generates, in an environment its `nvcc.profile` sets. `nvcc -dryrun` says
+all of it without running any of it: the assignments it makes and the
+commands it would hand to `sh -c`, one per line.
+
+**What is read.** `compile::parse_cuda` reads the command line as the GCC
+reader does: what is not on its lists is not cached. Host compiler flags,
+given with `-Xcompiler` or forwarded with
+`--forward-unknown-to-host-compiler`, are held to the GCC reader's list and
+say what they would say there (`-fopenmp`, `-march=native`, character
+sets). `-Xcudafe` may only keep diagnostics quiet, `-Xptxas` only ask for
+`-v`. A compile without `--objdir-as-tempdir` is not cached: `nvcc` names
+its intermediate files differently each time otherwise, and the names go
+into the object. A GPU architecture of `native` is not cached (the key does
+not know the GPU), nor is a compile while `NVCC_PREPEND_FLAGS` or
+`NVCC_APPEND_FLAGS` add flags no reader sees.
+
+**The identity** (§18.5's Compiler item) is `nvcc`'s file, its
+`nvcc.profile`, the programs a dry run of a plain compile says it runs
+(each found along the `PATH` the dry run gives, the places passed over
+watched, each an ELF file that names itself), its `libdevice` directory,
+and what the trial below finds its last step reads. The host compiler is
+identified per compile as any compiler is: the one `--compiler-bindir`
+names, or the one `nvcc` finds along its `PATH` (the places passed over
+watched); its identity goes into the key beside `nvcc`'s.
+
+**The key.** The text part is what the two preprocessor passes print, run
+by cactup as the dry run says `nvcc` would run them (in the environment it
+gives, printing instead of writing, with `-v` and the path map's flags),
+and the files part every file either reads, as for C and C++. The
+arguments part has the compile's flags, its working directory and object
+name (a CUDA object records where it was compiled, and names made from its
+own name, with or without debug information), and every step of the dry
+run of the compile as it will run, with the environment it is given but
+for `PATH` and `LD_LIBRARY_PATH` (whose programs and libraries the
+identities follow), each directory the path map knows mapped. Flags `nvcc`
+takes from the environment through its profile (`PTXAS_FLAGS`,
+`CUDAFE_FLAGS`) are in those steps.
+
+**The compile the cache runs** (decision 25). `cudafe++` names a unit's
+module ID, which names its registration, its fat binary and every entity of
+internal linkage. Where the unit defines no routine or variable of external
+linkage that serves, it makes the ID of the working directory, the time the
+source was last changed (as local time) and its process ID: every
+configuration, and every copy of a source, would make another object. Not
+told to make one (`--gen_module_id_file`), it reads the ID from its file.
+So a compile the cache runs, to store its result or to audit one, is not
+`nvcc` but `nvcc`'s steps (`cuda::Plan`): the dry run of the compile with
+the path map's flags (the host compiler's prefix maps through
+`-Xcompiler`, shortest directory first, and the source's mapped name
+through `-Xcudafe --orig_src_path_name`), run one step after another in the
+environment it gives, each program the file its identities found (run by
+the name `nvcc` gives it), without `--gen_module_id_file`, with an ID made
+of the key in the shape `cudafe++` gives its own
+(`_<hash>_<length>_<name>_<hash>`, `cuda::module_id`). The key differs
+wherever the compile does (it names the source and the object, mapped), so
+two units of one link never share an ID. Apart from the ID, the object is
+the one `nvcc` makes (tried: every section the same, but the order of the
+strings in `.debug_str`). The last host compile is also given `-MD` to say
+what it read; a compile whose last step read a file the key does not cover
+(neither pass's, nor one its identity's trial saw) is not stored.
+
+What `nvcc` itself does around the steps, the plan does as it does: it
+says `nvcc`'s own warnings first, stops at the first step that fails and
+ends with its exit status, removes the intermediate files `nvcc` removes,
+and for a step killed by a signal it did not pass on, says what `nvcc`
+says (`nvcc error   : '<program>' died due to signal <n> …`) and exits
+with the signal's number. A stop signal reaches the step running, and no
+further step starts. A dry run with more shell than `cuda::shell_words`
+follows (a command substitution, an operator, a pattern), or that does not
+run `cudafe++` making one ID in a file, or that runs a program neither
+identity knows, is not cached. Record mode, which adds nothing to a
+compile, runs `nvcc` as the recipe asks.
+
+**The trial.** An `nvcc` is cached only if, given one ID, it compiles a
+unit without an external routine to the same object in two trees laid out
+as Cactus lays them out (the configuration inside the root, names of other
+lengths), with the ID in both objects (`Compiler::takes_module_id`,
+`relocates`). The trial uses `nvcc`'s default host compiler. What its last
+step read outside the trial's own files (CUDA's `crt/host_runtime.h`,
+`fatbinary_section.h` and the like, which no preprocessor pass reads) is
+part of `nvcc`'s identity and watched (`Compiler::host_reads`).
+
+**The path map** is not used for a compile with device line information
+(`-G`, `-lineinfo`): it names the source by its real path whatever the
+flags say (tried). Nor is it for an OpenMP compile whose host compiler is
+Clang, as for Clang itself.

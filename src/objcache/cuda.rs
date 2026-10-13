@@ -25,37 +25,48 @@ use std::process::{Command, Stdio};
 
 /// What `nvcc -dryrun` says: the environment it sets for the programs it
 /// runs (`PATH`, `LD_LIBRARY_PATH`, `CICC_PATH`, `NVVMIR_LIBRARY_DIR`, …),
-/// and the commands, each as its words.
+/// the commands, each as its words, and what `nvcc` says itself (its
+/// warnings: the lines that are not commands).
 #[derive(Debug, Default, PartialEq)]
 pub struct DryRun {
     pub env: Vec<(String, String)>,
     pub commands: Vec<Vec<String>>,
+    pub said: Vec<String>,
+    /// A command that is more shell than [`shell_words`] follows: why.
+    pub unsupported: Option<String>,
 }
 
 impl DryRun {
     /// Read what `nvcc -dryrun` wrote (to standard error): each line it
     /// would run is `#$ ` and the line. An assignment (`NAME=value`) sets the
-    /// environment of what follows; any other line is a command, split as
-    /// the shell would split it, with `$NAME` taken from that environment.
+    /// environment of what follows; any other line is a command, which
+    /// `nvcc` hands to `sh -c` (seen), split as the shell would split it,
+    /// with `$NAME` taken from that environment, else this process's.
     pub fn read(said: &str) -> Self {
         let mut run = Self::default();
-        for line in said.lines().filter_map(|line| line.strip_prefix("#$ ")) {
+        for line in said.lines() {
+            let Some(line) = line.strip_prefix("#$ ") else {
+                run.said.push(line.to_owned());
+                continue;
+            };
             let name_end = line.find('=').filter(|at| {
                 let name = &line[..*at];
                 !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             });
             match name_end {
                 Some(at) => {
-                    let value = line[at + 1..].trim_end();
+                    // As written: `_SPACE_= ` is one blank.
+                    let value = &line[at + 1..];
                     run.env.retain(|(name, _)| name != &line[..at]);
                     run.env.push((line[..at].to_owned(), value.to_owned()));
                 }
-                None => {
-                    let words = shell_words(line, |name| run.get(name).map(str::to_owned));
-                    if !words.is_empty() {
-                        run.commands.push(words);
+                None => match shell_words(line, |name| run.get(name).map(str::to_owned).or_else(|| std::env::var(name).ok())) {
+                    Ok(words) if !words.is_empty() => run.commands.push(words),
+                    Ok(_) => {}
+                    Err(why) => {
+                        run.unsupported.get_or_insert(why);
                     }
-                }
+                },
             }
         }
         run
@@ -98,9 +109,14 @@ impl DryRun {
 }
 
 /// `line` split into words as a POSIX shell splits it: blanks separate,
-/// double and single quotes join, a backslash escapes, `$NAME` and
-/// `${NAME}` are replaced by what `get` gives (outside single quotes).
-pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Vec<String> {
+/// double and single quotes join, a backslash escapes (inside double quotes
+/// only `$`, `` ` ``, `"`, `\\` and a line break), `$NAME` and `${NAME}` are
+/// replaced by what `get` gives (outside single quotes), and an unquoted
+/// expansion that comes to nothing is no word. `Err`: shell syntax this does
+/// not follow (a command substitution, an operator, a pattern, `~`, another
+/// form of `${…}`).
+pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Result<Vec<String>, String> {
+    let unsupported = |what: &str| Err(format!("nvcc would run a command with {what} in it, which cactup does not repeat"));
     let mut words = Vec::new();
     let (mut word, mut any) = (String::new(), false);
     let mut quote: Option<char> = None;
@@ -113,12 +129,20 @@ pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Vec<Stri
                 quote = Some(c);
                 any = true;
             }
+            (Some('"'), '\\') => match chars.peek() {
+                Some(&next @ ('$' | '`' | '"' | '\\' | '\n')) => {
+                    chars.next();
+                    word.push(next);
+                }
+                _ => word.push('\\'),
+            },
             (_, '\\') => {
                 if let Some(next) = chars.next() {
                     word.push(next);
                     any = true;
                 }
             }
+            (_, '`') => return unsupported("a command substitution"),
             (_, '$') => {
                 let braced = chars.peek() == Some(&'{');
                 if braced {
@@ -133,14 +157,23 @@ pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Vec<Stri
                         break;
                     }
                 }
-                if braced && chars.peek() == Some(&'}') {
-                    chars.next();
+                if braced && chars.next() != Some('}') {
+                    return unsupported("a form of ${…}");
                 }
-                match name.is_empty() {
-                    true => word.push('$'),
-                    false => word.push_str(&get(&name).unwrap_or_default()),
+                if name.is_empty() {
+                    match chars.peek() {
+                        Some('(') => return unsupported("a command substitution"),
+                        Some('@' | '*' | '#' | '?' | '-' | '$' | '!') => return unsupported("a special parameter"),
+                        _ => {
+                            word.push('$');
+                            any = true;
+                        }
+                    }
+                } else {
+                    let value = get(&name).unwrap_or_default();
+                    any |= !value.is_empty() || quote.is_some();
+                    word.push_str(&value);
                 }
-                any = true;
             }
             (None, c) if c.is_whitespace() => {
                 if any {
@@ -148,16 +181,23 @@ pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Vec<Stri
                 }
                 any = false;
             }
+            (None, ';' | '|' | '&' | '<' | '>' | '(' | ')') => return unsupported("a shell operator"),
+            (None, '*' | '?' | '[') => return unsupported("a pattern"),
+            (None, '~') if !any => return unsupported("a ~"),
+            (None, '#') if !any => break,
             (_, c) => {
                 word.push(c);
                 any = true;
             }
         }
     }
+    if quote.is_some() {
+        return unsupported("an unclosed quote");
+    }
     if any {
         words.push(word);
     }
-    words
+    Ok(words)
 }
 
 /// What `nvcc` (at `path`) would run for `args`, in the working directory
@@ -171,6 +211,9 @@ pub fn dry_run(path: &Path, name: &OsStr, args: &[OsString], dir: Option<&Path>)
     super::key::in_english(&mut command);
     let out = command.output().with_context(|| format!("Failed to run {} -dryrun", path.display()))?;
     let run = DryRun::read(&String::from_utf8_lossy(&out.stderr));
+    if let Some(why) = &run.unsupported {
+        bail!("{why}");
+    }
     if run.commands.is_empty() {
         bail!("{} -dryrun does not say what it would run", path.display());
     }
@@ -256,28 +299,46 @@ pub struct Plan {
     /// The file the module ID is read from, and the ID.
     id_file: PathBuf,
     id: String,
+    /// What `nvcc` says itself before it runs anything (its warnings).
+    said: Vec<u8>,
+    /// The last step that runs the host compiler: the compile of the code
+    /// `nvcc` generates, into the object. It is given `-MD -MF <reads>`, to
+    /// say what it read (`identity::Compiler::host_reads`).
+    last: usize,
+    reads: PathBuf,
+    /// The plan has run (record mode runs `nvcc` as the recipe asks).
+    ran: std::cell::Cell<bool>,
 }
 
 /// One line of what `nvcc` would run.
 #[derive(Debug)]
 pub enum Step {
-    /// A program and its arguments (the program by the name `nvcc` runs it
-    /// by, found along the `PATH` it gives).
-    Run(Vec<String>),
+    /// A program, by the name `nvcc` runs it by, and its arguments; and the
+    /// file that is (the one identified, once [`Plan::resolve`] has found
+    /// it along the `PATH` `nvcc` gives).
+    Run { words: Vec<String>, file: Option<PathBuf> },
     /// An intermediate file `nvcc` removes.
     Remove(PathBuf),
 }
 
+/// The programs of `nvcc`'s own toolchain, by their base names.
+const TOOLCHAIN: &[&str] = &["cudafe++", "cicc", "ptxas", "fatbinary", "nvlink", "bin2c"];
+
 impl Plan {
     /// What `nvcc` (at `path`, run as `name`) would run for `args` in the
-    /// working directory, with the module ID `id`.
-    pub fn new(path: &Path, name: &OsStr, args: &[OsString], id: String) -> Res<Self> {
-        Self::from_dry_run(dry_run(path, name, args, None)?, id).with_context(|| format!("{} would compile in a way cactup cannot repeat", path.display()))
+    /// working directory, with the module ID still to be given
+    /// ([`Self::give_id`]).
+    pub fn new(path: &Path, name: &OsStr, args: &[OsString]) -> Res<Self> {
+        Self::from_dry_run(dry_run(path, name, args, None)?, String::new()).with_context(|| format!("{} would compile in a way cactup cannot repeat", path.display()))
     }
 
     fn from_dry_run(run: DryRun, id: String) -> Res<Self> {
+        if let Some(why) = run.unsupported {
+            bail!("{why}");
+        }
         let mut steps = Vec::new();
         let mut id_file = None;
+        let mut last = None;
         for mut words in run.commands {
             let base = words[0].rsplit('/').next().unwrap_or(&words[0]).to_owned();
             if base == "rm" {
@@ -294,37 +355,138 @@ impl Plan {
                 }
                 words.retain(|word| word != "--gen_module_id_file");
             }
-            steps.push(Step::Run(words));
+            if !TOOLCHAIN.contains(&base.as_str()) && words.iter().any(|word| word == "-c") {
+                last = Some(steps.len());
+            }
+            steps.push(Step::Run { words, file: None });
         }
         let id_file = id_file.context("it would run no cudafe++ that makes a module ID")?;
-        Ok(Self { env: run.env, steps, id_file, id })
+        let last = last.context("it would run no host compile of what it generates")?;
+        let mut reads = id_file.clone().into_os_string();
+        reads.push(".cactup-reads");
+        let said = run.said.iter().flat_map(|line| [line.as_bytes(), b"\n"].concat()).collect();
+        Ok(Self { env: run.env, steps, id_file, id, said, last, reads: PathBuf::from(reads), ran: std::cell::Cell::new(false) })
     }
 
-    /// Put the module ID where `cudafe++` will read it.
+    /// Find each program the plan runs along the `PATH` `nvcc` gives it, as
+    /// `sh` would: each must be the host compiler `host` or one of `nvcc`'s
+    /// own programs as its identity found them (`toolchain`), and that file
+    /// is what runs.
+    pub fn resolve(&mut self, host: &Compiler, toolchain: &[PathBuf]) -> Res<()> {
+        let search = self.get("PATH").map(OsString::from).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+        let host_file = fs::canonicalize(&host.path).with_context(|| format!("Failed to resolve {}", host.path.display()))?;
+        for step in &mut self.steps {
+            let Step::Run { words, file } = step else { continue };
+            let program = OsStr::new(&words[0]);
+            let found = match program.as_bytes().contains(&b'/') {
+                true => Some(PathBuf::from(program)),
+                false => identity::find_along(program, &search)?,
+            };
+            let found = found.with_context(|| format!("nvcc would run {}, which is not on its PATH", words[0]))?;
+            let real = fs::canonicalize(&found).with_context(|| format!("Failed to resolve {}", found.display()))?;
+            if real != host_file && !toolchain.contains(&real) {
+                bail!("nvcc would run {}, which is neither its host compiler nor a program of its own it was identified with", found.display());
+            }
+            *file = Some(found);
+        }
+        Ok(())
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.env.iter().rev().find(|(set, _)| set == name).map(|(_, value)| value.as_str())
+    }
+
+    /// The module ID to give.
+    pub fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+
+    /// Put the module ID where `cudafe++` will read it: the plan is about to
+    /// run.
     pub fn give_id(&self) -> std::io::Result<()> {
+        self.ran.set(true);
         fs::write(&self.id_file, &self.id)
+    }
+
+    /// Has the plan run (since [`Self::give_id`])?
+    pub fn ran(&self) -> bool {
+        self.ran.get()
     }
 
     pub fn steps(&self) -> &[Step] {
         &self.steps
     }
 
-    /// The command of a step that runs a program, in the environment `nvcc`
-    /// gives it (its `PATH` is where the program is found).
-    pub fn command(&self, words: &[String]) -> Command {
-        let mut command = Command::new(&words[0]);
-        command.args(&words[1..]).envs(self.env.iter().map(|(name, value)| (name, value)));
-        command
+    /// What `nvcc` says itself before it runs anything.
+    pub fn said(&self) -> &[u8] {
+        &self.said
     }
 
-    /// Remove what `nvcc` would have removed, from step `from` on: what a
-    /// compile that failed or was stopped leaves behind otherwise.
+    /// The plan as the key has it: every step's words, every file it
+    /// removes, and the environment `nvcc` gives them (but `PATH` and
+    /// `LD_LIBRARY_PATH`, whose programs and libraries the identities
+    /// follow), each name in them as `mapped` gives it. Flags `nvcc` takes
+    /// from the environment (`PTXAS_FLAGS`, `CUDAFE_FLAGS`, through its
+    /// profile) are in the words.
+    pub fn described(&self, mapped: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut put = |bytes: &[u8]| {
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+        };
+        for (name, value) in self.env.iter().filter(|(name, _)| name != "PATH" && name != "LD_LIBRARY_PATH") {
+            put(name.as_bytes());
+            put(&mapped(value.as_bytes()));
+        }
+        for step in &self.steps {
+            match step {
+                Step::Run { words, .. } => {
+                    put(b"run");
+                    words.iter().for_each(|word| put(&mapped(word.as_bytes())));
+                }
+                Step::Remove(file) => {
+                    put(b"remove");
+                    put(&mapped(file.as_os_str().as_bytes()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The command of step `at`, a program, in the environment `nvcc` gives
+    /// it: the file found for it, run by its name.
+    pub fn command(&self, at: usize) -> Option<Command> {
+        let Step::Run { words, file } = &self.steps[at] else { return None };
+        let mut command = Command::new(file.as_deref().unwrap_or(Path::new(&words[0])));
+        command.arg0(&words[0]).args(&words[1..]).envs(self.env.iter().map(|(name, value)| (name, value)));
+        if at == self.last {
+            command.args(["-MD", "-MF"]).arg(&self.reads);
+        }
+        Some(command)
+    }
+
+    /// Remove what `nvcc` would have removed, from step `from` on, and what
+    /// the plan adds: what a compile that failed or was stopped leaves
+    /// behind otherwise.
     pub fn tidy_from(&self, from: usize) {
         for step in self.steps.iter().skip(from) {
             if let Step::Remove(file) = step {
                 let _ = fs::remove_file(file);
             }
         }
+        let _ = fs::remove_file(&self.reads);
+    }
+
+    /// What the last step read, as it said (and the file it said it in
+    /// removed), but for `nvcc`'s own intermediate files beside the object.
+    /// `None`: it did not say.
+    pub fn last_reads(&self) -> Option<Vec<PathBuf>> {
+        let said = fs::read(&self.reads);
+        let _ = fs::remove_file(&self.reads);
+        let mut prefix = self.id_file.as_os_str().as_bytes().strip_suffix(b".module_id")?.to_vec();
+        prefix.push(b'.');
+        let files = depend_files(&said.ok()?)?;
+        Some(files.into_iter().filter(|file| !file.as_os_str().as_bytes().starts_with(&prefix)).collect())
     }
 
     /// Run every step in turn, in `dir`, without a word to the terminal:
@@ -332,28 +494,78 @@ impl Plan {
     fn run_quietly(&self, dir: &Path) -> Result<(), String> {
         self.give_id().map_err(|e| format!("cannot write {}: {e}", self.id_file.display()))?;
         for (at, step) in self.steps.iter().enumerate() {
-            match step {
-                Step::Remove(file) => {
+            let Some(mut command) = self.command(at) else {
+                if let Step::Remove(file) = step {
                     let _ = fs::remove_file(file);
                 }
-                Step::Run(words) => {
-                    let out = self.command(words).current_dir(dir).env("PWD", dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output();
-                    match out {
-                        Ok(out) if out.status.success() => {}
-                        Ok(out) => {
-                            self.tidy_from(at);
-                            return Err(format!("{} failed ({}): {}", words[0], out.status, String::from_utf8_lossy(&out.stderr)));
-                        }
-                        Err(e) => {
-                            self.tidy_from(at);
-                            return Err(format!("{} could not run: {e}", words[0]));
-                        }
-                    }
+                continue;
+            };
+            let out = command.current_dir(dir).env("PWD", dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output();
+            let program = match step {
+                Step::Run { words, .. } => words[0].as_str(),
+                Step::Remove(_) => "",
+            };
+            match out {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    self.tidy_from(at);
+                    return Err(format!("{program} failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr)));
+                }
+                Err(e) => {
+                    self.tidy_from(at);
+                    return Err(format!("{program} could not run: {e}"));
                 }
             }
         }
         Ok(())
     }
+}
+
+/// The files a dependency file as GCC writes it (`-MD`) names: what follows
+/// the target's colon, a backslash before a line break joining lines, a
+/// backslash before a blank or `#` escaping it, `$$` for `$`. `None`: not
+/// one such file.
+fn depend_files(said: &[u8]) -> Option<Vec<PathBuf>> {
+    let text = std::str::from_utf8(said).ok()?.replace("\\\n", " ");
+    let (_, rest) = text.split_once(": ")?;
+    let mut files = Vec::new();
+    let mut file = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if matches!(chars.peek(), Some(' ' | '#' | '\\')) => file.push(chars.next()?),
+            '$' if chars.peek() == Some(&'$') => {
+                chars.next();
+                file.push('$');
+            }
+            c if c.is_whitespace() => {
+                if !file.is_empty() {
+                    files.push(PathBuf::from(std::mem::take(&mut file)));
+                }
+            }
+            // A second target or a rule: not what `-MD` writes alone.
+            ':' if chars.peek().is_none_or(|next| next.is_whitespace()) => return None,
+            c => file.push(c),
+        }
+    }
+    if !file.is_empty() {
+        files.push(PathBuf::from(file));
+    }
+    Some(files)
+}
+
+/// What `nvcc` says when a program it runs is killed by `signal` (its own
+/// words, from its binary; CUDA 12.2).
+pub fn died(program: &str, signal: i32) -> String {
+    let why = match signal {
+        4 => "(Illegal Instruction)",
+        7 => "(Bus error)",
+        8 => "(Floating point exception)",
+        9 => "(Kill signal)",
+        11 => "(Invalid memory reference)",
+        _ => "",
+    };
+    format!("nvcc error   : '{program}' died due to signal {signal} {why}\n")
 }
 
 /// The module ID the cache gives a compile with the key `key` of the source
@@ -372,13 +584,15 @@ pub fn module_id(key: &str, source: &Path) -> String {
 /// two places, under the path map's flags as the cache gives them
 /// ([`map_flags`])? Tried in `dir`, with its default host compiler and the
 /// relocatable device code Cactus asks for, as a GCC is tried
-/// (`identity::relocates`).
-pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> (bool, bool) {
-    let Ok(trial) = tempfile::Builder::new().prefix("cuda-trial-").tempdir_in(dir) else { return (false, false) };
+/// (`identity::relocates`). And what does its last step, the host compile
+/// of what it generates, read that is not the trial's own?
+pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> Trial {
+    let failed = Trial { relocates: false, takes_id: false, host_reads: Vec::new() };
+    let Ok(trial) = tempfile::Builder::new().prefix("cuda-trial-").tempdir_in(dir) else { return failed };
     // By its physical path, and with `PWD` naming it, as the GCC trial: the
     // host compiler records `$PWD` where it names the working directory
     // (tried: a `/work` link on qbd left the physical path unmapped).
-    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return (false, false) };
+    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return failed };
     // Without a routine or variable of external linkage to name the module
     // by: `cudafe++` would make the ID of where and when it compiles.
     let text = "namespace {\n__device__ int hidden;\n__device__ int twice(int v) { return 2 * v + hidden; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n}\n";
@@ -388,6 +602,7 @@ pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> (bool, bool) {
     // in trees and configurations of names of other lengths: the map has
     // the configuration directory inside the root to get right.
     let mut objects = Vec::new();
+    let mut host_reads = None;
     for (place, config) in [("one/Cactus", "sim"), ("another/deeper/Cactus", "simulation")] {
         let root = trial_dir.join(place);
         let config = root.join("configs").join(config);
@@ -395,7 +610,7 @@ pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> (bool, bool) {
         let source = build.join("trial.cu");
         let made = [&build, &scratch, &config.join("bindings/include")].iter().all(|dir| fs::create_dir_all(dir).is_ok());
         if !made || fs::write(&source, text).is_err() {
-            return (false, false);
+            return failed;
         }
         let object = build.join("trial.cu.o");
         let mut args: Vec<OsString> = ["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "--objdir-as-tempdir", "-c", "-o"].map(OsString::from).to_vec();
@@ -411,14 +626,23 @@ pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> (bool, bool) {
             Ok(out) => Plan::from_dry_run(DryRun::read(&String::from_utf8_lossy(&out.stderr)), id.clone()),
             Err(e) => Err(e.into()),
         };
-        let ran = plan.map_err(|e| format!("{e:#}")).and_then(|plan| plan.run_quietly(&scratch));
-        if let Err(why) = ran {
-            identity::trial_says(&format!("{}: the trial compile: {why}", path.display()));
-            return (false, false);
+        let ran = plan.map_err(|e| format!("{e:#}")).and_then(|plan| plan.run_quietly(&scratch).map(|()| plan.last_reads()));
+        match ran {
+            Ok(Some(reads)) => {
+                host_reads.get_or_insert_with(|| reads.into_iter().filter(|read| !scratch.join(read).starts_with(&trial_dir)).collect::<Vec<_>>());
+            }
+            Ok(None) => {
+                identity::trial_says(&format!("{}: the trial compile's last step did not say what it read", path.display()));
+                return failed;
+            }
+            Err(why) => {
+                identity::trial_says(&format!("{}: the trial compile: {why}", path.display()));
+                return failed;
+            }
         }
         match fs::read(&object) {
             Ok(object) => objects.push(object),
-            Err(_) => return (false, false),
+            Err(_) => return failed,
         }
     }
     let takes_id = objects.iter().all(|object| object.windows(id.len()).any(|window| window == id.as_bytes()));
@@ -427,7 +651,14 @@ pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> (bool, bool) {
     } else if objects[0] != objects[1] {
         identity::trial_says(&format!("{} made two objects of the trial in two places", path.display()));
     }
-    (takes_id && objects[0] == objects[1], takes_id)
+    Trial { relocates: takes_id && objects[0] == objects[1], takes_id, host_reads: host_reads.unwrap_or_default() }
+}
+
+/// What [`trial`] found.
+pub(super) struct Trial {
+    pub relocates: bool,
+    pub takes_id: bool,
+    pub host_reads: Vec<PathBuf>,
 }
 
 /// The flags that have an `nvcc` compile of `source` honor the path map
@@ -457,16 +688,14 @@ pub(super) fn host(run: &DryRun, cc_dir: &Path) -> Res<(Compiler, identity::Watc
     if passes.any(|pass| pass[0] != first[0]) {
         bail!("nvcc would run more than one host compiler");
     }
+    // Along the `PATH` it gives, with the places passed over watched: a
+    // `g++` that turns up ahead of this one is another host compiler.
     let program = OsStr::new(&first[0]);
-    let found = match program.as_bytes().contains(&b'/') {
-        true => PathBuf::from(program),
-        false => {
-            let search = run.get("PATH").context("nvcc does not say where it finds the host compiler")?;
-            identity::find_along(program, OsStr::new(search))?
-                .with_context(|| format!("nvcc would run {}, which is not on its PATH", program.to_string_lossy()))?
-        }
-    };
+    let search = run.get("PATH").context("nvcc does not say where it finds the host compiler")?;
+    let (found, files, absent) = identity::search_watching(program, OsStr::new(search))?;
+    let found = found.with_context(|| format!("nvcc would run {}, which is not on its PATH", program.to_string_lossy()))?;
     let (host, watch) = identity::identify_watching(cc_dir, found.as_os_str())?;
+    let watch = watch.with_places(files, absent);
     if !matches!(host.family, Family::Gcc | Family::Clang) {
         bail!("nvcc's host compiler {} is not a C++ compiler cactup knows", found.display());
     }
@@ -572,8 +801,24 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
 
 /// Does the key of a CUDA compile still hold after it: the same passes print
 /// the same text, from the same files, which look as they did?
-pub fn still_holds(cuda: &Cuda, compile: &Compile, map: Option<&PathMap>, text: &str, files: &str, seen: &str) -> bool {
+/// And the compile's last step (`plan`'s) read nothing the key does not
+/// cover: files the passes read, and those of `host_reads` (its identity's).
+pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &Compile, map: Option<&PathMap>, text: &str, files: &str, seen: &str) -> bool {
+    let last_read = match plan.ran() {
+        true => match plan.last_reads() {
+            Some(read) => read,
+            None => return false,
+        },
+        false => Vec::new(),
+    };
     let Ok((now_text, _, mut named)) = run_passes(cuda, map) else { return false };
+    let passes: std::collections::HashSet<&Path> = named.keys().map(|(_, real)| real.as_path()).collect();
+    let covered = |read: &PathBuf| {
+        passes.contains(read.as_path()) || fs::canonicalize(read).is_ok_and(|real| host_reads.contains(&real) || passes.contains(real.as_path()))
+    };
+    if !last_read.iter().all(covered) {
+        return false;
+    }
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
     now_text == text && read_files(&named, map).is_ok_and(|(now_files, now_seen)| now_files == files && now_seen == seen)
@@ -637,12 +882,15 @@ mod tests {
     fn repeats_what_nvcc_would_run_with_the_module_id_given() {
         let plan = Plan::from_dry_run(DryRun::read(QBD), "_x".to_owned()).unwrap();
         assert_eq!(plan.id_file, Path::new("/w/t.o.module_id"));
+        // The last host compile says what it read.
+        assert_eq!(plan.last, 3);
+        assert_eq!(plan.reads, Path::new("/w/t.o.module_id.cactup-reads"));
         assert_eq!(plan.env, [("_NVVM_BRANCH_".to_owned(), "nvvm".to_owned()), ("PATH".to_owned(), "/cuda/bin/../nvvm/bin:/cuda/bin:/usr/bin".to_owned())]);
         let words: Vec<String> = plan
             .steps()
             .iter()
             .map(|step| match step {
-                Step::Run(words) => words.join(" "),
+                Step::Run { words, .. } => words.join(" "),
                 Step::Remove(file) => format!("remove {}", file.display()),
             })
             .collect();
@@ -670,6 +918,35 @@ mod tests {
         }
         let twice = QBD.replace("#$ cicc", "#$ cudafe++ --gen_module_id_file --module_id_file_name \"/w/u\" x\n#$ cicc");
         assert!(Plan::from_dry_run(DryRun::read(&twice), "_x".to_owned()).is_err());
+    }
+
+    #[test]
+    fn keeps_what_nvcc_says_itself_and_refuses_what_it_cannot_repeat() {
+        let warned = format!("nvcc warning : incompatible redefinition for option 'compiler-bindir', the last value of this option was used\n{QBD}");
+        let plan = Plan::from_dry_run(DryRun::read(&warned), "_x".to_owned()).unwrap();
+        assert_eq!(plan.said(), b"nvcc warning : incompatible redefinition for option 'compiler-bindir', the last value of this option was used\n");
+        let shelly = QBD.replace("#$ cicc --c++17", "#$ cicc --c++17 $(id -u)");
+        assert!(Plan::from_dry_run(DryRun::read(&shelly), "_x".to_owned()).is_err());
+        // No host compile of the generated code: nothing says what it read.
+        let without = QBD.replace("#$ g++ -c -x c++", "#$ g++ -x c++");
+        assert!(Plan::from_dry_run(DryRun::read(&without), "_x".to_owned()).is_err());
+    }
+
+    #[test]
+    fn reads_what_the_last_step_says_it_read() {
+        let said = b"/w/t.o: /w/t.o.cudafe1.cpp \\\n /cuda/include/crt/host_runtime.h /a\\ b.h \\\n /c$$d.h\n";
+        assert_eq!(
+            depend_files(said).unwrap(),
+            ["/w/t.o.cudafe1.cpp", "/cuda/include/crt/host_runtime.h", "/a b.h", "/c$d.h"].map(PathBuf::from)
+        );
+        assert!(depend_files(b"no target here").is_none());
+        assert!(depend_files(b"a: b\nc: d\n").is_none());
+    }
+
+    #[test]
+    fn says_what_nvcc_says_of_a_program_killed() {
+        assert_eq!(died("cicc", 9), "nvcc error   : 'cicc' died due to signal 9 (Kill signal)\n");
+        assert_eq!(died("cicc", 1), "nvcc error   : 'cicc' died due to signal 1 \n");
     }
 
     #[test]
@@ -703,7 +980,13 @@ mod tests {
     #[test]
     fn splits_words_as_the_shell_does() {
         let get = |name: &str| (name == "X").then(|| "/x".to_owned());
-        assert_eq!(shell_words(r#""/a b"/c -d 'e f' g\ h $X/y ${X}z $NO"#, get), ["/a b/c", "-d", "e f", "g h", "/x/y", "/xz", ""]);
-        assert_eq!(shell_words("  ", get), Vec::<String>::new());
+        assert_eq!(shell_words(r#""/a b"/c -d 'e f' g\ h $X/y ${X}z $NO "$NO""#, get).unwrap(), ["/a b/c", "-d", "e f", "g h", "/x/y", "/xz", ""]);
+        assert_eq!(shell_words("  ", get).unwrap(), Vec::<String>::new());
+        // A backslash in double quotes escapes only what the shell lets it.
+        assert_eq!(shell_words(r#""a\b" "c\"d" "e\$X""#, get).unwrap(), [r"a\b", "c\"d", "e$X"]);
+        assert_eq!(shell_words("a $ b", get).unwrap(), ["a", "$", "b"]);
+        for more in ["a `b`", "a $(b)", "a; b", "a | b", "a > b", "a*", "~/a", "${X:-y}", "$@", "'a"] {
+            assert!(shell_words(more, get).is_err(), "{more}");
+        }
     }
 }
