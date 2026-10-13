@@ -55,7 +55,7 @@ the last milestone, for when that host is not at hand.
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
 | M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews), its follow-ups at `05c67a3` and `e29e593` |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
-| M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **in review** (round 9 next): decisions 24–31; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed |
+| M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **passed the gate** at `b652348` (nine review rounds): decisions 24–31; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed; the two-thornlist benchmark 350 of 389 served, 1:07 against 8:30 |
 | M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; every cache-on build ends with one line: objects reused of all, and the misses by kind (built for the first time, sources changed, kept out by something `cache doctor` or `cache report` explains), a kind with a count of 0 left out (Max, 2026-10-13; "sources changed" needs a per-unit index beside the store); a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | **next**, then the merge to master (decision 27) |
 | M4b | Cray compilers: C, C++ and Fortran through `cc`, `CC`, `ftn`, seen through to the compiler they run, with the module environment that shapes them; Cray's `CC` as `nvcc`'s host compiler (decision 23) | follow-up after the merge (decision 27); no Cray machine to probe yet |
 | M5b | Take on the cases where whole files stay keyed (decision 27): Clang's file checksums, `-g3`, preprocessor warnings, redefinitions | follow-up after the merge (decision 27) |
@@ -2224,11 +2224,33 @@ commit after this record:
 - (A, B) round 7's rule cost nearly every C++ and CUDA unit its narrowing
   on GCC 11: libstdc++'s headers and `cuda_runtime.h` carry `#pragma GCC
   diagnostic`. `bench7` (`a0a697f`): 275 of 389 served (5 of 96 `nvcc`),
-  9:28 against 9:05 cache off. The C++ front end reads the whole unit
-  before it acts on a pragma, as `-E` does (B: 17 cases, `g++ -E` and `g++
-  -c` agree on every one; `gcc` differs in 11), and `nvcc`'s compile is
-  made of its own `-E` passes: the rule is for C only.
+  9:28 against 9:05 cache off. For C++ the compile and `-E` agree (B: 17
+  cases, `g++ -E` and `g++ -c` agree on every one; `gcc` differs in 11),
+  and `nvcc`'s compile is made of its own `-E` passes: the rule is for C
+  only.
 Key label `key-19`.
+
+### M4, round 9 (on `b652348`): SIGN-OFF by both; M4 passes its gate
+
+Both re-ran every earlier reproduction they had: all fixed, or right as
+before. A on plato and qbd: H1 (`-Wall` under `#pragma GCC diagnostic`, its
+alias, push/pop, `-Werror`) a miss matching gcc; the new rule tried on GCC
+8.5, 11.4, 13.2 and 14.2 (C++: the compile never names a header `-E` does
+not, 2,280 to 3,800 cases each; every predefined macro alike after
+`optimize`, `target` and their attributes; the compile expands exactly the
+pragma arguments `-E` does); end to end with g++ 11.4 and 14 and `nvcc`
+with g++ 11.4, every served object the compiler's. B on plato: 20 spellings
+of `#pragma GCC optimize` in C each a new key, 426 C and 487 C++ predefined
+macros compared after nine pragma sets (C++: none differ), 32 diagnostic
+pragma runs with exit status and warnings matching. (B could not reach qbd
+this round; A's qbd jobs 1092559 and 1092603 cover GCC 11.4 and `nvcc`.)
+The benchmark on `b652348` (`bench8`): 350 of 389 served (80 of 96
+`nvcc`), as at `6ff97d4`; audit 388 checked, 0 wrong. Non-blocking, done:
+the comment on `key::Output`; the reason given for C++ (the compile and
+`-E` agree, tried, rather than a mechanism: on GCC 14 both act on `target`
+as they read). Left: two older clippy errors (`from_mode(0)` in
+`tests/objcache.rs` and `upkeep.rs`) and older lints. **M4 signs off at
+`b652348`.**
 
 ## Decisions
 
@@ -2446,20 +2468,23 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M4 (CUDA) in review: round 9 on the fixes for round 8 (branch `feature/build-cache-next`,
-worktree `.claude/worktrees/build-cache-next`, to be fast-forwarded onto
-`feature/build-cache` once it passes). qbd test
-instance: `/work/mmorris/cactup-m4/` (its own `CACTUP_HOME`, installation
-`m4` at `/ddnB/work/mmorris/m4`, builds to `single` by the MDB's default;
-`pair.sh` serve-audit-serve, `bench.sh`/`bench2.sh` the two-thornlist
-benchmark, `night.sh` the GPU test suites; at most one ssh session to qbd
-at a time, its login limit holds a refused login for an hour). Results so
-far: serve, audit (404 `same`) and a fully served build on `720afc1`; the
-served build's test suite on gpu2 passed 71 of 71, a cache-off one 67 of
-67. The two-thornlist benchmark (three thorns apart each way): with whole
-files 184 of 389 served and no speedup (8:47 against 8:28 cache off);
-decision 29 336 of 389 (8:16); decision 30 346 (3:05); on `0164287` 350 of
-389 served (80 of 96 `nvcc`), 1:08 against 8:28–8:39 cache off, audit 0
-wrong, and the served build's test suite on gpu2 passed 67 of 67. Then M5
-cache doctor (with decision 27's report and the build's summary line), the
-merge to master, and the follow-ups M4b Cray, M5b, M6 HIP.
+M4 (CUDA) passed its gate at `b652348` (nine rounds; records above). Next:
+M5, `cactup cache doctor` (milestone table), with decision 27's report of
+where whole files stay keyed and the summary line every cache-on build ends
+with (reused of all; misses as new, sources changed, kept out; a kind with
+a count of 0 left out). Then the merge of `feature/build-cache` to master
+(decision 27), and the follow-ups M4b Cray, M5b, M6 HIP. Max's idea of
+warnings replayed by condition (decision 31) is on hold: the benchmark's
+misses are not about warnings.
+
+qbd test instance: `/work/mmorris/cactup-m4/` (its own `CACTUP_HOME`,
+installation `m4` at `/ddnB/work/mmorris/m4`, builds to `single` by the
+MDB's default; `pair.sh` serve-audit-serve, `bench*.sh` the two-thornlist
+benchmark (three thorns apart each way; `bench8.sh` on `b652348`),
+`night.sh` the GPU test suites; at most one ssh session to qbd at a time,
+its login limit holds a refused login for an hour; `ssh` from plato needs
+the sandbox off, which cannot resolve qbd's names). The benchmark's history:
+whole files 184 of 389 served, 8:47 against 8:28 cache off; decision 29 336
+(8:16); decision 30 346 (3:05); from `0164287` on, 350 of 389 (80 of 96
+`nvcc`), 1:07 to 1:39 against 8:28 to 9:05, audits 0 wrong; the served
+build's GPU test suite on gpu2 passed 67 of 67.

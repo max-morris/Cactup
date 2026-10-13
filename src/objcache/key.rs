@@ -1573,7 +1573,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
 /// What [`digest_output`] read of a preprocessor's output: its text
 /// digested and its length, the files its markers name, the macros `-dU`
 /// says it uses, the files it has code of, and whether it has a `#pragma
-/// GCC diagnostic` ([`said_as_compiled`]).
+/// GCC` the C front end acts on ([`said_as_compiled`]).
 pub(super) struct Output {
     pub text: String,
     pub bytes: u64,
@@ -1587,14 +1587,15 @@ pub(super) struct Output {
 /// does: its macros and every warning it would print? Not for C where the
 /// text has a `#pragma GCC` the C front end acts on as it reads on
 /// ([`acted_on_by_the_front_end`]), which `-E` ignores or follows only in
-/// part: `optimize` and `target` (with `push_options` and the like) redefine
-/// `__OPTIMIZE__`, `__FAST_MATH__`, `__AVX2__` and their kind for the rest
-/// of the unit, so `-dU` misses a macro the compile uses (a stale object
-/// where its definition is left out); `diagnostic` turns a warning on, or
-/// into an error, for the compile alone (`-E` ignores it before GCC 13, and
-/// for an option it does not know, `-Wall`, after). The C++ front end reads
-/// the whole unit before it acts on any pragma, as `-E` does (GCC 11 and 14
-/// tried), and libstdc++'s headers are full of them.
+/// part: `optimize` (and `target` before GCC 14, with `push_options` and
+/// the like) redefines `__OPTIMIZE__`, `__FAST_MATH__`, `__AVX2__` and their
+/// kind for the rest of the unit, so `-dU` misses a macro the compile uses
+/// (a stale object where its definition is left out); `diagnostic` turns a
+/// warning on, or into an error, for the compile alone (`-E` ignores it
+/// before GCC 13, and for an option it does not know, `-Wall`, after). For
+/// C++ the compile and `-E` agree on every macro and every preprocessor
+/// warning after any of them (tried on GCC 8.5, 11.4, 13.2 and 14.2), and
+/// libstdc++'s headers are full of them.
 pub(super) fn said_as_compiled(language: compile::Language, front_end_pragma: bool) -> bool {
     !(front_end_pragma && language == compile::Language::C)
 }
