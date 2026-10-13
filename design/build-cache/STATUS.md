@@ -1988,6 +1988,52 @@ values); the reason's variable is set as a side effect of each search (a
 relative RPATH try would be blamed on `LD_LIBRARY_PATH`: pass it to
 `passed` instead); the spec omits the `/usr/local` default.
 
+### M4, round 1 (on `4a14cba`): BLOCKED by both
+
+Both on plato (tests) and qbd (Slurm jobs on `single`, in
+`/work/mmorris/cactup-m4/review-a/` and `review-b/`). Blocking, all fixed
+in `4a25fd3`:
+- (B) `PTXAS_FLAGS`/`CUDAFE_FLAGS`, which `nvcc.profile` passes on, changed
+  the object, not the key (a stale object served). Now the plan is made at
+  key time and keyed: every step's words and the environment but `PATH`
+  and `LD_LIBRARY_PATH`, mapped (`PathMap::in_text`).
+- (B, A's N2) the last host compile reads CUDA headers no pass reads
+  (`crt/host_runtime.h`, `fatbinary_section.h`, …): a header update was
+  served stale. The trial now records what that step reads (`-MD`), the
+  identity hashes and watches it (`host_reads`), and each compile's last
+  step must read nothing else the key does not cover, or it is not stored.
+- (A) the host compiler was found along `nvcc`'s `PATH` without watching
+  what it passed, and the steps ran by name: a `g++` 13.2 put ahead of 11.4
+  was stored under 11.4's key. Now found with the places watched, and each
+  step runs the file its identities found (`Plan::resolve`; a program
+  neither knows: not cached).
+- (A) `-lineinfo` and `-G` objects name the real source path: 99 wrong in
+  an audit across configurations. No path map for them now
+  (`device_lines`).
+- (A) `-arch=native`: not cached now.
+- (A, B) `NVCC_PREPEND_FLAGS`/`NVCC_APPEND_FLAGS` bypassed the reader (an
+  options file changed under one key): not cached now.
+- (B) host flags given through `nvcc` skipped the GCC reader's notes
+  (charset not refused; a Clang host's OpenMP, `-include`): now noted.
+- (B) a step killed by a signal: `nvcc` says `nvcc error   : 'cicc' died
+  due to signal 9 (Kill signal)` and exits 9 (seen; its table has 4, 7, 8,
+  9, 11); the replay does so too. (A) `nvcc`'s own warnings (the dry run's
+  other lines) were lost: said first now.
+- (A, B) the spec: §18.11 written, §18.4 and the status line fixed, the
+  user docs too.
+Non-blocking, done: `shell_words` follows `sh` (a `$NAME` `nvcc` does not
+set from the environment, an empty unquoted expansion no word, backslashes
+in double quotes; more shell than that: not cached); the dry run's values
+untrimmed (`_SPACE_` is one blank). Left: the trial uses `nvcc`'s default
+host compiler (where `nvcc` rejects that one, no CUDA compile is cached);
+the host compiler's libraries are identified in the wrapper's environment,
+not in `nvcc`'s (CUDA's `lib` first); the plan's dry run is in `key_ms`
+now. On `4a25fd3`, qbd, fresh `store7`: serve `m4a`, audit `m4b` all 404
+`same` (99 `nvcc`), serve `m4c` all 404 served, linked, 1:05. Cost
+(reviewers, from the events): keying a CUDA compile 4.5 s
+median against an 18.7 s compile, the check after it 2 s; about 12 % on a
+miss; a served build 1:39 against 8:56.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
