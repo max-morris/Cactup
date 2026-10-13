@@ -848,9 +848,12 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
 /// `Warning:` or `Error:` line; the lines before it show where, and the
 /// source), without the driver's own `-v` lines.
 fn said_of_the_text(stderr: &[u8]) -> Vec<u8> {
-    let stderr = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = stderr.lines().filter(|line| ["Warning: ", "Error: ", "Fatal Error: "].iter().any(|kind| line.starts_with(kind))).collect();
-    lines.join("\n").into_bytes()
+    let stderr = key::plain(stderr);
+    let kinds = ["Warning: ", "Error: ", "Fatal Error: "];
+    // `f951: Warning: …` too.
+    let lines: Vec<&str> = stderr.lines().filter(|line| kinds.iter().any(|kind| line.starts_with(kind) || line.contains(&format!(": {kind}")))).collect();
+    // The quotes follow the locale's character set, the words do not.
+    lines.join("\n").replace(['\u{2018}', '\u{2019}'], "'").into_bytes()
 }
 
 /// Does the file at `path` begin as a gzip stream does?
@@ -1626,7 +1629,9 @@ mod tests {
             assert!(status.success());
         };
         let (p1, p2, b) = (real.root.join("p1"), real.root.join("p2"), real.root.join("b"));
-        std::fs::create_dir_all(&p1).unwrap();
+        // There, and empty: one not there draws a warning, and the check is
+        // then the dependency run again.
+        std::fs::create_dir_all(p1.join("a")).unwrap();
         make_module(&p2.join("a"), 2);
         make_module(&b, 3);
         let link = real.root.join("link");

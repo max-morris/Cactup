@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-16";
+pub const KEY_LABEL: &str = "key-17";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -515,6 +515,15 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     // files can be byte for byte.
     if conf.exact_warnings {
         arguments.feed(b"exact warnings");
+        // And how the compiler (for CUDA, its host compiler, whose messages
+        // `nvcc` passes on) words a warning here: the language and quotes
+        // follow the locale as this host resolves it (which locales and
+        // message catalogs are installed), not only the variables keyed.
+        let (path, fortran) = match &cuda_run {
+            Some((_, host)) => (&host.path, false),
+            None => (&compiler.path, compile.language.is_fortran()),
+        };
+        arguments.feed(&wording(path, fortran).map_err(whole)?);
     }
     // Whether each directory searched for headers is there: a compiler
     // warns of one that is not (gfortran always, GCC and Clang with
@@ -1279,7 +1288,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let status = child.wait();
     PREPROCESSOR.store(0, Ordering::SeqCst);
     let said = said.and_then(|said| said.join().ok()).unwrap_or_default();
-    let Output { text, bytes: text_bytes, mut named, used, with_code } = read?;
+    let Output { text, bytes: text_bytes, mut named, used, with_code, diagnostic_pragma } = read?;
     let status = status.context("Failed to wait for the preprocessor")?;
     if !status.success() {
         bail!("the preprocessor failed ({status})");
@@ -1290,15 +1299,14 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    // Narrowed only where the run said nothing of the text: a warning about
-    // a definition (a stray quote, `/*` in a comment, a name redefined) is
-    // the compile's too, and would be about a line the key leaves out.
     // Narrowed where nothing the run said of the text names a file it
     // would narrow: a warning about a definition (a stray quote, `/*` in a
     // comment, a name redefined) is the compile's too, and would be about a
     // line the key leaves out; the files a diagnostic names are kept whole
-    // (decision 30).
-    let used = match (narrow && compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed_files(&said)) {
+    // (decision 30). Not narrowed where the run may not have said all the
+    // compile will ([`said_as_compiled`]).
+    let diagnosed = diagnosed_files(&said).filter(|_| said_as_compiled(&said, diagnostic_pragma));
+    let used = match (narrow && compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed) {
         (true, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
         _ => None,
     };
@@ -1505,6 +1513,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
     // markers give them; and the file the lines now come from.
     let mut with_code = BTreeSet::new();
     let mut current: Option<PathBuf> = None;
+    let mut diagnostic_pragma = false;
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -1541,6 +1550,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
             None => {
+                diagnostic_pragma |= line.trim_ascii_start().starts_with(b"#pragma GCC diagnostic");
                 match definitions(&line).next() {
                     Some(name) => {
                         used.insert(name.to_vec());
@@ -1557,18 +1567,69 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
         }
     }
     hasher.end_stream(bytes);
-    Ok(Output { text: hasher.hex(), bytes, named, used, with_code })
+    Ok(Output { text: hasher.hex(), bytes, named, used, with_code, diagnostic_pragma })
 }
 
 /// What [`digest_output`] read of a preprocessor's output: its text
 /// digested and its length, the files its markers name, the macros `-dU`
-/// says it uses, and the files it has code of.
+/// says it uses, the files it has code of, and whether it has a `#pragma
+/// GCC diagnostic` ([`said_as_compiled`]).
 pub(super) struct Output {
     pub text: String,
     pub bytes: u64,
     pub named: Named,
     pub used: BTreeSet<Vec<u8>>,
     pub with_code: BTreeSet<PathBuf>,
+    pub diagnostic_pragma: bool,
+}
+
+/// Does what a preprocessor run `said` hold every warning of the text the
+/// compile would print? Not where the text has a `#pragma GCC diagnostic`
+/// and GCC is older than 13 (or says no version): `-E` then ignores the
+/// pragma, so a warning it makes an error, or turns on, is said by the
+/// compile alone (seen with GCC 11.4 on qbd).
+pub(super) fn said_as_compiled(said: &[u8], diagnostic_pragma: bool) -> bool {
+    let major = || {
+        let said = String::from_utf8_lossy(said);
+        let version = said.lines().find_map(|line| line.strip_prefix("gcc version "))?.to_owned();
+        version.split('.').next()?.parse::<u32>().ok()
+    };
+    !diagnostic_pragma || major().is_some_and(|major| major >= 13)
+}
+
+/// `said` without the terminal's escape sequences (colors, by
+/// `-fdiagnostics-color=always`, and links), which split the words a
+/// diagnostic is read by.
+pub(super) fn plain(said: &[u8]) -> String {
+    let said = String::from_utf8_lossy(said);
+    let mut out = String::with_capacity(said.len());
+    let mut chars = said.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // A control sequence ends at its final byte.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // An operating system command (a link) ends at BEL or ESC \.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Is `line`, of what a preprocessor run (with `-v`) said, part of a
@@ -1584,6 +1645,33 @@ fn diagnostic(line: &str) -> bool {
         || line.contains(": At top level")
 }
 
+/// What the compiler at `path` prints for an unused variable, run here as
+/// the compile runs (decision 31's exact warnings): its language and quotes.
+fn wording(path: &Path, fortran: bool) -> Res<Vec<u8>> {
+    let (language, source) = match fortran {
+        true => ("f95", "subroutine f\n  integer :: x\nend subroutine\n"),
+        false => ("c", "void f(void) { int x; }\n"),
+    };
+    let mut child = Command::new(path)
+        .args(["-fsyntax-only", "-Wunused-variable", "-x", language, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to run {} to see how it words a warning", path.display()))?;
+    PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, source.as_bytes());
+    }
+    let out = child.wait_with_output();
+    PREPROCESSOR.store(0, Ordering::SeqCst);
+    let out = out.context("Failed to wait for the compiler")?;
+    if out.stderr.is_empty() {
+        bail!("{} said nothing of an unused variable, so how it words a warning is not known", path.display());
+    }
+    Ok(out.stderr)
+}
+
 /// What a preprocessor run said of the text, as the key has it: its
 /// diagnostics, with the build's directories named as the store names them.
 /// Whether the compile prints a warning (and with `-Werror` whether it
@@ -1593,9 +1681,10 @@ fn diagnostic(line: &str) -> bool {
 /// (`#pragma GCC poison` of a defined name), an include directory that is a
 /// file. The run says it as the compile does.
 pub(super) fn said_of_the_text(said: &[u8], map: Option<&PathMap>) -> Vec<u8> {
-    let said = String::from_utf8_lossy(said);
+    let said = plain(said);
     let lines: Vec<&str> = said.lines().filter(|line| diagnostic(line)).collect();
-    let lines = lines.join("\n");
+    // The quotes follow the locale's character set, the words do not.
+    let lines = lines.join("\n").replace(['\u{2018}', '\u{2019}'], "'");
     map.map_or_else(|| lines.as_bytes().to_vec(), |map| map.messages_for_the_store(lines.as_bytes()))
 }
 
@@ -1616,7 +1705,7 @@ pub(super) fn text_and_said(text: &str, said: &[u8]) -> String {
 /// is keyed whole.
 pub(super) fn diagnosed_files(said: &[u8]) -> Option<BTreeSet<PathBuf>> {
     let mut files = BTreeSet::new();
-    for line in String::from_utf8_lossy(said).lines().filter(|line| diagnostic(line)) {
+    for line in plain(said).lines().filter(|line| diagnostic(line)) {
         let place = line.strip_prefix("In file included from ").or_else(|| line.strip_prefix("                 from ")).unwrap_or(line).trim_start();
         // The file's name ends at the `:` before a line number, or before
         // " In function" and its like.
@@ -2162,7 +2251,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "42ddd716d88b15fa006b1ffe6b55395a72caca7389d1642c29b012c80c9c7792");
+        assert_eq!(parts.key(), "6ba9de45bb3cffe98418992fb323c44c7d44949efc8f67663a4509ad00ad4c06");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2608,14 +2697,28 @@ mod tests {
         std::fs::write(tree.source(), format!("{SOURCE}#pragma GCC poison XPOISON\n")).unwrap();
         std::fs::write(tree.header(), format!("{HEADER}#define XPOISON 1\n")).unwrap();
         let defined = tree.key(&["-O2"]).parts;
+        let colored = tree.key(&["-O2", "-fdiagnostics-color=always"]).parts;
         std::fs::write(tree.header(), HEADER).unwrap();
         assert_ne!(tree.key(&["-O2"]).parts.text, defined.text, "poisoning a defined name");
+        assert_ne!(tree.key(&["-O2", "-fdiagnostics-color=always"]).parts.text, colored.text, "in colors too");
         std::fs::write(tree.source(), SOURCE).unwrap();
         // The run's `-v` lines are not what it said of the text.
         let said = b"Using built-in specs.\nignoring nonexistent directory \"/x\"\n/r/configs/c/build/T/a.c:2:2: warning: #warning hi [-Wcpp]\n";
         let map = tree.key(&["-O2"]).map.expect("a relocatable compile");
         assert_eq!(said_of_the_text(said, None), b"/r/configs/c/build/T/a.c:2:2: warning: #warning hi [-Wcpp]");
         assert!(said_of_the_text(&[b"In file included from ", tree.source().as_os_str().as_bytes(), b":1:\n"].concat(), Some(&map)).starts_with(b"In file included from @CACTUP_CONFIG@/"));
+    }
+
+    #[test]
+    fn reads_diagnostics_in_colors_and_knows_when_e_heeds_diagnostic_pragmas() {
+        let colored = b"\x1b[01m\x1b[Ka.c:2:9:\x1b[m\x1b[K \x1b[01;35m\x1b[Kwarning: \x1b[m\x1b[Kpoisoning existing macro \xe2\x80\x98\x1b[01m\x1b[KX\x1b[m\x1b[K\xe2\x80\x99 [\x1b]8;;https://gcc.gnu.org/x\x1b\\-Wfoo\x1b]8;;\x1b\\]\n";
+        assert_eq!(plain(colored), "a.c:2:9: warning: poisoning existing macro \u{2018}X\u{2019} [-Wfoo]\n");
+        assert_eq!(said_of_the_text(colored, None), b"a.c:2:9: warning: poisoning existing macro 'X' [-Wfoo]");
+        let said = |version: &str| format!("Using built-in specs.\ngcc version {version} (GCC)\n");
+        assert!(said_as_compiled(said("11.4.0").as_bytes(), false));
+        assert!(!said_as_compiled(said("11.4.0").as_bytes(), true));
+        assert!(said_as_compiled(said("13.1.0").as_bytes(), true));
+        assert!(!said_as_compiled(b"no version", true));
     }
 
     #[test]
@@ -2632,6 +2735,7 @@ mod tests {
         // And the knob itself: a header with nothing to leave out is the
         // same bytes either way.
         assert_ne!(exact.arguments, default.arguments);
+        assert!(String::from_utf8_lossy(&wording(Path::new("/usr/bin/gcc"), false).unwrap()).contains("unused variable"));
     }
 
     #[test]

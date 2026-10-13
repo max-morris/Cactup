@@ -5160,7 +5160,16 @@ fixed parts, so that the key does not change by accident:
   deciding a `#warning`, a `#pragma GCC dependency` behind `_Pragma` or a
   macro, a definition the narrowed key leaves out that `#pragma GCC poison`
   names), and the run prints it as the compile does. For gfortran a run that
-  printed anything is checked after the compile by running it again.
+  printed anything is checked after the compile by running it again. What
+  was said is read without the terminal's escape sequences
+  (`-fdiagnostics-color=always`), and with the locale's curly quotes as
+  plain ones. GCC before 13 ignores `#pragma GCC diagnostic` under `-E`, so
+  where the text has one (and the run names no GCC 13 or later) the files
+  are not narrowed: the compile may print, or fail on, a warning the run
+  did not say. With `build-cache-preserve-exact-warnings = true` the key
+  also has how the compiler (for CUDA, its host compiler) words a warning
+  in the compile's environment, from a small run of its own: the language
+  and quotes follow the locale as the host resolves it.
 - **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
   and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
   order, plus the language by the source's suffix, and with debug
