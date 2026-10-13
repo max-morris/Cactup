@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-15";
+pub const KEY_LABEL: &str = "key-16";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -443,7 +443,9 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     // The locale only where the compiler's trial says it can matter, and
     // wherever the compile converts character sets: the trial does not, and
     // a conversion such as `ASCII//TRANSLIT` follows the locale (§18.8).
-    let environment = environment::digest(!compiler.locale_neutral || compile.charset)?;
+    // With exact warnings (decision 31), the locale too: it says which
+    // language they are printed in, and with which quotes.
+    let environment = environment::digest(!compiler.locale_neutral || compile.charset || conf.exact_warnings)?;
     // A compile that converts character sets loads converters and locale
     // data nothing here follows (`GCONV_PATH`, `LOCPATH`, the system's
     // converter modules; tried: one charset name, two converters or two
@@ -511,7 +513,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     }
     // Whether each directory searched for headers is there: a compiler
     // warns of one that is not (gfortran always, GCC and Clang with
-    // `-Wmissing-include-dirs`), and with `-Werror` fails.
+    // `-Wmissing-include-dirs`) or is no directory (GCC always), and with
+    // `-Werror` fails.
     let mut words = compile.preprocess.iter().chain(&compile.keyed);
     while let Some(word) = words.next() {
         if ["-I", "-isystem", "-iquote", "-idirafter"].iter().any(|option| word == option)
@@ -519,7 +522,11 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         {
             arguments.feed(b"include directory");
             arguments.feed(&mapped(dir.as_bytes()));
-            arguments.feed(if Path::new(dir).is_dir() { b"there" } else { b"not there" });
+            arguments.feed(match std::fs::metadata(dir) {
+                Ok(meta) if meta.is_dir() => b"there",
+                Ok(_) => b"no directory",
+                Err(_) => b"not there",
+            });
         }
     }
     // A CUDA object records where it was compiled with or without debug
@@ -1273,6 +1280,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
         bail!("the preprocessor failed ({status})");
     }
     flags_from_elsewhere(compiler.family, compiler.specs.as_deref(), &said).map_err(anyhow::Error::msg)?;
+    let text = text_and_said(&text, &said_of_the_text(&said, map));
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
@@ -1569,6 +1577,30 @@ fn diagnostic(line: &str) -> bool {
         || line.contains(": In function ")
         || line.contains(": In member function ")
         || line.contains(": At top level")
+}
+
+/// What a preprocessor run said of the text, as the key has it: its
+/// diagnostics, with the build's directories named as the store names them.
+/// Whether the compile prints a warning (and with `-Werror` whether it
+/// fails) can turn on what no output shows: `__has_include`'s answer
+/// deciding a `#warning`, when files were last changed (`#pragma GCC
+/// dependency`, however it is spelled), a definition the key leaves out
+/// (`#pragma GCC poison` of a defined name), an include directory that is a
+/// file. The run says it as the compile does.
+pub(super) fn said_of_the_text(said: &[u8], map: Option<&PathMap>) -> Vec<u8> {
+    let said = String::from_utf8_lossy(said);
+    let lines: Vec<&str> = said.lines().filter(|line| diagnostic(line)).collect();
+    let lines = lines.join("\n");
+    map.map_or_else(|| lines.as_bytes().to_vec(), |map| map.messages_for_the_store(lines.as_bytes()))
+}
+
+/// The text part of a key: the digest of a preprocessor run's output
+/// `text`, with what the run said of it.
+pub(super) fn text_and_said(text: &str, said: &[u8]) -> String {
+    let mut hasher = Hasher::new("text and what was said of it");
+    hasher.feed(text.as_bytes());
+    hasher.feed(said);
+    hasher.hex()
 }
 
 /// The files a preprocessor run's diagnostics name (where each was said,
@@ -2123,7 +2155,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "c5356e2b9983c3d9518955c58b60f04275cb4bebb3dc0ae9b81c4f8d63230ee5");
+        assert_eq!(parts.key(), "42ddd716d88b15fa006b1ffe6b55395a72caca7389d1642c29b012c80c9c7792");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2531,6 +2563,64 @@ mod tests {
         std::fs::write(tree.header(), HEADER).unwrap();
         assert!(pragma_dependency(b"#pragma GCC dependency \"a\"\n") && pragma_dependency(b" # pragma GCC dependency x\n"));
         assert!(!pragma_dependency(b"#pragma GCC poison x\n") && !pragma_dependency(b"// #pragma GCC dependency\n"));
+        // An include directory that is a file draws another.
+        let file = tree.cc.join("a-file").display().to_string();
+        std::fs::write(&file, "").unwrap();
+        assert_ne!(tree.key(&["-O2", "-I", &file]).parts.arguments, without.arguments);
+    }
+
+    /// Whether the compile warns can turn on what no output shows; the
+    /// key has what the preprocessor run said (review 6).
+    #[test]
+    fn what_the_preprocessor_says_is_keyed() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        let plain = tree.key(&["-O2"]).parts;
+        // `__has_include` deciding only a `#warning`.
+        let local = tree.source().with_file_name("local_config.h");
+        std::fs::write(tree.source(), format!("#if !__has_include(\"local_config.h\")\n#warning no local config\n#endif\n{SOURCE}")).unwrap();
+        let warned = tree.key(&["-O2"]);
+        std::fs::write(&local, "").unwrap();
+        let mut quiet = tree.key(&["-O2"]);
+        assert_ne!(warned.parts.text, quiet.parts.text, "__has_include's answer");
+        assert!(warned.parts.text != plain.text && quiet.still_holds());
+        std::fs::remove_file(&local).unwrap();
+        // A `#pragma GCC dependency` as no line of a file spells it.
+        let dep = tree.cc.join("dep.txt");
+        std::fs::write(&dep, "").unwrap();
+        std::fs::write(tree.source(), format!("_Pragma(\"GCC dependency \\\"{}\\\"\")\n{SOURCE}", dep.display())).unwrap();
+        let set = |file: &Path, seconds: i64| std::fs::File::options().write(true).open(file).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64)).unwrap();
+        set(&tree.source(), 1_000_000_000);
+        let older = tree.key(&["-O2"]).parts;
+        set(&dep, 900_000_000);
+        assert_ne!(tree.key(&["-O2"]).parts.text, older.text, "the source is older than the file it depends on, or not");
+        // A name poisoned in the source and defined in a header the key
+        // narrows: the warning names the source alone.
+        std::fs::write(tree.source(), format!("{SOURCE}#pragma GCC poison XPOISON\n")).unwrap();
+        std::fs::write(tree.header(), format!("{HEADER}#define XPOISON 1\n")).unwrap();
+        let defined = tree.key(&["-O2"]).parts;
+        std::fs::write(tree.header(), HEADER).unwrap();
+        assert_ne!(tree.key(&["-O2"]).parts.text, defined.text, "poisoning a defined name");
+        std::fs::write(tree.source(), SOURCE).unwrap();
+        // The run's `-v` lines are not what it said of the text.
+        let said = b"Using built-in specs.\nignoring nonexistent directory \"/x\"\n/r/configs/c/build/T/a.c:2:2: warning: #warning hi [-Wcpp]\n";
+        let map = tree.key(&["-O2"]).map.expect("a relocatable compile");
+        assert_eq!(said_of_the_text(said, None), b"/r/configs/c/build/T/a.c:2:2: warning: #warning hi [-Wcpp]");
+        assert!(said_of_the_text(&[b"In file included from ", tree.source().as_os_str().as_bytes(), b":1:\n"].concat(), Some(&map)).starts_with(b"In file included from @CACTUP_CONFIG@/"));
+    }
+
+    #[test]
+    fn exact_warnings_key_the_locale() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        let tree = Tree::new();
+        let mut exact = tree.conf.clone();
+        exact.exact_warnings = true;
+        let keyed = |conf: &BuildConf| key(conf, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap().parts.environment;
+        assert_ne!(keyed(&exact), keyed(&tree.conf));
     }
 
     #[test]

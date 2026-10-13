@@ -12,7 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, Named, Parts, PathMap, Used, PREPROCESSOR};
+use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, said_of_the_text, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::BTreeSet;
@@ -943,6 +943,9 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
             reads.extend(fs::read(&listed).ok().as_deref().and_then(depend_files).context("nvcc's preprocessor did not say what it read")?);
         }
         text.feed(pass_text.as_bytes());
+        // And what it said of the text, which no output shows (as for C and
+        // C++: `key::said_of_the_text`).
+        text.feed(&said_of_the_text(&said, map));
         bytes += pass_bytes;
         for (name, entered) in pass_named {
             *named.entry(name).or_default() |= entered;

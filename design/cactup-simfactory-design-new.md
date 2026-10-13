@@ -1890,8 +1890,9 @@ who sets it. Where a job needs one, it is frozen like the machine's would be.
 
 And maintenance knobs for the build cache (D15, §18): `build-cache`
 (`off`, the default, `record`, `serve` or `audit`; read leniently — garbage
-means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8) and
-`build-cache-size` (§18.9); the store's root is the path knob
+means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8),
+`build-cache-preserve-exact-warnings` (`false`, the default, or `true`:
+§18.5, decision 31) and `build-cache-size` (§18.9); the store's root is the path knob
 `build-cache-home` (below, §18.7). They are not in the snapshot either, but a build does
 depend on them, on a compute node included: `prepare` resolves them and
 freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
@@ -4803,7 +4804,9 @@ cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
 directory and the Cactus root, what keys objects to their platform
 (§18.5): the machine, the build universe, and a SHA-256 of the build-phase
 environment setup; the store's root (§18.7); and
-whether keys use the path map (§18.8, knob `build-cache-relocate`). If that
+whether keys use the path map (§18.8, knob `build-cache-relocate`); and
+whether warnings are kept exact (§18.5, knob
+`build-cache-preserve-exact-warnings`). If that
 cannot be written, the build goes on without the cache and says so.
 
 The build script gains one step and changes one (`objcache::Staged`):
@@ -5120,7 +5123,9 @@ fixed parts, so that the key does not change by accident:
   builds with `build-cache-preserve-exact-warnings = true` (decision 31:
   by default a served object's warnings are best effort, and in rare cases
   name a line or a macro of another configuration's headers),
-  keep whole files. The names are read
+  keep whole files; with that knob the locale is keyed too (decision 5
+  leaves it out where the object does not depend on it, but the messages'
+  language and quotes do). The names are read
   as the compilers write them, as C strings (Clang writes a tab or a byte
   outside ASCII in octal); a marker whose name cannot be read leaves the
   compile without a key. So does a file the preprocessor *entered* (marker
@@ -5143,11 +5148,19 @@ fixed parts, so that the key does not change by accident:
   qbd) takes another branch of a `__has_include`, makes another object,
   and is not stored, though the key's runs before and after saw the file.
 - **What decides a warning or a failure besides the files.** Whether each
-  include directory (`-I`, `-isystem`, `-iquote`, `-idirafter`) is there
-  (gfortran warns of one that is not, GCC and Clang with
-  `-Wmissing-include-dirs`; with `-Werror` the compile fails); and a unit
-  that reads a `#pragma GCC dependency` is not cached (its warning compares
-  modification times).
+  include directory (`-I`, `-isystem`, `-iquote`, `-idirafter`) is there,
+  and is a directory (gfortran warns of one that is not there, GCC and
+  Clang with `-Wmissing-include-dirs`, GCC always of one that is a file;
+  with `-Werror` the compile fails); a unit that reads a `#pragma GCC
+  dependency` written as one is not cached (its warning compares
+  modification times). And what the key's preprocessor run says of the
+  text (its diagnostics; for gfortran its `Warning:` and `Error:` lines),
+  mapped as stored messages are, is in the text part: a warning can turn on
+  what neither the text nor the files show (`__has_include`'s answer
+  deciding a `#warning`, a `#pragma GCC dependency` behind `_Pragma` or a
+  macro, a definition the narrowed key leaves out that `#pragma GCC poison`
+  names), and the run prints it as the compile does. For gfortran a run that
+  printed anything is checked after the compile by running it again.
 - **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
   and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
   order, plus the language by the source's suffix, and with debug

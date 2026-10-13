@@ -225,6 +225,10 @@ pub struct Dependencies {
     /// as the dependency run's driver did (its `-v`, in its own directory).
     pub driven: Driven,
     pub run_driven: Driven,
+    /// What the run said of the text (gfortran's message lines): whether
+    /// the compile warns can turn on what no file listed shows
+    /// (`key::said_of_the_text`).
+    pub said: Vec<u8>,
 }
 
 /// What the gfortran driver finds by searching its own prefixes (its
@@ -456,10 +460,13 @@ impl Fortran {
         // file sends the check to that run.
         let taken = places.iter().find(|place| !empty(place)).cloned();
         let unplaced = unplaced.cloned();
+        let said = !deps.said.is_empty();
         self.watched = places.clone();
         match (taken, unplaced) {
             (Some(place), _) => self.unfollowed(format!("{} is where the compile looks first", place.display()), true),
             (None, Some(input)) => self.unfollowed(format!("{} was found where the compile does not look", input.display()), false),
+            // What the run said, only the run can say again.
+            (None, None) if said => self.unfollowed("the dependency run printed a message".to_owned(), false),
             (None, None) => self.places = Ok(places),
         }
     }
@@ -646,6 +653,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     for module in &deps.modules {
         hasher.feed(module.as_bytes());
     }
+    hasher.feed(&map.map_or_else(|| deps.said.clone(), |map| map.messages_for_the_store(&deps.said)));
     let text_bytes = compiled.len() as u64;
     let (files, seen, count) = read_inputs(&deps, map, &fortran)?;
     // The name the compile gives must reach the file read, by the way it
@@ -734,7 +742,8 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
     let Ok(deps) = dependencies(compiler, name, fortran) else { return false };
     deps.modules == fortran.modules
         && fortran.deps.as_ref().is_some_and(|before| {
-            before.run_driven == deps.run_driven && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == before.driven)
+            before.said == deps.said
+                && before.run_driven == deps.run_driven && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == before.driven)
         })
         && read_inputs(&deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen)
 }
@@ -835,6 +844,15 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
     Ok((files, seen, named.len()))
 }
 
+/// gfortran's message lines in what a dependency run wrote on stderr (each
+/// `Warning:` or `Error:` line; the lines before it show where, and the
+/// source), without the driver's own `-v` lines.
+fn said_of_the_text(stderr: &[u8]) -> Vec<u8> {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr.lines().filter(|line| ["Warning: ", "Error: ", "Fatal Error: "].iter().any(|kind| line.starts_with(kind))).collect();
+    lines.join("\n").into_bytes()
+}
+
 /// Does the file at `path` begin as a gzip stream does?
 fn is_gzip(path: &Path) -> bool {
     let mut magic = [0u8; 2];
@@ -870,6 +888,7 @@ fn dependencies(compiler: &Compiler, name: &OsStr, fortran: &Fortran) -> Res<Dep
     // What the driver found for itself for this run, by its own `-v` (for
     // the compile, right before it: [`Fortran::before_compile`]).
     deps.run_driven = Driven::from_driver(&out.stderr);
+    deps.said = said_of_the_text(&out.stderr);
     Ok(deps)
 }
 
@@ -952,7 +971,7 @@ fn parse_rule(out: &[u8], compiled: &Path, copies: Option<&Path>) -> Result<Depe
     }
     inputs.sort();
     inputs.dedup();
-    Ok(Dependencies { inputs, modules, driven: Driven::default(), run_driven: Driven::default() })
+    Ok(Dependencies { inputs, modules, driven: Driven::default(), run_driven: Driven::default(), said: Vec::new() })
 }
 
 /// The sources of [`relocates`]' trial: a Cactus Fortran compile in
