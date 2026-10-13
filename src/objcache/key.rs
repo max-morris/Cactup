@@ -130,13 +130,6 @@ impl PathMap {
         Some(Self { from_to })
     }
 
-    /// Each directory the map knows and the name it is mapped to, longest
-    /// first.
-    pub fn pairs(&self) -> Vec<(PathBuf, &'static str)> {
-        let strip = |from: &[u8]| PathBuf::from(OsStr::from_bytes(from.strip_suffix(b"/").unwrap_or(from)));
-        self.from_to.iter().map(|(from, to)| (strip(from), *to)).collect()
-    }
-
     /// The compiler flags that make a compile honor the map, for `__FILE__`
     /// and for debug information. Shortest directory first, so that the
     /// last map that matches a name is the most specific one.
@@ -404,8 +397,14 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         // Seen for real: one compile of one file, run twice, two objects.
         return Err("it targets the processor it runs on (native), and this host's processors are not all alike".to_owned());
     }
-    // Both of a CUDA compile's compilers must make one object in two places.
-    let map = PathMap::new(conf, &compiler, &compile).filter(|_| cuda_run.as_ref().is_none_or(|(_, host)| host.relocates));
+    // Both of a CUDA compile's compilers must make one object in two places;
+    // and `nvcc` splits what it hands on (`-Xcompiler`, `-Xcudafe`) at
+    // commas, so a map of a name with one cannot be given through it.
+    let comma = |map: &PathMap| {
+        let source = std::env::current_dir().map(|cwd| cwd.join(&compile.source)).unwrap_or_default();
+        source.as_os_str().as_bytes().contains(&b',') || map.flags().iter().any(|flag| flag.as_bytes().contains(&b','))
+    };
+    let map = PathMap::new(conf, &compiler, &compile).filter(|map| cuda_run.as_ref().is_none_or(|(_, host)| host.relocates && !comma(map)));
     let mapped = |text: &[u8]| map.as_ref().map_or_else(|| text.to_vec(), |map| map.apply(text));
 
     let mut arguments = Hasher::new("arguments");
@@ -442,11 +441,19 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             }
         }
     }
-    if compile.debug || compile.language.is_fortran() {
+    // A CUDA object records where it was compiled with or without debug
+    // information, and the names of `nvcc`'s files beside the object, made
+    // from the object's own (`--objdir-as-tempdir`; seen on qbd).
+    let cuda = compile.language == compile::Language::Cuda;
+    if compile.debug || compile.language.is_fortran() || cuda {
         let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
         arguments.feed(b"cwd");
         arguments.feed(&mapped(cwd.as_os_str().as_bytes()));
         arguments.feed(&mapped(std::env::var_os("PWD").unwrap_or_default().as_bytes()));
+        if cuda {
+            arguments.feed(b"object");
+            arguments.feed(&mapped(cwd.join(&compile.output).as_os_str().as_bytes()));
+        }
     }
 
     let name = argv[0].clone();
@@ -645,8 +652,10 @@ impl Keyed {
             // `nvcc`'s own form of them, and the name `cudafe++` makes the
             // module ID from (M4), mapped where the map holds.
             Some(_) => {
-                let source = std::env::current_dir().map(|cwd| cwd.join(&self.compile.source)).unwrap_or_else(|_| self.compile.source.clone());
-                out.extend(cuda::map_flags(&source, &self.map.as_ref().map(PathMap::pairs).unwrap_or_default()));
+                if let Some(map) = &self.map {
+                    let source = std::env::current_dir().map(|cwd| cwd.join(&self.compile.source)).unwrap_or_else(|_| self.compile.source.clone());
+                    out.extend(cuda::map_flags(&source, map));
+                }
             }
             None => out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default()),
         }

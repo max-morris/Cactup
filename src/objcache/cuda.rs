@@ -253,18 +253,28 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
     let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
     // With an entity of internal linkage, whose name `cudafe++` makes from
     // its process ID (decision 24).
-    let source = "namespace { __device__ int hidden; }\n__device__ int twice(int v) { return 2 * v + hidden; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n";
+    let text = "namespace { __device__ int hidden; }\n__device__ int twice(int v) { return 2 * v + hidden; }\n__global__ void k(int *p) { p[threadIdx.x] = twice(p[threadIdx.x]); }\nvoid launch(int *p) { k<<<1, 32>>>(p); }\n";
+    // Laid out as Cactus lays out a compile (the source copied into the
+    // configuration's build directory, run from its scratch directory),
+    // in trees and configurations of names of other lengths: the map has
+    // the configuration directory inside the root to get right.
     let mut objects = Vec::new();
-    for place in ["a", "b"] {
+    for (place, config) in [("one/Cactus", "sim"), ("another/deeper/Cactus", "simulation")] {
         let root = trial_dir.join(place);
-        if fs::create_dir_all(root.join("src")).is_err() || fs::write(root.join("src/trial.cu"), source).is_err() {
+        let config = root.join("configs").join(config);
+        let (build, scratch) = (config.join("build/Thorn"), config.join("scratch"));
+        let source = build.join("trial.cu");
+        let made = [&build, &scratch, &config.join("bindings/include")].iter().all(|dir| fs::create_dir_all(dir).is_ok());
+        if !made || fs::write(&source, text).is_err() {
             return false;
         }
-        let map = [(root.clone(), "/cactup-root")];
+        let object = build.join("trial.cu.o");
         let mut args: Vec<OsString> = ["-x", "cu", "-g", "-O2", "--relocatable-device-code=true", "--objdir-as-tempdir", "-c", "-o"].map(OsString::from).to_vec();
-        args.push(root.join("trial.o").into_os_string());
-        args.push(root.join("src/trial.cu").into_os_string());
-        args.extend(map_flags(&root.join("src/trial.cu"), &map));
+        args.push(object.clone().into_os_string());
+        args.push(source.clone().into_os_string());
+        args.push(OsString::from("-I"));
+        args.push(config.join("bindings/include").into_os_string());
+        args.extend(map_flags(&source, &PathMap::for_trial(&root, &config)));
         let mut command = match isolate {
             true => isolated(path, name, &args),
             false => {
@@ -274,8 +284,8 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
             }
         };
         command
-            .current_dir(&root)
-            .env("PWD", &root)
+            .current_dir(&scratch)
+            .env("PWD", &scratch)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -290,7 +300,7 @@ pub(super) fn relocates(path: &Path, name: &OsStr, dir: &Path, isolate: bool) ->
                 return false;
             }
         }
-        match fs::read(root.join("trial.o")) {
+        match fs::read(&object) {
             Ok(object) => objects.push(object),
             Err(_) => return false,
         }
@@ -451,30 +461,19 @@ fn wait_for(pid: i32) -> i32 {
 }
 
 /// The flags that have an `nvcc` compile of `source` honor the path map
-/// `map` (each directory and the name it is mapped to): the host
-/// compiler's prefix map (through `-Xcompiler`), and the name `cudafe++`
-/// is given for the source, of which the module ID is a hash.
-pub fn map_flags(source: &Path, map: &[(PathBuf, &str)]) -> Vec<OsString> {
-    let mut mapped = source.as_os_str().as_bytes().to_vec();
+/// `map`: the host compiler's prefix map (through `-Xcompiler`, shortest
+/// directory first, as the host compiler takes the last map that matches),
+/// and the name `cudafe++` is given for the source, of which the module ID
+/// is a hash.
+pub fn map_flags(source: &Path, map: &PathMap) -> Vec<OsString> {
     let mut flags = Vec::new();
-    for (from, to) in map {
-        let mut from_slash = from.as_os_str().as_bytes().to_vec();
-        if !from_slash.ends_with(b"/") {
-            from_slash.push(b'/');
-        }
-        if let Some(rest) = mapped.strip_prefix(from_slash.as_slice()) {
-            mapped = [to.as_bytes(), b"/", rest].concat();
-        }
-        let mut flag = OsString::from("-ffile-prefix-map=");
-        flag.push(from.as_os_str());
-        flag.push("=");
-        flag.push(to);
+    for flag in map.flags() {
         flags.push(OsString::from("-Xcompiler"));
         flags.push(flag);
     }
     flags.push(OsString::from("-Xcudafe"));
     let mut name = OsString::from("--orig_src_path_name=");
-    name.push(OsStr::from_bytes(&mapped));
+    name.push(OsStr::from_bytes(&map.apply(source.as_os_str().as_bytes())));
     flags.push(name);
     flags
 }
@@ -684,6 +683,27 @@ mod tests {
         let out = Command::new(&me).arg(super::super::INIT_VERB).arg(&sh).arg("sh").arg("-c").arg("true").output().unwrap();
         assert_eq!(out.status.code(), Some(127));
         assert!(String::from_utf8_lossy(&out.stderr).contains("not the first process"));
+    }
+
+    #[test]
+    fn maps_the_configuration_inside_the_root() {
+        // GCC takes the last map that matches: the root's first, then the
+        // configuration's (seen on qbd, the other way round: every config
+        // dir left as `/cactup-root//configs/<name>`).
+        let map = PathMap::for_trial(Path::new("/w/Cactus"), Path::new("/w/Cactus/configs/sim"));
+        let flags = map_flags(Path::new("/w/Cactus/configs/sim/build/T/a.cu"), &map);
+        let flags: Vec<&str> = flags.iter().map(|flag| flag.to_str().unwrap()).collect();
+        assert_eq!(
+            flags,
+            [
+                "-Xcompiler",
+                "-ffile-prefix-map=/w/Cactus/=/cactup-root/",
+                "-Xcompiler",
+                "-ffile-prefix-map=/w/Cactus/configs/sim/=/cactup-root/configs/@config/",
+                "-Xcudafe",
+                "--orig_src_path_name=/cactup-root/configs/@config/build/T/a.cu",
+            ]
+        );
     }
 
     #[test]
