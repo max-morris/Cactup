@@ -46,7 +46,7 @@ are spec §18.1; hold them when touching it:
 - **Signals and exit statuses pass through.** Forward stop signals to the
   compiler, leave ignored ones ignored (`nohup`), and end the way the
   compiler ended. `rustix` is there for the system calls std lacks
-  (`kill(2)`, `waitpid(2)`, `unshare(2)`): it makes them itself, without the
+  (`kill(2)`, `waitpid(2)`): it makes them itself, without the
   C library, so the binary stays static (D13).
 - **Hermetic (D11).** The wrapper and the probe read the attempt's frozen
   `cc/config.toml`, the configuration directory named in it, and the store

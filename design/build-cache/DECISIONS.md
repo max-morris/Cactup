@@ -396,7 +396,7 @@ Asked as seven questions with options; the answers, in Max's numbering.
     designed from Cray's documentation first, verified later.
 
 24. **`nvcc` runs in a PID namespace of its own; a fallback where there is
-    none** (2026-10-12). `cudafe++` mixes its process ID (`getpid()`, in
+    none** (2026-10-12; superseded by 25, the same day). `cudafe++` mixes its process ID (`getpid()`, in
     `make_module_id`) into the module ID and the names of internal-linkage
     device entities, so a CUDA file with any (an anonymous namespace, a
     `static __device__` variable, Thrust's placeholders: 86 of 99 CarpetX
@@ -424,6 +424,26 @@ Asked as seven questions with options; the answers, in Max's numbering.
     calls std lacks" (`CLAUDE.md`, D13), and the first version, by
     util-linux's `unshare` (mapping the user to root), is kept on the branch
     `feature/build-cache-m4-unshare` (`bfc016a`).
+
+25. **A cached `nvcc` compile runs `nvcc`'s own steps, with the module ID
+    given** (2026-10-12). Under the namespace, the first qbd audit across
+    two configurations still found 86 of 99 CUDA objects wrong: where a
+    unit defines no routine or variable of external linkage to name its
+    module by, `cudafe++` makes the ID of the working directory, its
+    source's modification time as local time, and its process ID
+    (`M4-CUDA.md`, tried), so every configuration and every copy of a
+    source made another object; no option changes that. Without
+    `--gen_module_id_file` it reads the ID from its file instead. Offered
+    (a) running `nvcc`'s dry run step by step with an ID made of the key,
+    (b) keying the working directory, mtime and time zone (hits only for
+    the same copy in the same configuration), or (c) not caching such
+    units (not knowable before compiling), Max chose "Replay, set the ID".
+    The PID then enters nothing, so the namespace of decision 24 is gone
+    (kept on `feature/build-cache-m4-pidns`), and with it the need for
+    user namespaces; `rustix` is back to `kill(2)` and `waitpid(2)`. An
+    `nvcc` whose dry run cactup cannot repeat as written (an `rm` of
+    anything but one file, no `cudafe++` making one ID in a file), or
+    that does not take the ID in the identity's trial, is not cached.
 
 ## Still open
 

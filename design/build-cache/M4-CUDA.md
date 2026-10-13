@@ -81,7 +81,9 @@ writes are removed by `nvcc` itself, and none is an output of the recipe.
    `-ffile-prefix-map` (through `-Xcompiler`), the objects compiled from
    two directories are identical, with and without `-g`. So a compile the
    cache runs passes the source's mapped name that way, as the path map
-   does for GCC, and CUDA objects are shared across installations.
+   does for GCC, and CUDA objects are shared across installations. (The
+   probes' sources each defined a routine of external linkage; for those
+   that do not, the module ID's second part is another matter: below.)
 2. **The empty `LD_LIBRARY_PATH` entry `nvcc.profile` adds: answered**
    (decision 22): such entries are watched from each compile's directory,
    not refused. The identity follows `nvcc`'s own environment for the
@@ -91,3 +93,36 @@ writes are removed by `nvcc` itself, and none is an output of the recipe.
 4. **Audit mode**: audit builds on qbd's compute nodes (A100, `gpu2`, by
    Slurm; Max, 2026-10-12: no load to worry about), then saturn and
    athena.
+
+## The module ID (decisions 24 and 25) *(seen, qbd, CUDA 12.2.1)*
+
+`cudafe++` names a translation unit's module ID (`__nv_module_id`, the
+`__cudaRegisterLinkedBinary_`/`__fatbinwrap_` symbols, and every entity of
+internal linkage, `_GLOBAL__N__<id>…`) `_<h1>_<length>_<name>_<h2>`, `h1` a
+hash of `--orig_src_path_name`. Where the unit defines a routine or
+variable of external linkage that serves, `h2` comes from its name and
+nothing else changes it (mtime, inode, directory, host, time: tried).
+Where none does (86 of 99 CarpetX units), `h2` is made of the working
+directory (`getcwd`), the time the source file was last changed rendered as
+local time (`TZ` changes it; a file that cannot be found gives the time of
+the compile), and the process ID, appended as `_<pid>`. Cactus compiles from
+each configuration's `scratch` directory, on a copy of each source made
+for that configuration: every configuration, and every copy, made another
+object. `-Xcudafe --module_id=…` is accepted and ignored; `cudafe++`'s debug
+levels do not print the strings it hashes.
+
+Without `--gen_module_id_file`, `cudafe++` reads the ID from the file
+`--module_id_file_name` names, as `cicc` does after it, and every name
+above carries it (tried). So a compile the cache runs is `nvcc`'s own dry
+run (`-dryrun`, of the compile with the map's flags), run step by step by
+cactup in the environment it gives, with that one flag left out and an ID
+made of the key in `cudafe++`'s shape (`cuda::Plan`, `cuda::module_id`):
+the same twice, from any directory, at any time, under any process ID;
+three runs without a PID namespace gave identical objects. A step that
+fails ends the compile with its exit status and its messages, as `nvcc`
+does (tried with an undefined identifier: both exit 2, same words). The
+identity's trial compiles a unit without an external routine in two
+places with one given ID and requires the ID in both objects
+(`takes_module_id`), and the objects equal (`relocates`); an `nvcc` that
+does not take the ID is not cached. The PID namespace of decision 24 is
+gone with it (kept on `feature/build-cache-m4-pidns`).
