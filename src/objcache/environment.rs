@@ -29,8 +29,9 @@ const KEYED: &[&str] = &[
     // Search paths the compiler adds to the ones on its command line.
     "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX",
     "SDKROOT",
-    // Behavior switches.
-    "GCC_COLORS", "CLANG_NO_DEFAULT_CONFIG",
+    // Behavior switches, and how GCC words its diagnostics (its fix-it
+    // lines, links, the width it wraps to), which are stored with the object.
+    "GCC_COLORS", "CLANG_NO_DEFAULT_CONFIG", "GCC_EXTRA_DIAGNOSTIC_OUTPUT", "GCC_URLS", "TERM_URLS", "COLUMNS",
     // The modules a machine's environment setup loaded.
     "LOADEDMODULES", "_LMFILES_",
     // What `nvcc` and the programs it runs read (seen, M4): flags its

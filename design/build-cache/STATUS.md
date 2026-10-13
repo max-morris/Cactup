@@ -55,10 +55,11 @@ the last milestone, for when that host is not at hand.
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
 | M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews), its follow-ups at `05c67a3` and `e29e593` |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
-| M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **written** (2026-10-12): qbd audit across two configurations all `same`; decisions 24, 25; design note `M4-CUDA.md`; review pair next |
-| M4b | Cray compilers: C, C++ and Fortran through `cc`, `CC`, `ftn`, seen through to the compiler they run, with the module environment that shapes them; Cray's `CC` as `nvcc`'s host compiler (decision 23) | **after M4**; no Cray machine to probe yet |
-| M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; the build's summary line counts compiles kept out and points at it; a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others | **after M4** (Max, 2026-10-11; placed between the GPU milestones 2026-10-12) |
-| M6 | HIP and other non-NVIDIA GPU compiles (`hipcc`, AMD's `amdclang`/`amdclang++`, and what else the MDB's GPU machines use) | **after M5** (Max, 2026-10-12) |
+| M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **in review** (round 4 next): decisions 24–29; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed |
+| M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; the build's summary line counts compiles kept out and points at it; a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | **next**, then the merge to master (decision 27) |
+| M4b | Cray compilers: C, C++ and Fortran through `cc`, `CC`, `ftn`, seen through to the compiler they run, with the module environment that shapes them; Cray's `CC` as `nvcc`'s host compiler (decision 23) | follow-up after the merge (decision 27); no Cray machine to probe yet |
+| M5b | Take on the cases where whole files stay keyed (decision 27): Clang's file checksums, `-g3`, preprocessor warnings, redefinitions | follow-up after the merge (decision 27) |
+| M6 | HIP and other non-NVIDIA GPU compiles (`hipcc`, AMD's `amdclang`/`amdclang++`, and what else the MDB's GPU machines use) | follow-up after the merge (decision 27) |
 | later | the narrower key revisited with audit mode | not started |
 
 ## What M0a is
@@ -2066,6 +2067,36 @@ lints. Key label `key-10`. Left: MDB machines without
 `--objdir-as-tempdir` (et-cuda, qbc, db1, slurmjupyter) are never cached
 (coverage, for M5's doctor to point at).
 
+### M4, round 3 (on `c3b03d7`): BLOCKED by both
+
+Round 2's fixes held (a thorn header ahead of CUDA's, `-G`/`-lineinfo`,
+another `g++` on `PATH`, `CPATH` shadows; served objects with given IDs
+ran right on an A100, linked with one `nvcc` made). Blocking, fixed in
+`feature/build-cache-next` (decisions 28, 29):
+- (A, B) decision 26 served stale messages: a dropped definition can draw
+  a warning about itself (a stray quote, `/*` in a comment, `unix`
+  redefined, `#pragma GCC poison`), and the compiler's messages can quote
+  or name one (a `-Wsign-compare` range over it; "did you mean"). Now no
+  line is dropped where the key's preprocessor run diagnoses anything, and
+  a hit with messages must match the files whole (decision 29); the
+  macros `nvcc` gives its passes count as given.
+- (B) a line that only looks like a definition, inside a block comment
+  whose end is followed by code: the scanner now follows comments and raw
+  strings.
+- (B) `Plan::ahead` named a header by the first directory above it: with
+  `-I<CUDA root>` a thorn's `math_constants.h` went unchecked. Now every
+  name below every directory searched.
+- (B) `GCC_EXTRA_DIAGNOSTIC_OUTPUT` (and `GCC_URLS`, `TERM_URLS`, `COLUMNS`)
+  keyed.
+- (A, B) the bench audit's wrong hit: the build on qbd358, whose file
+  system stalled, stored it (B re-ran the thornlist cleanly: byte for byte
+  the audit's object). Decision 28: each stored compile is held to what its
+  key read.
+Non-blocking, done: the spec's word on stop signals (a step may end with
+a status of its own). Left: `read_files` holds a unit's files in memory at
+once (about 20 MB for a CarpetX CUDA unit); the C/C++ own-reads check
+canonicalizes only where names differ.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -2282,29 +2313,20 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M4 (CUDA) written and passing on qbd, not yet reviewed (latest `395ce04`
-plus the docs of decision 25). Tested on qbd in a separate instance
-(`/work/mmorris/cactup-m4/`, its own `CACTUP_HOME`, installation `m4` at
-`/ddnB/work/mmorris/m4`, builds submitted to `single` by the MDB's build
-default; scripts `pair.sh`, `auditdbg2.sh` there; probes in
-`probe-h2/`). Serve `m4a` then audit `m4b` into a fresh `store6`,
-2026-10-12: **all 404 compiles hit and `same`, `nvcc`'s 99 included**
-(0 wrong, 0 not deterministic). The way there, on top of `cuda.rs` and
-`parse_cuda`: the `nvcc` flags gave the path map's prefix maps longest
-first, so GCC (which takes the last match) left every configuration
-directory unmapped (fixed, `9018772`; the trial now lays the source out as
-Cactus does, in two trees, the config inside the root; a CUDA object keys
-its compile directory and object name, both mapped); then `cudafe++`'s
-module ID, made of the working directory, the source's mtime as local time
-and the PID for units with no external routine to name it by (86 of 99),
-solved by running `nvcc`'s own steps with the ID given (decision 25,
-`395ce04`; the PID namespace of decision 24 is gone, kept on
-`feature/build-cache-m4-pidns`). Earlier fixes: trials ran a compiler by
-its bare name, so a GCC found another GCC's installation along `PATH`
-(qbd's gcc 13.2 never relocated, since M1); `nvcc` without
-`--objdir-as-tempdir` is refused; `nvcc`'s identity compares its dry
-run's toolchain, not its words. Next: a serve build of a third
-configuration from the store: all 404 served, linked, build 1:39 against 8:56 (`m4c`, job 1090243); then the review pair for M4
-(decision 19's scope). `CLAUDE.md`'s `rustix` line no longer names
-`unshare(2)` (Max, 2026-10-12). Then
-M4b Cray, M5 cache doctor, M6 HIP.
+M4 (CUDA) in review: round 4 on the fixes for round 3 and decisions 28
+and 29 (branch `feature/build-cache-next`, worktree
+`.claude/worktrees/build-cache-next`, to be fast-forwarded onto
+`feature/build-cache` once it passes; round 3 reviewed `c3b03d7`). qbd test
+instance: `/work/mmorris/cactup-m4/` (its own `CACTUP_HOME`, installation
+`m4` at `/ddnB/work/mmorris/m4`, builds to `single` by the MDB's default;
+`pair.sh` serve-audit-serve, `bench.sh`/`bench2.sh` the two-thornlist
+benchmark, `night.sh` the GPU test suites; at most one ssh session to qbd
+at a time, its login limit holds a refused login for an hour). Results so
+far: serve, audit (404 `same`) and a fully served build on `720afc1`; the
+served build's test suite on gpu2 passed 71 of 71, a cache-off one 67 of
+67. The two-thornlist benchmark (three thorns apart each way): with whole
+files 184 of 389 served and no speedup (8:47 against 8:28 cache off);
+decision 26 as first written gained nothing; decision 29 is to be measured
+(`bench2.sh` with the new binary and a fresh store). Then M5 cache doctor
+(with decision 27's report), the merge to master, and the follow-ups M4b
+Cray, M5b, M6 HIP.

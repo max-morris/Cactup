@@ -12,7 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{depend_files, digest_output, flags_from_elsewhere, read_files, reads_match, Named, Parts, PathMap, Used, PREPROCESSOR};
+use super::key::{depend_files, diagnoses, digest_output, flags_from_elsewhere, read_files, reads_match, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::BTreeSet;
@@ -537,23 +537,31 @@ impl Plan {
         let real: Vec<Option<PathBuf>> = dirs.iter().map(|dir| fs::canonicalize(dir).ok()).collect();
         let mut places = Vec::new();
         for read in host_reads {
-            let found = real.iter().position(|dir| dir.as_ref().is_some_and(|dir| read.starts_with(dir) && read != dir));
-            let names: Vec<PathBuf> = match found {
-                Some(at) => vec![read.strip_prefix(real[at].as_ref().expect("found")).expect("below").to_owned()],
-                None => {
-                    let parts: Vec<_> = read.components().collect();
-                    parts.iter().enumerate().filter(|(_, part)| part.as_os_str() == "include").map(|(at, _)| parts[at + 1..].iter().collect()).collect()
-                }
-            };
-            for name in names {
+            // Each name the file has below a directory searched, up to that
+            // directory: whichever the file is included by, every place
+            // before is looked at (the CUDA root given with `-I` as well as
+            // its `include` directory: seen).
+            let mut names: Vec<(PathBuf, usize)> = real
+                .iter()
+                .enumerate()
+                .filter_map(|(at, dir)| Some((read.strip_prefix(dir.as_ref()?).ok()?.to_owned(), at)))
+                .filter(|(name, _)| !name.as_os_str().is_empty())
+                .collect();
+            // Below none of them (a system header): each name it has below an
+            // `include` directory, in all of them.
+            if names.is_empty() {
+                let parts: Vec<_> = read.components().collect();
+                names = parts.iter().enumerate().filter(|(_, part)| part.as_os_str() == "include").map(|(at, _)| (parts[at + 1..].iter().collect(), dirs.len())).collect();
+            }
+            for (name, found) in names {
                 let mut gch = name.clone().into_os_string();
                 gch.push(".gch");
-                for dir in &dirs[..found.unwrap_or(dirs.len())] {
+                for dir in &dirs[..found] {
                     places.push(dir.join(&name));
                     places.push(dir.join(&gch));
                 }
-                if let Some(at) = found {
-                    places.push(dirs[at].join(&gch));
+                if let Some(dir) = dirs.get(found) {
+                    places.push(dir.join(&gch));
                 }
             }
         }
@@ -811,10 +819,21 @@ pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap
     let passes: Vec<Vec<String>> = run.preprocessor_passes().cloned().collect();
     let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), compile));
     let mut cuda = Cuda { host, passes, env: run.env.clone(), used };
-    let (text, text_bytes, named, names) = run_passes(&cuda, map)?;
-    if let Some(used) = &mut cuda.used {
-        *used = Used::new(names, compile);
-    }
+    let Passes { text, bytes: text_bytes, named, used: names, diagnosed } = run_passes(&cuda, map)?;
+    // Narrowed only where the passes said nothing of the text (as for C
+    // and C++); a macro the passes are given on their own command lines
+    // (`-DCUDA_DOUBLE_MATH_FUNCTIONS`) counts as given (a header's
+    // definition of it draws a warning).
+    cuda.used = match (cuda.used.take(), diagnosed) {
+        (Some(_), false) => {
+            let mut used = Used::new(names, compile);
+            for pass in &cuda.passes {
+                used.also_given(pass);
+            }
+            Some(used)
+        }
+        _ => None,
+    };
     let mut named = named;
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
@@ -825,9 +844,20 @@ pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap
 
 /// Run the passes of `cuda` again, and digest them: the text of each pass in
 /// turn, and every file any of them names.
-fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named, BTreeSet<Vec<u8>>)> {
+/// What [`run_passes`] found: the passes' text digested and its length, the
+/// files they named, the macros they say the text uses (`-dU`), and whether
+/// they said anything of the text.
+struct Passes {
+    text: String,
+    bytes: u64,
+    named: Named,
+    used: BTreeSet<Vec<u8>>,
+    diagnosed: bool,
+}
+
+fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<Passes> {
     let mut text = Hasher::new("cuda passes");
-    let (mut bytes, mut named, mut used) = (0u64, Named::new(), BTreeSet::new());
+    let (mut bytes, mut named, mut used, mut diagnosed) = (0u64, Named::new(), BTreeSet::new(), false);
     for pass in &cuda.passes {
         let mut args: Vec<&String> = Vec::new();
         let mut words = pass.iter().skip(1);
@@ -876,13 +906,14 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named, BT
             bail!("nvcc's preprocessor failed");
         }
         flags_from_elsewhere(cuda.host.family, cuda.host.specs.as_deref(), &said).map_err(anyhow::Error::msg)?;
+        diagnosed |= diagnoses(&said);
         text.feed(pass_text.as_bytes());
         bytes += pass_bytes;
         for (name, entered) in pass_named {
             *named.entry(name).or_default() |= entered;
         }
     }
-    Ok((text.hex(), bytes, named, used))
+    Ok(Passes { text: text.hex(), bytes, named, used, diagnosed })
 }
 
 /// Does the key of a CUDA compile still hold after it: the same passes print
@@ -900,7 +931,7 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
         },
         false => (Vec::new(), None),
     };
-    let Ok((now_text, _, mut named, _)) = run_passes(cuda, map) else { return false };
+    let Ok(Passes { text: now_text, mut named, .. }) = run_passes(cuda, map) else { return false };
     if let Some(pass_read) = pass_read {
         // (The source too, which a pass reads first and enters by no marker.)
         let mut entered: BTreeSet<PathBuf> = named.iter().filter(|(_, entered)| **entered).map(|((_, path), _)| path.clone()).collect();
@@ -1057,6 +1088,14 @@ mod tests {
         fs::create_dir_all(user.join("crt")).unwrap();
         fs::write(user.join("crt/host_runtime.h"), "").unwrap();
         assert!(plan.ahead(std::slice::from_ref(&header)).is_err());
+        // Also with CUDA's root searched first, which holds the header too
+        // (under a longer name).
+        let rooted = said.replace("#$ g++ -c -x c++ ", &format!("#$ g++ -c -x c++ -I{} ", root.join("cuda").display()));
+        let plan = Plan::from_dry_run(DryRun::read(&rooted), "_x".to_owned()).unwrap();
+        assert!(plan.ahead(std::slice::from_ref(&header)).is_err());
+        fs::remove_file(user.join("crt/host_runtime.h")).unwrap();
+        let places = plan.ahead(std::slice::from_ref(&header)).unwrap();
+        assert!(places.contains(&user.join("crt/host_runtime.h")));
     }
 
     #[test]

@@ -5088,19 +5088,29 @@ fixed parts, so that the key does not change by accident:
   information, `__builtin_COLUMN` and `std::source_location` record; Clang's
   debug information carries a checksum of each file. So an edit to a
   comment, or to text inside `#if 0`, changes the key. One kind of line is
-  left out (decision 26): with GCC (and `nvcc`'s GCC passes) and without
-  `-g3`, the preprocessor is asked which macros the text expands or tests
-  (`-dU`, whose definitions then stand in the text), and in every file but
-  the unit's own source a line that defines or undefines any other macro is
-  keyed as its line breaks alone, unless the macro is defined more than
-  once in the unit (a warning that it is redefined), is given on the
-  command line, or has a reserved name. Such a definition changes nothing
-  the compiler makes of the unit, and Cactus's headers that list every
-  thorn of a configuration (`cctk_DefineThorn.h`,
+  left out (decisions 26 and 29): with GCC (and `nvcc`'s GCC passes),
+  without `-g3`, and where the preprocessor run said nothing of the text (no
+  warning, error or note: a stray quote in a definition, `/*` in a comment,
+  a name redefined are warnings about the very lines left out), the
+  preprocessor is asked which macros the text expands or tests (`-dU`,
+  whose definitions then stand in the text), and in every file but the
+  unit's own source a line that defines or undefines any other macro is
+  left out, line breaks and all, unless the macro is defined more than once
+  in the unit, is given on a command line (the compile's, or one of
+  `nvcc`'s passes'), or has a reserved name. A line counts as a definition
+  only where it begins in code, not inside a block comment or a raw string.
+  Such a definition changes nothing in the object, and Cactus's headers that
+  list every thorn of a configuration (`cctk_DefineThorn.h`,
   `CParameterStructNames.h`) are nothing else for nearly every unit: two
-  configurations a few thorns apart share their objects. Clang, whose
-  debug information checksums each file, and `-g3`, whose debug
-  information has every macro, keep whole files. The names are read
+  configurations a few thorns apart share their objects. Where what is
+  compiled stands is in the text (`-E` keeps its lines where they were);
+  where a definition stands, and what it says, can show in the compiler's
+  messages ("in definition of macro", a spelling hint), which are stored
+  with the object. So an entry also keeps the digest of its files whole,
+  and a hit whose stored messages are not empty must match it too, or the
+  compile runs (`Miss::SaidElsewhere`). Clang, whose debug information
+  checksums each file, and `-g3`, whose debug information has every macro,
+  keep whole files. The names are read
   as the compilers write them, as C strings (Clang writes a tab or a byte
   outside ASCII in octal); a marker whose name cannot be read leaves the
   compile without a key. So does a file the preprocessor *entered* (marker
@@ -5109,6 +5119,17 @@ fixed parts, so that the key does not change by accident:
   generated code names its origin — may be of no file, and is then keyed
   as absent: the bytes compiled are those of the file the directive stands
   in, which was entered.
+- **What the compile read** (decision 28). A compile run to store its
+  result says what it read: GCC and Clang are given `-MD -MF
+  <object>.cactup-reads` (or, where the compile writes a full dependency
+  file of its own, `-MD -MF <file>`, that one is read; with `-MMD`, which
+  leaves out system headers, the compile is not cached), and `nvcc`'s
+  preprocessing steps and last step likewise. After the compile, those
+  files must be just the ones the key's run entered (and the source; for
+  `nvcc`'s last step, what its identity's trial saw): a compile that could
+  not see a file for a moment (a node whose file system stalled: seen on
+  qbd) takes another branch of a `__has_include`, makes another object,
+  and is not stored, though the key's runs before and after saw the file.
 - **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
   and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
   order, plus the language by the source's suffix, and with debug
@@ -6091,10 +6112,11 @@ the environment part (`EDG_…`, `NVVM…`, `OCG_FLAGS` and others).
 The last step finds CUDA's headers that only it reads by searching: the
 directory of the generated files, then the compile's own `-iquote`, `-I`,
 `-isystem` and `-idirafter` directories, before CUDA's. No pass makes
-those lookups, so each place searched ahead of the header (and a `.gch`
-beside it) must hold nothing, at key time and to the end of the compile
-(`Plan::ahead`): a thorn's own `math_constants.h` is not served around
-(tried).
+those lookups, so each place searched ahead of the header, under every
+name the header has below a directory searched (the CUDA root given with
+`-I` names it by a longer one), and a `.gch` beside each, must hold
+nothing, at key time and to the end of the compile (`Plan::ahead`): a
+thorn's own `math_constants.h` is not served around (tried).
 
 **The compile the cache runs** (decision 25). `cudafe++` names a unit's
 module ID, which names its registration, its fat binary and every entity of
@@ -6125,10 +6147,12 @@ ends with its exit status, removes the intermediate files `nvcc` removes,
 and for a step killed by a signal it did not pass on, says what `nvcc`
 says (`nvcc error   : '<program>' died due to signal <n> …`) and exits
 with the signal's number. A stop signal is the one exception: it reaches
-the step running, no further step starts, and the compile ends by the
-signal, as any compile through the wrapper does (`nvcc` itself, sent
-`SIGINT` with its whole process group, reports the step's death and exits
-2; sent `SIGTERM`, says `nvcc: Terminated` and exits 255: seen). A dry run with more shell than `cuda::shell_words`
+the step running, no further step starts, and the compile ends as that
+step ended (by the signal, or with a status of its own: GCC's `cc1plus`
+exits 4 on `SIGINT`), as any compile through the wrapper does (`nvcc`
+itself, sent `SIGINT` with its whole process group, reports the step's
+death and exits 2; sent `SIGTERM`, says `nvcc: Terminated` and exits 255:
+seen). A dry run with more shell than `cuda::shell_words`
 follows (a command substitution, an operator, a pattern), or that does not
 run `cudafe++` making one ID in a file, or that runs a program neither
 identity knows, is not cached. Record mode, which adds nothing to a

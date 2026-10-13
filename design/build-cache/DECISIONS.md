@@ -460,6 +460,47 @@ Asked as seven questions with options; the answers, in Max's numbering.
     gives, and a reserved name; the unit's own source, Clang (checksums of
     whole files in its debug information) and `-g3` keep whole files.
 
+27. **The doctor reports where whole files stay keyed; the order to the
+    first merge** (2026-10-13). Max: "the cases where whole files are
+    still keyed should be identified by cache doctor and as a follow up
+    milestone we should try to attack those cases". So M5 (`cactup cache
+    doctor`) also reports, for compiles kept from decision 26's sharing,
+    why (Clang, `-g3`, a preprocessor warning, a macro defined twice or
+    given on a command line, a reserved name), with the units and headers
+    affected; a follow-up milestone, M5b, takes those cases on, each with
+    its own decision and review. Then: "I want cache doctor before cray.
+    after cache doctor, I think we should merge to master. later milestones
+    are followups to the initial version of the feature". Order: M4 (CUDA)
+    and M5 (doctor), each gated; then `feature/build-cache` merges to
+    master as the feature's first version; then the follow-ups M4b (Cray),
+    M5b (whole-file cases) and M6 (HIP). M4 does not land on its own.
+
+28. **A compile the cache stores is held to what its key read**
+    (2026-10-13). On qbd, a build on a node whose file system stalled
+    (`make` itself found system headers missing) compiled one CUDA unit
+    successfully but differently (a `__has_include` branch, most likely)
+    while the key's preprocessor runs, before and after, saw every file;
+    the object was published, and the next audit found it wrong. Offered
+    checking each compile's own reads, Max chose "Compiles check own
+    reads": a compile run to store its result says what it read (`-MD
+    -MF`; `nvcc`'s preprocessing steps and last step likewise), and unless
+    that is the set of files the key's runs entered, nothing is stored. A
+    compile with `-MMD` (no system headers in its list) is not cached.
+
+29. **Where a definition stands is keyed only for entries with messages**
+    (2026-10-13). Decision 26 as first written kept the dropped lines' line
+    breaks; a used definition (each thorn's own parameter struct name) then
+    moved with every thorn added above it, and the benchmark gained
+    nothing (167 shared units still differed in their files part alone).
+    Offered to key definitions' places only where they can show, Max:
+    "Only when it prints". Unused definitions are left out line breaks and
+    all; where code stands is in the text (`-E` keeps its lines aligned);
+    an entry keeps the digest of its files whole, and a hit whose stored
+    messages are not empty must match it too. Review 3 then showed the
+    preprocessor warning about a dropped line itself (a stray quote,
+    `/*` in a comment, `unix` redefined): no line is dropped where the
+    key's preprocessor run says anything of the text.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

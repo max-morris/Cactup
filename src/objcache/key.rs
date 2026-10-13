@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-11";
+pub const KEY_LABEL: &str = "key-12";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -1232,7 +1232,10 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
-    let used = (compiler.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(used, compile));
+    // Narrowed only where the run said nothing of the text: a warning about
+    // a definition (a stray quote, `/*` in a comment, a name redefined) is
+    // the compile's too, and would be about a line the key leaves out.
+    let used = (compiler.family == Family::Gcc && !compile.macros_in_debug && !diagnoses(&said)).then(|| Used::new(used, compile));
     let (files, whole, seen) = read_files(&named, map, used.as_ref())?;
     let entered = named.iter().filter(|(_, entered)| **entered).map(|((_, path), _)| path.clone()).collect();
     Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, entered })
@@ -1471,6 +1474,19 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
     Ok((hasher.hex(), bytes, named, used))
 }
 
+/// Did a preprocessor run (with `-v`) say anything of the text: a warning,
+/// an error or a note, as GCC words them in English (`in_english`), or
+/// where one came from? `-v`'s own lines (the driver's version and
+/// command lines, the search list) are none of these.
+pub(super) fn diagnoses(said: &[u8]) -> bool {
+    String::from_utf8_lossy(said).lines().any(|line| {
+        [": warning: ", ": error: ", ": note: ", ": fatal error: ", ": pedantic: "].iter().any(|kind| line.contains(kind))
+            || line.starts_with("In file included from")
+            || line.starts_with("                 from ")
+            || line.contains(": In function ")
+    })
+}
+
 /// The macros a unit's text expands or tests (`-dU`), and what keeps a
 /// definition of another in the key all the same (decision 26).
 #[derive(Debug, Clone)]
@@ -1486,16 +1502,30 @@ pub(super) struct Used {
 
 impl Used {
     pub(super) fn new(names: BTreeSet<Vec<u8>>, compile: &Compile) -> Self {
-        let mut given = BTreeSet::new();
-        let mut args = compile.preprocess.iter();
+        let mut used = Self { names, given: BTreeSet::new(), source: compile.source.clone() };
+        let args: Vec<&[u8]> = compile.preprocess.iter().map(|arg| arg.as_bytes()).collect();
+        used.given_in(&args);
+        used
+    }
+
+    /// The macros a command line `words` defines or undefines count as
+    /// given too.
+    pub(super) fn also_given(&mut self, words: &[String]) {
+        let words: Vec<&[u8]> = words.iter().map(|word| word.as_bytes()).collect();
+        self.given_in(&words);
+    }
+
+    fn given_in(&mut self, args: &[&[u8]]) {
+        let mut args = args.iter();
         while let Some(arg) = args.next() {
-            if arg == "-D" || arg == "-U" {
-                let value = args.next().map(|value| value.as_bytes()).unwrap_or_default();
-                let name = value.split(|b| *b == b'=' || *b == b'(').next().unwrap_or_default();
-                given.insert(name.to_vec());
-            }
+            let value = match arg.strip_prefix(b"-D").or_else(|| arg.strip_prefix(b"-U")) {
+                Some(b"") => args.next().copied().unwrap_or_default(),
+                Some(value) => value,
+                None => continue,
+            };
+            let name = value.split(|b| *b == b'=' || *b == b'(').next().unwrap_or_default();
+            self.given.insert(name.to_vec());
         }
-        Self { names, given, source: compile.source.clone() }
     }
 
     /// May a definition of `name` be left out of a file's bytes? Not if the
@@ -1546,17 +1576,108 @@ fn definition(line: &[u8]) -> Option<&[u8]> {
     (len > 0 && !rest[0].is_ascii_digit()).then(|| &rest[..len])
 }
 
+/// Where a line of C or C++ begins: in code, in a block comment, or in a
+/// raw string literal (with its delimiter).
+#[derive(Debug, Clone, PartialEq)]
+enum Lex {
+    Code,
+    Comment,
+    Raw(Vec<u8>),
+}
+
+/// Where the line after `line` begins, `line` beginning in `state`. Strings
+/// and character constants end with their line; one that does not is cut
+/// off there, as a compiler would complain of it.
+fn lex_line(line: &[u8], mut state: Lex) -> Lex {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut at = 0;
+    while at < line.len() {
+        match &state {
+            Lex::Comment => match line[at..].starts_with(b"*/") {
+                true => {
+                    state = Lex::Code;
+                    at += 2;
+                }
+                false => at += 1,
+            },
+            Lex::Raw(delimiter) => {
+                let close = [b")", delimiter.as_slice(), b"\""].concat();
+                match line[at..].starts_with(&close) {
+                    true => {
+                        at += close.len();
+                        state = Lex::Code;
+                    }
+                    false => at += 1,
+                }
+            }
+            Lex::Code => match line[at] {
+                b'/' if line[at..].starts_with(b"//") => return Lex::Code,
+                b'/' if line[at..].starts_with(b"/*") => {
+                    state = Lex::Comment;
+                    at += 2;
+                }
+                b'"' => {
+                    // `R"`, `u8R"`, `uR"`, `UR"`, `LR"`: a raw string,
+                    // whose delimiter runs to the `(`.
+                    let before = &line[..at];
+                    let prefix = before.strip_suffix(b"R").map(|before| {
+                        let before = [b"u8".as_slice(), b"u", b"U", b"L"].iter().find_map(|p| before.strip_suffix(*p)).unwrap_or(before);
+                        before.last().is_none_or(|b| !ident(*b))
+                    });
+                    match (prefix, line[at + 1..].iter().position(|b| *b == b'(')) {
+                        (Some(true), Some(open)) => {
+                            state = Lex::Raw(line[at + 1..at + 1 + open].to_vec());
+                            at += open + 2;
+                        }
+                        _ => {
+                            at += 1;
+                            while at < line.len() && line[at] != b'"' {
+                                at += if line[at] == b'\\' { 2 } else { 1 };
+                            }
+                            at += 1;
+                        }
+                    }
+                }
+                b'\'' => {
+                    at += 1;
+                    while at < line.len() && line[at] != b'\'' {
+                        at += if line[at] == b'\\' { 2 } else { 1 };
+                    }
+                    at += 1;
+                }
+                _ => at += 1,
+            },
+        }
+    }
+    state
+}
+
+/// The logical lines of `bytes`, each with the macro it defines or
+/// undefines if it is such a line: one that begins in code (not inside a
+/// block comment or a raw string).
+fn directives(bytes: &[u8]) -> impl Iterator<Item = (&[u8], Option<&[u8]>)> {
+    let mut state = Lex::Code;
+    logical_lines(bytes).map(move |line| {
+        let defined = match state {
+            Lex::Code => definition(line),
+            _ => None,
+        };
+        state = lex_line(line, std::mem::replace(&mut state, Lex::Code));
+        (line, defined)
+    })
+}
+
 /// Every macro `bytes` defines or undefines, once per line that does.
 fn definitions(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    logical_lines(bytes).filter_map(definition)
+    directives(bytes).filter_map(|(_, defined)| defined)
 }
 
 /// `bytes` without the lines that define or undefine a macro `drop` says
 /// to leave out (decision 29: line breaks and all).
 fn without_definitions(bytes: &[u8], drop: impl Fn(&[u8]) -> bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
-    for line in logical_lines(bytes) {
-        if !definition(line).is_some_and(&drop) {
+    for (line, defined) in directives(bytes) {
+        if !defined.is_some_and(&drop) {
             out.extend_from_slice(line);
         }
     }
@@ -1845,7 +1966,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "d8353dce3839a5cbb91e32af7b3267c90dcab235ba7a893a13dc26de4589a2d1");
+        assert_eq!(parts.key(), "5476a202a276c3d956b70504855a8460280890e3e47c69a5b4edbd0ee4955059");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2199,6 +2320,56 @@ mod tests {
         std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_C 1\n")).unwrap();
         assert_ne!(tree.key(&["-g3"]).parts.files, debug.parts.files);
         std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn a_definition_the_preprocessor_warns_of_stays_in_the_key() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        // Its warning is the compile's message too: the files whole.
+        let tree = Tree::new();
+        let with = |thorns: &str| format!("#define ANSWER 42 /* the answer */\n{thorns}");
+        for (quiet, warned) in [("#define NOTE dont\n", "#define NOTE don't\n"), ("#define NOTE 1\n", "#define unix 2\n")] {
+            std::fs::write(tree.header(), with(quiet)).unwrap();
+            let one = tree.key(&["-O2"]);
+            std::fs::write(tree.header(), with(warned)).unwrap();
+            assert_ne!(tree.key(&["-O2"]).parts.files, one.parts.files, "{warned}");
+        }
+        std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn a_definition_in_a_comment_or_a_raw_string_is_none() {
+        let names = |text: &str| definitions(text.as_bytes()).map(|name| String::from_utf8_lossy(name).into_owned()).collect::<Vec<_>>();
+        assert_eq!(names("#define A\n/* old\n#define B 1 */ int x;\n#define C\n"), ["A", "C"]);
+        assert_eq!(names("const char *s = R\"x(\n#define D\n)x\";\n#define E\n"), ["E"]);
+        assert_eq!(names("// #define F\nint a = '\"'; /* \"*/\n#define G\n"), ["G"]);
+        assert_eq!(names("#define H \"/*\"\n#define I\n"), ["H", "I"]);
+        // What is left out is the definition alone; code beside a comment's
+        // end stays.
+        let kept = without_definitions(b"/* a\n#define B 1 */ int x;\n#define C\n", |_| true);
+        assert_eq!(kept, b"/* a\n#define B 1 */ int x;\n");
+    }
+
+    #[test]
+    fn a_compile_is_held_to_what_its_key_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::write(dir.join("a.h"), "").unwrap();
+        std::os::unix::fs::symlink(dir.join("a.h"), dir.join("b.h")).unwrap();
+        let keyed: BTreeSet<PathBuf> = [dir.join("a.h"), dir.join("s.c")].into();
+        assert!(reads_match(&[dir.join("s.c"), dir.join("a.h")], &keyed));
+        // Another name for the same file.
+        std::fs::write(dir.join("s.c"), "").unwrap();
+        assert!(reads_match(&[dir.join("s.c"), dir.join("b.h")], &keyed));
+        // A file the compile did not read, or read besides.
+        assert!(!reads_match(&[dir.join("s.c")], &keyed));
+        assert!(!reads_match(&[dir.join("s.c"), dir.join("a.h"), dir.join("c.h")], &keyed));
+        // `-MP`'s rules of no prerequisites name nothing new.
+        let said = b"s.o: s.c a.h \\\n b.h\n\na.h:\n\nb.h:\n";
+        assert_eq!(depend_files(said).unwrap(), ["s.c", "a.h", "b.h"].map(PathBuf::from));
+        assert!(depend_files(b"s.o: s.c\nt.o: t.c\n").is_none());
     }
 
     #[test]
