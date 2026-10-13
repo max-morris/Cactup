@@ -5171,10 +5171,15 @@ fixed parts, so that the key does not change by accident:
   `-dU` misses a macro the compile uses; `#pragma GCC diagnostic` turns a
   warning on, or into an error, for the compile alone (`-E` ignores it
   before GCC 13, and for an option it does not know, `-Wall`, after). So a C
-  unit whose text has a `#pragma GCC` other than those the preprocessor
-  alone handles or that change nothing later lines read (`system_header`,
-  `poison`, `warning`, `error`, `dependency`, `ivdep`, `unroll`,
-  `novector`, `visibility`) is not narrowed. (For C++ the compile and `-E`
+  unit whose text has a `#pragma GCC` that reaches a file the key may
+  narrow is not narrowed: any but those the preprocessor alone handles or
+  that change nothing later lines read (`system_header`, `poison`,
+  `warning`, `error`, `dependency`, `ivdep`, `unroll`, `novector`,
+  `visibility`), except a `diagnostic` one between a `push` and its `pop`
+  in one file with no other file entered in between. The file such a line
+  is in has code (the line) and is keyed whole, and the region reaches no
+  other; glibc's `stdlib-bsearch.h`, which every C unit with `<stdlib.h>`
+  reads, is so (`objcache::key::FrontEnd`). (For C++ the compile and `-E`
   agree on every macro and preprocessor warning after any of them, tried on
   GCC 8.5 to 14.2, and libstdc++'s headers are full of them.) With `build-cache-preserve-exact-warnings = true` the key
   also has how the compiler (for CUDA, its host compiler) words a warning
@@ -5588,9 +5593,10 @@ trial supports and audit mode has yet to try on real compiles.
 One directory tree per instance, shared by every installation,
 configuration and host of it, and written by builds running at the same
 time on several hosts over NFS or Lustre, where `flock` cannot be trusted
-(§2.3). So: no lock, no index, no file written by two processes. Every
+(§2.3). So: no lock, no file written by two processes. Every
 write is a new file under a name of its own, and the one shared step is
-`link(2)`, atomic on all three (`objcache::store`).
+`link(2)`, atomic on all three (`objcache::store`). (The one index, of
+the entries each object has, is made of such files too: below.)
 
 **Where.** `<root>/v2/<machine>/<first two hex digits of the key>/<key>`.
 The root is the user's knob `build-cache-home` (an absolute path), else the
@@ -5845,13 +5851,11 @@ it.
 Audit mode is the acceptance gate for serving: a full build in two
 installations with no wrong hit.
 
-**What a build says.** The build step ends with one line, as in record
-mode: `cactup: build cache: N compiles, H served from the cache, P
-published, U could not be (see cactup cache report)`; in audit mode, `A
-checked against the cache (W wrong, F failing to compile, D not
-deterministic, C with inputs that changed), P published`. They are counted
-from the event log, by the spellings `event::Outcome` and `event::Audit`
-give the log.
+**What a build says.** The build step ends with one line, written by
+`cactup __cc-summary` from the event log (§18.12): in a serving build, how
+many objects the cache gave of how many, and why the others were compiled;
+in audit mode, `A checked against the cache (W wrong, F failing to
+compile, D not deterministic, C with inputs that changed), P published`.
 
 **Signals.** A hit runs no compiler: a stop signal during it ends the
 wrapper by that signal, which leaves at most the temporary files the store
@@ -5909,8 +5913,9 @@ whole, or `gc` stops before removing anything, naming the log: a log it
 could not look at or read would leave the entries it records as in use
 looking unused. (`stats` says so and goes on; `verify` does not read
 logs.) It also removes the
-temporary files of publishes cut short (`.tmp-…`) older than a day, and
-folds the use logs. Only one `gc` runs at a time per store: it holds
+temporary files of publishes cut short (`.tmp-…`) older than a day,
+folds the use logs, and removes the unit records (§18.12) of entries that
+are gone. Only one `gc` runs at a time per store: it holds
 `<root>/gc.lock`, a heartbeat `lock::LinkLock` (§2.3). It never touches
 another format's directory. `--dry-run` says what it would remove, and
 removes nothing. An entry is removed by name after checking that the name
@@ -6219,3 +6224,87 @@ part of `nvcc`'s identity and watched (`Compiler::host_reads`).
 
 **The path map** is not used for an OpenMP compile whose host compiler is
 Clang, as for Clang itself.
+
+### 18.12 Why compiles miss: the build's line and `cactup cache doctor`
+
+Max (decision 27, 2026-10-13): "any build where cache is enabled should
+print at the end a brief line indicating how many objects were reused from
+the cache and some brief info about the kinds of misses (first time an
+object was built, source code differed, or a problem `cache doctor` or
+`cache report` can diagnose)"; "don't print any miss kind with 0 count";
+and the cases where whole files are still keyed are to be identified by
+`cache doctor`.
+
+**The line.** A serving build ends its build step with
+
+```
+cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with other sources, 5 built otherwise, 3 kept out (see cactup cache doctor)
+```
+
+Each compile the build ran through the cache is one of:
+
+- *reused*: served from the store;
+- *new*: the store has no entry for this object (by its name below
+  `build/`) at all;
+- *with other sources*: it has one made with the same compiler, flags,
+  environment and platform, from other preprocessed text or other files
+  (a thorn's source edited, or a header of the configuration that differs);
+- *built otherwise*: it has entries, none with the same compiler, flags,
+  environment and platform;
+- *kept out*: it has no key (not cached, §18.5), or its object could not be
+  stored (the check after the compile, a publish that failed);
+- *failed*: the compile failed.
+
+A kind with a count of 0 is left out, and so is the part after `;` when
+every object was reused. "See `cactup cache doctor`" follows only when
+something was kept out. A compile another build stored first, while this
+one compiled, counts by what the store held when this one looked. The
+line is the wrapper's events counted by `cactup __cc-summary
+<attempt>/cc`, which reads that directory alone (rule 6); if it cannot,
+the build says how many compiles went through the cache, as before.
+
+**The unit records.** Whether the store has another entry for an object is
+an index beside the entries: for each entry published, one file
+`<root>/v<N>/<machine>/units/<ab>/<unit digest>/<key>`, where the unit
+digest is a SHA-256 of the object's name below `build/`, written as an
+entry is (temporary file, `link(2)`, never changed). It holds what made the
+key, as JSON: the six parts (§18.5), and each file the key read, by its
+mapped name, with its digest as the key took it. Its content is a
+function of its key, so two builds publishing one key write the same file,
+and the second link finds the first. On a miss the wrapper reads the
+unit's records (the newest 32, by modification time), and with them the
+kind of miss; for the record closest to its own (the fewest parts, then
+the fewest files, that differ) it notes in its event which parts or which
+files differ, and how its key took each such file (below). Only a miss
+pays for this, one directory listing and a few small files. `cache gc`
+removes the records whose entry is gone, and `cache stats` counts them. A
+record missing (a publish cut short between the entry and its record, a
+record removed by hand) makes a miss look new: the line is a report, not a
+key.
+
+**How a key takes each file (decision 27).** Decision 26 leaves out of the
+files part the definitions a unit never uses, in the files the text has no
+code of; every other file is keyed whole, and with it every definition in
+it. The event of a compile says, when no file was narrowed, why (Clang;
+`-g3`; `build-cache-preserve-exact-warnings`; Fortran; a preprocessor
+diagnostic naming no file; a C unit with a `#pragma GCC` its front end
+acts on); and a miss with other sources says, for each file that differs,
+whether it was keyed whole and why (the unit's source; the text has code
+of it; a diagnostic names it) or narrowed, and then which definitions the
+unit does not use it kept all the same (defined twice in the unit, given on
+the command line, a reserved name).
+
+**`cactup cache doctor [<config>] [--attempt N]`** reads the event log of
+a build that went through the cache (the newest attempt of the config that
+has one, or `--attempt`) and says, in this order: the line above; the
+compiles kept out, by reason, each with how many and the first few
+objects, and what would let them in where cactup knows (a flag, a
+setting, a knob); the misses with other sources, by file, the files that
+cost the most misses first, with how the key took each (the cases where
+whole files stay keyed, which M5b is to take on); the misses built
+otherwise, by the part of the key that differed; and the compiles of which
+no file was narrowed, by reason. It reads the log and nothing else: no
+store, no compiler. (Its checks of a configuration's build environment
+without compiling, traced to the user's shell, the machine's `meta.toml`
+or the option list, are the milestone's second part.)
+

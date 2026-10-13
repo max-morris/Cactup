@@ -23,8 +23,8 @@
 //! change to what an entry holds or how it is read bumps [`FORMAT`], which
 //! puts the new entries in a directory of their own.
 
-use super::hash::Checksum;
-use super::key::{Parts, KEY_LABEL};
+use super::hash::{bytes_digest, Checksum};
+use super::key::{FileNote, Parts, KEY_LABEL};
 use crate::Res;
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,22 @@ pub struct About {
 
 /// What a publisher hands the store: the compile that succeeded, under the
 /// key that still held after it.
+/// What made the key of one entry, kept beside it for the object it is of
+/// (§18.12): the key's parts, and each file by its mapped name with the
+/// digest the files part took of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnitRecord {
+    pub parts: Parts,
+    pub files: Vec<FileNote>,
+}
+
+/// The directory of a machine's unit records, beside its entries' (§18.12).
+pub const UNITS: &str = "units";
+
+/// How many of an object's unit records a miss reads, the newest first.
+pub const UNIT_RECORDS_READ: usize = 32;
+
 pub struct NewEntry<'a> {
     pub key: &'a str,
     pub parts: &'a Parts,
@@ -349,6 +365,59 @@ impl Store {
             Err(e) => Err(e).with_context(|| format!("Failed to link {}", path.display())),
         }
         // The temporary file's own name goes when `temp` is dropped.
+    }
+
+    /// The directory of the unit records of the object named `unit` below
+    /// `build/` (§18.12).
+    fn unit_dir(&self, unit: &str) -> PathBuf {
+        let digest = bytes_digest(unit.as_bytes());
+        self.dir.join(UNITS).join(&digest[..2]).join(digest)
+    }
+
+    /// Note beside the entry of `key` what made it, for the object named
+    /// `unit` (§18.12): written as an entry is, under a name of its own, and
+    /// never changed. The same key always makes the same record, so one
+    /// already there is the one this would write.
+    pub fn record_unit(&self, unit: &str, key: &str, record: &UnitRecord) -> Res<()> {
+        if self.entry_path(key).is_none() {
+            bail!("\"{key}\" is not a key");
+        }
+        let dir = self.unit_dir(unit);
+        fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        let path = dir.join(key);
+        if path.symlink_metadata().is_ok() {
+            return Ok(());
+        }
+        let text = serde_json::to_vec(record).context("Failed to write a unit record")?;
+        let mut temp = tempfile::Builder::new()
+            .prefix(&format!(".tmp-{key}-"))
+            .tempfile_in(&dir)
+            .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?;
+        temp.write_all(&text).context("Failed to write a unit record")?;
+        temp.as_file().sync_all().context("Failed to sync a unit record to disk")?;
+        temp.as_file().set_permissions(fs::Permissions::from_mode(0o444)).context("Failed to make a unit record read-only")?;
+        match fs::hard_link(temp.path(), &path) {
+            Err(e) if e.kind() != ErrorKind::AlreadyExists && temp.as_file().metadata().map(|meta| meta.nlink()).unwrap_or(1) != 2 => {
+                Err(e).with_context(|| format!("Failed to link {}", path.display()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The records of the entries the store has for the object named
+    /// `unit`, but `not` (this compile's own key), the newest
+    /// [`UNIT_RECORDS_READ`] first. A record that cannot be read is passed
+    /// over: they are a report, not a key.
+    pub fn unit_records(&self, unit: &str, not: &str) -> Vec<UnitRecord> {
+        let Ok(listing) = fs::read_dir(self.unit_dir(unit)) else { return Vec::new() };
+        let mut found: Vec<(std::time::SystemTime, PathBuf)> = listing
+            .flatten()
+            .filter(|entry| entry.file_name().to_str().is_some_and(|name| self.entry_path(name).is_some() && name != not))
+            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .collect();
+        found.sort_by_key(|found| std::cmp::Reverse(found.0));
+        found.truncate(UNIT_RECORDS_READ);
+        found.into_iter().filter_map(|(_, path)| serde_json::from_slice(&fs::read(path).ok()?).ok()).collect()
     }
 
     /// Remove the entry of `key`, which audit mode has shown to be wrong

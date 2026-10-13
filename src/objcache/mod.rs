@@ -37,6 +37,7 @@ pub mod platform;
 pub mod probe;
 pub mod specs;
 pub mod store;
+pub mod summary;
 pub mod upkeep;
 pub mod wrapper;
 
@@ -56,6 +57,10 @@ pub const WRAP_VERB: &str = "__cc";
 /// The verb the build script runs the probe by: `cactup __cc-probe
 /// <config.toml>`.
 pub const PROBE_VERB: &str = "__cc-probe";
+
+/// The verb the build script prints its closing line by, in a serving
+/// build: `cactup __cc-summary <attempt>/cc` (§18.12).
+pub const SUMMARY_VERB: &str = "__cc-summary";
 
 /// The probe's exit status for "the cache cannot be used here, and the
 /// reason is already printed" — as opposed to the probe not running at all
@@ -443,11 +448,11 @@ impl Staged {
         let count = |field: &str| format!("$(grep -c '{field}' {events} 2>/dev/null)");
         // The spellings are `event::Outcome`'s and `event::Audit`'s.
         let summary = match self.mode {
+            // From the log by cactup itself (§18.12); if it cannot, the count.
             Mode::Serve => format!(
-                "\"cactup: build cache: $cactup_cc_count compiles, {} served from the cache, {} published, {} could not be (see cactup cache report)\"",
-                count("\"outcome\":\"hit\""),
-                count("\"published\":true"),
-                count("\"published\":false"),
+                "\"$({} {SUMMARY_VERB} {} 2>/dev/null || echo \"cactup: build cache: $cactup_cc_count compiles\")\"",
+                sh_quote(&self.cactup),
+                sh_quote(&self.cc_dir),
             ),
             Mode::Audit => format!(
                 "\"cactup: build cache: $cactup_cc_count compiles, {} checked against the cache ({} wrong, {} failing to compile, {} not deterministic, {} with inputs that changed), {} published\"",
@@ -740,21 +745,24 @@ mod tests {
         assert_eq!(ran.stdout, "cactup: build cache: compiles recorded: 2\nafter the build\n");
     }
 
-    /// A serving build ends its compile step with what the cache did, counted
-    /// from the event log.
+    /// A build ends its compile step with what the cache did, counted from
+    /// the event log.
     #[test]
-    fn a_serving_build_says_what_was_served_and_published() {
+    fn a_build_says_what_the_cache_did() {
         let log = r#"sh -c 'events="$(dirname "$MAKEFILES")/events.jsonl"; printf "%s\n" "{\"outcome\":\"hit\"}" "{\"outcome\":\"miss\",\"published\":true}" "{\"outcome\":\"hit\",\"audit\":\"second-compile-failed\"}" "{}" >> "$events"' --"#;
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("cfg");
         let cc_dir = config_dir.join(".cactup-builds/0000/cc");
         fs::create_dir_all(&cc_dir).unwrap();
+        // A serving build's line is cactup's own (`summary`, tried with the
+        // binary in `tests/objcache.rs`); a cactup that cannot say it
+        // leaves the count.
         for (mode, line) in [
-            (Mode::Serve, "cactup: build cache: 4 compiles, 2 served from the cache, 1 published, 0 could not be (see cactup cache report)"),
+            (Mode::Serve, "cactup: build cache: 4 compiles"),
             (Mode::Audit, "cactup: build cache: 4 compiles, 2 checked against the cache (0 wrong, 1 failing to compile, 0 not deterministic, 0 with inputs that changed), 1 published"),
         ] {
             let _ = fs::remove_file(events_path(&cc_dir));
-            let staged = Staged { mode, cactup: PathBuf::from("/bin/true"), cc_dir: cc_dir.clone(), config_dir: config_dir.clone() };
+            let staged = Staged { mode, cactup: PathBuf::from("/bin/false"), cc_dir: cc_dir.clone(), config_dir: config_dir.clone() };
             let script = format!("CACTUP_CC_MAKEFILES={}\n{}\n", sh_quote(&inject_path(&cc_dir)), staged.build_step(log, "sim"));
             let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env_remove("MAKEFILES").output().unwrap();
             assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{line}\n"), "{}", String::from_utf8_lossy(&out.stderr));

@@ -84,6 +84,37 @@ pub struct Event {
     pub serve_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub publish_ms: u64,
+    /// In a serving build, what kind of miss a compile the store did not
+    /// serve was (§18.12), by the unit records of its object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miss: Option<Miss>,
+    /// For a miss with other sources, each file that differs from the
+    /// closest record's, with how this key took it; for one built otherwise,
+    /// the parts of the key that differ. At most [`DIFFERS_KEPT`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub differs: Vec<String>,
+    /// Why the key narrowed no file of the unit, if it did not (decision
+    /// 27).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unnarrowed: Option<String>,
+}
+
+/// How many differences a miss notes.
+pub const DIFFERS_KEPT: usize = 8;
+
+/// What kind of miss a compile was, by what the store has for its object
+/// (§18.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Miss {
+    /// No entry for the object at all.
+    New,
+    /// An entry made with the same compiler, flags, environment and
+    /// platform, from other text or other files.
+    OtherSources,
+    /// Entries, none with the same compiler, flags, environment and
+    /// platform.
+    BuiltOtherwise,
 }
 
 /// Whether the store had the compile's object (§18.8).

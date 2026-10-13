@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-19";
+pub const KEY_LABEL: &str = "key-20";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -345,6 +345,10 @@ pub struct Keyed {
     /// The key leaves out definitions a unit never uses where it can (not
     /// with `build-cache-preserve-exact-warnings`, decision 31).
     narrow: bool,
+    /// How the key took each file the compile read, and why it narrowed
+    /// none, if it did not (§18.12, decision 27).
+    pub each: Vec<FileNote>,
+    pub unnarrowed: Option<&'static str>,
 }
 
 /// Where a C or C++ compile says what it read (decision 28).
@@ -618,6 +622,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             own_reads: OwnReads::Nowhere,
             keyed_reads: BTreeSet::new(),
             narrow: false,
+            each: read.each,
+            unnarrowed: Some("Fortran (its files are keyed whole)"),
         }, identified));
     }
     if let Some((run, host)) = cuda_run {
@@ -657,6 +663,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             own_reads: OwnReads::Nowhere,
             keyed_reads: BTreeSet::new(),
             narrow: !conf.exact_warnings,
+            each: read.each,
+            unnarrowed: read.unnarrowed,
         };
         return Ok((keyed, identified));
     }
@@ -740,6 +748,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         own_reads,
         keyed_reads,
         narrow,
+        each: read.each,
+        unnarrowed: read.unnarrowed,
     };
     Ok((keyed, identified))
 }
@@ -992,6 +1002,9 @@ struct Read {
     files: String,
     whole: String,
     count: usize,
+    /// How the key took each file, and why it narrowed none, if so.
+    each: Vec<FileNote>,
+    unnarrowed: Option<&'static str>,
     /// Digest of what each of those files looked like when it was read
     /// (device, inode, size, modification and change time, of the name and
     /// of what it leads to): not part of the key, but of the check after the
@@ -1305,13 +1318,28 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // line the key leaves out; the files a diagnostic names are kept whole
     // (decision 30). Not narrowed where the run may not have said all the
     // compile will ([`said_as_compiled`]).
-    let diagnosed = diagnosed_files(&said).filter(|_| said_as_compiled(compile.language, front_end_pragma));
-    let used = match (narrow && compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed) {
-        (true, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
+    let as_compiled = said_as_compiled(compile.language, front_end_pragma);
+    let diagnosed = diagnosed_files(&said).filter(|_| as_compiled);
+    let unnarrowed = unnarrowed(narrow, compiler.family, compile, diagnosed.is_some(), as_compiled);
+    let used = match (unnarrowed, diagnosed) {
+        (None, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
         _ => None,
     };
-    let (files, whole, seen) = read_files(&named, map, used.as_ref())?;
-    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen })
+    let Digested { files, whole, seen, each } = read_files(&named, map, used.as_ref())?;
+    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, each, unnarrowed })
+}
+
+/// Why no file of a unit is narrowed (decision 27), if none is: in the
+/// order the reasons are tried.
+pub(super) fn unnarrowed(narrow: bool, family: Family, compile: &Compile, diagnosed: bool, as_compiled: bool) -> Option<&'static str> {
+    match () {
+        _ if !narrow => Some("build-cache-preserve-exact-warnings is true"),
+        _ if family != Family::Gcc => Some("Clang (its debug information checksums each file)"),
+        _ if compile.macros_in_debug => Some("-g3 (the debug information has every macro)"),
+        _ if !as_compiled => Some("a C unit with a #pragma GCC its front end acts on"),
+        _ if !diagnosed => Some("a preprocessor diagnostic that names no file"),
+        _ => None,
+    }
 }
 
 /// Digest the files `named`, each under its mapped name: their bytes (the
@@ -1340,7 +1368,7 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// ([`Store::restore_with`], decision 30).
 ///
 /// [`Store::restore_with`]: super::store::Store::restore_with
-pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Used>) -> Res<(String, String, String)> {
+pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Used>) -> Res<Digested> {
     let mut files = Hasher::new("files");
     let mut whole = Hasher::new("files");
     let mut seen = Hasher::new("seen");
@@ -1390,32 +1418,98 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
             }
         }
     }
+    let mut each = Vec::with_capacity(reads.len());
     for (mapped, path, entered, read) in &reads {
         files.feed(mapped);
         whole.feed(mapped);
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
-        match read {
+        let (digest, taken) = match read {
             Ok(bytes) => {
                 let all = content_digest(bytes, map);
                 whole.feed(all.as_bytes());
                 match used {
                     Some(used) if !used.keeps(path) => {
-                        let kept = without_definitions(bytes, |name| used.droppable(name) && defined.get(name) == Some(&1));
-                        files.feed(content_digest(&kept, map).as_bytes());
+                        let once = |name: &[u8]| defined.get(name) == Some(&1);
+                        let kept = without_definitions(bytes, |name| used.droppable(name) && once(name));
+                        // The definitions of names the text does not use that
+                        // stayed all the same, and why (decision 27).
+                        let mut stayed: Vec<String> = definitions(bytes)
+                            .filter(|name| !(used.names.contains(*name) || used.droppable(name) && once(name)))
+                            .map(|name| format!("{} ({})", String::from_utf8_lossy(name), used.why_kept(name, once(name))))
+                            .collect();
+                        stayed.dedup();
+                        (content_digest(&kept, map), Taken::Narrowed(stayed))
                     }
-                    _ => files.feed(all.as_bytes()),
+                    Some(used) => (all, used.why_whole(path)),
+                    None => (all, Taken::Unnarrowed),
                 }
             }
             Err(_) if !*entered && absent() => {
-                files.feed(b"no such file");
                 whole.feed(b"no such file");
+                ("no such file".to_owned(), Taken::Absent)
             }
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
+        };
+        files.feed(digest.as_bytes());
+        each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, taken });
+    }
+    Ok(Digested { files: files.hex(), whole: whole.hex(), seen: seen.hex(), each })
+}
+
+/// What [`read_files`] made of the files a compile read: the key's files
+/// part, their digest whole (decision 29), what they looked like when read
+/// (the check after the compile), and how the key took each.
+pub(super) struct Digested {
+    pub files: String,
+    pub whole: String,
+    pub seen: String,
+    pub each: Vec<FileNote>,
+}
+
+/// One file a compile read, as its key took it (§18.12): by its mapped
+/// name, with the digest the files part has of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileNote {
+    pub name: String,
+    pub digest: String,
+    #[serde(skip)]
+    pub taken: Taken,
+}
+
+/// How a key took a file (decision 27): whole, and why; or narrowed, with
+/// the definitions of names the unit does not use that it kept all the
+/// same, and why each.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Taken {
+    /// No file of the unit was narrowed (`Keyed::unnarrowed` says why).
+    #[default]
+    Unnarrowed,
+    Source,
+    HasCode,
+    Diagnosed,
+    Narrowed(Vec<String>),
+    Absent,
+}
+
+impl Taken {
+    /// In words, for the event log and `cache doctor`.
+    pub fn describe(&self) -> String {
+        match self {
+            Taken::Unnarrowed => "whole: no file of the unit is narrowed".to_owned(),
+            Taken::Source => "whole: the unit's source".to_owned(),
+            Taken::HasCode => "whole: the compiled text has code of it".to_owned(),
+            Taken::Diagnosed => "whole: a preprocessor diagnostic names it".to_owned(),
+            Taken::Narrowed(stayed) if stayed.is_empty() => "narrowed: a definition the unit uses differs".to_owned(),
+            Taken::Narrowed(stayed) => {
+                let shown: Vec<&str> = stayed.iter().take(3).map(String::as_str).collect();
+                let more = if stayed.len() > 3 { format!(" and {} more", stayed.len() - 3) } else { String::new() };
+                format!("narrowed, kept definitions the unit does not use: {}{more}", shown.join(", "))
+            }
+            Taken::Absent => "no such file".to_owned(),
         }
     }
-    Ok((files.hex(), whole.hex(), seen.hex()))
 }
 
 /// Does the driver take flags for this compile from a file of its own? It
@@ -1513,7 +1607,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
     // markers give them; and the file the lines now come from.
     let mut with_code = BTreeSet::new();
     let mut current: Option<PathBuf> = None;
-    let mut front_end_pragma = false;
+    let mut front_end = FrontEnd::default();
     let (mut line, mut bytes) = (Vec::new(), 0u64);
     loop {
         line.clear();
@@ -1537,7 +1631,9 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
                 // name (a header may be called `<odd>.h`); and a name
                 // ending in `//`, GCC's note of the working directory.
                 let pseudo = NOT_FILES.contains(&marker.name.as_slice()) || marker.name.ends_with(b"//") || marker.name.is_empty();
-                current = Some(PathBuf::from(OsString::from_vec(marker.name.clone())));
+                let file = PathBuf::from(OsString::from_vec(marker.name.clone()));
+                front_end.enter(&file);
+                current = Some(file);
                 if !pseudo {
                     let entered = marker.enters();
                     *named.entry((mapped, PathBuf::from(OsString::from_vec(marker.name)))).or_default() |= entered;
@@ -1550,7 +1646,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
                 bail!("the source makes the assembler read another file (.incbin or .include), which the cache does not follow")
             }
             None => {
-                front_end_pragma |= acted_on_by_the_front_end(&line);
+                front_end.line(&line);
                 match definitions(&line).next() {
                     Some(name) => {
                         used.insert(name.to_vec());
@@ -1567,7 +1663,7 @@ pub(super) fn digest_output(child: &mut std::process::Child, map: Option<&PathMa
         }
     }
     hasher.end_stream(bytes);
-    Ok(Output { text: hasher.hex(), bytes, named, used, with_code, front_end_pragma })
+    Ok(Output { text: hasher.hex(), bytes, named, used, with_code, front_end_pragma: front_end.reaches })
 }
 
 /// What [`digest_output`] read of a preprocessor's output: its text
@@ -1585,8 +1681,9 @@ pub(super) struct Output {
 
 /// Does a C or C++ compile's preprocessor run see the text as the compile
 /// does: its macros and every warning it would print? Not for C where the
-/// text has a `#pragma GCC` the C front end acts on as it reads on
-/// ([`acted_on_by_the_front_end`]), which `-E` ignores or follows only in
+/// text has a `#pragma GCC` the C front end acts on as it reads on, and
+/// that reaches a file the key may narrow ([`FrontEnd`]), which `-E`
+/// ignores or follows only in
 /// part: `optimize` (and `target` before GCC 14, with `push_options` and
 /// the like) redefines `__OPTIMIZE__`, `__FAST_MATH__`, `__AVX2__` and their
 /// kind for the rest of the unit, so `-dU` misses a macro the compile uses
@@ -1600,13 +1697,53 @@ pub(super) fn said_as_compiled(language: compile::Language, front_end_pragma: bo
     !(front_end_pragma && language == compile::Language::C)
 }
 
-/// Is `line`, of `-E`'s output (which writes every pragma, `_Pragma` too,
-/// as `#pragma` at a line's start), a `#pragma GCC` but one of those the
-/// preprocessor alone handles, or that change nothing a later line reads?
-fn acted_on_by_the_front_end(line: &[u8]) -> bool {
+/// The `#pragma GCC` lines of `-E`'s output (which writes every pragma,
+/// `_Pragma` too, as `#pragma` at a line's start) that GCC's C front end
+/// acts on as it reads on, where `-E` does not, or only in part
+/// ([`said_as_compiled`]): whether one reaches lines of a file the key may
+/// narrow.
+///
+/// Every file such a line is in has code (the line itself) and is keyed
+/// whole. `optimize`, `target` and their kind redefine macros `-dU` then
+/// misses, wherever they are used: they reach every file. `diagnostic`
+/// changes warnings for the lines after it: one between a `push` and its
+/// `pop` in one file, with no other file entered in between, reaches no
+/// other file (glibc's `stdlib-bsearch.h`, which every C unit with
+/// `<stdlib.h>` reads, is so); any other reaches the files after it.
+#[derive(Debug, Default)]
+struct FrontEnd {
+    /// The file of each `#pragma GCC diagnostic push` not yet popped.
+    pushed: Vec<PathBuf>,
+    current: Option<PathBuf>,
+    reaches: bool,
+}
+
+impl FrontEnd {
     const LEFT_TO_THE_PREPROCESSOR: [&[u8]; 9] = [b"system_header", b"poison", b"warning", b"error", b"dependency", b"ivdep", b"unroll", b"novector", b"visibility"];
-    let mut words = line.split(|b| b.is_ascii_whitespace() || *b == b'(').filter(|word| !word.is_empty());
-    words.next() == Some(b"#pragma") && words.next() == Some(b"GCC") && words.next().is_none_or(|word| !LEFT_TO_THE_PREPROCESSOR.contains(&word))
+
+    /// The lines from here on come from `file` (a line marker).
+    fn enter(&mut self, file: &Path) {
+        if self.pushed.iter().any(|pushed| pushed != file) {
+            self.reaches = true;
+        }
+        self.current = Some(file.to_owned());
+    }
+
+    fn line(&mut self, line: &[u8]) {
+        let mut words = line.split(|b| b.is_ascii_whitespace() || *b == b'(').filter(|word| !word.is_empty());
+        if words.next() != Some(b"#pragma") || words.next() != Some(b"GCC") {
+            return;
+        }
+        match (words.next(), words.next()) {
+            (Some(word), _) if Self::LEFT_TO_THE_PREPROCESSOR.contains(&word) => {}
+            (Some(b"diagnostic"), Some(b"push")) => self.pushed.push(self.current.clone().unwrap_or_default()),
+            (Some(b"diagnostic"), Some(b"pop")) => {
+                self.pushed.pop();
+            }
+            (Some(b"diagnostic"), _) if !self.pushed.is_empty() => {}
+            _ => self.reaches = true,
+        }
+    }
 }
 
 /// `said` without the terminal's escape sequences (colors, by
@@ -1790,6 +1927,24 @@ impl Used {
         *path == self.source
             || self.with_code.contains(path)
             || (!self.diagnosed.is_empty() && std::fs::canonicalize(path).is_ok_and(|real| self.diagnosed.contains(&real)))
+    }
+
+    /// Why the file at `path`, which [`Used::keeps`], is keyed whole.
+    fn why_whole(&self, path: &Path) -> Taken {
+        match () {
+            _ if *path == self.source => Taken::Source,
+            _ if self.with_code.contains(path) && !self.diagnosed.contains(path) => Taken::HasCode,
+            _ => Taken::Diagnosed,
+        }
+    }
+
+    /// Why a definition of `name`, which the text does not use, stayed.
+    fn why_kept(&self, name: &[u8], once: bool) -> &'static str {
+        match () {
+            _ if self.given.contains(name) => "given on the command line",
+            _ if !once => "defined more than once",
+            _ => "a reserved name",
+        }
     }
 
     /// May a definition of `name` be left out of a file's bytes? Not if the
@@ -2263,7 +2418,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "4c996124dea19d194cf2d14205cdacd60986f15684f21f33e08b368ba813ee78");
+        assert_eq!(parts.key(), "9d12e615c19f076c08f6bdff02f9d030b42de91451d4c0daf2cc5e49d9491334");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2745,12 +2900,31 @@ mod tests {
         use compile::Language;
         assert!(said_as_compiled(Language::C, false) && !said_as_compiled(Language::C, true));
         assert!(said_as_compiled(Language::Cxx, true));
-        for line in ["#pragma GCC diagnostic error \"-Wall\"\n", "#pragma GCC optimize(\"O0\")\n", "#pragma GCC target(\"avx2\")\n", "#pragma GCC push_options\n", "#pragma GCC\n"] {
-            assert!(acted_on_by_the_front_end(line.as_bytes()), "{line}");
+        // Which pragmas reach a file the key may narrow: a line `@a.h`
+        // stands for a line marker entering that file.
+        let reaches = |lines: &[&str]| {
+            let mut front_end = FrontEnd::default();
+            for line in lines {
+                match line.strip_prefix('@') {
+                    Some(file) => front_end.enter(Path::new(file)),
+                    None => front_end.line(line.as_bytes()),
+                }
+            }
+            front_end.reaches
+        };
+        for line in ["#pragma GCC diagnostic error \"-Wall\"", "#pragma GCC optimize(\"O0\")", "#pragma GCC target(\"avx2\")", "#pragma GCC push_options", "#pragma GCC"] {
+            assert!(reaches(&["@a.c", line]), "{line}");
         }
-        for line in ["#pragma GCC system_header\n", "#pragma GCC poison X\n", "#pragma omp parallel\n", "int x;\n", "#pragma GCC unroll 4\n"] {
-            assert!(!acted_on_by_the_front_end(line.as_bytes()), "{line}");
+        for line in ["#pragma GCC system_header", "#pragma GCC poison X", "#pragma omp parallel", "int x;", "#pragma GCC unroll 4"] {
+            assert!(!reaches(&["@a.c", line]), "{line}");
         }
+        // glibc's `stdlib-bsearch.h`: a region that closes in its own file.
+        let region = ["@bsearch.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic ignored \"-Wcast-qual\"", "x;", "#pragma GCC diagnostic pop"];
+        assert!(!reaches(&[&["@a.c"], &region[..], &["@a.c", "@b.h"]].concat()));
+        // One that takes in another file, or is left open as one is entered.
+        assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic error \"-Wall\"", "@b.h", "@a.h", "#pragma GCC diagnostic pop"]));
+        assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic warning \"-Wall\"", "@a.c"]));
+        assert!(!reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic warning \"-Wall\"", "@a.h", "#pragma GCC diagnostic pop", "@b.h"]));
     }
 
     #[test]

@@ -20,11 +20,11 @@
 //! interpreter line — it hands to that same kind of shell
 //! ([`hand_to_shell`]) rather than fail a compile the recipe would have run.
 
-use super::event::{Audit, Event, Outcome};
-use super::store::{speak_of_definitions, whole_key, About, Miss, ModulesTo, NewEntry, Published, Store};
+use super::event::{Audit, Event, Miss as MissKind, Outcome, DIFFERS_KEPT};
+use super::store::{speak_of_definitions, whole_key, About, Miss, ModulesTo, NewEntry, Published, Store, UnitRecord};
 use super::probe::SELFTEST_COMPILER;
 use super::cuda::{self, Step};
-use super::{events_path, key, BuildConf, Mode, PROBE_VERB, WRAP_VERB};
+use super::{events_path, key, BuildConf, Mode, PROBE_VERB, SUMMARY_VERB, WRAP_VERB};
 use crate::Res;
 use anyhow::Context;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
@@ -48,13 +48,14 @@ const DEBUG_ENV: &str = "CACTUP_CC_DEBUG";
 const OTHER_WRAPPERS: &[&str] =
     &["ccache", "sccache", "distcc", "icecc", "icerun", "buildcache", "f90cache", "cachecc1"];
 
-/// If this process was started as the compiler wrapper or as the probe, be
-/// that and never return. Otherwise return at once, having touched nothing.
+/// If this process was started as the compiler wrapper, the probe or the
+/// build's summary, be that and never return. Otherwise return at once, having touched nothing.
 pub fn run_if_invoked() {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
         Some(verb) if verb == WRAP_VERB => wrap(args),
         Some(verb) if verb == PROBE_VERB => std::process::exit(super::probe::run(args.next())),
+        Some(verb) if verb == SUMMARY_VERB => std::process::exit(super::summary::run(args.next())),
         _ => {}
     }
 }
@@ -261,6 +262,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         relocatable: keyed.as_ref().ok().map(key::Keyed::relocatable),
         text_bytes: keyed.as_ref().ok().map(|keyed| keyed.text_bytes),
         files: keyed.as_ref().ok().map(|keyed| keyed.files as u64),
+        unnarrowed: keyed.as_ref().ok().and_then(|keyed| keyed.unnarrowed).map(str::to_owned),
         key_ms,
         ..Default::default()
     };
@@ -305,10 +307,13 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
                 let object = into.as_deref().unwrap_or(&keyed.compile.output);
                 match store.restore_with(&key, object, modules_to, keyed.whole()) {
                     // Messages for other files whole: perhaps one of its own.
-                    Err(Miss::SaidElsewhere) => {
+                    // An entry whose messages speak of definitions is only
+                    // under the key with its files whole, whatever the key
+                    // has (decision 30), so a narrowed key looks there too.
+                    Err(miss @ (Miss::SaidElsewhere | Miss::Absent)) if matches!(miss, Miss::SaidElsewhere) || keyed.narrowed() => {
                         let whole_key = whole_key(&key, keyed.whole());
                         match store.restore_with(&whole_key, object, modules_to, keyed.whole()) {
-                            Err(Miss::Absent) => (Err(Miss::SaidElsewhere), whole_key),
+                            Err(Miss::Absent) => (Err(miss), whole_key),
                             restored => (restored, whole_key),
                         }
                     }
@@ -426,6 +431,16 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     {
         event.store = Some(format!("the wrong entry could not be removed: {e:#}"));
     }
+    // What kind of miss this was, by what the store has for the object,
+    // and, once published, what made this entry (§18.12).
+    let mut stored_key = None;
+    if let (Ok(store), Ok(keyed), Some(unit)) = (&store, &keyed, &event.unit)
+        && event.outcome == Some(Outcome::Miss)
+    {
+        let (kind, differs) = miss_kind(&store.unit_records(unit, &keyed.parts.key()), keyed);
+        event.miss = Some(kind);
+        event.differs = differs;
+    }
     if let (Ok(store), Ok(keyed), Some(captured)) = (&store, &keyed, &captured)
         && status.success()
         && stable == Some(true)
@@ -434,14 +449,26 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         let (published, publish_ms) = timed(|| publish(store, keyed, captured, &event, &cwd));
         event.publish_ms = publish_ms;
         match published {
-            Ok(Published::Stored) => event.published = Some(true),
+            Ok((Published::Stored, key)) => {
+                event.published = Some(true);
+                stored_key = Some(key);
+            }
             // Another build compiled the same thing and published it first.
-            Ok(Published::AlreadyThere) => event.store = Some("another build published it first".to_owned()),
+            Ok((Published::AlreadyThere, _)) => event.store = Some("another build published it first".to_owned()),
             Err(why) => {
                 event.published = Some(false);
                 event.store = Some(why);
             }
         }
+    }
+    if let (Ok(store), Ok(keyed), Some(unit), Some(key)) = (&store, &keyed, &event.unit, &stored_key) {
+        let record = UnitRecord { parts: keyed.parts.clone(), files: keyed.each.clone() };
+        let ((), ms) = timed(|| {
+            if let Err(e) = store.record_unit(unit, key, &record) {
+                event.store = Some(format!("the unit record was not written: {e:#}"));
+            }
+        });
+        event.publish_ms += ms;
     }
     event.append(&events_path(cc_dir));
     if let Ok(keyed) = &mut keyed {
@@ -563,7 +590,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
 
 /// Publish the object of a compile that succeeded and whose key held, with
 /// the messages it wrote (§18.7, §18.8).
-fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event, cwd: &Path) -> Result<Published, String> {
+fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event, cwd: &Path) -> Result<(Published, String), String> {
     // Messages that may speak of a definition the key leaves out go under
     // the key with the files whole (decision 30).
     let key = event.key.clone().unwrap_or_default();
@@ -599,7 +626,60 @@ fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event
             host: gethostname::gethostname().to_string_lossy().into_owned(),
         },
     };
-    store.publish(&entry).map_err(|e| format!("not published: {e:#}"))
+    store.publish(&entry).map(|published| (published, key.clone())).map_err(|e| format!("not published: {e:#}"))
+}
+
+/// What kind of miss a compile keyed as `keyed` is, by the store's
+/// `records` for its object (§18.12), and what differs from the closest:
+/// for other sources, each file (with how this key took it), for a build
+/// made otherwise, the parts of the key.
+fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<String>) {
+    let ours = &keyed.parts;
+    let parts_differing = |theirs: &key::Parts| -> Vec<String> {
+        [
+            ("the platform", &theirs.platform, &ours.platform),
+            ("the compiler", &theirs.compiler, &ours.compiler),
+            ("the flags", &theirs.arguments, &ours.arguments),
+            ("the environment", &theirs.environment, &ours.environment),
+        ]
+        .into_iter()
+        .filter(|(_, theirs, ours)| theirs != ours)
+        .map(|(name, _, _)| name.to_owned())
+        .collect()
+    };
+    let files_differing = |record: &UnitRecord| -> Vec<String> {
+        let theirs: std::collections::HashMap<&str, &str> = record.files.iter().map(|note| (note.name.as_str(), note.digest.as_str())).collect();
+        let mut differs = Vec::new();
+        if record.parts.text != ours.text {
+            differs.push("the preprocessed text".to_owned());
+        }
+        for note in &keyed.each {
+            match theirs.get(note.name.as_str()) {
+                Some(digest) if *digest == note.digest => {}
+                Some(_) => differs.push(format!("{}: {}", note.name, note.taken.describe())),
+                None => differs.push(format!("{}: read by this compile only", note.name)),
+            }
+        }
+        let read: std::collections::HashSet<&str> = keyed.each.iter().map(|note| note.name.as_str()).collect();
+        differs.extend(record.files.iter().filter(|note| !read.contains(note.name.as_str())).map(|note| format!("{}: read by the other compile only", note.name)));
+        differs
+    };
+    let alike: Vec<&UnitRecord> = records.iter().filter(|record| parts_differing(&record.parts).is_empty()).collect();
+    let (kind, mut differs) = match (records.is_empty(), alike.is_empty()) {
+        (true, _) => (MissKind::New, Vec::new()),
+        (false, false) => {
+            let mut differs = alike.into_iter().map(files_differing).min_by_key(Vec::len).unwrap_or_default();
+            // The same files as the key takes them: the entry's messages
+            // speak of definitions, and its files whole differ (decision 30).
+            if differs.is_empty() {
+                differs.push("the files whole, which an entry whose messages speak of definitions must match".to_owned());
+            }
+            (MissKind::OtherSources, differs)
+        }
+        (false, true) => (MissKind::BuiltOtherwise, records.iter().map(|record| parts_differing(&record.parts)).min_by_key(Vec::len).unwrap_or_default()),
+    };
+    differs.truncate(DIFFERS_KEPT);
+    (kind, differs)
 }
 
 /// The compiler, started directly: the file `identified` if the key was

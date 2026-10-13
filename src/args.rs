@@ -836,6 +836,27 @@ pub(crate) enum CacheCommand {
         #[clap(long)]
         long: bool,
     },
+    /// Say why a build's compiles were not served from the build cache
+    ///
+    /// Reads what a build that went through the cache logged of its
+    /// compiles (the newest build of the config that did, or --attempt) and
+    /// says: how many objects the cache gave; the compiles it kept out, by
+    /// reason, with what would let them in where that is known; the
+    /// objects the cache had from other sources, by the file that differed,
+    /// with whether the cache compared that file whole and why; the objects
+    /// it had built otherwise, by what differed (compiler, flags,
+    /// environment); and the compiles of which it compared every file whole,
+    /// by reason. Nothing is compiled, and the cache itself is not read.
+    ///
+    ///   cactup cache doctor sim
+    #[clap(verbatim_doc_comment)]
+    Doctor {
+        /// Config whose build to look at (default: the active config).
+        name: Option<String>,
+        /// Build attempt to look at (default: the newest that went through the cache).
+        #[clap(long, value_name = "N")]
+        attempt: Option<u32>,
+    },
     /// Say what the build cache holds: objects, sizes, and how recently they were used
     ///
     /// Walks the cache directory (the build-cache-home knob; by default

@@ -56,7 +56,7 @@ the last milestone, for when that host is not at hand.
 | M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews), its follow-ups at `05c67a3` and `e29e593` |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **passed the gate** at `b652348` (nine review rounds): decisions 24–31; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed; the two-thornlist benchmark 350 of 389 served, 1:07 against 8:30 |
-| M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; every cache-on build ends with one line: objects reused of all, and the misses by kind (built for the first time, sources changed, kept out by something `cache doctor` or `cache report` explains), a kind with a count of 0 left out (Max, 2026-10-13; "sources changed" needs a per-unit index beside the store); a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | **next**, then the merge to master (decision 27) |
+| M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; every cache-on build ends with one line: objects reused of all, and the misses by kind (built for the first time, sources changed, kept out by something `cache doctor` or `cache report` explains), a kind with a count of 0 left out (Max, 2026-10-13; "sources changed" needs a per-unit index beside the store); a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | part 1 (the build's line, the unit records, `cache doctor` reading a build) **in review**; part 2 (the environment checks, the MDB check) next; then the merge to master (decision 27) |
 | M4b | Cray compilers: C, C++ and Fortran through `cc`, `CC`, `ftn`, seen through to the compiler they run, with the module environment that shapes them; Cray's `CC` as `nvcc`'s host compiler (decision 23) | follow-up after the merge (decision 27); no Cray machine to probe yet |
 | M5b | Take on the cases where whole files stay keyed (decision 27): Clang's file checksums, `-g3`, preprocessor warnings, redefinitions | follow-up after the merge (decision 27) |
 | M6 | HIP and other non-NVIDIA GPU compiles (`hipcc`, AMD's `amdclang`/`amdclang++`, and what else the MDB's GPU machines use) | follow-up after the merge (decision 27) |
@@ -2468,14 +2468,50 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M4 (CUDA) passed its gate at `b652348` (nine rounds; records above). Next:
-M5, `cactup cache doctor` (milestone table), with decision 27's report of
-where whole files stay keyed and the summary line every cache-on build ends
-with (reused of all; misses as new, sources changed, kept out; a kind with
-a count of 0 left out). Then the merge of `feature/build-cache` to master
-(decision 27), and the follow-ups M4b Cray, M5b, M6 HIP. Max's idea of
-warnings replayed by condition (decision 31) is on hold: the benchmark's
-misses are not about warnings.
+M5 (`cactup cache doctor`) in two parts, each through the review gate.
+Part 1 is in review (spec §18.12):
+
+- Every serving build ends with one line from `cactup __cc-summary`:
+  `350 of 389 objects reused; 39 compiled: 22 new, 9 with other sources,
+  5 built otherwise, 3 kept out (see cactup cache doctor)`, a kind with a
+  count of 0 left out. "Built otherwise" (another compiler, other flags or
+  environment) is a fourth kind beside Max's three, so that those misses
+  are not called "sources changed"; "failed" counts failed compiles.
+- The unit records: `<store>/v4/<machine>/units/<ab>/<unit digest>/<key>`,
+  one per published entry, JSON (the key's parts, each file's mapped name
+  and digest), written as entries are. A miss reads its object's newest 32
+  and logs its kind and what differs from the closest (files, with how the
+  key took each: decision 27; or the key's parts). `cache gc` removes the
+  records of entries that are gone; `cache stats` counts them.
+- `cactup cache doctor [<config>] [--attempt N]`: the line, the compiles
+  kept out by reason (with what would let them in, where known), the misses
+  with other sources by file, those built otherwise by part, and the
+  compiles of which no file was narrowed, by reason. Reads the event log
+  only.
+
+Found by trying it on plato (`~/tmp/build-cache-m5/run.sh`: smoke.th served
+as `m5a`, then two thorns fewer as `m5b`, then `m5a` again):
+- Round 8's rule (no narrowing for a C unit with a `#pragma GCC` its front
+  end acts on) kept every C unit whole on Debian 13: glibc's
+  `bits/stdlib-bsearch.h`, read by every unit with `<stdlib.h>`, has a
+  `#pragma GCC diagnostic push`/`ignored`/`pop`. `m5b` was served 236 of
+  342. A `diagnostic` region that opens and closes in one file, with no
+  other file entered in between, reaches no file the key may narrow (the
+  file it is in has code and is keyed whole): such a region no longer
+  counts (`key::FrontEnd`). `m5b` now 336 of 342; the 6 left are the
+  bindings sources, which list the thorns. Key label `key-20`.
+- From M4 (decision 30): an entry whose messages speak of definitions is
+  stored only under the key with its files whole, and a lookup went there
+  only after finding another entry under the plain key: such a unit was
+  never served, not even to the build that stored it (`OverloadComm.c`).
+  A narrowed key now looks there when the plain key has nothing.
+
+Then part 2: the cache's rules applied to a configuration's build
+environment without compiling, traced to the user's shell, the machine's
+`meta.toml` or the option list, behind a seam of named checks; and the CI
+check of every MDB machine's environment setup. Then the merge of
+`feature/build-cache` to master (decision 27), and the follow-ups M4b Cray,
+M5b, M6 HIP. Max's warnings replayed by condition (decision 31) is on hold.
 
 qbd test instance: `/work/mmorris/cactup-m4/` (its own `CACTUP_HOME`,
 installation `m4` at `/ddnB/work/mmorris/m4`, builds to `single` by the

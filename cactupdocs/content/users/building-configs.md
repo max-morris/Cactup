@@ -581,11 +581,37 @@ cactup knob build-cache serve                 # for every build from now on
 cactup knob delete build-cache                # back to the default, off
 ```
 
-With `serve`, the compile step ends with what the cache did:
+With `serve`, the compile step ends with what the cache did: how many
+objects it gave, and why the others were compiled. A kind with nothing in
+it is left out:
 
 ```
-cactup: build cache: 357 compiles, 307 served from the cache, 0 published
+cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with other sources, 5 built otherwise, 3 kept out (see cactup cache doctor)
 ```
+
+- *new*: the cache had no object of that name yet (the first build of a
+  thorn, or of a file);
+- *with other sources*: it had one compiled the same way, from other
+  sources: a file of the thorn edited, or a header that differs between
+  your configurations;
+- *built otherwise*: it had one compiled with another compiler, other
+  flags, or another environment;
+- *kept out*: the cache could not take part in that compile (a flag it does
+  not know, a compiler setting it cannot follow);
+- *failed*: the compile failed.
+
+`cactup cache doctor` says which, and why, for the newest build of a
+configuration that went through the cache:
+
+```sh
+cactup cache doctor myconfig
+```
+
+It lists the compiles kept out by reason, with what would let them in where
+cactup knows; for the objects with other sources, the files that differed,
+most often first, and whether the cache compared each file whole or left
+out definitions the file did not use; and what differed for those built
+otherwise. Nothing is compiled.
 
 **Your objects name their sources differently.** So that installations can
 share objects, a compile run through the cache records its source files as

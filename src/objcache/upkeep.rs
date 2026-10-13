@@ -10,7 +10,7 @@
 //! fileserver's clock — is when it found them. `gc` folds the logs it read
 //! into one that carries a time on each line, and removes them.
 
-use super::store::{Store, FORMAT};
+use super::store::{Store, FORMAT, UNITS};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::HashMap;
@@ -103,6 +103,8 @@ pub struct Machine {
     pub entries: Vec<Entry>,
     pub temps: Vec<Other>,
     pub logs: Vec<Log>,
+    /// The unit records (§18.12), each by the key of its entry.
+    pub records: Vec<(String, PathBuf)>,
 }
 
 impl Machine {
@@ -141,7 +143,17 @@ impl Scan {
 struct Piece {
     machine: usize,
     dir: PathBuf,
-    used: bool,
+    kind: PieceKind,
+}
+
+/// What a piece of the store holds.
+#[derive(Clone, Copy, PartialEq)]
+enum PieceKind {
+    Entries,
+    /// The use logs.
+    Used,
+    /// One `units/<ab>` directory of unit records (§18.12).
+    Units,
 }
 
 /// What one piece held.
@@ -151,6 +163,7 @@ struct Found {
     temps: Vec<Other>,
     logs: Vec<Log>,
     unreadable_logs: Vec<(PathBuf, String)>,
+    records: Vec<(String, PathBuf)>,
 }
 
 /// Is `name` a key (64 lowercase hex digits)?
@@ -164,6 +177,10 @@ fn modified(meta: &Metadata) -> SystemTime {
 
 /// Read one piece of the store.
 fn read_piece(piece: &Piece) -> Res<Found> {
+    if piece.kind == PieceKind::Units {
+        return read_units(&piece.dir);
+    }
+    let used = piece.kind == PieceKind::Used;
     let mut found = Found::default();
     let listing = match fs::read_dir(&piece.dir) {
         Ok(listing) => listing,
@@ -178,7 +195,7 @@ fn read_piece(piece: &Piece) -> Res<Found> {
             Ok(meta) => meta,
             // A use log that cannot be looked at is not known to say
             // nothing; an entry that cannot is no entry to remove.
-            Err(e) if piece.used && !name.starts_with(".tmp-") => {
+            Err(e) if used && !name.starts_with(".tmp-") => {
                 found.unreadable_logs.push((path, e.to_string()));
                 continue;
             }
@@ -189,7 +206,7 @@ fn read_piece(piece: &Piece) -> Res<Found> {
         }
         if name.starts_with(".tmp-") {
             found.temps.push(Other { path, modified: modified(&meta) });
-        } else if piece.used {
+        } else if used {
             let kind = name.rsplit_once('.').map(|(_, kind)| kind);
             if !matches!(kind, Some("keys" | "times")) {
                 continue;
@@ -236,6 +253,34 @@ fn read_piece(piece: &Piece) -> Res<Found> {
     Ok(found)
 }
 
+/// Read one `units/<ab>` directory: each object's records, and temporary
+/// files of records cut short. A record that cannot be looked at is passed
+/// over: it is a report, not a key.
+fn read_units(dir: &Path) -> Res<Found> {
+    let mut found = Found::default();
+    let listing = match fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", dir.display())),
+    };
+    for unit in listing.flatten() {
+        let Ok(records) = fs::read_dir(unit.path()) else { continue };
+        for record in records.flatten() {
+            let name = record.file_name().to_string_lossy().into_owned();
+            let Ok(meta) = fs::symlink_metadata(record.path()) else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            if name.starts_with(".tmp-") {
+                found.temps.push(Other { path: record.path(), modified: modified(&meta) });
+            } else if is_key(&name) {
+                found.records.push((name, record.path()));
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Walk the store under `root`: every machine's entries, temporary files and
 /// use logs, and what directories of other formats there are. The entry
 /// directories are read in parallel (`par::parallel_map`, which stops on
@@ -267,11 +312,19 @@ pub fn scan(root: &Path) -> Res<Scan> {
             continue;
         }
         let machine = scan.machines.len();
+        let prefix = |name: &str| name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit());
         for sub in list(&dir)? {
             let sub_name = sub.file_name().to_string_lossy().into_owned();
-            let prefix = sub_name.len() == 2 && sub_name.bytes().all(|b| b.is_ascii_hexdigit());
-            if prefix || sub_name == "used" {
-                pieces.push(Piece { machine, dir: sub.path(), used: sub_name == "used" });
+            if prefix(&sub_name) {
+                pieces.push(Piece { machine, dir: sub.path(), kind: PieceKind::Entries });
+            } else if sub_name == "used" {
+                pieces.push(Piece { machine, dir: sub.path(), kind: PieceKind::Used });
+            } else if sub_name == UNITS {
+                for units in list(&sub.path())? {
+                    if prefix(&units.file_name().to_string_lossy()) {
+                        pieces.push(Piece { machine, dir: units.path(), kind: PieceKind::Units });
+                    }
+                }
             }
         }
         scan.machines.push(Machine { name, dir, ..Default::default() });
@@ -296,6 +349,7 @@ pub fn scan(root: &Path) -> Res<Scan> {
         machine.entries.extend(found.entries);
         machine.temps.extend(found.temps);
         machine.logs.extend(found.logs);
+        machine.records.extend(found.records);
         scan.unreadable_logs.extend(found.unreadable_logs);
     }
     Ok(scan)
@@ -309,6 +363,8 @@ pub struct Plan {
     pub entries: Vec<(Entry, SystemTime)>,
     /// Temporary files a day old.
     pub temps: Vec<Other>,
+    /// Unit records whose entry is gone, or goes now (§18.12).
+    pub records: Vec<PathBuf>,
     /// Per machine: the logs to fold, and the uses to keep (the last of
     /// each key that stays).
     pub folds: Vec<(PathBuf, Vec<PathBuf>, Vec<(String, SystemTime)>)>,
@@ -350,6 +406,13 @@ pub fn plan(scan: &Scan, now: SystemTime, unused_for: Option<Duration>, to_size:
         kept = over.collect();
     }
     plan.bytes_after = bytes;
+    // The records of entries that are not there, or are removed now.
+    let removed: std::collections::HashSet<&Path> = plan.entries.iter().map(|(entry, _)| entry.path.as_path()).collect();
+    for machine in &scan.machines {
+        let staying: std::collections::HashSet<&str> =
+            machine.entries.iter().filter(|entry| !removed.contains(entry.path.as_path())).map(|entry| entry.key.as_str()).collect();
+        plan.records.extend(machine.records.iter().filter(|(key, _)| !staying.contains(key.as_str())).map(|(_, path)| path.clone()));
+    }
     // Fold every machine's logs into one with the last use of each key that
     // stays (and that a log knows a use of).
     for (index, machine) in scan.machines.iter().enumerate() {
@@ -375,6 +438,7 @@ pub struct Done {
     pub entries: u64,
     pub bytes: u64,
     pub temps: u64,
+    pub records: u64,
 }
 
 /// Carry out `plan`. An entry is removed only if its name still leads to
@@ -385,7 +449,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
     let mut done = Done::default();
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let removing = progress.add_child("remove from the build cache");
-    removing.init(Some(plan.entries.len() + plan.temps.len()), Some(prodash::unit::label("files")));
+    removing.init(Some(plan.entries.len() + plan.temps.len() + plan.records.len()), Some(prodash::unit::label("files")));
     let result = (|| -> Res<()> {
         for (entry, _) in &plan.entries {
             if gix::interrupt::is_triggered() {
@@ -403,6 +467,20 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
             }
             if fs::remove_file(&temp.path).is_ok() {
                 done.temps += 1;
+            }
+            removing.inc();
+        }
+        // A record says what made an entry; with the entry gone, it goes,
+        // and its object's directory with the last of them.
+        for record in &plan.records {
+            if gix::interrupt::is_triggered() {
+                bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
+            }
+            if fs::remove_file(record).is_ok() {
+                done.records += 1;
+                if let Some(dir) = record.parent() {
+                    let _ = fs::remove_dir(dir);
+                }
             }
             removing.inc();
         }
@@ -552,10 +630,31 @@ mod tests {
                 entries: vec![entry('a', 100, DAY), entry('b', 100, 2 * DAY), entry('c', 100, 8 * DAY)],
                 temps: vec![Other { path: PathBuf::from("/s/.tmp-x"), modified: UNIX_EPOCH + Duration::from_secs(5 * DAY) }],
                 logs: vec![Log { path: PathBuf::from("/s/v1/m/used/x.keys"), uses }],
+                records: ['a', 'b', 'd'].map(|key| (key.to_string().repeat(64), PathBuf::from(format!("/s/v1/m/units/00/u/{key}")))).to_vec(),
             }],
             other_formats: Vec::new(),
             unreadable_logs: Vec::new(),
         }
+    }
+
+    /// A unit record, written as the wrapper writes it, is found by the
+    /// walk and read back for a miss of the same object.
+    #[test]
+    fn unit_records_are_written_found_and_read() {
+        use super::super::key::{FileNote, Parts};
+        use super::super::store::UnitRecord;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path(), "m").unwrap();
+        let parts = Parts { platform: "p".into(), compiler: "c".into(), arguments: "a".into(), environment: "e".into(), text: "t".into(), files: "f".into() };
+        let record = UnitRecord { parts, files: vec![FileNote { name: "/cactup-root/t.h".into(), digest: "d".into(), taken: Default::default() }] };
+        let key = "e".repeat(64);
+        store.record_unit("T/a.c.o", &key, &record).unwrap();
+        store.record_unit("T/a.c.o", &key, &record).unwrap();
+        assert_eq!(store.unit_records("T/a.c.o", &"f".repeat(64)), vec![record.clone()]);
+        assert!(store.unit_records("T/a.c.o", &key).is_empty(), "a compile's own key is not another entry");
+        assert!(store.unit_records("T/b.c.o", "").is_empty());
+        let scan = scan(tmp.path()).unwrap();
+        assert_eq!(scan.machines[0].records.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(), [key]);
     }
 
     fn keys(plan: &Plan) -> Vec<char> {
@@ -571,6 +670,8 @@ mod tests {
         assert_eq!(keys(&plan), ['b']);
         assert_eq!(plan.bytes_after, 200);
         assert_eq!(plan.temps.len(), 1, "a temporary file five days old goes");
+        // The records of `b`, removed now, and `d`, gone already.
+        assert_eq!(plan.records, ["b", "d"].map(|key| PathBuf::from(format!("/s/v1/m/units/00/u/{key}"))));
         // The uses of what stays are kept; the log is folded.
         assert_eq!(plan.folds.len(), 1);
         assert_eq!(plan.folds[0].2, vec![("a".repeat(64), UNIX_EPOCH + Duration::from_secs(9 * DAY))]);

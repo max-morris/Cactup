@@ -519,6 +519,8 @@ pub struct Keyed {
     pub files: String,
     pub count: usize,
     pub seen: String,
+    /// How the key took each file (all whole: §18.12).
+    pub each: Vec<key::FileNote>,
 }
 
 /// `args` without `-D` and `-U` (each with its value): the compile does not
@@ -655,7 +657,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
     }
     hasher.feed(&map.map_or_else(|| deps.said.clone(), |map| map.messages_for_the_store(&deps.said)));
     let text_bytes = compiled.len() as u64;
-    let (files, seen, count) = read_inputs(&deps, map, &fortran)?;
+    let (files, seen, count, each) = read_inputs(&deps, map, &fortran)?;
     // The name the compile gives must reach the file read, by the way it
     // took then (a copy is checked by its bytes).
     if fortran.renamed.as_ref().is_none_or(|renamed| renamed.copy.is_none())
@@ -667,7 +669,7 @@ pub fn key(compiler: &Compiler, name: &OsStr, compile: &Compile, args: &[OsStrin
         bail!("the way to {} changed while it was read", joined.display());
     }
     fortran.deps = Some(deps);
-    Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, fortran })
+    Ok(Keyed { text: hasher.hex(), text_bytes, files, count, seen, each, fortran })
 }
 
 /// Does the preprocessor of the dependency run, run with `args` (the source
@@ -730,7 +732,7 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
         fortran.count += places.len() as u64 + 1;
         return places.iter().all(|place| empty(place))
             && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == deps.driven)
-            && read_inputs(deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen);
+            && read_inputs(deps, map, fortran).is_ok_and(|(now_files, now_seen, _, _)| now_files == files && now_seen == seen);
     }
     if fortran.blind {
         return false;
@@ -745,7 +747,7 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
             before.said == deps.said
                 && before.run_driven == deps.run_driven && driver_says(compiler, name, fortran).is_ok_and(|driven| driven == before.driven)
         })
-        && read_inputs(&deps, map, fortran).is_ok_and(|(now_files, now_seen, _)| now_files == files && now_seen == seen)
+        && read_inputs(&deps, map, fortran).is_ok_and(|(now_files, now_seen, _, _)| now_files == files && now_seen == seen)
 }
 
 /// The files the dependency run listed, digested as `key::read_files` does,
@@ -761,7 +763,7 @@ pub fn still_holds(compiler: &Compiler, name: &OsStr, map: Option<&PathMap>, for
 /// working directory, which the compile does not search for them; and for a
 /// copy, none may be one that the copy's directory, searched first by the
 /// compile, has too.
-fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) -> Res<(String, String, usize)> {
+fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) -> Res<(String, String, usize, Vec<key::FileNote>)> {
     let mut named = Named::new();
     let mapped = |path: &Path| map.map_or_else(|| path.as_os_str().as_bytes().to_vec(), |map| map.apply(path.as_os_str().as_bytes()));
     let copies = fortran.renamed.as_ref().filter(|renamed| renamed.copy.is_some()).map(Renamed::copies);
@@ -814,7 +816,7 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
     if copy.is_none() {
         named.insert((b"source".to_vec(), fortran.source.clone()), true);
     }
-    let (files, _, mut seen) = key::read_files(&named, map, None)?;
+    let key::Digested { files, mut seen, each, .. } = key::read_files(&named, map, None)?;
     // Only looked at, for the check after the compile: the file the compile
     // reads by the name it gives it (what that resolves through may change
     // where the physical path does not). Where a copy is compiled, its bytes
@@ -835,13 +837,13 @@ fn read_inputs(deps: &Dependencies, map: Option<&PathMap>, fortran: &Fortran) ->
             }
         }
     }
-    let (bytes, _, also_seen) = key::read_files(&looked_at, map, None)?;
+    let key::Digested { files: bytes, seen: also_seen, .. } = key::read_files(&looked_at, map, None)?;
     let mut hasher = Hasher::new("seen with what the compile reads");
     for part in [&seen, &bytes, &also_seen] {
         hasher.feed(part.as_bytes());
     }
     seen = hasher.hex();
-    Ok((files, seen, named.len()))
+    Ok((files, seen, named.len(), each))
 }
 
 /// gfortran's message lines in what a dependency run wrote on stderr (each

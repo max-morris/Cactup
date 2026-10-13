@@ -61,6 +61,17 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             }
             Ok(())
         }
+        CacheCommand::Doctor { name, attempt } => {
+            let installation = Installation::resolve(ctx)?;
+            let name = match name {
+                Some(name) => name,
+                None => installation.meta()?.active_config()?.to_owned(),
+            };
+            let build = Recorded::open(&installation, &name, attempt, None)?;
+            println!("{}", build.title().bold());
+            print!("{}{}", build.unreadable_note("this"), doctor(&build.events));
+            Ok(())
+        }
         CacheCommand::Stats => {
             let (root, from) = store_root(ctx)?;
             stats(&root, &from)
@@ -148,6 +159,9 @@ fn stats(root: &Path, from: &str) -> Res<()> {
             let used = machine.entries.iter().filter(|e| last(e) >= since).count();
             println!("    used or stored in the last {days} days: {used}");
         }
+        if !machine.records.is_empty() {
+            println!("    records of what made them, for `cactup cache doctor`: {}", machine.records.len());
+        }
         if !machine.temps.is_empty() {
             println!("    left over from interrupted builds: {} files (cactup cache gc removes those a day old)", machine.temps.len());
         }
@@ -193,11 +207,12 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
             println!("  would remove {} ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
         }
         println!(
-            "Would remove {} of {} objects ({}), leaving {}, and {} files left over from interrupted builds.",
+            "Would remove {} of {} objects ({}), leaving {}, {} records of objects no longer stored, and {} files left over from interrupted builds.",
             plan.entries.len(),
             scan.machines.iter().map(|m| m.entries.len()).sum::<usize>(),
             upkeep::human(bytes),
             upkeep::human(plan.bytes_after),
+            plan.records.len(),
             plan.temps.len()
         );
         return Ok(());
@@ -205,9 +220,10 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     let done = upkeep::carry_out(&plan)?;
     upkeep::stamp_size(root, plan.bytes_after)?;
     println!(
-        "Removed {} objects ({}) and {} files left over from interrupted builds; the build cache holds {}.",
+        "Removed {} objects ({}), {} records of objects no longer stored and {} files left over from interrupted builds; the build cache holds {}.",
         done.entries,
         upkeep::human(done.bytes),
+        done.records,
         done.temps,
         upkeep::human(plan.bytes_after)
     );
@@ -268,6 +284,120 @@ fn verify(root: &Path) -> Res<()> {
         println!("{unreadable} could not be read just now (left as they are: try again).");
     }
     Ok(())
+}
+
+/// `cactup cache doctor` (§18.12): why a build's compiles were not served,
+/// from its event log alone.
+fn doctor(events: &[Event]) -> String {
+    use crate::objcache::event::Miss;
+    use crate::objcache::summary::{self, Compiled};
+    let mut out = String::new();
+    let served_by_store = events.iter().any(|event| event.outcome.is_some());
+    if !served_by_store {
+        out.push_str("  this build only recorded its compiles: nothing was served or stored (see `cactup cache report`)\n");
+    } else {
+        let line = summary::line(events);
+        out.push_str(&format!("  {}\n", line.trim_start_matches("cactup: build cache: ").trim_end_matches(" (see cactup cache doctor)")));
+    }
+    let of = |kind: Compiled| -> Vec<&Event> { events.iter().filter(|event| summary::compiled(event) == Some(kind)).collect() };
+    // A few objects, by name, for a reason.
+    let some = |events: &[&Event]| -> String {
+        let names: Vec<&str> = events.iter().filter_map(|event| event.unit.as_deref()).take(3).collect();
+        match events.len().saturating_sub(names.len()) {
+            0 => names.join(", "),
+            more => format!("{} and {more} more", names.join(", ")),
+        }
+    };
+
+    let kept = of(Compiled::KeptOut);
+    if !kept.is_empty() {
+        out.push_str(&format!("\n  {} ({}):\n", "kept out".bold(), kept.len()));
+        let mut by: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
+        for event in &kept {
+            let why = match (&event.not_cached, &event.store, event.stable) {
+                (Some(why), _, _) => why.clone(),
+                (_, _, Some(false)) => "what it read changed while it compiled".to_owned(),
+                (_, Some(why), _) => why.clone(),
+                _ => "the build cache could not be used".to_owned(),
+            };
+            by.entry(why).or_default().push(event);
+        }
+        let mut by: Vec<(String, Vec<&Event>)> = by.into_iter().collect();
+        by.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+        for (why, events) in &by {
+            out.push_str(&format!("    {:>5}  {why}\n           {}\n", events.len(), some(events)));
+            if let Some(hint) = kept_out_hint(why) {
+                out.push_str(&format!("           {}\n", hint.green()));
+            }
+        }
+    }
+
+    let other = of(Compiled::OtherSources);
+    if !other.is_empty() {
+        out.push_str(&format!("\n  {} ({}), by what differed, most often first:\n", "with other sources".bold(), other.len()));
+        let mut by: HashMap<&str, usize> = HashMap::new();
+        for event in &other {
+            for differs in &event.differs {
+                *by.entry(differs.as_str()).or_default() += 1;
+            }
+        }
+        let mut by: Vec<(&str, usize)> = by.into_iter().collect();
+        by.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        for (differs, count) in by.iter().take(20) {
+            out.push_str(&format!("    {count:>5}  {differs}\n"));
+        }
+        if by.len() > 20 {
+            out.push_str(&format!("           and {} more\n", by.len() - 20));
+        }
+    }
+
+    let otherwise = of(Compiled::BuiltOtherwise);
+    if !otherwise.is_empty() {
+        out.push_str(&format!("\n  {} ({}), by what differed from the closest:\n", "built otherwise".bold(), otherwise.len()));
+        let mut by: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
+        for event in &otherwise {
+            by.entry(event.differs.join(", ")).or_default().push(event);
+        }
+        for (differs, events) in &by {
+            out.push_str(&format!("    {:>5}  {differs}\n           {}\n", events.len(), some(events)));
+        }
+    }
+    let new = events.iter().filter(|event| event.miss == Some(Miss::New) && summary::compiled(event) == Some(Compiled::New)).count();
+    if new > 0 {
+        out.push_str(&format!("\n  {} ({}): the cache had no object of that name\n", "new".bold(), new));
+    }
+
+    let mut unnarrowed: BTreeMap<&str, usize> = BTreeMap::new();
+    for event in events {
+        if let Some(why) = &event.unnarrowed {
+            *unnarrowed.entry(why.as_str()).or_default() += 1;
+        }
+    }
+    if !unnarrowed.is_empty() {
+        out.push_str(&format!(
+            "\n  {} (every file compared whole, so a header that lists the configuration's thorns keeps them from other configurations):\n",
+            "compiles of which no file was narrowed".bold()
+        ));
+        let mut unnarrowed: Vec<(&str, usize)> = unnarrowed.into_iter().collect();
+        unnarrowed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        for (why, count) in unnarrowed {
+            out.push_str(&format!("    {count:>5}  {why}\n"));
+        }
+    }
+    out
+}
+
+/// What would let compiles kept out for `why` in, where cactup knows.
+fn kept_out_hint(why: &str) -> Option<&'static str> {
+    let hints: [(&str, &str); 6] = [
+        ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
+        ("records when each source was last changed", "CUDA compiles with -G or -lineinfo (debug builds) are not cached"),
+        ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
+        ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
+        ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
+        ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
+    ];
+    hints.iter().find(|(pattern, _)| why.contains(pattern)).map(|(_, hint)| *hint)
 }
 
 /// The installation registered under `alias`.
@@ -564,6 +694,39 @@ mod tests {
     use super::*;
     use crate::objcache::event::Audit;
     use crate::objcache::key::Parts;
+
+    #[test]
+    fn the_doctor_says_why_compiles_were_not_served() {
+        use crate::objcache::event::Miss;
+        colored::control::set_override(false);
+        let miss = |unit: &str, kind: Miss, differs: &[&str]| Event {
+            unit: Some(unit.into()),
+            key: Some("k".into()),
+            outcome: Some(Outcome::Miss),
+            exit: Some(0),
+            stable: Some(true),
+            published: Some(true),
+            miss: Some(kind),
+            differs: differs.iter().map(|d| d.to_string()).collect(),
+            ..Default::default()
+        };
+        let header = "/cactup-root/configs/@config/bindings/include/cctk_DefineThorn.h: whole: the compiled text has code of it";
+        let events = vec![
+            Event { unit: Some("A/a.c.o".into()), key: Some("k".into()), outcome: Some(Outcome::Hit), exit: Some(0), ..Default::default() },
+            miss("A/b.c.o", Miss::New, &[]),
+            miss("A/c.c.o", Miss::OtherSources, &[header]),
+            miss("A/d.c.o", Miss::OtherSources, &[header, "the preprocessed text"]),
+            miss("A/e.c.o", Miss::BuiltOtherwise, &["the flags"]),
+            Event { unit: Some("B/f.cu.o".into()), not_cached: Some("nvcc compiles without --objdir-as-tempdir are not the same twice".into()), exit: Some(0), ..Default::default() },
+            Event { unit: Some("C/g.F90.o".into()), unnarrowed: Some("Fortran (its files are keyed whole)".into()), ..miss("C/g.F90.o", Miss::New, &[]) },
+        ];
+        let said = doctor(&events);
+        assert!(said.starts_with("  1 of 7 objects reused; 6 compiled: 2 new, 2 with other sources, 1 built otherwise, 1 kept out\n"), "{said}");
+        assert!(said.contains("kept out (1):\n        1  nvcc compiles without --objdir-as-tempdir are not the same twice\n           B/f.cu.o\n           give nvcc --objdir-as-tempdir"), "{said}");
+        assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n")), "{said}");
+        assert!(said.contains("built otherwise (1), by what differed from the closest:\n        1  the flags\n           A/e.c.o\n"), "{said}");
+        assert!(said.contains("        1  Fortran (its files are keyed whole)\n"), "{said}");
+    }
 
     fn parts(text: &str, arguments: &str) -> Parts {
         Parts {

@@ -1466,6 +1466,73 @@ fn a_serving_build_publishes_its_compiles_and_serves_them_elsewhere() {
     }
 }
 
+/// A miss says what kind it was, by the records the store keeps of each
+/// object's entries; and the build's line, by `cactup __cc-summary`,
+/// counts them (§18.12).
+#[test]
+fn a_miss_says_what_kind_it_was_and_the_build_line_counts_them() {
+    if !have("gcc") {
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let lib = shared.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let build = Build::new("record").serving("serve", &shared.join("store"));
+    let unit = Unit::new(&build, "c", &lib);
+    let kind = |flags: &[&str]| {
+        unit.wrapped("gcc", flags, &lib);
+        let event = build.last_event();
+        (event["miss"].as_str().map(str::to_owned), event["differs"].clone())
+    };
+    assert_eq!(kind(&["-O2"]).0.as_deref(), Some("new"));
+    assert!(fs::read_dir(shared.join("store")).unwrap().flatten().any(|machine| machine.path().is_dir()));
+    // The source edited: an entry made alike, from another text.
+    let source = fs::read_to_string(&unit.source).unwrap();
+    fs::write(&unit.source, format!("{source}int edited;\n")).unwrap();
+    let (miss, differs) = kind(&["-O2"]);
+    assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
+    assert!(differs.to_string().contains("the unit's source"), "{differs}");
+    // Other flags: entries, none made alike.
+    let (miss, differs) = kind(&["-O1"]);
+    assert_eq!(miss.as_deref(), Some("built-otherwise"), "{differs}");
+    assert!(differs.to_string().contains("the flags"), "{differs}");
+    // Served, then: the same flags and source again.
+    assert_eq!(kind(&["-O1"]).0, None);
+
+    let cc_dir = build.conf().parent().unwrap().to_owned();
+    let out = Command::new(CACTUP).arg("__cc-summary").arg(&cc_dir).output().unwrap();
+    assert_ran(&out, "cactup: build cache: 1 of 4 objects reused; 3 compiled: 1 new, 1 with other sources, 1 built otherwise\n", "", 0);
+}
+
+/// A compile whose messages speak of definitions is stored under its key
+/// with the files whole (decision 30), and served from there when it is
+/// compiled again alike.
+#[test]
+fn a_compile_whose_messages_speak_of_definitions_is_served_again() {
+    if !have("gcc") {
+        return;
+    }
+    let shared = tempfile::tempdir().unwrap();
+    let shared = fs::canonicalize(shared.path()).unwrap();
+    let lib = shared.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let build = Build::new("record").serving("serve", &shared.join("store"));
+    let unit = Unit::new(&build, "c", &lib);
+    // A definition the unit never uses, left out of the key; and one in the
+    // source the compile warns of, naming it a macro.
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#define LIB_UNUSED 1\n").unwrap();
+    let source = fs::read_to_string(&unit.source).unwrap();
+    fs::write(&unit.source, format!("#define NEVER_USED_HERE 1\n{source}")).unwrap();
+    let flags = ["-O2", "-Wunused-macros"];
+    let first = unit.wrapped("gcc", &flags, &lib);
+    assert!(text(&first.stderr).contains("macro"), "{}", text(&first.stderr));
+    assert_eq!(build.last_event()["published"].as_bool(), Some(true), "{}", build.last_event());
+    let again = unit.wrapped("gcc", &flags, &lib);
+    assert_eq!(build.last_event()["outcome"].as_str(), Some("hit"), "{}", build.last_event());
+    assert_eq!(text(&again.stderr), text(&first.stderr));
+}
+
 /// A hit writes the dependency file the compile would have written, byte
 /// for byte, with the target named or not; and leaves nothing else behind.
 #[test]

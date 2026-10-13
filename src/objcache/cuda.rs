@@ -12,7 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, said_of_the_text, Named, Parts, PathMap, Used, PREPROCESSOR};
+use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, said_of_the_text, unnarrowed, Digested, FileNote, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::BTreeSet;
@@ -814,6 +814,9 @@ pub struct Read {
     pub whole: String,
     pub count: usize,
     pub seen: String,
+    /// How the key took each file, and why it narrowed none, if so.
+    pub each: Vec<FileNote>,
+    pub unnarrowed: Option<&'static str>,
     pub cuda: Cuda,
 }
 
@@ -835,6 +838,7 @@ pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap
     // on their own command lines
     // (`-DCUDA_DOUBLE_MATH_FUNCTIONS`) counts as given (a header's
     // definition of it draws a warning).
+    let unnarrowed = unnarrowed(narrow, cuda.host.family, compile, diagnosed.is_some(), true);
     cuda.used = match (cuda.used.take(), diagnosed) {
         (Some(_), Some(diagnosed)) => {
             let mut used = Used::new(names, with_code, diagnosed, compile);
@@ -849,8 +853,8 @@ pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
-    let (files, whole, seen) = read_files(&named, map, cuda.used.as_ref())?;
-    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, cuda })
+    let Digested { files, whole, seen, each } = read_files(&named, map, cuda.used.as_ref())?;
+    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, each, unnarrowed, cuda })
 }
 
 /// What [`run_passes`] found: the passes' text digested and its length, the
@@ -984,7 +988,7 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
     }
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
-    now_text == text && read_files(&named, map, cuda.used.as_ref()).is_ok_and(|(now_files, _, now_seen)| now_files == files && now_seen == seen)
+    now_text == text && read_files(&named, map, cuda.used.as_ref()).is_ok_and(|now| now.files == files && now.seen == seen)
 }
 
 #[cfg(test)]
