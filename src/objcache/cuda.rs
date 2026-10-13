@@ -899,7 +899,7 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
             false => None,
         };
         if let Some(listed) = &listed {
-            command.args(["-MD", "-MF"]).arg(listed.to_path_buf());
+            command.args(["-MD", "-MF"]).arg(listed);
         }
         if let Some(map) = map {
             command.args(map.flags());
