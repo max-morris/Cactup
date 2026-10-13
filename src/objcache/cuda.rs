@@ -12,7 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{digest_output, flags_from_elsewhere, read_files, Named, Parts, PathMap, Used, PREPROCESSOR};
+use super::key::{depend_files, digest_output, flags_from_elsewhere, read_files, reads_match, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::BTreeSet;
@@ -312,6 +312,9 @@ pub struct Plan {
     /// say what it read (`identity::Compiler::host_reads`).
     last: usize,
     reads: PathBuf,
+    /// The preprocessing steps (`-E`), each given `-MD -MF <file>` too: what
+    /// they read must be what the key's passes read (decision 28).
+    pass_reads: Vec<(usize, PathBuf)>,
     /// The plan has run (record mode runs `nvcc` as the recipe asks).
     ran: std::cell::Cell<bool>,
 }
@@ -345,6 +348,7 @@ impl Plan {
         let mut steps = Vec::new();
         let mut id_file = None;
         let mut last = None;
+        let mut pass_steps = Vec::new();
         for mut words in run.commands {
             let base = words[0].rsplit('/').next().unwrap_or(&words[0]).to_owned();
             if base == "rm" {
@@ -364,6 +368,9 @@ impl Plan {
             if !TOOLCHAIN.contains(&base.as_str()) && words.iter().any(|word| word == "-c") {
                 last = Some(steps.len());
             }
+            if !TOOLCHAIN.contains(&base.as_str()) && words.iter().any(|word| word == "-E") {
+                pass_steps.push(steps.len());
+            }
             steps.push(Step::Run { words, file: None });
         }
         let id_file = id_file.context("it would run no cudafe++ that makes a module ID")?;
@@ -371,7 +378,16 @@ impl Plan {
         let mut reads = id_file.clone().into_os_string();
         reads.push(".cactup-reads");
         let said = run.said.iter().flat_map(|line| [line.as_bytes(), b"\n"].concat()).collect();
-        Ok(Self { env: run.env, steps, id_file, id, said, last, reads: PathBuf::from(reads), ran: std::cell::Cell::new(false) })
+        let pass_reads = pass_steps
+            .into_iter()
+            .enumerate()
+            .map(|(n, at)| {
+                let mut file = id_file.clone().into_os_string();
+                file.push(format!(".cactup-pass{n}"));
+                (at, PathBuf::from(file))
+            })
+            .collect();
+        Ok(Self { env: run.env, steps, id_file, id, said, last, reads: PathBuf::from(reads), pass_reads, ran: std::cell::Cell::new(false) })
     }
 
     /// Find each program the plan runs along the `PATH` `nvcc` gives it, as
@@ -468,6 +484,9 @@ impl Plan {
         if at == self.last {
             command.args(["-MD", "-MF"]).arg(&self.reads);
         }
+        if let Some((_, file)) = self.pass_reads.iter().find(|(step, _)| *step == at) {
+            command.args(["-MD", "-MF"]).arg(file);
+        }
         Some(command)
     }
 
@@ -481,6 +500,9 @@ impl Plan {
             }
         }
         let _ = fs::remove_file(&self.reads);
+        for (_, file) in &self.pass_reads {
+            let _ = fs::remove_file(file);
+        }
     }
 
     /// The places the last step would look in for a file of `host_reads`
@@ -547,8 +569,24 @@ impl Plan {
     /// removed), but for `nvcc`'s own intermediate files beside the object.
     /// `None`: it did not say.
     pub fn last_reads(&self) -> Option<Vec<PathBuf>> {
-        let said = fs::read(&self.reads);
-        let _ = fs::remove_file(&self.reads);
+        self.said_read(&self.reads)
+    }
+
+    /// What the preprocessing steps read, all of them, as they said (the
+    /// files they said it in removed). `None`: one did not say.
+    pub fn pass_reads(&self) -> Option<Vec<PathBuf>> {
+        let said: Vec<Option<Vec<PathBuf>>> = self.pass_reads.iter().map(|(_, file)| self.said_read(file)).collect();
+        said.into_iter().try_fold(Vec::new(), |mut all, read| {
+            all.extend(read?);
+            Some(all)
+        })
+    }
+
+    /// What a step said it read in `file` (removed), but for `nvcc`'s own
+    /// intermediate files beside the object.
+    fn said_read(&self, file: &Path) -> Option<Vec<PathBuf>> {
+        let said = fs::read(file);
+        let _ = fs::remove_file(file);
         let mut prefix = self.id_file.as_os_str().as_bytes().strip_suffix(b".module_id")?.to_vec();
         prefix.push(b'.');
         let files = depend_files(&said.ok()?)?;
@@ -587,38 +625,6 @@ impl Plan {
     }
 }
 
-/// The files a dependency file as GCC writes it (`-MD`) names: what follows
-/// the target's colon, a backslash before a line break joining lines, a
-/// backslash before a blank or `#` escaping it, `$$` for `$`. `None`: not
-/// one such file.
-fn depend_files(said: &[u8]) -> Option<Vec<PathBuf>> {
-    let text = std::str::from_utf8(said).ok()?.replace("\\\n", " ");
-    let (_, rest) = text.split_once(": ")?;
-    let mut files = Vec::new();
-    let mut file = String::new();
-    let mut chars = rest.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if matches!(chars.peek(), Some(' ' | '#' | '\\')) => file.push(chars.next()?),
-            '$' if chars.peek() == Some(&'$') => {
-                chars.next();
-                file.push('$');
-            }
-            c if c.is_whitespace() => {
-                if !file.is_empty() {
-                    files.push(PathBuf::from(std::mem::take(&mut file)));
-                }
-            }
-            // A second target or a rule: not what `-MD` writes alone.
-            ':' if chars.peek().is_none_or(|next| next.is_whitespace()) => return None,
-            c => file.push(c),
-        }
-    }
-    if !file.is_empty() {
-        files.push(PathBuf::from(file));
-    }
-    Some(files)
-}
 
 /// What `nvcc` says when a program it runs is killed by `signal` (its own
 /// words, from its binary; CUDA 12.2).
@@ -788,6 +794,8 @@ pub struct Read {
     pub text: String,
     pub text_bytes: u64,
     pub files: String,
+    /// The files whole (`key::read_files`).
+    pub whole: String,
     pub count: usize,
     pub seen: String,
     pub cuda: Cuda,
@@ -811,8 +819,8 @@ pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap
     // The source itself, whatever the markers call it.
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
-    let (files, seen) = read_files(&named, map, cuda.used.as_ref())?;
-    Ok(Read { text, text_bytes, files, count: named.len(), seen, cuda })
+    let (files, whole, seen) = read_files(&named, map, cuda.used.as_ref())?;
+    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, cuda })
 }
 
 /// Run the passes of `cuda` again, and digest them: the text of each pass in
@@ -880,17 +888,27 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named, BT
 /// Does the key of a CUDA compile still hold after it: the same passes print
 /// the same text, from the same files, which look as they did?
 /// And the compile's last step (`plan`'s) read nothing the key does not
-/// cover: files the passes read, and those of `host_reads` (its identity's).
+/// cover: files the passes read, and those of `host_reads` (its identity's);
+/// and its preprocessing steps read just what the key's passes did
+/// (decision 28).
 pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &Compile, map: Option<&PathMap>, parts: &Parts, seen: &str) -> bool {
     let (text, files) = (parts.text.as_str(), parts.files.as_str());
-    let last_read = match plan.ran() {
-        true => match plan.last_reads() {
-            Some(read) => read,
-            None => return false,
+    let (last_read, pass_read) = match plan.ran() {
+        true => match (plan.last_reads(), plan.pass_reads()) {
+            (Some(last), Some(passes)) => (last, Some(passes)),
+            _ => return false,
         },
-        false => Vec::new(),
+        false => (Vec::new(), None),
     };
     let Ok((now_text, _, mut named, _)) = run_passes(cuda, map) else { return false };
+    if let Some(pass_read) = pass_read {
+        // (The source too, which a pass reads first and enters by no marker.)
+        let mut entered: BTreeSet<PathBuf> = named.iter().filter(|(_, entered)| **entered).map(|((_, path), _)| path.clone()).collect();
+        entered.insert(compile.source.clone());
+        if !reads_match(&pass_read, &entered) {
+            return false;
+        }
+    }
     let passes: std::collections::HashSet<&Path> = named.keys().map(|(_, real)| real.as_path()).collect();
     let covered = |read: &PathBuf| {
         passes.contains(read.as_path()) || fs::canonicalize(read).is_ok_and(|real| host_reads.contains(&real) || passes.contains(real.as_path()))
@@ -900,7 +918,7 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
     }
     let source = compile.source.as_os_str().as_bytes();
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
-    now_text == text && read_files(&named, map, cuda.used.as_ref()).is_ok_and(|(now_files, now_seen)| now_files == files && now_seen == seen)
+    now_text == text && read_files(&named, map, cuda.used.as_ref()).is_ok_and(|(now_files, _, now_seen)| now_files == files && now_seen == seen)
 }
 
 #[cfg(test)]

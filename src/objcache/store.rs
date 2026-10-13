@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 /// The entry format, and the name of the directory its entries live in. A
 /// cactup with another format writes beside this one and never reads it
 /// (no backward compatibility, §2.4).
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
 /// An entry's first line.
 const MAGIC: &[u8] = b"cactup build cache entry\n";
@@ -72,6 +72,9 @@ struct Header {
     /// that order (§18.10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     modules: Vec<String>,
+    /// The files the compile read, whole (`key::read_files`): what a hit
+    /// with messages must match besides the key (decision 29).
+    whole: String,
     about: About,
 }
 
@@ -97,6 +100,8 @@ pub struct About {
 pub struct NewEntry<'a> {
     pub key: &'a str,
     pub parts: &'a Parts,
+    /// The files the compile read, whole (decision 29).
+    pub whole: &'a str,
     /// The object the compile wrote.
     pub object: &'a Path,
     pub stdout: &'a [u8],
@@ -162,6 +167,10 @@ pub enum Miss {
     Unreadable(String),
     /// The object could not be written where the compile would write it.
     CannotWrite(String),
+    /// The entry's messages were said of files whose macro definitions
+    /// stood elsewhere in them than they stand now, which its key does not
+    /// tell apart (decision 29): the compile runs. Left alone.
+    SaidElsewhere,
 }
 
 impl std::fmt::Display for Miss {
@@ -173,6 +182,7 @@ impl std::fmt::Display for Miss {
             Self::Foreign(why) => write!(f, "an entry this cactup cannot read: {why}"),
             Self::Unreadable(why) => write!(f, "the entry could not be read: {why}"),
             Self::CannotWrite(why) => write!(f, "the object could not be written: {why}"),
+            Self::SaidElsewhere => write!(f, "the entry's messages speak of its files as they were, not as they are"),
         }
     }
 }
@@ -249,6 +259,7 @@ impl Store {
             key: entry.key.to_owned(),
             parts: entry.parts.clone(),
             modules: entry.modules.iter().map(|(name, _)| name.clone()).collect(),
+            whole: entry.whole.to_owned(),
             about: entry.about.clone(),
         };
         let header = toml::to_string(&header).context("Failed to write an entry's header")?;
@@ -334,22 +345,24 @@ impl Store {
     /// there before.
     #[cfg(test)]
     pub fn restore(&self, key: &str, object: &Path) -> Result<Messages, Miss> {
-        self.restore_with(key, object, ModulesTo::Nowhere).map(|restored| restored.messages)
+        self.read(key, Some((object, ModulesTo::Nowhere)), None).map(|restored| restored.messages)
     }
 
-    /// [`Store::restore`], with a place for the entry's module files.
-    pub fn restore_with(&self, key: &str, object: &Path, modules: ModulesTo) -> Result<Restored, Miss> {
-        self.read(key, Some((object, modules)))
+    /// [`Store::restore`], with a place for the entry's module files, for a
+    /// compile whose files whole digest to `whole`: an entry with messages
+    /// gives its object only if its files did too (decision 29).
+    pub fn restore_with(&self, key: &str, object: &Path, modules: ModulesTo, whole: &str) -> Result<Restored, Miss> {
+        self.read(key, Some((object, modules)), Some(whole))
     }
 
     /// Read the entry of `key` as a restore does, writing nothing: what
     /// `cache verify` does (§18.9). An invalid entry is removed, as a
     /// restore would remove it.
     pub fn check(&self, key: &str) -> Result<(), Miss> {
-        self.read(key, None).map(drop)
+        self.read(key, None, None).map(drop)
     }
 
-    fn read(&self, key: &str, object: Option<(&Path, ModulesTo)>) -> Result<Restored, Miss> {
+    fn read(&self, key: &str, object: Option<(&Path, ModulesTo)>, whole: Option<&str>) -> Result<Restored, Miss> {
         let path = self.entry_path(key).ok_or_else(|| Miss::Invalid { why: format!("\"{key}\" is not a key"), removed: false })?;
         let unreadable = |e: io::Error| Miss::Unreadable(format!("{}: {e}", path.display()));
         // Looked at before it is opened: a FIFO there would block the open.
@@ -368,7 +381,7 @@ impl Store {
             Err(e) => return Err(unreadable(e)),
         };
         let meta = file.metadata().map_err(unreadable)?;
-        match read_into(file, &meta, key, object) {
+        match read_into(file, &meta, key, object, whole) {
             Ok(restored) => Ok(restored),
             Err(Fault::Invalid(why)) => {
                 let removed = invalidate(&path, &meta);
@@ -377,6 +390,7 @@ impl Store {
             Err(Fault::Foreign(why)) => Err(Miss::Foreign(why)),
             Err(Fault::Io(e)) => Err(unreadable(e)),
             Err(Fault::Output(why)) => Err(Miss::CannotWrite(why)),
+            Err(Fault::SaidElsewhere) => Err(Miss::SaidElsewhere),
         }
     }
 }
@@ -409,6 +423,8 @@ enum Fault {
     Io(io::Error),
     /// The entry may be fine; the object could not be put in place.
     Output(String),
+    /// A fine entry, whose messages are not for this compile.
+    SaidElsewhere,
 }
 
 impl From<io::Error> for Fault {
@@ -425,7 +441,7 @@ impl From<io::Error> for Fault {
 /// checksum over every byte, and only then the header. So an entry whose
 /// header this cactup cannot read, but which is whole, is another cactup's
 /// and not damage.
-fn read_into(file: File, meta: &Metadata, key: &str, outputs: Option<(&Path, ModulesTo)>) -> Result<Restored, Fault> {
+fn read_into(file: File, meta: &Metadata, key: &str, outputs: Option<(&Path, ModulesTo)>, whole: Option<&str>) -> Result<Restored, Fault> {
     let object = outputs.map(|(object, _)| object);
     let modules_to = outputs.map_or(ModulesTo::Nowhere, |(_, modules)| modules);
     let invalid = |why: &str| Fault::Invalid(why.to_owned());
@@ -561,6 +577,12 @@ fn read_into(file: File, meta: &Metadata, key: &str, outputs: Option<(&Path, Mod
     if object.is_some() && !header.modules.is_empty() && module_dir.is_none() {
         return Err(Fault::Output("the entry has module files, and nowhere to put them".to_owned()));
     }
+    // Messages name the places of definitions, which the key leaves out:
+    // they are this compile's only where its files are whole what the
+    // entry's were (decision 29).
+    if whole.is_some_and(|whole| whole != header.whole) && !(stdout.is_empty() && stderr.is_empty()) {
+        return Err(Fault::SaidElsewhere);
+    }
     let messages = Messages { stdout, stderr };
     let mut aside = Vec::new();
     // The module files first: an object in place stands for a whole compile.
@@ -689,6 +711,7 @@ mod tests {
             self.store.publish(&NewEntry {
                 key: &self.key,
                 parts: &self.parts,
+                whole: "whole",
                 object,
                 stdout: b"",
                 stderr,
@@ -715,6 +738,25 @@ mod tests {
             left.retain(|path| !keep.contains(&path.as_path()));
             left
         }
+    }
+
+    #[test]
+    fn messages_are_given_only_where_the_files_are_whole_the_same() {
+        // Decision 29: the key leaves out where definitions stand; what the
+        // compiler said may name those places.
+        let fx = Fixture::new();
+        let object = fx.object("a.c.o", b"object");
+        fx.publish(&object, b"t.h:3: note: in definition of macro 'X'\n").unwrap();
+        let restored = fx.tmp.path().join("build/restored.c.o");
+        assert!(matches!(fx.store.restore_with(&fx.key, &restored, ModulesTo::Nowhere, "elsewhere"), Err(Miss::SaidElsewhere)));
+        assert!(!restored.exists(), "nothing put in place");
+        assert!(fx.entry().exists(), "the entry is left alone");
+        assert!(fx.store.restore_with(&fx.key, &restored, ModulesTo::Nowhere, "whole").is_ok());
+        // A silent entry is given whatever the files' whole digest.
+        let silent = Fixture::new();
+        let object = silent.object("a.c.o", b"object");
+        silent.publish(&object, b"").unwrap();
+        assert!(silent.store.restore_with(&silent.key, &restored, ModulesTo::Nowhere, "elsewhere").is_ok());
     }
 
     #[test]
@@ -876,7 +918,7 @@ mod tests {
             // Another cactup's key label: its parts digest to another key
             // under this one's, which is not damage.
             ("another label", &|h| h.replacen(&format!("label = \"{KEY_LABEL}\"\n"), "label = \"key-2\"\n", 1)),
-            ("a field more", &|h| h.replacen("format = 2\n", "format = 2\nextra = 2\n", 1)),
+            ("a field more", &|h| h.replacen(&format!("format = {FORMAT}\n"), &format!("format = {FORMAT}\nextra = 2\n"), 1)),
             ("a field more in the parts", &|h| h.replacen("[parts]\n", "[parts]\nextra = \"x\"\n", 1)),
             ("a field more about it", &|h| h.replacen("[about]\n", "[about]\nextra = \"x\"\n", 1)),
             ("a field less", &|h| h.replacen("relocatable = true\n", "", 1)),
@@ -894,7 +936,7 @@ mod tests {
         // Another format, likewise.
         let _ = fs::remove_file(fx.entry());
         fx.publish(&object, b"").unwrap();
-        rewrite(&|h| h.replacen("format = 2\n", "format = 7\n", 1));
+        rewrite(&|h| h.replacen(&format!("format = {FORMAT}\n"), "format = 7\n", 1));
         assert!(matches!(fx.store.restore(&fx.key, &fx.tmp.path().join("build/r.o")), Err(Miss::Foreign(_))));
     }
 
@@ -1022,7 +1064,7 @@ mod tests {
         let bytes = fs::read(&object).unwrap();
         let restored = dir.join(format!("r{}.o", std::process::id()));
         for _ in 0..40 {
-            let entry = NewEntry { key: &key, parts: &parts, object: &object, stdout: b"out", stderr: b"err", modules: &[], about: about() };
+            let entry = NewEntry { key: &key, parts: &parts, whole: "whole", object: &object, stdout: b"out", stderr: b"err", modules: &[], about: about() };
             store.publish(&entry).unwrap();
             let messages = store.restore(&key, &restored).unwrap();
             assert_eq!(fs::read(&restored).unwrap(), bytes);

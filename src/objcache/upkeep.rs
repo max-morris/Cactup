@@ -633,7 +633,7 @@ mod tests {
             };
             let key = parts.key();
             let about = About { unit: None, compiler: "gcc".into(), relocatable: true, cactup: "t".into(), host: "h".into() };
-            store.publish(&NewEntry { key: &key, parts: &parts, object: &object, stdout: b"", stderr: b"", modules: &[], about }).unwrap();
+            store.publish(&NewEntry { key: &key, parts: &parts, whole: "", object: &object, stdout: b"", stderr: b"", modules: &[], about }).unwrap();
             published.push(key);
         }
         log_use(&store, &published[..1]).unwrap();

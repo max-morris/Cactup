@@ -297,7 +297,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             (true, _) => ModulesTo::Into(&cwd),
         };
         let (restored, serve_ms) = timed(|| match &into {
-            Ok(into) => store.restore_with(&key, into.as_deref().unwrap_or(&keyed.compile.output), modules_to),
+            Ok(into) => store.restore_with(&key, into.as_deref().unwrap_or(&keyed.compile.output), modules_to, keyed.whole()),
             Err(why) => Err(Miss::CannotWrite(why.clone())),
         });
         let into = into.ok().flatten();
@@ -373,7 +373,11 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // nothing below is worth making `make` wait for.
     let (stable, recheck_ms) = timed(|| match &mut keyed {
         Ok(keyed) if status.success() => Some(keyed.still_holds()),
-        _ => None,
+        Ok(keyed) => {
+            keyed.forget_reads();
+            None
+        }
+        Err(_) => None,
     });
     event.stable = stable;
     event.recheck_ms = looking_ms + recheck_ms;
@@ -530,6 +534,7 @@ fn audit(job: &Job, argv: &[OsString], identified: Option<&Path>, rewrite: Optio
         // The second compile failed, was killed, or could not run: the
         // first object is the build's.
         _ => {
+            keyed.forget_reads();
             let _ = std::fs::rename(&first, object);
             Audit::SecondCompileFailed
         }
@@ -554,6 +559,7 @@ fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event
     let entry = NewEntry {
         key: event.key.as_deref().unwrap_or_default(),
         parts: &keyed.parts,
+        whole: keyed.whole(),
         object: &keyed.compile.output,
         stdout: &stdout,
         stderr: &stderr,

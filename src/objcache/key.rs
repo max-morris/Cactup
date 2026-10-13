@@ -335,6 +335,24 @@ pub struct Keyed {
     /// Places a CUDA compile's last step looks in before it finds CUDA's
     /// own headers (`cuda::Plan::ahead`): all empty, and to stay so.
     ahead: Vec<PathBuf>,
+    /// The files read, whole (`read_files`): what a hit whose messages are
+    /// not empty must match besides the key (decision 29).
+    whole: String,
+    /// Where a C or C++ compile says what it read, to be held to what the
+    /// key's run entered (decision 28).
+    own_reads: OwnReads,
+}
+
+/// Where a C or C++ compile says what it read (decision 28).
+#[derive(Debug)]
+enum OwnReads {
+    /// Nowhere: Fortran and CUDA compiles are checked their own way.
+    Nowhere,
+    /// In a file cactup asks for (`-MD -MF`, added to the compile run to
+    /// store its result), once it has asked.
+    Ours(PathBuf, std::cell::Cell<bool>),
+    /// In the dependency file the compile writes anyway (`-MD -MF`).
+    Theirs(PathBuf),
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
@@ -540,6 +558,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             text: read.text,
             files: read.files,
         };
+        // (Fortran's files are keyed whole.)
+        let files_whole = parts.files.clone();
         return Ok((Keyed {
             compile,
             compiler,
@@ -556,6 +576,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             cuda: None,
             plan: None,
             ahead: Vec::new(),
+            whole: files_whole,
+            own_reads: OwnReads::Nowhere,
         }, identified));
     }
     if let Some((run, host)) = cuda_run {
@@ -591,6 +613,8 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             cuda: Some(read.cuda),
             plan,
             ahead,
+            whole: read.whole,
+            own_reads: OwnReads::Nowhere,
         };
         return Ok((keyed, identified));
     }
@@ -609,7 +633,45 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         text: read.text,
         files: read.files,
     };
-    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None, cuda: None, plan: None, ahead: Vec::new() };
+    // What the compile reads must be what this run entered: it says so in
+    // its own dependency file where it writes one listing every file (not
+    // `-MMD`'s, which leaves out system headers), else in one cactup asks
+    // for (decision 28).
+    let own_reads = match (serving, compile.depend.is_empty()) {
+        (false, _) => OwnReads::Nowhere,
+        (true, true) => {
+            let mut file = compile.output.clone().into_os_string();
+            file.push(".cactup-reads");
+            OwnReads::Ours(PathBuf::from(file), std::cell::Cell::new(false))
+        }
+        (true, false) => {
+            let full = compile.depend.iter().any(|flag| flag == "-MD") && !compile.depend.iter().any(|flag| flag == "-MMD");
+            let file = compile.depend.iter().rposition(|flag| flag == "-MF").and_then(|at| compile.depend.get(at + 1));
+            match (full, file) {
+                (true, Some(file)) => OwnReads::Theirs(PathBuf::from(file)),
+                _ => return Err("its dependency file leaves out files it reads (system headers, with -MMD), so the compile cannot be held to its key".to_owned()),
+            }
+        }
+    };
+    let keyed = Keyed {
+        compile,
+        compiler,
+        parts,
+        text_bytes: read.text_bytes,
+        files: read.count,
+        name,
+        watch,
+        before: None,
+        map,
+        seen: read.seen,
+        depend,
+        fortran: None,
+        cuda: None,
+        plan: None,
+        ahead: Vec::new(),
+        whole: read.whole,
+        own_reads,
+    };
     Ok((keyed, identified))
 }
 
@@ -686,8 +748,35 @@ impl Keyed {
         if let (Some(cuda), Some(plan)) = (&self.cuda, &self.plan) {
             return cuda::still_holds(cuda, plan, &self.compiler.host_reads, &self.compile, self.map.as_ref(), &self.parts, &self.seen);
         }
-        preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
-            .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
+        // What the compile says it read (removed if cactup asked for it),
+        // where it said it.
+        let said_read = match &self.own_reads {
+            OwnReads::Ours(file, asked) if asked.get() => {
+                let said = std::fs::read(file);
+                let _ = std::fs::remove_file(file);
+                match said.ok().as_deref().and_then(depend_files) {
+                    Some(read) => Some(read),
+                    None => return false,
+                }
+            }
+            OwnReads::Theirs(file) => match std::fs::read(file).ok().as_deref().and_then(depend_files) {
+                Some(read) => Some(read),
+                None => return false,
+            },
+            _ => None,
+        };
+        preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None).is_ok_and(|read| {
+            read.text == self.parts.text
+                && read.files == self.parts.files
+                && read.seen == self.seen
+                && said_read.is_none_or(|said| {
+                    // (The source too, which the compile reads first and
+                    // the run enters by no marker.)
+                    let mut entered = read.entered;
+                    entered.insert(self.compile.source.clone());
+                    reads_match(&said, &entered)
+                })
+        })
     }
 
     /// Get ready for the check after the compile, right before the compile:
@@ -708,6 +797,12 @@ impl Keyed {
     /// steps, as keyed, with the module ID made of the key (decision 25).
     pub fn plan(&self) -> Option<&cuda::Plan> {
         self.plan.as_ref()
+    }
+
+    /// The files read, whole: what an entry keeps besides the key, for a hit
+    /// whose messages are not empty (decision 29).
+    pub fn whole(&self) -> &str {
+        &self.whole
     }
 
     /// Is every place a CUDA compile's last step looks in before CUDA's own
@@ -743,7 +838,15 @@ impl Keyed {
                     out.extend(cuda::map_flags(&source, map));
                 }
             }
-            None => out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default()),
+            None => {
+                out.extend(self.map.as_ref().map(PathMap::flags).unwrap_or_default());
+                // The compile says what it reads (decision 28).
+                if let OwnReads::Ours(file, asked) = &self.own_reads {
+                    out.extend(["-MD", "-MF"].map(OsString::from));
+                    out.push(file.clone().into_os_string());
+                    asked.set(true);
+                }
+            }
         }
         out
     }
@@ -762,8 +865,22 @@ impl Keyed {
 
     /// Remove what keying made: the copy and the dependency runs' module
     /// files. (The process ends by `exit`, which runs no destructor.)
+    /// Remove what a compile that failed was asked to say it read
+    /// (decision 28): nothing checks it.
+    pub fn forget_reads(&self) {
+        if let OwnReads::Ours(file, _) = &self.own_reads {
+            let _ = std::fs::remove_file(file);
+        }
+        if let Some(plan) = &self.plan {
+            plan.tidy_from(plan.steps().len());
+        }
+    }
+
     pub fn clean_up(&mut self) {
         drop(self.fortran.take());
+        if let OwnReads::Ours(file, _) = &self.own_reads {
+            let _ = std::fs::remove_file(file);
+        }
         if let Some(plan) = &self.plan {
             plan.tidy_from(plan.steps().len());
         }
@@ -802,9 +919,13 @@ struct Read {
     /// Digest of its output.
     text: String,
     text_bytes: u64,
-    /// Digest of the contents of the files it named.
+    /// Digest of the contents of the files it named, and of them whole
+    /// ([`read_files`]).
     files: String,
+    whole: String,
     count: usize,
+    /// The files the run entered, and the source (decision 28).
+    entered: BTreeSet<PathBuf>,
     /// Digest of what each of those files looked like when it was read
     /// (device, inode, size, modification and change time, of the name and
     /// of what it leads to): not part of the key, but of the check after the
@@ -1112,8 +1233,9 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
 
     let used = (compiler.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(used, compile));
-    let (files, seen) = read_files(&named, map, used.as_ref())?;
-    Ok(Read { text, text_bytes, files, count: named.len(), seen })
+    let (files, whole, seen) = read_files(&named, map, used.as_ref())?;
+    let entered = named.iter().filter(|(_, entered)| **entered).map(|((_, path), _)| path.clone()).collect();
+    Ok(Read { text, text_bytes, files, whole, count: named.len(), seen, entered })
 }
 
 /// Digest the files `named`, each under its mapped name: their bytes (the
@@ -1131,9 +1253,19 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
 /// expands nor tests are left out of its bytes ([`Used::droppable`]): such a
 /// definition changes nothing the compiler makes of the unit. Cactus's
 /// headers that list every thorn of a configuration (`cctk_DefineThorn.h`,
-/// `CParameterStructNames.h`) are of that kind for nearly every unit.
-pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Used>) -> Res<(String, String)> {
+/// `CParameterStructNames.h`) are of that kind for nearly every unit. They
+/// are left out whole, line breaks and all (decision 29): where what is
+/// compiled stands is in the text (`-E` keeps its lines where they were),
+/// and where a definition stands shows only in what the compiler says
+/// ("in definition of macro" names its line). So the files part does not
+/// have the definitions' places, and the second digest returned does:
+/// every file's bytes whole, which an entry keeps beside its messages, and
+/// a hit whose messages are not empty must match ([`Store::restore_with`]).
+///
+/// [`Store::restore_with`]: super::store::Store::restore_with
+pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Used>) -> Res<(String, String, String)> {
     let mut files = Hasher::new("files");
+    let mut whole = Hasher::new("files");
     let mut seen = Hasher::new("seen");
     let mut steps = HashMap::new();
     let mut reads = Vec::with_capacity(named.len());
@@ -1176,22 +1308,30 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
     }
     for (mapped, path, entered, read) in &reads {
         files.feed(mapped);
+        whole.feed(mapped);
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
         match read {
-            Ok(bytes) => match used {
-                Some(used) if **path != used.source => {
-                    let kept = without_definitions(bytes, |name| used.droppable(name) && defined.get(name) == Some(&1));
-                    files.feed(content_digest(&kept, map).as_bytes());
+            Ok(bytes) => {
+                let all = content_digest(bytes, map);
+                whole.feed(all.as_bytes());
+                match used {
+                    Some(used) if **path != used.source => {
+                        let kept = without_definitions(bytes, |name| used.droppable(name) && defined.get(name) == Some(&1));
+                        files.feed(content_digest(&kept, map).as_bytes());
+                    }
+                    _ => files.feed(all.as_bytes()),
                 }
-                _ => files.feed(content_digest(bytes, map).as_bytes()),
-            },
-            Err(_) if !*entered && absent() => files.feed(b"no such file"),
+            }
+            Err(_) if !*entered && absent() => {
+                files.feed(b"no such file");
+                whole.feed(b"no such file");
+            }
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         }
     }
-    Ok((files.hex(), seen.hex()))
+    Ok((files.hex(), whole.hex(), seen.hex()))
 }
 
 /// Does the driver take flags for this compile from a file of its own? It
@@ -1411,18 +1551,76 @@ fn definitions(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     logical_lines(bytes).filter_map(definition)
 }
 
-/// `bytes` with each line that defines or undefines a macro `drop` says
-/// to leave out reduced to its line breaks: the lines after it keep their
-/// numbers.
+/// `bytes` without the lines that define or undefine a macro `drop` says
+/// to leave out (decision 29: line breaks and all).
 fn without_definitions(bytes: &[u8], drop: impl Fn(&[u8]) -> bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     for line in logical_lines(bytes) {
-        match definition(line) {
-            Some(name) if drop(name) => out.extend(line.iter().filter(|b| **b == b'\n')),
-            _ => out.extend_from_slice(line),
+        if !definition(line).is_some_and(&drop) {
+            out.extend_from_slice(line);
         }
     }
     out
+}
+
+/// The files a dependency file as GCC writes it (`-MD`) names: what follows
+/// the target's colon, a backslash before a line break joining lines, a
+/// backslash before a blank or `#` escaping it, `$$` for `$`; and after it,
+/// with `-MP`, a rule of no prerequisites for each header, which names
+/// nothing new. `None`: not one such file.
+pub(super) fn depend_files(said: &[u8]) -> Option<Vec<PathBuf>> {
+    let text = std::str::from_utf8(said).ok()?.replace("\\\n", " ");
+    // The first rule, up to the first line break left; the rest must be
+    // `-MP`'s empty rules.
+    let (first, phony) = text.split_once('\n').unwrap_or((&text, ""));
+    if !phony.lines().all(|line| line.trim().is_empty() || (line.trim_end().ends_with(':') && !line.trim_end()[..line.trim_end().len() - 1].contains(": "))) {
+        return None;
+    }
+    let (_, rest) = first.split_once(": ")?;
+    let mut files = Vec::new();
+    let mut file = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if matches!(chars.peek(), Some(' ' | '#' | '\\')) => file.push(chars.next()?),
+            '$' if chars.peek() == Some(&'$') => {
+                chars.next();
+                file.push('$');
+            }
+            c if c.is_whitespace() => {
+                if !file.is_empty() {
+                    files.push(PathBuf::from(std::mem::take(&mut file)));
+                }
+            }
+            // A second target or a rule: not what `-MD` writes alone.
+            ':' if chars.peek().is_none_or(|next| next.is_whitespace()) => return None,
+            c => file.push(c),
+        }
+    }
+    if !file.is_empty() {
+        files.push(PathBuf::from(file));
+    }
+    Some(files)
+}
+
+/// Did a compile read what its key read? `read`, what it says it read
+/// (its dependency output), against `keyed`, the files the key's
+/// preprocessor runs entered: the same files, by name or, where the names
+/// differ, by where they lead (decision 28: a file a compile could not see
+/// for a moment, as on a node whose file system stalled, takes another
+/// branch of a `__has_include` and makes another object, while the key's
+/// runs, before and after, saw it).
+pub(super) fn reads_match(read: &[PathBuf], keyed: &BTreeSet<PathBuf>) -> bool {
+    let read: BTreeSet<&Path> = read.iter().map(PathBuf::as_path).collect();
+    let keyed: BTreeSet<&Path> = keyed.iter().map(PathBuf::as_path).collect();
+    if read == keyed {
+        return true;
+    }
+    let real = |paths: Vec<&&Path>| -> Option<BTreeSet<PathBuf>> { paths.into_iter().map(|path| std::fs::canonicalize(path).ok()).collect() };
+    match (real(read.difference(&keyed).collect()), real(keyed.difference(&read).collect())) {
+        (Some(only_read), Some(only_keyed)) => only_read == only_keyed,
+        _ => false,
+    }
 }
 
 /// Why the driver, run as `name` with the environment `env` gives, could
@@ -1965,15 +2163,15 @@ mod tests {
         let base = tree.key(&["-O2"]);
         std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_C 1\n")).unwrap();
         assert_eq!(tree.key(&["-O2"]).parts, base.parts, "another thorn's line");
-        // A line broken with a backslash is one line (its two line breaks
-        // stay, as a blank line's would).
-        std::fs::write(tree.header(), with("#define THORN_A\n#define THORN_B\n\n")).unwrap();
-        let blank = tree.key(&["-O2"]);
+        // A line broken with a backslash is one line.
         std::fs::write(tree.header(), with("#define THORN_A\n# define THORN_D \\\n  2\n")).unwrap();
-        assert_eq!(tree.key(&["-O2"]).parts, blank.parts, "a definition over two lines");
-        // Line numbers stay: a line less moves what follows.
+        assert_eq!(tree.key(&["-O2"]).parts, base.parts, "a definition over two lines");
+        // A line less: where what is compiled stands is in the text, and
+        // where definitions stand only in messages (decision 29).
         std::fs::write(tree.header(), with("#define THORN_A\n")).unwrap();
-        assert_ne!(tree.key(&["-O2"]).parts.files, base.parts.files, "one line fewer");
+        let fewer = tree.key(&["-O2"]);
+        assert_eq!(fewer.parts, base.parts, "one line fewer");
+        assert_ne!(fewer.whole(), base.whole(), "the files whole are not the same");
         // What stays: a macro the text tests, one defined twice (a warning
         // that it is redefined), one the command line gives, a reserved name.
         for (what, thorns, flags) in [
@@ -2013,7 +2211,7 @@ mod tests {
         }
         let lines: Vec<&[u8]> = logical_lines(b"a\n#define B \\\n 1\nc").collect();
         assert_eq!(lines, [&b"a\n"[..], b"#define B \\\n 1\n", b"c"]);
-        assert_eq!(without_definitions(b"#define A \\\n 1\nint x;\n#define B\n", |name| name == b"A"), b"\n\nint x;\n#define B\n");
+        assert_eq!(without_definitions(b"#define A \\\n 1\nint x;\n#define B\n", |name| name == b"A"), b"int x;\n#define B\n");
     }
 
     #[test]
