@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-13";
+pub const KEY_LABEL: &str = "key-14";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -1259,7 +1259,15 @@ fn preprocess(compiler: &Compiler, name: &OsStr, compile: &Compile, map: Option<
     // Narrowed only where the run said nothing of the text: a warning about
     // a definition (a stray quote, `/*` in a comment, a name redefined) is
     // the compile's too, and would be about a line the key leaves out.
-    let used = (compiler.family == Family::Gcc && !compile.macros_in_debug && !diagnoses(&said)).then(|| Used::new(used, with_code, compile));
+    // Narrowed where nothing the run said of the text names a file it
+    // would narrow: a warning about a definition (a stray quote, `/*` in a
+    // comment, a name redefined) is the compile's too, and would be about a
+    // line the key leaves out; the files a diagnostic names are kept whole
+    // (decision 30).
+    let used = match (compiler.family == Family::Gcc && !compile.macros_in_debug, diagnosed_files(&said)) {
+        (true, Some(diagnosed)) => Some(Used::new(used, with_code, diagnosed, compile)),
+        _ => None,
+    };
     let (files, whole, seen) = read_files(&named, map, used.as_ref())?;
     Ok(Read { text, text_bytes, files, whole, count: named.len(), seen })
 }
@@ -1343,7 +1351,7 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                 let all = content_digest(bytes, map);
                 whole.feed(all.as_bytes());
                 match used {
-                    Some(used) if **path != used.source && !used.with_code.contains(*path) => {
+                    Some(used) if !used.keeps(path) => {
                         let kept = without_definitions(bytes, |name| used.droppable(name) && defined.get(name) == Some(&1));
                         files.feed(content_digest(&kept, map).as_bytes());
                     }
@@ -1525,17 +1533,40 @@ pub(super) struct Output {
     pub with_code: BTreeSet<PathBuf>,
 }
 
-/// Did a preprocessor run (with `-v`) say anything of the text: a warning,
-/// an error or a note, as GCC words them in English (`in_english`), or
-/// where one came from? `-v`'s own lines (the driver's version and
-/// command lines, the search list) are none of these.
-pub(super) fn diagnoses(said: &[u8]) -> bool {
-    String::from_utf8_lossy(said).lines().any(|line| {
-        [": warning: ", ": error: ", ": note: ", ": fatal error: ", ": pedantic: "].iter().any(|kind| line.contains(kind))
-            || line.starts_with("In file included from")
-            || line.starts_with("                 from ")
-            || line.contains(": In function ")
-    })
+/// Is `line`, of what a preprocessor run (with `-v`) said, part of a
+/// diagnostic: a warning, an error or a note, as GCC words them in English
+/// (`in_english`), or where one came from? `-v`'s own lines (the driver's
+/// version and command lines, the search list) are none of these.
+fn diagnostic(line: &str) -> bool {
+    [": warning: ", ": error: ", ": note: ", ": fatal error: ", ": pedantic: "].iter().any(|kind| line.contains(kind))
+        || line.starts_with("In file included from")
+        || line.starts_with("                 from ")
+        || line.contains(": In function ")
+        || line.contains(": In member function ")
+        || line.contains(": At top level")
+}
+
+/// The files a preprocessor run's diagnostics name (where each was said,
+/// and the files that included it), which are keyed whole (decision 30): a
+/// `#warning` in a unit's source leaves its headers of definitions as they
+/// would be otherwise. `None`: a diagnostic names no file (one about the
+/// command line, a program's own, or one this cannot read), and every file
+/// is keyed whole.
+pub(super) fn diagnosed_files(said: &[u8]) -> Option<BTreeSet<PathBuf>> {
+    let mut files = BTreeSet::new();
+    for line in String::from_utf8_lossy(said).lines().filter(|line| diagnostic(line)) {
+        let place = line.strip_prefix("In file included from ").or_else(|| line.strip_prefix("                 from ")).unwrap_or(line).trim_start();
+        // The file's name ends at the `:` before a line number, or before
+        // " In function" and its like.
+        let end = place.char_indices().find(|(at, c)| *c == ':' && (place[at + 1..].starts_with(|d: char| d.is_ascii_digit()) || place[at + 1..].starts_with(" In ") || place[at + 1..].starts_with(" At ")))?.0;
+        let name = &place[..end];
+        let named = Path::new(name);
+        if name.is_empty() || name.starts_with('<') || name.contains('\x1b') || (!name.contains('/') && !named.exists()) {
+            return None;
+        }
+        files.insert(named.to_owned());
+    }
+    Some(files)
 }
 
 /// The macros a unit's text expands or tests (`-dU`), and what keeps a
@@ -1550,14 +1581,19 @@ pub(super) struct Used {
     /// compiler checks line by line (indentation between statements, the
     /// columns of declarations) reads their raw lines, definitions too.
     with_code: BTreeSet<PathBuf>,
+    /// The files a diagnostic of the preprocessor named, kept whole too, by
+    /// physical path (a diagnostic may spell a name otherwise than a marker).
+    diagnosed: BTreeSet<PathBuf>,
     /// The unit's own source, keyed whole (`-Wunused-macros` speaks of its
     /// macros).
     pub source: PathBuf,
 }
 
 impl Used {
-    pub(super) fn new(names: BTreeSet<Vec<u8>>, with_code: BTreeSet<PathBuf>, compile: &Compile) -> Self {
-        let mut used = Self { names, given: BTreeSet::new(), with_code, source: compile.source.clone() };
+    pub(super) fn new(names: BTreeSet<Vec<u8>>, with_code: BTreeSet<PathBuf>, diagnosed: BTreeSet<PathBuf>, compile: &Compile) -> Self {
+        let diagnosed: BTreeSet<PathBuf> = diagnosed.iter().map(|file| std::fs::canonicalize(file).unwrap_or_else(|_| file.clone())).collect();
+        let with_code = with_code.into_iter().chain(diagnosed.iter().cloned()).collect();
+        let mut used = Self { names, given: BTreeSet::new(), with_code, diagnosed, source: compile.source.clone() };
         let args: Vec<&[u8]> = compile.preprocess.iter().map(|arg| arg.as_bytes()).collect();
         used.given_in(&args);
         used
@@ -1581,6 +1617,14 @@ impl Used {
             let name = value.split(|b| *b == b'=' || *b == b'(').next().unwrap_or_default();
             self.given.insert(name.to_vec());
         }
+    }
+
+    /// Is the file `path` (by the name the markers give it) kept whole: one
+    /// the text has code of, one a diagnostic named, or the source?
+    pub(super) fn keeps(&self, path: &Path) -> bool {
+        *path == self.source
+            || self.with_code.contains(path)
+            || (!self.diagnosed.is_empty() && std::fs::canonicalize(path).is_ok_and(|real| self.diagnosed.contains(&real)))
     }
 
     /// May a definition of `name` be left out of a file's bytes? Not if the
@@ -2039,7 +2083,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "ab2d32b55c36f5523f3d024abbbd7efe18e55da4a77c75e63b982573f72f3ccd");
+        assert_eq!(parts.key(), "11157ce2957af8b8fc05cffe012e6f21f920c6c21e9181e469e2a29df54dbf9a");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2410,6 +2454,34 @@ mod tests {
         std::fs::write(tree.header(), with("    #define UNUSED_X 1")).unwrap();
         assert_ne!(tree.key(&["-O2", "-Wall"]).parts.files, one.parts.files);
         std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn a_warning_in_the_source_leaves_the_headers_narrowed() {
+        if !have("gcc", Family::Gcc) {
+            return;
+        }
+        // CarpetX's `#warning "TODO"`: about the source, not the header of
+        // definitions, which is narrowed all the same.
+        let tree = Tree::new();
+        std::fs::write(tree.source(), format!("{SOURCE}#warning \"TODO\"\n")).unwrap();
+        std::fs::write(tree.header(), "#define ANSWER 42\n#define THORN_A\n").unwrap();
+        let one = tree.key(&["-O2"]);
+        std::fs::write(tree.header(), "#define ANSWER 42\n#define THORN_B 1\n").unwrap();
+        assert_eq!(tree.key(&["-O2"]).parts, one.parts);
+        std::fs::write(tree.source(), SOURCE).unwrap();
+        std::fs::write(tree.header(), HEADER).unwrap();
+    }
+
+    #[test]
+    fn reads_which_files_diagnostics_name() {
+        let said = b"Using built-in specs.\nIn file included from /w/a.c:1:\n/w/t.h:3:9: warning: \"X\" redefined\n /w/u.h:1: note: this is\n/w/a.c: In function 'f':\n";
+        let files = diagnosed_files(said).unwrap();
+        assert_eq!(files, ["/w/a.c", "/w/t.h", "/w/u.h"].map(PathBuf::from).into_iter().collect());
+        assert_eq!(diagnosed_files(b"gcc version 14\n").unwrap(), BTreeSet::new());
+        // No file named: everything whole.
+        assert!(diagnosed_files(b"<command-line>: warning: \"X\" redefined\n").is_none());
+        assert!(diagnosed_files(b"cc1: warning: something about the command line\n").is_none());
     }
 
     #[test]

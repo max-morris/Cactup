@@ -5089,9 +5089,11 @@ fixed parts, so that the key does not change by accident:
   debug information carries a checksum of each file. So an edit to a
   comment, or to text inside `#if 0`, changes the key. One kind of line is
   left out (decisions 26, 29, 30): with GCC (and `nvcc`'s GCC passes),
-  without `-g3`, and where the preprocessor run said nothing of the text (no
-  warning, error or note: a stray quote in a definition, `/*` in a comment,
-  a name redefined are warnings about the very lines left out), the
+  without `-g3`, and but in the files the preprocessor run's diagnostics
+  name (a stray quote in a definition, `/*` in a comment, a name redefined
+  are warnings about the very lines left out; a `#warning` in the source
+  names the source, which is whole anyway; a diagnostic that names no file
+  keeps every file whole), the
   preprocessor is asked which macros the text expands or tests (`-dU`,
   whose definitions then stand in the text), and in each file the text has
   no code of (a header of definitions alone; not the unit's own source) a

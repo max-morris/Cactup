@@ -12,7 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{depend_files, diagnoses, digest_output, flags_from_elsewhere, read_files, reads_match, Named, Parts, PathMap, Used, PREPROCESSOR};
+use super::key::{depend_files, diagnosed_files, digest_output, flags_from_elsewhere, read_files, reads_match, Named, Parts, PathMap, Used, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::collections::BTreeSet;
@@ -825,18 +825,19 @@ pub struct Read {
 /// they read, as for C and C++.
 pub fn key(run: &DryRun, host: Compiler, compile: &Compile, map: Option<&PathMap>) -> Res<Read> {
     let passes: Vec<Vec<String>> = run.preprocessor_passes().cloned().collect();
-    let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), Default::default(), compile));
+    let used = (host.family == Family::Gcc && !compile.macros_in_debug).then(|| Used::new(Default::default(), Default::default(), Default::default(), compile));
     let macro_use = used.is_some();
     let mut cuda = Cuda { host, passes, env: run.env.clone(), macro_use, used, keyed_reads: BTreeSet::new() };
     let Passes { text, bytes: text_bytes, named, used: names, with_code, diagnosed, reads } = run_passes(&cuda, map, true)?;
     cuda.keyed_reads = reads.into_iter().collect();
-    // Narrowed only where the passes said nothing of the text (as for C
-    // and C++); a macro the passes are given on their own command lines
+    // Narrowed but in the files the passes' diagnostics name (as for C and
+    // C++); not at all where one names no file; a macro the passes are given
+    // on their own command lines
     // (`-DCUDA_DOUBLE_MATH_FUNCTIONS`) counts as given (a header's
     // definition of it draws a warning).
     cuda.used = match (cuda.used.take(), diagnosed) {
-        (Some(_), false) => {
-            let mut used = Used::new(names, with_code, compile);
+        (Some(_), Some(diagnosed)) => {
+            let mut used = Used::new(names, with_code, diagnosed, compile);
             for pass in &cuda.passes {
                 used.also_given(pass);
             }
@@ -862,7 +863,8 @@ struct Passes {
     named: Named,
     used: BTreeSet<Vec<u8>>,
     with_code: BTreeSet<PathBuf>,
-    diagnosed: bool,
+    /// The files the passes' diagnostics name (`key::diagnosed_files`).
+    diagnosed: Option<BTreeSet<PathBuf>>,
     /// What the passes said they read (`-MD`), where asked.
     reads: Vec<PathBuf>,
 }
@@ -872,7 +874,7 @@ struct Passes {
 /// it read (`-MD`).
 fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
     let mut text = Hasher::new("cuda passes");
-    let (mut bytes, mut named, mut used, mut diagnosed) = (0u64, Named::new(), BTreeSet::new(), false);
+    let (mut bytes, mut named, mut used, mut diagnosed) = (0u64, Named::new(), BTreeSet::new(), Some(BTreeSet::new()));
     let mut with_code = BTreeSet::new();
     let mut reads = Vec::new();
     for pass in &cuda.passes {
@@ -933,7 +935,10 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
             bail!("nvcc's preprocessor failed");
         }
         flags_from_elsewhere(cuda.host.family, cuda.host.specs.as_deref(), &said).map_err(anyhow::Error::msg)?;
-        diagnosed |= diagnoses(&said);
+        match (&mut diagnosed, diagnosed_files(&said)) {
+            (Some(all), Some(these)) => all.extend(these),
+            _ => diagnosed = None,
+        }
         if let Some(listed) = listed {
             reads.extend(fs::read(&listed).ok().as_deref().and_then(depend_files).context("nvcc's preprocessor did not say what it read")?);
         }
