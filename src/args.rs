@@ -845,8 +845,9 @@ pub(crate) enum CacheCommand {
     /// objects the cache had from other sources, by the file that differed,
     /// with whether the cache compared that file whole and why; the objects
     /// it had built otherwise, by what differed (compiler, flags,
-    /// environment); and the compiles of which it compared every file whole,
-    /// by reason. Nothing is compiled, and the cache itself is not read.
+    /// environment, host platform, cactup version); and the compiles of
+    /// which it compared every file whole, by reason. Nothing is compiled,
+    /// and the cache itself is not read.
     ///
     ///   cactup cache doctor sim
     #[clap(verbatim_doc_comment)]

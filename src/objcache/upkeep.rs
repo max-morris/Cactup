@@ -375,8 +375,8 @@ pub struct Plan {
     /// Temporary files a day old.
     pub temps: Vec<Other>,
     /// Unit records whose entry is gone, or goes now (§18.12), each with
-    /// where its entry would be.
-    pub records: Vec<(PathBuf, PathBuf)>,
+    /// where its entry would be, and its size.
+    pub records: Vec<(PathBuf, PathBuf, u64)>,
     /// Per machine: the logs to fold, and the uses to keep (the last of
     /// each key that stays).
     pub folds: Vec<(PathBuf, Vec<PathBuf>, Vec<(String, SystemTime)>)>,
@@ -437,7 +437,7 @@ pub fn plan(scan: &Scan, now: SystemTime, unused_for: Option<Duration>, to_size:
                 .records
                 .iter()
                 .filter(|record| !staying.contains(record.key.as_str()))
-                .map(|record| (record.path.clone(), machine.dir.join(&record.key[..2]).join(&record.key))),
+                .map(|record| (record.path.clone(), machine.dir.join(&record.key[..2]).join(&record.key), record.bytes)),
         );
     }
     // Fold every machine's logs into one with the last use of each key that
@@ -499,12 +499,13 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
         }
         // A record says what made an entry; with the entry gone, it goes.
         // An entry published since the walk keeps its record.
-        for (record, entry) in &plan.records {
+        for (record, entry, bytes) in &plan.records {
             if gix::interrupt::is_triggered() {
                 bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
             }
             if fs::symlink_metadata(entry).is_err() && fs::remove_file(record).is_ok() {
                 done.records += 1;
+                done.bytes += bytes;
             }
             removing.inc();
         }
@@ -670,7 +671,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path(), "m").unwrap();
         let parts = Parts { platform: "p".into(), compiler: "c".into(), arguments: "a".into(), environment: "e".into(), text: "t".into(), files: "f".into() };
-        let record = UnitRecord { label: "key-x".into(), parts, files: vec![FileNote { name: "/cactup-root/t.h".into(), digest: "d".into(), taken: Default::default() }] };
+        let file = FileNote { name: "/cactup-root/t.h".into(), digest: "d".repeat(64), narrowed: true, taken: Default::default() };
+        let record = UnitRecord::new("key-x", &parts, &[file]);
+        assert_eq!(record.files[0].digest, "d".repeat(16), "a record keeps a digest's first digits");
         let key = "e".repeat(64);
         store.record_unit("T/a.c.o", &key, &record).unwrap();
         store.record_unit("T/a.c.o", &key, &record).unwrap();
@@ -697,7 +700,7 @@ mod tests {
         assert_eq!(plan.temps.len(), 1, "a temporary file five days old goes");
         // The records of `b`, removed now, and `d`, gone already; `a`'s
         // record counts with it.
-        assert_eq!(plan.records.iter().map(|(record, _)| record.clone()).collect::<Vec<_>>(), ["b", "d"].map(|key| PathBuf::from(format!("/s/v1/m/units/00/u.{key}"))));
+        assert_eq!(plan.records.iter().map(|(record, _, _)| record.clone()).collect::<Vec<_>>(), ["b", "d"].map(|key| PathBuf::from(format!("/s/v1/m/units/00/u.{key}"))));
         assert_eq!(plan.records[0].1, PathBuf::from(format!("/s/v1/m/bb/{}", "b".repeat(64))));
         // The uses of what stays are kept; the log is folded.
         assert_eq!(plan.folds.len(), 1);

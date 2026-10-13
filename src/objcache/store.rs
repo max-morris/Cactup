@@ -97,7 +97,9 @@ pub struct About {
 
 /// What made the key of one entry, kept beside it for the object it is of
 /// (§18.12): the key's parts, and each file by its mapped name with the
-/// digest the files part took of it.
+/// digest the files part took of it, cut to [`RECORD_DIGEST`] digits (a
+/// record is a report, never a key: what a 64-bit prefix might hide is one
+/// line of it).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnitRecord {
@@ -106,6 +108,57 @@ pub struct UnitRecord {
     pub label: String,
     pub parts: Parts,
     pub files: Vec<FileNote>,
+}
+
+/// How many hex digits of each file's digest a unit record keeps.
+pub const RECORD_DIGEST: usize = 16;
+
+/// The largest unit record read back, uncompressed: one that says it is
+/// larger is damaged.
+const RECORD_MAX: usize = 64 << 20;
+
+impl UnitRecord {
+    /// The record of a key made under `label` from `parts`, of the files
+    /// `each`.
+    pub fn new(label: &str, parts: &Parts, each: &[FileNote]) -> Self {
+        let files = each
+            .iter()
+            .map(|note| FileNote { name: note.name.clone(), digest: Self::short(&note.digest).to_owned(), narrowed: note.narrowed, taken: Default::default() })
+            .collect();
+        Self { label: label.to_owned(), parts: parts.clone(), files }
+    }
+
+    /// The part of a file's digest a record keeps.
+    pub fn short(digest: &str) -> &str {
+        &digest[..digest.len().min(RECORD_DIGEST)]
+    }
+
+    /// As it is written: its length, then the JSON compressed (zlib, which
+    /// checks what it reads back).
+    fn encode(&self) -> Res<Vec<u8>> {
+        let json = serde_json::to_vec(self).context("Failed to write a unit record")?;
+        let mut out = vec![0u8; 4 + zlib_rs::compress_bound(json.len())];
+        out[..4].copy_from_slice(&u32::try_from(json.len()).context("a unit record too large")?.to_le_bytes());
+        let (compressed, rc) = zlib_rs::compress_slice(&mut out[4..], &json, zlib_rs::DeflateConfig::new(6));
+        if rc != zlib_rs::ReturnCode::Ok {
+            bail!("Failed to compress a unit record ({rc:?})");
+        }
+        let length = compressed.len();
+        out.truncate(4 + length);
+        Ok(out)
+    }
+
+    /// What [`UnitRecord::encode`] wrote, if it reads back whole.
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let length = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        if length > RECORD_MAX {
+            return None;
+        }
+        let mut json = vec![0u8; length];
+        let (read, rc) = zlib_rs::decompress_slice(&mut json, &bytes[4..], zlib_rs::InflateConfig::default());
+        (rc == zlib_rs::ReturnCode::Ok && read.len() == length).then_some(())?;
+        serde_json::from_slice(&json).ok()
+    }
 }
 
 /// The directory of a machine's unit records, beside its entries' (§18.12).
@@ -392,7 +445,7 @@ impl Store {
         if path.symlink_metadata().is_ok() {
             return Ok(());
         }
-        let text = serde_json::to_vec(record).context("Failed to write a unit record")?;
+        let text = record.encode()?;
         let mut temp = tempfile::Builder::new()
             .prefix(&format!(".tmp-{key}-"))
             .tempfile_in(&dir)
@@ -427,7 +480,7 @@ impl Store {
             .collect();
         found.sort_by_key(|found| std::cmp::Reverse(found.0));
         found.truncate(UNIT_RECORDS_READ);
-        found.into_iter().filter_map(|(_, path)| serde_json::from_slice(&fs::read(path).ok()?).ok()).collect()
+        found.into_iter().filter_map(|(_, path)| UnitRecord::decode(&fs::read(path).ok()?)).collect()
     }
 
     /// Remove the entry of `key`, which audit mode has shown to be wrong

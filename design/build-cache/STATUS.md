@@ -2289,6 +2289,46 @@ kept definitions deduplicated. Left: records are 18% of the entries' bytes
 on `smoke` (4.7 of 26 MB; about 130 bytes a file read); the time a miss
 spends on records is in no event field.
 
+### M5 part 1, round 2 (on `8890389`): BLOCKED by both
+
+Both re-ran round 1's findings: all fixed. Both found nothing that changes
+what is served (A, B: GCC's `handle_pragma_diagnostic` passes `imply = kind
+!= DK_IGNORED` from GCC 8 to 14, so an `ignored` region turns nothing on;
+B ran nested regions, a stray pop, `_Pragma` and a `#line` re-sync in
+gnu11 and gnu89). Both ran real builds (outside the sandbox: a build locks
+in `~/.cactup`): two builds publishing into one store at once, `gc
+--to-size` removing exactly the records of the entries it removed.
+Blocking, fixed in the commit after this record:
+- (A) the doctor made one "kept out" group per compile when the reason
+  names a path (an entry that cannot be read; a temporary file that cannot
+  be made): reasons are grouped with paths left out; and a failed publish
+  no longer hides the read error before it.
+- (B) a header one key took whole and another narrowed was said to differ
+  in "a line the key keeps", though its bytes were the same: a record
+  notes whether each file was narrowed, and such a file is said to be
+  taken so.
+- (B) a serving build whose every compile was kept out was called "only
+  recorded": the doctor goes by the mode frozen for the attempt.
+Non-blocking, done: a hit whose dependency file could not be put in place
+is kept out; `gc` counts records' bytes in what it removed; `stats` shows
+the records' bytes per machine; the help text and docs name every kind of
+"built otherwise" and "kept out"; the doctor's no-narrowing heading;
+"narrowed" now also says the unit may use other definitions of the file.
+
+Compression (Max: "see if compression helps without killing performance"):
+records are zlib-compressed by `zlib-rs` 0.6 (pure Rust, already in the
+tree through gix; the MUSL binary stays static) and keep 16 hex digits of
+each file's digest (a record is a report, never a key). On `smoke` (363
+records): 4.66 MB plain, 2.8x at best by compression alone (zstd level 9;
+the 64-digit digests barely compress), 6x with the shorter digests and
+deflate level 6: 0.78 MB, 3% of the entries' 26.2 MB. Per record 0.06 ms
+to compress, 0.015 ms to read back (`opt-level = "z"`). Publishing, timed
+over alternating real builds of 357 compiles: median 3 to 4 ms and 90th
+percentile 5 to 7 ms with and without it (two earlier runs at 17 to 18 ms
+were the host's, the plain binary did the same then). zstd's C library
+would give the same size and faster reading, at the cost of a C build for
+the aarch64 MUSL target.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -1499,10 +1499,20 @@ fn a_miss_says_what_kind_it_was_and_the_build_line_counts_them() {
     assert!(differs.to_string().contains("the flags"), "{differs}");
     // Served, then: the same flags and source again.
     assert_eq!(kind(&["-O1"]).0, None);
+    // A header the key took whole, because a diagnostic pragma in the
+    // source reaches it, and then narrowed: not said to differ.
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#define LIB_UNUSED 1\n").unwrap();
+    fs::write(&unit.source, format!("#pragma GCC diagnostic warning \"-Wall\"\n{source}")).unwrap();
+    assert_eq!(kind(&["-O3"]).0.as_deref(), Some("built-otherwise"));
+    fs::write(&unit.source, &source).unwrap();
+    let (miss, differs) = kind(&["-O3"]);
+    assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
+    assert!(differs.to_string().contains("lib.h: narrowed by one key and taken whole by the other"), "{differs}");
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
 
     let cc_dir = build.conf().parent().unwrap().to_owned();
     let out = Command::new(CACTUP).arg("__cc-summary").arg(&cc_dir).output().unwrap();
-    assert_ran(&out, "cactup: build cache: 1 of 4 objects reused; 3 compiled: 1 new, 1 with other sources, 1 built otherwise\n", "", 0);
+    assert_ran(&out, "cactup: build cache: 1 of 6 objects reused; 5 compiled: 1 new, 2 with other sources, 2 built otherwise\n", "", 0);
 }
 
 /// A compile whose messages speak of definitions is stored under its key

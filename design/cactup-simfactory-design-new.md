@@ -6276,9 +6276,11 @@ digest is a SHA-256 of the object's name below `build/` and `<ab>` its
 first two digits (one directory per two digits, not one per object),
 written as an entry is (temporary file, `link(2)`, never changed). It holds
 what made the key, as JSON: the label the key was made under, the six parts
-(§18.5), and each file the key read, by its mapped name, with its digest as
-the key took it (about 130 bytes a file: a few kilobytes for a C unit, some
-hundred for a CUDA unit that reads a thousand files). A record of another
+(§18.5), and each file the key read, by its mapped name, with the first 16
+hex digits of its digest as the key took it and whether the key narrowed it
+(a record is a report, never a key: what a 64-bit prefix might hide is one
+line of it). A file one key narrowed and another took whole is said to be
+taken so, not to differ. A record of another
 label makes a miss *built otherwise* ("the cactup that keyed it"). Two
 thorns of one name in two arrangements share an object name, and so their
 records. Its content is a
@@ -6289,9 +6291,12 @@ kind of miss; for the record closest to its own (the fewest parts, then
 the fewest files, that differ) it notes in its event which parts or which
 files differ, and how its key took each such file (below). Only a miss
 pays for this: one listing of its `<ab>` directory, a look at each of its
-object's records, and the newest 32 read. Records are counted in the
-store's size (`cache stats`, the size notice, `cache gc --to-size`, which
-counts an entry with its record). `cache gc` removes the records whose
+object's records, and the newest 32 read. Records are compressed (zlib, by
+the pure-Rust `zlib-rs` already in the tree) and keep 16 hex digits of each
+file's digest: some kilobytes for a C unit, 3% of the entries' bytes on
+`smoke`. They are counted in the store's size as `cache stats` and `cache
+gc` measure it (`--to-size` counts an entry with its record; between
+measurements the size notice's estimate adds objects only). `cache gc` removes the records whose
 entry is gone, each only if its entry is still not there when it comes to
 it (one published since the walk keeps its record), and `cache stats`
 counts them. A

@@ -350,7 +350,10 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
                     keyed.clean_up();
                     std::process::exit(0)
                 }
-                Err(e) => event.store = Some(format!("the dependency file could not be put in place: {e}")),
+                Err(e) => {
+                    event.store = Some(format!("the dependency file could not be put in place: {e}"));
+                    event.miss = Some(MissKind::Unusable);
+                }
             },
             Err(Miss::Absent) => {}
             // Messages for other files whole: the kind of miss is the
@@ -465,14 +468,19 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             Ok((Published::AlreadyThere, _)) => {
                 event.store.get_or_insert_with(|| "another build published it first".to_owned());
             }
+            // After a reason the entry there could not be used, which is
+            // the first thing to put right.
             Err(why) => {
                 event.published = Some(false);
-                event.store = Some(why);
+                event.store = Some(match event.store.take() {
+                    Some(first) => format!("{first}; and {why}"),
+                    None => why,
+                });
             }
         }
     }
     if let (Ok(store), Ok(keyed), Some(unit), Some(key)) = (&store, &keyed, &event.unit, &stored_key) {
-        let record = UnitRecord { label: key::KEY_LABEL.to_owned(), parts: keyed.parts.clone(), files: keyed.each.clone() };
+        let record = UnitRecord::new(key::KEY_LABEL, &keyed.parts, &keyed.each);
         let ((), ms) = timed(|| {
             if let Err(e) = store.record_unit(unit, key, &record) {
                 event.store = Some(format!("the unit record was not written: {e:#}"));
@@ -661,14 +669,21 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
         .collect()
     };
     let files_differing = |record: &UnitRecord| -> Vec<String> {
-        let theirs: std::collections::HashMap<&str, &str> = record.files.iter().map(|note| (note.name.as_str(), note.digest.as_str())).collect();
+        let theirs: std::collections::HashMap<&str, &key::FileNote> = record.files.iter().map(|note| (note.name.as_str(), note)).collect();
         let mut differs = Vec::new();
         if record.parts.text != ours.text {
             differs.push("the preprocessed text".to_owned());
         }
         for note in &keyed.each {
             match theirs.get(note.name.as_str()) {
-                Some(digest) if *digest == note.digest => {}
+                Some(their) if their.digest == UnitRecord::short(&note.digest) => {}
+                // Not known to differ at all: the two digests are of other
+                // parts of it.
+                Some(their) if their.narrowed != note.narrowed => differs.push(format!(
+                    "{}: narrowed by one key and taken whole by the other, so not known to differ ({} here)",
+                    note.name,
+                    note.taken.describe()
+                )),
                 Some(_) => differs.push(format!("{}: {}", note.name, note.taken.describe())),
                 None => differs.push(format!("{}: read by this compile only", note.name)),
             }

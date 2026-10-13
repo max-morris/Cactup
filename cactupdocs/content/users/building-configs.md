@@ -595,9 +595,11 @@ cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with othe
   sources: a file of the thorn edited, or a header that differs between
   your configurations;
 - *built otherwise*: it had one compiled with another compiler, other
-  flags, or another environment;
+  flags, another environment or on another kind of host, or by another
+  version of cactup;
 - *kept out*: the cache could not take part in that compile (a flag it does
-  not know, a compiler setting it cannot follow);
+  not know, a compiler setting it cannot follow), or could not use what it
+  had (an object it could not read);
 - *failed*: the compile failed.
 
 `cactup cache doctor` says which, and why, for the newest build of a

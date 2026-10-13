@@ -1453,7 +1453,8 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         };
         files.feed(digest.as_bytes());
-        each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, taken });
+        let narrowed = matches!(taken, Taken::Narrowed(_));
+        each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, narrowed, taken });
     }
     Ok(Digested { files: files.hex(), whole: whole.hex(), seen: seen.hex(), each })
 }
@@ -1474,6 +1475,11 @@ pub(super) struct Digested {
 pub struct FileNote {
     pub name: String,
     pub digest: String,
+    /// Narrowed: the digest is of the file without the definitions the
+    /// unit does not use. A file one key narrowed and another took whole
+    /// has two digests though its bytes are the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub narrowed: bool,
     #[serde(skip)]
     pub taken: Taken,
 }
@@ -1504,12 +1510,14 @@ impl Taken {
             // What the key keeps of a narrowed file is everything but the
             // definitions it leaves out: comments, other directives, the
             // definitions the unit uses, and those it keeps all the same.
-            Taken::Narrowed(stayed) if stayed.is_empty() => "narrowed: what differs is a line the key keeps (a definition the unit uses, a comment, another directive)".to_owned(),
+            Taken::Narrowed(stayed) if stayed.is_empty() => {
+                "narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive), or the unit uses other definitions of it".to_owned()
+            }
             Taken::Narrowed(stayed) => {
                 let shown: Vec<&str> = stayed.iter().take(3).map(String::as_str).collect();
                 let more = if stayed.len() > 3 { format!(" and {} more", stayed.len() - 3) } else { String::new() };
                 format!(
-                    "narrowed: what differs is a line the key keeps (a definition the unit uses, a comment, another directive, or one of the definitions the unit does not use that it kept: {}{more})",
+                    "narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive, or one of the definitions the unit does not use that it kept: {}{more}), or the unit uses other definitions of it",
                     shown.join(", ")
                 )
             }

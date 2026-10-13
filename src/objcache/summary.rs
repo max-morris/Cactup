@@ -39,8 +39,10 @@ pub fn compiled(event: &Event) -> Option<Compiled> {
     if event.outcome == Some(Outcome::Hit) {
         return None;
     }
-    // Keyed in a build that only recorded: nothing was to be served.
-    if event.outcome.is_none() && event.not_cached.is_none() {
+    // Keyed in a build that only recorded: nothing was to be served. (In
+    // a serving build, a keyed compile without an outcome is one the store
+    // could not be opened for, which `store` says.)
+    if event.outcome.is_none() && event.not_cached.is_none() && event.store.is_none() {
         return None;
     }
     Some(match () {
@@ -53,8 +55,8 @@ pub fn compiled(event: &Event) -> Option<Compiled> {
             Some(Miss::OtherSources) => Compiled::OtherSources,
             Some(Miss::BuiltOtherwise) => Compiled::BuiltOtherwise,
             Some(Miss::Unusable) => Compiled::KeptOut,
-            // Keyed, not served, and no word of the store's records: the
-            // store could not be used.
+            // Keyed, not served, no kind of miss: the store could not be
+            // opened, or the compile names no object to look up.
             None => Compiled::KeptOut,
         },
     })

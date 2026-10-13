@@ -28,6 +28,7 @@ dependencies = [
  "signal-hook 0.4.4",
  "tempfile",
  "toml",
+ "zlib-rs",
 ]
 
 [[package]]

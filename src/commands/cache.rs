@@ -69,7 +69,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             };
             let build = Recorded::open(&installation, &name, attempt, None, "serve")?;
             println!("{}", build.title().bold());
-            print!("{}{}", build.unreadable_note("this"), doctor(&build.events));
+            print!("{}{}", build.unreadable_note("this"), doctor(&build.events, build.mode));
             Ok(())
         }
         CacheCommand::Stats => {
@@ -143,7 +143,17 @@ fn stats(root: &Path, from: &str) -> Res<()> {
     let day = Duration::from_secs(24 * 3600);
     for machine in &scan.machines {
         let bytes: u64 = machine.entries.iter().map(|e| e.bytes).sum();
-        println!("  {}: {} objects, {}", machine.name.bold(), machine.entries.len(), upkeep::human(bytes));
+        let record_bytes: u64 = machine.records.iter().map(|r| r.bytes).sum();
+        match record_bytes {
+            0 => println!("  {}: {} objects, {}", machine.name.bold(), machine.entries.len(), upkeep::human(bytes)),
+            _ => println!(
+                "  {}: {} objects, {} (and {} of records of what made them)",
+                machine.name.bold(),
+                machine.entries.len(),
+                upkeep::human(bytes),
+                upkeep::human(record_bytes)
+            ),
+        }
         let last_uses = machine.last_uses();
         let last = |e: &upkeep::Entry| last_uses.get(e.key.as_str()).map_or(e.published, |used| (*used).max(e.published));
         if let (Some(oldest), Some(newest)) =
@@ -288,11 +298,12 @@ fn verify(root: &Path) -> Res<()> {
 
 /// `cactup cache doctor` (§18.12): why a build's compiles were not served,
 /// from its event log alone.
-fn doctor(events: &[Event]) -> String {
+fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     use crate::objcache::event::Miss;
     use crate::objcache::summary::{self, Compiled};
     let mut out = String::new();
-    let served_by_store = events.iter().any(|event| event.outcome.is_some());
+    // By the mode the build was made in; without it, by its compiles.
+    let served_by_store = mode.map_or_else(|| events.iter().any(|event| event.outcome.is_some()), |mode| mode.serves());
     if !served_by_store {
         out.push_str("  this build only recorded its compiles: nothing was served or stored (see `cactup cache report`)\n");
     } else {
@@ -320,7 +331,7 @@ fn doctor(events: &[Event]) -> String {
                 (_, Some(why), _) => why.clone(),
                 _ => "the build cache could not be used".to_owned(),
             };
-            by.entry(why).or_default().push(event);
+            by.entry(without_paths(&why)).or_default().push(event);
         }
         let mut by: Vec<(String, Vec<&Event>)> = by.into_iter().collect();
         by.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
@@ -375,7 +386,7 @@ fn doctor(events: &[Event]) -> String {
     }
     if !unnarrowed.is_empty() {
         out.push_str(&format!(
-            "\n  {} (every file compared whole, so a header that lists the configuration's thorns keeps them from other configurations):\n",
+            "\n  {} (every file compared whole: a header that differs between configurations, such as one listing their thorns, keeps them apart):\n",
             "compiles of which no file was narrowed".bold()
         ));
         let mut unnarrowed: Vec<(&str, usize)> = unnarrowed.into_iter().collect();
@@ -385,6 +396,24 @@ fn doctor(events: &[Event]) -> String {
         }
     }
     out
+}
+
+/// A reason with the paths in it left out (as `<path>`), so that one cause
+/// is one line however many files it struck: an entry that cannot be read,
+/// a temporary file that cannot be made.
+fn without_paths(why: &str) -> String {
+    why.split(' ')
+        .map(|word| match word.trim_start_matches(['(', '"', '\'']).starts_with('/') {
+            true => {
+                // What follows the path in the same word (`:`, `)`) stays.
+                let end = word.find([':', ')', ',', ';']).unwrap_or(word.len());
+                let start = word.find('/').unwrap_or(0);
+                format!("{}<path>{}", &word[..start], &word[end..])
+            }
+            false => word.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What would let compiles kept out for `why` in, where cactup knows.
@@ -412,6 +441,8 @@ struct Recorded {
     alias: String,
     config: String,
     attempt: u32,
+    /// The cache's mode the build was made in, as frozen for it.
+    mode: Option<crate::objcache::Mode>,
     events: Vec<Event>,
     /// Lines of the log that are not events this cactup can read.
     unreadable: usize,
@@ -453,7 +484,9 @@ impl Recorded {
                  read (another version wrote it); build it again with `cactup -K build-cache=record build {name}`"
             );
         }
-        Ok(Self { alias: installation.alias.clone(), config: name.to_owned(), attempt, events, unreadable })
+        let cc_dir = BuildAttempt::attempt_dir(&config_dir, attempt).join("cc");
+        let mode = crate::objcache::BuildConf::load(&crate::objcache::conf_path(&cc_dir)).ok().map(|conf| conf.mode);
+        Ok(Self { alias: installation.alias.clone(), config: name.to_owned(), attempt, mode, events, unreadable })
     }
 
     /// A line for the report when part of the log could not be read, so the
@@ -722,12 +755,31 @@ mod tests {
             Event { unit: Some("B/f.cu.o".into()), not_cached: Some("nvcc compiles without --objdir-as-tempdir are not the same twice".into()), exit: Some(0), ..Default::default() },
             Event { unit: Some("C/g.F90.o".into()), unnarrowed: Some("Fortran (its files are keyed whole)".into()), ..miss("C/g.F90.o", Miss::New, &[]) },
         ];
-        let said = doctor(&events);
+        let said = doctor(&events, Some(crate::objcache::Mode::Serve));
         assert!(said.starts_with("  1 of 7 objects reused; 6 compiled: 2 new, 2 with other sources, 1 built otherwise, 1 kept out\n"), "{said}");
         assert!(said.contains("kept out (1):\n        1  nvcc compiles without --objdir-as-tempdir are not the same twice\n           B/f.cu.o\n           give nvcc --objdir-as-tempdir"), "{said}");
         assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n")), "{said}");
         assert!(said.contains("built otherwise (1), by what differed from the closest:\n        1  the flags\n           A/e.c.o\n"), "{said}");
         assert!(said.contains("        1  Fortran (its files are keyed whole)\n"), "{said}");
+
+        // A serving build whose every compile was kept out is no build
+        // that only recorded; one cause with a path in it is one line.
+        let unreadable = |unit: &str, path: &str| Event {
+            unit: Some(unit.into()),
+            key: Some("k".into()),
+            outcome: Some(Outcome::Miss),
+            exit: Some(0),
+            stable: Some(true),
+            miss: Some(Miss::Unusable),
+            store: Some(format!("the entry could not be read: {path}: Permission denied")),
+            ..Default::default()
+        };
+        let events = [unreadable("A/a.c.o", "/s/v4/m/0a/0a12"), unreadable("A/b.c.o", "/s/v4/m/1b/1b34")];
+        let said = doctor(&events, Some(crate::objcache::Mode::Serve));
+        assert!(!said.contains("only recorded"), "{said}");
+        assert!(said.contains("        2  the entry could not be read: <path>: Permission denied\n           A/a.c.o, A/b.c.o\n"), "{said}");
+        assert!(doctor(&events[..1], Some(crate::objcache::Mode::Record)).contains("only recorded"));
+        assert_eq!(without_paths("not published: Failed to create a temporary file in /s/v4/m/0a (Permission denied)"), "not published: Failed to create a temporary file in <path> (Permission denied)");
     }
 
     fn parts(text: &str, arguments: &str) -> Parts {
