@@ -353,7 +353,13 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
                 Err(e) => event.store = Some(format!("the dependency file could not be put in place: {e}")),
             },
             Err(Miss::Absent) => {}
-            Err(miss) => event.store = Some(miss.to_string()),
+            // Messages for other files whole: the kind of miss is the
+            // records' to say.
+            Err(miss @ Miss::SaidElsewhere) => event.store = Some(miss.to_string()),
+            Err(miss) => {
+                event.store = Some(miss.to_string());
+                event.miss = Some(MissKind::Unusable);
+            }
         }
     }
     // Not served: the compile writes its own dependency file. (Audit mode
@@ -436,6 +442,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     let mut stored_key = None;
     if let (Ok(store), Ok(keyed), Some(unit)) = (&store, &keyed, &event.unit)
         && event.outcome == Some(Outcome::Miss)
+        && event.miss.is_none()
     {
         let (kind, differs) = miss_kind(&store.unit_records(unit, &keyed.parts.key()), keyed);
         event.miss = Some(kind);
@@ -453,8 +460,11 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
                 event.published = Some(true);
                 stored_key = Some(key);
             }
-            // Another build compiled the same thing and published it first.
-            Ok((Published::AlreadyThere, _)) => event.store = Some("another build published it first".to_owned()),
+            // Another build compiled the same thing and published it first
+            // (or the entry there could not be used: that is said already).
+            Ok((Published::AlreadyThere, _)) => {
+                event.store.get_or_insert_with(|| "another build published it first".to_owned());
+            }
             Err(why) => {
                 event.published = Some(false);
                 event.store = Some(why);
@@ -462,7 +472,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         }
     }
     if let (Ok(store), Ok(keyed), Some(unit), Some(key)) = (&store, &keyed, &event.unit, &stored_key) {
-        let record = UnitRecord { parts: keyed.parts.clone(), files: keyed.each.clone() };
+        let record = UnitRecord { label: key::KEY_LABEL.to_owned(), parts: keyed.parts.clone(), files: keyed.each.clone() };
         let ((), ms) = timed(|| {
             if let Err(e) = store.record_unit(unit, key, &record) {
                 event.store = Some(format!("the unit record was not written: {e:#}"));
@@ -635,8 +645,11 @@ fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event
 /// made otherwise, the parts of the key.
 fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<String>) {
     let ours = &keyed.parts;
-    let parts_differing = |theirs: &key::Parts| -> Vec<String> {
+    let parts_differing = |record: &UnitRecord| -> Vec<String> {
+        let theirs = &record.parts;
+        let label = key::KEY_LABEL.to_owned();
         [
+            ("the cactup that keyed it", &record.label, &label),
             ("the platform", &theirs.platform, &ours.platform),
             ("the compiler", &theirs.compiler, &ours.compiler),
             ("the flags", &theirs.arguments, &ours.arguments),
@@ -664,7 +677,7 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
         differs.extend(record.files.iter().filter(|note| !read.contains(note.name.as_str())).map(|note| format!("{}: read by the other compile only", note.name)));
         differs
     };
-    let alike: Vec<&UnitRecord> = records.iter().filter(|record| parts_differing(&record.parts).is_empty()).collect();
+    let alike: Vec<&UnitRecord> = records.iter().filter(|record| parts_differing(record).is_empty()).collect();
     let (kind, mut differs) = match (records.is_empty(), alike.is_empty()) {
         (true, _) => (MissKind::New, Vec::new()),
         (false, false) => {
@@ -676,7 +689,7 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
             }
             (MissKind::OtherSources, differs)
         }
-        (false, true) => (MissKind::BuiltOtherwise, records.iter().map(|record| parts_differing(&record.parts)).min_by_key(Vec::len).unwrap_or_default()),
+        (false, true) => (MissKind::BuiltOtherwise, records.iter().map(parts_differing).min_by_key(Vec::len).unwrap_or_default()),
     };
     differs.truncate(DIFFERS_KEPT);
     (kind, differs)

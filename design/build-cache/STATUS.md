@@ -2252,6 +2252,43 @@ as they read). Left: two older clippy errors (`from_mode(0)` in
 `tests/objcache.rs` and `upkeep.rs`) and older lints. **M4 signs off at
 `b652348`.**
 
+### M5 part 1, round 1 (on `8fe00ab`): BLOCKED by both
+
+Both found nothing that changes what is served in the whole-key lookup
+and `read_files` (a hit under the key with the files whole needs the same
+plain key and the same files whole). Blocking, fixed in the commit after
+this record:
+- (B) `key::FrontEnd` let a `#pragma GCC diagnostic` region closed in one
+  file through, but a `warning` or `error` in it turns the option on for
+  the whole unit, and the `pop` does not undo that (`-Wpedantic` turned on
+  in one header warns of a GNU variadic definition in another, on GCC 14;
+  on GCC 8 to 12, whose `-E` ignores the pragma, a narrowed key would serve
+  that unit; inferred, no such GCC on plato). Only `ignored` is excused in
+  a region now. Key label `key-21`.
+- (A, B) audit-mode hits and recording builds were counted "kept out"
+  (`cache doctor` on Max's `et`, an audit build: "3376 kept out"). A hit is
+  reused in audit mode too; a keyed compile of a recording build is no
+  serving miss.
+- (A, B) an entry the store has but could not use (damaged, unreadable,
+  another cactup's) was "new", and its reason overwritten by "another
+  build published it first": now its own kind (`Miss::Unusable`), counted
+  as kept out, with the reason kept.
+- (A, B) a narrowed file that differed was said to differ in "a definition
+  the unit uses": it can be any line the key keeps (a comment, another
+  directive). Said so now.
+- (A) records of another key label made every miss "with other sources":
+  a record carries its label, and another label is "built otherwise".
+- (A) records were not in the store's size: counted now (`stats`, the size
+  stamp, `gc --to-size` with each entry's record).
+Non-blocking, done: records are flat files `units/<ab>/<unit>.<key>` (no
+directory per object); `gc` removes a record only if its entry is still
+not there then (one published during the walk keeps it); only plain files
+are read as records; the doctor's messages name `serve`, its `-G` hint says
+what to change; wording of `gc` and `stats`; a doc comment put back; the
+kept definitions deduplicated. Left: records are 18% of the entries' bytes
+on `smoke` (4.7 of 26 MB; about 130 bytes a file read); the time a miss
+spends on records is in no event field.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

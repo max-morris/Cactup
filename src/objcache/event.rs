@@ -113,8 +113,11 @@ pub enum Miss {
     /// platform, from other text or other files.
     OtherSources,
     /// Entries, none with the same compiler, flags, environment and
-    /// platform.
+    /// platform (or keyed by another cactup).
     BuiltOtherwise,
+    /// The store has an entry under this key it could not use (damaged,
+    /// unreadable, another cactup's): `store` says why.
+    Unusable,
 }
 
 /// Whether the store had the compile's object (§18.8).

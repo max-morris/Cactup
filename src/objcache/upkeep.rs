@@ -103,8 +103,16 @@ pub struct Machine {
     pub entries: Vec<Entry>,
     pub temps: Vec<Other>,
     pub logs: Vec<Log>,
-    /// The unit records (§18.12), each by the key of its entry.
-    pub records: Vec<(String, PathBuf)>,
+    /// The unit records (§18.12).
+    pub records: Vec<Record>,
+}
+
+/// A unit record (§18.12): of the entry of `key`, at `path`.
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub key: String,
+    pub path: PathBuf,
+    pub bytes: u64,
 }
 
 impl Machine {
@@ -133,8 +141,11 @@ pub struct Scan {
 }
 
 impl Scan {
+    /// The bytes of every entry and every unit record.
     pub fn bytes(&self) -> u64 {
-        self.machines.iter().flat_map(|m| m.entries.iter()).map(|e| e.bytes).sum()
+        let entries: u64 = self.machines.iter().flat_map(|m| m.entries.iter()).map(|e| e.bytes).sum();
+        let records: u64 = self.machines.iter().flat_map(|m| m.records.iter()).map(|r| r.bytes).sum();
+        entries + records
     }
 }
 
@@ -163,7 +174,7 @@ struct Found {
     temps: Vec<Other>,
     logs: Vec<Log>,
     unreadable_logs: Vec<(PathBuf, String)>,
-    records: Vec<(String, PathBuf)>,
+    records: Vec<Record>,
 }
 
 /// Is `name` a key (64 lowercase hex digits)?
@@ -253,9 +264,9 @@ fn read_piece(piece: &Piece) -> Res<Found> {
     Ok(found)
 }
 
-/// Read one `units/<ab>` directory: each object's records, and temporary
-/// files of records cut short. A record that cannot be looked at is passed
-/// over: it is a report, not a key.
+/// Read one `units/<ab>` directory: the records in it, and temporary files
+/// of records cut short. A record that cannot be looked at is passed over:
+/// it is a report, not a key.
 fn read_units(dir: &Path) -> Res<Found> {
     let mut found = Found::default();
     let listing = match fs::read_dir(dir) {
@@ -263,19 +274,19 @@ fn read_units(dir: &Path) -> Res<Found> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
         Err(e) => return Err(e).with_context(|| format!("Failed to read {}", dir.display())),
     };
-    for unit in listing.flatten() {
-        let Ok(records) = fs::read_dir(unit.path()) else { continue };
-        for record in records.flatten() {
-            let name = record.file_name().to_string_lossy().into_owned();
-            let Ok(meta) = fs::symlink_metadata(record.path()) else { continue };
-            if !meta.is_file() {
-                continue;
-            }
-            if name.starts_with(".tmp-") {
-                found.temps.push(Other { path: record.path(), modified: modified(&meta) });
-            } else if is_key(&name) {
-                found.records.push((name, record.path()));
-            }
+    for record in listing.flatten() {
+        let name = record.file_name().to_string_lossy().into_owned();
+        let Ok(meta) = fs::symlink_metadata(record.path()) else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if name.starts_with(".tmp-") {
+            found.temps.push(Other { path: record.path(), modified: modified(&meta) });
+        } else if let Some((unit, key)) = name.split_once('.')
+            && is_key(unit)
+            && is_key(key)
+        {
+            found.records.push(Record { key: key.to_owned(), path: record.path(), bytes: meta.len() });
         }
     }
     Ok(found)
@@ -363,8 +374,9 @@ pub struct Plan {
     pub entries: Vec<(Entry, SystemTime)>,
     /// Temporary files a day old.
     pub temps: Vec<Other>,
-    /// Unit records whose entry is gone, or goes now (§18.12).
-    pub records: Vec<PathBuf>,
+    /// Unit records whose entry is gone, or goes now (§18.12), each with
+    /// where its entry would be.
+    pub records: Vec<(PathBuf, PathBuf)>,
     /// Per machine: the logs to fold, and the uses to keep (the last of
     /// each key that stays).
     pub folds: Vec<(PathBuf, Vec<PathBuf>, Vec<(String, SystemTime)>)>,
@@ -392,26 +404,41 @@ pub fn plan(scan: &Scan, now: SystemTime, unused_for: Option<Duration>, to_size:
         let a_day_ago = now.checked_sub(Duration::from_secs(24 * 3600)).unwrap_or(UNIX_EPOCH);
         plan.temps.extend(machine.temps.iter().filter(|temp| temp.modified < a_day_ago).cloned());
     }
-    let mut bytes: u64 = kept.iter().map(|(entry, _, _)| entry.bytes).sum();
+    // An entry's bytes with its records'.
+    let mut records_of: HashMap<(usize, &str), u64> = HashMap::new();
+    for (index, machine) in scan.machines.iter().enumerate() {
+        for record in &machine.records {
+            *records_of.entry((index, record.key.as_str())).or_default() += record.bytes;
+        }
+    }
+    let with_records = |entry: &Entry, index: usize| entry.bytes + records_of.get(&(index, entry.key.as_str())).copied().unwrap_or(0);
+    let mut bytes: u64 = kept.iter().map(|(entry, _, index)| with_records(entry, *index)).sum();
     if let Some(to_size) = to_size {
         // Least recently used first.
         kept.sort_by_key(|(_, last, _)| *last);
         let mut over = kept.into_iter().peekable();
         while bytes > to_size
-            && let Some((entry, last, _)) = over.next()
+            && let Some((entry, last, index)) = over.next()
         {
-            bytes -= entry.bytes;
+            bytes -= with_records(entry, index);
             plan.entries.push((entry.clone(), last));
         }
         kept = over.collect();
     }
     plan.bytes_after = bytes;
-    // The records of entries that are not there, or are removed now.
+    // The records of entries that are not there, or are removed now (each
+    // removed only if its entry is still not there then: `carry_out`).
     let removed: std::collections::HashSet<&Path> = plan.entries.iter().map(|(entry, _)| entry.path.as_path()).collect();
     for machine in &scan.machines {
         let staying: std::collections::HashSet<&str> =
             machine.entries.iter().filter(|entry| !removed.contains(entry.path.as_path())).map(|entry| entry.key.as_str()).collect();
-        plan.records.extend(machine.records.iter().filter(|(key, _)| !staying.contains(key.as_str())).map(|(_, path)| path.clone()));
+        plan.records.extend(
+            machine
+                .records
+                .iter()
+                .filter(|record| !staying.contains(record.key.as_str()))
+                .map(|record| (record.path.clone(), machine.dir.join(&record.key[..2]).join(&record.key))),
+        );
     }
     // Fold every machine's logs into one with the last use of each key that
     // stays (and that a log knows a use of).
@@ -470,17 +497,14 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
             }
             removing.inc();
         }
-        // A record says what made an entry; with the entry gone, it goes,
-        // and its object's directory with the last of them.
-        for record in &plan.records {
+        // A record says what made an entry; with the entry gone, it goes.
+        // An entry published since the walk keeps its record.
+        for (record, entry) in &plan.records {
             if gix::interrupt::is_triggered() {
                 bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
             }
-            if fs::remove_file(record).is_ok() {
+            if fs::symlink_metadata(entry).is_err() && fs::remove_file(record).is_ok() {
                 done.records += 1;
-                if let Some(dir) = record.parent() {
-                    let _ = fs::remove_dir(dir);
-                }
             }
             removing.inc();
         }
@@ -630,7 +654,7 @@ mod tests {
                 entries: vec![entry('a', 100, DAY), entry('b', 100, 2 * DAY), entry('c', 100, 8 * DAY)],
                 temps: vec![Other { path: PathBuf::from("/s/.tmp-x"), modified: UNIX_EPOCH + Duration::from_secs(5 * DAY) }],
                 logs: vec![Log { path: PathBuf::from("/s/v1/m/used/x.keys"), uses }],
-                records: ['a', 'b', 'd'].map(|key| (key.to_string().repeat(64), PathBuf::from(format!("/s/v1/m/units/00/u/{key}")))).to_vec(),
+                records: ['a', 'b', 'd'].map(|key| Record { key: key.to_string().repeat(64), path: PathBuf::from(format!("/s/v1/m/units/00/u.{key}")), bytes: 10 }).to_vec(),
             }],
             other_formats: Vec::new(),
             unreadable_logs: Vec::new(),
@@ -646,7 +670,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path(), "m").unwrap();
         let parts = Parts { platform: "p".into(), compiler: "c".into(), arguments: "a".into(), environment: "e".into(), text: "t".into(), files: "f".into() };
-        let record = UnitRecord { parts, files: vec![FileNote { name: "/cactup-root/t.h".into(), digest: "d".into(), taken: Default::default() }] };
+        let record = UnitRecord { label: "key-x".into(), parts, files: vec![FileNote { name: "/cactup-root/t.h".into(), digest: "d".into(), taken: Default::default() }] };
         let key = "e".repeat(64);
         store.record_unit("T/a.c.o", &key, &record).unwrap();
         store.record_unit("T/a.c.o", &key, &record).unwrap();
@@ -654,7 +678,8 @@ mod tests {
         assert!(store.unit_records("T/a.c.o", &key).is_empty(), "a compile's own key is not another entry");
         assert!(store.unit_records("T/b.c.o", "").is_empty());
         let scan = scan(tmp.path()).unwrap();
-        assert_eq!(scan.machines[0].records.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(), [key]);
+        assert_eq!(scan.machines[0].records.iter().map(|record| record.key.clone()).collect::<Vec<_>>(), [key]);
+        assert!(scan.bytes() > 0, "records count in the store's size");
     }
 
     fn keys(plan: &Plan) -> Vec<char> {
@@ -668,10 +693,12 @@ mod tests {
         // published on day 8.
         let plan = plan(&store(), now, Some(Duration::from_secs(5 * DAY)), None);
         assert_eq!(keys(&plan), ['b']);
-        assert_eq!(plan.bytes_after, 200);
+        assert_eq!(plan.bytes_after, 210, "with the record of `a`");
         assert_eq!(plan.temps.len(), 1, "a temporary file five days old goes");
-        // The records of `b`, removed now, and `d`, gone already.
-        assert_eq!(plan.records, ["b", "d"].map(|key| PathBuf::from(format!("/s/v1/m/units/00/u/{key}"))));
+        // The records of `b`, removed now, and `d`, gone already; `a`'s
+        // record counts with it.
+        assert_eq!(plan.records.iter().map(|(record, _)| record.clone()).collect::<Vec<_>>(), ["b", "d"].map(|key| PathBuf::from(format!("/s/v1/m/units/00/u.{key}"))));
+        assert_eq!(plan.records[0].1, PathBuf::from(format!("/s/v1/m/bb/{}", "b".repeat(64))));
         // The uses of what stays are kept; the log is folded.
         assert_eq!(plan.folds.len(), 1);
         assert_eq!(plan.folds[0].2, vec![("a".repeat(64), UNIX_EPOCH + Duration::from_secs(9 * DAY))]);
@@ -689,7 +716,7 @@ mod tests {
         let plan = plan(&store(), now, Some(Duration::from_secs(365 * DAY)), Some(150));
         // Last uses: a day 9, b day 2, c day 8: b first, then c.
         assert_eq!(keys(&plan), ['b', 'c']);
-        assert_eq!(plan.bytes_after, 100);
+        assert_eq!(plan.bytes_after, 110, "`a` with its record");
         // The size alone, with no age, decides the same.
         assert_eq!(keys(&super::plan(&store(), now, None, Some(150))), ['b', 'c']);
         assert!(super::plan(&store(), now, None, None).entries.is_empty());

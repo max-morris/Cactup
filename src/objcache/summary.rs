@@ -35,7 +35,12 @@ impl Compiled {
 
 /// Why `event`'s compile ran, or `None` for one the cache served.
 pub fn compiled(event: &Event) -> Option<Compiled> {
-    if event.outcome == Some(Outcome::Hit) && event.audit.is_none() {
+    // Served, or in audit mode checked (and compiled anyway, to compare).
+    if event.outcome == Some(Outcome::Hit) {
+        return None;
+    }
+    // Keyed in a build that only recorded: nothing was to be served.
+    if event.outcome.is_none() && event.not_cached.is_none() {
         return None;
     }
     Some(match () {
@@ -47,6 +52,7 @@ pub fn compiled(event: &Event) -> Option<Compiled> {
             Some(Miss::New) => Compiled::New,
             Some(Miss::OtherSources) => Compiled::OtherSources,
             Some(Miss::BuiltOtherwise) => Compiled::BuiltOtherwise,
+            Some(Miss::Unusable) => Compiled::KeptOut,
             // Keyed, not served, and no word of the store's records: the
             // store could not be used.
             None => Compiled::KeptOut,
@@ -112,5 +118,17 @@ mod tests {
             line(&[hit, kept, failed, unstable]),
             "cactup: build cache: 1 of 4 objects reused; 3 compiled: 2 kept out, 1 failed (see cactup cache doctor)"
         );
+        // Checked in audit mode: found in the store, so reused, though it
+        // was compiled anyway to compare; an entry that could not be used
+        // is kept out.
+        let audited = Event { audit: Some(event::Audit::Same), ..event(Outcome::Hit, None) };
+        let unusable = Event { store: Some("the entry is damaged".into()), ..event(Outcome::Miss, Some(Miss::Unusable)) };
+        assert_eq!(compiled(&audited), None);
+        assert_eq!(compiled(&unusable), Some(Compiled::KeptOut));
+        // A build that only recorded: nothing was to be served, but a
+        // compile with no key was kept out all the same.
+        let recorded = Event { key: Some("k".into()), exit: Some(0), ..Default::default() };
+        assert_eq!(compiled(&recorded), None);
+        assert_eq!(compiled(&Event { not_cached: Some("why".into()), ..Default::default() }), Some(Compiled::KeptOut));
     }
 }

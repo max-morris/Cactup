@@ -30,7 +30,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             };
             // Both builds are found before anything is printed: a report
             // that ends in an error is not half a report.
-            let build = Recorded::open(&installation, &name, attempt, None)?;
+            let build = Recorded::open(&installation, &name, attempt, None, "record")?;
             let compare = against.is_some() || against_installation.is_some() || against_attempt.is_some();
             let other = match compare {
                 false => None,
@@ -50,7 +50,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                             build.attempt
                         );
                     }
-                    Some(Recorded::open(&other_installation, &other_name, against_attempt, same_config.then_some(build.attempt))?)
+                    Some(Recorded::open(&other_installation, &other_name, against_attempt, same_config.then_some(build.attempt), "record")?)
                 }
             };
             println!("{}", build.title().bold());
@@ -67,7 +67,7 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                 Some(name) => name,
                 None => installation.meta()?.active_config()?.to_owned(),
             };
-            let build = Recorded::open(&installation, &name, attempt, None)?;
+            let build = Recorded::open(&installation, &name, attempt, None, "serve")?;
             println!("{}", build.title().bold());
             print!("{}{}", build.unreadable_note("this"), doctor(&build.events));
             Ok(())
@@ -160,7 +160,7 @@ fn stats(root: &Path, from: &str) -> Res<()> {
             println!("    used or stored in the last {days} days: {used}");
         }
         if !machine.records.is_empty() {
-            println!("    records of what made them, for `cactup cache doctor`: {}", machine.records.len());
+            println!("    records of what made them (a miss reads them to say what differed): {}", machine.records.len());
         }
         if !machine.temps.is_empty() {
             println!("    left over from interrupted builds: {} files (cactup cache gc removes those a day old)", machine.temps.len());
@@ -207,7 +207,7 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
             println!("  would remove {} ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
         }
         println!(
-            "Would remove {} of {} objects ({}), leaving {}, {} records of objects no longer stored, and {} files left over from interrupted builds.",
+            "Would remove {} of {} objects ({}), leaving {}; and remove {} record(s) of objects no longer stored and {} file(s) left over from interrupted builds.",
             plan.entries.len(),
             scan.machines.iter().map(|m| m.entries.len()).sum::<usize>(),
             upkeep::human(bytes),
@@ -220,7 +220,7 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     let done = upkeep::carry_out(&plan)?;
     upkeep::stamp_size(root, plan.bytes_after)?;
     println!(
-        "Removed {} objects ({}), {} records of objects no longer stored and {} files left over from interrupted builds; the build cache holds {}.",
+        "Removed {} objects ({}), {} record(s) of objects no longer stored and {} file(s) left over from interrupted builds; the build cache holds {}.",
         done.entries,
         upkeep::human(done.bytes),
         done.records,
@@ -391,7 +391,7 @@ fn doctor(events: &[Event]) -> String {
 fn kept_out_hint(why: &str) -> Option<&'static str> {
     let hints: [(&str, &str); 6] = [
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
-        ("records when each source was last changed", "CUDA compiles with -G or -lineinfo (debug builds) are not cached"),
+        ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
@@ -420,7 +420,9 @@ struct Recorded {
 impl Recorded {
     /// The attempt `attempt` of config `name`, or the newest one that
     /// recorded its compiles (other than `not`).
-    fn open(installation: &Installation, name: &str, attempt: Option<u32>, not: Option<u32>) -> Res<Self> {
+    /// `mode` is the build-cache knob's value a build to look at would have
+    /// been made with, for the message when there is none.
+    fn open(installation: &Installation, name: &str, attempt: Option<u32>, not: Option<u32>, mode: &str) -> Res<Self> {
         let config_dir = installation.cactus_root().join("configs").join(name);
         if !config_dir.is_dir() {
             bail!("no config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
@@ -429,15 +431,15 @@ impl Recorded {
         let attempt = match attempt {
             Some(id) if log(id).is_file() => id,
             Some(id) => bail!(
-                "build attempt {id:04} of config \"{name}\" recorded no compiles: it was not built with the \
-                 build-cache knob set to record, or nothing needed compiling"
+                "build attempt {id:04} of config \"{name}\" logged no compiles: it was not built with the \
+                 build-cache knob on, or nothing needed compiling"
             ),
             None => {
                 let recorded = |id: &u32| Some(*id) != not && log(*id).is_file();
                 BuildAttempt::scan(&config_dir)?.into_iter().rev().find(recorded).ok_or_else(|| {
                     anyhow!(
-                        "no{} build of config \"{name}\" in installation {} recorded its compiles; build it with \
-                         `cactup -K build-cache=record build {name}`",
+                        "no{} build of config \"{name}\" in installation {} logged its compiles; build it with \
+                         `cactup -K build-cache={mode} build {name}`",
                         if not.is_some() { " other" } else { "" },
                         installation.alias,
                     )
@@ -864,18 +866,19 @@ mod tests {
         record(2, &[keyed("T/a.c.o", parts("t", "a"), 1), keyed("T/b.c.o", parts("u", "a"), 1)]);
 
         // Attempt 3 recorded nothing: the newest that did is 2.
-        let newest = Recorded::open(&installation, "sim", None, None).unwrap();
+        let newest = Recorded::open(&installation, "sim", None, None, "record").unwrap();
         assert_eq!((newest.attempt, newest.events.len(), newest.unreadable), (2, 2, 0));
         assert_eq!(newest.unreadable_note("this"), "");
         assert_eq!(newest.title(), "sim, build attempt 0002 (installation et)");
-        assert_eq!(Recorded::open(&installation, "sim", None, Some(2)).unwrap().attempt, 1);
-        assert_eq!(Recorded::open(&installation, "sim", Some(1), None).unwrap().attempt, 1);
+        assert_eq!(Recorded::open(&installation, "sim", None, Some(2), "record").unwrap().attempt, 1);
+        assert_eq!(Recorded::open(&installation, "sim", Some(1), None, "record").unwrap().attempt, 1);
 
-        let err = |attempt, not| Recorded::open(&installation, "sim", attempt, not).err().unwrap().to_string();
-        assert!(err(Some(3), None).contains("build attempt 0003 of config \"sim\" recorded no compiles"));
-        assert!(Recorded::open(&installation, "nope", None, None).err().unwrap().to_string().contains("no config named \"nope\""));
+        let err = |attempt, not| Recorded::open(&installation, "sim", attempt, not, "serve").err().unwrap().to_string();
+        assert!(err(Some(3), None).contains("build attempt 0003 of config \"sim\" logged no compiles"));
+        assert!(Recorded::open(&installation, "nope", None, None, "record").err().unwrap().to_string().contains("no config named \"nope\""));
         std::fs::remove_file(log_path(&config_dir, 1)).unwrap();
         assert!(err(None, Some(2)).contains("no other build of config \"sim\""), "{}", err(None, Some(2)));
+        assert!(err(None, Some(2)).contains("-K build-cache=serve"), "{}", err(None, Some(2)));
 
         // Lines this cactup cannot read are counted and said; a log with
         // nothing else is an error, not an empty build.
@@ -887,7 +890,7 @@ mod tests {
             writeln!(log, "{line}").unwrap();
         };
         append(2, "{\"compiler\":\"gcc\",\"some-older-format\":true}");
-        let partly = Recorded::open(&installation, "sim", Some(2), None).unwrap();
+        let partly = Recorded::open(&installation, "sim", Some(2), None, "record").unwrap();
         assert_eq!((partly.events.len(), partly.unreadable), (2, 1));
         assert!(partly.unreadable_note("that").contains("1 line of that build's log cannot be read and is not counted"));
         append(3, "{\"compiler\":\"gcc\",\"some-older-format\":true}");

@@ -293,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-20";
+pub const KEY_LABEL: &str = "key-21";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -1435,11 +1435,11 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                         let kept = without_definitions(bytes, |name| used.droppable(name) && once(name));
                         // The definitions of names the text does not use that
                         // stayed all the same, and why (decision 27).
-                        let mut stayed: Vec<String> = definitions(bytes)
+                        let stayed: BTreeSet<String> = definitions(bytes)
                             .filter(|name| !(used.names.contains(*name) || used.droppable(name) && once(name)))
                             .map(|name| format!("{} ({})", String::from_utf8_lossy(name), used.why_kept(name, once(name))))
                             .collect();
-                        stayed.dedup();
+                        let stayed: Vec<String> = stayed.into_iter().collect();
                         (content_digest(&kept, map), Taken::Narrowed(stayed))
                     }
                     Some(used) => (all, used.why_whole(path)),
@@ -1501,11 +1501,17 @@ impl Taken {
             Taken::Source => "whole: the unit's source".to_owned(),
             Taken::HasCode => "whole: the compiled text has code of it".to_owned(),
             Taken::Diagnosed => "whole: a preprocessor diagnostic names it".to_owned(),
-            Taken::Narrowed(stayed) if stayed.is_empty() => "narrowed: a definition the unit uses differs".to_owned(),
+            // What the key keeps of a narrowed file is everything but the
+            // definitions it leaves out: comments, other directives, the
+            // definitions the unit uses, and those it keeps all the same.
+            Taken::Narrowed(stayed) if stayed.is_empty() => "narrowed: what differs is a line the key keeps (a definition the unit uses, a comment, another directive)".to_owned(),
             Taken::Narrowed(stayed) => {
                 let shown: Vec<&str> = stayed.iter().take(3).map(String::as_str).collect();
                 let more = if stayed.len() > 3 { format!(" and {} more", stayed.len() - 3) } else { String::new() };
-                format!("narrowed, kept definitions the unit does not use: {}{more}", shown.join(", "))
+                format!(
+                    "narrowed: what differs is a line the key keeps (a definition the unit uses, a comment, another directive, or one of the definitions the unit does not use that it kept: {}{more})",
+                    shown.join(", ")
+                )
             }
             Taken::Absent => "no such file".to_owned(),
         }
@@ -1706,10 +1712,14 @@ pub(super) fn said_as_compiled(language: compile::Language, front_end_pragma: bo
 /// Every file such a line is in has code (the line itself) and is keyed
 /// whole. `optimize`, `target` and their kind redefine macros `-dU` then
 /// misses, wherever they are used: they reach every file. `diagnostic`
-/// changes warnings for the lines after it: one between a `push` and its
-/// `pop` in one file, with no other file entered in between, reaches no
-/// other file (glibc's `stdlib-bsearch.h`, which every C unit with
-/// `<stdlib.h>` reads, is so); any other reaches the files after it.
+/// changes warnings for the lines after it. An `ignored` between a `push`
+/// and its `pop` in one file, with no other file entered in between,
+/// reaches no other file (glibc's `stdlib-bsearch.h`, which every C unit
+/// with `<stdlib.h>` reads, is so); a `warning` or an `error` turns the
+/// option on for the whole unit, which the `pop` does not undo (review:
+/// `-Wpedantic` so turned on in one header warns of a definition in
+/// another), and reaches every file after it, as does anything outside a
+/// region.
 #[derive(Debug, Default)]
 struct FrontEnd {
     /// The file of each `#pragma GCC diagnostic push` not yet popped.
@@ -1740,7 +1750,7 @@ impl FrontEnd {
             (Some(b"diagnostic"), Some(b"pop")) => {
                 self.pushed.pop();
             }
-            (Some(b"diagnostic"), _) if !self.pushed.is_empty() => {}
+            (Some(b"diagnostic"), Some(b"ignored")) if !self.pushed.is_empty() => {}
             _ => self.reaches = true,
         }
     }
@@ -2418,7 +2428,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "9d12e615c19f076c08f6bdff02f9d030b42de91451d4c0daf2cc5e49d9491334");
+        assert_eq!(parts.key(), "dadb1d25328b8cfefdfe32aea75e7c54070bfec6910bb0b9589b28195cd426f5");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 
@@ -2922,9 +2932,15 @@ mod tests {
         let region = ["@bsearch.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic ignored \"-Wcast-qual\"", "x;", "#pragma GCC diagnostic pop"];
         assert!(!reaches(&[&["@a.c"], &region[..], &["@a.c", "@b.h"]].concat()));
         // One that takes in another file, or is left open as one is entered.
-        assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic error \"-Wall\"", "@b.h", "@a.h", "#pragma GCC diagnostic pop"]));
-        assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic warning \"-Wall\"", "@a.c"]));
-        assert!(!reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic warning \"-Wall\"", "@a.h", "#pragma GCC diagnostic pop", "@b.h"]));
+        assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic ignored \"-Wall\"", "@b.h", "@a.h", "#pragma GCC diagnostic pop"]));
+        assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic ignored \"-Wall\"", "@a.c"]));
+        assert!(!reaches(&["@a.h", "#pragma GCC diagnostic push", "#pragma GCC diagnostic ignored \"-Wall\"", "@a.h", "#pragma GCC diagnostic pop", "@b.h"]));
+        // A warning or an error turns the option on for the whole unit,
+        // region or not.
+        for kind in ["warning", "error"] {
+            let turned_on = format!("#pragma GCC diagnostic {kind} \"-Wpedantic\"");
+            assert!(reaches(&["@a.h", "#pragma GCC diagnostic push", &turned_on, "x;", "#pragma GCC diagnostic pop"]), "{kind}");
+        }
     }
 
     #[test]

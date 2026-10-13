@@ -95,14 +95,15 @@ pub struct About {
     pub host: String,
 }
 
-/// What a publisher hands the store: the compile that succeeded, under the
-/// key that still held after it.
 /// What made the key of one entry, kept beside it for the object it is of
 /// (§18.12): the key's parts, and each file by its mapped name with the
 /// digest the files part took of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnitRecord {
+    /// The label the key was made under: a key of another cactup is no
+    /// other way of building the same object, but another way of keying it.
+    pub label: String,
     pub parts: Parts,
     pub files: Vec<FileNote>,
 }
@@ -113,6 +114,8 @@ pub const UNITS: &str = "units";
 /// How many of an object's unit records a miss reads, the newest first.
 pub const UNIT_RECORDS_READ: usize = 32;
 
+/// What a publisher hands the store: the compile that succeeded, under the
+/// key that still held after it.
 pub struct NewEntry<'a> {
     pub key: &'a str,
     pub parts: &'a Parts,
@@ -367,11 +370,12 @@ impl Store {
         // The temporary file's own name goes when `temp` is dropped.
     }
 
-    /// The directory of the unit records of the object named `unit` below
-    /// `build/` (§18.12).
-    fn unit_dir(&self, unit: &str) -> PathBuf {
+    /// Where the unit records of the object named `unit` below `build/`
+    /// are (§18.12): `units/<ab>/<unit digest>.<key>`, one directory of
+    /// them per first two digits, not one per object.
+    fn unit_place(&self, unit: &str) -> (PathBuf, String) {
         let digest = bytes_digest(unit.as_bytes());
-        self.dir.join(UNITS).join(&digest[..2]).join(digest)
+        (self.dir.join(UNITS).join(&digest[..2]), format!("{digest}."))
     }
 
     /// Note beside the entry of `key` what made it, for the object named
@@ -382,9 +386,9 @@ impl Store {
         if self.entry_path(key).is_none() {
             bail!("\"{key}\" is not a key");
         }
-        let dir = self.unit_dir(unit);
+        let (dir, prefix) = self.unit_place(unit);
         fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-        let path = dir.join(key);
+        let path = dir.join(format!("{prefix}{key}"));
         if path.symlink_metadata().is_ok() {
             return Ok(());
         }
@@ -406,14 +410,20 @@ impl Store {
 
     /// The records of the entries the store has for the object named
     /// `unit`, but `not` (this compile's own key), the newest
-    /// [`UNIT_RECORDS_READ`] first. A record that cannot be read is passed
-    /// over: they are a report, not a key.
+    /// [`UNIT_RECORDS_READ`] first. Only plain files are read, and one that
+    /// cannot be read is passed over: they are a report, not a key.
     pub fn unit_records(&self, unit: &str, not: &str) -> Vec<UnitRecord> {
-        let Ok(listing) = fs::read_dir(self.unit_dir(unit)) else { return Vec::new() };
+        let (dir, prefix) = self.unit_place(unit);
+        let Ok(listing) = fs::read_dir(dir) else { return Vec::new() };
         let mut found: Vec<(std::time::SystemTime, PathBuf)> = listing
             .flatten()
-            .filter(|entry| entry.file_name().to_str().is_some_and(|name| self.entry_path(name).is_some() && name != not))
-            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .filter(|entry| {
+                entry.file_name().to_str().and_then(|name| name.strip_prefix(&prefix)).is_some_and(|key| self.entry_path(key).is_some() && key != not)
+            })
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok().filter(Metadata::is_file)?;
+                Some((meta.modified().ok()?, entry.path()))
+            })
             .collect();
         found.sort_by_key(|found| std::cmp::Reverse(found.0));
         found.truncate(UNIT_RECORDS_READ);

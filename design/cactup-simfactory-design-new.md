@@ -5175,11 +5175,13 @@ fixed parts, so that the key does not change by accident:
   narrow is not narrowed: any but those the preprocessor alone handles or
   that change nothing later lines read (`system_header`, `poison`,
   `warning`, `error`, `dependency`, `ivdep`, `unroll`, `novector`,
-  `visibility`), except a `diagnostic` one between a `push` and its `pop`
-  in one file with no other file entered in between. The file such a line
-  is in has code (the line) and is keyed whole, and the region reaches no
-  other; glibc's `stdlib-bsearch.h`, which every C unit with `<stdlib.h>`
-  reads, is so (`objcache::key::FrontEnd`). (For C++ the compile and `-E`
+  `visibility`), except a `diagnostic ignored` between a `push` and its
+  `pop` in one file with no other file entered in between. The file such a
+  line is in has code (the line) and is keyed whole, and the region reaches
+  no other; glibc's `stdlib-bsearch.h`, which every C unit with
+  `<stdlib.h>` reads, is so (`objcache::key::FrontEnd`). A `warning` or
+  `error` in a region is no such exception: it turns the option on for the
+  whole unit, and the `pop` does not undo that. (For C++ the compile and `-E`
   agree on every macro and preprocessor warning after any of them, tried on
   GCC 8.5 to 14.2, and libstdc++'s headers are full of them.) With `build-cache-preserve-exact-warnings = true` the key
   also has how the compiler (for CUDA, its host compiler) words a warning
@@ -6251,12 +6253,16 @@ Each compile the build ran through the cache is one of:
   (a thorn's source edited, or a header of the configuration that differs);
 - *built otherwise*: it has entries, none with the same compiler, flags,
   environment and platform;
-- *kept out*: it has no key (not cached, §18.5), or its object could not be
-  stored (the check after the compile, a publish that failed);
+- *kept out*: it has no key (not cached, §18.5), the store has an entry
+  under its key that it could not use (damaged, unreadable, another
+  cactup's), or its object could not be stored (the check after the
+  compile, a publish that failed);
 - *failed*: the compile failed.
 
 A kind with a count of 0 is left out, and so is the part after `;` when
-every object was reused. "See `cactup cache doctor`" follows only when
+every object was reused. (In audit mode a hit counts as reused, though it
+is compiled anyway to compare; audit mode's own line says what the
+comparisons found, §18.8.) "See `cactup cache doctor`" follows only when
 something was kept out. A compile another build stored first, while this
 one compiled, counts by what the store held when this one looked. The
 line is the wrapper's events counted by `cactup __cc-summary
@@ -6265,19 +6271,30 @@ the build says how many compiles went through the cache, as before.
 
 **The unit records.** Whether the store has another entry for an object is
 an index beside the entries: for each entry published, one file
-`<root>/v<N>/<machine>/units/<ab>/<unit digest>/<key>`, where the unit
-digest is a SHA-256 of the object's name below `build/`, written as an
-entry is (temporary file, `link(2)`, never changed). It holds what made the
-key, as JSON: the six parts (§18.5), and each file the key read, by its
-mapped name, with its digest as the key took it. Its content is a
+`<root>/v<N>/<machine>/units/<ab>/<unit digest>.<key>`, where the unit
+digest is a SHA-256 of the object's name below `build/` and `<ab>` its
+first two digits (one directory per two digits, not one per object),
+written as an entry is (temporary file, `link(2)`, never changed). It holds
+what made the key, as JSON: the label the key was made under, the six parts
+(§18.5), and each file the key read, by its mapped name, with its digest as
+the key took it (about 130 bytes a file: a few kilobytes for a C unit, some
+hundred for a CUDA unit that reads a thousand files). A record of another
+label makes a miss *built otherwise* ("the cactup that keyed it"). Two
+thorns of one name in two arrangements share an object name, and so their
+records. Its content is a
 function of its key, so two builds publishing one key write the same file,
 and the second link finds the first. On a miss the wrapper reads the
 unit's records (the newest 32, by modification time), and with them the
 kind of miss; for the record closest to its own (the fewest parts, then
 the fewest files, that differ) it notes in its event which parts or which
 files differ, and how its key took each such file (below). Only a miss
-pays for this, one directory listing and a few small files. `cache gc`
-removes the records whose entry is gone, and `cache stats` counts them. A
+pays for this: one listing of its `<ab>` directory, a look at each of its
+object's records, and the newest 32 read. Records are counted in the
+store's size (`cache stats`, the size notice, `cache gc --to-size`, which
+counts an entry with its record). `cache gc` removes the records whose
+entry is gone, each only if its entry is still not there when it comes to
+it (one published since the walk keeps its record), and `cache stats`
+counts them. A
 record missing (a publish cut short between the entry and its record, a
 record removed by hand) makes a miss look new: the line is a report, not a
 key.
