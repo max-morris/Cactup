@@ -1425,9 +1425,9 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
-        // Narrowed: a definition was left out, so the digest is not of the
-        // file whole.
-        let (digest, taken, narrowed) = match read {
+        // Whether a definition was left out: the digest is then not of the
+        // file's bytes.
+        let (digest, taken, left_out) = match read {
             Ok(bytes) => {
                 let all = content_digest(bytes, map);
                 whole.feed(all.as_bytes());
@@ -1442,8 +1442,10 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                             .map(|name| format!("{} ({})", String::from_utf8_lossy(name), used.why_kept(name, once(name))))
                             .collect();
                         let stayed: Vec<String> = stayed.into_iter().collect();
-                        let left_out = kept.len() != bytes.len();
-                        (content_digest(&kept, map), Taken::Narrowed(stayed), left_out)
+                        match kept.len() != bytes.len() {
+                            true => (content_digest(&kept, map), Taken::Narrowed(stayed), true),
+                            false => (all, Taken::NothingLeftOut, false),
+                        }
                     }
                     Some(used) => (all, used.why_whole(path), false),
                     None => (all, Taken::Unnarrowed, false),
@@ -1456,7 +1458,8 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         };
         files.feed(digest.as_bytes());
-        each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, narrowed, taken });
+        let narrowed = matches!(taken, Taken::Narrowed(_) | Taken::NothingLeftOut);
+        each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, narrowed, left_out, taken });
     }
     Ok(Digested { files: files.hex(), whole: whole.hex(), seen: seen.hex(), each })
 }
@@ -1477,11 +1480,15 @@ pub(super) struct Digested {
 pub struct FileNote {
     pub name: String,
     pub digest: String,
-    /// Narrowed: the digest is of the file without the definitions the
-    /// unit does not use. A file one key narrowed and another took whole
-    /// has two digests though its bytes are the same.
+    /// The key narrowed it (decision 26) …
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub narrowed: bool,
+    /// … and left a definition out of it: its digest is then of other bytes
+    /// than the file's, and cannot be compared with the digest of a key
+    /// that took the file whole. (Narrowed with nothing to leave out, the
+    /// digest is the file's own.)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_out: bool,
     #[serde(skip)]
     pub taken: Taken,
 }
@@ -1498,6 +1505,9 @@ pub enum Taken {
     HasCode,
     Diagnosed,
     Narrowed(Vec<String>),
+    /// Narrowed, with nothing to leave out: the unit uses every definition
+    /// in it, or it has none. Its digest is of the file whole.
+    NothingLeftOut,
     Absent,
 }
 
@@ -1523,6 +1533,7 @@ impl Taken {
                     shown.join(", ")
                 )
             }
+            Taken::NothingLeftOut => "whole: the unit uses every definition in it, or it has none".to_owned(),
             Taken::Absent => "no such file".to_owned(),
         }
     }

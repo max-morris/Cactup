@@ -6279,10 +6279,11 @@ synced: a record cut short by a crash reads back as none and is passed
 over. It holds
 what made the key, as JSON: the label the key was made under, the six parts
 (§18.5), and each file the key read, by its mapped name, with the first 16
-hex digits of its digest as the key took it and whether the key narrowed it
-(a record is a report, never a key: what a 64-bit prefix might hide is one
-line of it). A file one key narrowed and another took whole is said to be
-taken so, not to differ. A record of another
+hex digits of its digest as the key took it, whether the key narrowed it and
+whether it left a definition out of it (a record is a report, never a key:
+what a 64-bit prefix might hide is one line of it). Where one key left
+definitions out of a file and the other took it whole, the two digests are
+of other bytes: the file is said to be taken so, not to differ. A record of another
 label makes a miss *built otherwise* ("the cactup that keyed it"). Two
 thorns of one name in two arrangements share an object name, and so their
 records. What it says is a function of its key (but for whether a file
@@ -6291,7 +6292,8 @@ write records alike, and the second link finds the first. On a miss the wrapper 
 unit's records (the newest 32, by modification time), and with them the
 kind of miss; for the record closest to its own (the fewest parts, then
 the fewest files, that differ) it notes in its event which parts or which
-files differ, and how its key took each such file (below). Only a miss
+files differ (at most 64, with a count of the rest, which `cache doctor`
+says), and how its key took each such file (below). Only a miss
 pays for this: one listing of its `<ab>` directory, a look at each of its
 object's records, and the newest 32 read. Records are compressed (zlib, by
 the pure-Rust `zlib-rs` already in the tree) and keep 16 hex digits of each
@@ -6314,9 +6316,10 @@ it. The event of a compile says, when no file was narrowed, why (Clang;
 diagnostic naming no file; a C unit with a `#pragma GCC` its front end
 acts on); and a miss with other sources says, for each file that differs,
 whether it was keyed whole and why (the unit's source; the text has code
-of it; a diagnostic names it) or narrowed, and then which definitions the
-unit does not use it kept all the same (defined twice in the unit, given on
-the command line, a reserved name).
+of it; a diagnostic names it; the unit uses every definition in it, or it
+has none) or narrowed, and then which definitions the unit does not use it
+kept all the same (defined twice in the unit, given on the command line, a
+reserved name).
 
 **`cactup cache doctor [<config>] [--attempt N]`** reads the event log of
 a build that went through the cache (the newest attempt of the config that

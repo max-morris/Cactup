@@ -1508,11 +1508,17 @@ fn a_miss_says_what_kind_it_was_and_the_build_line_counts_them() {
     let (miss, differs) = kind(&["-O3"]);
     assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
     assert!(differs.to_string().contains("lib.h: narrowed by one key and taken whole by the other, so not known to differ (narrowed here)\""), "{differs}");
+    // Narrowed by both, the one with nothing to leave out: the digests
+    // compare, and a comment differs.
+    fs::write(lib.join("lib.h"), "/* a comment */\n#define LIB_START 0\n").unwrap();
+    let (miss, differs) = kind(&["-O3"]);
+    assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
+    assert!(differs.to_string().contains("lib.h: narrowed: a line the key keeps differs"), "{differs}");
     fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
 
     let cc_dir = build.conf().parent().unwrap().to_owned();
     let out = Command::new(CACTUP).arg("__cc-summary").arg(&cc_dir).output().unwrap();
-    assert_ran(&out, "cactup: build cache: 1 of 6 objects reused; 5 compiled: 1 new, 2 with other sources, 2 built otherwise\n", "", 0);
+    assert_ran(&out, "cactup: build cache: 1 of 7 objects reused; 6 compiled: 1 new, 3 with other sources, 2 built otherwise\n", "", 0);
 }
 
 /// A compile whose messages speak of definitions is stored under its key

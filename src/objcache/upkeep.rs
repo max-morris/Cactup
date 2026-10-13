@@ -480,7 +480,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
     let result = (|| -> Res<()> {
         for (entry, _) in &plan.entries {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
+                bail!("interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
             }
             if entry.still_there() && fs::remove_file(&entry.path).is_ok() {
                 done.entries += 1;
@@ -490,7 +490,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
         }
         for temp in &plan.temps {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
+                bail!("interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
             }
             if fs::remove_file(&temp.path).is_ok() {
                 done.temps += 1;
@@ -501,7 +501,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
         // An entry published since the walk keeps its record.
         for (record, entry, bytes) in &plan.records {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} objects ({})", done.entries, human(done.bytes));
+                bail!("interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
             }
             if fs::symlink_metadata(entry).is_err() && fs::remove_file(record).is_ok() {
                 done.records += 1;
@@ -671,7 +671,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path(), "m").unwrap();
         let parts = Parts { platform: "p".into(), compiler: "c".into(), arguments: "a".into(), environment: "e".into(), text: "t".into(), files: "f".into() };
-        let file = FileNote { name: "/cactup-root/t.h".into(), digest: "d".repeat(64), narrowed: true, taken: Default::default() };
+        let file = FileNote { name: "/cactup-root/t.h".into(), digest: "d".repeat(64), narrowed: true, left_out: true, taken: Default::default() };
         let record = UnitRecord::new("key-x", &parts, &[file]);
         assert_eq!(record.files[0].digest, "d".repeat(16), "a record keeps a digest's first digits");
         let key = "e".repeat(64);

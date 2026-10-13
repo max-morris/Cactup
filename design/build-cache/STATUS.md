@@ -2357,6 +2357,30 @@ filled by an older cactup has no records. Left: records of round 2's
 format (this branch only) cannot be read and keep a new record from being
 written until `gc`; the time a miss spends on records is in no event field.
 
+### M5 part 1, round 4 (on `a5685b1`): BLOCKED by both
+
+Both re-ran rounds 1 to 3 (all as fixed; real builds 0 of 357, 357 of 357,
+336 of 342; publishing median 2 to 4 ms) and found nothing that changes what
+is served (B: `FrontEnd` through the wrapper against gcc 14 alone, every
+case alike, with and without `-Werror`). Blocking, all in the miss report,
+fixed in the commit after this record:
+- (A, B) round 3's "narrowed only when a definition was left out" made a
+  file narrowed with nothing to leave out look taken whole: an ordinary
+  comment edit was "not known to differ", and a header the unit came to
+  use all of was "narrowed here". A record keeps both facts now (narrowed,
+  and a definition left out); only a file one key took whole and the other
+  left definitions out of is "not known to differ"; a file with nothing
+  left out is said to be whole ("the unit uses every definition in it").
+- (B) a miss's list of differing files was cut to 8 silently, sorted by
+  name, so the configuration's own headers (`/cactup-root/configs/…`) and
+  system headers, those M5b is to see, fell off: 64 now, with a count of
+  the rest, which the doctor says.
+Also: a Fortran unit's source is named by its file (it was "source" for
+all); the doctor's no-narrowing heading no longer speaks of thorn lists;
+the "cannot write in the cache" hint matches only a failure to create
+there; `gc`'s interrupt message counts records; a doc comment on records.
+Left: the doctor says nothing of audit verdicts (`cache report` does).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

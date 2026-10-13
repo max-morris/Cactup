@@ -365,6 +365,10 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         if by.len() > 20 {
             out.push_str(&format!("           and {} more\n", by.len() - 20));
         }
+        let unlisted: u64 = other.iter().map(|event| event.differs_more).sum();
+        if unlisted > 0 {
+            out.push_str(&format!("           (and {unlisted} differences the compiles did not list: each lists at most {})\n", crate::objcache::event::DIFFERS_KEPT));
+        }
     }
 
     let otherwise = of(Compiled::BuiltOtherwise);
@@ -391,7 +395,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     }
     if !unnarrowed.is_empty() {
         out.push_str(&format!(
-            "\n  {} (every file compared whole: a header that differs between configurations, such as one listing their thorns, keeps them apart):\n",
+            "\n  {} (every file compared whole, definitions the unit does not use too):\n",
             "compiles of which no file was narrowed".bold()
         ));
         let mut unnarrowed: Vec<(&str, usize)> = unnarrowed.into_iter().collect();
@@ -429,7 +433,7 @@ fn kept_out_hint(why: &str) -> Option<&'static str> {
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
-        ("not published: Failed to", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
+        ("not published: Failed to create", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
         ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
     ];
     hints.iter().find(|(pattern, _)| why.contains(pattern)).map(|(_, hint)| *hint)
@@ -756,7 +760,7 @@ mod tests {
             Event { unit: Some("A/a.c.o".into()), key: Some("k".into()), outcome: Some(Outcome::Hit), exit: Some(0), ..Default::default() },
             miss("A/b.c.o", Miss::New, &[]),
             miss("A/c.c.o", Miss::OtherSources, &[header]),
-            miss("A/d.c.o", Miss::OtherSources, &[header, "the preprocessed text"]),
+            Event { differs_more: 3, ..miss("A/d.c.o", Miss::OtherSources, &[header, "the preprocessed text"]) },
             miss("A/e.c.o", Miss::BuiltOtherwise, &["the flags"]),
             Event { unit: Some("B/f.cu.o".into()), not_cached: Some("nvcc compiles without --objdir-as-tempdir are not the same twice".into()), exit: Some(0), ..Default::default() },
             Event { unit: Some("C/g.F90.o".into()), unnarrowed: Some("Fortran (its files are keyed whole)".into()), ..miss("C/g.F90.o", Miss::New, &[]) },
@@ -764,7 +768,7 @@ mod tests {
         let said = doctor(&events, Some(crate::objcache::Mode::Serve));
         assert!(said.starts_with("  1 of 7 objects reused; 6 compiled: 2 new, 2 with other sources, 1 built otherwise, 1 kept out\n"), "{said}");
         assert!(said.contains("kept out (1):\n        1  nvcc compiles without --objdir-as-tempdir are not the same twice\n           B/f.cu.o\n           give nvcc --objdir-as-tempdir"), "{said}");
-        assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n")), "{said}");
+        assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n           (and 3 differences the compiles did not list")), "{said}");
         assert!(said.contains("built otherwise (1), by what differed from the closest:\n        1  the flags\n           A/e.c.o\n"), "{said}");
         assert!(said.contains("        1  Fortran (its files are keyed whole)\n"), "{said}");
 

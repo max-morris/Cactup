@@ -123,7 +123,13 @@ impl UnitRecord {
     pub fn new(label: &str, parts: &Parts, each: &[FileNote]) -> Self {
         let files = each
             .iter()
-            .map(|note| FileNote { name: note.name.clone(), digest: Self::short(&note.digest).to_owned(), narrowed: note.narrowed, taken: Default::default() })
+            .map(|note| FileNote {
+                name: note.name.clone(),
+                digest: Self::short(&note.digest).to_owned(),
+                narrowed: note.narrowed,
+                left_out: note.left_out,
+                taken: Default::default(),
+            })
             .collect();
         Self { label: label.to_owned(), parts: parts.clone(), files }
     }
@@ -433,8 +439,9 @@ impl Store {
 
     /// Note beside the entry of `key` what made it, for the object named
     /// `unit` (§18.12): written as an entry is, under a name of its own, and
-    /// never changed. The same key always makes the same record, so one
-    /// already there is the one this would write.
+    /// never changed. The same key makes the same record but for which files
+    /// were narrowed, which the key does not show; one already there is
+    /// kept.
     pub fn record_unit(&self, unit: &str, key: &str, record: &UnitRecord) -> Res<()> {
         if self.entry_path(key).is_none() {
             bail!("\"{key}\" is not a key");

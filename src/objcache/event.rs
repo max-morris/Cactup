@@ -90,9 +90,12 @@ pub struct Event {
     pub miss: Option<Miss>,
     /// For a miss with other sources, each file that differs from the
     /// closest record's, with how this key took it; for one built otherwise,
-    /// the parts of the key that differ. At most [`DIFFERS_KEPT`].
+    /// the parts of the key that differ. At most [`DIFFERS_KEPT`] …
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub differs: Vec<String>,
+    /// … and how many more there were.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub differs_more: u64,
     /// Why the key narrowed no file of the unit, if it did not (decision
     /// 27).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +103,7 @@ pub struct Event {
 }
 
 /// How many differences a miss notes.
-pub const DIFFERS_KEPT: usize = 8;
+pub const DIFFERS_KEPT: usize = 64;
 
 /// What kind of miss a compile was, by what the store has for its object
 /// (§18.12).

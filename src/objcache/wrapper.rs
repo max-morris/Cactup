@@ -449,7 +449,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     {
         let (kind, differs) = miss_kind(&store.unit_records(unit, &keyed.parts.key()), keyed);
         event.miss = Some(kind);
+        event.differs_more = differs.len().saturating_sub(DIFFERS_KEPT) as u64;
         event.differs = differs;
+        event.differs.truncate(DIFFERS_KEPT);
     }
     if let (Ok(store), Ok(keyed), Some(captured)) = (&store, &keyed, &captured)
         && status.success()
@@ -674,28 +676,41 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
         if record.parts.text != ours.text {
             differs.push("the preprocessed text".to_owned());
         }
+        // Fortran names its source "source" (it is keyed by its bytes, not
+        // by a path): by its file name, so that sources are not one line.
+        let shown = |name: &str| match name {
+            "source" => format!("{} (the unit's source)", keyed.compile.source.file_name().unwrap_or_default().to_string_lossy()),
+            name => name.to_owned(),
+        };
         for note in &keyed.each {
+            let name = shown(&note.name);
             match theirs.get(note.name.as_str()) {
                 Some(their) if their.digest == UnitRecord::short(&note.digest) => {}
-                // Not known to differ at all: the two digests are of other
-                // parts of it.
-                Some(their) if their.narrowed != note.narrowed => {
-                    let here = match &note.taken {
-                        key::Taken::Narrowed(_) => "narrowed here".to_owned(),
-                        whole => format!("{} here", whole.describe()),
+                // Not known to differ at all: one digest is of the file whole,
+                // the other of it with definitions left out.
+                Some(their) if (their.left_out && !note.narrowed) || (note.left_out && !their.narrowed) => {
+                    let here = match note.left_out {
+                        true => "narrowed here".to_owned(),
+                        false => format!("{} here", note.taken.describe()),
                     };
-                    differs.push(format!("{}: narrowed by one key and taken whole by the other, so not known to differ ({here})", note.name));
+                    differs.push(format!("{name}: narrowed by one key and taken whole by the other, so not known to differ ({here})"));
                 }
-                Some(_) => differs.push(format!("{}: {}", note.name, note.taken.describe())),
-                None => differs.push(format!("{}: read by this compile only", note.name)),
+                // Both narrowed, and the other left definitions out where
+                // this did not: a kept line differs, or the units use other
+                // definitions of it.
+                Some(their) if their.left_out && !note.left_out => differs.push(format!(
+                    "{name}: narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive), or the two units use other definitions of it"
+                )),
+                Some(_) => differs.push(format!("{name}: {}", note.taken.describe())),
+                None => differs.push(format!("{name}: read by this compile only")),
             }
         }
         let read: std::collections::HashSet<&str> = keyed.each.iter().map(|note| note.name.as_str()).collect();
-        differs.extend(record.files.iter().filter(|note| !read.contains(note.name.as_str())).map(|note| format!("{}: read by the other compile only", note.name)));
+        differs.extend(record.files.iter().filter(|note| !read.contains(note.name.as_str())).map(|note| format!("{}: read by the other compile only", shown(&note.name))));
         differs
     };
     let alike: Vec<&UnitRecord> = records.iter().filter(|record| parts_differing(record).is_empty()).collect();
-    let (kind, mut differs) = match (records.is_empty(), alike.is_empty()) {
+    let (kind, differs) = match (records.is_empty(), alike.is_empty()) {
         (true, _) => (MissKind::New, Vec::new()),
         (false, false) => {
             let mut differs = alike.into_iter().map(files_differing).min_by_key(Vec::len).unwrap_or_default();
@@ -708,7 +723,6 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
         }
         (false, true) => (MissKind::BuiltOtherwise, records.iter().map(parts_differing).min_by_key(Vec::len).unwrap_or_default()),
     };
-    differs.truncate(DIFFERS_KEPT);
     (kind, differs)
 }
 
