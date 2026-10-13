@@ -2008,13 +2008,14 @@ in `4a25fd3`:
   step runs the file its identities found (`Plan::resolve`; a program
   neither knows: not cached).
 - (A) `-lineinfo` and `-G` objects name the real source path: 99 wrong in
-  an audit across configurations. No path map for them now
-  (`device_lines`).
+  an audit across configurations. No path map for them now (round 2: not
+  cached at all).
 - (A) `-arch=native`: not cached now.
 - (A, B) `NVCC_PREPEND_FLAGS`/`NVCC_APPEND_FLAGS` bypassed the reader (an
   options file changed under one key): not cached now.
 - (B) host flags given through `nvcc` skipped the GCC reader's notes
-  (charset not refused; a Clang host's OpenMP, `-include`): now noted.
+  (charset not refused; a Clang host's OpenMP): now noted. (`-include`
+  cannot get past the CUDA reader at all.)
 - (B) a step killed by a signal: `nvcc` says `nvcc error   : 'cicc' died
   due to signal 9 (Kill signal)` and exits 9 (seen; its table has 4, 7, 8,
   9, 11); the replay does so too. (A) `nvcc`'s own warnings (the dry run's
@@ -2033,6 +2034,37 @@ now. On `4a25fd3`, qbd, fresh `store7`: serve `m4a`, audit `m4b` all 404
 (reviewers, from the events): keying a CUDA compile 4.5 s
 median against an 18.7 s compile, the check after it 2 s; about 12 % on a
 miss; a served build 1:39 against 8:56.
+
+### M4, round 2 (on `4a25fd3`): BLOCKED by both, one finding each
+
+Both re-ran their round-1 reproductions on `4a25fd3`: all fixed (another
+`g++` ahead on `PATH` runs nothing new and is not stored; `$HOME` in a
+flag; `nvcc`'s warnings byte for byte; failing steps' exit codes and
+leftovers; `-arch=native` and `NVCC_APPEND_FLAGS` not cached;
+`PTXAS_FLAGS` keyed; a killed `cicc` as `nvcc`; an updated CUDA header a
+new identity). B ran served objects with given IDs on an A100, linked with
+one `nvcc` made itself: correct. Blocking, fixed in the commit after this
+record:
+- (B) the last step finds CUDA's `math_constants.h`, `crt/host_runtime.h`,
+  … by searching the compile's own `-I` directories first, and no pass
+  makes those lookups: a thorn header of that name, added after the object
+  was stored, was served around (`nvcc` itself fails, or reads it). Now
+  each place searched ahead of such a header (the generated files'
+  directory, `-iquote`, `-I`, `-isystem`, `-idirafter`; `.gch` beside
+  each) must be empty at key time and stay so (`Plan::ahead`; not cached
+  otherwise).
+- (A) `-G`/`-lineinfo` record each source's modification time in the
+  device line table, and Cactus copies sources anew before each compile: a
+  rebuild was served objects with the old times. Not cached now.
+Non-blocking, done: the variables `nvcc`'s programs read keyed (`EDG_…`,
+`NVVM…`, `OCG_FLAGS`, `NVASM_FLAGS`, `LLVMC_FLAGS` and others); an unquoted
+`$NAME` whose value has blanks or a pattern is not repeated (the shell
+would split it); the spec's word on stop signals made exact (`nvcc` reports
+a step's death by `SIGINT` and exits 2; the wrapper ends by the signal, as
+for any compile); doc comment, duplicate list, `use` order, two clippy
+lints. Key label `key-10`. Left: MDB machines without
+`--objdir-as-tempdir` (et-cuda, qbc, db1, slurmjupyter) are never cached
+(coverage, for M5's doctor to point at).
 
 ## Decisions
 
@@ -2273,6 +2305,6 @@ its bare name, so a GCC found another GCC's installation along `PATH`
 `--objdir-as-tempdir` is refused; `nvcc`'s identity compares its dry
 run's toolchain, not its words. Next: a serve build of a third
 configuration from the store: all 404 served, linked, build 1:39 against 8:56 (`m4c`, job 1090243); then the review pair for M4
-(decision 19's scope). `CLAUDE.md`'s `rustix` line still names
-`unshare(2)`: Max to authorize the edit (the contract file has it). Then
+(decision 19's scope). `CLAUDE.md`'s `rustix` line no longer names
+`unshare(2)` (Max, 2026-10-12). Then
 M4b Cray, M5 cache doctor, M6 HIP.

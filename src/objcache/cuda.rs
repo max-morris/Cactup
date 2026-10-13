@@ -12,8 +12,7 @@
 use super::compile::Compile;
 use super::hash::{file_digest, Hasher};
 use super::identity::{self, Compiler, Family, Seen, Watched};
-use super::key::{digest_output, flags_from_elsewhere, read_files, Named, PathMap, PREPROCESSOR};
-use std::sync::atomic::Ordering;
+use super::key::{digest_output, flags_from_elsewhere, read_files, Named, Parts, PathMap, PREPROCESSOR};
 use crate::Res;
 use anyhow::{bail, Context};
 use std::ffi::{OsStr, OsString};
@@ -22,6 +21,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
 
 /// What `nvcc -dryrun` says: the environment it sets for the programs it
 /// runs (`PATH`, `LD_LIBRARY_PATH`, `CICC_PATH`, `NVVMIR_LIBRARY_DIR`, …),
@@ -99,7 +99,7 @@ impl DryRun {
             .map(String::as_str)
             .filter(|program| {
                 let base = program.rsplit('/').next().unwrap_or(program);
-                ["cudafe++", "cicc", "ptxas", "fatbinary", "nvlink", "bin2c"].contains(&base)
+                TOOLCHAIN.contains(&base)
             })
             .collect();
         programs.sort_unstable();
@@ -171,6 +171,11 @@ pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Result<V
                     }
                 } else {
                     let value = get(&name).unwrap_or_default();
+                    // The shell would split it at blanks, and expand a
+                    // pattern in it.
+                    if quote.is_none() && value.contains(|c: char| c.is_whitespace() || "*?[".contains(c)) {
+                        return unsupported("a value of $NAME with blanks or a pattern in it, unquoted");
+                    }
                     any |= !value.is_empty() || quote.is_some();
                     word.push_str(&value);
                 }
@@ -475,6 +480,66 @@ impl Plan {
             }
         }
         let _ = fs::remove_file(&self.reads);
+    }
+
+    /// The places the last step would look in for a file of `host_reads`
+    /// (its identity's: what that step read in the trial) before it finds
+    /// the file: the directory of the generated files that include them
+    /// (the object's), then its `-iquote`, `-I`, `-isystem` and
+    /// `-idirafter` directories in that order, up to the one that holds the
+    /// file, each under the name the file has below that directory; and a
+    /// precompiled header (`.gch`) beside each. The key reads none of these
+    /// lookups (no pass makes them), so they must all find nothing: `Err`
+    /// names one that does. A file below none of the directories (a system
+    /// header) is looked for under each name it has below an `include`
+    /// directory, in all of them.
+    pub fn ahead(&self, host_reads: &[PathBuf]) -> Res<Vec<PathBuf>> {
+        let Step::Run { words, .. } = &self.steps[self.last] else { return Ok(Vec::new()) };
+        let object_dir = self.id_file.parent().map(Path::to_owned).unwrap_or_default();
+        let mut dirs = vec![object_dir];
+        for option in ["-iquote", "-I", "-isystem", "-idirafter"] {
+            let mut words = words.iter();
+            while let Some(word) = words.next() {
+                if word == "-I-" {
+                    bail!("its last step splits the include path (-I-)");
+                }
+                let dir = match word.strip_prefix(option) {
+                    Some("") => words.next().cloned(),
+                    Some(dir) if option == "-I" || dir.starts_with('/') => Some(dir.to_owned()),
+                    _ => None,
+                };
+                dirs.extend(dir.map(PathBuf::from));
+            }
+        }
+        let real: Vec<Option<PathBuf>> = dirs.iter().map(|dir| fs::canonicalize(dir).ok()).collect();
+        let mut places = Vec::new();
+        for read in host_reads {
+            let found = real.iter().position(|dir| dir.as_ref().is_some_and(|dir| read.starts_with(dir) && read != dir));
+            let names: Vec<PathBuf> = match found {
+                Some(at) => vec![read.strip_prefix(real[at].as_ref().expect("found")).expect("below").to_owned()],
+                None => {
+                    let parts: Vec<_> = read.components().collect();
+                    parts.iter().enumerate().filter(|(_, part)| part.as_os_str() == "include").map(|(at, _)| parts[at + 1..].iter().collect()).collect()
+                }
+            };
+            for name in names {
+                let mut gch = name.clone().into_os_string();
+                gch.push(".gch");
+                for dir in &dirs[..found.unwrap_or(dirs.len())] {
+                    places.push(dir.join(&name));
+                    places.push(dir.join(&gch));
+                }
+                if let Some(at) = found {
+                    places.push(dirs[at].join(&gch));
+                }
+            }
+        }
+        places.sort();
+        places.dedup();
+        if let Some(there) = places.iter().find(|place| fs::symlink_metadata(place).is_ok()) {
+            bail!("{} is where nvcc's last step looks for a file of CUDA's before CUDA's own", there.display());
+        }
+        Ok(places)
     }
 
     /// What the last step read, as it said (and the file it said it in
@@ -803,7 +868,8 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>) -> Res<(String, u64, Named)> {
 /// the same text, from the same files, which look as they did?
 /// And the compile's last step (`plan`'s) read nothing the key does not
 /// cover: files the passes read, and those of `host_reads` (its identity's).
-pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &Compile, map: Option<&PathMap>, text: &str, files: &str, seen: &str) -> bool {
+pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &Compile, map: Option<&PathMap>, parts: &Parts, seen: &str) -> bool {
+    let (text, files) = (parts.text.as_str(), parts.files.as_str());
     let last_read = match plan.ran() {
         true => match plan.last_reads() {
             Some(read) => read,
@@ -823,7 +889,6 @@ pub fn still_holds(cuda: &Cuda, plan: &Plan, host_reads: &[PathBuf], compile: &C
     named.insert((map.map_or_else(|| source.to_vec(), |map| map.apply(source)), compile.source.clone()), true);
     now_text == text && read_files(&named, map).is_ok_and(|(now_files, now_seen)| now_files == files && now_seen == seen)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -933,6 +998,37 @@ mod tests {
     }
 
     #[test]
+    fn what_the_last_step_finds_by_searching_must_be_cudas_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let (cuda, user, objects) = (root.join("cuda/include"), root.join("thorn/src"), root.join("build"));
+        for dir in [cuda.join("crt"), user.clone(), objects.clone()] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let header = cuda.join("crt/host_runtime.h");
+        fs::write(&header, "").unwrap();
+        let o = objects.join("t.o");
+        let said = format!(
+            "#$ cudafe++ --gen_module_id_file --module_id_file_name \"{o}.module_id\" \"{o}.cpp4.ii\"\n#$ g++ -c -x c++ -I{user} \"-I{cuda}\" \"{o}.cudafe1.cpp\" -o \"{o}\"\n",
+            o = o.display(),
+            user = user.display(),
+            cuda = cuda.display()
+        );
+        let plan = Plan::from_dry_run(DryRun::read(&said), "_x".to_owned()).unwrap();
+        let places = plan.ahead(std::slice::from_ref(&header)).unwrap();
+        // The generated files' own directory, then the thorn's, then a
+        // precompiled header beside CUDA's own.
+        for place in ["build/crt/host_runtime.h", "build/crt/host_runtime.h.gch", "thorn/src/crt/host_runtime.h", "thorn/src/crt/host_runtime.h.gch", "cuda/include/crt/host_runtime.h.gch"] {
+            assert!(places.contains(&root.join(place)), "{place}");
+        }
+        assert!(!places.contains(&header));
+        // A thorn's header of that name, ahead of CUDA's: not cached.
+        fs::create_dir_all(user.join("crt")).unwrap();
+        fs::write(user.join("crt/host_runtime.h"), "").unwrap();
+        assert!(plan.ahead(std::slice::from_ref(&header)).is_err());
+    }
+
+    #[test]
     fn reads_what_the_last_step_says_it_read() {
         let said = b"/w/t.o: /w/t.o.cudafe1.cpp \\\n /cuda/include/crt/host_runtime.h /a\\ b.h \\\n /c$$d.h\n";
         assert_eq!(
@@ -985,6 +1081,9 @@ mod tests {
         // A backslash in double quotes escapes only what the shell lets it.
         assert_eq!(shell_words(r#""a\b" "c\"d" "e\$X""#, get).unwrap(), [r"a\b", "c\"d", "e$X"]);
         assert_eq!(shell_words("a $ b", get).unwrap(), ["a", "$", "b"]);
+        let blank = |name: &str| (name == "B").then(|| "two words".to_owned());
+        assert!(shell_words("a $B", blank).is_err());
+        assert_eq!(shell_words(r#"a "$B""#, blank).unwrap(), ["a", "two words"]);
         for more in ["a `b`", "a $(b)", "a; b", "a | b", "a > b", "a*", "~/a", "${X:-y}", "$@", "'a"] {
             assert!(shell_words(more, get).is_err(), "{more}");
         }

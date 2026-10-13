@@ -994,7 +994,7 @@ fn run(job: &Job, argv: &[OsString], identified: Option<&Path>, output: Output, 
     }
     let mut ended = None;
     let mut steps = commands.into_iter().enumerate();
-    while let Some((at, command)) = steps.next() {
+    for (at, command) in steps.by_ref() {
         let Some(mut command) = command else {
             if let Some(Step::Remove(file)) = plan.and_then(|plan| plan.steps().get(at)) {
                 let _ = std::fs::remove_file(file);

@@ -106,14 +106,13 @@ impl PathMap {
     /// The map for a compile, if it is known to hold for it: the compiler
     /// was tried and made one object of the same sources in two places
     /// (`Compiler::relocates`), and the compile uses nothing known to put
-    /// unmapped paths into the object (Clang's OpenMP source locations,
-    /// `nvcc`'s device line information).
+    /// unmapped paths into the object (Clang's OpenMP source locations).
     ///
     /// Both the spelling cactup has for each directory and its physical
     /// path are mapped: make reports one, a shell's `pwd` may report the
     /// other.
     pub fn new(conf: &BuildConf, compiler: &Compiler, compile: &Compile) -> Option<Self> {
-        let unmapped_paths = (compiler.family == Family::Clang && compile.openmp) || compile.device_lines;
+        let unmapped_paths = compiler.family == Family::Clang && compile.openmp;
         if !conf.relocate || !compiler.relocates || unmapped_paths {
             return None;
         }
@@ -294,7 +293,7 @@ pub struct Parts {
 /// it runs (the path map's flags are keyed by [`PathMap::description`],
 /// but not every such change will be), or a change in how a part is
 /// digested. A change that only narrows what is cached needs no bump.
-pub const KEY_LABEL: &str = "key-9";
+pub const KEY_LABEL: &str = "key-10";
 
 impl Parts {
     pub fn key(&self) -> String {
@@ -333,6 +332,9 @@ pub struct Keyed {
     cuda: Option<cuda::Cuda>,
     /// What a CUDA compile runs, as keyed (decision 25).
     plan: Option<cuda::Plan>,
+    /// Places a CUDA compile's last step looks in before it finds CUDA's
+    /// own headers (`cuda::Plan::ahead`): all empty, and to stay so.
+    ahead: Vec<PathBuf>,
 }
 
 /// Key the compile `argv` asks for (the compiler's words, then its
@@ -353,6 +355,9 @@ pub fn key(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) ->
     let (keyed, identified) = key_made(conf, cc_dir, argv, serving)?;
     if !keyed.watch.holds() {
         return Err("the compiler's programs or libraries changed while the key was made".to_owned());
+    }
+    if !keyed.nothing_ahead() {
+        return Err("a file appeared where nvcc's last step looks before CUDA's own headers while the key was made".to_owned());
     }
     if let Some(what) = identified.changed(&keyed.watch.stamps()) {
         return Err(format!("{what} changed while the key was made"));
@@ -501,6 +506,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
     // identities found; and the key has them, mapped. Flags `nvcc` takes
     // from the environment through its profile (`PTXAS_FLAGS`,
     // `CUDAFE_FLAGS`) are in them.
+    let mut ahead = Vec::new();
     let plan = match &cuda_run {
         Some((_, host)) => {
             let cwd = std::env::current_dir().context("Failed to read the working directory").map_err(whole)?;
@@ -510,6 +516,11 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             }
             let mut plan = cuda::Plan::new(&compiler.path, &argv[0], &args).map_err(whole)?;
             plan.resolve(host, &compiler.toolchain).map_err(whole)?;
+            // What the last step finds by searching, which no pass reads,
+            // must be CUDA's own; the places it looks in first must stay
+            // empty to the end of the compile (looked at by name, decision
+            // 20).
+            ahead = plan.ahead(&compiler.host_reads).map_err(whole)?;
             arguments.feed(b"nvcc's steps");
             arguments.feed(&plan.described(|text| map.as_ref().map_or_else(|| text.to_vec(), |map| map.in_text(text))));
             Some(plan)
@@ -544,6 +555,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             fortran: Some(read.fortran),
             cuda: None,
             plan: None,
+            ahead: Vec::new(),
         }, identified));
     }
     if let Some((run, host)) = cuda_run {
@@ -578,6 +590,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             fortran: None,
             cuda: Some(read.cuda),
             plan,
+            ahead,
         };
         return Ok((keyed, identified));
     }
@@ -596,7 +609,7 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
         text: read.text,
         files: read.files,
     };
-    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None, cuda: None, plan: None };
+    let keyed = Keyed { compile, compiler, parts, text_bytes: read.text_bytes, files: read.count, name, watch, before: None, map, seen: read.seen, depend, fortran: None, cuda: None, plan: None, ahead: Vec::new() };
     Ok((keyed, identified))
 }
 
@@ -664,14 +677,14 @@ impl Keyed {
         // compile ran assembled it (tried). What its identity watches must
         // hold, as right before the compile, with nothing come or gone.
         match &self.before {
-            Some((true, stamps)) if self.watch.holds() && *stamps == self.watch.stamps() => {}
+            Some((true, stamps)) if self.watch.holds() && *stamps == self.watch.stamps() && self.nothing_ahead() => {}
             _ => return false,
         }
         if let Some(fortran) = &mut self.fortran {
             return fortran::still_holds(&self.compiler, &self.name, self.map.as_ref(), fortran, &self.parts.files, &self.seen);
         }
         if let (Some(cuda), Some(plan)) = (&self.cuda, &self.plan) {
-            return cuda::still_holds(cuda, plan, &self.compiler.host_reads, &self.compile, self.map.as_ref(), &self.parts.text, &self.parts.files, &self.seen);
+            return cuda::still_holds(cuda, plan, &self.compiler.host_reads, &self.compile, self.map.as_ref(), &self.parts, &self.seen);
         }
         preprocess(&self.compiler, &self.name, &self.compile, self.map.as_ref(), None)
             .is_ok_and(|read| read.text == self.parts.text && read.files == self.parts.files && read.seen == self.seen)
@@ -695,6 +708,12 @@ impl Keyed {
     /// steps, as keyed, with the module ID made of the key (decision 25).
     pub fn plan(&self) -> Option<&cuda::Plan> {
         self.plan.as_ref()
+    }
+
+    /// Is every place a CUDA compile's last step looks in before CUDA's own
+    /// headers still empty?
+    fn nothing_ahead(&self) -> bool {
+        self.ahead.iter().all(|place| std::fs::symlink_metadata(place).is_err())
     }
 
     /// How the check after a Fortran compile was made: by lookups in place
@@ -1493,7 +1512,7 @@ mod tests {
             text: "t".into(),
             files: "f".into(),
         };
-        assert_eq!(parts.key(), "6ae31331ad4b46b21c80c9c116820bfbf475a91d27712a258df59ebea948ca27");
+        assert_eq!(parts.key(), "a7528af9c7950e53a65c8528404688439d2fe5281123805bed061797d1c2318f");
         assert_eq!(PathMap::description(), ["-ffile-prefix-map", "/cactup-root/", "/cactup-root/configs/@config/"]);
     }
 

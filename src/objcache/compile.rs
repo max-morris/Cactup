@@ -99,10 +99,6 @@ pub struct Compile {
     /// `-march=native` or one of its like: the compiler targets the
     /// processor it finds itself running on.
     pub native: bool,
-    /// `nvcc`'s `-G` or `-lineinfo`: the device code's line information,
-    /// which names the source by its real path whatever the path map's
-    /// flags say (seen on qbd).
-    pub device_lines: bool,
     /// `-finput-charset=` or `-fexec-charset=`: character set conversion,
     /// which can follow the locale (`ASCII//TRANSLIT` does), so the locale
     /// stays in the key whatever the compiler's locale trial said.
@@ -393,7 +389,7 @@ pub fn parse(args: &[OsString]) -> Result<Compile, String> {
     if !depend.is_empty() && !depend_file {
         return Err("a dependency file is asked for without -MF to say where".to_owned());
     }
-    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend, host: None, device_lines: false })
+    Ok(Compile { language, source, source_at, output_at, output, preprocess, keyed, debug, macros_in_debug, openmp, forced_include, native, charset, depend, host: None })
 }
 
 /// `nvcc`'s options that take no value and only change the object or the
@@ -427,7 +423,7 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
     let mut output_at = Vec::new();
     let (mut preprocess, mut keyed) = (Vec::new(), Vec::new());
     let (mut level, mut language_given, mut forward) = (0, false, false);
-    let (mut native, mut openmp, mut charset, mut device_lines) = (false, false, false, false);
+    let (mut native, mut openmp, mut charset) = (false, false, false);
     let mut unknown = Vec::new();
     // What a host compiler flag says of the compile, as the GCC reader
     // notes it.
@@ -542,8 +538,14 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
                 list.push(given.clone());
             }
         } else if CUDA_SETTINGS.contains(&name) || matches!(flag, "-O" | "-O0" | "-O1" | "-O2" | "-O3" | "-G" | "--device-debug") || debug_level(flag).is_some() {
+            // The device code's line information records the time each
+            // source was last changed, which no key has (Cactus copies the
+            // source anew before each compile), and its real path (both
+            // seen on qbd).
+            if matches!(name, "G" | "device-debug" | "lineinfo" | "generate-line-info") {
+                return Err(format!("{flag} records when each source was last changed in the object, which the cache does not follow"));
+            }
             forward |= name == "forward-unknown-to-host-compiler";
-            device_lines |= matches!(name, "G" | "device-debug" | "lineinfo" | "generate-line-info");
             // As for GCC: a bare `-g` turns debug information on, an
             // explicit level sets it; `-G` is the device's own.
             match debug_level(flag) {
@@ -613,7 +615,6 @@ pub fn parse_cuda(args: &[OsString]) -> Result<Compile, String> {
         charset,
         depend: Vec::new(),
         host,
-        device_lines,
     })
 }
 
@@ -685,11 +686,10 @@ mod tests {
         assert!(host("-Xcompiler -fopenmp").openmp && host("-fopenmp").openmp);
         assert!(host("-Xcompiler -fexec-charset=IBM1047").charset && host("-finput-charset=latin1").charset);
         assert!(host("-Xcompiler -march=native").native);
-        // Device line information names the source by its real path.
+        // Device line information records when each source was changed.
         for lines in ["-G", "--device-debug", "-lineinfo", "--generate-line-info"] {
-            assert!(host(lines).device_lines, "{lines}");
+            assert!(cuda(&format!("{base} {lines}")).is_err_and(|why| why.contains("last changed")), "{lines}");
         }
-        assert!(!host("-O3").device_lines);
         // The GPU of the machine it compiles on: not keyed.
         for native in ["-arch=native", "--gpu-architecture native", "-gencode arch=native,code=native", "--gpu-code=native"] {
             assert!(cuda(&format!("{base} {native}")).is_err_and(|why| why.contains("GPU")), "{native}");

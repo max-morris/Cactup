@@ -33,11 +33,15 @@ const KEYED: &[&str] = &[
     "GCC_COLORS", "CLANG_NO_DEFAULT_CONFIG",
     // The modules a machine's environment setup loaded.
     "LOADEDMODULES", "_LMFILES_",
+    // What `nvcc` and the programs it runs read (seen, M4): flags its
+    // profile passes on, and settings of its front end and back ends.
+    "PTXAS_FLAGS", "CUDAFE_FLAGS", "OCG_FLAGS", "NVASM_FLAGS", "LLVMC_FLAGS", "LLVM_OVERRIDE_PRODUCER", "DUMP_KNOBS_TO_FILE",
+    "USR_INCLUDE", "GCC_ROOT", "BINUTILS_ROOT", "LPATH",
 ];
 
 /// Families of variables that wrapper compilers and vendor toolchains read.
 const KEYED_PREFIXES: &[&str] =
-    &["OMPI_", "MPICH_", "I_MPI_", "CRAY", "PE_", "NVCC_", "NVHPC", "NVCOMPILER_", "PGI", "HIP", "ROCM_", "SPACK_", "NIX_", "__INTEL_"];
+    &["OMPI_", "MPICH_", "I_MPI_", "CRAY", "PE_", "NVCC_", "NVVM", "EDG_", "NVHPC", "NVCOMPILER_", "PGI", "HIP", "ROCM_", "SPACK_", "NIX_", "__INTEL_"];
 
 /// Variables that make a compiler write a file besides its object: a hit
 /// would skip writing it.

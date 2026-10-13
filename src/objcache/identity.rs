@@ -382,8 +382,6 @@ fn runs(program: &Path) -> bool {
     }
 }
 
-/// What an identity is computed from: the files it read, and the places
-/// passed over before each file was found.
 /// Find `program` along `path` as a program another runs (`nvcc`'s host
 /// compiler), with the places passed over on the way, to be watched.
 pub(super) fn search_watching(program: &OsStr, path: &OsStr) -> Res<(Option<PathBuf>, Vec<Seen>, Vec<PathBuf>)> {
@@ -392,6 +390,8 @@ pub(super) fn search_watching(program: &OsStr, path: &OsStr) -> Res<(Option<Path
     Ok((found, files, absent))
 }
 
+/// What an identity is computed from: the files it read, and the places
+/// passed over before each file was found.
 pub(super) struct Watched<'a> {
     pub(super) files: &'a mut Vec<Seen>,
     pub(super) absent: &'a mut Vec<PathBuf>,

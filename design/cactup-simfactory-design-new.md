@@ -6047,7 +6047,10 @@ sets). `-Xcudafe` may only keep diagnostics quiet, `-Xptxas` only ask for
 its intermediate files differently each time otherwise, and the names go
 into the object. A GPU architecture of `native` is not cached (the key does
 not know the GPU), nor is a compile while `NVCC_PREPEND_FLAGS` or
-`NVCC_APPEND_FLAGS` add flags no reader sees.
+`NVCC_APPEND_FLAGS` add flags no reader sees, nor one with device line
+information (`-G`, `-lineinfo`): it records the time each source was last
+changed, and Cactus copies each source anew before it compiles it
+(tried).
 
 **The identity** (§18.5's Compiler item) is `nvcc`'s file, its
 `nvcc.profile`, the programs a dry run of a plain compile says it runs
@@ -6069,7 +6072,16 @@ run of the compile as it will run, with the environment it is given but
 for `PATH` and `LD_LIBRARY_PATH` (whose programs and libraries the
 identities follow), each directory the path map knows mapped. Flags `nvcc`
 takes from the environment through its profile (`PTXAS_FLAGS`,
-`CUDAFE_FLAGS`) are in those steps.
+`CUDAFE_FLAGS`) are in those steps; the variables its programs read are in
+the environment part (`EDG_…`, `NVVM…`, `OCG_FLAGS` and others).
+
+The last step finds CUDA's headers that only it reads by searching: the
+directory of the generated files, then the compile's own `-iquote`, `-I`,
+`-isystem` and `-idirafter` directories, before CUDA's. No pass makes
+those lookups, so each place searched ahead of the header (and a `.gch`
+beside it) must hold nothing, at key time and to the end of the compile
+(`Plan::ahead`): a thorn's own `math_constants.h` is not served around
+(tried).
 
 **The compile the cache runs** (decision 25). `cudafe++` names a unit's
 module ID, which names its registration, its fat binary and every entity of
@@ -6099,8 +6111,11 @@ says `nvcc`'s own warnings first, stops at the first step that fails and
 ends with its exit status, removes the intermediate files `nvcc` removes,
 and for a step killed by a signal it did not pass on, says what `nvcc`
 says (`nvcc error   : '<program>' died due to signal <n> …`) and exits
-with the signal's number. A stop signal reaches the step running, and no
-further step starts. A dry run with more shell than `cuda::shell_words`
+with the signal's number. A stop signal is the one exception: it reaches
+the step running, no further step starts, and the compile ends by the
+signal, as any compile through the wrapper does (`nvcc` itself, sent
+`SIGINT` with its whole process group, reports the step's death and exits
+2; sent `SIGTERM`, says `nvcc: Terminated` and exits 255: seen). A dry run with more shell than `cuda::shell_words`
 follows (a command substitution, an operator, a pattern), or that does not
 run `cudafe++` making one ID in a file, or that runs a program neither
 identity knows, is not cached. Record mode, which adds nothing to a
@@ -6115,7 +6130,5 @@ step read outside the trial's own files (CUDA's `crt/host_runtime.h`,
 `fatbinary_section.h` and the like, which no preprocessor pass reads) is
 part of `nvcc`'s identity and watched (`Compiler::host_reads`).
 
-**The path map** is not used for a compile with device line information
-(`-G`, `-lineinfo`): it names the source by its real path whatever the
-flags say (tried). Nor is it for an OpenMP compile whose host compiler is
+**The path map** is not used for an OpenMP compile whose host compiler is
 Clang, as for Clang itself.
