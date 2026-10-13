@@ -1507,7 +1507,7 @@ fn a_miss_says_what_kind_it_was_and_the_build_line_counts_them() {
     fs::write(&unit.source, &source).unwrap();
     let (miss, differs) = kind(&["-O3"]);
     assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
-    assert!(differs.to_string().contains("lib.h: narrowed by one key and taken whole by the other"), "{differs}");
+    assert!(differs.to_string().contains("lib.h: narrowed by one key and taken whole by the other, so not known to differ (narrowed here)\""), "{differs}");
     fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
 
     let cc_dir = build.conf().parent().unwrap().to_owned();

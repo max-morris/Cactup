@@ -679,11 +679,13 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
                 Some(their) if their.digest == UnitRecord::short(&note.digest) => {}
                 // Not known to differ at all: the two digests are of other
                 // parts of it.
-                Some(their) if their.narrowed != note.narrowed => differs.push(format!(
-                    "{}: narrowed by one key and taken whole by the other, so not known to differ ({} here)",
-                    note.name,
-                    note.taken.describe()
-                )),
+                Some(their) if their.narrowed != note.narrowed => {
+                    let here = match &note.taken {
+                        key::Taken::Narrowed(_) => "narrowed here".to_owned(),
+                        whole => format!("{} here", whole.describe()),
+                    };
+                    differs.push(format!("{}: narrowed by one key and taken whole by the other, so not known to differ ({here})", note.name));
+                }
                 Some(_) => differs.push(format!("{}: {}", note.name, note.taken.describe())),
                 None => differs.push(format!("{}: read by this compile only", note.name)),
             }

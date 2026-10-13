@@ -211,18 +211,19 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     }
     let now = crate::lock::fileserver_now(root)?;
     let plan = upkeep::plan(&scan, now, unused_for, to_size);
-    let bytes: u64 = plan.entries.iter().map(|(e, _)| e.bytes).sum();
+    // The objects' bytes with their records', as the size counts them.
+    let bytes: u64 = plan.entries.iter().map(|(e, _)| e.bytes).sum::<u64>() + plan.records.iter().map(|(_, _, bytes)| bytes).sum::<u64>();
     if dry_run {
         for (entry, last) in &plan.entries {
             println!("  would remove {} ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
         }
         println!(
-            "Would remove {} of {} objects ({}), leaving {}; and remove {} record(s) of objects no longer stored and {} file(s) left over from interrupted builds.",
+            "Would remove {} of {} objects and {} record(s) of objects no longer stored ({} in all), leaving {}; and {} file(s) left over from interrupted builds.",
             plan.entries.len(),
             scan.machines.iter().map(|m| m.entries.len()).sum::<usize>(),
+            plan.records.len(),
             upkeep::human(bytes),
             upkeep::human(plan.bytes_after),
-            plan.records.len(),
             plan.temps.len()
         );
         return Ok(());
@@ -230,10 +231,10 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
     let done = upkeep::carry_out(&plan)?;
     upkeep::stamp_size(root, plan.bytes_after)?;
     println!(
-        "Removed {} objects ({}), {} record(s) of objects no longer stored and {} file(s) left over from interrupted builds; the build cache holds {}.",
+        "Removed {} objects and {} record(s) of objects no longer stored ({} in all), and {} file(s) left over from interrupted builds; the build cache holds {}.",
         done.entries,
-        upkeep::human(done.bytes),
         done.records,
+        upkeep::human(done.bytes),
         done.temps,
         upkeep::human(plan.bytes_after)
     );
@@ -323,7 +324,8 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     let kept = of(Compiled::KeptOut);
     if !kept.is_empty() {
         out.push_str(&format!("\n  {} ({}):\n", "kept out".bold(), kept.len()));
-        let mut by: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
+        // By the reason with its paths left out, with the first in full.
+        let mut by: BTreeMap<String, (String, Vec<&Event>)> = BTreeMap::new();
         for event in &kept {
             let why = match (&event.not_cached, &event.store, event.stable) {
                 (Some(why), _, _) => why.clone(),
@@ -331,12 +333,15 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
                 (_, Some(why), _) => why.clone(),
                 _ => "the build cache could not be used".to_owned(),
             };
-            by.entry(without_paths(&why)).or_default().push(event);
+            by.entry(without_paths(&why)).or_insert_with(|| (why.clone(), Vec::new())).1.push(event);
         }
-        let mut by: Vec<(String, Vec<&Event>)> = by.into_iter().collect();
-        by.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-        for (why, events) in &by {
+        let mut by: Vec<(String, (String, Vec<&Event>))> = by.into_iter().collect();
+        by.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()).then_with(|| a.0.cmp(&b.0)));
+        for (why, (first, events)) in &by {
             out.push_str(&format!("    {:>5}  {why}\n           {}\n", events.len(), some(events)));
+            if first != why {
+                out.push_str(&format!("           the first: {first}\n"));
+            }
             if let Some(hint) = kept_out_hint(why) {
                 out.push_str(&format!("           {}\n", hint.green()));
             }
@@ -375,7 +380,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     }
     let new = events.iter().filter(|event| event.miss == Some(Miss::New) && summary::compiled(event) == Some(Compiled::New)).count();
     if new > 0 {
-        out.push_str(&format!("\n  {} ({}): the cache had no object of that name\n", "new".bold(), new));
+        out.push_str(&format!("\n  {} ({}): the cache had no record of an object of that name (one stored by an older cactup has none)\n", "new".bold(), new));
     }
 
     let mut unnarrowed: BTreeMap<&str, usize> = BTreeMap::new();
@@ -418,12 +423,13 @@ fn without_paths(why: &str) -> String {
 
 /// What would let compiles kept out for `why` in, where cactup knows.
 fn kept_out_hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 6] = [
+    let hints: [(&str, &str); 7] = [
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
+        ("not published: Failed to", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
         ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
     ];
     hints.iter().find(|(pattern, _)| why.contains(pattern)).map(|(_, hint)| *hint)
@@ -481,7 +487,7 @@ impl Recorded {
         if events.is_empty() && unreadable > 0 {
             bail!(
                 "build attempt {attempt:04} of config \"{name}\" recorded its compiles in a form this cactup cannot \
-                 read (another version wrote it); build it again with `cactup -K build-cache=record build {name}`"
+                 read (another version wrote it); build it again with `cactup -K build-cache={mode} build {name}`"
             );
         }
         let cc_dir = BuildAttempt::attempt_dir(&config_dir, attempt).join("cc");
@@ -777,7 +783,10 @@ mod tests {
         let events = [unreadable("A/a.c.o", "/s/v4/m/0a/0a12"), unreadable("A/b.c.o", "/s/v4/m/1b/1b34")];
         let said = doctor(&events, Some(crate::objcache::Mode::Serve));
         assert!(!said.contains("only recorded"), "{said}");
-        assert!(said.contains("        2  the entry could not be read: <path>: Permission denied\n           A/a.c.o, A/b.c.o\n"), "{said}");
+        assert!(
+            said.contains("        2  the entry could not be read: <path>: Permission denied\n           A/a.c.o, A/b.c.o\n           the first: the entry could not be read: /s/v4/m/0a/0a12: Permission denied\n"),
+            "{said}"
+        );
         assert!(doctor(&events[..1], Some(crate::objcache::Mode::Record)).contains("only recorded"));
         assert_eq!(without_paths("not published: Failed to create a temporary file in /s/v4/m/0a (Permission denied)"), "not published: Failed to create a temporary file in <path> (Permission denied)");
     }

@@ -1425,7 +1425,9 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
         // "Not there" is the one thing a made-up name may be: any other
         // failure to read is a failure to key.
         let absent = || matches!(path.metadata(), Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory));
-        let (digest, taken) = match read {
+        // Narrowed: a definition was left out, so the digest is not of the
+        // file whole.
+        let (digest, taken, narrowed) = match read {
             Ok(bytes) => {
                 let all = content_digest(bytes, map);
                 whole.feed(all.as_bytes());
@@ -1440,20 +1442,20 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                             .map(|name| format!("{} ({})", String::from_utf8_lossy(name), used.why_kept(name, once(name))))
                             .collect();
                         let stayed: Vec<String> = stayed.into_iter().collect();
-                        (content_digest(&kept, map), Taken::Narrowed(stayed))
+                        let left_out = kept.len() != bytes.len();
+                        (content_digest(&kept, map), Taken::Narrowed(stayed), left_out)
                     }
-                    Some(used) => (all, used.why_whole(path)),
-                    None => (all, Taken::Unnarrowed),
+                    Some(used) => (all, used.why_whole(path), false),
+                    None => (all, Taken::Unnarrowed, false),
                 }
             }
             Err(_) if !*entered && absent() => {
                 whole.feed(b"no such file");
-                ("no such file".to_owned(), Taken::Absent)
+                ("no such file".to_owned(), Taken::Absent, false)
             }
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         };
         files.feed(digest.as_bytes());
-        let narrowed = matches!(taken, Taken::Narrowed(_));
         each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, narrowed, taken });
     }
     Ok(Digested { files: files.hex(), whole: whole.hex(), seen: seen.hex(), each })

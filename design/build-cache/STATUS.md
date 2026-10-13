@@ -2329,6 +2329,34 @@ were the host's, the plain binary did the same then). zstd's C library
 would give the same size and faster reading, at the cost of a C build for
 the aarch64 MUSL target.
 
+### M5 part 1, round 3 (on `a81fb74`): A SIGN-OFF, B BLOCKED
+
+Both re-ran rounds 1 and 2 (fixed) and found nothing that changes what is
+served (records are read only after the hit or miss, and after the
+compile; `FrontEnd` through the wrapper against gcc 14 alone, exit status,
+messages and object alike in every case). Records: damaged ones (cut
+short, a byte flipped, round 2's plain JSON, empty, a 60 MB length, a
+directory, a FIFO) passed over by compiles, `stats` and `gc`; 8 builds
+publishing one unit at once, 20 rounds, 20 entries and 20 records; `gc
+--to-size` removed exactly the records of the entries it removed; 0.8 MB of
+records against 26 MB of entries on `smoke`. Cost (B, local disk): a miss
+reading 32 records of a 1000-file unit (15 KB each) pays about 13 ms
+(0.4 ms a record); a record of a `smoke` unit 0.015 ms.
+
+B blocked on one finding, fixed in the commit after this record: a file one
+key narrowed and another took whole was said to be so, then given a cause
+("a line the key keeps differs …") that contradicted it. Now only how this
+key took it ("narrowed here", "whole: … here"), and the test asserts the
+whole line. Also: a file counts as narrowed only when a definition was left
+out of it; a record is not synced (one cut short reads as none); "kept out"
+in the docs covers a store the build cannot write in, and the doctor has a
+hint for it; `gc`'s dry run counts records' bytes as the real run does; each
+grouped reason shows the first in full (A: the path the user needs); the
+"another version wrote it" message names the right mode; "new" says a store
+filled by an older cactup has no records. Left: records of round 2's
+format (this branch only) cannot be read and keep a new record from being
+written until `gc`; the time a miss spends on records is in no event field.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -2554,9 +2582,10 @@ Part 1 is in review (spec §18.12):
   count of 0 left out. "Built otherwise" (another compiler, other flags or
   environment) is a fourth kind beside Max's three, so that those misses
   are not called "sources changed"; "failed" counts failed compiles.
-- The unit records: `<store>/v4/<machine>/units/<ab>/<unit digest>/<key>`,
-  one per published entry, JSON (the key's parts, each file's mapped name
-  and digest), written as entries are. A miss reads its object's newest 32
+- The unit records: `<store>/v4/<machine>/units/<ab>/<unit digest>.<key>`,
+  one per published entry, zlib-compressed JSON (the key's label and parts,
+  each file's mapped name, 16 hex digits of its digest, whether it was
+  narrowed), written as entries are. A miss reads its object's newest 32
   and logs its kind and what differs from the closest (files, with how the
   key took each: decision 27; or the key's parts). `cache gc` removes the
   records of entries that are gone; `cache stats` counts them.
@@ -2576,7 +2605,8 @@ as `m5a`, then two thorns fewer as `m5b`, then `m5a` again):
   other file entered in between, reaches no file the key may narrow (the
   file it is in has code and is keyed whole): such a region no longer
   counts (`key::FrontEnd`). `m5b` now 336 of 342; the 6 left are the
-  bindings sources, which list the thorns. Key label `key-20`.
+  bindings sources, which list the thorns. (Round 1 then excused only an
+  `ignored` region: key label `key-21`.)
 - From M4 (decision 30): an entry whose messages speak of definitions is
   stored only under the key with its files whole, and a lookup went there
   only after finding another entry under the plain key: such a unit was

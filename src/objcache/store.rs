@@ -450,8 +450,9 @@ impl Store {
             .prefix(&format!(".tmp-{key}-"))
             .tempfile_in(&dir)
             .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))?;
+        // Not synced, unlike an entry: a record cut short by a crash reads
+        // back as none, and is passed over.
         temp.write_all(&text).context("Failed to write a unit record")?;
-        temp.as_file().sync_all().context("Failed to sync a unit record to disk")?;
         temp.as_file().set_permissions(fs::Permissions::from_mode(0o444)).context("Failed to make a unit record read-only")?;
         match fs::hard_link(temp.path(), &path) {
             Err(e) if e.kind() != ErrorKind::AlreadyExists && temp.as_file().metadata().map(|meta| meta.nlink()).unwrap_or(1) != 2 => {

@@ -589,7 +589,7 @@ it is left out:
 cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with other sources, 5 built otherwise, 3 kept out (see cactup cache doctor)
 ```
 
-- *new*: the cache had no object of that name yet (the first build of a
+- *new*: the cache knew of no object of that name yet (the first build of a
   thorn, or of a file);
 - *with other sources*: it had one compiled the same way, from other
   sources: a file of the thorn edited, or a header that differs between
@@ -598,8 +598,9 @@ cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with othe
   flags, another environment or on another kind of host, or by another
   version of cactup;
 - *kept out*: the cache could not take part in that compile (a flag it does
-  not know, a compiler setting it cannot follow), or could not use what it
-  had (an object it could not read);
+  not know, a compiler setting it cannot follow), could not use what it had
+  (an object it could not read), or could not keep what was compiled (a
+  cache it cannot write in);
 - *failed*: the compile failed.
 
 `cactup cache doctor` says which, and why, for the newest build of a

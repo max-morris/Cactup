@@ -6274,7 +6274,9 @@ an index beside the entries: for each entry published, one file
 `<root>/v<N>/<machine>/units/<ab>/<unit digest>.<key>`, where the unit
 digest is a SHA-256 of the object's name below `build/` and `<ab>` its
 first two digits (one directory per two digits, not one per object),
-written as an entry is (temporary file, `link(2)`, never changed). It holds
+written as an entry is (temporary file, `link(2)`, never changed), but not
+synced: a record cut short by a crash reads back as none and is passed
+over. It holds
 what made the key, as JSON: the label the key was made under, the six parts
 (§18.5), and each file the key read, by its mapped name, with the first 16
 hex digits of its digest as the key took it and whether the key narrowed it
@@ -6283,9 +6285,9 @@ line of it). A file one key narrowed and another took whole is said to be
 taken so, not to differ. A record of another
 label makes a miss *built otherwise* ("the cactup that keyed it"). Two
 thorns of one name in two arrangements share an object name, and so their
-records. Its content is a
-function of its key, so two builds publishing one key write the same file,
-and the second link finds the first. On a miss the wrapper reads the
+records. What it says is a function of its key (but for whether a file
+was narrowed, which the key does not show), so two builds publishing one key
+write records alike, and the second link finds the first. On a miss the wrapper reads the
 unit's records (the newest 32, by modification time), and with them the
 kind of miss; for the record closest to its own (the fewest parts, then
 the fewest files, that differ) it notes in its event which parts or which
