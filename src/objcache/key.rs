@@ -511,6 +511,11 @@ fn key_made(conf: &BuildConf, cc_dir: &Path, argv: &[OsString], serving: bool) -
             }
         }
     }
+    // Exact warnings (decision 31) key whole files, which a narrowed key's
+    // files can be byte for byte.
+    if conf.exact_warnings {
+        arguments.feed(b"exact warnings");
+    }
     // Whether each directory searched for headers is there: a compiler
     // warns of one that is not (gfortran always, GCC and Clang with
     // `-Wmissing-include-dirs`) or is no directory (GCC always), and with
@@ -1618,7 +1623,9 @@ pub(super) fn diagnosed_files(said: &[u8]) -> Option<BTreeSet<PathBuf>> {
         let end = place.char_indices().find(|(at, c)| *c == ':' && (place[at + 1..].starts_with(|d: char| d.is_ascii_digit()) || place[at + 1..].starts_with(" In ") || place[at + 1..].starts_with(" At ")))?.0;
         let name = &place[..end];
         let named = Path::new(name);
-        if name.is_empty() || name.starts_with('<') || name.contains('\x1b') || (!name.contains('/') && !named.exists()) {
+        // A name no file has (one a `#line` gave) says nothing of where
+        // the lines it speaks of are.
+        if name.is_empty() || name.starts_with('<') || name.contains('\x1b') || !named.exists() {
             return None;
         }
         files.insert(named.to_owned());
@@ -2612,15 +2619,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_warnings_key_the_locale() {
+    fn exact_warnings_key_the_knob_and_the_locale() {
         if !have("gcc", Family::Gcc) {
             return;
         }
         let tree = Tree::new();
         let mut exact = tree.conf.clone();
         exact.exact_warnings = true;
-        let keyed = |conf: &BuildConf| key(conf, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap().parts.environment;
-        assert_ne!(keyed(&exact), keyed(&tree.conf));
+        let keyed = |conf: &BuildConf| key(conf, &tree.cc, &tree.argv("gcc", &["-O2"]), false).unwrap().parts;
+        let (exact, default) = (keyed(&exact), keyed(&tree.conf));
+        assert_ne!(exact.environment, default.environment);
+        // And the knob itself: a header with nothing to leave out is the
+        // same bytes either way.
+        assert_ne!(exact.arguments, default.arguments);
     }
 
     #[test]
@@ -2642,10 +2653,17 @@ mod tests {
 
     #[test]
     fn reads_which_files_diagnostics_name() {
-        let said = b"Using built-in specs.\nIn file included from /w/a.c:1:\n/w/t.h:3:9: warning: \"X\" redefined\n /w/u.h:1: note: this is\n/w/a.c: In function 'f':\n";
-        let files = diagnosed_files(said).unwrap();
-        assert_eq!(files, ["/w/a.c", "/w/t.h", "/w/u.h"].map(PathBuf::from).into_iter().collect());
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path().display();
+        for name in ["a.c", "t.h", "u.h"] {
+            std::fs::write(tmp.path().join(name), "").unwrap();
+        }
+        let said = format!("Using built-in specs.\nIn file included from {w}/a.c:1:\n{w}/t.h:3:9: warning: \"X\" redefined\n {w}/u.h:1: note: this is\n{w}/a.c: In function 'f':\n");
+        let files = diagnosed_files(said.as_bytes()).unwrap();
+        assert_eq!(files, ["a.c", "t.h", "u.h"].map(|name| tmp.path().join(name)).into_iter().collect());
         assert_eq!(diagnosed_files(b"gcc version 14\n").unwrap(), BTreeSet::new());
+        // A name a `#line` gave, of no file: everything whole.
+        assert!(diagnosed_files(format!("{w}/gen/thorns.ccl:3:2: warning: \"/*\" within comment [-Wcomment]\n").as_bytes()).is_none());
         // No file named: everything whole.
         assert!(diagnosed_files(b"<command-line>: warning: \"X\" redefined\n").is_none());
         assert!(diagnosed_files(b"cc1: warning: something about the command line\n").is_none());

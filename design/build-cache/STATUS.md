@@ -55,7 +55,7 @@ the last milestone, for when that host is not at hand.
 | M2a | gfortran (§18.10): keyed by its dependency run, served with its module files (store format 2), audited; the source named from `scratch` under the path map (decision 13) | **passed the gate** at `a14f279` (four review rounds; Einstein Toolkit audit builds on that commit, both optionlists, 0 wrong) |
 | M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews), its follow-ups at `05c67a3` and `e29e593` |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
-| M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **in review** (round 6 next): decisions 24–31; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed |
+| M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **in review** (round 7 next): decisions 24–31; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed |
 | M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; every cache-on build ends with one line: objects reused of all, and the misses by kind (built for the first time, sources changed, kept out by something `cache doctor` or `cache report` explains), a kind with a count of 0 left out (Max, 2026-10-13; "sources changed" needs a per-unit index beside the store); a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | **next**, then the merge to master (decision 27) |
 | M4b | Cray compilers: C, C++ and Fortran through `cc`, `CC`, `ftn`, seen through to the compiler they run, with the module environment that shapes them; Cray's `CC` as `nvcc`'s host compiler (decision 23) | follow-up after the merge (decision 27); no Cray machine to probe yet |
 | M5b | Take on the cases where whole files stay keyed (decision 27): Clang's file checksums, `-g3`, preprocessor warnings, redefinitions | follow-up after the merge (decision 27) |
@@ -2147,6 +2147,34 @@ served object's messages to differ from the compile's own. Handled in
 B's round-5 run hung on one tool call 16 minutes in and reported nothing.
 It was stopped after three hours and sent again, now on `94d856c`.
 
+### M4, round 6 (on `94d856c`): BLOCKED by both
+
+Both re-ran their earlier reproductions (all fixed) and found the object
+right in every case. Each found ways for a warning to exist in the compile
+and not in a hit, or the reverse; with `-Werror` that is a compile that
+should fail and does not. One of them reached an exit status without
+`-Werror`: GCC before 13 ignores `#pragma GCC diagnostic` under `-E`, so a
+narrowed key served an object where the compile fails (A, on qbd's GCC
+11.4). Fixed in `24c7479` and the commit after this record:
+- (A, B) `#pragma GCC dependency` behind `_Pragma`, a macro, a comment, no
+  blank or a continued line; (B) `__has_include` deciding only a
+  `#warning` (inherited); (A, B) `#pragma GCC poison` of a name defined
+  only in a header the key narrows; (A) a `#line` naming a file that does
+  not exist, under which a narrowed header's warning was said. The key's
+  preprocessor run prints each of these as the compile does: what it says
+  of the text (its diagnostics, mapped; gfortran's message lines) is now
+  in the text part, for C, C++, `nvcc`'s passes and gfortran (whose check
+  after the compile then runs the dependency run again). A diagnostic that
+  names no existing file keeps every file whole.
+- (A, B) an include directory that is a file (GCC always warns): its kind
+  is keyed.
+- (A) the knob never reached a C/C++ key: a `true` build could share a key
+  with a `false` build's narrowed entry. Keyed now; and (B) at `true` the
+  locale too, since the messages' language and quotes follow it.
+Also (B): the spec's knob list and frozen settings name the knob. Left:
+`true`/`false` where `build-cache-relocate` takes `yes`/`no` (Max's words);
+older clippy lints. Key label `key-16`.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -2363,8 +2391,7 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M4 (CUDA) in review: round 6 on `94d856c` (A on the fixes for its round-5
-findings, B on round 5's scope again; branch `feature/build-cache-next`,
+M4 (CUDA) in review: round 7 on the fixes for round 6 (branch `feature/build-cache-next`,
 worktree `.claude/worktrees/build-cache-next`, to be fast-forwarded onto
 `feature/build-cache` once it passes). qbd test
 instance: `/work/mmorris/cactup-m4/` (its own `CACTUP_HOME`, installation

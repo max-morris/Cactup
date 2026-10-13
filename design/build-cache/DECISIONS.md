@@ -532,6 +532,14 @@ Asked as seven questions with options; the answers, in Max's numbering.
     cached). Max's other idea, warnings stored with the conditions that
     make them and replayed by condition, is not needed so far: the
     benchmark's remaining misses were not about replayed warnings.
+    Review 6 found more of what decides whether a warning exists:
+    `__has_include` deciding a `#warning`, `#pragma GCC dependency` behind
+    `_Pragma`, a poisoned name defined in a header the key narrows, a
+    `#line` naming a file that does not exist, an include directory that
+    is a file. What the key's preprocessor run says of the text (its
+    diagnostics, mapped) is now in the key, and a diagnostic naming no file
+    keeps every file whole. The knob itself is keyed, and at `true` so is
+    the locale.
 
 ## Still open
 
