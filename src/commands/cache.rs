@@ -84,9 +84,25 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                     let layout = crate::progress::Layout::for_names(names.iter().map(String::as_str));
                     let mut findings = Vec::new();
                     for (set, name) in sets.iter().zip(&names) {
-                        let line = crate::progress::Line::counting(progress.add_child(name.clone()), name.clone(), layout.clone());
-                        line.phase("runs the build's environment setup and the cache's checks in it");
-                        findings.extend((set.run)());
+                        use prodash::{Count, Progress};
+                        let mut line = crate::progress::Line::counting(progress.add_child(name.clone()), name.clone(), layout.clone());
+                        line.init(None, Some(prodash::unit::label("s")));
+                        // The seconds so far: a line that never changes is
+                        // never drawn.
+                        let done = std::sync::atomic::AtomicBool::new(false);
+                        std::thread::scope(|scope| {
+                            let ticker = line.another_handle();
+                            let done = &done;
+                            scope.spawn(move || {
+                                let start = std::time::Instant::now();
+                                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                                    ticker.set(start.elapsed().as_secs() as usize);
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            });
+                            findings.extend((set.run)());
+                            done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        });
                         drop(line);
                     }
                     if let Some(renderer) = renderer {

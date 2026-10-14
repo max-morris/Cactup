@@ -29,6 +29,7 @@ use std::ffi::OsString;
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 /// The verb the build environment's shell runs the checks by: `cactup
@@ -143,6 +144,17 @@ pub fn languages() -> Vec<Language> {
 pub const PATH_VARIABLES: [&str; 9] =
     ["PATH", "LD_LIBRARY_PATH", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LD_PRELOAD"];
 
+/// Is `entry`, of the path variable `variable`, not an absolute path? A
+/// library `LD_PRELOAD` names without a `/` is searched for, as the loader
+/// does: only a relative path with one is relative there (and a blank
+/// between its entries is no entry).
+fn relative_entry(variable: &str, entry: &[u8]) -> bool {
+    match variable {
+        "LD_PRELOAD" => entry.contains(&b'/') && !entry.starts_with(b"/"),
+        _ => !entry.starts_with(b"/"),
+    }
+}
+
 /// `cactup __cc-doctor`: read a [`Request`] on stdin, run the checks in
 /// this process's environment (the build's), and write the [`Reply`] on
 /// stdout. Status 1 if the request cannot be read.
@@ -188,14 +200,8 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     // kind of compile out (below, in the probe's key); every one makes each
     // compile look at more places.
     for variable in PATH_VARIABLES {
-        // A library named without a `/` is searched for, as the loader
-        // does: only a relative path with one is relative for `LD_PRELOAD`.
-        let relative = |entry: &[u8]| match variable {
-            "LD_PRELOAD" => entry.contains(&b'/') && !entry.starts_with(b"/"),
-            _ => !entry.starts_with(b"/"),
-        };
         if let Some(value) = std::env::var_os(variable)
-            && value.as_encoded_bytes().split(|b| *b == b':' || (variable == "LD_PRELOAD" && *b == b' ')).any(relative)
+            && value.as_encoded_bytes().split(|b| *b == b':' || (variable == "LD_PRELOAD" && *b == b' ')).any(|entry| relative_entry(variable, entry))
         {
             reply.found.push(Raw {
                 severity: Severity::Note,
@@ -267,14 +273,18 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     // not follow is found, with the variable it is in.
     let source = format!("probe.{}", language.suffix);
     let parse = |flags: &[OsString]| {
-        let mut args: Vec<OsString> = words[1..].to_vec();
-        args.extend(flags.iter().cloned());
+        let mut args: Vec<OsString> = flags.to_vec();
         args.extend(["-c", "-o", "probe.o", &source].map(OsString::from));
         match compiler.family {
             identity::Family::Nvcc => compile::parse_cuda(&args).map(|_| ()),
             _ => compile::parse(&args).map(|_| ()),
         }
     };
+    // The compiler's own words after its name (`g++ -std=c++17`): the
+    // compiler variable's, checked once.
+    if let Err(why) = parse(&words[1..]) {
+        found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), why));
+    }
     let mut every_flag = Vec::new();
     for variable in &language.flag_variables {
         // As the recipe's shell splits them (`-DNAME="a b"` is one word).
@@ -385,7 +395,7 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
     let mut found = Vec::new();
     for state in ["unset", "empty", "set"] {
         // What the setup prints goes to stderr; stdout is the values.
-        let mut script = format!("module() {{ :; }}; ml() {{ :; }}\n{{\n{env}\n}} >&2 </dev/null\nprintf '%s\\n' '{END}'\n");
+        let mut script = format!("module() {{ :; }}; ml() {{ :; }}\n{{\n:\n{env}\n}} >&2 </dev/null\nprintf '%s\\n' '{END}'\n");
         for variable in PATH_VARIABLES {
             script.push_str(&format!("printf '%s=%s\\n' {variable} \"${{{variable}-<unset>}}\"\n"));
         }
@@ -406,7 +416,7 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
         if state != "set" {
             command.env("PATH", "/usr/bin:/bin");
         }
-        let child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("the setup could not be run: {e}"))?;
+        let child = command.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("the setup could not be run: {e}"))?;
         let out = wait_interruptibly(child).map_err(|e| format!("{e:#}"))?;
         let out = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((_, values)) = out.split_once(&format!("{END}\n")) else {
@@ -418,7 +428,7 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
             if value == "<unset>" || (value.is_empty() && state != "set") {
                 continue;
             }
-            if value.split(':').any(|entry| !entry.starts_with('/')) && !found.iter().any(|(found, _, _): &(String, _, _)| found == variable) {
+            if value.split([':', ' ']).any(|entry| relative_entry(variable, entry.as_bytes())) && !found.iter().any(|(found, _, _): &(String, _, _)| found == variable) {
                 found.push((variable.to_owned(), state, value.to_owned()));
             }
         }
@@ -426,30 +436,52 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
     Ok(found)
 }
 
+/// What the checks' shell says on stderr once the setup is through.
+const SETUP_DONE: &str = "cactup: the environment setup ran to its end";
+
+/// A script that runs the environment setup `env` as the build script does
+/// (`set -e`), with its stdin `/dev/null` and its stdout sent to stderr,
+/// and then `then`. (`:` first: a group with nothing in it, as an empty
+/// setup or one of comments makes, is a syntax error.)
+fn setup_then(env: &str, then: &str) -> String {
+    format!("set -e\n{{\n:\n{env}\n}} >&2 </dev/null\n{then}\n")
+}
+
 /// Run the checks of [`Request`] in the build environment `env` (the
 /// attempt's frozen setup), from `cactus_root`, by `cactup`.
 pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, request: &Request) -> Res<Reply> {
     // As the build script runs it (`set -e`), but what the setup prints goes
     // to stderr: stdout is the checks' answer.
-    let script = format!("set -e\n{{\n{env}\n}} >&2 </dev/null\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(cactup));
+    // A line on stderr once the setup is through: one that ends the shell
+    // with status 0 (an `exit`, a `return`) is told from the checks.
+    let script = setup_then(env, &format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(cactup)));
     let mut child = Command::new("/bin/sh")
         .arg("-c")
         .arg(&script)
         .current_dir(cactus_root)
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("Failed to start the build environment's shell")?;
     let input = serde_json::to_vec(request).context("Failed to write the checks' request")?;
+    // From a thread of its own: a setup that stops at once never reads it
+    // (what it said is the finding, not the broken pipe), one that runs
+    // long reads it late.
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&input).context("Failed to hand the build environment what to check")?;
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
     }
     let out = wait_interruptibly(child)?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        let said = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
-        anyhow::bail!("the build environment setup did not run to its end ({}): {said}", out.status);
+    let said = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() && !said.contains(SETUP_DONE) {
+        let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
+        anyhow::bail!("the build environment setup did not run to its end ({}): {last}", out.status);
+    }
+    if !said.contains(SETUP_DONE) {
+        anyhow::bail!("the build environment setup ended the shell before its end (an exit, or a return), as the build's would");
     }
     serde_json::from_slice(&out.stdout).context("The checks in the build environment answered in a form this cactup cannot read")
 }
@@ -457,31 +489,49 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
 /// Wait for `child`, stopping it on Ctrl-C (`CLAUDE.md`'s interrupt
 /// contract): a module system's setup can take a while.
 fn wait_interruptibly(mut child: std::process::Child) -> Res<std::process::Output> {
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let reading = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(stdout) = stdout.as_mut() {
-            let _ = stdout.read_to_end(&mut out);
+    use std::sync::mpsc;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            let _ = sender.send(bytes);
+        });
+        receiver
+    };
+    let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    // The setup's process group: what it started too (it runs in a group of
+    // its own).
+    let kill = |child: &mut std::process::Child| {
+        if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         }
-        out
-    });
-    let reading_err = std::thread::spawn(move || {
-        let mut err = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut err);
-        }
-        err
-    });
+        let _ = child.kill();
+        let _ = child.wait();
+    };
     loop {
         if let Some(status) = child.try_wait().context("Failed to wait for the build environment")? {
-            let stdout = reading.join().unwrap_or_default();
-            let stderr = reading_err.join().unwrap_or_default();
+            // A process the setup left running in the background may hold
+            // the pipes: what came within a moment is all there is.
+            let collect = |receiver: &mpsc::Receiver<Vec<u8>>| {
+                for _ in 0..20 {
+                    if let Ok(bytes) = receiver.recv_timeout(std::time::Duration::from_millis(50)) {
+                        return bytes;
+                    }
+                    if gix::interrupt::is_triggered() {
+                        break;
+                    }
+                }
+                Vec::new()
+            };
+            let (stdout, stderr) = (collect(&stdout), collect(&stderr));
             return Ok(std::process::Output { status, stdout, stderr });
         }
         if gix::interrupt::is_triggered() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill(&mut child);
             anyhow::bail!("interrupted");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -507,6 +557,14 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     let optionlist = optionlist_values(&attempt.optionlist_path());
     let defaults = configured_values(&meta.config_dir);
     let configured = meta.config_dir.join("config-data/make.config.defn").is_file();
+    if !configured {
+        findings.push(Finding {
+            severity: Severity::Note,
+            what: "the configuration is not configured yet: the compilers and flags checked are the option list's, without Cactus's defaults".to_owned(),
+            from: "the configuration".to_owned(),
+            fix: None,
+        });
+    }
     let request = Request {
         config_dir: configured.then(|| meta.config_dir.clone()),
         optionlist: optionlist.clone(),
@@ -524,9 +582,13 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     let found: Vec<Raw> = reply.found.iter().map(|raw| with_flag_variable(raw, &reply.values)).collect();
     let mut merged: Vec<(Severity, &Raw, Vec<&str>)> = Vec::new();
     for raw in &found {
-        match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && seen.variable == raw.variable) {
-            Some((severity, _, languages)) => {
+        match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && (seen.variable == raw.variable || seen.variable.is_none() || raw.variable.is_none())) {
+            Some((severity, seen, languages)) => {
                 *severity = (*severity).min(raw.severity);
+                // The one that names where it is.
+                if seen.variable.is_none() && raw.variable.is_some() {
+                    *seen = raw;
+                }
                 match &raw.language {
                     Some(language) if !languages.is_empty() => languages.push(language),
                     Some(_) => {}
@@ -578,7 +640,13 @@ pub fn check_sets(attempt: &crate::build::attempt::BuildAttempt, conf: BuildConf
                 if gix::interrupt::is_triggered() {
                     return Vec::new();
                 }
-                vec![Finding { severity: Severity::Unchecked, what: format!("the build environment could not be checked: {e:#}"), from: "the build environment".to_owned(), fix: None }]
+                let machine = &attempt.meta.machine;
+                vec![Finding {
+                    severity: Severity::Unchecked,
+                    what: format!("the build environment could not be checked: {e:#}"),
+                    from: format!("the build environment setup of machine {machine} (`cactup machine show {machine}`)"),
+                    fix: None,
+                }]
             })
         }),
     }]
@@ -590,9 +658,10 @@ pub fn check_sets(attempt: &crate::build::attempt::BuildAttempt, conf: BuildConf
 fn with_flag_variable(raw: &Raw, values: &BTreeMap<String, String>) -> Raw {
     let (None, Some(language)) = (&raw.variable, &raw.language) else { return raw.clone() };
     let Some(language) = languages().into_iter().find(|known| known.name == *language) else { return raw.clone() };
-    let variable = language.flag_variables.iter().find(|variable| {
+    let variable = language.flag_variables.iter().chain([&language.compiler_variable]).find(|variable| {
+        let skip = usize::from(**variable == language.compiler_variable);
         values.get(*variable).is_some_and(|value| {
-            value.split_whitespace().any(|flag| {
+            value.split_whitespace().skip(skip).any(|flag| {
                 raw.reason.split([' ', ',', '(', ')']).any(|word| word == flag) || (flag.ends_with("native") && raw.reason.contains("native"))
             })
         })
@@ -635,8 +704,11 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     // About a flag: the option list's variable that has it, else Cactus's
     // defaults for the compiler (what configure wrote). The flag is the
     // reason's first word, or the word of the variable it names.
-    let in_variable = raw.variable.as_ref().filter(|variable| variable.ends_with("FLAGS")).and_then(|variable| reply.values.get(variable)).and_then(|value| {
-        value.split_whitespace().find(|flag| raw.reason.split([' ', ',', '(', ')']).any(|word| word == *flag) || (flag.ends_with("native") && raw.reason.contains("native")))
+    let compilers = ["CC", "CXX", "F90", "F77", "CUCC"];
+    let in_variable = raw.variable.as_ref().and_then(|variable| reply.values.get(variable).map(|value| (variable, value))).and_then(|(variable, value)| {
+        // In a compiler variable, its words after the name.
+        let skip = usize::from(compilers.contains(&variable.as_str()));
+        value.split_whitespace().skip(skip).find(|flag| raw.reason.split([' ', ',', '(', ')']).any(|word| word == *flag) || (flag.ends_with("native") && raw.reason.contains("native")))
     });
     if let Some(flag) = raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')).or(in_variable) {
         // Within the finding's language where it has one (`C_OPTIMISE_FLAGS`
@@ -679,7 +751,8 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
 
 /// What would let compiles kept out for `why` in, where cactup knows.
 pub fn hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 9] = [
+    let hints: [(&str, &str); 10] = [
+        ("already stands in front of the compiler", "name the compiler itself in the option list (CC = gcc, not ccache gcc): the build cache takes ccache's place"),
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
@@ -772,9 +845,34 @@ mod tests {
         let (from, fix) = trace(raw, &reply, &optionlist, &defaults, "the option list (x)", "the setup");
         assert_eq!(from, "the option list (x), CFLAGS");
         assert!(fix.is_some());
+        // A flag written in the compiler variable is the compiler
+        // variable's, not each flag variable's.
+        let c_only: Vec<Language> = languages().into_iter().filter(|language| language.name == "C").collect();
+        let in_cc: BTreeMap<String, String> = [("CC", "gcc --coverage"), ("CFLAGS", "-O2")].map(|(name, value)| (name.to_owned(), value.to_owned())).into();
+        let reply_cc = run(&Request { config_dir: None, optionlist: in_cc, conf: conf(tmp.path()), languages: c_only }, false);
+        let refused: Vec<&Raw> = reply_cc.found.iter().filter(|raw| raw.severity == Severity::KeepsOut).collect();
+        assert!(refused.iter().any(|raw| raw.variable.as_deref() == Some("CC") && raw.reason.contains("--coverage")), "{:?}", reply_cc.found);
+        assert!(!refused.iter().any(|raw| raw.variable.as_deref() == Some("CFLAGS")), "{:?}", reply_cc.found);
         // A flag configure added: Cactus's defaults.
         let from_defaults = Raw { reason: "-O3 is a flag the cache does not follow".into(), ..(*raw).clone() };
         assert!(trace(&from_defaults, &reply, &BTreeMap::new(), &defaults, "x", "y").0.starts_with("Cactus's default C_OPTIMISE_FLAGS"));
+    }
+
+    /// The setup runs as the build script runs it: an empty one or one of
+    /// comments runs, what it prints is not the answer, one that fails
+    /// stops there.
+    #[test]
+    fn a_setup_runs_as_the_build_script_runs_it() {
+        let run = |env: &str| Command::new("/bin/sh").arg("-c").arg(setup_then(env, "echo answer")).output().unwrap();
+        for env in ["", "# nothing but a comment", "echo banner; export X=1"] {
+            let out = run(env);
+            assert_eq!((out.status.success(), String::from_utf8_lossy(&out.stdout).as_ref()), (true, "answer\n"), "{env:?}");
+        }
+        let out = run("false\nexport X=1");
+        assert!(!out.status.success() && out.stdout.is_empty());
+        assert!(fragile_entries("").unwrap().is_empty() && fragile_entries("# only this").unwrap().is_empty());
+        assert!(fragile_entries("export LD_PRELOAD=libc.so.6\n").unwrap().is_empty(), "a name the loader searches for");
+        assert_eq!(fragile_entries("export LD_PRELOAD=lib/x.so\n").unwrap()[0].0, "LD_PRELOAD");
     }
 
     /// A setup that gives a variable an empty entry where it was not set

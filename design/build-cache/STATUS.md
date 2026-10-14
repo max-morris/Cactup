@@ -2513,6 +2513,38 @@ rule, `LD_AUDIT` traced; the Fortran "no file is narrowed" note dropped
 (the cache's own limit, M5b's); `REFUSED` tied to the lists it repeats by
 a test; the knob readers reused.
 
+### M5 part 2, round 2 (on `3ac6cde`): BLOCKED by both
+
+Both re-ran round 1 (F77, a printing setup, the all-clear, Ctrl-C, the MDB
+check's end marker: fixed; tracing right in every case run but one) and
+confirmed nothing changes a build or what is served. Blocking, fixed in the
+commit after this record:
+- (A) an empty setup, or one of comments, was a syntax error inside the
+  group round 1 put it in: every configuration of the seven MDB machines
+  without a build setup was "not checked". A `:` opens the group now.
+- (A) a setup that fails at once was reported as a broken pipe: the
+  request is written from a thread of its own, and the setup's own message
+  is the finding.
+- (A) the setup run for the path variables flagged a library `LD_PRELOAD`
+  names without a `/` (which the loader searches for): one rule for both.
+- (B) no progress line was drawn (prodash draws a line that changed): the
+  seconds so far count on it.
+- (B) a flag in the compiler variable itself (`CC = gcc --coverage`) was
+  checked with every flag variable and traced to them: checked once, as
+  the compiler variable's.
+- (B) a setup that ends the shell with status 0 (`exit 0`, a `return`)
+  was taken for an answer this cactup cannot read: a line the shell writes
+  once the setup is through tells them apart.
+Also: a finding that names its variable is kept when merged (`CCC_OVERRIDE_
+OPTIONS` once, a relative `COMPILER_PATH` once); a process the setup leaves
+running in the background no longer holds the doctor (the pipes are read
+for a moment after the setup ends), and Ctrl-C kills the setup's process
+group; a fix line for `ccache gcc`; a setup that could not run is traced
+to the machine; a configuration not configured yet says the option list
+stands in. Left: a variable a module sets (stubbed in the setup's run for
+the path variables) can make an entry look fragile there; a thorn's own
+flags (`make.code.defn`) are not seen.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
