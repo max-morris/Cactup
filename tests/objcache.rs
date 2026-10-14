@@ -1561,7 +1561,11 @@ fn a_compile_whose_messages_speak_of_definitions_is_served_again() {
     assert!(text(&first.stderr).contains("macro"), "{}", text(&first.stderr));
     assert_eq!(build.last_event()["published"].as_bool(), Some(true), "{}", build.last_event());
     let again = unit.wrapped("gcc", &flags, &lib);
-    assert_eq!(build.last_event()["outcome"].as_str(), Some("hit"), "{}", build.last_event());
+    let event = build.last_event();
+    assert_eq!(event["outcome"].as_str(), Some("hit"), "{event}");
+    // The entry in use is the one under the key with the files whole, and
+    // the build's use log is to name it (`objcache::after_build`).
+    assert!(event["served"].as_str().is_some_and(|served| Some(served) != event["key"].as_str()), "{event}");
     assert_eq!(text(&again.stderr), text(&first.stderr));
 
     // An entry under the plain key whose messages speak of a macro, passed
@@ -1979,6 +1983,15 @@ fn fortran_is_served_with_its_module_files_elsewhere() {
     assert_eq!(other.last_event()["outcome"].as_str(), Some("hit"));
     assert_eq!(fs::metadata(there.module("provider.mod")).unwrap().modified().unwrap(), before);
     assert_eq!(there.strays(), Vec::<PathBuf>::new());
+
+    // A source edited: the miss names it by its mapped path, as any other
+    // file, not by a name another thorn's source may share.
+    let user = fs::read_to_string(&here.user).unwrap();
+    fs::write(&here.user, format!("! edited\n{user}")).unwrap();
+    here.wrapped(&here.user);
+    let event = one.last_event();
+    assert_eq!(event["miss"].as_str(), Some("other-sources"), "{event}");
+    assert!(event["differs"].to_string().contains("/cactup-root/configs/@config/build/Thorn/user.f90 (the unit's source)"), "{event}");
 }
 
 /// Audit mode compiles a Fortran hit anyway: the same object and module

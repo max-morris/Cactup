@@ -2425,6 +2425,25 @@ said beside the earlier reason, not over it, and counted by one constant.
 Both reviewers cleaned their cargo output (the home file system has 579 GB
 free).
 
+### M5 part 1, round 7 (on `7766abb`): BLOCKED by both
+
+Both re-ran rounds 1 to 6 (fixed; A: 132 and 64 more compiles through the
+wrapper against gcc 14 alone, none differing; real builds as before) and
+found nothing that changes what is served. Blocking, fixed in the commit
+after this record:
+- (A) a hit from the key with the files whole (decision 30) was logged as a
+  use of the plain key, which has no entry: `cache gc --unused-for` and
+  `--to-size` took the entry in use for unused and removed it (reproduced
+  with real builds: the next build compiled `OverloadComm.c` anew). Since
+  M4, and every such unit since part 1's lookup. The event names the key it
+  was served from (`served`), and the use log records it.
+- (B) a Fortran source was named by its file name alone, so the doctor
+  took same-named sources of several thorns (`Basegrid.F90` in four of the
+  Einstein Toolkit's) for one file: by its mapped path now.
+Also: the quota hint names either file system; the plural wording of the
+doctor's note on records not written; a type alias for the tally; the
+spec's use-log path (`v<N>`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

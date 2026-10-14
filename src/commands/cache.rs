@@ -354,7 +354,9 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         // By file: a difference is `<file>: <how this key took it>`, and
         // one file taken in several ways (units that keep other
         // definitions of it) is one file all the same.
-        let mut by: HashMap<&str, (usize, HashMap<&str, usize>)> = HashMap::new();
+        // Each file: its misses, and how many of them took it each way.
+        type Tally<'a> = (usize, HashMap<&'a str, usize>);
+        let mut by: HashMap<&str, Tally> = HashMap::new();
         for event in &other {
             for differs in &event.differs {
                 let (what, how) = differs.split_once(": ").unwrap_or((differs.as_str(), ""));
@@ -363,7 +365,7 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
                 *file.1.entry(how).or_default() += 1;
             }
         }
-        let mut by: Vec<(&str, (usize, HashMap<&str, usize>))> = by.into_iter().collect();
+        let mut by: Vec<(&str, Tally)> = by.into_iter().collect();
         by.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(b.0)));
         for (what, (count, hows)) in by.iter().take(20) {
             let mut hows: Vec<(&str, usize)> = hows.iter().map(|(how, n)| (*how, *n)).collect();
@@ -412,12 +414,12 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         .filter(|event| event.store.as_deref().is_some_and(|why| why.contains(crate::objcache::wrapper::UNIT_RECORD_NOT_WRITTEN)))
         .count();
     if unrecorded > 0 {
-        let (count, were) = match unrecorded {
-            1 => ("1 object was".to_owned(), "its miss"),
-            n => (format!("{n} objects were"), "their misses"),
+        let (count, it, were) = match unrecorded {
+            1 => ("1 object was".to_owned(), "it", "its miss"),
+            n => (format!("{n} objects were"), "them", "their misses"),
         };
         out.push_str(&format!(
-            "\n  {count} stored without the record of what made it (the build could not write it: see its event log), so later builds may call {were} new\n"
+            "\n  {count} stored without the record of what made {it} (the build could not write {it}: see its event log), so later builds may call {were} new\n"
         ));
     }
 
@@ -467,7 +469,7 @@ fn kept_out_hint(why: &str) -> Option<&'static str> {
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
-        ("Disk quota exceeded", "the build cache is over your quota: make room (cactup cache gc), or set build-cache-size to be told before"),
+        ("Disk quota exceeded", "a quota is used up (on the build cache's file system or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
         ("No space left on device", "a file system is full (the build cache's or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
         ("not published: Failed to create", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
         ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),

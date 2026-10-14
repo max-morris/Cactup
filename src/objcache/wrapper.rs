@@ -326,6 +326,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             Err(why) => (Err(Miss::CannotWrite(why.clone())), key.clone()),
         });
         if restored.is_ok() {
+            if from != key {
+                event.served = Some(from.clone());
+            }
             served_key = Some(from);
         }
         let into = into.ok().flatten();
@@ -703,9 +706,17 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
             differs.push("the preprocessed text".to_owned());
         }
         // Fortran names its source "source" (it is keyed by its bytes, not
-        // by a path): by its file name, so that sources are not one line.
+        // by a path): by its path, mapped as other files' are, so that
+        // sources of one name in two thorns are two files.
+        let source = || {
+            let given = std::env::current_dir().map(|cwd| cwd.join(&keyed.compile.source)).unwrap_or_else(|_| keyed.compile.source.clone());
+            let path = std::fs::canonicalize(&given).unwrap_or(given);
+            let bytes = path.as_os_str().as_encoded_bytes();
+            let mapped = keyed.map().map_or_else(|| bytes.to_vec(), |map| map.apply(bytes));
+            String::from_utf8_lossy(&mapped).into_owned()
+        };
         let shown = |name: &str| match name {
-            "source" => format!("{} (the unit's source)", keyed.compile.source.file_name().unwrap_or_default().to_string_lossy()),
+            "source" => format!("{} (the unit's source)", source()),
             name => name.to_owned(),
         };
         for note in &keyed.each {

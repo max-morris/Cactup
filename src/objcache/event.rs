@@ -76,6 +76,11 @@ pub struct Event {
     /// Did this compile add an entry to the store?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published: Option<bool>,
+    /// The key of the entry a hit came from, where it is not `key`: the key
+    /// with the files whole (decision 30). The use log records it, so that
+    /// `cache gc` knows that entry is in use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served: Option<String>,
     /// In audit mode, what checking a hit found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Audit>,

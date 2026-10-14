@@ -5881,8 +5881,9 @@ when each entry was last used.
 **Last use.** An entry is never changed after its link (§18.7), so when it
 was last used is kept beside it, not in it. After the build step of a
 serving or auditing build, `execute` writes one new file into the store,
-`<root>/v2/<machine>/used/<random>.keys`, listing the keys that build found
-there, one per line, through a temporary file renamed into place. Its
+`<root>/v<N>/<machine>/used/<random>.keys`, listing the keys of the entries
+that build found there (for a hit under the key with the files whole,
+decision 30, that key), one per line, through a temporary file renamed into place. Its
 modification time, set by the write, is the fileserver's clock at the end
 of that build (§2.3), and is when every key in it was last used. No two
 builds write the same file, and none changes one: nothing is shared but

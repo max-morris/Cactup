@@ -301,8 +301,13 @@ pub fn after_build(cc_dir: &Path) {
     }
     let Ok(store) = store::Store::new(&conf.store, &conf.machine) else { return };
     let events = event::read(&events_path(cc_dir)).map(|(events, _)| events).unwrap_or_default();
-    let keys: Vec<String> =
-        events.iter().filter(|e| e.outcome == Some(event::Outcome::Hit)).filter_map(|e| e.key.clone()).collect();
+    // The key of the entry each hit came from (decision 30's are under the
+    // key with the files whole).
+    let keys: Vec<String> = events
+        .iter()
+        .filter(|e| e.outcome == Some(event::Outcome::Hit))
+        .filter_map(|e| e.served.clone().or_else(|| e.key.clone()))
+        .collect();
     if let Err(e) = upkeep::log_use(&store, &keys) {
         eprintln!("{} build cache: could not record which entries this build used: {e:#}", "warning:".yellow().bold());
     }
@@ -528,9 +533,12 @@ mod tests {
         stage_inputs.store = &store;
         stage_inputs.size_limit = Some(1);
         stage(&cc, Mode::Serve, &stage_inputs).unwrap();
-        let (hit, miss) = ("a".repeat(64), "b".repeat(64));
+        let (hit, miss, whole) = ("a".repeat(64), "b".repeat(64), "w".repeat(64));
         for event in [
             event::Event { key: Some(hit.clone()), outcome: Some(event::Outcome::Hit), ..Default::default() },
+            // Served from the key with the files whole (decision 30): that
+            // entry is the one in use.
+            event::Event { key: Some("k".repeat(64)), served: Some(whole.clone()), outcome: Some(event::Outcome::Hit), ..Default::default() },
             event::Event { key: Some(miss), outcome: Some(event::Outcome::Miss), published: Some(true), object_bytes: Some(4096), ..Default::default() },
         ] {
             event.append(&events_path(&cc));
@@ -539,7 +547,7 @@ mod tests {
         let used = store.join(format!("v{}/mel5/used", store::FORMAT));
         let logs: Vec<_> = fs::read_dir(&used).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(logs.len(), 1);
-        assert_eq!(fs::read_to_string(&logs[0]).unwrap(), format!("{hit}\n"));
+        assert_eq!(fs::read_to_string(&logs[0]).unwrap(), format!("{hit}\n{whole}\n"));
         // Never measured: the build says so, and writes nothing that would
         // pass for a measurement.
         assert!(!store.join(format!("v{}/size", store::FORMAT)).exists());
