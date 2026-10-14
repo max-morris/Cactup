@@ -1114,8 +1114,9 @@ pub(crate) struct TestStartArgs {
     #[clap(flatten)]
     pub topology: TopologyFlags,
     // §11.3
-    /// Test selection: test names, thorns (arrangement/Thorn), or
-    /// arrangements. Empty selects all tests.
+    /// Test selection: test names, thorns (Thorn or arrangement/Thorn),
+    /// Thorn/test pairs, or arrangements. A name that is both an arrangement
+    /// and a thorn selects the arrangement. Empty selects all tests.
     pub tests: Vec<String>,
     // §11.6
     /// Compute-node path: the absolute test-run directory, so the

@@ -10,6 +10,7 @@
 
 pub mod manage;
 pub mod run;
+mod select;
 
 use crate::database::SCHEMA;
 use crate::installation::{write_toml, Installation};
