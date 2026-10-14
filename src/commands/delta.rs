@@ -294,15 +294,42 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     let processed = cactus_root.join("configs").join(&name).join(build::THORNLIST_PROCESSED);
     let text = std::fs::read_to_string(&processed)
         .with_context(|| format!("Failed to read {}", processed.display()))?;
-    let probe = fetch::probe_sources(&inst.root, &cactus_root, &text)?;
-    let live = &probe.heads;
+    // The same three readings `cactup build` decides on (§7.4): the repos'
+    // state, and each thorn's provider, shape and stamp. Leaving the thorn
+    // half out let this say "matches" about a tree the next build rebuilds.
+    let list = crate::thornlist::parse_config_list(&text, &inst.root, &cactus_root)?;
+    let live = match &list {
+        Ok(list) => fetch::source_heads_with_progress(&inst.root, list)?,
+        Err(why) => Err(fetch::NoSources::Unparseable(why.clone())),
+    };
+    let list = list.ok();
+    let scan = list.as_ref().map(|l| build::thorn_shapes_with_progress(&cactus_root, l)).transpose()?;
+    let thorns = ThornChanges::new(
+        [meta.thorn_providers.as_ref(), meta.thorn_shapes.as_ref(), meta.thorn_stamps.as_ref()],
+        list.as_ref().map(|l| l.thorn_providers()).as_ref(),
+        scan.as_ref(),
+    );
+    // A plain-list thorn with no repo behind it has no source state, but its
+    // stamp still sees its files edited once a build has recorded one; only
+    // what has neither (the flesh, a thorn without a stamp) goes unnoticed.
+    let stamped = |thorn: &str| {
+        build::has_stamp(meta.thorn_stamps.as_ref(), thorn) && build::has_stamp(scan.as_ref().map(|s| &s.stamps), thorn)
+    };
+    let untracked: Vec<String> =
+        list.iter().flat_map(|l| l.untracked()).filter(|t| !stamped(t)).cloned().collect();
 
     let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref().ok());
     if delta == SourceDelta::Unknown {
         // Three different situations, and only one of them is fixed by
         // running `cactup build`: telling a user whose sources cactup cannot
         // read to build "to establish a baseline" sends them in a circle.
-        match (live, &meta.sources) {
+        match (&live, &meta.sources) {
+            (Err(why), None) if meta.thorn_stamps.is_some() => println!(
+                "{} cactup cannot track this config's repos: {why}. Only its thorns' files \
+                 are compared; after a refetch or an edit to the flesh, `cactup build {name} \
+                 --reconfig` rebuilds incrementally.",
+                "note:".yellow().bold()
+            ),
             (Err(why), None) => println!(
                 "{} cactup cannot track this config's sources: {why}. It records no source \
                  baseline, so there is nothing to compare; after changing the sources, \
@@ -320,6 +347,12 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
                  changed since the last build, `cactup build {name} --reconfig` rebuilds them.",
                 "note:".yellow().bold()
             ),
+        }
+        if thorns.print(verbose) {
+            println!(
+                "\n  {} `cactup build {name}` reconfigures and rebuilds what this affects.",
+                "→".bold()
+            );
         }
         return Ok(());
     }
@@ -374,18 +407,24 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         println!("    {}", dir.display().to_string().dimmed());
     }
 
-    // A plain-list thorn with no repo behind it has no state to compare, so
-    // nothing above can speak for it — and "matches" must not either.
-    if !probe.untracked.is_empty() {
+    let thorns_changed = thorns.print(verbose);
+
+    // What nothing above can speak for — and "matches" must not either.
+    if !untracked.is_empty() {
         println!(
             "  {} — {}",
-            build::summarize(&probe.untracked).bold(),
+            build::summarize(&untracked).bold(),
             "not a link into the installation's repos/, so not tracked: edits to it go unnoticed".yellow()
         );
     }
 
     match delta {
-        SourceDelta::Unchanged if !probe.untracked.is_empty() => {
+        // A thorn change rebuilds incrementally, whatever the repos say.
+        SourceDelta::Unchanged if thorns_changed => println!(
+            "\n  {} `cactup build {name}` reconfigures and rebuilds what this affects.",
+            "→".bold()
+        ),
+        SourceDelta::Unchanged if !untracked.is_empty() => {
             println!("  {}", "everything else matches what this config was built from.".green());
         }
         SourceDelta::Unchanged => {
@@ -422,7 +461,7 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
     let processed =
         inst.cactus_root().join("configs").join(&meta.name).join(build::THORNLIST_PROCESSED);
     let Ok(text) = std::fs::read_to_string(&processed) else { return Ok(()) };
-    let Ok(live) = fetch::probe_sources(&inst.root, &inst.cactus_root(), &text)?.heads else { return Ok(()) };
+    let Ok(live) = fetch::probe_sources(&inst.root, &inst.cactus_root(), &text)? else { return Ok(()) };
     let (delta, change) = build::source_delta(meta.sources.as_ref(), Some(&live));
     if matches!(delta, SourceDelta::Unknown | SourceDelta::Unchanged) {
         return Ok(());
@@ -477,6 +516,52 @@ pub fn check_machine(current: &Machine, recorded: &str, what: &str, ignore: bool
 }
 
 /// Shared "what changed in the worktree" block.
+/// The thorns whose recorded provider, shape or stamp (§7.4) no longer
+/// matches the tree, each named under the strongest of the three only, as
+/// `cactup build` acts on it: a new provider or shape loses the thorn's build
+/// state, a new stamp alone is an incremental rebuild.
+struct ThornChanges {
+    providers: Vec<String>,
+    shapes: Vec<String>,
+    stamps: Vec<String>,
+}
+
+type ThornMap = std::collections::BTreeMap<String, String>;
+
+impl ThornChanges {
+    /// `stored` is the config's recorded providers, shapes and stamps, in
+    /// that order; `providers` and `scan` the tree's now.
+    fn new(stored: [Option<&ThornMap>; 3], providers: Option<&ThornMap>, scan: Option<&build::ThornScan>) -> Self {
+        let [stored_providers, stored_shapes, stored_stamps] = stored;
+        let providers = build::provider_delta(stored_providers, providers);
+        let shapes: Vec<String> = build::shape_delta(stored_shapes, scan.map(|s| &s.shapes))
+            .into_iter()
+            .filter(|t| !providers.contains(t))
+            .collect();
+        let stamps = build::stamp_delta(stored_stamps, scan.map(|s| &s.stamps))
+            .into_iter()
+            .filter(|t| !providers.contains(t) && !shapes.contains(t))
+            .collect();
+        ThornChanges { providers, shapes, stamps }
+    }
+
+    /// Print a line per kind of change; whether there was any.
+    fn print(&self, verbose: bool) -> bool {
+        let names = |thorns: &[String]| if verbose { thorns.join(", ") } else { build::summarize(thorns) };
+        let kinds = [
+            (&self.providers, "provided by a different directory, or gone from the thornlist since the build"),
+            (&self.shapes, "files added or removed, or a .ccl or make.* file edited, since the build"),
+            (&self.stamps, "files edited since the build"),
+        ];
+        for (thorns, what) in kinds {
+            if !thorns.is_empty() {
+                println!("  {} — {}", names(thorns).bold(), what.yellow());
+            }
+        }
+        kinds.iter().any(|(thorns, _)| !thorns.is_empty())
+    }
+}
+
 fn print_modified(diff: &SourceDiff, verbose: bool) {
     if diff.modified.is_empty() {
         return;
@@ -511,4 +596,35 @@ fn read_live_thornlist(inst: &Installation) -> Res<crate::thornlist::Thornlist> 
         .with_context(|| format!("Failed to read thornlist {}", path.display()))?;
     crate::thornlist::parse(&text)
         .with_context(|| format!("Failed to parse thornlist {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, &str)]) -> ThornMap {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// Each changed thorn is named once, under the strongest change `cactup
+    /// build` acts on, and a tree with no stamps recorded yet reports none.
+    #[test]
+    fn thorn_changes_name_each_thorn_under_its_strongest_change() {
+        let providers = map(&[("A", "arr/A"), ("B", "arr/B"), ("C", "arr/C"), ("D", "arr/D")]);
+        let shapes = map(&[("A", "s"), ("B", "s"), ("C", "s"), ("D", "s")]);
+        let stamps = map(&[("A", "t"), ("B", "t"), ("C", "t"), ("D", "t")]);
+        let now = build::ThornScan {
+            shapes: map(&[("A", "s2"), ("B", "s2"), ("C", "s"), ("D", "s")]),
+            stamps: map(&[("A", "t2"), ("B", "t2"), ("C", "t2"), ("D", "t")]),
+        };
+        let moved = map(&[("A", "other/A"), ("B", "arr/B"), ("C", "arr/C"), ("D", "arr/D")]);
+        let got = ThornChanges::new([Some(&providers), Some(&shapes), Some(&stamps)], Some(&moved), Some(&now));
+        assert_eq!(got.providers, ["A"]);
+        assert_eq!(got.shapes, ["B"]);
+        assert_eq!(got.stamps, ["C"]);
+
+        let unstamped = ThornChanges::new([Some(&providers), Some(&shapes), None], Some(&providers), Some(&now));
+        assert_eq!(unstamped.shapes, ["A", "B"]);
+        assert!(unstamped.stamps.is_empty(), "no recorded stamps is no information");
+    }
 }
