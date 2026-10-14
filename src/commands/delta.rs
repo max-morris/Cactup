@@ -305,16 +305,24 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     let list = list.ok();
     let scan = list.as_ref().map(|l| build::thorn_shapes_with_progress(&cactus_root, l)).transpose()?;
     let thorns = ThornChanges::new(
-        [meta.thorn_providers.as_ref(), meta.thorn_shapes.as_ref(), meta.thorn_stamps.as_ref()],
+        meta.thorn_providers.as_ref(),
+        meta.thorn_shapes.as_ref(),
+        meta.thorn_stamps.as_ref(),
         list.as_ref().map(|l| l.thorn_providers()).as_ref(),
         scan.as_ref(),
     );
+    // Whether thorn stamps are compared at all: both the record and the tree
+    // must have some, exactly as `cactup build` requires. A record without
+    // any predates them (or an older cactup rewrote it), and compares nothing.
+    let recorded_stamps = meta.thorn_stamps.as_ref().filter(|s| !s.is_empty());
+    let fresh_stamps = scan.as_ref().map(|s| &s.stamps).filter(|s| !s.is_empty());
+    let stamps_compared = recorded_stamps.is_some() && fresh_stamps.is_some();
+    let stamps_unrecorded = recorded_stamps.is_none() && fresh_stamps.is_some();
     // A plain-list thorn with no repo behind it has no source state, but its
     // stamp still sees its files edited once a build has recorded one; only
     // what has neither (the flesh, a thorn without a stamp) goes unnoticed.
-    let stamped = |thorn: &str| {
-        build::has_stamp(meta.thorn_stamps.as_ref(), thorn) && build::has_stamp(scan.as_ref().map(|s| &s.stamps), thorn)
-    };
+    let stamped =
+        |thorn: &str| build::has_stamp(recorded_stamps, thorn) && build::has_stamp(fresh_stamps, thorn);
     let untracked: Vec<String> =
         list.iter().flat_map(|l| l.untracked()).filter(|t| !stamped(t)).cloned().collect();
 
@@ -324,10 +332,11 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         // running `cactup build`: telling a user whose sources cactup cannot
         // read to build "to establish a baseline" sends them in a circle.
         match (&live, &meta.sources) {
-            (Err(why), None) if meta.thorn_stamps.is_some() => println!(
+            (Err(why), None) if stamps_compared => println!(
                 "{} cactup cannot track this config's repos: {why}. Only its thorns' files \
-                 are compared; after a refetch or an edit to the flesh, `cactup build {name} \
-                 --reconfig` rebuilds incrementally.",
+                 are compared; after changing the flesh, `cactup build {name} --reconfig` \
+                 rebuilds incrementally, and after a refetch, `cactup build {name} -f` rebuilds \
+                 from scratch.",
                 "note:".yellow().bold()
             ),
             (Err(why), None) => println!(
@@ -424,6 +433,13 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
             "\n  {} `cactup build {name}` reconfigures and rebuilds what this affects.",
             "→".bold()
         ),
+        // Built before stamps: nothing can say whether thorn files changed.
+        SourceDelta::Unchanged if stamps_unrecorded => println!(
+            "  {} thorn files have no baseline yet (this config was built before cactup \
+             recorded one); the next `cactup build {name}` records it. If files git does not \
+             track were regenerated since, `cactup build {name} --reconfig` rebuilds them.",
+            "note:".yellow().bold()
+        ),
         SourceDelta::Unchanged if !untracked.is_empty() => {
             println!("  {}", "everything else matches what this config was built from.".green());
         }
@@ -454,6 +470,11 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
 /// nothing here may stand between the user and their job. The one error is
 /// an interrupt during the probe (§2.4): the user asked cactup to stop, so
 /// the submit or run must not go ahead.
+///
+/// It compares the repos only, not the per-thorn records `config delta`
+/// also reads (§7.4): a thorn git does not track that was edited after the
+/// build goes unmentioned here. Stamping means walking every thorn, a cost
+/// not yet judged worth paying on every submit.
 pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: bool) -> Res<()> {
     if silent || meta.sources.is_none() {
         return Ok(());
@@ -515,7 +536,6 @@ pub fn check_machine(current: &Machine, recorded: &str, what: &str, ignore: bool
     Ok(())
 }
 
-/// Shared "what changed in the worktree" block.
 /// The thorns whose recorded provider, shape or stamp (§7.4) no longer
 /// matches the tree, each named under the strongest of the three only, as
 /// `cactup build` acts on it: a new provider or shape loses the thorn's build
@@ -529,16 +549,21 @@ struct ThornChanges {
 type ThornMap = std::collections::BTreeMap<String, String>;
 
 impl ThornChanges {
-    /// `stored` is the config's recorded providers, shapes and stamps, in
-    /// that order; `providers` and `scan` the tree's now.
-    fn new(stored: [Option<&ThornMap>; 3], providers: Option<&ThornMap>, scan: Option<&build::ThornScan>) -> Self {
-        let [stored_providers, stored_shapes, stored_stamps] = stored;
-        let providers = build::provider_delta(stored_providers, providers);
-        let shapes: Vec<String> = build::shape_delta(stored_shapes, scan.map(|s| &s.shapes))
+    /// The `recorded_*` maps are the config's record; `providers` and `scan`
+    /// the tree now.
+    fn new(
+        recorded_providers: Option<&ThornMap>,
+        recorded_shapes: Option<&ThornMap>,
+        recorded_stamps: Option<&ThornMap>,
+        providers: Option<&ThornMap>,
+        scan: Option<&build::ThornScan>,
+    ) -> Self {
+        let providers = build::provider_delta(recorded_providers, providers);
+        let shapes: Vec<String> = build::shape_delta(recorded_shapes, scan.map(|s| &s.shapes))
             .into_iter()
             .filter(|t| !providers.contains(t))
             .collect();
-        let stamps = build::stamp_delta(stored_stamps, scan.map(|s| &s.stamps))
+        let stamps = build::stamp_delta(recorded_stamps, scan.map(|s| &s.stamps))
             .into_iter()
             .filter(|t| !providers.contains(t) && !shapes.contains(t))
             .collect();
@@ -547,9 +572,13 @@ impl ThornChanges {
 
     /// Print a line per kind of change; whether there was any.
     fn print(&self, verbose: bool) -> bool {
-        let names = |thorns: &[String]| if verbose { thorns.join(", ") } else { build::summarize(thorns) };
+        let names =
+            |thorns: &[String]| if verbose { thorns.join(", ") } else { build::summarize(thorns) };
         let kinds = [
-            (&self.providers, "provided by a different directory, or gone from the thornlist since the build"),
+            (
+                &self.providers,
+                "provided by a different directory, or gone from the thornlist since the build",
+            ),
             (&self.shapes, "files added or removed, or a .ccl or make.* file edited, since the build"),
             (&self.stamps, "files edited since the build"),
         ];
@@ -562,6 +591,7 @@ impl ThornChanges {
     }
 }
 
+/// Shared "what changed in the worktree" block.
 fn print_modified(diff: &SourceDiff, verbose: bool) {
     if diff.modified.is_empty() {
         return;
@@ -618,12 +648,14 @@ mod tests {
             stamps: map(&[("A", "t2"), ("B", "t2"), ("C", "t2"), ("D", "t")]),
         };
         let moved = map(&[("A", "other/A"), ("B", "arr/B"), ("C", "arr/C"), ("D", "arr/D")]);
-        let got = ThornChanges::new([Some(&providers), Some(&shapes), Some(&stamps)], Some(&moved), Some(&now));
+        let got =
+            ThornChanges::new(Some(&providers), Some(&shapes), Some(&stamps), Some(&moved), Some(&now));
         assert_eq!(got.providers, ["A"]);
         assert_eq!(got.shapes, ["B"]);
         assert_eq!(got.stamps, ["C"]);
 
-        let unstamped = ThornChanges::new([Some(&providers), Some(&shapes), None], Some(&providers), Some(&now));
+        let unstamped =
+            ThornChanges::new(Some(&providers), Some(&shapes), None, Some(&providers), Some(&now));
         assert_eq!(unstamped.shapes, ["A", "B"]);
         assert!(unstamped.stamps.is_empty(), "no recorded stamps is no information");
     }

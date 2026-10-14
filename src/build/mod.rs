@@ -848,7 +848,12 @@ const SHAPE_WALK_MAX_DEPTH: u32 = 32;
 /// build by simply declining to recurse past `SHAPE_WALK_MAX_DEPTH` rather
 /// than erroring — silent truncation is fine here, since it can only make a
 /// fingerprint miss part of an already-pathological tree, not corrupt one.
-fn walk_shape_dir(dir: &Path, prefix: &str, depth: u32, out: &mut Vec<ShapeFile>) -> std::io::Result<()> {
+fn walk_shape_dir(
+    dir: &Path,
+    prefix: &str,
+    depth: u32,
+    out: &mut Vec<ShapeFile>,
+) -> std::io::Result<()> {
     if depth > SHAPE_WALK_MAX_DEPTH {
         return Ok(());
     }
@@ -1256,40 +1261,35 @@ pub fn rebuild_decision(
     }
 }
 
+/// What a short-circuited build did with thorn stamps (see `thorn_shapes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampReading {
+    /// No thorn could be stamped: nothing compared, nothing recorded.
+    Absent,
+    /// The record had none (built before stamps, or rewritten by a cactup
+    /// without them): this build records the first, compared with nothing.
+    FirstBaseline,
+    /// Compared with the record's, and equal.
+    Compared,
+}
+
 /// The line a short-circuited build prints. It must never claim "same
 /// sources" for anything cactup did not actually compare: not when the probe
 /// found no sources at all (`no_sources`), not when there was no baseline to
-/// compare with (`had_baseline`), and not for the thorns of a plain
-/// `ThornList` that have no repo behind them (`untracked`, less those whose
-/// stamp this build compared) — each of those is a way for an edit to be
-/// silently ignored, which is the one thing a user must be told. `stamped`
-/// is whether this build compared thorn stamps at all: with no repo to read,
-/// they are all that stands between an edit and "up to date".
+/// compare with (`had_baseline`, or `stamps` short of `Compared`), and not
+/// for the thorns of a plain `ThornList` that have no repo behind them
+/// (`untracked`, less those whose stamp this build compared) — each of those
+/// is a way for an edit to be silently ignored, which is the one thing a
+/// user must be told. With no repo to read, stamps are all that stands
+/// between a thorn edit and "up to date".
 fn up_to_date_message(
     name: &str,
     no_sources: Option<&crate::fetch::NoSources>,
     had_baseline: bool,
     untracked: &[String],
-    stamped: bool,
+    stamps: StampReading,
 ) -> String {
     const AGAIN: &str = "pass --reconfig to rebuild incrementally, or -f to rebuild from scratch";
-    if let Some(why) = no_sources
-        && stamped
-    {
-        return format!(
-            "Config {name} is up to date as far as cactup can tell (same optionlist, same \
-             universe, same thornlist, same thorn files), but it cannot track this config's \
-             repos: {why}. Edits to the Cactus flesh and refetches that move it go unnoticed; \
-             {AGAIN}."
-        );
-    }
-    if let Some(why) = no_sources {
-        return format!(
-            "Config {name} is up to date as far as cactup can tell (same optionlist, same \
-             universe, same thornlist), but it cannot track this config's sources: {why}. Source \
-             edits and refetches go unnoticed; {AGAIN}."
-        );
-    }
     let untracked_note = if untracked.is_empty() {
         String::new()
     } else {
@@ -1299,19 +1299,50 @@ fn up_to_date_message(
             summarize(untracked)
         )
     };
-    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
+    // The upgrade case: a config last built before stamps existed may have
+    // had thorns regenerated since, and nothing could have noticed.
+    const NO_STAMPS: &str = "Its thorns' files had no baseline, so they become one now and later \
+                             edits to them are detected.";
+    if let Some(why) = no_sources {
+        let unseen = "Edits to the Cactus flesh and refetches that move it go unnoticed";
+        return match stamps {
+            StampReading::Compared => format!(
+                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+                 universe, same thornlist, same thorn files), but it cannot track this config's \
+                 repos: {why}.{untracked_note} {unseen}; {AGAIN}."
+            ),
+            StampReading::FirstBaseline => format!(
+                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+                 universe, same thornlist), but it cannot track this config's repos: {why}. \
+                 {NO_STAMPS}{untracked_note} {unseen}. If thorns or the flesh changed since the \
+                 last build, {AGAIN}."
+            ),
+            StampReading::Absent => format!(
+                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+                 universe, same thornlist), but it cannot track this config's sources: {why}. \
+                 Source edits and refetches go unnoticed; {AGAIN}."
+            ),
+        };
+    }
     if !had_baseline {
-        format!(
+        return format!(
             "Config {name} is up to date (same optionlist, same universe, same thornlist). It had \
              no source baseline, so the sources as they stand now become one and later changes \
              are detected.{untracked_note} If they changed since the last build, {AGAIN}."
-        )
-    } else {
-        format!(
-            "Config {name} is up to date (same optionlist, same universe, same thornlist, \
-             {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
-        )
+        );
     }
+    if stamps == StampReading::FirstBaseline {
+        return format!(
+            "Config {name} is up to date (same optionlist, same universe, same thornlist, same \
+             sources for what cactup tracks). {NO_STAMPS}{untracked_note} If files git does not \
+             track were regenerated since the last build, {AGAIN}."
+        );
+    }
+    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
+    format!(
+        "Config {name} is up to date (same optionlist, same universe, same thornlist, \
+         {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
+    )
 }
 
 /// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4):
@@ -1896,8 +1927,8 @@ fn prepare_with_cache(
         stored_meta.as_ref().and_then(|m| m.thorn_stamps.as_ref()),
         fresh_stamps.as_ref(),
     );
-    let stamped = decision == RebuildDecision::UpToDate && !changed_stamps.is_empty();
-    if stamped {
+    let stamp_rebuild = decision == RebuildDecision::UpToDate && !changed_stamps.is_empty();
+    if stamp_rebuild {
         decision = RebuildDecision::Incremental("thorn sources were edited");
     }
     if opts.force {
@@ -1918,17 +1949,23 @@ fn prepare_with_cache(
         && is_complete(&cactus_root, name)
         && let Some(stored) = stored_meta.clone()
     {
-        // Past tense: what this build compared, so a stamp counts only if the
-        // last build recorded one too.
-        let stamped = stamping && stored.thorn_stamps.as_ref().is_some_and(|s| !s.is_empty());
+        // What this build compared: a stamp counts only if the last build
+        // recorded one too. A first baseline names what it starts covering
+        // in its own words, so `untracked` (filtered by the fresh stamps)
+        // stands as it is then.
+        let stamps = match (stamping, stored.thorn_stamps.as_ref().is_some_and(|s| !s.is_empty())) {
+            (false, _) => StampReading::Absent,
+            (true, false) => StampReading::FirstBaseline,
+            (true, true) => StampReading::Compared,
+        };
         let unseen: Vec<String> = untracked
             .iter()
-            .filter(|t| !has_stamp(stored.thorn_stamps.as_ref(), t))
+            .filter(|t| stamps != StampReading::Compared || !has_stamp(stored.thorn_stamps.as_ref(), t))
             .cloned()
             .collect();
         println!(
             "{}",
-            up_to_date_message(name, no_sources.as_ref(), stored.sources.is_some(), &unseen, stamped)
+            up_to_date_message(name, no_sources.as_ref(), stored.sources.is_some(), &unseen, stamps)
         );
         // Record the source/provider/shape baseline even though nothing was
         // built. A config last built by a cactup without source, provenance,
@@ -2039,7 +2076,7 @@ fn prepare_with_cache(
                 summarize(&source_change.vanished)
             );
         }
-        if stamped {
+        if stamp_rebuild {
             println!("  thorns with edited files: {}", summarize(&changed_stamps));
         }
     }
@@ -4679,27 +4716,40 @@ mod tests {
     /// not compare: no reading at all, no baseline yet, or untracked thorns.
     #[test]
     fn up_to_date_message_never_overclaims_the_sources() {
-        let plain = up_to_date_message("bcx", None, true, &[], true);
+        let plain = up_to_date_message("bcx", None, true, &[], StampReading::Compared);
         assert!(plain.contains("same sources)"), "{plain}");
 
-        let untracked = up_to_date_message("bcx", None, true, &["Local/Mine".to_string()], true);
+        let mine = ["Local/Mine".to_string()];
+        let untracked = up_to_date_message("bcx", None, true, &mine, StampReading::Compared);
         assert!(!untracked.contains("same sources)"), "{untracked}");
         assert!(untracked.contains("Local/Mine") && untracked.contains("--reconfig"), "{untracked}");
 
-        let fresh = up_to_date_message("bcx", None, false, &["Local/Mine".to_string()], false);
+        let fresh = up_to_date_message("bcx", None, false, &mine, StampReading::Absent);
         assert!(!fresh.contains("same sources"), "{fresh}");
         assert!(fresh.contains("no source baseline") && fresh.contains("Local/Mine"), "{fresh}");
 
         let why = crate::fetch::NoSources::NoGitRepos;
-        let blind = up_to_date_message("bcx", Some(&why), true, &[], false);
+        let blind = up_to_date_message("bcx", Some(&why), true, &[], StampReading::Absent);
         assert!(!blind.contains("same sources"), "{blind}");
         assert!(blind.contains("names no git repos") && blind.contains("--reconfig"), "{blind}");
 
         // With no repo to read, stamped thorns are still compared: say so,
         // and name the flesh as what goes unnoticed — not "Source edits".
-        let stamped = up_to_date_message("bcx", Some(&why), true, &[], true);
+        let stamped = up_to_date_message("bcx", Some(&why), true, &[], StampReading::Compared);
         assert!(stamped.contains("same thorn files") && stamped.contains("Cactus flesh"), "{stamped}");
         assert!(!stamped.contains("Source edits"), "{stamped}");
+        // ...and an untracked entry this build did not compare is still named.
+        let new = ["Local/New".to_string()];
+        let partly = up_to_date_message("bcx", Some(&why), true, &new, StampReading::Compared);
+        assert!(partly.contains("Local/New"), "{partly}");
+
+        // The upgrade case: a record without stamps compared no thorn files,
+        // so the line must neither claim them nor imply nothing could change.
+        for no_sources in [None, Some(&why)] {
+            let first = up_to_date_message("bcx", no_sources, true, &[], StampReading::FirstBaseline);
+            assert!(!first.contains("same sources)") && !first.contains("same thorn files"), "{first}");
+            assert!(first.contains("had no baseline") && first.contains("--reconfig"), "{first}");
+        }
     }
 
     #[test]
@@ -5197,7 +5247,8 @@ mod tests {
             edited.meta.thorn_shapes.as_ref().unwrap()["TestThorn"], first_shape,
             "the fingerprint must be blind to ordinary source content"
         );
-        assert_ne!(edited.meta.thorn_stamps.as_ref().unwrap()["TestThorn"], first_stamp, "the stamp must see it");
+        let edited_stamp = &edited.meta.thorn_stamps.as_ref().unwrap()["TestThorn"];
+        assert_ne!(*edited_stamp, first_stamp, "the stamp must see it");
         assert!(
             !stale_thorn_state_gone(&config_dir, "TestThorn"),
             "make must be left to handle a body edit — the per-thorn build state must survive"
@@ -5247,6 +5298,41 @@ mod tests {
             "invalidation must be scoped per thorn: a body-edited thorn keeps its build state \
              even while another thorn is being invalidated in the same build"
         );
+    }
+
+    /// The upgrade path: a record without stamps (built by a cactup before
+    /// them, or rewritten by one) compares no thorn files. It must neither
+    /// rebuild for want of a baseline — that would cost every config a
+    /// rebuild on upgrade — nor fail to adopt one, or edits would stay unseen.
+    #[test]
+    fn a_record_without_stamps_adopts_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;\n\
+                 *) ;;",
+                c = cactus.display()
+            ),
+        );
+        let (list, thorn_dir) = write_shape_fixture(&cactus);
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list);
+        assert!(build(&inst, &machine, "sim", &first_opts).unwrap().rebuilt);
+
+        let mut record = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        record.thorn_stamps = None;
+        record.store(&cactus).unwrap();
+        let upgraded = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!upgraded.rebuilt, "no stamps on record is no information, not a change");
+        let adopted = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        assert!(adopted.thorn_stamps.is_some_and(|s| s.contains_key("TestThorn")), "baseline adopted");
+
+        fs::write(thorn_dir.join("src/thorn.cc"), "int a; int b;\n").unwrap();
+        assert!(build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "the adopted baseline sees edits");
     }
 
     /// Defect A, configure-failure branch: the marker is absent (configure

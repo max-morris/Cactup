@@ -250,23 +250,29 @@ A config is built from two things, and cactup tracks changes to both:
 - **What those thorns are built from** comes from the source repos under
   `Cactus/repos/`. At every build, cactup records the commit each of that
   config's repos was on and whether its worktree had local modifications, then
-  compares that against the tree at the next build.
+  compares that against the tree at the next build. It also records, per
+  thorn, when each of the files it compiles was last written. That is what
+  notices an edit to files git doesn't track: a thorn generated into a
+  checkout without being committed, say.
 
   The thornlist can be in GetComponents (CRL) form or a plain Cactus
   `ThornList` (one `Arrangement/Thorn` per line). For a plain list, cactup
   finds each thorn's repo by following its `arrangements/<A>/<T>` link into
   `Cactus/repos/`. A thorn that isn't such a link (a directory you created by
-  hand, say) is still built, but its sources aren't tracked, and every build
-  names it. If cactup can't track a config's sources at all (none of its
-  repos can be found or read), every build says so and why, and source
-  changes go unnoticed. After editing such a config's sources, rebuild it with
-  `--reconfig`. `cactup config delta <name>` gives the same explanation.
+  hand, say) is still built, and edits to its files are still noticed, but
+  not which commit it came from. If cactup can't track a config's repos at
+  all (none of them can be found or read), every build says so and why: edits
+  to thorn files still trigger a rebuild, but changes to the Cactus flesh go
+  unnoticed. After changing the flesh, rebuild with `--reconfig`, and after a
+  refetch, with `-f`. `cactup config delta <name>` gives the same
+  explanation.
 
 The second half is what makes ordinary source work visible. All of these are
 picked up by a plain `cactup build <name>`, with no `-f`:
 
 - **You edited a thorn in place.** Same commit, changed files — the everyday
-  workflow of hacking on a thorn and rebuilding.
+  workflow of hacking on a thorn and rebuilding. That includes files git
+  doesn't track, such as a thorn a code generator rewrites.
 - **You checked out a different branch or commit inside a repo.**
 - **A refetch moved the repos** (see
   [Installing Releases](installing-releases.html)), even though it usually
@@ -277,7 +283,7 @@ What each costs:
 | What changed | What `cactup build <name>` does |
 |---|---|
 | Nothing under this config | short-circuits: "up to date" |
-| A thorn's body code edited in place (a `.cc`, `.F90`, header, …) | reconfigure + rebuild what the edit affects; that thorn's `build/<Thorn>/` is left alone |
+| A thorn's body code edited in place (a `.cc`, `.F90`, header, …), tracked by git or not | reconfigure + rebuild what the edit affects; that thorn's `build/<Thorn>/` is left alone |
 | A thorn's *shape* changed — a file added or removed, or a `.ccl` / `make.code.defn` / `make.configuration.defn` / `make.code.deps` edited | that thorn's `build/<Thorn>/` and `libthorn_<Thorn>.a` are deleted, then rebuilt from scratch |
 | A thorn repo on a different commit | reconfigure + rebuild what that affects |
 | The **Cactus flesh** on a different commit | a from-scratch rebuild — the make system and everything `config-data` is generated from have changed |
@@ -301,10 +307,15 @@ orphan object keeps linking in silently. Both failures require deleting that
 thorn's build state outright, which is why a shape change gets a harder reset
 than a body edit. As with source tracking, a config built before this landed
 has no recorded shape baseline; its first build afterward records one and
-invalidates nothing, and every build after that is detected.
+invalidates nothing, and every build after that is detected. The same holds
+for the record of when a thorn's files were written: if you regenerated a
+thorn git doesn't track before your first build with a cactup that keeps that
+record, that build says so, and `--reconfig` picks the change up.
 
-Untracked files are ignored throughout — the test harness leaves output inside
-the source tree, and that must never read as a source change.
+Files git doesn't track count only where the build reads them: a thorn's own
+top-level files and everything under its `src/`. Anywhere else they are
+ignored. The test harness leaves output inside the source tree, and that must
+never read as a source change.
 
 #### Seeing what diverged
 
