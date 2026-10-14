@@ -6340,6 +6340,8 @@ rules to the configuration's build environment as its newest build
 attempt froze it (its environment setup and option list; a configuration
 never built has none to check), without a build (`objcache::doctor`):
 
+- It runs the setup four times (once for the checks, three times for the
+  path variables): a slow module system's setup takes that much longer.
 - It starts the setup in a shell, as the build script does (`set -e`),
   from the Cactus root, with the setup's own stdin `/dev/null` and its
   stdout sent to stderr, and the shell then starts `cactup __cc-doctor`
@@ -6367,7 +6369,14 @@ never built has none to check), without a build (`objcache::doctor`):
   the first only), and a whole key of a small probe compile with every
   flag (its preprocessor and the identity's trial compiles run; no object
   of the build is compiled), which also says whether keys are relocatable
-  and whether files are narrowed; entries of the path variables that are
+  and whether files are narrowed; what each thorn adds to the flags for
+  its own compiles, read as Cactus's `make.subdir` reads it for each of
+  the thorn's source directories (the configuration's `make.config.defn`,
+  the thorn's `bindings/Configuration/Thorns/make.<thorn>.defn`, the
+  directory's `make.code.defn`, `bindings/Configuration/<thorn>/make
+  .configuration.defn`), only the flags beyond the configuration's checked
+  and only directories whose files name a flag variable asked (a flag set
+  for one target, `x.o: CXXFLAGS += …`, is said not to be checked); entries of the path variables that are
   not absolute; and the setup itself, run in bash with each path variable
   unset, empty and set (module commands doing nothing, a sourced file that
   is not there passed over), for one it gives an entry that is not
@@ -6380,7 +6389,8 @@ never built has none to check), without a build (`objcache::doctor`):
   entries found from a value of the shell's), else the setup's (the
   machine's `[environment]`, or its universe's); a flag is the option
   list's variable that has it, else Cactus's default for the compiler of
-  the finding's language, as configure wrote it; a compiler is the option
+  the finding's language, as configure wrote it, or the thorn whose file
+  adds it (only that thorn's compiles get it); a compiler is the option
   list's, else the one configure chose.
 - The checks are named sets returning findings (`doctor::CheckSet`), so
   that a general `cactup doctor` can run them with others.

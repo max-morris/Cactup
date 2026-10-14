@@ -2545,6 +2545,27 @@ stands in. Left: a variable a module sets (stubbed in the setup's run for
 the path variables) can make an entry look fragile there; a thorn's own
 flags (`make.code.defn`) are not seen.
 
+### M5 part 2, round 3 (on `770193e`): BLOCKED by both
+
+Both re-ran rounds 1 and 2 (an empty setup, a failing one, `exit 0`,
+`LD_PRELOAD` by name, a flag in `CC`, progress counting, Ctrl-C in every
+phase leaving nothing behind: fixed) and confirmed nothing changes a build
+or what is served. Blocking, fixed in the commit after this record:
+- (A) a setup leaving a process in the background that holds the pipes
+  (`sleep 15 &`) was "not checked": the reader gave up and threw away what
+  it had. The setup's output goes to files now, and only the shell is
+  waited for (as the wrapper's own shell lookup does); an answer that
+  parses is the proof the setup ran through (`exec 2>/dev/null`).
+- (A) the setup's run for the path variables split every variable on
+  blanks (`/opt/My Tools/bin` flagged): only `LD_PRELOAD`'s.
+- (B) a compiler text only a shell runs (`CC = LANG=C gcc`) was given a
+  fix that named a word of it as a flag: a hint of its own.
+Also, at Max's word ("seems worth fixing"): the flags a thorn adds for its
+own compiles in its `make.code.defn` (and its bindings' make files) are
+checked, read as Cactus's `make.subdir` reads them for each of its source
+directories, traced to the thorn's file; a flag set for one target only is
+said not to be checked. The setup runs four times: said in the spec.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -107,6 +107,10 @@ pub struct Raw {
     /// The make variable it is in, or the environment variable it is about.
     pub variable: Option<String>,
     pub reason: String,
+    /// The thorn (and the file of it) that adds the flag, for a flag only
+    /// a thorn's own compiles get.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thorn: Option<String>,
 }
 
 /// What the process in the build environment answers.
@@ -186,6 +190,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 language: None,
                 variable: None,
                 reason: format!("the compilers and flags are the option list's: make could not give the configuration's ({e:#})"),
+                thorn: None,
             });
             request.optionlist.clone()
         }),
@@ -194,7 +199,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     // The environment: what keeps every compile out.
     for reason in environment::refusals(std::env::vars_os()) {
         let variable = reason.split_whitespace().next().map(str::to_owned);
-        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason });
+        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason, thorn: None });
     }
     // Entries of the path variables that are not absolute: some keep a
     // kind of compile out (below, in the probe's key); every one makes each
@@ -208,21 +213,162 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 language: None,
                 variable: Some(variable.to_owned()),
                 reason: format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"),
+                thorn: None,
             });
         }
     }
     let Ok(tmp) = tempfile::tempdir() else { return reply };
+    let mut parsers = Vec::new();
     for language in &request.languages {
-        reply.found.extend(check_language(request, language, &reply.values, tmp.path(), probe));
+        reply.found.extend(check_language(request, language, &reply.values, tmp.path(), probe, &mut parsers));
+    }
+    // What thorns add to the flags for their own compiles.
+    if let Some(config_dir) = &request.config_dir {
+        reply.found.extend(thorn_flags(config_dir, &request.conf.cactus_root, &reply.values, &parsers));
     }
     reply
 }
 
+/// A language whose compiler was identified, and so whose flags can be
+/// read.
+struct Parser {
+    language: Language,
+    family: identity::Family,
+}
+
+/// Do the flags `flags` pass the wrapper's reader of a compile of a source
+/// named `source` with a compiler of `family`?
+fn parse_flags(family: identity::Family, flags: &[OsString], source: &str) -> Result<(), String> {
+    let mut args: Vec<OsString> = flags.to_vec();
+    args.extend(["-c", "-o", "probe.o", source].map(OsString::from));
+    match family {
+        identity::Family::Nvcc => compile::parse_cuda(&args).map(|_| ()),
+        _ => compile::parse(&args).map(|_| ()),
+    }
+}
+
+/// What each thorn of the configuration at `config_dir` (a Cactus tree at
+/// `cactus_root`) adds to the flag variables for its own compiles, read as
+/// Cactus's `make.subdir` reads them for each of the thorn's source
+/// directories: the configuration's `make.config.defn`, then the thorn's
+/// `bindings/Configuration/Thorns/make.<thorn>.defn`, the directory's
+/// `make.code.defn`, and `bindings/Configuration/<thorn>/make.configuration
+/// .defn`. Only the flags a thorn adds are checked (the configuration's are
+/// checked already), and only directories whose files name a flag variable
+/// are asked (`make` runs once for each). A flag set for one target of a
+/// thorn (`x.o: CXXFLAGS += …`) is not evaluated: said so.
+fn thorn_flags(config_dir: &Path, cactus_root: &Path, values: &BTreeMap<String, String>, parsers: &[Parser]) -> Vec<Raw> {
+    let mut found = Vec::new();
+    let variables: Vec<String> = {
+        let mut variables: Vec<String> = parsers.iter().flat_map(|parser| parser.language.flag_variables.clone()).collect();
+        variables.sort();
+        variables.dedup();
+        variables
+    };
+    if variables.is_empty() {
+        return found;
+    }
+    let thorns: Vec<String> = std::fs::read_to_string(config_dir.join("ThornList"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split('#').next())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|thorn| thorn.contains('/'))
+        .map(str::to_owned)
+        .collect();
+    let bindings = config_dir.join("bindings/Configuration");
+    for thorn in thorns {
+        if gix::interrupt::is_triggered() {
+            break;
+        }
+        let Some(name) = thorn.rsplit('/').next() else { continue };
+        let src = cactus_root.join("arrangements").join(&thorn).join("src");
+        let shared = [bindings.join(format!("Thorns/make.{name}.defn")), bindings.join(name).join("make.configuration.defn")];
+        let mut dirs = Vec::new();
+        source_dirs(&src, 0, &mut dirs);
+        for dir in dirs {
+            let defn = dir.join("make.code.defn");
+            let texts: Vec<(PathBuf, String)> = std::iter::once(defn.clone()).chain(shared.iter().cloned()).filter_map(|path| Some((path.clone(), std::fs::read_to_string(&path).ok()?))).collect();
+            if !texts.iter().any(|(_, text)| variables.iter().any(|variable| text.contains(variable.as_str()))) {
+                continue;
+            }
+            let shown = defn.strip_prefix(cactus_root).unwrap_or(&defn).display().to_string();
+            // A flag variable set for one target only.
+            for (path, text) in &texts {
+                for line in text.lines().filter(|line| !line.trim_start().starts_with('#')) {
+                    let Some((target, rest)) = line.split_once(':') else { continue };
+                    let target_like = !target.trim().is_empty() && !target.contains('=') && !rest.starts_with('=');
+                    if target_like && variables.iter().any(|variable| rest.trim_start().trim_start_matches("override ").starts_with(variable.as_str())) {
+                        found.push(Raw {
+                            severity: Severity::Note,
+                            language: None,
+                            variable: None,
+                            reason: format!("a flag variable is set for one target only, which is not checked here: {}", line.trim()),
+                            thorn: Some(format!("{thorn} ({})", path.strip_prefix(cactus_root).unwrap_or(path).display())),
+                        });
+                    }
+                }
+            }
+            let Ok(theirs) = evaluate(config_dir, &variables, Some((name, &dir))) else { continue };
+            for parser in parsers {
+                for variable in &parser.language.flag_variables {
+                    let base: Vec<&str> = values.get(variable).map(|value| value.split_whitespace().collect()).unwrap_or_default();
+                    let value = theirs.get(variable).cloned().unwrap_or_default();
+                    let words = super::cuda::shell_words(&value, |name| std::env::var(name).ok()).unwrap_or_else(|_| value.split_whitespace().map(str::to_owned).collect());
+                    // The thorn's own: the words beyond the configuration's.
+                    let mut left = base.clone();
+                    let added: Vec<OsString> = words
+                        .iter()
+                        .filter(|word| match left.iter().position(|base| base == word) {
+                            Some(at) => {
+                                left.remove(at);
+                                false
+                            }
+                            None => true,
+                        })
+                        .map(OsString::from)
+                        .collect();
+                    if added.is_empty() {
+                        continue;
+                    }
+                    if let Err(why) = parse_flags(parser.family, &added, &format!("probe.{}", parser.language.suffix)) {
+                        found.push(Raw {
+                            severity: Severity::KeepsOut,
+                            language: Some(parser.language.name.clone()),
+                            variable: Some(variable.clone()),
+                            reason: why,
+                            thorn: Some(format!("{thorn} ({shown})")),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The directories under `dir` with a `make.code.defn` (a thorn's `src`
+/// and those of its subdirectories that have one), to a depth of 4.
+fn source_dirs(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+    if depth > 4 {
+        return;
+    }
+    if dir.join("make.code.defn").is_file() {
+        found.push(dir.to_owned());
+    }
+    let Ok(listing) = std::fs::read_dir(dir) else { return };
+    for entry in listing.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            source_dirs(&entry.path(), depth + 1, found);
+        }
+    }
+}
+
 /// The compiler and flags of `language`, as `values` has them, checked as a
 /// compile of it through the wrapper would be.
-fn check_language(request: &Request, language: &Language, values: &BTreeMap<String, String>, tmp: &Path, probe: bool) -> Vec<Raw> {
+fn check_language(request: &Request, language: &Language, values: &BTreeMap<String, String>, tmp: &Path, probe: bool, parsers: &mut Vec<Parser>) -> Vec<Raw> {
     let mut found = Vec::new();
-    let raw = |severity, variable: Option<&str>, reason: String| Raw { severity, language: Some(language.name.clone()), variable: variable.map(str::to_owned), reason };
+    let raw = |severity, variable: Option<&str>, reason: String| Raw { severity, language: Some(language.name.clone()), variable: variable.map(str::to_owned), reason, thorn: None };
     let Some(compiler) = values.get(&language.compiler_variable).filter(|value| !value.trim().is_empty() && value.trim() != "none") else {
         return found;
     };
@@ -272,14 +418,8 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     // Each variable of flags on its own, so that every flag the cache does
     // not follow is found, with the variable it is in.
     let source = format!("probe.{}", language.suffix);
-    let parse = |flags: &[OsString]| {
-        let mut args: Vec<OsString> = flags.to_vec();
-        args.extend(["-c", "-o", "probe.o", &source].map(OsString::from));
-        match compiler.family {
-            identity::Family::Nvcc => compile::parse_cuda(&args).map(|_| ()),
-            _ => compile::parse(&args).map(|_| ()),
-        }
-    };
+    let parse = |flags: &[OsString]| parse_flags(compiler.family, flags, &source);
+    parsers.push(Parser { language: language.clone(), family: compiler.family });
     // The compiler's own words after its name (`g++ -std=c++17`): the
     // compiler variable's, checked once.
     if let Err(why) = parse(&words[1..]) {
@@ -344,22 +484,36 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
 /// `config_dir` (Cactus's `make.config.defn`, with its conditionals: the
 /// optimizing flags where optimizing, and the like), in this environment.
 fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String, String>> {
+    let mut variables: Vec<String> = Vec::new();
+    for language in languages {
+        variables.push(language.compiler_variable.clone());
+        variables.extend(language.flag_variables.iter().cloned());
+    }
+    variables.sort();
+    variables.dedup();
+    evaluate(config_dir, &variables, None)
+}
+
+/// The values of `variables` as `make` has them for the configuration at
+/// `config_dir`, and with `thorn` (its name and one of its source
+/// directories) as Cactus's `make.subdir` has them for that directory's
+/// compiles.
+fn evaluate(config_dir: &Path, variables: &[String], thorn: Option<(&str, &Path)>) -> Res<BTreeMap<String, String>> {
     let defn = config_dir.join("config-data/make.config.defn");
     if !defn.is_file() {
         anyhow::bail!("{} is not there", defn.display());
     }
-    let mut variables: Vec<&str> = Vec::new();
-    for language in languages {
-        variables.push(&language.compiler_variable);
-        variables.extend(language.flag_variables.iter().map(String::as_str));
-    }
-    variables.sort();
-    variables.dedup();
     let dir = tempfile::tempdir().context("Failed to make a temporary directory")?;
     // `$(info)`: no shell between make and the values (a quote in one is
     // its own).
-    let mut makefile = format!("TOP := {}\ninclude {}\n", config_dir.display(), defn.display());
-    for variable in &variables {
+    let mut makefile = format!("TOP := {}\nCONFIG := {}/config-data\ninclude {}\n", config_dir.display(), config_dir.display(), defn.display());
+    if let Some((name, src)) = thorn {
+        makefile.push_str(&format!(
+            "THORN := {name}\nSRCDIR := {src}\nBINDINGS_DIR = $(TOP)/bindings\n-include $(BINDINGS_DIR)/Configuration/Thorns/make.$(THORN).defn\n-include $(SRCDIR)/make.code.defn\n-include $(TOP)/bindings/Configuration/$(THORN)/make.configuration.defn\n",
+            src = src.display()
+        ));
+    }
+    for variable in variables {
         makefile.push_str(&format!("$(info {variable}=$({variable}))\n"));
     }
     makefile.push_str("print: ; @:\n");
@@ -416,8 +570,7 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
         if state != "set" {
             command.env("PATH", "/usr/bin:/bin");
         }
-        let child = command.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("the setup could not be run: {e}"))?;
-        let out = wait_interruptibly(child).map_err(|e| format!("{e:#}"))?;
+        let out = run_to_files(&mut command, None).map_err(|e| format!("{e:#}"))?;
         let out = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((_, values)) = out.split_once(&format!("{END}\n")) else {
             return Err(format!("with the path variables {state} before it, the setup did not run to its end (an exit, or a command that failed under set -e), so what it sets is not known"));
@@ -428,7 +581,11 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
             if value == "<unset>" || (value.is_empty() && state != "set") {
                 continue;
             }
-            if value.split([':', ' ']).any(|entry| relative_entry(variable, entry.as_bytes())) && !found.iter().any(|(found, _, _): &(String, _, _)| found == variable) {
+            let entries: Vec<&str> = match variable {
+                "LD_PRELOAD" => value.split([':', ' ']).collect(),
+                _ => value.split(':').collect(),
+            };
+            if entries.iter().any(|entry| relative_entry(variable, entry.as_bytes())) && !found.iter().any(|(found, _, _): &(String, _, _)| found == variable) {
                 found.push((variable.to_owned(), state, value.to_owned()));
             }
         }
@@ -455,26 +612,15 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
     // A line on stderr once the setup is through: one that ends the shell
     // with status 0 (an `exit`, a `return`) is told from the checks.
     let script = setup_then(env, &format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(cactup)));
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&script)
-        .current_dir(cactus_root)
-        .process_group(0)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to start the build environment's shell")?;
     let input = serde_json::to_vec(request).context("Failed to write the checks' request")?;
-    // From a thread of its own: a setup that stops at once never reads it
-    // (what it said is the finding, not the broken pipe), one that runs
-    // long reads it late.
-    if let Some(mut stdin) = child.stdin.take() {
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        });
+    let out = run_to_files(Command::new("/bin/sh").arg("-c").arg(&script).current_dir(cactus_root), Some(input))?;
+    // An answer is the proof the setup ran through (its stderr may be gone:
+    // `exec 2>/dev/null`).
+    if out.status.success()
+        && let Ok(reply) = serde_json::from_slice::<Reply>(&out.stdout)
+    {
+        return Ok(reply);
     }
-    let out = wait_interruptibly(child)?;
     let said = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() && !said.contains(SETUP_DONE) {
         let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
@@ -488,54 +634,56 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
 
 /// Wait for `child`, stopping it on Ctrl-C (`CLAUDE.md`'s interrupt
 /// contract): a module system's setup can take a while.
-fn wait_interruptibly(mut child: std::process::Child) -> Res<std::process::Output> {
-    use std::sync::mpsc;
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            let _ = sender.send(bytes);
-        });
-        receiver
-    };
-    let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    // The setup's process group: what it started too (it runs in a group of
-    // its own).
-    let kill = |child: &mut std::process::Child| {
-        if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    };
+fn wait_interruptibly(mut child: std::process::Child) -> Res<std::process::ExitStatus> {
     loop {
         if let Some(status) = child.try_wait().context("Failed to wait for the build environment")? {
-            // A process the setup left running in the background may hold
-            // the pipes: what came within a moment is all there is.
-            let collect = |receiver: &mpsc::Receiver<Vec<u8>>| {
-                for _ in 0..20 {
-                    if let Ok(bytes) = receiver.recv_timeout(std::time::Duration::from_millis(50)) {
-                        return bytes;
-                    }
-                    if gix::interrupt::is_triggered() {
-                        break;
-                    }
-                }
-                Vec::new()
-            };
-            let (stdout, stderr) = (collect(&stdout), collect(&stderr));
-            return Ok(std::process::Output { status, stdout, stderr });
+            return Ok(status);
         }
         if gix::interrupt::is_triggered() {
-            kill(&mut child);
+            // The setup's process group: what it started too (it runs in
+            // a group of its own).
+            if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
             anyhow::bail!("interrupted");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+/// Run `command` with its stdout and stderr in files of their own, waiting
+/// for it alone (a process it leaves in the background may keep them open:
+/// what was written by the time it ends is all there is), with `input` on
+/// its stdin. Ctrl-C stops it.
+fn run_to_files(command: &mut Command, input: Option<Vec<u8>>) -> Res<std::process::Output> {
+    let stdout = tempfile::tempfile().context("Failed to make a temporary file")?;
+    let stderr = tempfile::tempfile().context("Failed to make a temporary file")?;
+    let mut child = command
+        .process_group(0)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(stdout.try_clone().context("Failed to share a temporary file")?)
+        .stderr(stderr.try_clone().context("Failed to share a temporary file")?)
+        .spawn()
+        .context("Failed to start the build environment's shell")?;
+    // From a thread of its own: a setup that stops at once never reads it
+    // (what it said is the finding, not a broken pipe), one that runs long
+    // reads it late.
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
+    let status = wait_interruptibly(child)?;
+    let read = |mut file: std::fs::File| {
+        use std::io::Seek;
+        let mut bytes = Vec::new();
+        let _ = file.seek(std::io::SeekFrom::Start(0));
+        let _ = file.read_to_end(&mut bytes);
+        bytes
+    };
+    Ok(std::process::Output { status, stdout: read(stdout), stderr: read(stderr) })
 }
 
 /// The checks of a configuration's build environment, as the build
@@ -582,7 +730,7 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     let found: Vec<Raw> = reply.found.iter().map(|raw| with_flag_variable(raw, &reply.values)).collect();
     let mut merged: Vec<(Severity, &Raw, Vec<&str>)> = Vec::new();
     for raw in &found {
-        match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && (seen.variable == raw.variable || seen.variable.is_none() || raw.variable.is_none())) {
+        match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && seen.thorn == raw.thorn && (seen.variable == raw.variable || seen.variable.is_none() || raw.variable.is_none())) {
             Some((severity, seen, languages)) => {
                 *severity = (*severity).min(raw.severity);
                 // The one that names where it is.
@@ -671,6 +819,15 @@ fn with_flag_variable(raw: &Raw, values: &BTreeMap<String, String>) -> Raw {
 
 /// Where a finding comes from, and what to change.
 fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaults: &BTreeMap<String, String>, source: &str, setup: &str) -> (String, Option<String>) {
+    // A thorn's own flag: only that thorn's compiles get it.
+    if let Some(thorn) = &raw.thorn {
+        let from = match &raw.variable {
+            Some(variable) => format!("thorn {thorn}, which adds it to {variable} for its own compiles"),
+            None => format!("thorn {thorn}"),
+        };
+        let fix = (raw.severity == Severity::KeepsOut).then(|| "the cache stays out of that thorn's compiles of this language only; the flag is the thorn's own".to_owned());
+        return (from, fix);
+    }
     // About an environment variable: the user's shell if it had the
     // variable (with the entries found) before the setup ran, else the
     // setup.
@@ -710,6 +867,8 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
         let skip = usize::from(compilers.contains(&variable.as_str()));
         value.split_whitespace().skip(skip).find(|flag| raw.reason.split([' ', ',', '(', ')']).any(|word| word == *flag) || (flag.ends_with("native") && raw.reason.contains("native")))
     });
+    // (Not where the compiler's whole text is the reason: it is no flag's.)
+    let in_variable = in_variable.filter(|_| !raw.reason.contains("is not a plain command"));
     if let Some(flag) = raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')).or(in_variable) {
         // Within the finding's language where it has one (`C_OPTIMISE_FLAGS`
         // for C, not `CXX_OPTIMISE_FLAGS`).
@@ -751,7 +910,8 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
 
 /// What would let compiles kept out for `why` in, where cactup knows.
 pub fn hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 10] = [
+    let hints: [(&str, &str); 11] = [
+        ("is not a plain command naming a program", "name the compiler alone in the option list (CC = gcc): settings such as LANG=C belong in the machine's environment setup, and flags in the flags variable"),
         ("already stands in front of the compiler", "name the compiler itself in the option list (CC = gcc, not ccache gcc): the build cache takes ccache's place"),
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
@@ -853,6 +1013,12 @@ mod tests {
         let refused: Vec<&Raw> = reply_cc.found.iter().filter(|raw| raw.severity == Severity::KeepsOut).collect();
         assert!(refused.iter().any(|raw| raw.variable.as_deref() == Some("CC") && raw.reason.contains("--coverage")), "{:?}", reply_cc.found);
         assert!(!refused.iter().any(|raw| raw.variable.as_deref() == Some("CFLAGS")), "{:?}", reply_cc.found);
+        // A compiler text only a shell runs: its own hint, no flag's.
+        let not_plain = Raw { variable: Some("CC".into()), reason: "LANG=C gcc is not a plain command naming a program, so the recipe's shell runs it".into(), ..(*raw).clone() };
+        let with_lang: BTreeMap<String, String> = [("CC".to_owned(), "LANG=C gcc".to_owned())].into();
+        let reply_lang = Reply { values: with_lang.clone(), ..Reply::default() };
+        let (_, fix) = trace(&not_plain, &reply_lang, &with_lang, &BTreeMap::new(), "x", "y");
+        assert!(fix.is_some_and(|fix| fix.starts_with("name the compiler alone")));
         // A flag configure added: Cactus's defaults.
         let from_defaults = Raw { reason: "-O3 is a flag the cache does not follow".into(), ..(*raw).clone() };
         assert!(trace(&from_defaults, &reply, &BTreeMap::new(), &defaults, "x", "y").0.starts_with("Cactus's default C_OPTIMISE_FLAGS"));
@@ -873,6 +1039,44 @@ mod tests {
         assert!(fragile_entries("").unwrap().is_empty() && fragile_entries("# only this").unwrap().is_empty());
         assert!(fragile_entries("export LD_PRELOAD=libc.so.6\n").unwrap().is_empty(), "a name the loader searches for");
         assert_eq!(fragile_entries("export LD_PRELOAD=lib/x.so\n").unwrap()[0].0, "LD_PRELOAD");
+    }
+
+    /// A process the setup leaves in the background does not hold the run
+    /// up, nor hide what the setup set; a blank in a directory is no
+    /// separator but in `LD_PRELOAD`.
+    #[test]
+    fn a_setup_that_leaves_a_process_behind_and_a_blank_in_a_path() {
+        let start = std::time::Instant::now();
+        let found = fragile_entries("sleep 20 &\nexport CPATH=/opt/inc:$CPATH\n").unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+        assert_eq!(found.iter().map(|(variable, _, _)| variable.as_str()).collect::<Vec<_>>(), ["CPATH"]);
+        assert!(fragile_entries("export PATH=\"/opt/My Tools/bin:$PATH\"\n").unwrap().is_empty());
+    }
+
+    /// A flag a thorn adds in its own `make.code.defn` is checked, and
+    /// traced to it; the configuration's own flags are not checked again.
+    #[test]
+    fn a_thorn_s_own_flags_are_checked() {
+        if identity::find_program(OsStr::new("gcc")).is_err() || identity::find_program(OsStr::new("make")).is_err() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config = root.join("configs/sim");
+        std::fs::create_dir_all(config.join("config-data")).unwrap();
+        std::fs::write(config.join("config-data/make.config.defn"), "export CC = gcc\nexport CPPFLAGS =\nexport CFLAGS = -O2 -fprofile-generate\n").unwrap();
+        std::fs::write(config.join("ThornList"), "# thorns\nArr/Plain\nArr/Adds # its own\n").unwrap();
+        for (thorn, defn) in [("Plain", "SRCS = a.c\n"), ("Adds", "SRCS = a.c\nCFLAGS += -DTHORN=\"a b\" --coverage\nx.c.o: CFLAGS += -O0\n")] {
+            std::fs::create_dir_all(root.join(format!("arrangements/Arr/{thorn}/src"))).unwrap();
+            std::fs::write(root.join(format!("arrangements/Arr/{thorn}/src/make.code.defn")), defn).unwrap();
+        }
+        let c = languages().into_iter().find(|language| language.name == "C").unwrap();
+        let values: BTreeMap<String, String> = [("CC", "gcc"), ("CPPFLAGS", ""), ("CFLAGS", "-O2 -fprofile-generate")].map(|(name, value)| (name.to_owned(), value.to_owned())).into();
+        let found = thorn_flags(&config, root, &values, &[Parser { language: c, family: identity::Family::Gcc }]);
+        let kept: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::KeepsOut).collect();
+        assert_eq!(kept.len(), 1, "{found:?}");
+        assert!(kept[0].reason.contains("--coverage") && kept[0].thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Adds")), "{found:?}");
+        assert!(found.iter().any(|raw| raw.severity == Severity::Note && raw.reason.contains("one target only")), "{found:?}");
     }
 
     /// A setup that gives a variable an empty entry where it was not set
