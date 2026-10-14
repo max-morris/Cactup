@@ -141,6 +141,13 @@ pub struct ConfigMeta {
     /// scalar keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thorn_shapes: Option<BTreeMap<String, String>>,
+    /// Thorn name -> stamp of its compiled files' mtimes and sizes, as of
+    /// this build (`ThornScan::stamps`): what notices an edit to a thorn git
+    /// does not track, which `sources` cannot see (see `thorn_shapes`).
+    /// Absent reads as "no information", like the maps above, and is
+    /// serialized last beside them for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thorn_stamps: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -841,7 +848,12 @@ const SHAPE_WALK_MAX_DEPTH: u32 = 32;
 /// build by simply declining to recurse past `SHAPE_WALK_MAX_DEPTH` rather
 /// than erroring — silent truncation is fine here, since it can only make a
 /// fingerprint miss part of an already-pathological tree, not corrupt one.
-fn walk_shape_dir(dir: &Path, prefix: &str, depth: u32, out: &mut Vec<String>) -> std::io::Result<()> {
+fn walk_shape_dir(
+    dir: &Path,
+    prefix: &str,
+    depth: u32,
+    out: &mut Vec<ShapeFile>,
+) -> std::io::Result<()> {
     if depth > SHAPE_WALK_MAX_DEPTH {
         return Ok(());
     }
@@ -854,18 +866,39 @@ fn walk_shape_dir(dir: &Path, prefix: &str, depth: u32, out: &mut Vec<String>) -
         if meta.is_dir() {
             walk_shape_dir(&entry.path(), &rel, depth + 1, out)?;
         } else if meta.is_file() {
-            out.push(rel);
+            out.push(ShapeFile::new(rel, &meta));
         }
     }
     Ok(())
 }
 
-/// Item 4 of `thorn_shapes`: the compilation-relevant file paths under a
-/// thorn dir, relative to it — direct children, plus everything recursively
-/// under `src/`. `doc/`, `test/`, `par/`, `.git`, and any other subdirectory
-/// are deliberately not descended into: none of them feed the compile or the
-/// bindings generation this fingerprint exists to track.
-fn shape_files(thorn_dir: &Path) -> std::io::Result<Vec<String>> {
+/// One file `shape_files` found: its path relative to the thorn dir, plus
+/// the mtime and size the thorn's stamp is made of (see `thorn_shapes`).
+/// Both come off the `fs::metadata` the walk already needs to tell files from
+/// directories, so the stamp costs no extra I/O.
+struct ShapeFile {
+    rel: String,
+    mtime_nanos: u128,
+    len: u64,
+}
+
+impl ShapeFile {
+    fn new(rel: String, meta: &fs::Metadata) -> Self {
+        let mtime_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        ShapeFile { rel, mtime_nanos, len: meta.len() }
+    }
+}
+
+/// Item 4 of `thorn_shapes`: the compilation-relevant files under a thorn
+/// dir, by path relative to it — direct children, plus everything
+/// recursively under `src/`. `doc/`, `test/`, `par/`, `.git`, and any other
+/// subdirectory are deliberately not descended into: none of them feed the
+/// compile or the bindings generation this fingerprint exists to track.
+fn shape_files(thorn_dir: &Path) -> std::io::Result<Vec<ShapeFile>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(thorn_dir)? {
         let entry = entry?;
@@ -877,10 +910,10 @@ fn shape_files(thorn_dir: &Path) -> std::io::Result<Vec<String>> {
                 walk_shape_dir(&entry.path(), "src", 0, &mut files)?;
             }
         } else if meta.is_file() {
-            files.push(name_str);
+            files.push(ShapeFile::new(name_str, &meta));
         }
     }
-    files.sort();
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(files)
 }
 
@@ -974,6 +1007,18 @@ fn feed(hasher: &mut gix::hash::Hasher, bytes: &[u8]) {
 /// `SourceDelta::Edited`'s doc comment already rejects for the flesh; the
 /// same trade applies per-thorn here.
 ///
+/// Edits to that content are what the thorn's *stamp* is for, returned beside
+/// its shape in [`ThornScan`]: a hash over the same files of each one's path,
+/// mtime and size — mtime-based exactly like the `make` that consumes them,
+/// like the `<n>mod@<mtime>` worktree half of `git::source_state`. That state
+/// covers tracked files only (the test harness leaves untracked output in
+/// source trees), so a thorn git does not track — generated into a checkout,
+/// or never in a repo at all — has its edits seen here or nowhere: a config
+/// rebuilt off such regenerated kernels used to read as up to date and never
+/// recompile them. A changed stamp earns an incremental rebuild (`stamp_delta`
+/// and its call site in `prepare`), never the per-thorn wipe a changed shape
+/// does, for the reason above.
+///
 /// Error semantics are load-bearing: if a thorn's directory cannot be read at
 /// all — missing, or an I/O error anywhere inside it (listing it, reading a
 /// qualifying file, hashing) — that thorn is simply omitted from the
@@ -990,7 +1035,7 @@ fn shape_one_thorn(
     repos_root: Option<&Path>,
     url_cache: &Mutex<HashMap<PathBuf, Option<String>>>,
     provider: &str,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let thorn_dir = cactus_root.join(provider);
 
     let files = shape_files(&thorn_dir).ok()?;
@@ -1014,20 +1059,36 @@ fn shape_one_thorn(
     }
 
     for f in &files {
-        feed(&mut hasher, f.as_bytes());
+        feed(&mut hasher, f.rel.as_bytes());
     }
     for f in &files {
-        let basename = Path::new(f).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let basename = Path::new(&f.rel).file_name().and_then(|n| n.to_str()).unwrap_or("");
         if !is_shape_qualifying(basename) {
             continue;
         }
-        let bytes = fs::read(thorn_dir.join(f)).ok()?;
-        feed(&mut hasher, f.as_bytes());
+        let bytes = fs::read(thorn_dir.join(&f.rel)).ok()?;
+        feed(&mut hasher, f.rel.as_bytes());
         feed(&mut hasher, &bytes);
     }
+    let shape = hasher.try_finalize().ok()?;
 
-    let id = hasher.try_finalize().ok()?;
-    Some(id.to_hex_with_len(16).to_string())
+    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+    for f in &files {
+        feed(&mut hasher, f.rel.as_bytes());
+        feed(&mut hasher, &f.mtime_nanos.to_le_bytes());
+        feed(&mut hasher, &f.len.to_le_bytes());
+    }
+    let stamp = hasher.try_finalize().ok()?;
+    Some((shape.to_hex_with_len(16).to_string(), stamp.to_hex_with_len(16).to_string()))
+}
+
+/// What [`thorn_shapes`] reads off each thorn, both keyed by thorn name: its
+/// shape fingerprint, and the stamp of its content's mtimes and sizes (see
+/// `thorn_shapes` for what each covers and what a change to each costs).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ThornScan {
+    pub shapes: BTreeMap<String, String>,
+    pub stamps: BTreeMap<String, String>,
 }
 
 /// Per-thorn "shape" fingerprints, fanned out across [`crate::par::parallel_map`]
@@ -1046,7 +1107,7 @@ pub fn thorn_shapes(
     cactus_root: &Path,
     list: &Thornlist,
     progress: &mut prodash::tree::Item,
-) -> Res<BTreeMap<String, String>> {
+) -> Res<ThornScan> {
     let repos_root = fs::canonicalize(cactus_root.join("repos")).ok();
     let url_cache: Mutex<HashMap<PathBuf, Option<String>>> = Mutex::new(HashMap::new());
     let providers: Vec<(String, String)> = list.thorn_providers().into_iter().collect();
@@ -1059,10 +1120,15 @@ pub fn thorn_shapes(
         let shape = shape_one_thorn(cactus_root, repos_root.as_deref(), &url_cache, provider);
         drop(current);
         progress.lock().expect("thorn_shapes progress poisoned").inc();
-        shape.map(|hash| (name.clone(), hash))
+        shape.map(|reading| (name.clone(), reading))
     })?;
 
-    Ok(results.into_iter().flatten().collect())
+    let mut scan = ThornScan::default();
+    for (name, (shape, stamp)) in results.into_iter().flatten() {
+        scan.shapes.insert(name.clone(), shape);
+        scan.stamps.insert(name, stamp);
+    }
+    Ok(scan)
 }
 
 /// [`thorn_shapes`] for a call site with no progress tree of its own to hang
@@ -1072,7 +1138,7 @@ pub fn thorn_shapes(
 /// `manifest::setup_prodash_if_tty`'s doc comment on why that precondition
 /// matters — a phase that DID call them would lose those messages on a
 /// non-tty stderr).
-pub fn thorn_shapes_with_progress(cactus_root: &Path, list: &Thornlist) -> Res<BTreeMap<String, String>> {
+pub fn thorn_shapes_with_progress(cactus_root: &Path, list: &Thornlist) -> Res<ThornScan> {
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let mut probing = progress.add_child("probe thorn shapes");
     let result = thorn_shapes(cactus_root, list, &mut probing);
@@ -1101,6 +1167,36 @@ pub fn shape_delta(
         .filter(|(name, shape)| fresh.get(name.as_str()) != Some(shape))
         .map(|(name, _)| name.clone())
         .collect()
+}
+
+/// The stamp counterpart of `shape_delta`: thorns whose compiled files were
+/// written since the stamp was taken, though their shape stayed the same (see
+/// `thorn_shapes`). Unlike `shape_delta`, a thorn gone from `fresh` is not
+/// named: it is a vanished or unreadable thorn, which `shape_delta` already
+/// names and whose state that one wipes. Either side `None` is no
+/// information, never "unchanged" — a config built before stamps existed
+/// acquires them on its next build.
+pub fn stamp_delta(
+    stored: Option<&BTreeMap<String, String>>,
+    fresh: Option<&BTreeMap<String, String>>,
+) -> Vec<String> {
+    let (Some(stored), Some(fresh)) = (stored, fresh) else {
+        return Vec::new();
+    };
+    stored
+        .iter()
+        .filter(|(name, stamp)| fresh.get(name.as_str()).is_some_and(|now| now != *stamp))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Whether `stamps` covers `entry`, a `Thornlist::untracked` entry (an
+/// `Arrangement/Thorn`, or the flesh, which never has a stamp). Such a thorn
+/// has no source state, but its stamp still sees its files edited, so the
+/// notes about what goes unnoticed must leave it out.
+pub fn has_stamp(stamps: Option<&BTreeMap<String, String>>, entry: &str) -> bool {
+    let thorn = entry.rsplit('/').next().unwrap_or(entry);
+    stamps.is_some_and(|s| s.contains_key(thorn))
 }
 
 /// `stored_thornlist`/`fresh_thornlist` are the *processed* (toggles-applied)
@@ -1165,49 +1261,95 @@ pub fn rebuild_decision(
     }
 }
 
+/// What a short-circuited build did with thorn stamps (see `thorn_shapes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampReading {
+    /// No thorn could be stamped: nothing compared, nothing recorded.
+    Absent,
+    /// The record had none (built before stamps, or rewritten by a cactup
+    /// without them): this build records the first, compared with nothing.
+    FirstBaseline,
+    /// Compared with the record's, and equal.
+    Compared,
+}
+
 /// The line a short-circuited build prints. It must never claim "same
 /// sources" for anything cactup did not actually compare: not when the probe
 /// found no sources at all (`no_sources`), not when there was no baseline to
-/// compare with (`had_baseline`), and not for the thorns of a plain
-/// `ThornList` that have no repo behind them (`untracked`) — each of those is
-/// a way for an edit to be silently ignored, which is the one thing a user
-/// must be told.
+/// compare with (`had_baseline`, or `stamps` short of `Compared`), and not
+/// for the thorns of a plain `ThornList` that have no repo behind them
+/// (`untracked`, less those whose stamp this build compared) — each of those
+/// is a way for an edit to be silently ignored, which is the one thing a
+/// user must be told. With no repo to read, stamps are all that stands
+/// between a thorn edit and "up to date".
 fn up_to_date_message(
     name: &str,
     no_sources: Option<&crate::fetch::NoSources>,
     had_baseline: bool,
     untracked: &[String],
+    stamps: StampReading,
 ) -> String {
     const AGAIN: &str = "pass --reconfig to rebuild incrementally, or -f to rebuild from scratch";
-    if let Some(why) = no_sources {
-        return format!(
-            "Config {name} is up to date as far as cactup can tell (same optionlist, same \
-             universe, same thornlist), but it cannot track this config's sources: {why}. Source \
-             edits and refetches go unnoticed; {AGAIN}."
-        );
-    }
-    let untracked_note = if untracked.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " Not tracked, since they are not links into the installation's repos/, so edits to \
-             them go unnoticed: {}.",
-            summarize(untracked)
-        )
+    let untracked_note_for = |untracked: &[String]| {
+        if untracked.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Not tracked, since they are not links into the installation's repos/, so edits \
+                 to them go unnoticed: {}.",
+                summarize(untracked)
+            )
+        }
     };
-    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
+    let untracked_note = untracked_note_for(untracked);
+    // The upgrade case: a config last built before stamps existed may have
+    // had thorns regenerated since, and nothing could have noticed.
+    const NO_STAMPS: &str = "Its thorns' files had no baseline, so they become one now and later \
+                             edits to them are detected.";
+    if let Some(why) = no_sources {
+        let unseen = "Edits to the Cactus flesh and refetches that move it go unnoticed";
+        // That sentence names the flesh already; the note names the rest.
+        let others: Vec<String> =
+            untracked.iter().filter(|t| *t != crate::thornlist::UNTRACKED_FLESH).cloned().collect();
+        let untracked_note = untracked_note_for(&others);
+        return match stamps {
+            StampReading::Compared => format!(
+                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+                 universe, same thornlist, same thorn files), but it cannot track this config's \
+                 repos: {why}.{untracked_note} {unseen}; {AGAIN}."
+            ),
+            StampReading::FirstBaseline => format!(
+                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+                 universe, same thornlist), but it cannot track this config's repos: {why}. \
+                 {NO_STAMPS}{untracked_note} {unseen}. If thorns or the flesh changed since the \
+                 last build, {AGAIN}."
+            ),
+            StampReading::Absent => format!(
+                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
+                 universe, same thornlist), but it cannot track this config's sources: {why}. \
+                 Source edits and refetches go unnoticed; {AGAIN}."
+            ),
+        };
+    }
     if !had_baseline {
-        format!(
+        return format!(
             "Config {name} is up to date (same optionlist, same universe, same thornlist). It had \
              no source baseline, so the sources as they stand now become one and later changes \
              are detected.{untracked_note} If they changed since the last build, {AGAIN}."
-        )
-    } else {
-        format!(
-            "Config {name} is up to date (same optionlist, same universe, same thornlist, \
-             {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
-        )
+        );
     }
+    if stamps == StampReading::FirstBaseline {
+        return format!(
+            "Config {name} is up to date (same optionlist, same universe, same thornlist, same \
+             sources for what cactup tracks). {NO_STAMPS}{untracked_note} If files git does not \
+             track were regenerated since the last build, {AGAIN}."
+        );
+    }
+    let tracked = if untracked.is_empty() { "same sources" } else { "same sources for what cactup tracks" };
+    format!(
+        "Config {name} is up to date (same optionlist, same universe, same thornlist, \
+         {tracked}).{untracked_note} To rebuild anyway, {AGAIN}."
+    )
 }
 
 /// Resolve the BUILD universe name per §4.8 precedence (steps 1, 3, 4):
@@ -1526,6 +1668,7 @@ pub struct SourceProbe {
     pub sources: Option<crate::fetch::SourceHeads>,
     pub providers: Option<BTreeMap<String, String>>,
     pub shapes: Option<BTreeMap<String, String>>,
+    pub stamps: Option<BTreeMap<String, String>>,
     taken: std::time::Instant,
 }
 
@@ -1737,10 +1880,17 @@ fn prepare_with_cache(
     // could never acquire one to diff a later plain rebuild against.
     // `?` propagates only an interrupt (§2.4) — an individual unreadable
     // thorn never fails `thorn_shapes` (see its doc comment).
-    let fresh_shapes = parsed_list
-        .as_ref()
-        .map(|l| thorn_shapes_with_progress(&cactus_root, l))
-        .transpose()?;
+    let (fresh_shapes, fresh_stamps) =
+        match parsed_list.as_ref().map(|l| thorn_shapes_with_progress(&cactus_root, l)).transpose()? {
+            Some(scan) => (Some(scan.shapes), Some(scan.stamps)),
+            None => (None, None),
+        };
+    // An untracked thorn with a stamp has its file edits seen from this build
+    // on (see `thorn_shapes`), so only the rest — the flesh, above all — is
+    // named as going unnoticed.
+    let untracked: Vec<String> =
+        untracked.into_iter().filter(|t| !has_stamp(fresh_stamps.as_ref(), t)).collect();
+    let stamping = fresh_stamps.as_ref().is_some_and(|s| !s.is_empty());
     let (sources, source_change) =
         source_delta(stored_meta.as_ref().and_then(|m| m.sources.as_ref()), fresh_sources.as_ref());
     // Which thorn names changed which directory provides them (§7.4) — the
@@ -1776,6 +1926,18 @@ fn prepare_with_cache(
         &changed_providers,
         &changed_shapes,
     );
+    // The last gap: a thorn's compiled files rewritten with nothing above
+    // seeing it, because git does not track that thorn — generated into a
+    // checkout, or not in a repo at all (see `thorn_shapes`). Weakest of
+    // every source-derived reason, so it only ever replaces "up to date".
+    let changed_stamps = stamp_delta(
+        stored_meta.as_ref().and_then(|m| m.thorn_stamps.as_ref()),
+        fresh_stamps.as_ref(),
+    );
+    let stamp_rebuild = decision == RebuildDecision::UpToDate && !changed_stamps.is_empty();
+    if stamp_rebuild {
+        decision = RebuildDecision::Incremental("thorn sources were edited");
+    }
     if opts.force {
         decision = RebuildDecision::Full("-f given");
     } else if stored_meta.as_ref().is_some_and(|m| m.machine != machine.name) {
@@ -1794,7 +1956,24 @@ fn prepare_with_cache(
         && is_complete(&cactus_root, name)
         && let Some(stored) = stored_meta.clone()
     {
-        println!("{}", up_to_date_message(name, no_sources.as_ref(), stored.sources.is_some(), &untracked));
+        // What this build compared: a stamp counts only if the last build
+        // recorded one too. A first baseline names what it starts covering
+        // in its own words, so `untracked` (filtered by the fresh stamps)
+        // stands as it is then.
+        let stamps = match (stamping, stored.thorn_stamps.as_ref().is_some_and(|s| !s.is_empty())) {
+            (false, _) => StampReading::Absent,
+            (true, false) => StampReading::FirstBaseline,
+            (true, true) => StampReading::Compared,
+        };
+        let unseen: Vec<String> = untracked
+            .iter()
+            .filter(|t| stamps != StampReading::Compared || !has_stamp(stored.thorn_stamps.as_ref(), t))
+            .cloned()
+            .collect();
+        println!(
+            "{}",
+            up_to_date_message(name, no_sources.as_ref(), stored.sources.is_some(), &unseen, stamps)
+        );
         // Record the source/provider/shape baseline even though nothing was
         // built. A config last built by a cactup without source, provenance,
         // or shape tracking has none of them, and without this it could never
@@ -1809,6 +1988,8 @@ fn prepare_with_cache(
             fresh_providers.as_ref().is_some_and(|live| stored.thorn_providers.as_ref() != Some(live));
         let shapes_changed =
             fresh_shapes.as_ref().is_some_and(|live| stored.thorn_shapes.as_ref() != Some(live));
+        let stamps_changed =
+            fresh_stamps.as_ref().is_some_and(|live| stored.thorn_stamps.as_ref() != Some(live));
         // The header facts the record snapshots (§7.4) can change without
         // anything the build consumes changing — the rebuild decision
         // ignores the header — so they are refreshed here instead, along
@@ -1830,7 +2011,7 @@ fn prepare_with_cache(
             fs::write(&snapshot_path, &optionlist.source)
                 .with_context(|| format!("Failed to write {}", snapshot_path.display()))?;
         }
-        if sources_changed || providers_changed || shapes_changed || header_changed {
+        if sources_changed || providers_changed || shapes_changed || stamps_changed || header_changed {
             if let Some(live) = fresh_sources {
                 stored.sources = Some(live.heads);
             }
@@ -1840,11 +2021,23 @@ fn prepare_with_cache(
             if let Some(live) = fresh_shapes {
                 stored.thorn_shapes = Some(live);
             }
+            if let Some(live) = fresh_stamps {
+                stored.thorn_stamps = Some(live);
+            }
             stored.store(&cactus_root)?;
         }
         return Ok(Prepared::UpToDate(stored));
     }
-    if let Some(why) = &no_sources {
+    if let Some(why) = &no_sources
+        && stamping
+    {
+        println!(
+            "{} cactup cannot track config {name}'s repos: {why}. Edits to its thorns' files \
+             still trigger a rebuild, but edits to the Cactus flesh and refetches that move it \
+             do not; pass --reconfig to rebuild after changing the flesh, or -f after a refetch.",
+            "note:".yellow().bold()
+        );
+    } else if let Some(why) = &no_sources {
         println!(
             "{} cactup cannot track config {name}'s sources: {why}. This build records no \
              source baseline, so later edits and refetches will not trigger a rebuild; pass \
@@ -1889,6 +2082,9 @@ fn prepare_with_cache(
                 "  no longer readable (gone, or no longer a git repo): {}",
                 summarize(&source_change.vanished)
             );
+        }
+        if stamp_rebuild {
+            println!("  thorns with edited files: {}", summarize(&changed_stamps));
         }
     }
 
@@ -2033,6 +2229,7 @@ fn prepare_with_cache(
         sources: fresh_sources.as_ref().map(|s| s.heads.clone()),
         thorn_providers: fresh_providers.clone(),
         thorn_shapes: fresh_shapes.clone(),
+        thorn_stamps: fresh_stamps.clone(),
     };
 
     let attempt_id = BuildAttempt::next_id(&config_dir)?;
@@ -2162,6 +2359,7 @@ fn prepare_with_cache(
             sources: fresh_sources,
             providers: fresh_providers,
             shapes: fresh_shapes,
+            stamps: fresh_stamps,
             taken: probed_at,
         },
     ))
@@ -2268,9 +2466,9 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     // handful of files and taking an uncontended lock. Aged only now, with
     // both locks already held, so a build that waited for either of them
     // probes for itself.
-    let (fresh_sources, fresh_providers, fresh_shapes) =
+    let (fresh_sources, fresh_providers, fresh_shapes, fresh_stamps) =
         match probe.filter(|p| p.taken.elapsed() < PROBE_REUSE_WINDOW) {
-            Some(p) => (p.sources, p.providers, p.shapes),
+            Some(p) => (p.sources, p.providers, p.shapes, p.stamps),
             None => {
                 // The processed thornlist is re-parsed from the copy
                 // `prepare` staged into the attempt dir — that,
@@ -2295,11 +2493,14 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                 // support (§2.4), its only failure mode is the user having
                 // hit Ctrl-C, and that must abort this build rather than
                 // silently compiling against an incomplete shape probe.
-                let shapes = match &fresh_list {
-                    Some(l) => Some(thorn_shapes_with_progress(&cactus_root, l)?),
-                    None => None,
+                let (shapes, stamps) = match &fresh_list {
+                    Some(l) => {
+                        let scan = thorn_shapes_with_progress(&cactus_root, l)?;
+                        (Some(scan.shapes), Some(scan.stamps))
+                    }
+                    None => (None, None),
                 };
-                (sources, providers, shapes)
+                (sources, providers, shapes, stamps)
             }
         };
 
@@ -2551,6 +2752,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     meta.sources = fresh_sources.map(|s| s.heads);
     meta.thorn_providers = fresh_providers;
     meta.thorn_shapes = fresh_shapes;
+    meta.thorn_stamps = fresh_stamps;
     meta.store(&cactus_root)?;
     fs::copy(attempt.optionlist_path(), config_dir.join("cactup-optionlist.cfg"))
         .with_context(|| "Failed to install cactup-optionlist.cfg")?;
@@ -2778,6 +2980,7 @@ mod tests {
             sources: None,
             thorn_providers: None,
             thorn_shapes: None,
+            thorn_stamps: None,
         };
         let resolved = resolve_thornlist(&cactus, "sim", Some(&stored), None).unwrap();
         assert!(!resolved.from_snapshot, "the renamed live list, not the snapshot");
@@ -3225,6 +3428,22 @@ mod tests {
         // invalidate.
         let added = provider_map(&[("WeylScal4", "aaa"), ("Boundary", "bbb"), ("ML_BSSN", "ddd")]);
         assert!(shape_delta(Some(&stored), Some(&added)).is_empty());
+    }
+
+    #[test]
+    fn stamp_deltas() {
+        let stored = provider_map(&[("WeylScal4", "aaa"), ("Boundary", "bbb")]);
+        assert!(stamp_delta(None, Some(&stored)).is_empty(), "no stamps yet is no information");
+        assert!(stamp_delta(Some(&stored), None).is_empty());
+        assert!(stamp_delta(Some(&stored), Some(&stored)).is_empty());
+        let edited = provider_map(&[("WeylScal4", "ccc"), ("Boundary", "bbb")]);
+        assert_eq!(stamp_delta(Some(&stored), Some(&edited)), vec!["WeylScal4".to_string()]);
+        // Unlike a shape, a vanished thorn is not an edit: `shape_delta`
+        // already names it, and wipes its state.
+        let dropped = provider_map(&[("Boundary", "bbb")]);
+        assert!(stamp_delta(Some(&stored), Some(&dropped)).is_empty());
+        let added = provider_map(&[("WeylScal4", "aaa"), ("Boundary", "bbb"), ("ML_BSSN", "ddd")]);
+        assert!(stamp_delta(Some(&stored), Some(&added)).is_empty());
     }
 
     #[test]
@@ -4504,21 +4723,53 @@ mod tests {
     /// not compare: no reading at all, no baseline yet, or untracked thorns.
     #[test]
     fn up_to_date_message_never_overclaims_the_sources() {
-        let plain = up_to_date_message("bcx", None, true, &[]);
+        let plain = up_to_date_message("bcx", None, true, &[], StampReading::Compared);
         assert!(plain.contains("same sources)"), "{plain}");
 
-        let untracked = up_to_date_message("bcx", None, true, &["Local/Mine".to_string()]);
+        let mine = ["Local/Mine".to_string()];
+        let untracked = up_to_date_message("bcx", None, true, &mine, StampReading::Compared);
         assert!(!untracked.contains("same sources)"), "{untracked}");
         assert!(untracked.contains("Local/Mine") && untracked.contains("--reconfig"), "{untracked}");
 
-        let fresh = up_to_date_message("bcx", None, false, &["Local/Mine".to_string()]);
+        let fresh = up_to_date_message("bcx", None, false, &mine, StampReading::Absent);
         assert!(!fresh.contains("same sources"), "{fresh}");
         assert!(fresh.contains("no source baseline") && fresh.contains("Local/Mine"), "{fresh}");
 
         let why = crate::fetch::NoSources::NoGitRepos;
-        let blind = up_to_date_message("bcx", Some(&why), true, &[]);
+        let blind = up_to_date_message("bcx", Some(&why), true, &[], StampReading::Absent);
         assert!(!blind.contains("same sources"), "{blind}");
         assert!(blind.contains("names no git repos") && blind.contains("--reconfig"), "{blind}");
+
+        // With no repo to read, stamped thorns are still compared: say so,
+        // and name the flesh as what goes unnoticed — not "Source edits".
+        let stamped = up_to_date_message("bcx", Some(&why), true, &[], StampReading::Compared);
+        assert!(stamped.contains("same thorn files") && stamped.contains("Cactus flesh"), "{stamped}");
+        assert!(!stamped.contains("Source edits"), "{stamped}");
+        // ...and an untracked entry this build did not compare is still named.
+        let new = ["Local/New".to_string()];
+        let partly = up_to_date_message("bcx", Some(&why), true, &new, StampReading::Compared);
+        assert!(partly.contains("Local/New"), "{partly}");
+        // ...but the flesh only once: the line names it already.
+        let flesh = [crate::thornlist::UNTRACKED_FLESH.to_string()];
+        let once = up_to_date_message("bcx", Some(&why), true, &flesh, StampReading::Compared);
+        assert_eq!(once.matches("Cactus flesh").count(), 1, "{once}");
+
+        // The upgrade case: a record without stamps compared no thorn files,
+        // so the line must neither claim them nor imply nothing could change.
+        for no_sources in [None, Some(&why)] {
+            let first = up_to_date_message("bcx", no_sources, true, &[], StampReading::FirstBaseline);
+            assert!(!first.contains("same sources)") && !first.contains("same thorn files"), "{first}");
+            assert!(first.contains("had no baseline") && first.contains("--reconfig"), "{first}");
+        }
+    }
+
+    #[test]
+    fn untracked_entries_with_a_stamp_are_covered() {
+        let stamps: BTreeMap<String, String> = [("Mine".to_string(), "t".to_string())].into();
+        assert!(has_stamp(Some(&stamps), "Local/Mine"));
+        assert!(!has_stamp(Some(&stamps), "Local/Other"));
+        assert!(!has_stamp(Some(&stamps), "the Cactus flesh"));
+        assert!(!has_stamp(None, "Local/Mine"));
     }
 
     /// The bug report this exists for: a config built only with `-f` from a
@@ -4952,6 +5203,11 @@ mod tests {
     /// (`SourceDelta::Edited`); if `thorn_shapes` hashed body content, every
     /// edit would wipe a thorn's whole build directory, punishing anyone
     /// iterating on sources.
+    ///
+    /// It must still rebuild, incrementally: the fixture's thorn is in no git
+    /// repo, so its stamp is the only thing that sees the edit — the
+    /// incident of a config rebuilt off regenerated kernels in an untracked
+    /// thorn reading as up to date and never recompiling them.
     #[test]
     fn body_edit_does_not_wipe_per_thorn_build_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -4969,6 +5225,7 @@ mod tests {
                 c = cactus.display()
             ),
         );
+        let log = || fs::read_to_string(root.join("make.log")).unwrap_or_default();
         let clear_log = || {
             let _ = fs::remove_file(root.join("make.log"));
         };
@@ -4979,28 +5236,40 @@ mod tests {
         let first = build(&inst, &machine, "sim", &first_opts).unwrap();
         assert!(first.rebuilt);
         let first_shape = first.meta.thorn_shapes.as_ref().unwrap()["TestThorn"].clone();
+        let first_stamp = first.meta.thorn_stamps.as_ref().unwrap()["TestThorn"].clone();
+
+        clear_log();
+        let unchanged = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!unchanged.rebuilt, "an untouched thorn must keep its stamp: {}", log());
 
         let config_dir = cactus.join("configs/sim");
         fabricate_stale_thorn_state(&config_dir, "TestThorn");
 
         // Edit the body of the ordinary source file only.
         fs::write(thorn_dir.join("src/thorn.cc"), "int a; int b;\n").unwrap();
+        // `config delta` reads the same stamp; smoke-test it on a real one.
+        crate::commands::delta::config_delta(&inst, Some("sim".into()), true).unwrap();
         clear_log();
         let edited = build(&inst, &machine, "sim", &opts).unwrap();
-        assert!(!edited.rebuilt, "a body-only edit must not by itself trigger a rebuild");
+        assert!(edited.rebuilt, "a body edit to a thorn git does not track must rebuild");
+        assert!(log().contains("sim-config"), "must reconfigure: {}", log());
+        assert!(!log().contains("realclean"), "a body edit needs no realclean: {}", log());
         assert_eq!(
             edited.meta.thorn_shapes.as_ref().unwrap()["TestThorn"], first_shape,
             "the fingerprint must be blind to ordinary source content"
         );
+        let edited_stamp = &edited.meta.thorn_stamps.as_ref().unwrap()["TestThorn"];
+        assert_ne!(*edited_stamp, first_stamp, "the stamp must see it");
         assert!(
             !stale_thorn_state_gone(&config_dir, "TestThorn"),
             "make must be left to handle a body edit — the per-thorn build state must survive"
         );
+        clear_log();
+        let settled = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!settled.rebuilt, "the rebuild must record the edited stamp: {}", log());
 
-        // The assertion above is necessary but not sufficient: nothing was
-        // rebuilt, so the deletion block never ran and could not have wiped
-        // anything regardless. Force a real `Incremental` pass — a *second*
-        // thorn changing shape in the same build — and check that the
+        // Now force an `Incremental` pass that does wipe — a *second* thorn
+        // changing shape in the same build as a body edit — and check that the
         // invalidation is scoped to that thorn and does not sweep up the
         // body-edited one alongside it.
         let other_dir = cactus.join("arrangements/TestArr/OtherThorn");
@@ -5040,6 +5309,41 @@ mod tests {
             "invalidation must be scoped per thorn: a body-edited thorn keeps its build state \
              even while another thorn is being invalidated in the same build"
         );
+    }
+
+    /// The upgrade path: a record without stamps (built by a cactup before
+    /// them, or rewritten by one) compares no thorn files. It must neither
+    /// rebuild for want of a baseline — that would cost every config a
+    /// rebuild on upgrade — nor fail to adopt one, or edits would stay unseen.
+    #[test]
+    fn a_record_without_stamps_adopts_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;\n\
+                 *) ;;",
+                c = cactus.display()
+            ),
+        );
+        let (list, thorn_dir) = write_shape_fixture(&cactus);
+        let mut first_opts = BuildOpts::default_for_tests();
+        first_opts.thornlist = Some(list);
+        assert!(build(&inst, &machine, "sim", &first_opts).unwrap().rebuilt);
+
+        let mut record = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        record.thorn_stamps = None;
+        record.store(&cactus).unwrap();
+        let upgraded = build(&inst, &machine, "sim", &opts).unwrap();
+        assert!(!upgraded.rebuilt, "no stamps on record is no information, not a change");
+        let adopted = ConfigMeta::load(&cactus, "sim").unwrap().unwrap();
+        assert!(adopted.thorn_stamps.is_some_and(|s| s.contains_key("TestThorn")), "baseline adopted");
+
+        fs::write(thorn_dir.join("src/thorn.cc"), "int a; int b;\n").unwrap();
+        assert!(build(&inst, &machine, "sim", &opts).unwrap().rebuilt, "the adopted baseline sees edits");
     }
 
     /// Defect A, configure-failure branch: the marker is absent (configure

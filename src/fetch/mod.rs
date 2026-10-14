@@ -822,27 +822,19 @@ impl std::fmt::Display for NoSources {
     }
 }
 
-/// What [`probe_sources`] found: the reading (or why there is none), plus the
-/// thorns of a plain `ThornList` that no reading can cover (see
-/// `thornlist::Thornlist::untracked`), which every report must name too, or
-/// "matches what this config was built from" overclaims for them.
-pub struct SourceReading {
-    pub heads: Result<SourceHeads, NoSources>,
-    pub untracked: Vec<String>,
-}
-
 /// [`source_heads_with_progress`] off a config's processed thornlist *text*
 /// (CRL or plain, see `thornlist::parse_config_list`), folding a parse
 /// failure into [`NoSources::Unparseable`] so every caller reports it the
 /// same way. `Err` only on interrupt (§2.4).
-pub fn probe_sources(install_root: &Path, cactus_root: &Path, processed_thornlist: &str) -> Res<SourceReading> {
-    Ok(match crate::thornlist::parse_config_list(processed_thornlist, install_root, cactus_root)? {
-        Ok(list) => SourceReading {
-            heads: source_heads_with_progress(install_root, &list)?,
-            untracked: list.untracked().to_vec(),
-        },
-        Err(why) => SourceReading { heads: Err(NoSources::Unparseable(why)), untracked: Vec::new() },
-    })
+pub fn probe_sources(
+    install_root: &Path,
+    cactus_root: &Path,
+    processed_thornlist: &str,
+) -> Res<Result<SourceHeads, NoSources>> {
+    match crate::thornlist::parse_config_list(processed_thornlist, install_root, cactus_root)? {
+        Ok(list) => source_heads_with_progress(install_root, &list),
+        Err(why) => Ok(Err(NoSources::Unparseable(why))),
+    }
 }
 
 /// [`source_heads`] behind its own phase-scoped line renderer, for callers
@@ -1164,7 +1156,7 @@ mod tests {
 
         // Neither a CRL list nor a plain ThornList: the reason names the line.
         let junk =
-            probe_sources(tmp.path(), &tmp.path().join("Cactus"), "not a thornlist\n").unwrap().heads.unwrap_err();
+            probe_sources(tmp.path(), &tmp.path().join("Cactus"), "not a thornlist\n").unwrap().unwrap_err();
         assert!(matches!(junk, NoSources::Unparseable(_)), "{junk:?}");
         assert!(junk.to_string().contains("line 1"), "{junk}");
 
@@ -1172,11 +1164,10 @@ mod tests {
         // straight into arrangements/): its own reason, not "names no git
         // repos" (it never names any) nor a `!DEFINE ROOT` hint (it has none).
         std::fs::create_dir_all(tmp.path().join("Cactus/arrangements/CactusBase/Boundary")).unwrap();
-        let unlinked = probe_sources(tmp.path(), &tmp.path().join("Cactus"), "CactusBase/Boundary\n").unwrap();
-        let why = unlinked.heads.unwrap_err();
+        let why =
+            probe_sources(tmp.path(), &tmp.path().join("Cactus"), "CactusBase/Boundary\n").unwrap().unwrap_err();
         assert!(matches!(why, NoSources::NoLinkedThorns { .. }), "{why:?}");
         assert!(!why.to_string().contains("DEFINE ROOT"), "{why}");
-        assert_eq!(unlinked.untracked, ["the Cactus flesh".to_string(), "CactusBase/Boundary".to_string()]);
 
         // Repos that are there but not git repos: the probe's own error is
         // the clue, so it must survive into the message.
