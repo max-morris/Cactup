@@ -1514,7 +1514,7 @@ pub enum Taken {
 
 impl Taken {
     /// The first few of `stayed`, and how many more.
-    fn listed(stayed: &[String]) -> String {
+    pub fn listed(stayed: &[String]) -> String {
         let shown: Vec<&str> = stayed.iter().take(3).map(String::as_str).collect();
         match stayed.len().saturating_sub(3) {
             0 => shown.join(", "),

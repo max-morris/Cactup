@@ -1522,11 +1522,19 @@ fn a_miss_says_what_kind_it_was_and_the_build_line_counts_them() {
     let (miss, differs) = kind(&["-Os"]);
     assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
     assert!(differs.to_string().contains("lib.h: whole: the definitions the unit does not use were all kept: UNUSED_M (defined more than once)"), "{differs}");
+    // The closest left a definition out, this one kept it (defined twice):
+    // the kept one is named.
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#define UNUSED_M 1\n").unwrap();
+    assert_eq!(kind(&["-Og"]).0.as_deref(), Some("built-otherwise"));
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#undef UNUSED_M\n#define UNUSED_M 1\n").unwrap();
+    let (miss, differs) = kind(&["-Og"]);
+    assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
+    assert!(differs.to_string().contains("or one of the definitions the unit does not use that it kept: UNUSED_M (defined more than once)), or the two units use other definitions of it"), "{differs}");
     fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
 
     let cc_dir = build.conf().parent().unwrap().to_owned();
     let out = Command::new(CACTUP).arg("__cc-summary").arg(&cc_dir).output().unwrap();
-    assert_ran(&out, "cactup: build cache: 1 of 9 objects reused; 8 compiled: 1 new, 4 with other sources, 3 built otherwise\n", "", 0);
+    assert_ran(&out, "cactup: build cache: 1 of 11 objects reused; 10 compiled: 1 new, 5 with other sources, 4 built otherwise\n", "", 0);
 }
 
 /// A compile whose messages speak of definitions is stored under its key

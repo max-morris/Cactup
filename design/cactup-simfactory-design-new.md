@@ -6246,13 +6246,14 @@ cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with othe
 Each compile the build ran through the cache is one of:
 
 - *reused*: served from the store;
-- *new*: the store has no entry for this object (by its name below
-  `build/`) at all;
-- *with other sources*: it has one made with the same compiler, flags,
-  environment and platform, from other preprocessed text or other files
+- *new*: the store has no record of an entry for this object (by its name
+  below `build/`) at all;
+- *with other sources*: it has a record of one made with the same compiler,
+  flags, environment and platform, from other preprocessed text or other
+  files
   (a thorn's source edited, or a header of the configuration that differs);
-- *built otherwise*: it has entries, none with the same compiler, flags,
-  environment and platform;
+- *built otherwise*: it has records of entries, none with the same
+  compiler, flags, environment and platform;
 - *kept out*: it has no key (not cached, §18.5), the store has an entry
   under its key that it could not use (damaged, unreadable, another
   cactup's), or its object could not be stored (the check after the
@@ -6305,8 +6306,9 @@ entry is gone, each only if its entry is still not there when it comes to
 it (one published since the walk keeps its record), and `cache stats`
 counts them. A
 record missing (a publish cut short between the entry and its record, a
-record removed by hand) makes a miss look new: the line is a report, not a
-key.
+record removed by hand) makes a miss look new, and a record outlives an
+entry removed otherwise than by `gc` (`verify`, audit mode) until the next
+`gc`: the line is a report, not a key.
 
 **How a key takes each file (decision 27).** Decision 26 leaves out of the
 files part the definitions a unit never uses, in the files the text has no

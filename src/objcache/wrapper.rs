@@ -503,7 +503,11 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
         let record = UnitRecord::new(key::KEY_LABEL, &keyed.parts, &keyed.each);
         let ((), ms) = timed(|| {
             if let Err(e) = store.record_unit(unit, key, &record) {
-                event.store = Some(format!("the unit record was not written: {e:#}"));
+                let not_written = format!("{UNIT_RECORD_NOT_WRITTEN}: {e:#}");
+                event.store = Some(match event.store.take() {
+                    Some(first) => format!("{first}; {not_written}"),
+                    None => not_written,
+                });
             }
         });
         event.publish_ms += ms;
@@ -667,6 +671,10 @@ fn publish(store: &Store, keyed: &key::Keyed, captured: &Captured, event: &Event
     store.publish(&entry).map(|published| (published, key.clone())).map_err(|e| format!("not published: {e:#}"))
 }
 
+/// What an event's `store` says when a published entry's unit record could
+/// not be written (`cache doctor` counts them by it).
+pub const UNIT_RECORD_NOT_WRITTEN: &str = "the unit record was not written";
+
 /// What kind of miss a compile keyed as `keyed` is, by the store's
 /// `records` for its object (§18.12), and what differs from the closest:
 /// for other sources, each file (with how this key took it), for a build
@@ -716,9 +724,17 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
                 // Both narrowed, and the other left definitions out where
                 // this did not: a kept line differs, or the units use other
                 // definitions of it.
-                Some(their) if their.left_out && !note.left_out => differs.push(format!(
-                    "{name}: narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive), or the two units use other definitions of it"
-                )),
+                Some(their) if their.left_out && !note.left_out => {
+                    let kept = match &note.taken {
+                        key::Taken::NothingLeftOut(stayed) if !stayed.is_empty() => {
+                            format!(", or one of the definitions the unit does not use that it kept: {}", key::Taken::listed(stayed))
+                        }
+                        _ => String::new(),
+                    };
+                    differs.push(format!(
+                        "{name}: narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive{kept}), or the two units use other definitions of it"
+                    ));
+                }
                 Some(_) => differs.push(format!("{name}: {}", note.taken.describe())),
                 None => differs.push(format!("{name}: read by this compile only")),
             }

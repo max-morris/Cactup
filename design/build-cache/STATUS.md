@@ -2404,6 +2404,27 @@ store); 148 GB of reviewers' cargo output from passed milestones, in 80
 directories, was cleaned (`cargo clean --target-dir`), their scripts and
 logs kept.
 
+### M5 part 1, round 6 (on `97f80a7`): A SIGN-OFF, B BLOCKED
+
+Both re-ran rounds 1 to 5 (fixed; A: 132 compiles against gcc 14 alone, 57
+hits, none differing; real builds 0, 357 and 336 of 342 reused; B: two
+builds into one store, 357 entries and 357 records) and found nothing that
+changes what is served. B blocked on two, fixed in the commit after this
+record:
+- the miss whose closest record left definitions out of a file this key
+  left nothing out of (its unused ones kept: defined twice, reserved)
+  did not name those kept definitions: it does now;
+- the doctor ranked "with other sources" by the whole line, so one header
+  taken in several ways (units keeping other definitions of it) was split
+  over lines and ranked below a smaller one: it tallies by file now, the
+  ways it was taken under it.
+Also (A): the spec says a record may outlive an entry `verify` or audit
+mode removed, until `gc`; hints for a full quota and a full file system
+(either the cache's or the build's); a record that could not be written is
+said beside the earlier reason, not over it, and counted by one constant.
+Both reviewers cleaned their cargo output (the home file system has 579 GB
+free).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

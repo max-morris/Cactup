@@ -351,16 +351,36 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
     let other = of(Compiled::OtherSources);
     if !other.is_empty() {
         out.push_str(&format!("\n  {} ({}), by what differed, most often first:\n", "with other sources".bold(), other.len()));
-        let mut by: HashMap<&str, usize> = HashMap::new();
+        // By file: a difference is `<file>: <how this key took it>`, and
+        // one file taken in several ways (units that keep other
+        // definitions of it) is one file all the same.
+        let mut by: HashMap<&str, (usize, HashMap<&str, usize>)> = HashMap::new();
         for event in &other {
             for differs in &event.differs {
-                *by.entry(differs.as_str()).or_default() += 1;
+                let (what, how) = differs.split_once(": ").unwrap_or((differs.as_str(), ""));
+                let file = by.entry(what).or_default();
+                file.0 += 1;
+                *file.1.entry(how).or_default() += 1;
             }
         }
-        let mut by: Vec<(&str, usize)> = by.into_iter().collect();
-        by.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        for (differs, count) in by.iter().take(20) {
-            out.push_str(&format!("    {count:>5}  {differs}\n"));
+        let mut by: Vec<(&str, (usize, HashMap<&str, usize>))> = by.into_iter().collect();
+        by.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(b.0)));
+        for (what, (count, hows)) in by.iter().take(20) {
+            let mut hows: Vec<(&str, usize)> = hows.iter().map(|(how, n)| (*how, *n)).collect();
+            hows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            match hows.as_slice() {
+                [("", _)] => out.push_str(&format!("    {count:>5}  {what}\n")),
+                [(how, _)] => out.push_str(&format!("    {count:>5}  {what}: {how}\n")),
+                _ => {
+                    out.push_str(&format!("    {count:>5}  {what}\n"));
+                    for (how, n) in hows.iter().take(3) {
+                        out.push_str(&format!("           {n} {how}\n"));
+                    }
+                    if hows.len() > 3 {
+                        out.push_str(&format!("           and {} other ways\n", hows.len() - 3));
+                    }
+                }
+            }
         }
         if by.len() > 20 {
             out.push_str(&format!("           and {} more\n", by.len() - 20));
@@ -387,11 +407,17 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         out.push_str(&format!("\n  {} ({}): the cache had no record of an object of that name (one stored by an older cactup has none)\n", "new".bold(), new));
     }
 
-    let unrecorded = events.iter().filter(|event| event.store.as_deref().is_some_and(|why| why.starts_with("the unit record was not written"))).count();
+    let unrecorded = events
+        .iter()
+        .filter(|event| event.store.as_deref().is_some_and(|why| why.contains(crate::objcache::wrapper::UNIT_RECORD_NOT_WRITTEN)))
+        .count();
     if unrecorded > 0 {
+        let (count, were) = match unrecorded {
+            1 => ("1 object was".to_owned(), "its miss"),
+            n => (format!("{n} objects were"), "their misses"),
+        };
         out.push_str(&format!(
-            "\n  {} objects were stored without the record of what made them (the build could not write it: see its event log), so later builds may call their misses new\n",
-            unrecorded
+            "\n  {count} stored without the record of what made it (the build could not write it: see its event log), so later builds may call {were} new\n"
         ));
     }
 
@@ -435,13 +461,14 @@ fn without_paths(why: &str) -> String {
 
 /// What would let compiles kept out for `why` in, where cactup knows.
 fn kept_out_hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 8] = [
+    let hints: [(&str, &str); 9] = [
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
-        ("No space left on device", "the build cache's file system is full: make room (cactup cache gc), or set build-cache-size to be told before"),
+        ("Disk quota exceeded", "the build cache is over your quota: make room (cactup cache gc), or set build-cache-size to be told before"),
+        ("No space left on device", "a file system is full (the build cache's or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
         ("not published: Failed to create", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
         ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
     ];
@@ -780,6 +807,26 @@ mod tests {
         assert!(said.contains(&format!("        2  {header}\n        1  the preprocessed text\n           (and 3 differences the compiles did not list")), "{said}");
         assert!(said.contains("built otherwise (1), by what differed from the closest:\n        1  the flags\n           A/e.c.o\n"), "{said}");
         assert!(said.contains("        1  Fortran (its files are keyed whole)\n"), "{said}");
+
+        // One header taken in two ways by units that keep other
+        // definitions of it is one file, ranked by all its misses.
+        let big = |how: &str| format!("/cactup-root/big.h: narrowed: a line the key keeps differs ({how})");
+        let split = [
+            miss("B/a.c.o", Miss::OtherSources, &[&big("U1")]),
+            miss("B/b.c.o", Miss::OtherSources, &[&big("U2")]),
+            miss("B/c.c.o", Miss::OtherSources, &[&big("U1")]),
+            miss("B/d.c.o", Miss::OtherSources, &["/cactup-root/small.h: whole: the compiled text has code of it"]),
+            miss("B/e.c.o", Miss::OtherSources, &["/cactup-root/small.h: whole: the compiled text has code of it"]),
+        ];
+        let said = doctor(&split, Some(crate::objcache::Mode::Serve));
+        assert!(
+            said.contains(&format!(
+                "        3  /cactup-root/big.h\n           2 {}\n           1 {}\n        2  /cactup-root/small.h: whole: the compiled text has code of it\n",
+                big("U1").trim_start_matches("/cactup-root/big.h: "),
+                big("U2").trim_start_matches("/cactup-root/big.h: ")
+            )),
+            "{said}"
+        );
 
         // A serving build whose every compile was kept out is no build
         // that only recorded; one cause with a path in it is one line.
