@@ -2600,6 +2600,27 @@ help, docs and spec say thorns' files are read with make and their
 `$(shell)` runs; the "not a plain command" hint names every language's
 compiler.
 
+### M5 part 2, round 5 (on `56e4d0f`): BLOCKED by both
+
+Both re-ran rounds 1 to 4 with their planted thorns (`make.code.deps`,
+capabilities, `*_OPTIMISE_FLAGS`, linked `SUBDIRS`, a directory not
+compiled, `-march=native` by key, AMReX's `CXX = $(CUCC)`, quoted
+option-list flags: all right now) and confirmed nothing changes a build or
+what is served. Blocking, both raised by both, fixed in the commit after
+this record:
+- flags set for some objects only (`a.cc.o: CXXFLAGS += …`, `%.cc.o: …`;
+  ML_ADMConstraints has one) were passed over without a word (round 3's
+  note had gone with the rework): each object's values are asked of `make
+  -n` with a rule of its own, and checked.
+- a thorn's finding was given the option list's fix, and one the probe's
+  key found named no file: a fix of its own for a thorn's flag, and the
+  flag's variable found among the thorn's values.
+Also: a file that names the flag only in a comment is not taken for the
+one that sets it; a language listed once in a merged finding; a directory
+the fragment would stand down for (an `include`, a `define`) is said to
+keep the cache out; a language checked again with the same values is
+checked once (60 thorns with one capability's flag: once). `et`: 2.0 s.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

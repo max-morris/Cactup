@@ -6380,8 +6380,15 @@ never built has none to check), without a build (`objcache::doctor`):
   where a language's compiler or flags differ there (AMReX's capability
   can make `CXX` `nvcc`), the language is checked again as above, probe
   key and all, and what that finds beyond the configuration's check is the
-  thorn's, traced to the file that has the flag. A directory `make` cannot
-  read is "not checked". The thorns and their files are read as they are
+  thorn's, traced to the file that has the flag (in a line that is no
+  comment). Where a thorn's file sets a compiler or flag variable for some
+  objects only (`x.cc.o: CXXFLAGS += …`, `%.cc.o: …`), each object of the
+  directory is asked of `make -n` with a rule of its own that prints its
+  values (nothing is built), and checked the same way. A directory whose
+  `make.code.defn` or `make.code.deps` the fragment would stand down for
+  (`probe::STAND_DOWN`) keeps the cache out of its compiles, said so. A
+  language checked again with the same values is checked once. A directory
+  `make` cannot read is "not checked". The thorns and their files are read as they are
   now, not as the attempt froze them (the doctor speaks of the next
   build). On the Einstein Toolkit (334 directories) this costs about two
   seconds; entries of the path variables that are

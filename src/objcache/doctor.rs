@@ -10,10 +10,12 @@
 //! driver's own searches, the compiler's identity, the flags (each variable
 //! on its own, so that every cause is found and not the first only), and
 //! a whole key of a small probe compile (the preprocessor and the
-//! identity's trial compiles run; no object of the build is compiled). It
-//! answers in JSON on stdout; `cache doctor` says where each finding comes
-//! from (the user's shell, the machine's environment setup, the option
-//! list, Cactus's defaults) and what to change ([`Finding`]).
+//! identity's trial compiles run; no object of the build is compiled), and
+//! again where a thorn's compiles get other compilers or flags (read with
+//! make through Cactus's own `make.subdir`, [`thorn_checks`]). It answers
+//! in JSON on stdout; `cache doctor` says where each finding comes from (the
+//! user's shell, the machine's environment setup, the option list,
+//! Cactus's defaults, a thorn's file) and what to change ([`Finding`]).
 //!
 //! The findings are a small seam ([`CheckSet`]): named sets of checks
 //! returning findings, so that a general `cactup doctor` can run them with
@@ -273,7 +275,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
     let tops: Vec<(String, PathBuf)> = thorns.iter().map(|thorn| (thorn.clone(), cactus_root.join("arrangements").join(thorn).join("src"))).filter(|(_, src)| src.is_dir()).collect();
     let tops = crate::par::parallel_map(&tops, |(thorn, src)| (thorn.clone(), src.clone(), subdir_values(cactus_root, config_dir, thorn, src, &asking)));
     let Ok(tops) = tops else { return Vec::new() };
-    let mut dirs: Vec<(String, PathBuf, Res<BTreeMap<String, String>>)> = Vec::new();
+    let mut dirs: Vec<ThornDir> = Vec::new();
     let mut subdirs = Vec::new();
     for (thorn, src, top) in tops {
         if let Ok(top) = &top {
@@ -288,6 +290,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
     dirs.extend(subdirs);
 
     let mut found = Vec::new();
+    let mut memo = std::collections::HashMap::new();
     for (thorn, dir, theirs) in dirs {
         if gix::interrupt::is_triggered() {
             break;
@@ -301,33 +304,172 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             }
         };
         let name = thorn.rsplit('/').next().unwrap_or(&thorn);
-        for language in &request.languages {
-            let own: Vec<&String> = std::iter::once(&language.compiler_variable).chain(&language.flag_variables).collect();
-            let words = |values: &BTreeMap<String, String>, variable: &str| {
-                let value = values.get(variable).cloned().unwrap_or_default();
-                super::cuda::shell_words(&value, |name| std::env::var(name).ok()).unwrap_or_else(|_| value.split_whitespace().map(str::to_owned).collect())
-            };
-            if own.iter().all(|variable| words(values, variable) == words(&theirs, variable)) {
-                continue;
-            }
-            // The language again, with the thorn's compiler and flags.
-            let mut merged = values.clone();
-            for variable in &own {
-                merged.insert((*variable).clone(), theirs.get(*variable).cloned().unwrap_or_default());
-            }
-            let again = check_language(request, language, &merged, tmp, probe);
-            let already = |raw: &Raw| base.iter().any(|seen| seen.reason == raw.reason && seen.language == raw.language);
-            for raw in again.into_iter().filter(|raw| !already(raw)) {
-                let file = flag_file(&raw, &theirs, &dir, config_dir, name).map(|file| file.strip_prefix(cactus_root).map(Path::to_path_buf).unwrap_or(file).display().to_string());
-                let thorn = match file {
-                    Some(file) => format!("{thorn} ({file})"),
-                    None => format!("{thorn} ({shown})"),
-                };
-                found.push(Raw { thorn: Some(thorn), ..raw });
+        // A directory whose make files might define compile recipes of
+        // their own: the fragment stands down there, and nothing is cached.
+        let files: Vec<PathBuf> = [dir.join("make.code.defn"), dir.join("make.code.deps")].into_iter().filter(|file| file.is_file()).collect();
+        if !files.is_empty()
+            && Command::new("grep").args(["-E", "-q", "-e", super::probe::STAND_DOWN]).args(&files).stdin(Stdio::null()).status().is_ok_and(|status| status.success())
+        {
+            found.push(Raw {
+                severity: Severity::KeepsOut,
+                language: None,
+                variable: None,
+                reason: "its make files might define compile recipes of their own (an include, a define, $(eval), a COMPILE_ variable), so the build cache stands down for its compiles".to_owned(),
+                thorn: Some(format!("{thorn} ({shown})")),
+            });
+            continue;
+        }
+        found.extend(differences(request, values, &theirs, base, tmp, probe, &mut memo, |raw| {
+            let file = flag_file(raw, &theirs, &dir, config_dir, name).map(|file| file.strip_prefix(cactus_root).map(Path::to_path_buf).unwrap_or(file).display().to_string());
+            format!("{thorn} ({})", file.unwrap_or_else(|| shown.clone()))
+        }));
+        // Flags set for some objects only (`x.cc.o: CXXFLAGS += …`,
+        // `%.cc.o: …`): each object's own values, as make gives them when
+        // it would build it.
+        if one_target_only(&dir, config_dir, name, &variables) {
+            match object_values(cactus_root, config_dir, &thorn, &dir, &variables) {
+                Ok(objects) => {
+                    for (object, own) in objects {
+                        found.extend(differences(request, &theirs, &own, base, tmp, probe, &mut memo, |raw| {
+                            let file = flag_file(raw, &own, &dir, config_dir, name).map(|file| file.strip_prefix(cactus_root).map(Path::to_path_buf).unwrap_or(file).display().to_string());
+                            format!("{thorn} ({}, for {object})", file.unwrap_or_else(|| shown.clone()))
+                        }));
+                    }
+                }
+                Err(e) => found.push(Raw {
+                    severity: Severity::Unchecked,
+                    language: None,
+                    variable: None,
+                    reason: format!("make could not give the values the thorn sets for some of its objects only: {e:#}"),
+                    thorn: Some(format!("{thorn} ({shown})")),
+                }),
             }
         }
     }
     found
+}
+
+/// A thorn, one of its directories, and the values make gives there.
+type ThornDir = (String, PathBuf, Res<BTreeMap<String, String>>);
+
+/// The language checks made again, by language and the values checked.
+type Memo = std::collections::HashMap<(String, Vec<(String, String)>), Vec<Raw>>;
+
+/// What the languages find with `theirs` (a thorn's, or an object's) that
+/// they did not with `values` and the configuration's check (`base`): each
+/// language whose compiler or flags differ is checked again, the probe's
+/// key too, once for each set of its values (`memo`); each finding gets the
+/// thorn and file `place` names, and the variable it is about where the
+/// probe's reason names a flag of its.
+#[allow(clippy::too_many_arguments)]
+fn differences(
+    request: &Request,
+    values: &BTreeMap<String, String>,
+    theirs: &BTreeMap<String, String>,
+    base: &[Raw],
+    tmp: &Path,
+    probe: bool,
+    memo: &mut Memo,
+    place: impl Fn(&Raw) -> String,
+) -> Vec<Raw> {
+    let mut found = Vec::new();
+    for language in &request.languages {
+        let own: Vec<&String> = std::iter::once(&language.compiler_variable).chain(&language.flag_variables).collect();
+        let words = |values: &BTreeMap<String, String>, variable: &str| {
+            let value = values.get(variable).cloned().unwrap_or_default();
+            super::cuda::shell_words(&value, |name| std::env::var(name).ok()).unwrap_or_else(|_| value.split_whitespace().map(str::to_owned).collect())
+        };
+        if own.iter().all(|variable| words(values, variable) == words(theirs, variable)) {
+            continue;
+        }
+        let mut merged = values.clone();
+        for variable in &own {
+            merged.insert((*variable).clone(), theirs.get(*variable).cloned().unwrap_or_default());
+        }
+        let key = (language.name.clone(), own.iter().map(|variable| ((*variable).clone(), merged.get(*variable).cloned().unwrap_or_default())).collect());
+        let again = memo.entry(key).or_insert_with(|| check_language(request, language, &merged, tmp, probe)).clone();
+        let already = |raw: &Raw| base.iter().any(|seen| seen.reason == raw.reason && seen.language == raw.language);
+        for raw in again.into_iter().filter(|raw| !already(raw)) {
+            let raw = with_flag_variable(&raw, &merged);
+            let thorn = place(&raw);
+            found.push(Raw { thorn: Some(thorn), ..raw });
+        }
+    }
+    found
+}
+
+/// Does a file of the thorn's in `dir` set one of `variables` for some
+/// targets only (`x.o: CXXFLAGS += …`, `%.cc.o: …`)?
+fn one_target_only(dir: &Path, config_dir: &Path, name: &str, variables: &[String]) -> bool {
+    let files = [dir.join("make.code.defn"), dir.join("make.code.deps"), config_dir.join(format!("bindings/Configuration/Thorns/make.{name}.defn"))];
+    files.iter().filter_map(|file| std::fs::read_to_string(file).ok()).any(|text| {
+        text.lines().filter(|line| !line.trim_start().starts_with('#')).any(|line| {
+            let Some((target, rest)) = line.split_once(':') else { return false };
+            let rest = rest.trim_start().trim_start_matches("override ").trim_start_matches("export ").trim_start();
+            // The variable's whole name, then an assignment.
+            let assigns = |variable: &String| {
+                rest.strip_prefix(variable.as_str()).is_some_and(|after| ["=", ":=", "::=", "+=", "?=", "!="].iter().any(|op| after.trim_start().starts_with(op)))
+            };
+            !target.trim().is_empty() && !target.contains('=') && !rest.starts_with('=') && variables.iter().any(assigns)
+        })
+    })
+}
+
+/// The values of `variables` as make has them for each object of the
+/// thorn's in `dir` (its `SRCS`), when it would build it: target- and
+/// pattern-specific values included. Asked with `make -n` and a rule of
+/// its own for each object, which prints them; nothing is built.
+fn object_values(cactus_root: &Path, config_dir: &Path, thorn: &str, dir: &Path, variables: &[String]) -> Res<Vec<(String, BTreeMap<String, String>)>> {
+    let name = thorn.rsplit('/').next().unwrap_or(thorn);
+    let tmp = tempfile::tempdir().context("Failed to make a temporary directory")?;
+    // The directory's sources, as its make.code.defn names them.
+    std::fs::write(tmp.path().join("srcs.mk"), format!("SRCDIR := {}\n-include $(SRCDIR)/make.code.defn\n$(info SRCS=$(SRCS))\ncactup-doctor-print: ; @:\n", dir.display())).context("Failed to write a makefile")?;
+    let out = Command::new("make").args(["-s", "-f", "srcs.mk", "cactup-doctor-print"]).env_remove("MAKEFILES").env_remove("MAKEFLAGS").current_dir(tmp.path()).stdin(Stdio::null()).output().context("Failed to run make")?;
+    let objects: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().find_map(|line| line.strip_prefix("SRCS=")).unwrap_or_default().split_whitespace().map(|source| format!("{source}.o")).collect();
+    if objects.is_empty() {
+        return Ok(Vec::new());
+    }
+    const MARK: &str = "cactup-doctor-object ";
+    let mut print = String::new();
+    for object in &objects {
+        print.push_str(&format!("{object}:\n\t$(info {MARK}{object})\n"));
+        for variable in variables {
+            print.push_str(&format!("\t$(info {variable}=$({variable}))\n"));
+        }
+    }
+    std::fs::write(tmp.path().join("print.mk"), print).context("Failed to write a makefile")?;
+    let out = Command::new("make")
+        .args(["-n", "-s", "-k", "-f"])
+        .arg(cactus_root.join("lib/make/make.subdir"))
+        .args(["-f", "print.mk"])
+        .args(&objects)
+        .arg(format!("TOP={}", config_dir.display()))
+        .arg(format!("CONFIG={}/config-data", config_dir.display()))
+        .arg(format!("SRCDIR={}", dir.display()))
+        .arg(format!("THORN={name}"))
+        .arg(format!("CCTK_HOME={}", cactus_root.display()))
+        .arg(format!("MAKE_DIR={}", cactus_root.join("lib/make").display()))
+        .args(["SRCS=", "CCTK_TARGET=cactup-doctor-nothing"])
+        .env_remove("MAKEFILES")
+        .env_remove("MAKEFLAGS")
+        .current_dir(tmp.path())
+        .stdin(Stdio::null())
+        .output()
+        .context("Failed to run make")?;
+    let mut found: Vec<(String, BTreeMap<String, String>)> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(object) = line.strip_prefix(MARK) {
+            found.push((object.to_owned(), BTreeMap::new()));
+        } else if let (Some((_, values)), Some((name, value))) = (found.last_mut(), line.split_once('='))
+            && variables.iter().any(|variable| variable == name)
+        {
+            values.insert(name.to_owned(), value.trim().to_owned());
+        }
+    }
+    if found.len() != objects.len() {
+        anyhow::bail!("make gave the values of {} of {} objects", found.len(), objects.len());
+    }
+    Ok(found)
 }
 
 /// The values of `variables` as Cactus's `make.subdir` has them for the
@@ -385,9 +527,10 @@ fn flag_file(raw: &Raw, theirs: &BTreeMap<String, String>, dir: &Path, config_di
     let mut candidates = vec![dir.join("make.code.defn"), dir.join("make.code.deps"), thorn_defn.clone(), bindings.join(name).join("make.configuration.defn")];
     // The capabilities the thorn's bindings include.
     if let Ok(text) = std::fs::read_to_string(&thorn_defn) {
-        candidates.extend(text.split_whitespace().filter(|word| word.contains("Capabilities/make.")).map(|word| PathBuf::from(word.trim_matches(['"', '\''])).file_name().map(|file| bindings.join("Capabilities").join(file))).flatten());
+        candidates.extend(text.split_whitespace().filter(|word| word.contains("Capabilities/make.")).filter_map(|word| PathBuf::from(word.trim_matches(['"', '\''])).file_name().map(|file| bindings.join("Capabilities").join(file))));
     }
-    candidates.into_iter().find(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains(flag)))
+    // In a line that is no comment.
+    candidates.into_iter().find(|file| std::fs::read_to_string(file).is_ok_and(|text| text.lines().any(|line| !line.trim_start().starts_with('#') && line.split('#').next().unwrap_or_default().contains(flag))))
 }
 
 /// The compiler and flags of `language`, as `values` has them, checked as a
@@ -516,14 +659,12 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
     }
     variables.sort();
     variables.dedup();
-    evaluate(config_dir, &variables, None)
+    evaluate(config_dir, &variables)
 }
 
 /// The values of `variables` as `make` has them for the configuration at
-/// `config_dir`, and with `thorn` (its name and one of its source
-/// directories) as Cactus's `make.subdir` has them for that directory's
-/// compiles.
-fn evaluate(config_dir: &Path, variables: &[String], thorn: Option<(&str, &Path)>) -> Res<BTreeMap<String, String>> {
+/// `config_dir`.
+fn evaluate(config_dir: &Path, variables: &[String]) -> Res<BTreeMap<String, String>> {
     let defn = config_dir.join("config-data/make.config.defn");
     if !defn.is_file() {
         anyhow::bail!("{} is not there", defn.display());
@@ -532,12 +673,6 @@ fn evaluate(config_dir: &Path, variables: &[String], thorn: Option<(&str, &Path)
     // `$(info)`: no shell between make and the values (a quote in one is
     // its own).
     let mut makefile = format!("TOP := {}\nCONFIG := {}/config-data\ninclude {}\n", config_dir.display(), config_dir.display(), defn.display());
-    if let Some((name, src)) = thorn {
-        makefile.push_str(&format!(
-            "THORN := {name}\nSRCDIR := {src}\nBINDINGS_DIR = $(TOP)/bindings\n-include $(BINDINGS_DIR)/Configuration/Thorns/make.$(THORN).defn\n-include $(SRCDIR)/make.code.defn\n-include $(TOP)/bindings/Configuration/$(THORN)/make.configuration.defn\n",
-            src = src.display()
-        ));
-    }
     for variable in variables {
         makefile.push_str(&format!("$(info {variable}=$({variable}))\n"));
     }
@@ -763,7 +898,8 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
                     *seen = raw;
                 }
                 match &raw.language {
-                    Some(language) if !languages.is_empty() => languages.push(language),
+                    Some(language) if !languages.is_empty() && !languages.contains(&language.as_str()) => languages.push(language),
+                    Some(_) if !languages.is_empty() => {}
                     Some(_) => {}
                     None => languages.clear(),
                 }
@@ -851,7 +987,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             None => format!("thorn {thorn}"),
         };
         let fix = (raw.severity == Severity::KeepsOut).then(|| {
-            hint(&raw.reason).map_or_else(|| "the cache stays out of that thorn's compiles of this language only: the file named sets it".to_owned(), |hint| format!("{hint} (in the file named)"))
+            "the thorn's own: the cache stays out of those compiles only, and the file named is where it is set (the thorn's to change, not the option list's)".to_owned()
         });
         return (from, fix);
     }
@@ -1103,7 +1239,14 @@ mod tests {
             "include $(CONFIG)/make.config.defn\nBINDINGS_DIR=$(TOP)/bindings\n-include $(BINDINGS_DIR)/Configuration/Thorns/make.$(THORN).defn\n-include $(SRCDIR)/make.code.defn\n-include $(TOP)/bindings/Configuration/$(THORN)/make.configuration.defn\nOBJS = $(SRCS:%=%.o)\n$(CCTK_TARGET): $(OBJS)\n\techo > make.checked\n-include $(SRCDIR)/make.code.deps\n",
         );
         write(config.join("config-data/make.config.defn"), "export CC = gcc\nexport CPPFLAGS =\nexport CFLAGS = -O2\n");
-        write(config.join("ThornList"), "# thorns\nArr/Plain\nArr/Deps\nArr/Sub\nArr/Cap # its own\n");
+        write(config.join("ThornList"), "# thorns\nArr/Plain\nArr/Deps\nArr/Sub\nArr/Cap # its own\nArr/Tgt\nArr/Pat\nArr/Inc\n");
+        // Make files the fragment stands down for.
+        write(root.join("arrangements/Arr/Inc/src/make.code.defn"), "SRCS = d.c\ninclude $(SRCDIR)/more.mk\n");
+        write(root.join("arrangements/Arr/Inc/src/more.mk"), "");
+        // A flag for one object only, and for objects of a pattern.
+        write(root.join("arrangements/Arr/Tgt/src/make.code.defn"), "SRCS = a.c b.c\n");
+        write(root.join("arrangements/Arr/Tgt/src/make.code.deps"), "b.c.o: CFLAGS += --coverage\n");
+        write(root.join("arrangements/Arr/Pat/src/make.code.defn"), "SRCS = c.c\n%.c.o: CFLAGS += -fbranch-probabilities\n");
         write(root.join("arrangements/Arr/Plain/src/make.code.defn"), "SRCS = a.c\n");
         write(root.join("arrangements/Arr/Deps/src/make.code.defn"), "SRCS = a.c\n");
         write(root.join("arrangements/Arr/Deps/src/make.code.deps"), "CFLAGS += --coverage\n");
@@ -1127,6 +1270,11 @@ mod tests {
         assert!(about("-fauto-profile").is_some_and(|thorn| thorn.starts_with("Arr/Cap") && thorn.contains("make.FOO.defn")), "{found:?}");
         assert!(about("-fprofile-use").is_none(), "a directory no thorn compiles: {found:?}");
         assert!(!found.iter().any(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Plain"))), "{found:?}");
+        let of = |thorn: &str| kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|place| place.starts_with(thorn))).map(|raw| raw.thorn.clone().unwrap()).collect::<Vec<_>>();
+        assert_eq!(of("Arr/Tgt").len(), 1, "{found:?}");
+        assert!(of("Arr/Tgt")[0].contains("make.code.deps, for b.c.o"), "{found:?}");
+        assert!(of("Arr/Pat").iter().any(|place| place.contains("for c.c.o")), "{found:?}");
+        assert!(kept.iter().any(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Inc")) && raw.reason.contains("stands down")), "{found:?}");
     }
 
     /// A setup that gives a variable an empty entry where it was not set

@@ -339,7 +339,7 @@ fn wrap_recipe(body: &str, var: &str) -> Option<String> {
 ///
 /// It goes into the fragment inside `$(shell …)` and single quotes, so it
 /// has no `'`, no `#` (make's comment) and no unbalanced parenthesis.
-const STAND_DOWN: &str = "COMPILE_\
+pub(super) const STAND_DOWN: &str = "COMPILE_\
     |^[[:space:]]*(-|s)?include([[:space:]]|\\\\|$)\
     |^[[:space:]]*((override|export|private|unexport)([[:space:]]|\\\\)+)*define([[:space:]]|\\\\|$)\
     |^[[:space:]]*-?load([[:space:]]|\\\\|$)\
