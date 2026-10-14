@@ -2479,6 +2479,40 @@ verdicts; the time a miss spends on records is in no event field; the
 build's line does not say when it could not read lines of the log. **M5
 part 1 signs off at `ad236d2`.**
 
+### M5 part 2, round 1 (on `3ff11ce`): BLOCKED by both
+
+Both confirmed nothing changes a build or what is served (the wrapper's
+functions only made visible; the probe keys in record mode in a temporary
+tree). Both could not build configurations (`~/.cactup` read-only in their
+sandboxes) and made CACTUP_HOMEs of their own with copies of `m5a`'s
+attempt. The same blocking findings from both, fixed in the commit after
+this record:
+- Fortran 77 (`F77`, `F77FLAGS`, `COMPILE_F77`) was not checked.
+- A setup that prints on stdout broke the check (the answer shares the
+  pipe): the setup's stdout goes to stderr, its stdin is `/dev/null`, and
+  it runs under `set -e`, as the build script runs it.
+- The green all-clear was given where nothing was checked: a kind of its
+  own ("not checked") now, and the all-clear only without it.
+- The MDB check passed over setups that stop early (dash ends at a
+  sourced file that is not there: omnia, db1's `host` universe): run in
+  bash, which goes on, with a line at the end that must be reached (an
+  `exit` fails the test); a printed `NAME=value` line is no value.
+- Ctrl-C was not honored while the setup ran for the path variables; no
+  progress line was ever drawn: a `progress::Line` on its layout's clock.
+- Findings traced to the wrong place: a probe's reason (`-march=native`)
+  to "the build environment", now to the flag's variable; a flag in two
+  languages' variables merged into one (now one finding per variable);
+  what the wrapper makes of the compiler's text before any key (a command
+  only a shell runs, `ccache gcc`, a name the shell has a meaning of its
+  own for) was not applied, and is.
+Also: shell versus setup decided by whether the setup changed the value;
+flags split as the shell splits them (`-DNAME="a b"`); a default flag
+traced within its language; `make`'s values read by `$(info)`; a note where
+the option list's values stand in for `make`'s; `LD_PRELOAD` by its own
+rule, `LD_AUDIT` traced; the Fortran "no file is narrowed" note dropped
+(the cache's own limit, M5b's); `REFUSED` tied to the lists it repeats by
+a test; the knob readers reused.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

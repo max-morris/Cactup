@@ -45,7 +45,7 @@ const DEBUG_ENV: &str = "CACTUP_CC_DEBUG";
 /// Tools that already stand in front of a compiler. cactup does not stack
 /// on top of one: which of the two would see the real compiler, and what
 /// the other would then key on, is not something to guess at.
-const OTHER_WRAPPERS: &[&str] =
+pub(super) const OTHER_WRAPPERS: &[&str] =
     &["ccache", "sccache", "distcc", "icecc", "icerun", "buildcache", "f90cache", "cachecc1"];
 
 /// If this process was started as the compiler wrapper, the probe or the
@@ -83,24 +83,29 @@ impl Job {
     /// only to a shell, so it goes back to one (see [`pass_through`]) and
     /// the cache stays out of it.
     fn argv(&self) -> Option<Vec<OsString>> {
-        let plain = |b: &u8| b.is_ascii_alphanumeric() || b"_-+./:,@%=~ \t".contains(b);
-        let text = self.compiler.as_bytes();
-        if !text.iter().all(plain) {
-            return None;
-        }
-        let words: Vec<&[u8]> = text.split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty()).collect();
-        // The two characters let through above that a shell does read
-        // something into, by position: `~` at the start of a word, and `=`
-        // after a name at the start of the command.
-        if words.iter().any(|word| word.starts_with(b"~")) || is_assignment(words.first()?) {
-            return None;
-        }
-        if shell_resolves_differently(OsStr::from_bytes(words[0])) {
-            return None;
-        }
-        let argv = words.into_iter().map(|w| OsString::from_vec(w.to_vec()));
-        Some(argv.chain(self.args.iter().cloned()).collect())
+        let words = plain_words(self.compiler.as_bytes())?;
+        Some(words.into_iter().chain(self.args.iter().cloned()).collect())
     }
+}
+
+/// The compiler's text `text` as words, if it is a plain command (see
+/// [`Job::argv`]); `cache doctor` asks it of a configuration's compilers.
+pub(super) fn plain_words(text: &[u8]) -> Option<Vec<OsString>> {
+    let plain = |b: &u8| b.is_ascii_alphanumeric() || b"_-+./:,@%=~ \t".contains(b);
+    if !text.iter().all(plain) {
+        return None;
+    }
+    let words: Vec<&[u8]> = text.split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty()).collect();
+    // The two characters let through above that a shell does read
+    // something into, by position: `~` at the start of a word, and `=`
+    // after a name at the start of the command.
+    if words.iter().any(|word| word.starts_with(b"~")) || is_assignment(words.first()?) {
+        return None;
+    }
+    if shell_resolves_differently(OsStr::from_bytes(words[0])) {
+        return None;
+    }
+    Some(words.into_iter().map(|w| OsString::from_vec(w.to_vec())).collect())
 }
 
 /// Is `word` a shell variable assignment (`NAME=value`)? A path with an `=`

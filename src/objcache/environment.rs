@@ -113,6 +113,18 @@ pub fn digest(locale: bool) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// Every variable that keeps the cache out is in the list `cache
+    /// doctor` reports from.
+    #[test]
+    fn refused_lists_every_variable_that_keeps_the_cache_out() {
+        let mut both: Vec<&str> = MORE_OUTPUT.iter().chain(MORE_FLAGS).copied().collect();
+        let mut refused = REFUSED.to_vec();
+        both.sort();
+        refused.sort();
+        assert_eq!(both, refused);
+        assert_eq!(refusals(REFUSED.iter().map(|name| (OsString::from(name), OsString::from("x")))).len(), REFUSED.len());
+    }
+
     fn of(vars: &[(&str, &str)]) -> Result<String, String> {
         digest_of(vars.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))), true)
     }

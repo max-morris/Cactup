@@ -6340,20 +6340,27 @@ rules to the configuration's build environment as its newest build
 attempt froze it (its environment setup and option list; a configuration
 never built has none to check), without a build (`objcache::doctor`):
 
-- It starts the setup in a shell, as the build script does, from the
-  Cactus root, and the shell starts `cactup __cc-doctor` with what to
-  check on stdin. The checks run in that process, in the build's own
-  environment, with the functions a compile through the wrapper runs; the
-  answer comes back as JSON. A setup that does not finish is stopped on
-  Ctrl-C. A configuration built in a container universe is not checked
-  (said so).
+- It starts the setup in a shell, as the build script does (`set -e`),
+  from the Cactus root, with the setup's own stdin `/dev/null` and its
+  stdout sent to stderr, and the shell then starts `cactup __cc-doctor`
+  with what to check on stdin. The checks run in that process, in the
+  build's own environment, with the functions a compile through the wrapper
+  runs; the answer comes back as JSON on stdout. A setup that does not run
+  to its end is said so ("not checked"), and the all-clear is given only
+  where everything was checked. Ctrl-C stops it. A configuration built in
+  a container universe is not checked (said so).
 - The compilers and flags are those `make` gives the configuration's
-  compile recipes (`CC` with `CPPFLAGS` and `CFLAGS`, `CXX`, `F90`, `CUCC`
-  with theirs), read through `config-data/make.config.defn` with its
-  conditionals (the optimizing flags where optimizing); where the
-  configuration is not configured, the option list's.
+  compile recipes (`CC` with `CPPFLAGS` and `CFLAGS`, `CXX`, `F90`, `F77`,
+  `CUCC` with theirs), read through `config-data/make.config.defn` with its
+  conditionals (the optimizing flags where optimizing) by `$(info)`; where
+  the configuration is not configured, or `make` cannot read it, the
+  option list's (said so). Flags are split as the recipe's shell splits
+  them.
 - The checks: the variables that keep every compile out
-  (`CCC_OVERRIDE_OPTIONS` and the like); for each language, the driver's
+  (`CCC_OVERRIDE_OPTIONS` and the like); for each language, what the
+  wrapper makes of the compiler's text before any key (a command only a
+  shell can run, another wrapper such as `ccache` in front, a name the
+  recipe's shell gives a meaning of its own), the driver's
   own searches (`COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LD_PRELOAD`,
   `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, each
   variable of flags on its own (every flag the cache does not follow, not
@@ -6361,22 +6368,25 @@ never built has none to check), without a build (`objcache::doctor`):
   flag (its preprocessor and the identity's trial compiles run; no object
   of the build is compiled), which also says whether keys are relocatable
   and whether files are narrowed; entries of the path variables that are
-  not absolute; and the setup itself, run with each path variable unset,
-  empty and set, for one it gives an entry that is not absolute (`export
-  X=/dir:$X` with `X` unset).
+  not absolute; and the setup itself, run in bash with each path variable
+  unset, empty and set (module commands doing nothing, a sourced file that
+  is not there passed over), for one it gives an entry that is not
+  absolute (`export X=/dir:$X` with `X` unset); a setup that does not reach
+  its end there (an `exit`) is said so.
 - Each finding says how much it matters (keeps the cache out; costs
   objects shared or time; worth knowing), what, where it comes from, and
   what to change. An environment variable is the user's shell's when it
-  had the value (or the entries found) before the setup ran, else the
-  setup's (the machine's `[environment]`, or its universe's); a flag is the
-  option list's variable that has it, else Cactus's default for the
-  compiler, as configure wrote it; a compiler is the option list's.
+  had the value before the setup ran and the setup left it so (or kept the
+  entries found from a value of the shell's), else the setup's (the
+  machine's `[environment]`, or its universe's); a flag is the option
+  list's variable that has it, else Cactus's default for the compiler of
+  the finding's language, as configure wrote it; a compiler is the option
+  list's, else the one configure chose.
 - The checks are named sets returning findings (`doctor::CheckSet`), so
   that a general `cactup doctor` can run them with others.
 
 **The MDB's setups.** A unit test runs every in-repository machine's
-build environment setup, in every universe, with each path variable unset,
-empty and set (module commands doing nothing), and fails on one that gives
-a path variable an entry that is not an absolute path: CI runs it on every
-change to the MDB.
+build environment setup, in every universe, as above, and fails on one
+that gives a path variable an entry that is not an absolute path, or that
+does not run to its end: CI runs it on every change to the MDB.
 

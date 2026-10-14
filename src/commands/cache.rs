@@ -79,11 +79,15 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                     let conf = probe_conf(ctx, &attempt)?;
                     println!("{}", format!("{name}: the build environment of build attempt {id:04} (installation {})", installation.alias).bold());
                     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+                    let sets = crate::objcache::doctor::check_sets(&attempt, conf);
+                    let names: Vec<String> = sets.iter().map(|set| format!("check the {}", set.name)).collect();
+                    let layout = crate::progress::Layout::for_names(names.iter().map(String::as_str));
                     let mut findings = Vec::new();
-                    for set in crate::objcache::doctor::check_sets(&attempt, conf) {
-                        let checking = progress.add_child(format!("check the {}", set.name));
-                        checking.init(None, Some(prodash::unit::label("checks")));
+                    for (set, name) in sets.iter().zip(&names) {
+                        let line = crate::progress::Line::counting(progress.add_child(name.clone()), name.clone(), layout.clone());
+                        line.phase("runs the build's environment setup and the cache's checks in it");
                         findings.extend((set.run)());
+                        drop(line);
                     }
                     if let Some(renderer) = renderer {
                         renderer.shutdown_and_wait();
@@ -512,8 +516,8 @@ fn probe_conf(ctx: &Ctx, attempt: &BuildAttempt) -> Res<crate::objcache::BuildCo
         universe: None,
         build_env_digest: String::new(),
         store: PathBuf::from("/nonexistent-cactup-store"),
-        relocate: db.knob("build-cache-relocate") != Some("no"),
-        exact_warnings: db.knob("build-cache-preserve-exact-warnings") == Some("true"),
+        relocate: crate::objcache::relocate_from_db(&db),
+        exact_warnings: crate::objcache::exact_warnings_from_db(&db),
         size_limit: None,
     })
 }
@@ -523,10 +527,12 @@ fn probe_conf(ctx: &Ctx, attempt: &BuildAttempt) -> Res<crate::objcache::BuildCo
 fn environment_findings(findings: &[crate::objcache::doctor::Finding]) -> String {
     use crate::objcache::doctor::Severity;
     let mut out = String::new();
-    if !findings.iter().any(|finding| finding.severity == Severity::KeepsOut) {
+    // All clear only where everything was checked.
+    if !findings.iter().any(|finding| matches!(finding.severity, Severity::KeepsOut | Severity::Unchecked)) {
         out.push_str(&format!("  {}\n", "nothing in it keeps the build cache out of a compile".green()));
     }
     for (severity, heading) in [
+        (Severity::Unchecked, "not checked"),
         (Severity::KeepsOut, "keeps the build cache out"),
         (Severity::Costs, "costs objects shared, or time"),
         (Severity::Note, "worth knowing"),

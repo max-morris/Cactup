@@ -39,6 +39,9 @@ pub const DOCTOR_VERB: &str = "__cc-doctor";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Severity {
+    /// Not checked (the setup did not run to its end, the build runs in a
+    /// container): what follows says nothing of it.
+    Unchecked,
     /// The cache stays out of these compiles.
     KeepsOut,
     /// The cache takes part, but shares less (fewer objects between
@@ -130,6 +133,7 @@ pub fn languages() -> Vec<Language> {
         language("C", "CC", &["CPPFLAGS", "CFLAGS"], "c", "#include <stdlib.h>\nint probe(void) { return EXIT_SUCCESS; }\n"),
         language("C++", "CXX", &["CPPFLAGS", "CXXFLAGS"], "cc", "#include <vector>\nint probe() { return std::vector<int>(1).size(); }\n"),
         language("Fortran", "F90", &["F90FLAGS"], "f90", "subroutine probe()\nend subroutine\n"),
+        language("Fortran 77", "F77", &["F77FLAGS"], "f", "      subroutine probe\n      end\n"),
         language("CUDA", "CUCC", &["CUCCFLAGS"], "cu", "__global__ void probe() {}\n"),
     ]
 }
@@ -158,13 +162,21 @@ pub fn run_verb() -> i32 {
 /// moves there and back: only for a process of its own).
 pub fn run(request: &Request, probe: bool) -> Reply {
     let mut reply = Reply::default();
-    for variable in PATH_VARIABLES.iter().chain(environment::REFUSED.iter()) {
+    for variable in PATH_VARIABLES.iter().chain(environment::REFUSED.iter()).chain(["LD_AUDIT"].iter()) {
         if let Some(value) = std::env::var_os(variable) {
             reply.env.insert((*variable).to_owned(), value.to_string_lossy().into_owned());
         }
     }
     reply.values = match &request.config_dir {
-        Some(config_dir) => made_values(config_dir, &request.languages).unwrap_or_else(|_| request.optionlist.clone()),
+        Some(config_dir) => made_values(config_dir, &request.languages).unwrap_or_else(|e| {
+            reply.found.push(Raw {
+                severity: Severity::Note,
+                language: None,
+                variable: None,
+                reason: format!("the compilers and flags are the option list's: make could not give the configuration's ({e:#})"),
+            });
+            request.optionlist.clone()
+        }),
         None => request.optionlist.clone(),
     };
     // The environment: what keeps every compile out.
@@ -176,8 +188,14 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     // kind of compile out (below, in the probe's key); every one makes each
     // compile look at more places.
     for variable in PATH_VARIABLES {
+        // A library named without a `/` is searched for, as the loader
+        // does: only a relative path with one is relative for `LD_PRELOAD`.
+        let relative = |entry: &[u8]| match variable {
+            "LD_PRELOAD" => entry.contains(&b'/') && !entry.starts_with(b"/"),
+            _ => !entry.starts_with(b"/"),
+        };
         if let Some(value) = std::env::var_os(variable)
-            && value.as_encoded_bytes().split(|b| *b == b':').any(|entry| !entry.starts_with(b"/"))
+            && value.as_encoded_bytes().split(|b| *b == b':' || (variable == "LD_PRELOAD" && *b == b' ')).any(relative)
         {
             reply.found.push(Raw {
                 severity: Severity::Note,
@@ -202,8 +220,18 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     let Some(compiler) = values.get(&language.compiler_variable).filter(|value| !value.trim().is_empty() && value.trim() != "none") else {
         return found;
     };
-    let words: Vec<OsString> = compiler.split_whitespace().map(OsString::from).collect();
+    // What the wrapper makes of the compiler's text before any key: a
+    // command only a shell can run, another wrapper in front, a name the
+    // recipe's shell gives a meaning of its own.
+    let Some(words) = super::wrapper::plain_words(compiler.as_bytes()) else {
+        found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), format!("{compiler} is not a plain command naming a program, so the recipe's shell runs it")));
+        return found;
+    };
     let name = words[0].clone();
+    if Path::new(&name).file_name().and_then(|name| name.to_str()).is_some_and(|program| super::wrapper::OTHER_WRAPPERS.contains(&program)) {
+        found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), format!("{} already stands in front of the compiler, and the cache does not stack on another wrapper", name.to_string_lossy())));
+        return found;
+    }
     // Not there at all: this configuration may not compile the language.
     if identity::find_program(&name).is_err() {
         found.push(raw(Severity::Note, Some(&language.compiler_variable), format!("{} is not on PATH in the build environment", name.to_string_lossy())));
@@ -211,7 +239,13 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     }
     let cc_dir = tmp.join(format!("cc-{}", language.suffix));
     let _ = std::fs::create_dir_all(&cc_dir);
-    let fortran = language.name == "Fortran";
+    // Make runs Cactus's recipes with bash (Cactus sets SHELL).
+    let shell = ["/bin/bash", "/bin/sh"].into_iter().map(Path::new).find(|shell| shell.is_file()).unwrap_or(Path::new("/bin/sh"));
+    if let Err(why) = super::lookup::shell_runs_program(&cc_dir, shell, &name) {
+        found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), format!("{why}, so the recipe's shell runs it")));
+        return found;
+    }
+    let fortran = language.name.starts_with("Fortran");
     if let Some(why) = key::driver_led_elsewhere(&name, fortran, |variable| std::env::var_os(variable)) {
         found.push(raw(Severity::KeepsOut, None, why));
     }
@@ -243,7 +277,12 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     };
     let mut every_flag = Vec::new();
     for variable in &language.flag_variables {
-        let flags: Vec<OsString> = values.get(variable).map(|value| value.split_whitespace().map(OsString::from).collect()).unwrap_or_default();
+        // As the recipe's shell splits them (`-DNAME="a b"` is one word).
+        let value = values.get(variable).cloned().unwrap_or_default();
+        let flags: Vec<OsString> = match super::cuda::shell_words(&value, |name| std::env::var(name).ok()) {
+            Ok(words) => words.into_iter().map(OsString::from).collect(),
+            Err(_) => value.split_whitespace().map(OsString::from).collect(),
+        };
         if let Err(why) = parse(&flags) {
             found.push(raw(Severity::KeepsOut, Some(variable), why));
         }
@@ -280,7 +319,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             if conf.relocate && compiler.relocates && !keyed.relocatable() {
                 found.push(raw(Severity::Costs, None, "its keys name this installation's paths, so its objects are not shared between installations or configurations".to_owned()));
             }
-            if let Some(why) = keyed.unnarrowed {
+            if let Some(why) = keyed.unnarrowed.filter(|_| !fortran) {
                 found.push(raw(Severity::Costs, None, format!("no file is narrowed ({why}): a header that differs between configurations keeps their objects apart")));
             }
         }
@@ -307,10 +346,13 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
     variables.sort();
     variables.dedup();
     let dir = tempfile::tempdir().context("Failed to make a temporary directory")?;
-    let mut makefile = format!("TOP := {}\ninclude {}\nprint:\n", config_dir.display(), defn.display());
+    // `$(info)`: no shell between make and the values (a quote in one is
+    // its own).
+    let mut makefile = format!("TOP := {}\ninclude {}\n", config_dir.display(), defn.display());
     for variable in &variables {
-        makefile.push_str(&format!("\t@printf '%s\\n' '{variable}=$({variable})'\n"));
+        makefile.push_str(&format!("$(info {variable}=$({variable}))\n"));
     }
+    makefile.push_str("print: ; @:\n");
     std::fs::write(dir.path().join("print.mk"), makefile).context("Failed to write a makefile")?;
     let out = Command::new("make")
         .args(["-s", "-f", "print.mk", "print"])
@@ -333,19 +375,23 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
 /// an absolute path, run with each of them unset, empty and set: `export
 /// X=/dir:$X` gives `X` an empty entry (the working directory) where `X`
 /// was not set before. Commands of module systems (`module`, `ml`) do
-/// nothing here. Each finding: the variable, how it was before, its value
-/// after.
-pub fn fragile_entries(env: &str) -> Vec<(String, &'static str, String)> {
+/// nothing here, and a file it sources that is not there does not stop it
+/// (it runs in bash, which goes on). Each finding: the variable, how it was
+/// before, its value after. An error if the setup does not run to its end
+/// (an `exit`, `set -e` and a command that fails): what it would set after
+/// is not known.
+pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>, String> {
+    const END: &str = "cactup: the end of the setup";
     let mut found = Vec::new();
     for state in ["unset", "empty", "set"] {
-        let mut script = String::from("module() { :; }; ml() { :; }\n");
-        script.push_str(env);
-        script.push('\n');
+        // What the setup prints goes to stderr; stdout is the values.
+        let mut script = format!("module() {{ :; }}; ml() {{ :; }}\n{{\n{env}\n}} >&2 </dev/null\nprintf '%s\\n' '{END}'\n");
         for variable in PATH_VARIABLES {
             script.push_str(&format!("printf '%s=%s\\n' {variable} \"${{{variable}-<unset>}}\"\n"));
         }
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(&script).env_clear().env("HOME", "/nonexistent-home").stdin(Stdio::null()).stderr(Stdio::null());
+        let shell = ["/bin/bash", "/bin/sh"].into_iter().find(|shell| Path::new(shell).is_file()).unwrap_or("/bin/sh");
+        let mut command = Command::new(shell);
+        command.arg("-c").arg(&script).env_clear().env("HOME", "/nonexistent-home");
         for variable in PATH_VARIABLES {
             match state {
                 "set" => {
@@ -360,9 +406,14 @@ pub fn fragile_entries(env: &str) -> Vec<(String, &'static str, String)> {
         if state != "set" {
             command.env("PATH", "/usr/bin:/bin");
         }
-        let Ok(out) = command.output() else { continue };
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Some((variable, value)) = line.split_once('=') else { continue };
+        let child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("the setup could not be run: {e}"))?;
+        let out = wait_interruptibly(child).map_err(|e| format!("{e:#}"))?;
+        let out = String::from_utf8_lossy(&out.stdout).into_owned();
+        let Some((_, values)) = out.split_once(&format!("{END}\n")) else {
+            return Err(format!("with the path variables {state} before it, the setup did not run to its end (an exit, or a command that failed under set -e), so what it sets is not known"));
+        };
+        for line in values.lines() {
+            let Some((variable, value)) = line.split_once('=').filter(|(variable, _)| PATH_VARIABLES.contains(variable)) else { continue };
             // Left as it came (unset, or empty as it was): not the setup's.
             if value == "<unset>" || (value.is_empty() && state != "set") {
                 continue;
@@ -372,13 +423,15 @@ pub fn fragile_entries(env: &str) -> Vec<(String, &'static str, String)> {
             }
         }
     }
-    found
+    Ok(found)
 }
 
 /// Run the checks of [`Request`] in the build environment `env` (the
 /// attempt's frozen setup), from `cactus_root`, by `cactup`.
 pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, request: &Request) -> Res<Reply> {
-    let script = format!("{env}\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(cactup));
+    // As the build script runs it (`set -e`), but what the setup prints goes
+    // to stderr: stdout is the checks' answer.
+    let script = format!("set -e\n{{\n{env}\n}} >&2 </dev/null\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(cactup));
     let mut child = Command::new("/bin/sh")
         .arg("-c")
         .arg(&script)
@@ -394,11 +447,9 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
     }
     let out = wait_interruptibly(child)?;
     if !out.status.success() {
-        anyhow::bail!(
-            "the checks in the build environment did not run ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default()
-        );
+        let said = String::from_utf8_lossy(&out.stderr);
+        let said = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
+        anyhow::bail!("the build environment setup did not run to its end ({}): {said}", out.status);
     }
     serde_json::from_slice(&out.stdout).context("The checks in the build environment answered in a form this cactup cannot read")
 }
@@ -446,7 +497,7 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     let mut findings = Vec::new();
     if let Some(universe) = meta.universe.as_ref().filter(|universe| universe.wrapper_argv.is_some() || universe.wrapper.is_some()) {
         findings.push(Finding {
-            severity: Severity::Note,
+            severity: Severity::Unchecked,
             what: format!("this configuration builds in the universe \"{}\", whose environment is not checked here", universe.name),
             from: "the configuration".to_owned(),
             fix: None,
@@ -466,11 +517,14 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     let reply = in_build_environment(&cactup, &meta.cactus_root, &meta.build_env, &request)?;
     let source = format!("the option list ({})", meta.optionlist_source);
     let setup = format!("the build environment setup of machine {} (`cactup machine show {}`)", meta.machine, meta.machine);
-    // One finding per reason: the languages it was found for (none, when
-    // it is about every compile), and the most it matters.
+    // One finding per reason and variable: the languages it was found for
+    // (none, when it is about every compile), and the most it matters. A
+    // probe's reason with no variable is about a flag of the language's,
+    // where one is in it.
+    let found: Vec<Raw> = reply.found.iter().map(|raw| with_flag_variable(raw, &reply.values)).collect();
     let mut merged: Vec<(Severity, &Raw, Vec<&str>)> = Vec::new();
-    for raw in &reply.found {
-        match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason) {
+    for raw in &found {
+        match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && seen.variable == raw.variable) {
             Some((severity, _, languages)) => {
                 *severity = (*severity).min(raw.severity);
                 match &raw.language {
@@ -494,13 +548,19 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     }
     // A setup that gives a path variable an empty entry where it was not
     // set before: fine for this user now, not for one who has it unset.
-    for (variable, state, value) in fragile_entries(&meta.build_env) {
-        findings.push(Finding {
-            severity: Severity::Note,
-            what: format!("with {variable} {state} before it runs, the setup makes it \"{value}\", with an entry that is not an absolute path (an empty one is the working directory)"),
-            from: setup.clone(),
-            fix: Some(format!("write it as export {variable}=\"/dir${{{variable}:+:${variable}}}\"")),
-        });
+    match fragile_entries(&meta.build_env) {
+        Ok(fragile) => {
+            for (variable, state, value) in fragile {
+                findings.push(Finding {
+                    severity: Severity::Note,
+                    what: format!("with {variable} {state} before it runs, the setup makes it \"{value}\", with an entry that is not an absolute path (an empty one is the working directory)"),
+                    from: setup.clone(),
+                    fix: Some(format!("write it as export {variable}=\"/dir${{{variable}:+:${variable}}}\"")),
+                });
+            }
+        }
+        Err(why) if !gix::interrupt::is_triggered() => findings.push(Finding { severity: Severity::Unchecked, what: why, from: setup.clone(), fix: None }),
+        Err(_) => {}
     }
     findings.sort_by_key(|finding| finding.severity);
     findings.dedup();
@@ -518,10 +578,26 @@ pub fn check_sets(attempt: &crate::build::attempt::BuildAttempt, conf: BuildConf
                 if gix::interrupt::is_triggered() {
                     return Vec::new();
                 }
-                vec![Finding { severity: Severity::Note, what: format!("the build environment could not be checked: {e:#}"), from: "the build environment".to_owned(), fix: None }]
+                vec![Finding { severity: Severity::Unchecked, what: format!("the build environment could not be checked: {e:#}"), from: "the build environment".to_owned(), fix: None }]
             })
         }),
     }]
+}
+
+/// `raw` with the flag variable of its language that has the flag its
+/// reason is about, where it has none (a reason of the probe's key): a word
+/// of the variable the reason names (`-march=native`: "native").
+fn with_flag_variable(raw: &Raw, values: &BTreeMap<String, String>) -> Raw {
+    let (None, Some(language)) = (&raw.variable, &raw.language) else { return raw.clone() };
+    let Some(language) = languages().into_iter().find(|known| known.name == *language) else { return raw.clone() };
+    let variable = language.flag_variables.iter().find(|variable| {
+        values.get(*variable).is_some_and(|value| {
+            value.split_whitespace().any(|flag| {
+                raw.reason.split([' ', ',', '(', ')']).any(|word| word == flag) || (flag.ends_with("native") && raw.reason.contains("native"))
+            })
+        })
+    });
+    Raw { variable: variable.cloned(), ..raw.clone() }
 }
 
 /// Where a finding comes from, and what to change.
@@ -530,12 +606,15 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     // variable (with the entries found) before the setup ran, else the
     // setup.
     let variable = raw.variable.clone().or_else(|| raw.reason.split_whitespace().next().filter(|word| word.chars().all(|c| c.is_ascii_uppercase() || c == '_')).map(str::to_owned));
-    if let Some(variable) = variable.as_deref().filter(|variable| reply.env.contains_key(*variable) || PATH_VARIABLES.contains(variable) || environment::REFUSED.contains(variable)) {
+    if let Some(variable) = variable.as_deref().filter(|variable| reply.env.contains_key(*variable) || PATH_VARIABLES.contains(variable) || environment::REFUSED.contains(variable) || *variable == "LD_AUDIT") {
+        // The shell's where the setup left the value as the shell had it,
+        // or kept entries of the shell's (a non-empty value) it found.
         let inner = reply.env.get(variable).cloned().unwrap_or_default();
         let outer = std::env::var(variable).ok();
         let not_absolute = |value: &str| value.split(':').filter(|entry| !entry.starts_with('/')).map(str::to_owned).collect::<Vec<_>>();
         let from_shell = match &outer {
-            Some(outer) if raw.reason.contains("is set") => !outer.is_empty() || inner.is_empty(),
+            Some(outer) if *outer == inner => true,
+            Some(outer) if raw.reason.contains("is set") || outer.is_empty() => false,
             Some(outer) => {
                 let theirs = not_absolute(outer);
                 not_absolute(&inner).iter().all(|entry| theirs.contains(entry))
@@ -546,16 +625,38 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             true => format!("your shell ({variable} is so before the build's environment setup runs: your login files, or what you loaded)"),
             false => setup.to_owned(),
         };
-        let fix = match raw.reason.contains("is set") {
-            true => format!("unset {variable} for the build"),
-            false => format!("give {variable} absolute directories only: export {variable}=\"/dir${{{variable}:+:${variable}}}\" adds one without an empty entry"),
+        let fix = match () {
+            _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
+            _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
+            _ => format!("give {variable} absolute directories only: export {variable}=\"/dir${{{variable}:+:${variable}}}\" adds one without an empty entry"),
         };
         return (from, Some(fix));
     }
     // About a flag: the option list's variable that has it, else Cactus's
-    // defaults for the compiler (what configure wrote).
-    if let Some(flag) = raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')) {
-        let has = |values: &BTreeMap<String, String>| values.iter().find(|(_, value)| value.split_whitespace().any(|word| word == flag || word.starts_with(&format!("{flag}=")))).map(|(name, _)| name.clone());
+    // defaults for the compiler (what configure wrote). The flag is the
+    // reason's first word, or the word of the variable it names.
+    let in_variable = raw.variable.as_ref().filter(|variable| variable.ends_with("FLAGS")).and_then(|variable| reply.values.get(variable)).and_then(|value| {
+        value.split_whitespace().find(|flag| raw.reason.split([' ', ',', '(', ')']).any(|word| word == *flag) || (flag.ends_with("native") && raw.reason.contains("native")))
+    });
+    if let Some(flag) = raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')).or(in_variable) {
+        // Within the finding's language where it has one (`C_OPTIMISE_FLAGS`
+        // for C, not `CXX_OPTIMISE_FLAGS`).
+        let prefix = match raw.language.as_deref() {
+            Some("C") => Some("C_"),
+            Some("C++") => Some("CXX_"),
+            Some("Fortran") => Some("F90_"),
+            Some("Fortran 77") => Some("F77_"),
+            Some("CUDA") => Some("CUCC_"),
+            _ => None,
+        };
+        let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || name == "CPPFLAGS");
+        let has = |values: &BTreeMap<String, String>| {
+            values
+                .iter()
+                .filter(|(name, _)| own(name))
+                .find(|(_, value)| value.split_whitespace().any(|word| word == flag || word.starts_with(&format!("{flag}="))))
+                .map(|(name, _)| name.clone())
+        };
         let from = match (has(optionlist), has(defaults)) {
             (Some(name), _) => format!("{source}, {name}"),
             (None, Some(name)) => format!("Cactus's default {name} for this compiler (configure wrote it to config-data/make.config.defn; the option list can set {name} itself)"),
@@ -564,10 +665,14 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
         let fix = hint(&raw.reason).map(str::to_owned).or_else(|| Some(format!("leave {flag} out, if the build does not need it")));
         return (from, fix);
     }
-    // About the compiler.
+    // About the compiler: the option list's, else the one configure chose.
     if let Some(variable) = raw.variable.as_deref() {
         let value = reply.values.get(variable).cloned().unwrap_or_default();
-        return (format!("{source}, {variable} = {value}"), hint(&raw.reason).map(str::to_owned));
+        let from = match optionlist.contains_key(variable) {
+            true => format!("{source}, {variable} = {value}"),
+            false => format!("Cactus's default {variable} = {value} (configure chose it; the option list can set {variable} itself)"),
+        };
+        return (from, hint(&raw.reason).map(str::to_owned));
     }
     ("the build environment".to_owned(), hint(&raw.reason).map(str::to_owned))
 }
@@ -641,12 +746,15 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let c: Vec<Language> = languages().into_iter().filter(|language| language.name == "C" || language.name == "CUDA").collect();
+        let c: Vec<Language> = languages().into_iter().filter(|language| ["C", "CUDA", "Fortran 77"].contains(&language.name.as_str())).collect();
         let optionlist: BTreeMap<String, String> = [
             ("CC", "gcc"),
-            ("CPPFLAGS", "-DX=1"),
+            // One word to the shell: no second input file.
+            ("CPPFLAGS", "-DX=1 -DNAME=\"a b\""),
             ("CFLAGS", "-g -O2 -fprofile-generate"),
             ("CUCC", "no-such-nvcc-here"),
+            ("F77", "gfortran"),
+            ("F77FLAGS", "-g -fprofile-generate"),
         ]
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .into();
@@ -656,6 +764,9 @@ mod tests {
         assert!(refused.iter().any(|raw| raw.variable.as_deref() == Some("CFLAGS") && raw.reason.starts_with("-fprofile-generate")), "{:?}", reply.found);
         assert!(!refused.iter().any(|raw| raw.variable.as_deref() == Some("CPPFLAGS")), "{:?}", reply.found);
         assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("CUDA") && raw.reason.contains("not on PATH")), "{:?}", reply.found);
+        if identity::find_program(OsStr::new("gfortran")).is_ok() {
+            assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("Fortran 77") && raw.variable.as_deref() == Some("F77FLAGS")), "{:?}", reply.found);
+        }
         let raw = refused.iter().find(|raw| raw.variable.as_deref() == Some("CFLAGS")).unwrap();
         let defaults: BTreeMap<String, String> = [("C_OPTIMISE_FLAGS".to_owned(), "-O3".to_owned())].into();
         let (from, fix) = trace(raw, &reply, &optionlist, &defaults, "the option list (x)", "the setup");
@@ -670,11 +781,17 @@ mod tests {
     /// before is found; the idiom that does not, is not.
     #[test]
     fn finds_a_setup_that_gives_an_empty_entry() {
-        let found = fragile_entries("export LD_LIBRARY_PATH=/opt/mpi/lib:$LD_LIBRARY_PATH\nexport CPATH=\"${CPATH:+$CPATH:}/opt/inc\"\nmodule load gcc\n");
+        let found = fragile_entries("export LD_LIBRARY_PATH=/opt/mpi/lib:$LD_LIBRARY_PATH\nexport CPATH=\"${CPATH:+$CPATH:}/opt/inc\"\nmodule load gcc\n").unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!((found[0].0.as_str(), found[0].1, found[0].2.as_str()), ("LD_LIBRARY_PATH", "unset", "/opt/mpi/lib:"));
-        assert!(fragile_entries("export PATH=/opt/bin:$PATH\n").is_empty(), "PATH is always set");
-        assert_eq!(fragile_entries("export LIBRARY_PATH=lib\n")[0].0, "LIBRARY_PATH");
+        assert!(fragile_entries("export PATH=/opt/bin:$PATH\n").unwrap().is_empty(), "PATH is always set");
+        assert_eq!(fragile_entries("export LIBRARY_PATH=lib\n").unwrap()[0].0, "LIBRARY_PATH");
+        // What the setup prints is not taken for a value; a file it sources
+        // that is not there does not hide what it sets after.
+        let found = fragile_entries("echo CPATH=:x\necho 'Loading gcc (default=14)'\n. /nonexistent/init/bash\nexport CPATH=/opt/inc:$CPATH\n").unwrap();
+        assert_eq!((found.len(), found[0].0.as_str()), (1, "CPATH"), "{found:?}");
+        // A setup that stops early says so.
+        assert!(fragile_entries("exit 0\n").is_err());
     }
 
     /// Every machine of the MDB, in every universe: its build environment
@@ -695,8 +812,13 @@ mod tests {
                     continue;
                 }
                 checked += 1;
-                for (variable, state, value) in fragile_entries(&env) {
-                    bad.push(format!("{name} (universe {universe:?}): with {variable} {state} before, it is \"{value}\""));
+                match fragile_entries(&env) {
+                    Ok(fragile) => {
+                        for (variable, state, value) in fragile {
+                            bad.push(format!("{name} (universe {universe:?}): with {variable} {state} before, it is \"{value}\""));
+                        }
+                    }
+                    Err(why) => bad.push(format!("{name} (universe {universe:?}): {why}")),
                 }
             }
         }
