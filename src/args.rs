@@ -841,9 +841,11 @@ pub(crate) enum CacheCommand {
     /// First it checks the config's build environment, as its newest build
     /// set it up: the environment, the compilers and the flags, with the
     /// cache's own rules, in that environment (it runs the compilers on
-    /// small probe sources, and builds nothing). Each finding says where it
+    /// small probe sources, and builds nothing), and what each thorn's own
+    /// make files add for its compiles (read with make, as a build reads
+    /// them, so their $(shell ...) commands run). Each finding says where it
     /// comes from (your shell, the machine's environment setup, the option
-    /// list, Cactus's defaults) and what to change.
+    /// list, Cactus's defaults, a thorn's file) and what to change.
     ///
     /// Then it reads what a build that went through the cache logged of its
     /// compiles (the newest build of the config that did, or --attempt) and

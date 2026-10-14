@@ -2566,6 +2566,40 @@ checked, read as Cactus's `make.subdir` reads them for each of its source
 directories, traced to the thorn's file; a flag set for one target only is
 said not to be checked. The setup runs four times: said in the spec.
 
+### M5 part 2, round 4 (on `e31f029`): BLOCKED by both
+
+Both re-ran rounds 1 to 3 (all fixed: a background process, a blank in a
+path, `CC = LANG=C gcc`, Ctrl-C in every phase) and confirmed nothing
+changes a build or what is served. All blocking findings were in the new
+check of thorns' flags, each reproduced with planted thorns and Cactus's
+own `make.subdir`:
+- (A, B) flags a thorn's compiles get were missed: in `make.code.deps`
+  (AHFinderDirect's umfpack sets `CPPFLAGS` there; ML_ADMConstraints'
+  one-target line is there), through a capability its bindings include
+  (AMReX's makes `CXX` `nvcc`), through `CXX_OPTIMISE_FLAGS` and the like;
+  and its compiler was never evaluated.
+- (A) the directories were a walk, not the thorn's `SUBDIRS`: a linked
+  source directory (GRHayLib's `Reconstruction`) missed, a directory no
+  thorn compiles reported.
+- (A) a thorn's flags went through the reader alone, never a key
+  (`-march=native` on a host of mixed processors).
+- (B) the configuration's flags were split at blanks and the thorn's as
+  the shell does: a quoted option-list flag made every thorn that names a
+  flag variable "keep the cache out".
+Fixed in the commit after this record, by A's design: each directory a
+thorn compiles (`src`, its `SUBDIRS` as make reads them) is read by `make`
+through Cactus's own `make.subdir` with a goal that prints the compilers
+and flags and no source; where a language differs from the
+configuration's, it is checked again with `check_language` (probe key and
+all), and what that finds beyond the configuration's check is the
+thorn's, traced to the file that has the flag (the directory's
+`make.code.defn` or `make.code.deps`, the thorn's bindings, a capability
+they include). A directory make cannot read is "not checked". The Einstein
+Toolkit's `et` (334 directories): 1.5 s for the whole doctor. Also: the
+help, docs and spec say thorns' files are read with make and their
+`$(shell)` runs; the "not a plain command" hint names every language's
+compiler.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

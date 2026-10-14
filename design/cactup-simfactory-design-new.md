@@ -6369,14 +6369,22 @@ never built has none to check), without a build (`objcache::doctor`):
   the first only), and a whole key of a small probe compile with every
   flag (its preprocessor and the identity's trial compiles run; no object
   of the build is compiled), which also says whether keys are relocatable
-  and whether files are narrowed; what each thorn adds to the flags for
-  its own compiles, read as Cactus's `make.subdir` reads it for each of
-  the thorn's source directories (the configuration's `make.config.defn`,
-  the thorn's `bindings/Configuration/Thorns/make.<thorn>.defn`, the
-  directory's `make.code.defn`, `bindings/Configuration/<thorn>/make
-  .configuration.defn`), only the flags beyond the configuration's checked
-  and only directories whose files name a flag variable asked (a flag set
-  for one target, `x.o: CXXFLAGS += …`, is said not to be checked); entries of the path variables that are
+  and whether files are narrowed; and what each thorn's compiles get
+  beyond the configuration's: for each directory a thorn compiles (its
+  `src` and its `SUBDIRS`, as make reads them, links and all), Cactus's own
+  `make.subdir` is read by `make` with a goal that prints the compilers
+  and flags and no source (so nothing is compiled, no dependency file read;
+  a thorn's `$(shell …)` runs, as in a build), which takes in the thorn's
+  bindings and the capabilities they include, the directory's
+  `make.code.defn` and `make.code.deps`, and `make.configuration.defn`;
+  where a language's compiler or flags differ there (AMReX's capability
+  can make `CXX` `nvcc`), the language is checked again as above, probe
+  key and all, and what that finds beyond the configuration's check is the
+  thorn's, traced to the file that has the flag. A directory `make` cannot
+  read is "not checked". The thorns and their files are read as they are
+  now, not as the attempt froze them (the doctor speaks of the next
+  build). On the Einstein Toolkit (334 directories) this costs about two
+  seconds; entries of the path variables that are
   not absolute; and the setup itself, run in bash with each path variable
   unset, empty and set (module commands doing nothing, a sourced file that
   is not there passed over), for one it gives an entry that is not

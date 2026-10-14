@@ -614,9 +614,11 @@ cactup cache doctor myconfig
 It first checks the configuration's build environment as its newest build
 set it up: your environment, the compilers and the flags, by the cache's
 own rules (it runs the compilers on small probe sources; it builds
-nothing). Each finding says what keeps the cache out, or costs objects
-shared, where it comes from (your shell, the machine's environment setup,
-the option list, or Cactus's defaults for the compiler) and what to change.
+nothing), and what each thorn's own make files add for its compiles (read
+with `make` as a build reads them, so a `$(shell ...)` in them runs). Each
+finding says what keeps the cache out, or costs objects shared, where it
+comes from (your shell, the machine's environment setup, the option list,
+Cactus's defaults for the compiler, or a thorn's file) and what to change.
 Then, for the newest build that went through the cache, it lists the
 compiles kept out by reason, with what would let them in where cactup
 knows; for the objects with other sources, the files that differed,
