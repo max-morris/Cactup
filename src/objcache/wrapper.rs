@@ -359,6 +359,7 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
                 Err(e) => {
                     event.store = Some(format!("the dependency file could not be put in place: {e}"));
                     event.miss = Some(MissKind::Unusable);
+                    event.served = None;
                 }
             },
             Err(Miss::Absent) => {}
@@ -388,9 +389,13 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // other files whole (decision 30): it is then the closest.
     let records = match (&store, &keyed, &event.unit) {
         (Ok(store), Ok(keyed), Some(unit)) if event.outcome == Some(Outcome::Miss) && event.miss.is_none() => {
-            let own = match said_elsewhere {
-                true => String::new(),
-                false => keyed.parts.key(),
+            // This compile's own keys: the plain one, and the one with its
+            // files whole (an entry there, removed since, may have left its
+            // record).
+            let (plain, whole) = (keyed.parts.key(), whole_key(&keyed.parts.key(), keyed.whole()));
+            let own: Vec<&str> = match said_elsewhere {
+                true => vec![&whole],
+                false => vec![&plain, &whole],
             };
             Some(store.unit_records(unit, &own))
         }
@@ -699,6 +704,19 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
         .map(|(name, _, _)| name.to_owned())
         .collect()
     };
+    // Fortran's source by its mapped path, worked out once.
+    let source = std::cell::OnceCell::new();
+    let fortran_source = || {
+        source
+            .get_or_init(|| {
+                let given = std::env::current_dir().map(|cwd| cwd.join(&keyed.compile.source)).unwrap_or_else(|_| keyed.compile.source.clone());
+                let path = std::fs::canonicalize(&given).unwrap_or(given);
+                let bytes = path.as_os_str().as_encoded_bytes();
+                let mapped = keyed.map().map_or_else(|| bytes.to_vec(), |map| map.apply(bytes));
+                String::from_utf8_lossy(&mapped).into_owned()
+            })
+            .clone()
+    };
     let files_differing = |record: &UnitRecord| -> Vec<String> {
         let theirs: std::collections::HashMap<&str, &key::FileNote> = record.files.iter().map(|note| (note.name.as_str(), note)).collect();
         let mut differs = Vec::new();
@@ -708,15 +726,8 @@ fn miss_kind(records: &[UnitRecord], keyed: &key::Keyed) -> (MissKind, Vec<Strin
         // Fortran names its source "source" (it is keyed by its bytes, not
         // by a path): by its path, mapped as other files' are, so that
         // sources of one name in two thorns are two files.
-        let source = || {
-            let given = std::env::current_dir().map(|cwd| cwd.join(&keyed.compile.source)).unwrap_or_else(|_| keyed.compile.source.clone());
-            let path = std::fs::canonicalize(&given).unwrap_or(given);
-            let bytes = path.as_os_str().as_encoded_bytes();
-            let mapped = keyed.map().map_or_else(|| bytes.to_vec(), |map| map.apply(bytes));
-            String::from_utf8_lossy(&mapped).into_owned()
-        };
         let shown = |name: &str| match name {
-            "source" => format!("{} (the unit's source)", source()),
+            "source" => format!("{} (the unit's source)", fortran_source()),
             name => name.to_owned(),
         };
         for note in &keyed.each {

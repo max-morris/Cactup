@@ -218,7 +218,7 @@ fn gc(root: &Path, unused_for: Option<Duration>, to_size: Option<u64>, dry_run: 
             println!("  would remove {} ({}, last used or stored {})", entry.path.display(), upkeep::human(entry.bytes), ago(now, *last));
         }
         println!(
-            "Would remove {} of {} objects and {} record(s) of objects no longer stored ({} in all), leaving {}; and {} file(s) left over from interrupted builds.",
+            "Would remove {} of {} objects and {} record(s) of objects not stored or removed with them ({} in all), leaving {}; and {} file(s) left over from interrupted builds.",
             plan.entries.len(),
             scan.machines.iter().map(|m| m.entries.len()).sum::<usize>(),
             plan.records.len(),

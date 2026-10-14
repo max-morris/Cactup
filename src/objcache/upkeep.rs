@@ -677,9 +677,9 @@ mod tests {
         let key = "e".repeat(64);
         store.record_unit("T/a.c.o", &key, &record).unwrap();
         store.record_unit("T/a.c.o", &key, &record).unwrap();
-        assert_eq!(store.unit_records("T/a.c.o", &"f".repeat(64)), vec![record.clone()]);
-        assert!(store.unit_records("T/a.c.o", &key).is_empty(), "a compile's own key is not another entry");
-        assert!(store.unit_records("T/b.c.o", "").is_empty());
+        assert_eq!(store.unit_records("T/a.c.o", &[&"f".repeat(64)]), vec![record.clone()]);
+        assert!(store.unit_records("T/a.c.o", &["x", &key]).is_empty(), "a compile's own key is not another entry");
+        assert!(store.unit_records("T/b.c.o", &[]).is_empty());
         let scan = scan(tmp.path()).unwrap();
         assert_eq!(scan.machines[0].records.iter().map(|record| record.key.clone()).collect::<Vec<_>>(), [key]);
         assert!(scan.bytes() > 0, "records count in the store's size");

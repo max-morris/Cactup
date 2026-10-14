@@ -470,16 +470,16 @@ impl Store {
     }
 
     /// The records of the entries the store has for the object named
-    /// `unit`, but `not` (this compile's own key), the newest
+    /// `unit`, but those of the keys `not` (this compile's own), the newest
     /// [`UNIT_RECORDS_READ`] first. Only plain files are read, and one that
     /// cannot be read is passed over: they are a report, not a key.
-    pub fn unit_records(&self, unit: &str, not: &str) -> Vec<UnitRecord> {
+    pub fn unit_records(&self, unit: &str, not: &[&str]) -> Vec<UnitRecord> {
         let (dir, prefix) = self.unit_place(unit);
         let Ok(listing) = fs::read_dir(dir) else { return Vec::new() };
         let mut found: Vec<(std::time::SystemTime, PathBuf)> = listing
             .flatten()
             .filter(|entry| {
-                entry.file_name().to_str().and_then(|name| name.strip_prefix(&prefix)).is_some_and(|key| self.entry_path(key).is_some() && key != not)
+                entry.file_name().to_str().and_then(|name| name.strip_prefix(&prefix)).is_some_and(|key| self.entry_path(key).is_some() && !not.contains(&key))
             })
             .filter_map(|entry| {
                 let meta = entry.metadata().ok().filter(Metadata::is_file)?;

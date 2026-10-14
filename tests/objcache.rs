@@ -1566,6 +1566,14 @@ fn a_compile_whose_messages_speak_of_definitions_is_served_again() {
     // The entry in use is the one under the key with the files whole, and
     // the build's use log is to name it (`objcache::after_build`).
     assert!(event["served"].as_str().is_some_and(|served| Some(served) != event["key"].as_str()), "{event}");
+    // That entry removed (as `cache verify` removes a damaged one): its own
+    // record, left until `cache gc`, is no other entry of the object.
+    let served = event["served"].as_str().unwrap().to_owned();
+    let found = Command::new("find").arg(shared.join("store")).args(["-type", "f", "-name", &served]).output().unwrap();
+    let entry = text(&found.stdout).lines().next().expect("the entry served").to_owned();
+    fs::remove_file(&entry).unwrap();
+    unit.wrapped("gcc", &flags, &lib);
+    assert_eq!(build.last_event()["miss"].as_str(), Some("new"), "{}", build.last_event());
     assert_eq!(text(&again.stderr), text(&first.stderr));
 
     // An entry under the plain key whose messages speak of a macro, passed

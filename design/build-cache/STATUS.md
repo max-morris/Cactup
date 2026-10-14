@@ -2444,6 +2444,24 @@ Also: the quota hint names either file system; the plural wording of the
 doctor's note on records not written; a type alias for the tally; the
 spec's use-log path (`v<N>`).
 
+### M5 part 1, round 8 (on `399cf37`): A SIGN-OFF, B BLOCKED
+
+A re-ran rounds 1 to 7 (fixed), 48 more `FrontEnd` compiles against gcc 14
+alone (244 in all, none differing), and round 7's `gc` finding on real
+builds both ways: with the store aged 40 days by hand, and with an hour of
+real time between filling the store and building again (`gc --unused-for
+1h` now removes nothing in use; the hits from the key with the files whole
+name it as `served`, and the use logs list it). B could not run real builds
+this round (`~/.cactup` read-only in its sandbox, running outside refused)
+and worked with test trees of real gcc 14 compiles; it blocked on one,
+fixed in the commit after this record: a miss read its own record under
+the key with the files whole as another entry's, when that entry had been
+removed (`cache verify`) and its record was left until `gc`: "with other
+sources" for an unchanged compile. Both of a compile's own keys are passed
+over now. Also: the Fortran source's path worked out once per miss; a hit
+whose dependency file could not be put in place no longer names the entry
+it came from; `gc --dry-run`'s wording.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
