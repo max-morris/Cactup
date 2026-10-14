@@ -1290,21 +1290,28 @@ fn up_to_date_message(
     stamps: StampReading,
 ) -> String {
     const AGAIN: &str = "pass --reconfig to rebuild incrementally, or -f to rebuild from scratch";
-    let untracked_note = if untracked.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " Not tracked, since they are not links into the installation's repos/, so edits to \
-             them go unnoticed: {}.",
-            summarize(untracked)
-        )
+    let untracked_note_for = |untracked: &[String]| {
+        if untracked.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Not tracked, since they are not links into the installation's repos/, so edits \
+                 to them go unnoticed: {}.",
+                summarize(untracked)
+            )
+        }
     };
+    let untracked_note = untracked_note_for(untracked);
     // The upgrade case: a config last built before stamps existed may have
     // had thorns regenerated since, and nothing could have noticed.
     const NO_STAMPS: &str = "Its thorns' files had no baseline, so they become one now and later \
                              edits to them are detected.";
     if let Some(why) = no_sources {
         let unseen = "Edits to the Cactus flesh and refetches that move it go unnoticed";
+        // That sentence names the flesh already; the note names the rest.
+        let others: Vec<String> =
+            untracked.iter().filter(|t| *t != crate::thornlist::UNTRACKED_FLESH).cloned().collect();
+        let untracked_note = untracked_note_for(&others);
         return match stamps {
             StampReading::Compared => format!(
                 "Config {name} is up to date as far as cactup can tell (same optionlist, same \
@@ -4742,6 +4749,10 @@ mod tests {
         let new = ["Local/New".to_string()];
         let partly = up_to_date_message("bcx", Some(&why), true, &new, StampReading::Compared);
         assert!(partly.contains("Local/New"), "{partly}");
+        // ...but the flesh only once: the line names it already.
+        let flesh = [crate::thornlist::UNTRACKED_FLESH.to_string()];
+        let once = up_to_date_message("bcx", Some(&why), true, &flesh, StampReading::Compared);
+        assert_eq!(once.matches("Cactus flesh").count(), 1, "{once}");
 
         // The upgrade case: a record without stamps compared no thorn files,
         // so the line must neither claim them nor imply nothing could change.

@@ -42,7 +42,7 @@ pub struct Thornlist {
     /// Only for a list read by [`parse_config_list`] from a plain Cactus
     /// `ThornList`: the `Arrangement/Thorn`s that are not links into
     /// `repos/`, so no repo, and no source state, could be found for them —
-    /// plus "the Cactus flesh" when the root `Makefile` is not one either.
+    /// plus [`UNTRACKED_FLESH`] when the root `Makefile` is not one either.
     untracked: Vec<String>,
     /// Set only by [`parse_config_list`]'s plain-`ThornList` path. Not
     /// derived from an empty `crl_version`: a bare `!CRL_VERSION` header
@@ -258,7 +258,7 @@ pub fn parse_config_list(
     let mut untracked = Vec::new();
     match repo_behind(&cactus_root.join("Makefile"), &repos_dir, repos_real.as_deref()) {
         Some(repo) => components.push(component(ComponentType::Git, root.clone(), "Makefile", repo)),
-        None => untracked.push("the Cactus flesh".to_owned()),
+        None => untracked.push(UNTRACKED_FLESH.to_owned()),
     }
     let arrangements = format!("{root}/arrangements");
     let behind = crate::par::parallel_map(&thorns, |thorn| {
@@ -283,6 +283,10 @@ pub fn parse_config_list(
         plain: true,
     }))
 }
+
+/// The [`Thornlist::untracked`] entry naming the flesh, when the root
+/// `Makefile` is not a link into `repos/`.
+pub const UNTRACKED_FLESH: &str = "the Cactus flesh";
 
 /// The `Arrangement/Thorn` lines of a plain Cactus `ThornList`, comments
 /// (`#` to end of line, so a `#DISABLED` toggle too) and anything after the

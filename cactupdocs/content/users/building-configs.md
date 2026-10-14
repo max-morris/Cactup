@@ -261,11 +261,11 @@ A config is built from two things, and cactup tracks changes to both:
   `Cactus/repos/`. A thorn that isn't such a link (a directory you created by
   hand, say) is still built, and edits to its files are still noticed, but
   not which commit it came from. If cactup can't track a config's repos at
-  all (none of them can be found or read), every build says so and why: edits
-  to thorn files still trigger a rebuild, but changes to the Cactus flesh go
-  unnoticed. After changing the flesh, rebuild with `--reconfig`, and after a
-  refetch, with `-f`. `cactup config delta <name>` gives the same
-  explanation.
+  all (none of them can be found or read), every build says so and why. As
+  long as cactup can read the thornlist itself, edits to thorn files still
+  trigger a rebuild, but changes to the Cactus flesh go unnoticed. After
+  changing the flesh, rebuild with `--reconfig`, and after a refetch, with
+  `-f`. `cactup config delta <name>` gives the same explanation.
 
 The second half is what makes ordinary source work visible. All of these are
 picked up by a plain `cactup build <name>`, with no `-f`:
