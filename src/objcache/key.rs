@@ -1444,7 +1444,7 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
                         let stayed: Vec<String> = stayed.into_iter().collect();
                         match kept.len() != bytes.len() {
                             true => (content_digest(&kept, map), Taken::Narrowed(stayed), true),
-                            false => (all, Taken::NothingLeftOut, false),
+                            false => (all, Taken::NothingLeftOut(stayed), false),
                         }
                     }
                     Some(used) => (all, used.why_whole(path), false),
@@ -1458,7 +1458,7 @@ pub(super) fn read_files(named: &Named, map: Option<&PathMap>, used: Option<&Use
             Err(e) => bail!("a file the compile reads cannot be read to key it (Failed to read {}: {e})", path.display()),
         };
         files.feed(digest.as_bytes());
-        let narrowed = matches!(taken, Taken::Narrowed(_) | Taken::NothingLeftOut);
+        let narrowed = matches!(taken, Taken::Narrowed(_) | Taken::NothingLeftOut(_));
         each.push(FileNote { name: String::from_utf8_lossy(mapped).into_owned(), digest, narrowed, left_out, taken });
     }
     Ok(Digested { files: files.hex(), whole: whole.hex(), seen: seen.hex(), each })
@@ -1505,13 +1505,23 @@ pub enum Taken {
     HasCode,
     Diagnosed,
     Narrowed(Vec<String>),
-    /// Narrowed, with nothing to leave out: the unit uses every definition
-    /// in it, or it has none. Its digest is of the file whole.
-    NothingLeftOut,
+    /// Narrowed, with nothing left out: the unit uses every definition in
+    /// it, or it has none, or those it does not use were kept all the same
+    /// (as for `Narrowed`). Its digest is of the file whole.
+    NothingLeftOut(Vec<String>),
     Absent,
 }
 
 impl Taken {
+    /// The first few of `stayed`, and how many more.
+    fn listed(stayed: &[String]) -> String {
+        let shown: Vec<&str> = stayed.iter().take(3).map(String::as_str).collect();
+        match stayed.len().saturating_sub(3) {
+            0 => shown.join(", "),
+            more => format!("{} and {more} more", shown.join(", ")),
+        }
+    }
+
     /// In words, for the event log and `cache doctor`.
     pub fn describe(&self) -> String {
         match self {
@@ -1525,15 +1535,12 @@ impl Taken {
             Taken::Narrowed(stayed) if stayed.is_empty() => {
                 "narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive), or the unit uses other definitions of it".to_owned()
             }
-            Taken::Narrowed(stayed) => {
-                let shown: Vec<&str> = stayed.iter().take(3).map(String::as_str).collect();
-                let more = if stayed.len() > 3 { format!(" and {} more", stayed.len() - 3) } else { String::new() };
-                format!(
-                    "narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive, or one of the definitions the unit does not use that it kept: {}{more}), or the unit uses other definitions of it",
-                    shown.join(", ")
-                )
-            }
-            Taken::NothingLeftOut => "whole: the unit uses every definition in it, or it has none".to_owned(),
+            Taken::Narrowed(stayed) => format!(
+                "narrowed: a line the key keeps differs (a definition the unit uses, a comment, another directive, or one of the definitions the unit does not use that it kept: {}), or the unit uses other definitions of it",
+                Self::listed(stayed)
+            ),
+            Taken::NothingLeftOut(stayed) if stayed.is_empty() => "whole: the unit uses every definition in it, or it has none".to_owned(),
+            Taken::NothingLeftOut(stayed) => format!("whole: the definitions the unit does not use were all kept: {}", Self::listed(stayed)),
             Taken::Absent => "no such file".to_owned(),
         }
     }

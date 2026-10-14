@@ -387,6 +387,14 @@ fn doctor(events: &[Event], mode: Option<crate::objcache::Mode>) -> String {
         out.push_str(&format!("\n  {} ({}): the cache had no record of an object of that name (one stored by an older cactup has none)\n", "new".bold(), new));
     }
 
+    let unrecorded = events.iter().filter(|event| event.store.as_deref().is_some_and(|why| why.starts_with("the unit record was not written"))).count();
+    if unrecorded > 0 {
+        out.push_str(&format!(
+            "\n  {} objects were stored without the record of what made them (the build could not write it: see its event log), so later builds may call their misses new\n",
+            unrecorded
+        ));
+    }
+
     let mut unnarrowed: BTreeMap<&str, usize> = BTreeMap::new();
     for event in events {
         if let Some(why) = &event.unnarrowed {
@@ -427,12 +435,13 @@ fn without_paths(why: &str) -> String {
 
 /// What would let compiles kept out for `why` in, where cactup knows.
 fn kept_out_hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 7] = [
+    let hints: [(&str, &str); 8] = [
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
+        ("No space left on device", "the build cache's file system is full: make room (cactup cache gc), or set build-cache-size to be told before"),
         ("not published: Failed to create", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
         ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
     ];

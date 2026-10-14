@@ -2381,6 +2381,29 @@ the "cannot write in the cache" hint matches only a failure to create
 there; `gc`'s interrupt message counts records; a doc comment on records.
 Left: the doctor says nothing of audit verdicts (`cache report` does).
 
+### M5 part 1, round 5 (on `d2d684e`): BLOCKED by both
+
+Both re-ran rounds 1 to 4 (all as fixed; real builds as before; A: 132
+compiles through the wrapper against gcc 14 alone, 57 of them hits, every
+one alike) and found nothing that changes what is served. Blocking, all in
+the kind of miss or what it says, fixed in the commit after this record:
+- (A) a miss whose own entry was passed over for messages about other
+  files whole (decision 30) was "new": its own record was left out of
+  those read. It is read in that case, and the miss is "with other
+  sources: the files whole …".
+- (A) the kind went by what the store held after the compile, so a build
+  publishing meanwhile changed it: records are read when the miss is
+  found, before the compile.
+- (B) a file with nothing left out because every definition the unit does
+  not use was kept anyway (defined twice, given, reserved) was said to be
+  used whole by the unit: it says which were kept and why now.
+Also: hints for a full file system; "new" in the docs says a cache filled by
+an older cactup has no records; the doctor says when records could not be
+written. B's run filled the home file system (debug builds and a test
+store); 148 GB of reviewers' cargo output from passed milestones, in 80
+directories, was cleaned (`cargo clean --target-dir`), their scripts and
+logs kept.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

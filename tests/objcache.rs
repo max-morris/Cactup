@@ -1514,11 +1514,19 @@ fn a_miss_says_what_kind_it_was_and_the_build_line_counts_them() {
     let (miss, differs) = kind(&["-O3"]);
     assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
     assert!(differs.to_string().contains("lib.h: narrowed: a line the key keeps differs"), "{differs}");
+    // A definition the unit does not use, kept because it is defined twice:
+    // nothing is left out, and the miss says why that one stayed.
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#undef UNUSED_M\n#define UNUSED_M 1\n").unwrap();
+    assert_eq!(kind(&["-Os"]).0.as_deref(), Some("built-otherwise"));
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#undef UNUSED_M\n#define UNUSED_M 2\n").unwrap();
+    let (miss, differs) = kind(&["-Os"]);
+    assert_eq!(miss.as_deref(), Some("other-sources"), "{differs}");
+    assert!(differs.to_string().contains("lib.h: whole: the definitions the unit does not use were all kept: UNUSED_M (defined more than once)"), "{differs}");
     fs::write(lib.join("lib.h"), "#define LIB_START 0\n").unwrap();
 
     let cc_dir = build.conf().parent().unwrap().to_owned();
     let out = Command::new(CACTUP).arg("__cc-summary").arg(&cc_dir).output().unwrap();
-    assert_ran(&out, "cactup: build cache: 1 of 7 objects reused; 6 compiled: 1 new, 3 with other sources, 2 built otherwise\n", "", 0);
+    assert_ran(&out, "cactup: build cache: 1 of 9 objects reused; 8 compiled: 1 new, 4 with other sources, 3 built otherwise\n", "", 0);
 }
 
 /// A compile whose messages speak of definitions is stored under its key
@@ -1547,6 +1555,19 @@ fn a_compile_whose_messages_speak_of_definitions_is_served_again() {
     let again = unit.wrapped("gcc", &flags, &lib);
     assert_eq!(build.last_event()["outcome"].as_str(), Some("hit"), "{}", build.last_event());
     assert_eq!(text(&again.stderr), text(&first.stderr));
+
+    // An entry under the plain key whose messages speak of a macro, passed
+    // over where the files whole differ: that entry is the closest, and the
+    // miss is not "new" (§18.12).
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#define BAD (1 << 40)\n").unwrap();
+    fs::write(&unit.source, format!("{source}int bad = BAD;\n")).unwrap();
+    let speaks = unit.wrapped("gcc", &["-O2"], &lib);
+    assert!(text(&speaks.stderr).contains("macro"), "{}", text(&speaks.stderr));
+    fs::write(lib.join("lib.h"), "#define LIB_START 0\n#define BAD (1 << 40)\n#define LIB_UNUSED 1\n").unwrap();
+    unit.wrapped("gcc", &["-O2"], &lib);
+    let event = build.last_event();
+    assert_eq!(event["miss"].as_str(), Some("other-sources"), "{event}");
+    assert!(event["differs"].to_string().contains("the files whole"), "{event}");
 }
 
 /// A hit writes the dependency file the compile would have written, byte

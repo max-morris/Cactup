@@ -590,7 +590,8 @@ cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with othe
 ```
 
 - *new*: the cache knew of no object of that name yet (the first build of a
-  thorn, or of a file);
+  thorn, or of a file; or a cache filled by an older cactup, which kept no
+  record of what made its objects);
 - *with other sources*: it had one compiled the same way, from other
   sources: a file of the thorn edited, or a header that differs between
   your configurations;
@@ -613,7 +614,7 @@ cactup cache doctor myconfig
 It lists the compiles kept out by reason, with what would let them in where
 cactup knows; for the objects with other sources, the files that differed,
 most often first, and whether the cache compared each file whole or left
-out definitions the file did not use; and what differed for those built
+out definitions the compile did not use; and what differed for those built
 otherwise. Nothing is compiled.
 
 **Your objects name their sources differently.** So that installations can

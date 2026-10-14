@@ -288,6 +288,9 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // whose messages speak of definitions, the key with the files whole
     // (decision 30).
     let mut served_key = None;
+    // Whether this key's own entry was passed over for its messages
+    // (decision 30).
+    let mut said_elsewhere = false;
     if let Some((store, keyed)) = serving {
         let key = keyed.parts.key();
         event.outcome = Some(Outcome::Miss);
@@ -358,7 +361,10 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
             Err(Miss::Absent) => {}
             // Messages for other files whole: the kind of miss is the
             // records' to say.
-            Err(miss @ Miss::SaidElsewhere) => event.store = Some(miss.to_string()),
+            Err(miss @ Miss::SaidElsewhere) => {
+                event.store = Some(miss.to_string());
+                said_elsewhere = true;
+            }
             Err(miss) => {
                 event.store = Some(miss.to_string());
                 event.miss = Some(MissKind::Unusable);
@@ -372,6 +378,21 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     {
         keyed.drop_depend();
     }
+    // What the store has for the object as this compile finds it missing,
+    // for the kind of miss (§18.12): read now, before the compile, so that
+    // another build publishing meanwhile does not change it. The entry of
+    // this very key counts only where it was passed over for messages about
+    // other files whole (decision 30): it is then the closest.
+    let records = match (&store, &keyed, &event.unit) {
+        (Ok(store), Ok(keyed), Some(unit)) if event.outcome == Some(Outcome::Miss) && event.miss.is_none() => {
+            let own = match said_elsewhere {
+                true => String::new(),
+                false => keyed.parts.key(),
+            };
+            Some(store.unit_records(unit, &own))
+        }
+        _ => None,
+    };
     // The check after a Fortran compile looks the inputs up again where it
     // can, which needs them looked up right before the compile (§18.10).
     let ((), looking_ms) = timed(|| {
@@ -443,11 +464,8 @@ fn cached(job: &Job, conf: &BuildConf, cc_dir: &Path, argv: &[OsString], mode: M
     // What kind of miss this was, by what the store has for the object,
     // and, once published, what made this entry (§18.12).
     let mut stored_key = None;
-    if let (Ok(store), Ok(keyed), Some(unit)) = (&store, &keyed, &event.unit)
-        && event.outcome == Some(Outcome::Miss)
-        && event.miss.is_none()
-    {
-        let (kind, differs) = miss_kind(&store.unit_records(unit, &keyed.parts.key()), keyed);
+    if let (Ok(keyed), Some(records)) = (&keyed, &records) {
+        let (kind, differs) = miss_kind(records, keyed);
         event.miss = Some(kind);
         event.differs_more = differs.len().saturating_sub(DIFFERS_KEPT) as u64;
         event.differs = differs;

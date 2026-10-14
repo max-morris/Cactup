@@ -6316,10 +6316,9 @@ it. The event of a compile says, when no file was narrowed, why (Clang;
 diagnostic naming no file; a C unit with a `#pragma GCC` its front end
 acts on); and a miss with other sources says, for each file that differs,
 whether it was keyed whole and why (the unit's source; the text has code
-of it; a diagnostic names it; the unit uses every definition in it, or it
-has none) or narrowed, and then which definitions the unit does not use it
-kept all the same (defined twice in the unit, given on the command line, a
-reserved name).
+of it; a diagnostic names it; nothing in it was left out) or narrowed, and
+either way which definitions the unit does not use it kept all the same
+(defined twice in the unit, given on the command line, a reserved name).
 
 **`cactup cache doctor [<config>] [--attempt N]`** reads the event log of
 a build that went through the cache (the newest attempt of the config that
