@@ -2247,7 +2247,7 @@ pub(super) fn reads_match(read: &[PathBuf], keyed: &BTreeSet<PathBuf>) -> bool {
 /// along `PATH` before it is found). A hit
 /// compares nothing after the key: so these keep the compile out of the
 /// cache.
-fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
+pub(super) fn driver_led_elsewhere(name: &OsStr, fortran: bool, env: impl Fn(&str) -> Option<OsString>) -> Option<String> {
     let relative_entry = |variable: &str| {
         env(variable).is_some_and(|value| value.as_bytes().split(|b| *b == b':').any(|entry| !entry.starts_with(b"/")))
     };

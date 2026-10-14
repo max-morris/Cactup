@@ -56,6 +56,7 @@ pub fn run_if_invoked() {
         Some(verb) if verb == WRAP_VERB => wrap(args),
         Some(verb) if verb == PROBE_VERB => std::process::exit(super::probe::run(args.next())),
         Some(verb) if verb == SUMMARY_VERB => std::process::exit(super::summary::run(args.next())),
+        Some(verb) if verb == super::doctor::DOCTOR_VERB => std::process::exit(super::doctor::run_verb()),
         _ => {}
     }
 }

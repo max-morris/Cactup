@@ -54,6 +54,29 @@ const MORE_OUTPUT: &[&str] =
 /// would decline is declined: keying the variable's value is not enough.
 const MORE_FLAGS: &[&str] = &["CCC_OVERRIDE_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS", "GCC_COMPARE_DEBUG"];
 
+/// Every variable that keeps the cache out of a compile when set.
+pub const REFUSED: [&str; 8] = [
+    "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "CC_PRINT_OPTIONS", "CC_PRINT_HEADERS", "CC_LOG_DIAGNOSTICS",
+    "CCC_OVERRIDE_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS", "GCC_COMPARE_DEBUG",
+];
+
+/// Why each variable of `vars` that keeps the cache out does (`cache
+/// doctor`: every one, where a compile stops at the first).
+pub fn refusals(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<String> {
+    let mut found: Vec<String> = vars
+        .filter_map(|(name, _)| {
+            let name = name.to_str()?;
+            match () {
+                _ if MORE_OUTPUT.contains(&name) => Some(format!("{name} is set, which makes the compiler write another file")),
+                _ if MORE_FLAGS.contains(&name) => Some(format!("{name} is set, which changes the compiler's flags behind its command line")),
+                _ => None,
+            }
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// The digest of the keyed part of `vars`, or the variable that rules
 /// caching out.
 fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>, locale: bool) -> Result<String, String> {

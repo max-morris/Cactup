@@ -26,6 +26,7 @@
 
 pub mod compile;
 pub mod cuda;
+pub mod doctor;
 pub mod environment;
 pub mod event;
 pub mod fortran;

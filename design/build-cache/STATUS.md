@@ -56,7 +56,7 @@ the last milestone, for when that host is not at hand.
 | M3a | The check after a gfortran compile runs no compiler: the files read again and the places it looks looked at by cactup (decisions 14, 16; C and C++ on the branch `feature/build-cache-m3a-cxx`) | **signed off** at `6ba57f8` (round 12); inherited holes closed after it (the compiler identity watches where it searched), **signed off** at `95f7ec6` (seven reviews), its follow-ups at `05c67a3` and `e29e593` |
 | M3b | Keys from the compile's own dependency list, no preprocessor run on a miss or a hit (decision 14) | **only if Max decides so**; it would need for C and C++ the `__has_include` knowledge M3a's C and C++ half could not make sound (decision 16) |
 | M4 | CUDA: `nvcc` (and NVIDIA's other compilers as far as they go) keyed, served and audited like GCC and Clang (decision 2) | **passed the gate** at `b652348` (nine review rounds): decisions 24–31; design note `M4-CUDA.md`; qbd: audits all `same`, a served build's GPU test suite all passed; the two-thornlist benchmark 350 of 389 served, 1:07 against 8:30 |
-| M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; every cache-on build ends with one line: objects reused of all, and the misses by kind (built for the first time, sources changed, kept out by something `cache doctor` or `cache report` explains), a kind with a count of 0 left out (Max, 2026-10-13; "sources changed" needs a per-unit index beside the store); a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | part 1 (the build's line, the unit records, `cache doctor` reading a build) **passed the gate** at `ad236d2` (nine review rounds); part 2 (the environment checks, the MDB check) next; then the merge to master (decision 27) |
+| M5 | `cactup cache doctor`: the cache's rules applied to a configuration's build environment without compiling (path-variable refusals, compilers and the programs they run, refused flags and settings), each finding traced to the user's shell, the machine's `meta.toml` or the optionlist, with what to change; every cache-on build ends with one line: objects reused of all, and the misses by kind (built for the first time, sources changed, kept out by something `cache doctor` or `cache report` explains), a kind with a count of 0 left out (Max, 2026-10-13; "sources changed" needs a per-unit index beside the store); a CI check of every MDB machine's environment setup (each path variable unset, empty and set) for empty or relative entries. The checks sit behind a small seam (named sets of checks returning findings: severity, what, where from, fix), so a later general `cactup doctor`, out of scope here, can run them with others; and where whole files stay keyed (decision 27) | part 1 (the build's line, the unit records, `cache doctor` reading a build) **passed the gate** at `ad236d2` (nine review rounds); part 2 (the environment checks, the MDB check) **in review**; then the merge to master (decision 27) |
 | M4b | Cray compilers: C, C++ and Fortran through `cc`, `CC`, `ftn`, seen through to the compiler they run, with the module environment that shapes them; Cray's `CC` as `nvcc`'s host compiler (decision 23) | follow-up after the merge (decision 27); no Cray machine to probe yet |
 | M5b | Take on the cases where whole files stay keyed (decision 27): Clang's file checksums, `-g3`, preprocessor warnings, redefinitions | follow-up after the merge (decision 27) |
 | M6 | HIP and other non-NVIDIA GPU compiles (`hipcc`, AMD's `amdclang`/`amdclang++`, and what else the MDB's GPU machines use) | follow-up after the merge (decision 27) |
@@ -2735,10 +2735,23 @@ as `m5a`, then two thorns fewer as `m5b`, then `m5a` again):
   never served, not even to the build that stored it (`OverloadComm.c`).
   A narrowed key now looks there when the plain key has nothing.
 
-Then part 2: the cache's rules applied to a configuration's build
-environment without compiling, traced to the user's shell, the machine's
-`meta.toml` or the option list, behind a seam of named checks; and the CI
-check of every MDB machine's environment setup. Then the merge of
+Part 2 is in review (spec §18.12, "The build environment", "The MDB's
+setups"; `src/objcache/doctor.rs`): `cache doctor` first runs the
+attempt's frozen environment setup in a shell, which starts `cactup
+__cc-doctor` with the compilers and flags `make` gives the configuration
+(through `config-data/make.config.defn`); that process applies the
+wrapper's own functions in the build's environment (the refused
+variables, the driver's own searches, the compiler's identity, each
+variable of flags on its own, a whole key of a probe compile per
+language) and answers in JSON; `cache doctor` traces each finding to the
+user's shell, the machine's setup, the option list or Cactus's defaults,
+with what to change. Named sets of checks (`doctor::CheckSet`). A unit
+test runs every MDB machine's build setup in every universe with each
+path variable unset, empty and set: all clean today (they use the
+`${X:+…}` idiom). On plato's `m5a`: nothing keeps the cache out;
+`CCC_OVERRIDE_OPTIONS`, a relative `COMPILER_PATH` and an empty
+`LIBRARY_PATH` entry planted in the shell are each found and traced to
+it. Then the merge of
 `feature/build-cache` to master (decision 27), and the follow-ups M4b Cray,
 M5b, M6 HIP. Max's warnings replayed by condition (decision 31) is on hold.
 

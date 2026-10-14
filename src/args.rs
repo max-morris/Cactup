@@ -836,9 +836,16 @@ pub(crate) enum CacheCommand {
         #[clap(long)]
         long: bool,
     },
-    /// Say why a build's compiles were not served from the build cache
+    /// Say what keeps a config's compiles from the build cache, and why a build's were not served
     ///
-    /// Reads what a build that went through the cache logged of its
+    /// First it checks the config's build environment, as its newest build
+    /// set it up: the environment, the compilers and the flags, with the
+    /// cache's own rules, in that environment (it runs the compilers on
+    /// small probe sources, and builds nothing). Each finding says where it
+    /// comes from (your shell, the machine's environment setup, the option
+    /// list, Cactus's defaults) and what to change.
+    ///
+    /// Then it reads what a build that went through the cache logged of its
     /// compiles (the newest build of the config that did, or --attempt) and
     /// says: how many objects the cache gave; the compiles it kept out, by
     /// reason, with what would let them in where that is known; the
@@ -846,8 +853,8 @@ pub(crate) enum CacheCommand {
     /// with whether the cache compared that file whole and why; the objects
     /// it had built otherwise, by what differed (compiler, flags,
     /// environment, host platform, cactup version); and the compiles of
-    /// which it compared every file whole, by reason. Nothing is compiled,
-    /// and the cache itself is not read.
+    /// which it compared every file whole, by reason. The cache itself is
+    /// not read.
     ///
     ///   cactup cache doctor sim
     #[clap(verbatim_doc_comment)]

@@ -611,11 +611,18 @@ configuration that went through the cache:
 cactup cache doctor myconfig
 ```
 
-It lists the compiles kept out by reason, with what would let them in where
-cactup knows; for the objects with other sources, the files that differed,
+It first checks the configuration's build environment as its newest build
+set it up: your environment, the compilers and the flags, by the cache's
+own rules (it runs the compilers on small probe sources; it builds
+nothing). Each finding says what keeps the cache out, or costs objects
+shared, where it comes from (your shell, the machine's environment setup,
+the option list, or Cactus's defaults for the compiler) and what to change.
+Then, for the newest build that went through the cache, it lists the
+compiles kept out by reason, with what would let them in where cactup
+knows; for the objects with other sources, the files that differed,
 most often first, and whether the cache compared each file whole or left
 out definitions the compile did not use; and what differed for those built
-otherwise. Nothing is compiled.
+otherwise.
 
 **Your objects name their sources differently.** So that installations can
 share objects, a compile run through the cache records its source files as

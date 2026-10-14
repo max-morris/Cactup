@@ -67,9 +67,42 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
                 Some(name) => name,
                 None => installation.meta()?.active_config()?.to_owned(),
             };
-            let build = Recorded::open(&installation, &name, attempt, None, "serve")?;
-            println!("{}", build.title().bold());
-            print!("{}{}", build.unreadable_note("this"), doctor(&build.events, build.mode));
+            let config_dir = installation.cactus_root().join("configs").join(&name);
+            if !config_dir.is_dir() {
+                bail!("no config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
+            }
+            // The build environment, as the newest attempt froze it.
+            let newest = BuildAttempt::scan(&config_dir)?.into_iter().last();
+            match newest {
+                Some(id) => {
+                    let attempt = BuildAttempt::open(&config_dir, id)?;
+                    let conf = probe_conf(ctx, &attempt)?;
+                    println!("{}", format!("{name}: the build environment of build attempt {id:04} (installation {})", installation.alias).bold());
+                    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+                    let mut findings = Vec::new();
+                    for set in crate::objcache::doctor::check_sets(&attempt, conf) {
+                        let checking = progress.add_child(format!("check the {}", set.name));
+                        checking.init(None, Some(prodash::unit::label("checks")));
+                        findings.extend((set.run)());
+                    }
+                    if let Some(renderer) = renderer {
+                        renderer.shutdown_and_wait();
+                    }
+                    if gix::interrupt::is_triggered() {
+                        bail!("interrupted");
+                    }
+                    print!("{}", environment_findings(&findings));
+                }
+                None => println!("{}", format!("{name} has not been built yet: its build environment is checked once it has").bold()),
+            }
+            // What the newest build that went through the cache found.
+            match Recorded::open(&installation, &name, attempt, None, "serve") {
+                Ok(build) => {
+                    println!("\n{}", build.title().bold());
+                    print!("{}{}", build.unreadable_note("this"), doctor(&build.events, build.mode));
+                }
+                Err(e) => println!("\n{}", format!("{e:#}").bold()),
+            }
             Ok(())
         }
         CacheCommand::Stats => {
@@ -461,20 +494,61 @@ fn without_paths(why: &str) -> String {
         .join(" ")
 }
 
+/// The cache's settings a build of `attempt` would freeze: the attempt's
+/// own where it went through the cache, else the knobs now (§18.2). The
+/// checks key a probe under them (in record mode: nothing is stored).
+fn probe_conf(ctx: &Ctx, attempt: &BuildAttempt) -> Res<crate::objcache::BuildConf> {
+    use crate::objcache::{conf_path, BuildConf, Mode};
+    if let Ok(conf) = BuildConf::load(&conf_path(&attempt.dir.join("cc"))) {
+        return Ok(conf);
+    }
+    let db = ctx.db.read()?;
+    Ok(BuildConf {
+        mode: Mode::Record,
+        cactup: std::env::current_exe().unwrap_or_default(),
+        config_dir: attempt.meta.config_dir.clone(),
+        cactus_root: attempt.meta.cactus_root.clone(),
+        machine: attempt.meta.machine.clone(),
+        universe: None,
+        build_env_digest: String::new(),
+        store: PathBuf::from("/nonexistent-cactup-store"),
+        relocate: db.knob("build-cache-relocate") != Some("no"),
+        exact_warnings: db.knob("build-cache-preserve-exact-warnings") == Some("true"),
+        size_limit: None,
+    })
+}
+
+/// The findings of the build environment's checks, by how much they
+/// matter, each with where it comes from and what to change.
+fn environment_findings(findings: &[crate::objcache::doctor::Finding]) -> String {
+    use crate::objcache::doctor::Severity;
+    let mut out = String::new();
+    if !findings.iter().any(|finding| finding.severity == Severity::KeepsOut) {
+        out.push_str(&format!("  {}\n", "nothing in it keeps the build cache out of a compile".green()));
+    }
+    for (severity, heading) in [
+        (Severity::KeepsOut, "keeps the build cache out"),
+        (Severity::Costs, "costs objects shared, or time"),
+        (Severity::Note, "worth knowing"),
+    ] {
+        let these: Vec<_> = findings.iter().filter(|finding| finding.severity == severity).collect();
+        if these.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n  {} ({}):\n", heading.bold(), these.len()));
+        for finding in these {
+            out.push_str(&format!("    {}\n      from: {}\n", finding.what, finding.from));
+            if let Some(fix) = &finding.fix {
+                out.push_str(&format!("      {}\n", fix.green()));
+            }
+        }
+    }
+    out
+}
+
 /// What would let compiles kept out for `why` in, where cactup knows.
 fn kept_out_hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 9] = [
-        ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
-        ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
-        ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
-        ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
-        ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
-        ("Disk quota exceeded", "a quota is used up (on the build cache's file system or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
-        ("No space left on device", "a file system is full (the build cache's or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
-        ("not published: Failed to create", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
-        ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
-    ];
-    hints.iter().find(|(pattern, _)| why.contains(pattern)).map(|(_, hint)| *hint)
+    crate::objcache::doctor::hint(why)
 }
 
 /// The installation registered under `alias`.

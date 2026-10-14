@@ -1590,6 +1590,45 @@ fn a_compile_whose_messages_speak_of_definitions_is_served_again() {
     assert!(event["differs"].to_string().contains("the files whole"), "{event}");
 }
 
+/// `cactup __cc-doctor`, as `cache doctor` starts it in a build's
+/// environment: a C compiler and flags the cache follows key a probe
+/// compile and keep nothing out; a variable that changes the compiler's
+/// flags behind its command line is found (§18.12).
+#[test]
+fn the_doctor_checks_a_build_environment_in_a_process_of_its_own() {
+    if !have("gcc") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let request = format!(
+        r#"{{"config_dir":null,"optionlist":{{"CC":"gcc","CPPFLAGS":"","CFLAGS":"-g -O2"}},
+           "conf":{{"mode":"record","cactup":"/opt/cactup","config-dir":"{root}/configs/sim","cactus-root":"{root}","machine":"test",
+                   "build-env-digest":"","store":"/nonexistent","relocate":true}},
+           "languages":[{{"name":"C","compiler_variable":"CC","flag_variables":["CPPFLAGS","CFLAGS"],"suffix":"c","probe":"int probe(void) {{ return 0; }}\n"}}]}}"#,
+        root = tmp.path().display()
+    );
+    let ask = |env: &[(&str, &str)]| {
+        let mut child = Command::new(CACTUP)
+            .arg("__cc-doctor")
+            .envs(env.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), request.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let reply = ask(&[]);
+    let kept_out = |reply: &serde_json::Value| reply["found"].as_array().unwrap().iter().filter(|raw| raw["severity"] == "keeps-out").count();
+    assert_eq!(kept_out(&reply), 0, "{reply}");
+    assert_eq!(reply["values"]["CC"], "gcc");
+    let reply = ask(&[("CCC_OVERRIDE_OPTIONS", "+-O0")]);
+    assert!(reply["found"].to_string().contains("CCC_OVERRIDE_OPTIONS is set"), "{reply}");
+    assert!(kept_out(&reply) > 0, "{reply}");
+}
+
 /// A hit writes the dependency file the compile would have written, byte
 /// for byte, with the target named or not; and leaves nothing else behind.
 #[test]
