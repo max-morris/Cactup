@@ -14,8 +14,9 @@
 //! again where a thorn's compiles get other compilers or flags (read with
 //! make through Cactus's own `make.subdir`, [`thorn_checks`]). It answers
 //! in JSON on stdout; `cache doctor` says where each finding comes from (the
-//! user's shell, the machine's environment setup, the option list,
-//! Cactus's defaults, a thorn's file) and what to change ([`Finding`]).
+//! user's shell, the machine's environment setup, the variable of
+//! `make.config.defn` make says gives a flag, [`sources`], a thorn's file)
+//! and what to change ([`Finding`]).
 //!
 //! The findings are a small seam ([`CheckSet`]): named sets of checks
 //! returning findings, so that a general `cactup doctor` can run them with
@@ -228,7 +229,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 severity: Severity::Unchecked,
                 language: None,
                 variable: None,
-                reason: format!("make could not give the configuration's compilers and flags ({e:#}), so they are not checked"),
+                reason: format!("make could not give the configuration's compilers and flags ({e:#}), so they are not checked, nor what each thorn's own make files give its compiles"),
                 thorn: None,
                 fix: None,
                 sources: Vec::new(),
@@ -275,6 +276,12 @@ pub fn run(request: &Request, probe: bool) -> Reply {
             return reply;
         }
     };
+    // What keeps every compile out whatever its compiler (a relative
+    // `COMPILER_PATH`, `GCC_EXEC_PREFIX`), where no compiler is checked.
+    if !checked && let Some(why) = key::driver_led_elsewhere(std::ffi::OsStr::new("cc"), false, |variable| std::env::var_os(variable)) {
+        let variable = why.split_whitespace().next().filter(|word| word.chars().all(|c| c.is_ascii_uppercase() || c == '_')).map(str::to_owned);
+        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason: why, thorn: None, fix: None, sources: Vec::new() });
+    }
     for language in request.languages.iter().filter(|_| checked) {
         if gix::interrupt::is_triggered() {
             return reply;
@@ -290,7 +297,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
             }
             *raw = with_flag_variable(raw, &reply.values);
             let (Some(variable), Some(word)) = (raw.variable.clone(), subject_word(raw, &reply.values)) else { continue };
-            raw.sources = sources(config_dir, &variable, &word);
+            raw.sources = sources(config_dir, &variable, &word, !raw.reason.contains(" is read as one)"));
         }
     }
     // What thorns give their own compiles beyond the configuration's.
@@ -1025,10 +1032,13 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
 /// Where the configuration at `config_dir` gives its `variable` the word
 /// `word`, as make says it: each variable assigned in its
 /// `make.config.defn` with the word in its text whose emptying (on make's
-/// command line) gives `variable` fewer copies of it; `variable` itself
-/// where none does (its own setting). Nothing of Cactus's is assumed (its
-/// switches, which flag variable feeds which): make answers.
-fn sources(config_dir: &Path, variable: &str, word: &str) -> Vec<String> {
+/// command line) gives `variable` fewer copies of it; and `variable` itself
+/// where none does (its own setting), or, where `every_copy` (each copy of
+/// the word is the reason: a refused flag, a word read as `-o`; not a word
+/// read as a second input, which is one copy), where copies are left with
+/// all those emptied. Nothing of Cactus's is assumed (its switches, which
+/// flag variable feeds which): make answers.
+fn sources(config_dir: &Path, variable: &str, word: &str, every_copy: bool) -> Vec<String> {
     let copies = |overrides: &[String]| evaluate_with(config_dir, &[variable.to_owned()], overrides).ok().and_then(|values| values.get(variable).cloned()).map(|value| value.split_whitespace().filter(|seen| *seen == word).count());
     let Some(all) = copies(&[]).filter(|all| *all > 0) else { return Vec::new() };
     let text = std::fs::read_to_string(config_dir.join("config-data/make.config.defn")).unwrap_or_default();
@@ -1045,11 +1055,12 @@ fn sources(config_dir: &Path, variable: &str, word: &str) -> Vec<String> {
         .collect();
     names.sort();
     names.dedup();
-    let found: Vec<String> = names.into_iter().filter(|name| copies(&[format!("{name}=")]).is_some_and(|left| left < all)).collect();
-    match found.is_empty() {
-        true => vec![variable.to_owned()],
-        false => found,
+    let mut found: Vec<String> = names.into_iter().filter(|name| copies(&[format!("{name}=")]).is_some_and(|left| left < all)).collect();
+    let emptied: Vec<String> = found.iter().map(|name| format!("{name}=")).collect();
+    if found.is_empty() || (every_copy && copies(&emptied).is_some_and(|left| left > 0)) {
+        found.push(variable.to_owned());
     }
+    found
 }
 
 /// The word of its variable a finding is about: the one its reason names
@@ -1090,11 +1101,12 @@ fn evaluate_with(config_dir: &Path, variables: &[String], overrides: &[String]) 
         .args(overrides)
         .current_dir(dir.path())
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()
         .context("Failed to run make")?;
     if !out.status.success() {
-        anyhow::bail!("make could not read {}", defn.display());
+        let said = String::from_utf8_lossy(&out.stderr);
+        let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
+        anyhow::bail!("make could not read {}: {last}", defn.display());
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1365,6 +1377,10 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             fix: Some("run cactup cache doctor again once a build has written them (a build does, before it compiles)".to_owned()),
         });
     }
+    let written = match configured {
+        true => written_values(&meta.config_dir),
+        false => BTreeMap::new(),
+    };
     let request = Request {
         config_dir: configured.then(|| meta.config_dir.clone()),
         optionlist: optionlist.clone(),
@@ -1417,7 +1433,7 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             n if n == every => raw.reason.clone(),
             _ => format!("{}: {}", languages.join(", "), raw.reason),
         };
-        let (from, fix) = trace(raw, &reply, &optionlist, &source, &setup);
+        let (from, fix) = trace(raw, &reply, &optionlist, &written, &source, &setup);
         findings.push(Finding { severity, what, from, fix });
     }
     // A setup that gives a path variable an empty entry where it was not
@@ -1482,7 +1498,7 @@ fn with_flag_variable(raw: &Raw, values: &BTreeMap<String, String>) -> Raw {
 }
 
 /// Where a finding comes from, and what to change.
-fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, source: &str, setup: &str) -> (String, Option<String>) {
+fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, written: &BTreeMap<String, String>, source: &str, setup: &str) -> (String, Option<String>) {
     // A thorn's own flag: only that thorn's compiles get it.
     if let Some(thorn) = &raw.thorn {
         let from = match &raw.variable {
@@ -1546,11 +1562,13 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, source
         // Where make says the configuration's variable gets it
         // (`Raw::sources`): the option list's variable, or one configure
         // wrote. Nothing of Cactus's is assumed here.
-        // (The option list's where its value has the word: configure may
-        // have written another, F77's from F90's.)
-        let place = |name: &String| match optionlist.get(name).is_some_and(|value| value.split_whitespace().any(|word| word == flag)) {
-            true => format!("{source}, {name}"),
-            false => format!("{name} as configure wrote it (config-data/make.config.defn)"),
+        // What can be seen, no more: the variable as configure wrote it,
+        // and whether the option list has it the same (configure may have
+        // written it from another: F77's from F90's).
+        let words = |value: &String| value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let place = |name: &String| match (optionlist.get(name), written.get(name)) {
+            (Some(listed), Some(wrote)) if words(listed) == words(wrote) => format!("{name} (config-data/make.config.defn; the same in {source})"),
+            _ => format!("{name} as configure wrote it (config-data/make.config.defn)"),
         };
         let from = match (raw.sources.is_empty(), raw.variable.as_ref()) {
             (false, _) => raw.sources.iter().map(place).collect::<Vec<_>>().join("; "),
@@ -1579,13 +1597,16 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, source
     // About the compiler: the option list's, else the one configure chose.
     if let Some(variable) = raw.variable.as_deref() {
         let value = reply.values.get(variable).cloned().unwrap_or_default();
-        let from = match optionlist.contains_key(variable) {
-            true => format!("{source}, {variable} = {value}"),
-            false => format!("{variable} = {value} as configure wrote it (config-data/make.config.defn)"),
+        let from = match (optionlist.get(variable), written.get(variable)) {
+            (Some(listed), Some(wrote)) if listed.split_whitespace().eq(wrote.split_whitespace()) => format!("{variable} = {value} (config-data/make.config.defn; the same in {source})"),
+            _ => format!("{variable} = {value} as configure wrote it (config-data/make.config.defn)"),
         };
         return (from, hint(&raw.reason).map(str::to_owned));
     }
-    ("the build environment".to_owned(), hint(&raw.reason).map(str::to_owned))
+    match raw.reason.starts_with("make could not give the configuration's") {
+        true => ("the configuration (config-data/make.config.defn)".to_owned(), None),
+        false => ("the build environment".to_owned(), hint(&raw.reason).map(str::to_owned)),
+    }
 }
 
 /// What would let compiles kept out for `why` in, where cactup knows.
@@ -1629,6 +1650,19 @@ fn optionlist_values(path: &Path) -> BTreeMap<String, String> {
         }
     }
     values
+}
+
+/// The variables configure wrote for the configuration at `config_dir`
+/// (`export NAME = value` in `config-data/make.config.defn`), as written:
+/// what a finding's variable is said to be.
+fn written_values(config_dir: &Path) -> BTreeMap<String, String> {
+    std::fs::read_to_string(config_dir.join("config-data/make.config.defn"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("export "))
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
+        .collect()
 }
 
 /// Did Cactus's last configure of the configuration at `config_dir` fail
@@ -1696,17 +1730,31 @@ mod tests {
         let refused: Vec<&Raw> = reply.found.iter().filter(|raw| raw.severity == Severity::KeepsOut && raw.language.as_deref() == Some("C")).collect();
         let raw = refused.iter().find(|raw| raw.variable.as_deref() == Some("CFLAGS") && raw.reason.starts_with("-fprofile-generate")).expect("CFLAGS's flag");
         assert_eq!(raw.sources, ["C_OPTIMISE_FLAGS"], "{:?}", reply.found);
+        // A flag from two places: both (the variable's own setting too).
+        let two = configured(
+            "two",
+            "export SHELL = /bin/sh\nexport CC = gcc\nexport CFLAGS = -g -flto\nexport C_OPTIMISE_FLAGS = -O3 -flto\n\
+             export CCTK_OPTIMISE_MODE = yes\nifeq ($(strip $(CCTK_OPTIMISE_MODE)),yes)\n  CFLAGS += $(C_OPTIMISE_FLAGS)\nendif\n",
+        );
+        assert_eq!(sources(&two, "CFLAGS", "-flto", true), ["C_OPTIMISE_FLAGS", "CFLAGS"]);
+        // A word read as a second input is one copy: not the variable's
+        // own where another variable gives it.
+        assert_eq!(sources(&two, "CFLAGS", "-flto", false), ["C_OPTIMISE_FLAGS"]);
         assert!(!refused.iter().any(|raw| raw.variable.as_deref() == Some("CPPFLAGS")), "{:?}", reply.found);
         assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("CUDA") && raw.reason.contains("not on PATH")), "{:?}", reply.found);
         if identity::find_program(OsStr::new("gfortran")).is_ok() {
             assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("Fortran 77") && raw.reason.starts_with("-fprofile-generate") && raw.sources == ["F77FLAGS"]), "{:?}", reply.found);
         }
         let optionlist: BTreeMap<String, String> = [("C_OPTIMISE_FLAGS".to_owned(), "-O3 -fprofile-generate".to_owned())].into();
-        let (from, fix) = trace(raw, &reply, &optionlist, "the option list (x)", "the setup");
-        assert_eq!(from, "the option list (x), C_OPTIMISE_FLAGS");
+        let written = written_values(&config);
+        let (from, fix) = trace(raw, &reply, &optionlist, &written, "the option list (x)", "the setup");
+        assert_eq!(from, "C_OPTIMISE_FLAGS (config-data/make.config.defn; the same in the option list (x))");
         assert!(fix.is_some());
-        let (from, _) = trace(raw, &reply, &BTreeMap::new(), "the option list (x)", "the setup");
+        let (from, _) = trace(raw, &reply, &BTreeMap::new(), &written, "the option list (x)", "the setup");
         assert_eq!(from, "C_OPTIMISE_FLAGS as configure wrote it (config-data/make.config.defn)");
+        // The option list has another: not said to be where it comes from.
+        let other: BTreeMap<String, String> = [("C_OPTIMISE_FLAGS".to_owned(), "-O1 -fprofile-generate -g".to_owned())].into();
+        assert_eq!(trace(raw, &reply, &other, &written, "x", "y").0, "C_OPTIMISE_FLAGS as configure wrote it (config-data/make.config.defn)");
         // A flag written in the compiler variable is the compiler
         // variable's, not each flag variable's.
         let c_only: Vec<Language> = languages().into_iter().filter(|language| language.name == "C").collect();
@@ -1722,7 +1770,7 @@ mod tests {
         let not_plain = Raw { variable: Some("CC".into()), reason: "LANG=C gcc is not a plain command naming a program, so the recipe's shell runs it".into(), ..(*raw).clone() };
         let with_lang: BTreeMap<String, String> = [("CC".to_owned(), "LANG=C gcc".to_owned())].into();
         let reply_lang = Reply { values: with_lang.clone(), ..Reply::default() };
-        let (_, fix) = trace(&not_plain, &reply_lang, &with_lang, "x", "y");
+        let (_, fix) = trace(&not_plain, &reply_lang, &with_lang, &BTreeMap::new(), "x", "y");
         assert!(fix.is_some_and(|fix| fix.starts_with("name the compiler alone")));
     }
 

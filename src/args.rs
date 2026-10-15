@@ -844,8 +844,11 @@ pub(crate) enum CacheCommand {
     /// small probe sources, and builds nothing), and what each thorn's own
     /// make files add for its compiles (read with make, as a build reads
     /// them, so their $(shell ...) commands run). Each finding says where it
-    /// comes from (your shell, the machine's environment setup, the option
-    /// list, Cactus's defaults, a thorn's file) and what to change.
+    /// comes from (your shell, the machine's environment setup, the variable
+    /// of the config's make.config.defn that gives the flag, a thorn's file)
+    /// and what to change. A config that is not configured yet, or that its
+    /// newest build will configure again, has its compilers and flags
+    /// checked once a build has configured it.
     ///
     /// Then it reads what a build that went through the cache logged of its
     /// compiles (the newest build of the config that did, or --attempt) and

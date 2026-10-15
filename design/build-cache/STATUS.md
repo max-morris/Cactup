@@ -3053,6 +3053,27 @@ gate, it is checked against the real tools it concerns (Cactus's
 configure, make, the wrapper, the MDB's option lists, configurations
 planted as a real build leaves them), not unit tests only.
 
+### M5 part 2, round 24 on the redesign (on `af96c1f`): BLOCKED by both
+
+Both re-ran rounds 1 to 23 (each traced where make says, real-configure
+plants too; doctor and wrapper agree on every first reason). Blocking,
+fixed in the commit after this record, nothing of Cactus modeled in any:
+- (both) a flag a variable has in its own text and gets from another
+  too (`-flto` in CFLAGS and `C_OPTIMISE_FLAGS`) was traced to the other
+  only: where copies are left with the sources found all emptied, the
+  variable itself is named too (not for a word read as a second input,
+  which is one copy).
+- (B) "the option list" was said of a variable whose option-list value
+  had the word, which configure need not have used (F77FLAGS: configure
+  writes F90's): the trace says the variable as configure wrote it, and
+  that the option list has it the same only where it does.
+- (B) where no compiler is checked (no configure to ask), what keeps
+  every compile out whatever the compiler (a relative `COMPILER_PATH`,
+  `GCC_EXEC_PREFIX`) was only "worth knowing": it is checked there too.
+Also: make's own reason where it cannot read `make.config.defn`, traced
+to the configuration, and that the thorns are not checked then either;
+the help, user docs and spec no longer speak of "Cactus's defaults".
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3318,8 +3339,8 @@ wrapper's own functions in the build's environment (the refused
 variables, the driver's own searches, the compiler's identity, the
 compile's words read whole and the reader's first reason (decision 32),
 a whole key of a probe compile per language where there is none) and answers in JSON; `cache doctor` traces each finding to the
-user's shell, the machine's setup, the option list or Cactus's defaults,
-with what to change. Named sets of checks (`doctor::CheckSet`). A unit
+user's shell, the machine's setup, or the variable of `make.config.defn`
+make says gives the flag (decision 33), with what to change. Named sets of checks (`doctor::CheckSet`). A unit
 test runs every MDB machine's build setup in every universe with each
 path variable unset, empty and set: all clean today (they use the
 `${X:+…}` idiom). On plato's `m5a`: nothing keeps the cache out;

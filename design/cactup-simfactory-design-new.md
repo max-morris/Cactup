@@ -6385,9 +6385,10 @@ never built has none to check), without a build (`objcache::doctor`):
   of `make.config.defn` with the word in their text whose emptying, on
   make's command line, takes a copy of it out of the variable the compile
   gets (`C_OPTIMISE_FLAGS`, not `C_DEBUG_FLAGS` where debugging is off;
-  `F77_OPTIMISE_FLAGS` as configure wrote it), the variable itself where
-  none does; each is the option list's where the option list's value of
-  it has the word, else as configure wrote it. Nothing of Cactus's
+  `F77_OPTIMISE_FLAGS` as configure wrote it), and the variable itself
+  where none does, or (but for a word read as a second input, one copy)
+  where copies are left with all those emptied; each is said as
+  configure wrote it, with whether the option list has it the same. Nothing of Cactus's
   switches or of which variable feeds which is written into the doctor.
   Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the
@@ -6467,11 +6468,10 @@ never built has none to check), without a build (`objcache::doctor`):
   what to change. An environment variable is the user's shell's when it
   had the value before the setup ran and the setup left it so (or kept the
   entries found from a value of the shell's), else the setup's (the
-  machine's `[environment]`, or its universe's); a flag is the option
-  list's variable that has it, else Cactus's default for the compiler of
-  the finding's language, as configure wrote it, or the thorn whose file
-  adds it (only that thorn's compiles get it); a compiler is the option
-  list's, else the one configure chose.
+  machine's `[environment]`, or its universe's); a flag is the variable
+  of `make.config.defn` make says gives it (above), said with whether the
+  option list has that variable the same, or the thorn whose file adds it
+  (only that thorn's compiles get it); a compiler likewise.
 - The checks are named sets returning findings (`doctor::CheckSet`), so
   that a general `cactup doctor` can run them with others.
 
