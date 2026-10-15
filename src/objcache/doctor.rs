@@ -890,6 +890,11 @@ fn reason_words(reason: &str) -> Option<Vec<&str>> {
 /// word for an input, so it goes too). A flag the reader refuses that takes
 /// no value is named alone (`--coverage`, whatever follows it).
 fn shown_for(reason: &str, value: Option<&String>) -> Option<String> {
+    // The word it says is read as `-o` (`-openmp`), whatever else the
+    // variable has that is read so.
+    if reason.contains(" is read as -o") {
+        return reason_subject(reason).map(str::to_owned);
+    }
     let named = reason_words(reason).or_else(|| reason.split([' ', ',']).next().filter(|word| word.starts_with('-')).map(|word| vec![word]))?;
     let given: Vec<&str> = value.map(|value| value.split_whitespace().collect()).unwrap_or_default();
     let flag = named[0];
@@ -1464,12 +1469,30 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
         // (CPPFLAGS only for a finding of no variable: its words reach no
         // other variable, and it sorts before them all.)
         let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || (name == "CPPFLAGS" && raw.variable.is_none()));
+        // Not a variable whose switch is off (`C_DEBUG_FLAGS` where
+        // `CCTK_DEBUG_MODE` is no): the compiles do not get it.
+        let off = |name: &str| {
+            ["DEBUG", "OPTIMISE", "PROFILE", "WARN", "OPENMP"].iter().any(|switch| {
+                name.ends_with(&format!("_{switch}_FLAGS")) && defaults.get(&format!("CCTK_{switch}_MODE")).is_some_and(|mode| mode != "yes")
+            })
+        };
+        // For a word read as a second input: a variable where it stands
+        // alone, not one where it is the value of a flag the reader takes
+        // with one (`-isystem /dir` in CFLAGS, a stray `/dir` in
+        // C_OPTIMISE_FLAGS).
+        let stray = raw.reason.contains(" is read as one)");
+        let a_value = |before: &str| ["-I", "-D", "-U", "-MF", "-MT", "-MQ", "-o", "-x"].contains(&before) || super::compile::WITH_VALUE.contains(&before);
+        let alone = |value: &str| {
+            let words: Vec<&str> = value.split_whitespace().collect();
+            words.iter().enumerate().any(|(at, word)| *word == flag && (at == 0 || !a_value(words[at - 1])))
+        };
         let has = |values: &BTreeMap<String, String>| {
-            values
-                .iter()
-                .filter(|(name, _)| own(name))
-                .find(|(_, value)| value.split_whitespace().any(|word| word == flag || word.starts_with(&format!("{flag}="))))
-                .map(|(name, _)| name.clone())
+            let mut found = values.iter().filter(|(name, _)| own(name) && !off(name)).filter(|(_, value)| value.split_whitespace().any(|word| word == flag || word.starts_with(&format!("{flag}="))));
+            match stray {
+                true => found.find(|(_, value)| alone(value)),
+                false => found.next(),
+            }
+            .map(|(name, _)| name.clone())
         };
         let from = match (has(optionlist), has(defaults)) {
             (Some(name), _) => format!("{source}, {name}"),
@@ -1874,6 +1897,8 @@ mod tests {
         assert_eq!(shown_for("--coverage is a flag the cache does not follow", Some(&value)).unwrap(), "--coverage");
         let value = "-O3 -override-limits".to_owned();
         assert_eq!(shown_for("-o is given more than once", Some(&value)).unwrap(), "-override-limits");
+        let value = "-O2 -override-limits -openmp".to_owned();
+        assert_eq!(shown_for("-o is given more than once (-openmp is read as -o and what follows it)", Some(&value)).unwrap(), "-openmp");
         let value = "-mllvm -a -O2 -mllvm -b".to_owned();
         assert_eq!(shown_for("-mllvm is a flag the cache does not follow", Some(&value)).unwrap(), "-mllvm -a and -mllvm -b");
         assert_eq!(reason_words("--ptxas-options=-O3 -O3 is not a flag the cache knows"), Some(vec!["--ptxas-options=-O3"]));

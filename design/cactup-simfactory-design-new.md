@@ -6376,9 +6376,10 @@ never built has none to check), without a build (`objcache::doctor`):
   so a value the reader takes apart from its flag, `-I /dir`, is never
   named); where it is a second `-o`, with the word the reader reads one
   out of (`-openmp`), each variable with that word; the fix names a
-  flag's value too where the reader knows it takes one (`-mllvm x`), or
-  where it does not know the flag and a word that is no flag follows it
-  (`-L /opt/lib`). Only the first (decision 32): that what
+  flag's value too where the reader knows it takes one (`-mllvm x`); the
+  place traced to is a variable of the option list or of Cactus's
+  defaults whose switch is on (not `C_DEBUG_FLAGS` where
+  `CCTK_DEBUG_MODE` is `no`). Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the
   doctor again once it is changed; where the configuration's check
   stopped at a reason, a thorn's reason about a word the configuration's

@@ -2940,6 +2940,24 @@ Also: the "from" of a second `-o` or second input looks for the word it is
 about (`-openmp`, not `-o`), so it names `CPP_OPENMP_FLAGS` and the like;
 the spec says the unknown-flag fix again (`-L /opt/lib`).
 
+### M5 part 2, round 19 (on `120ebf8`): BLOCKED by both
+
+Both re-ran rounds 1 to 18 (all as recorded; each word named checked to be
+a true cause with the real reader). Blocking, fixed in the commit after
+this record, all in where a finding is traced and what its fix names:
+- (B) a word read as `-o` given to a variable whose first `-o` word is
+  another (`-override-limits` beside `-openmp`, tianhe1a's shape) had
+  that other word in its fix: the fix names the word the reason names.
+- (B, older) the trace named an option list variable whose switch is off
+  (`C_DEBUG_FLAGS` with `DEBUG = no`, where `C_PROFILE_FLAGS` gives the
+  flag): a `*_DEBUG/OPTIMISE/PROFILE/WARN/OPENMP_FLAGS` whose
+  `CCTK_*_MODE` is not `yes` is passed over.
+- (A, older) a second input was traced to the first variable (by name)
+  with its word, which may hold it as a flag's value (`-isystem /dir` in
+  CFLAGS, a stray `/dir` in `C_OPTIMISE_FLAGS`, omnia's shape): to one
+  where it stands alone (not after `-I`, `-D`, `-isystem` and the reader's
+  other flags with a value apart, `compile::WITH_VALUE`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -116,7 +116,7 @@ pub struct Compile {
 }
 
 /// Flags that take their value as the next argument, and go into the key.
-const WITH_VALUE: &[&str] = &[
+pub(super) const WITH_VALUE: &[&str] = &[
     "-isystem",
     "-iquote",
     "-idirafter",
