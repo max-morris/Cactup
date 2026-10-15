@@ -979,6 +979,11 @@ fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: 
     Some((why, None))
 }
 
+/// Cactus's switches of flag variables: `*_<SWITCH>_FLAGS` are the
+/// compiles' where `CCTK_<SWITCH>_MODE` is `yes`, and `*_NO_OPTIMISE_FLAGS`
+/// where `CCTK_OPTIMISE_MODE` is not.
+const SWITCHES: [&str; 5] = ["DEBUG", "OPTIMISE", "PROFILE", "WARN", "OPENMP"];
+
 /// The compilers and flags as `make` gives them for the configuration at
 /// `config_dir` (Cactus's `make.config.defn`, with its conditionals: the
 /// optimizing flags where optimizing, and the like), in this environment.
@@ -988,8 +993,10 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
         variables.push(language.compiler_variable.clone());
         variables.extend(language.flag_variables.iter().cloned());
     }
-    // And the shell the recipes run in.
+    // And the shell the recipes run in, and the switches that decide which
+    // of the option list's flag variables the compiles get.
     variables.push("SHELL".to_owned());
+    variables.extend(SWITCHES.iter().map(|switch| format!("CCTK_{switch}_MODE")));
     variables.sort();
     variables.dedup();
     evaluate(config_dir, &variables)
@@ -1470,10 +1477,16 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
         // other variable, and it sorts before them all.)
         let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || (name == "CPPFLAGS" && raw.variable.is_none()));
         // Not a variable whose switch is off (`C_DEBUG_FLAGS` where
-        // `CCTK_DEBUG_MODE` is no): the compiles do not get it.
+        // `CCTK_DEBUG_MODE` is no; `C_NO_OPTIMISE_FLAGS` where
+        // `CCTK_OPTIMISE_MODE` is yes): the compiles do not get it. The
+        // switches as make gives them (Cactus sets some in conditionals).
         let off = |name: &str| {
-            ["DEBUG", "OPTIMISE", "PROFILE", "WARN", "OPENMP"].iter().any(|switch| {
-                name.ends_with(&format!("_{switch}_FLAGS")) && defaults.get(&format!("CCTK_{switch}_MODE")).is_some_and(|mode| mode != "yes")
+            SWITCHES.iter().any(|switch| {
+                let mode = reply.values.get(&format!("CCTK_{switch}_MODE")).map(|mode| mode.trim() == "yes");
+                match name.ends_with(&format!("_NO_{switch}_FLAGS")) {
+                    true => mode == Some(true),
+                    false => name.ends_with(&format!("_{switch}_FLAGS")) && mode == Some(false),
+                }
             })
         };
         // For a word read as a second input: a variable where it stands

@@ -2958,6 +2958,20 @@ this record, all in where a finding is traced and what its fix names:
   where it stands alone (not after `-I`, `-D`, `-isystem` and the reader's
   other flags with a value apart, `compile::WITH_VALUE`).
 
+### M5 part 2, round 20 (on `5b9e237`): BLOCKED by both
+
+Both re-ran rounds 1 to 19 (all as recorded). Blocking, both raised by
+both, in round 19's switch filter, fixed in the commit after this record:
+`*_NO_OPTIMISE_FLAGS` ends in `_OPTIMISE_FLAGS`, so it was judged by
+`CCTK_OPTIMISE_MODE` the wrong way round (Cactus gives it where that is
+not `yes`): with OPTIMISE off a flag of it was traced to "the option list
+or Cactus's defaults, CFLAGS", with it on to the variable the compiles do
+not get. It is on exactly where optimizing is off now. And the switches
+are make's own (`CCTK_*_MODE` evaluated with the compilers and flags):
+Cactus writes `CCTK_WARN_MODE` indented in a conditional, which the line
+reader of `make.config.defn` never saw, so `*_WARN_FLAGS` was never
+passed over.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

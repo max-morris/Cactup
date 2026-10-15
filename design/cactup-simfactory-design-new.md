@@ -6378,8 +6378,9 @@ never built has none to check), without a build (`objcache::doctor`):
   out of (`-openmp`), each variable with that word; the fix names a
   flag's value too where the reader knows it takes one (`-mllvm x`); the
   place traced to is a variable of the option list or of Cactus's
-  defaults whose switch is on (not `C_DEBUG_FLAGS` where
-  `CCTK_DEBUG_MODE` is `no`). Only the first (decision 32): that what
+  defaults whose switch is on, as make gives the switches (not
+  `C_DEBUG_FLAGS` where `CCTK_DEBUG_MODE` is `no`, nor
+  `C_NO_OPTIMISE_FLAGS` where `CCTK_OPTIMISE_MODE` is `yes`). Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the
   doctor again once it is changed; where the configuration's check
   stopped at a reason, a thorn's reason about a word the configuration's
