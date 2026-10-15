@@ -3115,6 +3115,32 @@ configured from the option list of the attempt with the newest stamp
 scenarios with stamps as a build leaves them: each right. Also: the
 compiler variable's place counts its name (`source_of_copy`).
 
+### M5 part 2, round 27 (on `2cd6d8b`): BLOCKED by both
+
+Both re-ran rounds 1 to 26 and planted with stamps as a build leaves them
+(again, revert, resubmit, late, late2, cfgfail, first, firstfail, oldmix:
+each right). Blocking (B), older than round 26, fixed in the commit after
+this record: after a `--virtual-executable` build the doctor took that
+attempt's setup, which is empty (it neither configures nor compiles): it
+checked in the user's own shell (a false all-clear; a false "not on
+PATH"). It takes the newest attempt that builds. Blocking (A): a
+configure that left no stamp (an older cactup's build, a queued job whose
+script was frozen before the stamp) was invisible, and the option list
+of the newest stamped or installed attempt taken for the one configured
+from: now, where Cactus's `config-info` (every configure writes it,
+before the stamp) is newer than the newest stamp (else than the installed
+option list of the newest successful attempt), what it was configured
+from is said not to be known, and nothing checked. And (A) the same
+option list configures differently in another setup (Cactus expands
+`${WORD}` at configure time; sciama's `CC = ${CC}`): the stamped attempt's
+setup and universe are compared too. Also: the stamp is a
+byte written (`echo >`), so its time is the file server's where the step
+runs again (CLAUDE.md, locking); the newest stamp is found by the stamps'
+times alone, one attempt opened; a stale comment. Known and left: what
+the user's own shell gives a configure (a `${WORD}` from it) is recorded
+nowhere; the doctor runs in the user's shell now, and reads the
+configuration's flags as configure wrote them.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

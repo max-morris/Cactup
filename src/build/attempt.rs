@@ -218,7 +218,7 @@ impl BuildAttempt {
     /// what `cache doctor` checks a config's flags against. Nothing reads it
     /// on the build path.
     pub fn configured_stamp_path(&self) -> PathBuf {
-        self.dir.join("configured")
+        self.dir.join(CONFIGURED_STAMP)
     }
 
     /// This attempt's optionlist *source* snapshot (verbatim TOML, pre-render)
@@ -362,6 +362,10 @@ impl BuildAttempt {
 /// Parse a `%04d` attempt directory name (>=4 ASCII digits, like
 /// `sim::restart`'s `output-%04d` parser minus the prefix — a build attempt
 /// dir carries no other name component).
+/// The file in an attempt's directory its build script writes once its
+/// configure step has succeeded ([`BuildAttempt::configured_stamp_path`]).
+pub const CONFIGURED_STAMP: &str = "configured";
+
 fn parse_attempt_dir_name(name: &str) -> Option<u32> {
     if name.len() < 4 || !name.bytes().all(|b| b.is_ascii_digit()) {
         return None;

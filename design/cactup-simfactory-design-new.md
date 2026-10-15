@@ -6391,12 +6391,16 @@ never built has none to check), without a build (`objcache::doctor`):
   value, given back to make between two marker words, has that copy's
   place between them (`source_of_copy`); each is said as configure wrote
   it, with whether the option list has it the same. A `make` that cannot
-  be started is the setup's (its `PATH`). Whether the newest attempt
-  configures again: its option list other than the one the configuration
-  was last configured from, which is that of the attempt whose build
-  configured it last (each build script touches its attempt's
-  `configured` stamp once its configure step succeeds; the newest stamp),
-  or, where no stamped build configured it, the one installed with it. Nothing of Cactus's
+  be started is the setup's (its `PATH`). Whether the newest attempt that
+  builds (not a `--virtual-executable` one) configures again: its option
+  list, setup or universe other than those of the attempt whose build
+  configured the configuration last (each build script writes its
+  attempt's `configured` stamp once its configure step succeeds; the
+  newest stamp), or, where no stamped build configured it, of the newest
+  successful attempt (whose option list was installed). Where Cactus's
+  `config-info`, which every configure writes, is newer than that, a
+  configure that recorded nothing ran last: what the configuration was
+  configured from is said not to be known, and nothing checked. Nothing of Cactus's
   switches or of which variable feeds which is written into the doctor.
   Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the

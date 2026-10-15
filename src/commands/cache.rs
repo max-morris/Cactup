@@ -71,8 +71,13 @@ pub fn dispatch(ctx: &Ctx, command: CacheCommand) -> Res<()> {
             if !config_dir.is_dir() {
                 bail!("no config named \"{name}\" in installation {} (see `cactup config list`)", installation.alias);
             }
-            // The build environment, as the newest attempt froze it.
-            let newest = BuildAttempt::scan(&config_dir)?.into_iter().last();
+            // The build environment, as the newest attempt that builds froze
+            // it (a `--virtual-executable` one has none: it neither
+            // configures nor compiles).
+            let newest = BuildAttempt::scan(&config_dir)?
+                .into_iter()
+                .rev()
+                .find(|id| BuildAttempt::open(&config_dir, *id).is_ok_and(|attempt| attempt.meta.virtual_executable.is_none()));
             match newest {
                 Some(id) => {
                     let attempt = BuildAttempt::open(&config_dir, id)?;
