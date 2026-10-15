@@ -214,10 +214,10 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     reply.values = match &request.config_dir {
         Some(config_dir) => made_values(config_dir, &request.languages).unwrap_or_else(|e| {
             reply.found.push(Raw {
-                severity: Severity::Note,
+                severity: Severity::Unchecked,
                 language: None,
                 variable: None,
-                reason: format!("the compilers and flags are the option list's: make could not give the configuration's ({e:#})"),
+                reason: format!("make could not give the configuration's compilers and flags ({e:#}): {OPTION_LIST_ONLY}"),
                 thorn: None,
                 fix: None,
             });
@@ -979,6 +979,11 @@ fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: 
     Some((why, None))
 }
 
+/// What is checked of a configuration whose compilers and flags make
+/// cannot give: the option list's compilers and the variables every
+/// compile gets, not what configure would add to them.
+const OPTION_LIST_ONLY: &str = "only the option list's compilers and its CPPFLAGS, CFLAGS, CXXFLAGS, F90FLAGS, F77FLAGS and CUCCFLAGS are checked, not the flags its DEBUG, OPTIMISE, PROFILE, WARN and OPENMP switches add (C_OPTIMISE_FLAGS and the like) nor Cactus's defaults";
+
 /// Cactus's switches of flag variables: `*_<SWITCH>_FLAGS` are the
 /// compiles' where `CCTK_<SWITCH>_MODE` is `yes`, and `*_NO_OPTIMISE_FLAGS`
 /// where `CCTK_OPTIMISE_MODE` is not.
@@ -1258,8 +1263,8 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     let configured = meta.config_dir.join("config-data/make.config.defn").is_file();
     if !configured {
         findings.push(Finding {
-            severity: Severity::Note,
-            what: "the configuration is not configured yet: the compilers and flags checked are the option list's, without Cactus's defaults".to_owned(),
+            severity: Severity::Unchecked,
+            what: format!("the configuration is not configured yet: {OPTION_LIST_ONLY}"),
             from: "the configuration".to_owned(),
             fix: None,
         });

@@ -2972,6 +2972,20 @@ Cactus writes `CCTK_WARN_MODE` indented in a conditional, which the line
 reader of `make.config.defn` never saw, so `*_WARN_FLAGS` was never
 passed over.
 
+### M5 part 2, round 21 (on `8eba40d`): BLOCKED by both
+
+Both re-ran rounds 1 to 20 (all as recorded; round 20's switches checked
+against make itself, `WARN` from the shell too). Blocking, both raised by
+both, older than this round, fixed in the commit after this record: where
+the configuration is not configured (a first build queued, or one that
+stopped in configure), or make cannot read it, only the option list's
+base variables were checked, never its `C_OPTIMISE_FLAGS` and the other
+variables its switches add (OPTIMISE is on by default: where most option
+lists keep their flags; holodeck's `-xHost`), and the note said the
+option list's flags were what was checked. It is "not checked" now, with
+what is checked and what is not. (Composing them as configure would was
+left: it takes configure's defaults, more to get wrong.)
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

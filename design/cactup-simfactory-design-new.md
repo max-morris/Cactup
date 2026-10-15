@@ -6356,7 +6356,9 @@ never built has none to check), without a build (`objcache::doctor`):
   `CUCC` with theirs), read through `config-data/make.config.defn` with its
   conditionals (the optimizing flags where optimizing) by `$(info)`; where
   the configuration is not configured, or `make` cannot read it, the
-  option list's (said so). Flags are split as the recipe's shell splits
+  option list's compilers and the variables every compile gets, and "not
+  checked" said of what its switches (`C_OPTIMISE_FLAGS` and the like)
+  and Cactus's defaults would add. Flags are split as the recipe's shell splits
   them.
 - The checks: the variables that keep every compile out
   (`CCC_OVERRIDE_OPTIONS` and the like); for each language, what the
