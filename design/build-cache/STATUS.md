@@ -3031,6 +3031,28 @@ after this record:
   the first setting standing), `${WORD}` expanded from the build's
   environment and `$$` a `$` where the checks run.
 
+### M5 part 2, round 24: stopped; the doctor asks, decision 33
+
+Round 24 (on `acb88dc`) was stopped when Max decided the doctor should
+ask the build's tools rather than model Cactus. The commit after this
+record: `doctor::sources` traces a finding's word by emptying each
+variable of `make.config.defn` that has it on make's command line and
+seeing whether a copy leaves the compile's variable (no prefixes,
+switches, `NO_OPTIMISE`, F77-from-F90 or value-flag rules in `trace`
+any more; the option list's where its value has the word, else "as
+configure wrote it"); where there is no configure to ask, no compiler or
+flag is checked, said so (no option-list parsing or `${WORD}` expansion,
+no F77 copy). Checked against the reviewers' planted real-configure
+layouts of rounds 17 to 23 (switches on and off, `NO_OPTIMISE`, WARN off,
+F77 overwritten, stray words beside `-isystem`, `-openmp` in two
+variables, queued and failed reconfigures): each traced where make says;
+`et`, `m5a`, `m5b` clean. 188 fewer lines in `doctor.rs`, 146 more.
+
+**Working practice (Max, 2026-10-15):** before a fix goes back to the
+gate, it is checked against the real tools it concerns (Cactus's
+configure, make, the wrapper, the MDB's option lists, configurations
+planted as a real build leaves them), not unit tests only.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

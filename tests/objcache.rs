@@ -1600,8 +1600,13 @@ fn the_doctor_checks_a_build_environment_in_a_process_of_its_own() {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
+    // A configured configuration: its compilers and flags as make gives
+    // them from `config-data/make.config.defn`.
+    let config = tmp.path().join("configs/sim");
+    fs::create_dir_all(config.join("config-data")).unwrap();
+    fs::write(config.join("config-data/make.config.defn"), "export SHELL = /bin/sh\nexport CC = gcc\nexport CPPFLAGS =\nexport CFLAGS = -g -O2\n").unwrap();
     let request = format!(
-        r#"{{"config_dir":null,"optionlist":{{"CC":"gcc","CPPFLAGS":"","CFLAGS":"-g -O2"}},
+        r#"{{"config_dir":"{root}/configs/sim","optionlist":{{"CC":"gcc","CPPFLAGS":"","CFLAGS":"-g -O2"}},
            "conf":{{"mode":"record","cactup":"/opt/cactup","config-dir":"{root}/configs/sim","cactus-root":"{root}","machine":"test",
                    "build-env-digest":"","store":"/nonexistent","relocate":true}},
            "languages":[{{"name":"C","compiler_variable":"CC","flag_variables":["CPPFLAGS","CFLAGS"],"suffix":"c","probe":"int probe(void) {{ return 0; }}\n"}}]}}"#,

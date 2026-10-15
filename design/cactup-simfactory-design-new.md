@@ -6354,19 +6354,14 @@ never built has none to check), without a build (`objcache::doctor`):
 - The compilers and flags are those `make` gives the configuration's
   compile recipes (`CC` with `CPPFLAGS` and `CFLAGS`, `CXX`, `F90`, `F77`,
   `CUCC` with theirs), read through `config-data/make.config.defn` with its
-  conditionals (the optimizing flags where optimizing) by `$(info)`; where
-  the configuration is not configured, or `make` cannot read it, or the
-  newest attempt configures it again from another option list (other
-  than the one installed with the configuration when an attempt
-  succeeded), or its last configure failed (`CONFIG-STATUS` in Cactus's
-  `config-info`), the option list's compilers and the variables every
-  compile gets (read as Cactus reads an option list: `#` comments, the
-  first setting, `${WORD}` from the build's environment), and "not checked" said
-  of what its switches (`C_OPTIMISE_FLAGS` and the like) and Cactus's
-  defaults would add. Fortran 77's compiler and flags are Fortran's, as
-  configure makes them (`F77`, `F77FLAGS` and every `F77_*_FLAGS` from
-  F90's): a finding of one is traced to the F90 variable. Flags are split as the recipe's shell splits
-  them.
+  conditionals (the optimizing flags where optimizing) by `$(info)`. Where
+  there is no such configure to ask (the configuration is not configured,
+  `make` cannot read it, the newest attempt configures it again from
+  another option list than the one installed with the configuration when
+  an attempt succeeded, or its last configure failed, `CONFIG-STATUS` in
+  Cactus's `config-info`), no compiler or flag is checked, said so: the
+  doctor does not emulate configure (decision 33). Flags are split as the
+  recipe's shell splits them.
 - The checks: the variables that keep every compile out
   (`CCC_OVERRIDE_OPTIONS` and the like); for each language, what the
   wrapper makes of the compiler's text before any key (a command only a
@@ -6385,11 +6380,16 @@ never built has none to check), without a build (`objcache::doctor`):
   so a value the reader takes apart from its flag, `-I /dir`, is never
   named); where it is a second `-o`, with the word the reader reads one
   out of (`-openmp`), each variable with that word; the fix names a
-  flag's value too where the reader knows it takes one (`-mllvm x`); the
-  place traced to is a variable of the option list or of Cactus's
-  defaults whose switch is on, as make gives the switches (not
-  `C_DEBUG_FLAGS` where `CCTK_DEBUG_MODE` is `no`, nor
-  `C_NO_OPTIMISE_FLAGS` where `CCTK_OPTIMISE_MODE` is `yes`). Only the first (decision 32): that what
+  flag's value too where the reader knows it takes one (`-mllvm x`). The
+  place a flag is traced to is asked of make (decision 33): the variables
+  of `make.config.defn` with the word in their text whose emptying, on
+  make's command line, takes a copy of it out of the variable the compile
+  gets (`C_OPTIMISE_FLAGS`, not `C_DEBUG_FLAGS` where debugging is off;
+  `F77_OPTIMISE_FLAGS` as configure wrote it), the variable itself where
+  none does; each is the option list's where the option list's value of
+  it has the word, else as configure wrote it. Nothing of Cactus's
+  switches or of which variable feeds which is written into the doctor.
+  Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the
   doctor again once it is changed; where the configuration's check
   stopped at a reason, a thorn's reason about a word the configuration's

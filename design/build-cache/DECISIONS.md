@@ -554,6 +554,20 @@ Asked as seven questions with options; the answers, in Max's numbering.
     round 16's open finding in STATUS), with its own review, after the
     merge.
 
+33. **`cache doctor` asks the build's tools, and models none of Cactus**
+    (2026-10-15). After round 23 Max: "I do want cache doctor to be
+    helpful and not be wrong, but re-implementing the entire Cactus build
+    system makes me wary", and "go ahead" to: trace a flag to the variable
+    it comes from by asking make (empty each candidate on make's command
+    line, see whether the word leaves the compile's variable), and check
+    no compiler or flag where there is no configure to ask (not
+    configured, a reconfigure queued, a failed configure), saying so,
+    instead of emulating configure and Cactus's option-list parser. The
+    modeled design is kept on the branch `feature/doctor-modeled` (at
+    `acb88dc`) "in case we want to revisit it". Max kept the review bar
+    (decision 17's: any false statement blocks), with fixes checked
+    against the real tools before review.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on
