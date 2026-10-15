@@ -191,7 +191,8 @@ pub fn run_verb() -> i32 {
     if let Some(value) = &tmpdir {
         reply.env.insert("TMPDIR".to_owned(), value.to_string_lossy().into_owned());
     }
-    reply.found.extend(unusable_tmpdir(tmpdir.map(PathBuf::from)));
+    let scratch = request.config_dir.as_ref().map(|config_dir| config_dir.join("scratch"));
+    reply.found.extend(unusable_tmpdir(tmpdir.map(PathBuf::from), scratch.as_deref()));
     // Stopped: no answer, rather than one that looks whole.
     if gix::interrupt::is_triggered() {
         return 1;
@@ -279,14 +280,23 @@ pub fn run(request: &Request, probe: bool) -> Reply {
 /// preprocessor's list of what a compile reads, and the recipe's shell for
 /// the compiler's lookup: where none can be made, every compile is kept
 /// out (and compiles, the compiler falling back on `/tmp`). A relative or
-/// empty `TMPDIR` is the compile's directory's, not looked at here.
-fn unusable_tmpdir(given: Option<PathBuf>) -> Option<Raw> {
+/// empty `TMPDIR` is taken in the directory the compiles run in, `scratch`
+/// (Cactus's `SCRATCH_BUILD`: a quoted `~/tmp` is `scratch/~/tmp`); not
+/// looked at where there is none yet.
+fn unusable_tmpdir(given: Option<PathBuf>, scratch: Option<&Path>) -> Option<Raw> {
     let dir = given.clone().unwrap_or_else(|| PathBuf::from("/tmp"));
-    if !dir.is_absolute() {
-        return None;
-    }
-    let e = tempfile::Builder::new().prefix(".cactup-doctor-").tempfile_in(&dir).err()?;
+    let relative = !dir.is_absolute();
+    let place = match relative {
+        true => scratch.filter(|scratch| scratch.is_dir())?.join(&dir),
+        false => dir.clone(),
+    };
+    let e = tempfile::Builder::new().prefix(".cactup-doctor-").tempfile_in(&place).err()?;
     let reason = match given {
+        Some(_) if relative => format!(
+            "TMPDIR is \"{}\", which is no absolute path: the compiles run in {}, where no file can be made in it ({e}), so the build cache keeps every compile out",
+            dir.display(),
+            scratch.map(Path::display).map(|shown| shown.to_string()).unwrap_or_default()
+        ),
         Some(_) => format!("TMPDIR is {}, where no file can be made ({e}), so the build cache keeps every compile out", dir.display()),
         None => format!("TMPDIR is not set and no file can be made in /tmp ({e}), so the build cache keeps every compile out"),
     };
@@ -803,7 +813,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             }
         }
         // Said already by a check above, or new: the probe's own.
-        Err(why) if !found.iter().any(|raw| raw.reason == why) => found.push(raw(Severity::KeepsOut, None, why)),
+        Err(why) if !found.iter().any(|raw| raw.reason.starts_with(&why)) => found.push(raw(Severity::KeepsOut, None, why)),
         Err(_) => {}
     }
     found
@@ -879,6 +889,10 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                         kept.push(word);
                         continue;
                     }
+                    // A host compiler's flag goes with what gave it to nvcc.
+                    if host && kept.last().is_some_and(|before| before == "-Xcompiler" || before == "--compiler-options") {
+                        kept.pop();
+                    }
                     // The rest of what it names.
                     for _ in 1..named.len() {
                         words.next();
@@ -905,11 +919,32 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                     break;
                 }
             }
-            // Said only when nothing was taken out before it.
+            // About no word it can take out ("there is more than one input
+            // file"): said, and the search ends. A word left after a flag
+            // it does not know may be that flag's value.
+            // The word the reader takes for a second input, where it says
+            // so: named, taken out, and the rest read on.
+            _ if why == "there is more than one input file" && said.len() < 16 && rest.iter().any(|word| !word.to_string_lossy().starts_with('-')) => {
+                let at = rest.iter().position(|word| !word.to_string_lossy().starts_with('-')).unwrap_or_default();
+                let word = rest.remove(at);
+                // With the flag before it, whose value it may be (`-L
+                // /opt/lib`): one cause, not a second one for the flag.
+                let why = match at.checked_sub(1).filter(|before| rest[*before].to_string_lossy().starts_with('-')) {
+                    Some(before) => format!("{why} ({}, after {}, is read as one)", word.to_string_lossy(), rest.remove(before).to_string_lossy()),
+                    None => format!("{why} ({} is read as one)", word.to_string_lossy()),
+                };
+                let why = match maybe_values.last() {
+                    Some((_, flag)) => format!("{why} (unless a word of these flags is the value of {})", flag.to_string_lossy()),
+                    None => why,
+                };
+                said.push(why);
+            }
             _ => {
-                if said.is_empty() {
-                    said.push(why);
-                }
+                let why = match maybe_values.last() {
+                    Some((_, flag)) => format!("{why} (unless a word of these flags is the value of {})", flag.to_string_lossy()),
+                    None => why,
+                };
+                said.push(why);
                 break;
             }
         }
@@ -1079,12 +1114,23 @@ fn checks_command(work: &Path, cactup: &Path) -> String {
 /// A temporary directory, in TMPDIR, else in /tmp (as the compilers fall
 /// back on it: a TMPDIR that is not there is a finding, not a failure).
 fn temp_dir() -> Res<tempfile::TempDir> {
-    tempfile::tempdir().or_else(|_| tempfile::tempdir_in("/tmp")).with_context(|| format!("Failed to make a temporary directory in {} or /tmp", std::env::temp_dir().display()))
+    tempfile::tempdir().or_else(|_| tempfile::tempdir_in("/tmp")).with_context(|| format!("Failed to make a temporary directory in {}", tried()))
 }
+
+/// Where [`temp_dir`] and [`temp_file`] look: TMPDIR, then /tmp.
+fn tried() -> String {
+    match std::env::temp_dir() {
+        dir if dir == Path::new("/tmp") => "/tmp".to_owned(),
+        dir => format!("{} or /tmp", dir.display()),
+    }
+}
+
+/// What [`temp_dir`] and [`temp_file`] say when they find no room.
+const NO_ROOM: &str = "Failed to make a temporary ";
 
 /// A temporary file, as [`temp_dir`] places it.
 fn temp_file() -> Res<std::fs::File> {
-    tempfile::tempfile().or_else(|_| tempfile::tempfile_in("/tmp")).with_context(|| format!("Failed to make a temporary file in {} or /tmp", std::env::temp_dir().display()))
+    tempfile::tempfile().or_else(|_| tempfile::tempfile_in("/tmp")).with_context(|| format!("Failed to make a temporary file in {}", tried()))
 }
 
 /// Wait for `child`, stopping it on Ctrl-C (`CLAUDE.md`'s interrupt
@@ -1274,12 +1320,12 @@ pub fn check_sets(attempt: &crate::build::attempt::BuildAttempt, conf: BuildConf
                     return Vec::new();
                 }
                 let machine = &attempt.meta.machine;
-                vec![Finding {
-                    severity: Severity::Unchecked,
-                    what: format!("the build environment could not be checked: {e:#}"),
-                    from: format!("the build environment setup of machine {machine} (`cactup machine show {machine}`)"),
-                    fix: None,
-                }]
+                // No room for cache doctor's own files: before the setup ran.
+                let from = match format!("{e:#}").starts_with(NO_ROOM) {
+                    true => "this host (your shell's TMPDIR, or /tmp)".to_owned(),
+                    false => format!("the build environment setup of machine {machine} (`cactup machine show {machine}`)"),
+                };
+                vec![Finding { severity: Severity::Unchecked, what: format!("the build environment could not be checked: {e:#}"), from, fix: None }]
             })
         }),
     }]
@@ -1333,12 +1379,14 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             None => false,
         };
         let from = match from_shell {
+            _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "this host's /tmp".to_owned(),
             true => format!("your shell ({variable} is so before the build's environment setup runs: your login files, or what you loaded)"),
             false => setup.to_owned(),
         };
         let fix = match () {
             _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "set TMPDIR to a directory that is there and writable, for the build".to_owned(),
-            _ if variable == "TMPDIR" => "make the directory TMPDIR names, writable, before the build (or set TMPDIR to one that is)".to_owned(),
+            _ if variable == "TMPDIR" && raw.reason.contains("no absolute path") => "give TMPDIR an absolute directory (a ~ in quotes is not expanded: write $HOME)".to_owned(),
+            _ if variable == "TMPDIR" => "set TMPDIR to a directory that is there and writable for you (or make the one it names)".to_owned(),
             _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
             _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
             _ => format!("give {variable} absolute directories only: export {variable}=\"/dir${{{variable}:+:${variable}}}\" adds one without an empty entry"),
@@ -1401,13 +1449,14 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
 
 /// What would let compiles kept out for `why` in, where cactup knows.
 pub fn hint(why: &str) -> Option<&'static str> {
-    let hints: [(&str, &str); 11] = [
+    let hints: [(&str, &str); 12] = [
         ("is not a plain command naming a program", "name the compiler alone in the option list (CC = gcc, CXX = g++, and so on): settings such as LANG=C belong in the machine's environment setup, and flags in the flags variables"),
         ("already stands in front of the compiler", "name the compiler itself in the option list (CC = gcc, not ccache gcc): the build cache takes ccache's place"),
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
-        ("is not a flag the cache knows", "if the flag is not needed, take it out of the option list; if it is, the cache does not know it yet"),
+        ("is not a flag the cache knows", "if the flag is not needed, leave it out (the option list can set the variable that has it); if it is, the cache does not know it yet"),
+        ("more than one input file", "a word of the flags is read as a second source: a flag's value given apart from it (-L /dir), which the cache reads only joined to it (-L/dir)"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
         ("Disk quota exceeded", "a quota is used up (on the build cache's file system or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
         ("No space left on device", "a file system is full (the build cache's or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
@@ -1723,6 +1772,17 @@ mod tests {
             let reasons = nvcc(flags);
             assert!(reasons.len() == 1 && reasons[0].starts_with("-pg"), "{flags}: {reasons:?}");
         }
+        // What is left for the key: the host flag with its -Xcompiler.
+        let left = |flags: &str| every_reason(|words: &[OsString]| parse_flags(identity::Family::Nvcc, words, "probe.cu"), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).1;
+        assert_eq!(left("-O2 -Xcompiler -fipa-pta"), ["-O2"].map(OsString::from));
+        assert_eq!(left("--compiler-options -pg -Xcompiler -Wall"), ["-Xcompiler", "-Wall"].map(OsString::from));
+        // A word read as a second source, once a refused flag is out: said.
+        let reasons = gcc("-O2 --coverage -L /opt/lib -g");
+        assert!(reasons.len() == 2 && reasons[1] == "there is more than one input file (/opt/lib, after -L, is read as one)", "{reasons:?}");
+        // And what comes after it is read on.
+        let (reasons, left) = every_reason(|words: &[OsString]| parse_flags(identity::Family::Gcc, words, "probe.c"), &["-O2", "-fsanitize=address", "-L", "/opt/lib", "-fipa-pta", "-march=native"].map(OsString::from));
+        assert_eq!(reasons.len(), 3, "{reasons:?}");
+        assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
     }
 
     /// The checks get the setup's TMPDIR (the build's), set, empty or not
@@ -1746,9 +1806,15 @@ mod tests {
         assert_eq!(run("export TMPDIR=/nowhere/x\nreadonly TMPDIR"), format!("/nowhere/x|{DOCTOR_VERB}|{work}"));
         // Not exported: not the build's either.
         assert_eq!(run("TMPDIR=/nowhere/x"), format!("unset|{DOCTOR_VERB}|{work}"));
-        assert!(unusable_tmpdir(Some("/nowhere/x".into())).is_some_and(|raw| raw.severity == Severity::KeepsOut));
-        assert!(unusable_tmpdir(Some(tmp.path().to_owned())).is_none());
-        assert!(unusable_tmpdir(Some("relative".into())).is_none());
+        assert!(unusable_tmpdir(Some("/nowhere/x".into()), None).is_some_and(|raw| raw.severity == Severity::KeepsOut));
+        assert!(unusable_tmpdir(Some(tmp.path().to_owned()), None).is_none());
+        // Relative: where the compiles run, if there is such a place yet.
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(scratch.join("tmp")).unwrap();
+        assert!(unusable_tmpdir(Some("~/tmp".into()), None).is_none());
+        assert!(unusable_tmpdir(Some("~/tmp".into()), Some(&scratch)).is_some_and(|raw| raw.reason.contains("no absolute path")));
+        assert!(unusable_tmpdir(Some("tmp".into()), Some(&scratch)).is_none());
+        assert!(unusable_tmpdir(Some("".into()), Some(&scratch)).is_none());
         // A flag's value goes with it in what to leave out.
         let value = "-O2 -mllvm -x86-asm-syntax=intel".to_owned();
         assert_eq!(with_its_value(&["-mllvm"], Some(&value)), "-mllvm -x86-asm-syntax=intel");

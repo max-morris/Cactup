@@ -2771,6 +2771,29 @@ and `-mllvm b`) is named in the fix; "TMPDIR is not set" gets a fix of
 its own; a temporary directory `cache doctor` cannot make names where it
 looked.
 
+### M5 part 2, round 12 (on `a9170fa`): BLOCKED by both
+
+Both re-ran rounds 1 to 11 (all as recorded; B judged round 10 too; Ctrl-C
+swept to 10 s, idle and at a load of 40: at most 0.67 s, nothing left;
+each object's values equal to the build's own on `et`). Blocking, fixed in
+the commit after this record:
+- (both) round 11's key without the flags already said kept the
+  `-Xcompiler` of a refused nvcc host flag, which then read the next word
+  or the probe's `-c` (a false "leave -c out"): it goes with its flag.
+- (both) a reason about no flag ("there is more than one input file",
+  from `-L /opt/lib`), held back once a flag was taken out, came from the
+  key traced to "the build environment" with no fix: it is said with its
+  variable, names the word read as an input and the flag before it, takes
+  them out and reads on (`-fipa-pta`, `-march=native` after them are
+  said), with a fix.
+- (B) a relative `TMPDIR` (a quoted `~/tmp`) keeps every compile out (the
+  compiles run in `configs/<name>/scratch`) and was not looked at: it is
+  checked there.
+Also: "leave it out" for an unknown flag no longer says "of the option
+list" (it may be Cactus's default); "TMPDIR is not set" with no room in
+`/tmp` is the host's; no room for `cache doctor`'s own files is said of
+this host, not of the setup.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

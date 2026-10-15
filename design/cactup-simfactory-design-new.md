@@ -6370,7 +6370,9 @@ never built has none to check), without a build (`objcache::doctor`):
   out and the rest read again; with its value where it takes one the reader
   knows of (the fix names the value too: the flag alone does not compile);
   a word after a flag the reader does not know is said as what may be its
-  value; no further after a host compiler's flag of nvcc's), and a whole
+  value; a word read as a second input is named, with the flag before it,
+  and the rest read on; a host compiler's flag of nvcc's is taken out with
+  its `-Xcompiler`, and the search ends there), and a whole
   key of a small probe compile with every flag but those already said (so
   that what only the key says, `-march=native` on a host of unlike
   processors, is said beside a flag the reader refuses; its preprocessor
@@ -6404,7 +6406,9 @@ never built has none to check), without a build (`objcache::doctor`):
   its own (the checks' `TMPDIR`, the compilers' files too), however they
   ended. The `TMPDIR` the setup exports is the build's: the checks read it
   before they take `cache doctor`'s directory for theirs, and make a file
-  there, as the wrapper makes its files for a compile (a
+  there, as the wrapper makes its files for a compile (a relative one in
+  the directory the compiles run in, `configs/<name>/scratch`: a quoted
+  `~/tmp` is no home directory; a
   `TMPDIR` where none can be made keeps every compile out, though the
   compilers fall back on `/tmp`); `cache doctor`'s own files go in `/tmp`
   where the user's `TMPDIR` has no room for them.
