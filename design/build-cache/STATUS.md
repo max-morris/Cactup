@@ -3141,6 +3141,26 @@ the user's own shell gives a configure (a `${WORD}` from it) is recorded
 nowhere; the doctor runs in the user's shell now, and reads the
 configuration's flags as configure wrote them.
 
+### M5 part 2, round 28 (on `1a5a166`): BLOCKED by both
+
+Both re-ran rounds 1 to 27. Blocking, both raised by both: Cactus's CST,
+in every build's own `make` step, rewrites `config-info` after the stamp
+wherever the setup sets an option a thorn declares (`MPI_DIR`: mel5's
+setup; `HDF5_DIR`, AMReX on omnia), so round 27's "a configure that
+recorded nothing" was said of every such build, and nothing checked; and
+after `cactup build prune` the same. Rounds 23 to 28 all found what
+reconstructing who configured last, from what, gets wrong; the commit
+after this record drops that: the compilers and flags are checked only
+where what is configured is provably the newest building attempt's own
+configure (its stamp, with `make.config.defn`, which only configure
+writes, not newer; before the stamp, it succeeded and its option list is
+the installed one, `make.config.defn` not newer than that); otherwise
+"not checked", said why. A queued or resubmitted attempt is checked once
+it has configured. Every planted scenario of rounds 23 to 28 (CST
+rewrite, prune, hand configure, late configure, revert, resubmit,
+virtual, failed, not configured) says true things; `et`, `m5a`, `m5b`
+clean.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

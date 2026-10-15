@@ -1403,51 +1403,36 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
         return Ok(findings);
     }
     let optionlist = optionlist_values(&attempt.optionlist_path());
-    // Who configured the configuration last: every build configures with
-    // its attempt's option list and setup before it compiles, and touches
-    // its attempt's stamp once its configure step succeeds (a byte written
-    // there: the file server's time), so the attempt with the newest stamp;
-    // where no build stamped one (an older cactup's builds), the newest
-    // that succeeded, whose option list was installed. Where Cactus's
-    // `config-info` (which every configure writes, before the stamp) is
-    // newer than that, a configure that recorded nothing ran last, and what
-    // the configuration was configured from is not known.
-    use crate::build::attempt::{BuildAttempt, CONFIGURED_STAMP};
+    // The compilers and flags are checked only where what is configured is
+    // provably the newest building attempt's own configure: it wrote its
+    // `configured` stamp (once its configure step succeeded) and
+    // `config-data/make.config.defn`, which only a configure writes, is not
+    // newer than that; or, for an attempt of a cactup from before the
+    // stamp, it succeeded, its option list is the one installed with the
+    // configuration then, and `make.config.defn` is not newer than that.
+    // Nothing else is reconstructed (who configured last, from what): a
+    // queued, failed or resubmitted attempt has its flags checked once it
+    // has configured. All on the configuration's file system.
     let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    let stamped = (0..=attempt.id).filter_map(|id| modified(&BuildAttempt::attempt_dir(&meta.config_dir, id).join(CONFIGURED_STAMP)).map(|at| (at, id))).max_by_key(|(at, _)| *at);
-    let last: Option<(Option<std::time::SystemTime>, Option<BuildAttempt>)> = match stamped {
-        Some((at, id)) => Some((Some(at), BuildAttempt::open(&meta.config_dir, id).ok())),
-        None => (0..=attempt.id)
-            .rev()
-            .filter_map(|id| BuildAttempt::open(&meta.config_dir, id).ok())
-            .find(|earlier| earlier.meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0)))
-            .map(|earlier| (modified(&meta.config_dir.join("cactup-optionlist.cfg")), Some(earlier))),
-    };
-    let info_at = modified(&meta.config_dir.join("config-info"));
-    let unrecorded = info_at.is_some() && match &last {
-        Some((Some(at), Some(_))) => info_at.is_some_and(|info| info > *at),
-        _ => true,
-    };
-    // A build with the newest attempt configures it again where its option
-    // list (compared as written: not `config-info`'s, which Cactus records
-    // with comments taken out and `${VAR}` expanded) or its setup (which
-    // gives that expansion) or universe is another.
-    let universe = |attempt: &BuildAttempt| attempt.meta.universe.as_ref().map(|universe| universe.name.clone());
-    let reconfigures = !unrecorded
-        && last.as_ref().and_then(|(_, last)| last.as_ref()).is_some_and(|last| {
-            std::fs::read(last.optionlist_path()).ok() != std::fs::read(attempt.optionlist_path()).ok() || last.meta.build_env != meta.build_env || universe(last) != universe(attempt)
-        });
+    let defn_path = meta.config_dir.join("config-data/make.config.defn");
+    let defn = modified(&defn_path);
+    let installed = meta.config_dir.join("cactup-optionlist.cfg");
+    let vouched_at = modified(&attempt.configured_stamp_path()).or_else(|| {
+        let succeeded = meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0));
+        let ours = std::fs::read(attempt.optionlist_path()).ok();
+        (succeeded && ours.is_some() && std::fs::read(&installed).ok() == ours).then(|| modified(&installed)).flatten()
+    });
+    let configured = defn.is_some() && vouched_at.is_some_and(|at| defn.is_some_and(|defn| defn <= at));
     // A configure that failed leaves the one before in place
-    // (`CONFIG-STATUS` in `config-info` is not 0): not what is built.
+    // (`CONFIG-STATUS` in `config-info` is not 0): said so where it is why.
     let failed = configure_failed(&meta.config_dir);
-    let defn = meta.config_dir.join("config-data/make.config.defn").is_file();
-    let configured = defn && !unrecorded && !reconfigures && !failed;
     if !configured {
+        let id = attempt.id;
         let why = match () {
-            _ if !defn => "the configuration is not configured yet",
-            _ if failed => "the configuration's last configure failed, and what it left is not what a build compiles with",
-            _ if unrecorded => "the configuration was last configured by a build that recorded nothing of it (one of an older cactup's), so what it was configured from is not known",
-            _ => "the newest build attempt's option list or environment setup is not the one the configuration was last configured with, and a build with it configures it again first",
+            _ if defn.is_none() => "the configuration is not configured yet".to_owned(),
+            _ if failed => "the configuration's last configure failed, and what it left is not what a build compiles with".to_owned(),
+            _ if vouched_at.is_none() => format!("build attempt {id:04}, the newest that builds, has not configured the configuration (it is queued, or ended before or in its configure), so what it compiles with is not known"),
+            _ => format!("the configuration has been configured again since build attempt {id:04}, the newest that builds, configured it, so what it is configured from is not known"),
         };
         findings.push(Finding { severity: Severity::Unchecked, what: format!("{why}: its compilers and flags are not checked"), from: "the configuration".to_owned(), fix: None });
         findings.push(Finding {
