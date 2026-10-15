@@ -6370,9 +6370,12 @@ never built has none to check), without a build (`objcache::doctor`):
   out and the rest read again; with its value where it takes one the reader
   knows of (the fix names the value too: the flag alone does not compile);
   a word after a flag the reader does not know is said as what may be its
-  value; no further after a host compiler's flag of nvcc's), and a whole key of a small probe compile with every
-  flag (its preprocessor and the identity's trial compiles run; no object
-  of the build is compiled), which also says whether keys are relocatable
+  value; no further after a host compiler's flag of nvcc's), and a whole
+  key of a small probe compile with every flag but those already said (so
+  that what only the key says, `-march=native` on a host of unlike
+  processors, is said beside a flag the reader refuses; its preprocessor
+  and the identity's trial compiles run; no object of the build is
+  compiled), which also says whether keys are relocatable
   and whether files are narrowed; and what each thorn's compiles get
   beyond the configuration's: for each directory a thorn compiles (its
   `src` and its `SUBDIRS`, as make reads them, links and all, and its
@@ -6399,8 +6402,9 @@ never built has none to check), without a build (`objcache::doctor`):
   between their compiles, stop what they run and give no answer), makes
   it 0.5 s later, and removes the checks' temporary directory, which is
   its own (the checks' `TMPDIR`, the compilers' files too), however they
-  ended. The setup's own `TMPDIR` is the build's: the checks are given it
-  and make a file there, as the wrapper makes its files for a compile (a
+  ended. The `TMPDIR` the setup exports is the build's: the checks read it
+  before they take `cache doctor`'s directory for theirs, and make a file
+  there, as the wrapper makes its files for a compile (a
   `TMPDIR` where none can be made keeps every compile out, though the
   compilers fall back on `/tmp`); `cache doctor`'s own files go in `/tmp`
   where the user's `TMPDIR` has no room for them.

@@ -2749,6 +2749,28 @@ every check). A grouped finding names five thorns before "and N more"
 three runs for its path entries), so a 30 s setup takes two minutes, with
 progress.
 
+### M5 part 2, round 11 (on `efd7087`): BLOCKED by A; B did not report
+
+B stopped without a report when the session ended overnight (it left
+nothing running; its output was cleared); round 12 asks it for rounds 10
+and 11 both. A re-ran rounds 1 to 10 (all as recorded; round 10's `TMPDIR`
+finding checked against the wrapper itself: true) and found, blocking and
+older than round 10:
+- one flag the reader refuses hid every reason the probe's key would
+  give after it (`-march=native` on a host of unlike processors, beside
+  `-fipa-pta`), and nothing said so: the key's error was the reason
+  already said. The probe's key is now made without the flags already
+  said (`doctor::every_reason` gives what is left), so the key's own
+  reasons are said beside them.
+Also: the build's `TMPDIR` is read by the checks themselves, as exported
+(a setup's unexported `TMPDIR` is not the build's; no `env`, which a
+`PATH` without it would break); a flag given twice is said once; no
+"value of" note after a flag with a value joined to it (`-wd810`,
+`-L/opt/lib`); every value of a flag given twice with one (`-mllvm a`
+and `-mllvm b`) is named in the fix; "TMPDIR is not set" gets a fix of
+its own; a temporary directory `cache doctor` cannot make names where it
+looked.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

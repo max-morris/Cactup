@@ -174,22 +174,24 @@ pub fn run_verb() -> i32 {
     // temporary files are in a directory `cache doctor` removes).
     // SAFETY: as in `main`, once, before any thread is started.
     let _ = unsafe { gix::interrupt::init_handler(1, || {}) };
+    // The build's TMPDIR, as the setup exported it (where the wrapper makes
+    // its files for a compile); the checks' own files, and the compilers'
+    // they run, go in the directory `cache doctor` gave, which it removes.
+    let tmpdir = std::env::var_os("TMPDIR");
+    if let Some(work) = std::env::args_os().nth(2) {
+        // SAFETY: no other thread is running yet.
+        unsafe { std::env::set_var("TMPDIR", work) };
+    }
     let mut input = Vec::new();
     let Ok(request) = std::io::stdin().read_to_end(&mut input).map_err(|e| e.to_string()).and_then(|_| serde_json::from_slice::<Request>(&input).map_err(|e| e.to_string())) else {
         return 1;
     };
     // Its own process: the probe's compile may run in its own directory.
     let mut reply = run(&request, true);
-    // The build's TMPDIR (this process has one of `cache doctor`'s): where
-    // the wrapper makes its files for a compile.
-    let args: Vec<OsString> = std::env::args_os().skip(2).collect();
-    if let [set, value] = args.as_slice() {
-        let value = (set == "set").then_some(value);
-        if let Some(value) = value {
-            reply.env.insert("TMPDIR".to_owned(), value.to_string_lossy().into_owned());
-        }
-        reply.found.extend(unusable_tmpdir(value.map(PathBuf::from)));
+    if let Some(value) = &tmpdir {
+        reply.env.insert("TMPDIR".to_owned(), value.to_string_lossy().into_owned());
     }
+    reply.found.extend(unusable_tmpdir(tmpdir.map(PathBuf::from)));
     // Stopped: no answer, rather than one that looks whole.
     if gix::interrupt::is_triggered() {
         return 1;
@@ -743,10 +745,14 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     let parse = |flags: &[OsString]| parse_flags(compiler.family, flags, &source);
     let reasons = |flags: &[OsString]| every_reason(parse, flags);
     // The compiler's own words after its name (`g++ -std=c++17`): the
-    // compiler variable's, checked once.
-    for why in reasons(&words[1..]) {
+    // compiler variable's, checked once. The probe's key (below) is made
+    // without the flags these reasons are about, so that what only the key
+    // says is said too (`-march=native` beside a flag the reader refuses).
+    let (said, own) = reasons(&words[1..]);
+    for why in said {
         found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), why));
     }
+    let keyed_words: Vec<OsString> = std::iter::once(words[0].clone()).chain(own).collect();
     let mut every_flag = Vec::new();
     for variable in &language.flag_variables {
         // As the recipe's shell splits them (`-DNAME="a b"` is one word).
@@ -755,10 +761,11 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             Ok(words) => words.into_iter().map(OsString::from).collect(),
             Err(_) => value.split_whitespace().map(OsString::from).collect(),
         };
-        for why in reasons(&flags) {
+        let (said, rest) = reasons(&flags);
+        for why in said {
             found.push(raw(Severity::KeepsOut, Some(variable), why));
         }
-        every_flag.extend(flags);
+        every_flag.extend(rest);
     }
     if !probe || gix::interrupt::is_triggered() {
         return found;
@@ -777,7 +784,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         return found;
     }
     let conf = BuildConf { mode: Mode::Record, config_dir: config_dir.clone(), cactus_root: tmp.join("Cactus"), ..request.conf.clone() };
-    let mut argv = words.clone();
+    let mut argv = keyed_words;
     argv.extend(every_flag);
     argv.extend([OsString::from("-c"), "-o".into(), dir.join("probe.o").into(), probe.into()]);
     let here = std::env::current_dir();
@@ -827,10 +834,13 @@ fn reason_words(reason: &str) -> Option<Vec<&str>> {
 fn with_its_value(words: &[&str], value: Option<&String>) -> String {
     let given: Vec<&str> = value.map(|value| value.split_whitespace().collect()).unwrap_or_default();
     match words {
-        [flag] if super::compile::NOT_CACHED_WITH_VALUE.contains(flag) => match given.iter().position(|word| word == flag).and_then(|at| given.get(at + 1)) {
-            Some(next) => format!("{flag} {next}"),
-            None => (*flag).to_owned(),
-        },
+        [flag] if super::compile::NOT_CACHED_WITH_VALUE.contains(flag) => {
+            let each: Vec<String> = given.windows(2).filter(|pair| pair[0] == *flag).map(|pair| format!("{flag} {}", pair[1])).collect();
+            match each.is_empty() {
+                true => (*flag).to_owned(),
+                false => each.join(" and "),
+            }
+        }
         _ => words.join(" "),
     }
 }
@@ -846,8 +856,9 @@ fn names_flag(reason: &str, flag: &str) -> bool {
 /// (`compile::NOT_CACHED_WITH_VALUE`); one it does not know may take the
 /// next word or not, so a reason about that word says it may be the value.
 /// A host compiler's flag nvcc is given with `-Xcompiler` ends the search:
-/// taking it out would leave that flag reading the next.
-fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsString]) -> Vec<String> {
+/// taking it out would leave that flag reading the next. With the reasons,
+/// what is left of `flags` once the flags they are about are taken out.
+fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsString]) -> (Vec<String>, Vec<OsString>) {
     let mut rest = flags.to_vec();
     let mut said: Vec<String> = Vec::new();
     // Words right after a flag it does not know, with that flag.
@@ -861,6 +872,7 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                 let valued = named.len() == 1 && super::compile::NOT_CACHED_WITH_VALUE.iter().any(|known| named[0] == *known);
                 let unknown = named.len() == 1 && why.contains("not a flag the cache knows");
                 let mut kept = Vec::new();
+                let mut later = Vec::new();
                 let mut words = std::mem::take(&mut rest).into_iter().peekable();
                 while let Some(word) = words.next() {
                     if word != named[0] {
@@ -873,7 +885,11 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                     }
                     match words.peek() {
                         Some(_) if valued => drop(words.next()),
-                        Some(next) if unknown => maybe_values.push((next.clone(), named[0].clone())),
+                        // (Not after one that has a value joined to it:
+                        // `-L/opt/lib`, `-wd810`, `-fx=y`.)
+                        Some(next) if unknown && *next != named[0] && !named[0].to_string_lossy().contains(|c: char| c == '=' || c == '/' || c.is_ascii_digit()) => {
+                            later.push((next.clone(), named[0].clone()))
+                        }
                         _ => {}
                     }
                 }
@@ -883,6 +899,7 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                     Some((_, flag)) => format!("{why} (unless it is the value of {} before it)", flag.to_string_lossy()),
                     None => why,
                 };
+                maybe_values.append(&mut later);
                 said.push(why);
                 if host {
                     break;
@@ -897,7 +914,7 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
             }
         }
     }
-    said
+    (said, rest)
 }
 
 /// The compilers and flags as `make` gives them for the configuration at
@@ -1053,26 +1070,21 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
 }
 
 /// What the shell runs once the setup is through: the line that says so,
-/// then the checks, with `work` as their TMPDIR and the setup's own TMPDIR
-/// (the build's) as arguments; by `env`, which a `readonly TMPDIR` does
-/// not stop.
+/// then the checks, given `work` for their TMPDIR (they read the build's
+/// own, as exported, first).
 fn checks_command(work: &Path, cactup: &Path) -> String {
-    format!(
-        "printf '%s\\n' '{SETUP_DONE}' >&2\nexec env TMPDIR={} {} {DOCTOR_VERB} \"${{TMPDIR+set}}\" \"${{TMPDIR-}}\"",
-        crate::build::sh_quote(work),
-        crate::build::sh_quote(cactup)
-    )
+    format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexec {} {DOCTOR_VERB} {}", crate::build::sh_quote(cactup), crate::build::sh_quote(work))
 }
 
 /// A temporary directory, in TMPDIR, else in /tmp (as the compilers fall
 /// back on it: a TMPDIR that is not there is a finding, not a failure).
 fn temp_dir() -> Res<tempfile::TempDir> {
-    tempfile::tempdir().or_else(|_| tempfile::tempdir_in("/tmp")).context("Failed to make a temporary directory")
+    tempfile::tempdir().or_else(|_| tempfile::tempdir_in("/tmp")).with_context(|| format!("Failed to make a temporary directory in {} or /tmp", std::env::temp_dir().display()))
 }
 
 /// A temporary file, as [`temp_dir`] places it.
 fn temp_file() -> Res<std::fs::File> {
-    tempfile::tempfile().or_else(|_| tempfile::tempfile_in("/tmp")).context("Failed to make a temporary file")
+    tempfile::tempfile().or_else(|_| tempfile::tempfile_in("/tmp")).with_context(|| format!("Failed to make a temporary file in {} or /tmp", std::env::temp_dir().display()))
 }
 
 /// Wait for `child`, stopping it on Ctrl-C (`CLAUDE.md`'s interrupt
@@ -1325,6 +1337,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             false => setup.to_owned(),
         };
         let fix = match () {
+            _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "set TMPDIR to a directory that is there and writable, for the build".to_owned(),
             _ if variable == "TMPDIR" => "make the directory TMPDIR names, writable, before the build (or set TMPDIR to one that is)".to_owned(),
             _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
             _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
@@ -1684,7 +1697,7 @@ mod tests {
     /// are all said.
     #[test]
     fn says_every_refused_flag_and_no_value_of_one() {
-        let said = |family, flags: &str, source: &str| every_reason(|words: &[OsString]| parse_flags(family, words, source), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>());
+        let said = |family, flags: &str, source: &str| every_reason(|words: &[OsString]| parse_flags(family, words, source), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).0;
         let gcc = |flags| said(identity::Family::Gcc, flags, "probe.c");
         assert_eq!(gcc("-O2 --coverage -pg").len(), 2);
         assert_eq!(gcc("-mllvm -inline-threshold=500 -O2"), ["-mllvm is a flag the cache does not follow"]);
@@ -1699,6 +1712,12 @@ mod tests {
         // what may be the first's value.
         let reasons = gcc("-O2 -fipa-pta -fno-tree-pre");
         assert!(reasons.len() == 2 && reasons[1].contains("unless it is the value of -fipa-pta"), "{reasons:?}");
+        // Not after one with its value joined, nor of a flag given twice.
+        assert!(!gcc("-O2 -wd810 -wd981").iter().any(|why| why.contains("unless")), "{:?}", gcc("-O2 -wd810 -wd981"));
+        assert_eq!(gcc("-O2 -fipa-pta -fipa-pta"), ["-fipa-pta is not a flag the cache knows"]);
+        // What is left for the probe's key: the flags not said.
+        let left = every_reason(|words: &[OsString]| parse_flags(identity::Family::Gcc, words, "probe.c"), &["-O2", "-fipa-pta", "-march=native"].map(OsString::from)).1;
+        assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
         let nvcc = |flags| said(identity::Family::Nvcc, flags, "probe.cu");
         for flags in ["-Xcompiler -pg --objdir-as-tempdir -x cu", "-Xcompiler -pg -Xcompiler -fopenmp"] {
             let reasons = nvcc(flags);
@@ -1713,7 +1732,8 @@ mod tests {
     fn the_checks_get_the_build_s_tmpdir() {
         let tmp = tempfile::tempdir().unwrap();
         let fake = tmp.path().join("cactup");
-        std::fs::write(&fake, "#!/bin/sh\nprintf '%s|%s|%s' \"$TMPDIR\" \"$2\" \"$3\"\n").unwrap();
+        // Says what it is given: its TMPDIR as exported, and its arguments.
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s|%s|%s' \"${TMPDIR-unset}\" \"$1\" \"$2\"\n").unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let work = tmp.path().join("work");
         let run = |env: &str| {
@@ -1721,15 +1741,19 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         let work = work.display();
-        assert_eq!(run(""), format!("{work}||"));
-        assert_eq!(run("export TMPDIR=/nowhere/x"), format!("{work}|set|/nowhere/x"));
-        assert_eq!(run("export TMPDIR=/nowhere/x\nreadonly TMPDIR"), format!("{work}|set|/nowhere/x"));
+        assert_eq!(run(""), format!("unset|{DOCTOR_VERB}|{work}"));
+        assert_eq!(run("export TMPDIR=/nowhere/x"), format!("/nowhere/x|{DOCTOR_VERB}|{work}"));
+        assert_eq!(run("export TMPDIR=/nowhere/x\nreadonly TMPDIR"), format!("/nowhere/x|{DOCTOR_VERB}|{work}"));
+        // Not exported: not the build's either.
+        assert_eq!(run("TMPDIR=/nowhere/x"), format!("unset|{DOCTOR_VERB}|{work}"));
         assert!(unusable_tmpdir(Some("/nowhere/x".into())).is_some_and(|raw| raw.severity == Severity::KeepsOut));
         assert!(unusable_tmpdir(Some(tmp.path().to_owned())).is_none());
         assert!(unusable_tmpdir(Some("relative".into())).is_none());
         // A flag's value goes with it in what to leave out.
         let value = "-O2 -mllvm -x86-asm-syntax=intel".to_owned();
         assert_eq!(with_its_value(&["-mllvm"], Some(&value)), "-mllvm -x86-asm-syntax=intel");
+        let value = "-mllvm -a -O2 -mllvm -b".to_owned();
+        assert_eq!(with_its_value(&["-mllvm"], Some(&value)), "-mllvm -a and -mllvm -b");
         assert_eq!(reason_words("--ptxas-options=-O3 -O3 is not a flag the cache knows"), Some(vec!["--ptxas-options=-O3"]));
     }
 
