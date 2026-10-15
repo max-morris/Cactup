@@ -2794,6 +2794,29 @@ list" (it may be Cactus's default); "TMPDIR is not set" with no room in
 `/tmp` is the host's; no room for `cache doctor`'s own files is said of
 this host, not of the setup.
 
+### M5 part 2, round 13 (on `0fa9e69`): BLOCKED by both
+
+Both re-ran rounds 1 to 12 (all as recorded; round 12's relative `TMPDIR`
+checked against the wrapper run in a `scratch`: agrees). Blocking, both
+raised by both, in round 12's second-input reading, fixed in the commit
+after this record:
+- it took the first word without a dash for the second input, and the
+  word before it out with it: a value the reader takes apart from its
+  flag (`-I /dir`, `-isystem /dir`, `-D X`, `--param`, nvcc's
+  `--gpu-architecture sm_80`, `-ccbin g++`) was named, and a flag before
+  the word (`-march=native`, `--objdir-as-tempdir`) dropped. The word is
+  now the one without which the reader no longer says "there is more
+  than one input file", taken out alone; a flag before it the reader does
+  not know is said in its turn.
+- its fix said the cache reads such a value joined to its flag (`-L/dir`),
+  which it does not: the fix is to leave the word out with its flag.
+Also: a flag the reader reads out of a longer word (`-o` of
+`-override-limits`) is named by that word in the fix; the fix for an
+unknown flag with a word after it that is no flag names both
+(`-L /opt/lib`); a variable with shell syntax the recipe's shell expands
+first (a command substitution) is "not checked" instead of read word by
+word.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

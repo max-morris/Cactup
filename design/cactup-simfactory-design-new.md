@@ -6370,8 +6370,10 @@ never built has none to check), without a build (`objcache::doctor`):
   out and the rest read again; with its value where it takes one the reader
   knows of (the fix names the value too: the flag alone does not compile);
   a word after a flag the reader does not know is said as what may be its
-  value; a word read as a second input is named, with the flag before it,
-  and the rest read on; a host compiler's flag of nvcc's is taken out with
+  value; a word read as a second input, the one without which the reader
+  no longer says so, is named and taken out alone, and the rest read on;
+  a variable with shell syntax the recipe's shell expands first is "not
+  checked"; a host compiler's flag of nvcc's is taken out with
   its `-Xcompiler`, and the search ends there), and a whole
   key of a small probe compile with every flag but those already said (so
   that what only the key says, `-march=native` on a host of unlike
