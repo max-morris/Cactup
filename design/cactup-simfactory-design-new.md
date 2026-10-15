@@ -6366,8 +6366,11 @@ never built has none to check), without a build (`objcache::doctor`):
   own searches (`COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LD_PRELOAD`,
   `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, each
   variable of flags on its own (every flag the cache does not follow, not
-  the first only: the flag a reason names is taken out and the rest read
-  again), and a whole key of a small probe compile with every
+  the first only: the flag a reason names, as the reason gives it, is taken
+  out and the rest read again; with its value where it takes one the reader
+  knows of, and no further where the next word could be the value of a
+  flag the reader does not know, or after a host compiler's flag of
+  nvcc's), and a whole key of a small probe compile with every
   flag (its preprocessor and the identity's trial compiles run; no object
   of the build is compiled), which also says whether keys are relocatable
   and whether files are narrowed; and what each thorn's compiles get
@@ -6385,7 +6388,7 @@ never built has none to check), without a build (`objcache::doctor`):
   `make.configuration.defn`; `SRCS` as the configuration makes it; what is
   set for the goal, for `$(OBJS)`, for one object or a pattern, `$*` its
   stem, `private` too). Nothing is built: Cactus's rules for dependency
-  files are cancelled, and every line `make -n` would run all the same (a
+  files are canceled, and every line `make -n` would run all the same (a
   `+` line, one with `$(MAKE)`, remaking a file it includes) goes to a
   shell that runs none of them; it runs make's `$(shell …)`, whose output
   make reads through a pipe (a recipe's goes to a file), in the
@@ -6393,8 +6396,10 @@ never built has none to check), without a build (`objcache::doctor`):
   build would (a `$(shell …)` inside a recipe of a target the build would
   make runs too). On Ctrl-C, `cache doctor` asks the setup's process group
   to stop (a TERM: the checks, which look for it between languages and
-  between their compiles, stop what they run, clean up and give no
-  answer), and makes it 0.5 s later.
+  between their compiles, stop what they run and give no answer), makes
+  it 0.5 s later, and removes the checks' temporary directory, which is
+  its own (the checks' `TMPDIR`, the compilers' files too), however they
+  ended.
   Where an object's compiler or flags differ from the configuration's
   (AMReX's capability can make `CXX` `nvcc`), its language is checked
   again as above, probe key and all, once for each set of values, and
@@ -6412,7 +6417,9 @@ never built has none to check), without a build (`objcache::doctor`):
   cannot read through is "not checked"; one it cannot read at all compiles
   nothing, in a build too, and is passed over (but a thorn's
   `src/make.code.defn` there and unreadable, at which a build stops). A thorn with a `Makefile`
-  of its own (built by it, not by Cactus's) is "not checked"; so are the
+  of its own (built by it, not by Cactus's) is "not checked" (its bindings
+  too). The flesh's own compiles are not checked (its make files set no
+  flags of their own); so are the
   capabilities' flags while the configuration's bindings are not written,
   and every thorn's while the configuration is not configured. The thorns and their files are read as they are
   now, not as the attempt froze them (the doctor speaks of the next

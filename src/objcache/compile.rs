@@ -159,6 +159,14 @@ const NOT_CACHED: &[&str] = &[
     "-dumpbase", "-dumpdir", "-fdiagnostics-format",
 ];
 
+/// Those of [`NOT_CACHED`] that, given alone, take the next argument as
+/// their value (`-mllvm -inline-threshold=500`). Not read by [`parse`]
+/// (which takes no compile with one); `cache doctor` reads past them.
+pub(super) const NOT_CACHED_WITH_VALUE: &[&str] = &[
+    "-x", "-imacros", "-mllvm", "-module", "-specs", "--specs", "-Xclang", "-Xpreprocessor", "-Xassembler", "-B", "-wrapper",
+    "-include-pch", "-J", "-fintrinsic-modules-path", "-fpre-include", "-dumpbase", "-dumpdir", "-aux-info",
+];
+
 /// `-f<name>` and `-fno-<name>` flags that only change the object or the
 /// diagnostics, with no file but the object written and none read.
 const F_FLAGS: &[&str] = &[

@@ -2634,7 +2634,7 @@ assignments to the compile variables themselves were looked for (missed:
 `make -n` ran a prerequisite's `+` and `$(MAKE)` lines. Fixed in the commit
 after this record by running `make.subdir` as the build's sub-make runs
 it, for its goal, with `make -n`, the compile recipes redefined to print
-each object's values, Cactus's dependency-file rules cancelled, and the
+each object's values, Cactus's dependency-file rules canceled, and the
 recipe lines `make -n` runs regardless sent to a shell that runs none of
 them (it runs `$(shell)`, read through a pipe): every directory, every
 object, no trigger. Also: one finding with the objects that get it (no
@@ -2695,6 +2695,33 @@ checked"; the bindings-not-written finding is the configuration's; the
 compiler's name is checked in the configuration's `SHELL`; grouped
 findings say "thorns". Not taken: the doctor's makes use `make` from
 `PATH` (every MDB machine has plain `make`).
+
+### M5 part 2, round 9 (on `5ff56f9`): BLOCKED by both
+
+Both re-ran rounds 1 to 8 (all as recorded; the bindings compared with the
+build's own makes: equal). Round 8's "nothing left" held at the delays
+tried, not across a run. Blocking, fixed in the commit after this record:
+- (both) Ctrl-C while a compiler was being identified still left
+  `__cc-doctor`'s temporary directory (identification runs several
+  compiles and does not look for an interrupt; the KILL came first, the
+  more so on a busy host): `cache doctor` now owns that directory (the
+  checks' `TMPDIR`) and removes it once they are gone, however they
+  ended. A sweep of Ctrl-C from 0.05 s to 1.35 s: stopped in 0.27 s at
+  most, nothing left.
+- (B) the search for every refused flag read a refused flag's value as a
+  flag (`-mllvm -inline-threshold=500`), and for nvcc left `-Xcompiler`
+  reading the next flag (a false "leave --objdir-as-tempdir out"); (A) a
+  refused flag with a comma (`-Wp,-D_FORTIFY_SOURCE=3`,
+  `-fsanitize=address,undefined`, as distribution CFLAGS have them) ended
+  it. The flag is now taken from the reason's own text; a value is taken
+  with the flags the reader knows to take one
+  (`compile::NOT_CACHED_WITH_VALUE`, read by nothing else); the search
+  stops where the next word may be an unknown flag's value, and after an
+  nvcc host flag (`doctor::every_reason`, tested with the real reader for
+  gcc and nvcc).
+Also: a British spelling ("canceled" now); a grouped finding names
+six thorns before "and N more"; bindings are not checked for a thorn the
+doctor does not build-check.
 
 ## Decisions
 

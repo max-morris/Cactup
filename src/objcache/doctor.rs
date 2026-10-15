@@ -307,8 +307,9 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
         }
         dirs.push((thorn, src, made));
     }
-    // And each thorn's bindings, which make.thornlib compiles the same way.
-    for thorn in &thorns {
+    // And each thorn's bindings, which make.thornlib compiles the same way
+    // (for a thorn it builds: with a `src`, and no Makefile of its own).
+    for thorn in thorns.iter().filter(|thorn| dirs.iter().any(|(top, _, _)| top == *thorn)) {
         let bindings = config_dir.join("bindings/build").join(thorn.rsplit('/').next().unwrap_or(thorn));
         if bindings.is_dir() {
             subdirs.push((thorn.clone(), bindings));
@@ -388,8 +389,8 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
     }
     for (raw, thorns) in grouped {
         let names = match thorns.len() {
-            n if n <= 3 => thorns.join(", "),
-            n => format!("{} and {} more thorns", thorns[..2].join(", "), n - 2),
+            n if n <= 6 => thorns.join(", "),
+            n => format!("{} and {} more", thorns[..5].join(", "), n - 5),
         };
         let place = raw.thorn.clone().unwrap_or_default();
         found.push(Raw { thorn: Some(format!("{names} {place}")), ..raw });
@@ -498,7 +499,7 @@ fn made_compiles(request: &Request, config_dir: &Path, thorn: &str, dir: &Path, 
     const VALUE: &str = "cactup-doctor-value ";
     let mut print = format!("$(info {OBJECTS}$(OBJS))\n$(info {SUBDIRS}$(SUBDIRS))\n");
     // Cactus's rules for the dependency files make.subdir includes,
-    // cancelled: none is made (not even by the shell that runs nothing,
+    // canceled: none is made (not even by the shell that runs nothing,
     // one for each source).
     for suffix in ["c", "cc", "C", "cpp", "cxx", "cl", "cu", "F77", "f77", "F", "f", "F90", "f90"] {
         print.push_str(&format!("%.{suffix}.d: $(SRCDIR)/%.{suffix}\n"));
@@ -602,7 +603,7 @@ fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
 /// What to change for a flag a thorn gives its compiles, set in `file`
 /// where one was found: the thorn's file, or what generates it.
 fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path) -> Option<String> {
-    let flag = raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-'));
+    let flag = reason_words(&raw.reason).map(|words| words.join(" "));
     let leave = flag.map(|flag| format!(" (leave {flag} out, if its compiles do not need it)")).unwrap_or_default();
     let generated = file.is_some_and(|file| file.starts_with(config_dir.join("bindings")));
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
@@ -625,7 +626,7 @@ fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path) -> Option<String
 fn flag_file(raw: &Raw, theirs: &BTreeMap<String, String>, dir: &Path, config_dir: &Path, name: &str) -> Option<PathBuf> {
     let variable = raw.variable.as_ref()?;
     let value = theirs.get(variable)?;
-    let flag = value.split_whitespace().find(|flag| raw.reason.split([' ', ',', '(', ')']).any(|word| word == *flag) || (flag.ends_with("native") && raw.reason.contains("native")))?;
+    let flag = value.split_whitespace().find(|flag| names_flag(&raw.reason, flag))?;
     let bindings = config_dir.join("bindings/Configuration");
     let thorn_defn = bindings.join(format!("Thorns/make.{name}.defn"));
     let mut candidates = vec![dir.join("make.code.defn"), dir.join("make.code.deps"), thorn_defn.clone(), bindings.join(name).join("make.configuration.defn")];
@@ -698,32 +699,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     // not follow is found, with the variable it is in.
     let source = format!("probe.{}", language.suffix);
     let parse = |flags: &[OsString]| parse_flags(compiler.family, flags, &source);
-    // Every reason in `flags`: the reader says the first, so the flag it
-    // names is taken out and the rest read again (while what it names is a
-    // flag: a word after one taken out could read as something else).
-    let reasons = |flags: &[OsString]| {
-        let mut rest = flags.to_vec();
-        let mut said = Vec::new();
-        while let Err(why) = parse(&rest) {
-            let named = why.split([' ', ',']).find(|word| word.starts_with('-') && rest.iter().any(|flag| flag == *word)).map(OsString::from);
-            let first = said.is_empty();
-            match named {
-                Some(flag) if said.len() < 16 => {
-                    rest.retain(|word| *word != flag);
-                    said.push(why);
-                }
-                // What it names is no flag of the variable's: said only
-                // when nothing was taken out before it.
-                _ => {
-                    if first {
-                        said.push(why);
-                    }
-                    break;
-                }
-            }
-        }
-        said
-    };
+    let reasons = |flags: &[OsString]| every_reason(parse, flags);
     // The compiler's own words after its name (`g++ -std=c++17`): the
     // compiler variable's, checked once.
     for why in reasons(&words[1..]) {
@@ -782,6 +758,78 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         Err(_) => {}
     }
     found
+}
+
+/// The words a reason of the wrapper's reader is about, as it gives them
+/// before what it says of them (`-Wp,-D_FORTIFY_SOURCE=3 is a flag the
+/// cache does not follow`): a flag, or a flag and its value; none where
+/// the reason is about no flag.
+fn reason_words(reason: &str) -> Option<Vec<&str>> {
+    const SAYS: [&str; 6] = [", for the host compiler", " is a flag the cache", " is not a flag the cache", " native targets", " records when", " has nothing after it"];
+    let at = SAYS.iter().filter_map(|says| reason.find(says)).min()?;
+    let words: Vec<&str> = reason[..at].split(' ').collect();
+    words[0].starts_with('-').then_some(words)
+}
+
+/// Is `flag` what the reason `reason` is about, or a word of it?
+fn names_flag(reason: &str, flag: &str) -> bool {
+    reason_words(reason).is_some_and(|words| words.contains(&flag)) || reason.split([' ', ',', '(', ')']).any(|word| word == flag) || (flag.ends_with("native") && reason.contains("native"))
+}
+
+/// Every reason the reader (`parse`) has for `flags`: it says the first,
+/// so the flag it names is taken out and the rest read again. A flag it
+/// refuses stands alone, or takes the next word as its value
+/// (`compile::NOT_CACHED_WITH_VALUE`); one it does not know may take the
+/// next word or not: a word not like a flag goes with it, one like a flag
+/// stays, and a reason that names it ends the search unsaid (it may be the
+/// value). So does a host compiler's flag nvcc is given with `-Xcompiler`:
+/// taking it out would leave that flag reading the next.
+fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsString]) -> Vec<String> {
+    let mut rest = flags.to_vec();
+    let mut said: Vec<String> = Vec::new();
+    let mut maybe_values: Vec<OsString> = Vec::new();
+    while let Err(why) = parse(&rest) {
+        // The words it names, where they stand in what is left.
+        let named: Option<Vec<OsString>> = reason_words(&why).map(|words| words.into_iter().map(OsString::from).collect()).filter(|words: &Vec<OsString>| rest.windows(words.len()).any(|at| at == words.as_slice()));
+        match named {
+            Some(named) if said.is_empty() || (!maybe_values.contains(&named[0]) && said.len() < 16) => {
+                let host = why.contains("for the host compiler");
+                let valued = named.len() == 1 && super::compile::NOT_CACHED_WITH_VALUE.iter().any(|known| named[0] == *known);
+                let unknown = why.contains("not a flag the cache knows");
+                let mut kept = Vec::new();
+                let mut words = std::mem::take(&mut rest).into_iter().peekable();
+                while let Some(word) = words.next() {
+                    if word != named[0] {
+                        kept.push(word);
+                        continue;
+                    }
+                    // The rest of what it names.
+                    for _ in 1..named.len() {
+                        words.next();
+                    }
+                    match words.peek() {
+                        Some(_) if valued => drop(words.next()),
+                        Some(next) if unknown && !next.to_string_lossy().starts_with('-') => drop(words.next()),
+                        Some(next) if unknown => maybe_values.push(next.clone()),
+                        _ => {}
+                    }
+                }
+                rest = kept;
+                said.push(why);
+                if host {
+                    break;
+                }
+            }
+            // Said only when nothing was taken out before it.
+            _ => {
+                if said.is_empty() {
+                    said.push(why);
+                }
+                break;
+            }
+        }
+    }
+    said
 }
 
 /// The compilers and flags as `make` gives them for the configuration at
@@ -909,9 +957,18 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
     // to stderr: stdout is the checks' answer.
     // A line on stderr once the setup is through: one that ends the shell
     // with status 0 (an `exit`, a `return`) is told from the checks.
-    let script = setup_then(env, &format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(cactup)));
+    // The checks' temporary files (theirs, and the compilers' they run)
+    // all go in a directory of this process's, which goes when they are
+    // done, however they ended (a Ctrl-C that had to kill them too).
+    let work = tempfile::tempdir().context("Failed to make a temporary directory")?;
+    let script = setup_then(
+        env,
+        &format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexport TMPDIR={}\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(work.path()), crate::build::sh_quote(cactup)),
+    );
     let input = serde_json::to_vec(request).context("Failed to write the checks' request")?;
-    let out = run_to_files(Command::new("/bin/sh").arg("-c").arg(&script).current_dir(cactus_root), Some(input), true)?;
+    let out = run_to_files(Command::new("/bin/sh").arg("-c").arg(&script).current_dir(cactus_root), Some(input), true);
+    drop(work);
+    let out = out?;
     // An answer is the proof the setup ran through (its stderr may be gone:
     // `exec 2>/dev/null`).
     if out.status.success()
@@ -1138,7 +1195,7 @@ fn with_flag_variable(raw: &Raw, values: &BTreeMap<String, String>) -> Raw {
         let skip = usize::from(**variable == language.compiler_variable);
         values.get(*variable).is_some_and(|value| {
             value.split_whitespace().skip(skip).any(|flag| {
-                raw.reason.split([' ', ',', '(', ')']).any(|word| word == flag) || (flag.ends_with("native") && raw.reason.contains("native"))
+                names_flag(&raw.reason, flag)
             })
         })
     });
@@ -1193,11 +1250,14 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     let in_variable = raw.variable.as_ref().and_then(|variable| reply.values.get(variable).map(|value| (variable, value))).and_then(|(variable, value)| {
         // In a compiler variable, its words after the name.
         let skip = usize::from(compilers.contains(&variable.as_str()));
-        value.split_whitespace().skip(skip).find(|flag| raw.reason.split([' ', ',', '(', ')']).any(|word| word == *flag) || (flag.ends_with("native") && raw.reason.contains("native")))
+        value.split_whitespace().skip(skip).find(|flag| names_flag(&raw.reason, flag))
     });
     // (Not where the compiler's whole text is the reason: it is no flag's.)
     let in_variable = in_variable.filter(|_| !raw.reason.contains("is not a plain command"));
-    if let Some(flag) = raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')).or(in_variable) {
+    // (A flag with a comma in it is one: `-Wp,-D_FORTIFY_SOURCE=3`.)
+    let named = reason_words(&raw.reason);
+    let first = named.as_ref().map(|words| words[0]).or_else(|| raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')));
+    if let Some(flag) = first.or(in_variable) {
         // Within the finding's language where it has one (`C_OPTIMISE_FLAGS`
         // for C, not `CXX_OPTIMISE_FLAGS`).
         let prefix = match raw.language.as_deref() {
@@ -1221,7 +1281,8 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             (None, Some(name)) => format!("Cactus's default {name} for this compiler (configure wrote it to config-data/make.config.defn; the option list can set {name} itself)"),
             (None, None) => format!("{source} or Cactus's defaults, {}", raw.variable.as_deref().unwrap_or("the flags")),
         };
-        let fix = hint(&raw.reason).map(str::to_owned).or_else(|| Some(format!("leave {flag} out, if the build does not need it")));
+        let shown = named.as_ref().map(|words| words.join(" ")).unwrap_or_else(|| flag.to_owned());
+        let fix = hint(&raw.reason).map(str::to_owned).or_else(|| Some(format!("leave {shown} out, if the build does not need it")));
         return (from, fix);
     }
     // About the compiler: the option list's, else the one configure chose.
@@ -1410,7 +1471,7 @@ mod tests {
             config.join("config-data/make.config.rules"),
             &format!("define COMPILE_C\n$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@\nendef\n%.c.o: $(SRCDIR)/%.c\n\t$(COMPILE_C)\n%.c.d: $(SRCDIR)/%.c\n\t+touch {}/dependencies-made\n", root.display()),
         );
-        let thorns = ["Plain", "Deps", "Sub", "Cap", "Cap2", "Tgt", "Pat", "Inc", "Objs", "Top", "Cond", "Stem", "Ind", "Priv", "Run", "Shell", "Rem", "Dup", "Bash", "Uses", "Unread", "Own", "Dangle", "Two", "Bnd"];
+        let thorns = ["Plain", "Deps", "Sub", "Cap", "Cap2", "Tgt", "Pat", "Inc", "Objs", "Top", "Cond", "Stem", "Ind", "Priv", "Run", "Shell", "Rem", "Dup", "Bash", "Uses", "Unread", "Own", "Dangle", "Two", "Bnd", "Mllvm"];
         write(config.join("ThornList"), &format!("# thorns\n{}\n", thorns.map(|thorn| format!("Arr/{thorn}")).join(" # its own\n")));
         let thorn = |name: &str, defn: &str, deps: Option<&str>| {
             let src = root.join("arrangements/Arr").join(name).join("src");
@@ -1477,6 +1538,9 @@ mod tests {
         std::os::unix::fs::symlink(root.join("nowhere.deps"), root.join("arrangements/Arr/Dangle/src/make.code.deps")).unwrap();
         // Two flags of one variable the cache refuses: both said.
         thorn("Two", "SRCS = a.c\nCFLAGS += --coverage -pg\n", None);
+        // A flag the cache does not follow, with what may be its value:
+        // that word is no flag of its own.
+        thorn("Mllvm", "SRCS = a.c\nCFLAGS += -mllvm -inline-threshold=500\n", None);
         // No source of its own; its bindings, compiled as a directory of
         // its, get the capability's flag.
         thorn("Bnd", "SRCS =\n", None);
@@ -1520,8 +1584,33 @@ mod tests {
         assert!(of("Arr/Dangle").is_empty(), "{found:?}");
         let two: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Two "))).collect();
         assert!(two.iter().any(|raw| raw.reason.contains("--coverage")) && two.iter().any(|raw| raw.reason.contains("-pg")), "{found:?}");
+        let mllvm: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Mllvm "))).collect();
+        assert!(mllvm.len() == 1 && mllvm[0].reason.starts_with("-mllvm"), "{found:?}");
         let unchecked: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::Unchecked).collect();
         assert!(unchecked.len() == 1 && unchecked[0].thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Own")), "{found:?}");
+    }
+
+    /// A word a refused flag may take as its value is not a flag of its
+    /// own; a host compiler's flag ends the search; flags that stand alone
+    /// are all said.
+    #[test]
+    fn says_every_refused_flag_and_no_value_of_one() {
+        let said = |family, flags: &str, source: &str| every_reason(|words: &[OsString]| parse_flags(family, words, source), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>());
+        let gcc = |flags| said(identity::Family::Gcc, flags, "probe.c");
+        assert_eq!(gcc("-O2 --coverage -pg").len(), 2);
+        assert_eq!(gcc("-mllvm -inline-threshold=500 -O2"), ["-mllvm is a flag the cache does not follow"]);
+        assert_eq!(gcc("-Xassembler --noexecstack").len(), 1);
+        assert_eq!(gcc("-O2").len(), 0);
+        // A flag with a comma in it, and one that takes the next word.
+        let reasons = gcc("-O2 -flto=auto -Wp,-D_FORTIFY_SOURCE=3 -fsanitize=address,undefined -specs=/dev/null -mllvm -x86-asm-syntax=intel -imacros /dev/null --coverage");
+        assert_eq!(reasons.len(), 7, "{reasons:?}");
+        assert!(!reasons.iter().any(|why| why.starts_with("-x86")), "{reasons:?}");
+        assert_eq!(reason_words(&reasons[1]), Some(vec!["-Wp,-D_FORTIFY_SOURCE=3"]));
+        let nvcc = |flags| said(identity::Family::Nvcc, flags, "probe.cu");
+        for flags in ["-Xcompiler -pg --objdir-as-tempdir -x cu", "-Xcompiler -pg -Xcompiler -fopenmp"] {
+            let reasons = nvcc(flags);
+            assert!(reasons.len() == 1 && reasons[0].starts_with("-pg"), "{flags}: {reasons:?}");
+        }
     }
 
     /// A setup that gives a variable an empty entry where it was not set
