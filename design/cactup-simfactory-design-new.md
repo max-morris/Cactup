@@ -6372,25 +6372,34 @@ never built has none to check), without a build (`objcache::doctor`):
   and whether files are narrowed; and what each thorn's compiles get
   beyond the configuration's: for each directory a thorn compiles (its
   `src` and its `SUBDIRS`, as make reads them, links and all), Cactus's own
-  `make.subdir` is read by `make` with a goal that prints the compilers
-  and flags and no source (so nothing is compiled, no dependency file read;
-  a thorn's `$(shell …)` runs, as in a build), which takes in the thorn's
-  bindings and the capabilities they include, the directory's
-  `make.code.defn` and `make.code.deps`, and `make.configuration.defn`;
-  where a language's compiler or flags differ there (AMReX's capability
-  can make `CXX` `nvcc`), the language is checked again as above, probe
-  key and all, and what that finds beyond the configuration's check is the
-  thorn's, traced to the file that has the flag (in a line that is no
-  comment). Where a thorn's file sets a compiler or flag variable for some
-  objects only (`x.cc.o: CXXFLAGS += …`, `%.cc.o: …`), each object of the
-  directory is asked of `make -n` with a rule of its own that prints its
-  values (nothing is built), and checked the same way. A directory whose
+  `make.subdir` is run as the build's sub-make there runs it (the
+  variables the build passes it and exports to it, its goal), with
+  `make -n`, in a directory of its own, and with the compile recipes
+  (`COMPILE_C` and the rest, as the fragment redefines them) redefined to
+  print each object's compiler and flags: so each object gets what its
+  compile would (the thorn's bindings and the capabilities they include,
+  the directory's `make.code.defn` and `make.code.deps`,
+  `make.configuration.defn`; `SRCS` as the configuration makes it; what is
+  set for the goal, for `$(OBJS)`, for one object or a pattern, `$*` its
+  stem, `private` too). Nothing is built: Cactus's rules for dependency
+  files are cancelled, and every line `make -n` would run all the same (a
+  `+` line, one with `$(MAKE)`, remaking a file it includes) goes to a
+  shell that runs none of them; it runs make's `$(shell …)`, whose output
+  make reads through a pipe (a recipe's goes to a file), as a build would.
+  Where an object's compiler or flags differ from the configuration's
+  (AMReX's capability can make `CXX` `nvcc`), its language is checked
+  again as above, probe key and all, once for each set of values, and
+  what that finds beyond the configuration's check is the thorn's: one
+  finding for the objects that get it (the directory's, or those named),
+  traced to the file that has the flag (in a line that is no comment),
+  with a fix for where that file comes from (the thorn's own, or written
+  from its configuration or a capability's). A directory whose
   `make.code.defn` or `make.code.deps` the fragment would stand down for
-  (`probe::STAND_DOWN`) keeps the cache out of its compiles, said so. A
-  language checked again with the same values is checked once. A directory
+  (`probe::STAND_DOWN`) keeps the cache out of its compiles, said so with
+  the line. A directory
   `make` cannot read is "not checked". The thorns and their files are read as they are
   now, not as the attempt froze them (the doctor speaks of the next
-  build). On the Einstein Toolkit (334 directories) this costs about two
+  build). On the Einstein Toolkit (334 directories) this costs under two
   seconds; entries of the path variables that are
   not absolute; and the setup itself, run in bash with each path variable
   unset, empty and set (module commands doing nothing, a sourced file that

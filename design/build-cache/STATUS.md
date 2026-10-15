@@ -2621,6 +2621,28 @@ the fragment would stand down for (an `include`, a `define`) is said to
 keep the cache out; a language checked again with the same values is
 checked once (60 thorns with one capability's flag: once). `et`: 2.0 s.
 
+### M5 part 2, round 6 (on `da23d88`): BLOCKED by both
+
+Both re-ran rounds 1 to 5 (all right) and confirmed nothing changes a
+build or what is served. Blocking, raised by both: an object's values were
+asked of make outside the context the build's sub-make gives them (`SRCS=`
+on the command line emptied `$(OBJS)`; nothing set for the goal reached
+the objects; `SRCS` read from `make.code.defn` alone missed sources the
+configuration chooses; an explicit rule's `$*` is not the stem), and only
+assignments to the compile variables themselves were looked for (missed:
+`CXX_OPTIMISE_FLAGS`, a variable a flag variable refers to, `private`). B:
+`make -n` ran a prerequisite's `+` and `$(MAKE)` lines. Fixed in the commit
+after this record by running `make.subdir` as the build's sub-make runs
+it, for its goal, with `make -n`, the compile recipes redefined to print
+each object's values, Cactus's dependency-file rules cancelled, and the
+recipe lines `make -n` runs regardless sent to a shell that runs none of
+them (it runs `$(shell)`, read through a pipe): every directory, every
+object, no trigger. Also: one finding with the objects that get it (no
+repeat per object; a flag one object takes away is the others'); a fix
+for where the flag's file comes from (the thorn's, its configuration's,
+a capability's); the stand-down names its line; short make runs are no
+longer rounded up to the 50 ms poll. `et`: 1.9 s.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

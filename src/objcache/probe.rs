@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 /// the configuration's own rules file has it in the shape cactup knows
 /// ([`define_body`], [`wrap_recipe`]) — a flesh that reshapes a recipe loses
 /// the cache for that language, not its build.
-const RECIPES: &[(&str, &str)] = &[
+pub(super) const RECIPES: &[(&str, &str)] = &[
     ("COMPILE_C", "CC"),
     ("COMPILE_CXX", "CXX"),
     ("COMPILE_CU", "CUCC"),
