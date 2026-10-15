@@ -6365,30 +6365,25 @@ never built has none to check), without a build (`objcache::doctor`):
   recipe's shell gives a meaning of its own), the driver's
   own searches (`COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LD_PRELOAD`,
   `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, the
-  compile's words read whole, as the recipe has them, each reason given to
-  the variable that has the word it is about (one about the compile as a
-  whole, as nvcc's reader has some, to the language's flags), and every
-  flag the cache does not follow said, not the first only (the flag a
-  reason names, as the reason gives it, is taken out and the rest read
-  again; with its value where it takes one the reader
-  knows of (the fix names the value too: the flag alone does not compile);
-  a word after a flag the reader does not know is said as what may be its
-  value; a word read as a second input is named and taken out alone, and
-  the rest read on: the reader is asked, without the probe's source and
-  its `-o`, of each longer start of the flags, and the first that has an
-  input ends at it (a value the reader takes apart from its flag, `-I
-  /dir`, is none; two such words are found one after the other); a word
-  the reader reads `-o` out of (`-openmp`, `-override-limits`) is named
-  whole and taken out;
-  a variable with shell syntax the recipe's shell expands first is "not
-  checked"; a host compiler's flag of nvcc's is taken out with
-  its `-Xcompiler`, and the search ends there), and a whole
-  key of a small probe compile with every flag but those already said (so
-  that what only the key says, `-march=native` on a host of unlike
-  processors, is said beside a flag the reader refuses; its preprocessor
-  and the identity's trial compiles run; no object of the build is
-  compiled), which also says whether keys are relocatable
-  and whether files are narrowed; and what each thorn's compiles get
+  compile's words read whole, as the recipe has them (the compiler's own
+  after its name, then each variable of flags), and the reader's first
+  reason given to each variable that has the word it is about (one about
+  the compile as a whole, as nvcc's reader has some, to the language's
+  flags): where it is a second input, with the word the reader takes for
+  it (asked of the reader, without the probe's source and its `-o`, of
+  each longer start of the flags: the first that has an input ends at it,
+  so a value the reader takes apart from its flag, `-I /dir`, is never
+  named); where it is a second `-o`, with the word the reader reads one
+  out of (`-openmp`); the fix names a flag's value too where the reader
+  knows it takes one (`-mllvm x`), or where the reader does not know the
+  flag and a word that is no flag follows it (`-L /opt/lib`). Only the
+  first (decision 32): what comes after it is said to be not checked, to
+  be seen by running the doctor again once it is changed. A variable with
+  shell syntax the recipe's shell expands first is "not checked". Where
+  the reader has no reason, a whole key of a small probe compile with
+  every flag (its preprocessor and the identity's trial compiles run; no
+  object of the build is compiled), which also says whether keys are
+  relocatable and whether files are narrowed; and what each thorn's compiles get
   beyond the configuration's: for each directory a thorn compiles (its
   `src` and its `SUBDIRS`, as make reads them, links and all, and its
   bindings, `bindings/build/<thorn>`), Cactus's own

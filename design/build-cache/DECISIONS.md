@@ -541,6 +541,19 @@ Asked as seven questions with options; the answers, in Max's numbering.
     keeps every file whole. The knob itself is keyed, and at `true` so is
     the locale.
 
+32. **`cache doctor` says the first thing refused, for now** (2026-10-15).
+    Rounds 12 to 16 of M5 part 2's gate were all on saying every flag the
+    cache refuses, not the first only, and each fix found a new case. Max:
+    "Implement that simpler option as a stopgap so we can merge to master
+    sooner, then keep hacking away on the flags properly." So the doctor
+    says the reader's first reason for each language's compiles (with the
+    word it is about, given to every variable that has it, and the
+    compile's words read whole), says that what comes after is not
+    checked, and makes no probe key past it. The search for every reason
+    goes on on the branch `feature/doctor-every-flag` (at `379bfc6`, with
+    round 16's open finding in STATUS), with its own review, after the
+    merge.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

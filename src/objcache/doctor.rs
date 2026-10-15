@@ -761,19 +761,15 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             "the compiler did not make one object of the trial in two places, so its objects are not shared between installations or configurations".to_owned(),
         ));
     }
-    // Each variable of flags on its own, so that every flag the cache does
-    // not follow is found, with the variable it is in.
     let source = format!("probe.{}", language.suffix);
     let parse = |flags: &[OsString], with_source: bool| parse_flags(compiler.family, flags, with_source.then_some(source.as_str()));
     // The compile's words as the recipe has them, read whole: the
     // compiler's own after its name (`g++ -std=c++17`), then each variable
     // of flags. What the reader says of the compile as a whole (nvcc's
     // `--objdir-as-tempdir`, a source that is not CUDA) holds of all of
-    // them together, not of one; each reason is the variable's that has the
-    // word it is about (else the language's flags': where the word would
-    // go). The probe's key (below) is made without the flags these reasons
-    // are about, so that what only the key says is said too
-    // (`-march=native` beside a flag the reader refuses).
+    // them together, not of one; its reason is each variable's that has
+    // the word it is about (else the language's flags': where the word
+    // would go).
     let mut parts: Vec<(&String, Vec<OsString>)> = vec![(&language.compiler_variable, words[1..].to_vec())];
     for variable in &language.flag_variables {
         // As the recipe's shell splits them (`-DNAME="a b"` is one word).
@@ -790,12 +786,23 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         parts.push((variable, flags));
     }
     let every: Vec<OsString> = parts.iter().flat_map(|(_, words)| words.iter().cloned()).collect();
-    let (said, rest) = every_reason(parse, &every);
-    for why in said {
+    if let Some(why) = first_reason(parse, &every) {
         let about = reason_subject(&why);
-        let variable = about.and_then(|about| parts.iter().find(|(_, words)| words.iter().any(|word| *word == about)).map(|(variable, _)| *variable));
-        let variable = variable.or(language.flag_variables.last()).unwrap_or(&language.compiler_variable);
-        found.push(raw(Severity::KeepsOut, Some(variable), why));
+        let mut owners: Vec<&String> = parts.iter().filter(|(_, words)| about.is_some_and(|about| words.iter().any(|word| *word == about))).map(|(variable, _)| *variable).collect();
+        if owners.is_empty() {
+            owners.extend(language.flag_variables.last().or(Some(&language.compiler_variable)));
+        }
+        for variable in owners {
+            found.push(raw(Severity::KeepsOut, Some(variable), why.clone()));
+        }
+        // The reader stops at its first reason: nothing past it is read,
+        // nor the probe's key made (it would stop there too).
+        found.push(raw(
+            Severity::Unchecked,
+            None,
+            "only the first thing the build cache refuses in these compiles is said (its reader stops there): change it, and run cactup cache doctor again to see what else keeps them out, if anything".to_owned(),
+        ));
+        return found;
     }
     if !probe || gix::interrupt::is_triggered() {
         return found;
@@ -814,7 +821,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         return found;
     }
     let conf = BuildConf { mode: Mode::Record, config_dir: config_dir.clone(), cactus_root: tmp.join("Cactus"), ..request.conf.clone() };
-    let mut argv: Vec<OsString> = std::iter::once(words[0].clone()).chain(rest).collect();
+    let mut argv: Vec<OsString> = std::iter::once(words[0].clone()).chain(every).collect();
     argv.extend([OsString::from("-c"), "-o".into(), dir.join("probe.o").into(), probe.into()]);
     let here = std::env::current_dir();
     let _ = std::env::set_current_dir(&scratch);
@@ -910,112 +917,35 @@ const NO_INPUT: &str = "there is no input file";
 /// (`-openmp`, `-override-limits`), where the compile has its own.
 const SECOND_OUTPUT: &str = "-o is given more than once";
 
-/// Every reason the reader (`parse`) has for `flags`: it says the first,
-/// so the flag it names is taken out and the rest read again. A flag it
-/// refuses stands alone, or takes the next word as its value
-/// (`compile::NOT_CACHED_WITH_VALUE`); one it does not know may take the
-/// next word or not, so a reason about that word says it may be the value.
-/// A host compiler's flag nvcc is given with `-Xcompiler` ends the search:
-/// taking it out would leave that flag reading the next. With the reasons,
-/// what is left of `flags` once the flags they are about are taken out.
-fn every_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: &[OsString]) -> (Vec<String>, Vec<OsString>) {
-    let mut rest = flags.to_vec();
-    let mut said: Vec<String> = Vec::new();
-    // Words right after a flag it does not know, with that flag.
-    let mut maybe_values: Vec<(OsString, OsString)> = Vec::new();
-    while let Err(why) = parse(&rest, true) {
-        // The words it names, where they stand in what is left.
-        let named: Option<Vec<OsString>> = reason_words(&why).map(|words| words.into_iter().map(OsString::from).collect()).filter(|words: &Vec<OsString>| rest.windows(words.len()).any(|at| at == words.as_slice()));
-        match named {
-            Some(named) if said.len() < 64 => {
-                let host = why.contains("for the host compiler");
-                let valued = named.len() == 1 && super::compile::NOT_CACHED_WITH_VALUE.iter().any(|known| named[0] == *known);
-                let unknown = named.len() == 1 && why.contains("not a flag the cache knows");
-                let mut kept = Vec::new();
-                let mut later = Vec::new();
-                let mut words = std::mem::take(&mut rest).into_iter().peekable();
-                while let Some(word) = words.next() {
-                    // (A two-word reason, `-Xptxas -O3`: only where both are,
-                    // not `-Xptxas -v`.)
-                    if word != named[0] || named.get(1).is_some_and(|value| words.peek() != Some(value)) {
-                        kept.push(word);
-                        continue;
-                    }
-                    // A host compiler's flag goes with what gave it to nvcc.
-                    if host && kept.last().is_some_and(|before| before == "-Xcompiler" || before == "--compiler-options") {
-                        kept.pop();
-                    }
-                    // The rest of what it names.
-                    for _ in 1..named.len() {
-                        words.next();
-                    }
-                    match words.peek() {
-                        Some(_) if valued => drop(words.next()),
-                        // (Not after one that has a value joined to it:
-                        // `-L/opt/lib`, `-wd810`, `-fx=y`.)
-                        // (As the variable has them: not a word that came
-                        // to follow it as others were taken out.)
-                        Some(next)
-                            if unknown
-                                && *next != named[0]
-                                && !named[0].to_string_lossy().contains(|c: char| c == '=' || c == '/' || c.is_ascii_digit())
-                                && flags.windows(2).any(|pair| pair[0] == named[0] && pair[1] == *next) =>
-                        {
-                            later.push((next.clone(), named[0].clone()))
-                        }
-                        _ => {}
-                    }
-                }
-                rest = kept;
-                // The reader takes it for a flag; the build may not.
-                let why = match maybe_values.iter().find(|(value, _)| *value == named[0]) {
-                    Some((_, flag)) => format!("{why} (unless it is the value of {} before it)", flag.to_string_lossy()),
-                    None => why,
-                };
-                maybe_values.append(&mut later);
-                said.push(why);
-                if host {
-                    break;
-                }
-            }
-            // A second `-o`, read out of a word of the flags: that word,
-            // named, taken out, and the rest read on.
-            _ if why == SECOND_OUTPUT && said.len() < 64 && let Some(at) = rest.iter().position(|word| word.to_string_lossy().starts_with("-o") && word != "-o") => {
-                let word = rest.remove(at);
-                said.push(format!("{why} ({} is read as -o and what follows it)", word.to_string_lossy()));
-            }
-            // A second input: the first word the reader takes for an input
-            // of its own, which the probe's source then is a second to.
-            // Asked of the reader, without that source, of each longer
-            // start of the flags: the first that has an input ends at it (a
-            // value the reader takes apart from its flag, `-I /dir`, is no
-            // input; a start that ends in a flag wanting its value is not
-            // yet one). Named, taken out alone (the flag before it, where
-            // the reader does not know it, is said next, as what is read on
-            // finds it), and the rest read on.
-            _ if why == SECOND_INPUT && said.len() < 64 && let Some(at) = (1..=rest.len()).find(|end| match parse(&rest[..*end], false) {
-                // With an input, the reader goes on (no `-o`, the input's
-                // language, a flag it does not know): any answer but none.
-                Err(why) => why != NO_INPUT && why != SECOND_OUTPUT && !why.ends_with("has nothing after it"),
-                Ok(()) => true,
-            }).map(|end| end - 1) => {
-                let word = rest.remove(at);
-                said.push(format!("{why} ({} is read as one)", word.to_string_lossy()));
-            }
-            // About no word it can take out: said, and the search ends. A
-            // word left after a flag it does not know may be that flag's
-            // value.
-            _ => {
-                let why = match maybe_values.last() {
-                    Some((_, flag)) => format!("{why} (unless a word of these flags is the value of {})", flag.to_string_lossy()),
-                    None => why,
-                };
-                said.push(why);
-                break;
-            }
-        }
+/// The reader's first reason for `flags`, if it has one: where it is a
+/// second input, with the word it takes for that input (asked of the
+/// reader, without the probe's source and its `-o`, of each longer start of
+/// the flags: the first that has an input ends at it, so a value the reader
+/// takes apart from its flag, `-I /dir`, is never named); where it is a
+/// second `-o`, with the word it reads one out of (`-openmp`).
+///
+/// Only the first: the wrapper's reader stops there, and a search past it
+/// for every reason (taking each flag said out, and reading on) is on the
+/// branch `feature/doctor-every-flag` until it passes its review (Max,
+/// 2026-10-15).
+fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: &[OsString]) -> Option<String> {
+    let why = parse(flags, true).err()?;
+    if why == SECOND_INPUT
+        && let Some(end) = (1..=flags.len()).find(|end| match parse(&flags[..*end], false) {
+            // With an input, the reader goes on (no `-o`, the input's
+            // language, a flag it does not know): any answer but none.
+            Err(why) => why != NO_INPUT && why != SECOND_OUTPUT && !why.ends_with("has nothing after it"),
+            Ok(()) => true,
+        })
+    {
+        return Some(format!("{why} ({} is read as one)", flags[end - 1].to_string_lossy()));
     }
-    (said, rest)
+    if why == SECOND_OUTPUT
+        && let Some(word) = flags.iter().find(|word| word.to_string_lossy().starts_with("-o") && *word != "-o")
+    {
+        return Some(format!("{why} ({} is read as -o and what follows it)", word.to_string_lossy()));
+    }
+    Some(why)
 }
 
 /// The compilers and flags as `make` gives them for the configuration at
@@ -1815,88 +1745,42 @@ mod tests {
         std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
         assert!(of("Arr/Dangle").is_empty(), "{found:?}");
         let two: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Two "))).collect();
-        assert!(two.iter().any(|raw| raw.reason.contains("--coverage")) && two.iter().any(|raw| raw.reason.contains("-pg")), "{found:?}");
+        // The first only, and a word that the rest is not checked.
+        assert!(two.len() == 1 && two[0].reason.contains("--coverage"), "{found:?}");
+        assert!(found.iter().any(|raw| raw.severity == Severity::Unchecked && raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Two ")) && raw.reason.starts_with("only the first")), "{found:?}");
         let mllvm: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Mllvm "))).collect();
         assert!(mllvm.len() == 1 && mllvm[0].reason.starts_with("-mllvm"), "{found:?}");
-        let unchecked: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::Unchecked).collect();
+        let unchecked: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::Unchecked && !raw.reason.starts_with("only the first")).collect();
         assert!(unchecked.len() == 1 && unchecked[0].thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Own")), "{found:?}");
     }
 
-    /// A word a refused flag may take as its value is not a flag of its
-    /// own; a host compiler's flag ends the search; flags that stand alone
-    /// are all said.
+    /// The reader's first reason, with the word it is about where it names
+    /// none: the word taken for a second input (not a value the reader
+    /// takes apart from its flag), the word read as a second `-o`; nvcc's
+    /// reasons about the compile as a whole are of all its words together.
     #[test]
-    fn says_every_refused_flag_and_no_value_of_one() {
-        let said = |family, flags: &str, source: &str| every_reason(|words: &[OsString], with_source: bool| parse_flags(family, words, with_source.then_some(source)), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).0;
+    fn says_the_first_refused_flag_and_the_word_it_is_about() {
+        let said = |family, flags: &str, source: &str| first_reason(|words: &[OsString], with_source: bool| parse_flags(family, words, with_source.then_some(source)), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>());
         let gcc = |flags| said(identity::Family::Gcc, flags, "probe.c");
-        assert_eq!(gcc("-O2 --coverage -pg").len(), 2);
-        assert_eq!(gcc("-mllvm -inline-threshold=500 -O2"), ["-mllvm is a flag the cache does not follow"]);
-        assert_eq!(gcc("-Xassembler --noexecstack").len(), 1);
-        assert_eq!(gcc("-O2").len(), 0);
-        // A flag with a comma in it, and one that takes the next word.
-        let reasons = gcc("-O2 -flto=auto -Wp,-D_FORTIFY_SOURCE=3 -fsanitize=address,undefined -specs=/dev/null -mllvm -x86-asm-syntax=intel -imacros /dev/null --coverage");
-        assert_eq!(reasons.len(), 7, "{reasons:?}");
-        assert!(!reasons.iter().any(|why| why.starts_with("-x86")), "{reasons:?}");
-        assert_eq!(reason_words(&reasons[1]), Some(vec!["-Wp,-D_FORTIFY_SOURCE=3"]));
-        // Two flags it does not know, side by side: both, the second as
-        // what may be the first's value.
-        let reasons = gcc("-O2 -fipa-pta -fno-tree-pre");
-        assert!(reasons.len() == 2 && reasons[1].contains("unless it is the value of -fipa-pta"), "{reasons:?}");
-        // Not after one with its value joined, nor of a flag given twice.
-        assert!(!gcc("-O2 -wd810 -wd981").iter().any(|why| why.contains("unless")), "{:?}", gcc("-O2 -wd810 -wd981"));
-        assert_eq!(gcc("-O2 -fipa-pta -fipa-pta"), ["-fipa-pta is not a flag the cache knows"]);
-        // What is left for the probe's key: the flags not said.
-        let left = every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-O2", "-fipa-pta", "-march=native"].map(OsString::from)).1;
-        assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
-        let nvcc = |flags| said(identity::Family::Nvcc, flags, "probe.cu");
-        for flags in ["-Xcompiler -pg --objdir-as-tempdir -x cu", "-Xcompiler -pg -Xcompiler -fopenmp"] {
-            let reasons = nvcc(flags);
-            assert!(reasons.len() == 1 && reasons[0].starts_with("-pg"), "{flags}: {reasons:?}");
+        assert_eq!(gcc("-O2 --coverage -pg").as_deref(), Some("--coverage is a flag the cache does not follow"));
+        assert_eq!(gcc("-mllvm -inline-threshold=500 -O2").as_deref(), Some("-mllvm is a flag the cache does not follow"));
+        assert_eq!(gcc("-O2"), None);
+        assert_eq!(gcc("-O2 -Wp,-D_FORTIFY_SOURCE=3").as_deref().and_then(reason_words), Some(vec!["-Wp,-D_FORTIFY_SOURCE=3"]));
+        // The stray word, after a value the reader takes apart from its
+        // flag.
+        for (flags, stray) in [("-O2 -I /usr/include /opt/x.a", "/opt/x.a"), ("-D NDEBUG CCTK_DEBUG", "CCTK_DEBUG"), ("-include stdio.h extra.o", "extra.o"), ("-isystem /usr/include /usr/local/include", "/usr/local/include"), ("-O2 -L /opt/lib", "/opt/lib")] {
+            assert_eq!(gcc(flags), Some(format!("there is more than one input file ({stray} is read as one)")), "{flags}");
         }
-        // What is left for the key: the host flag with its -Xcompiler.
-        // nvcc's reasons about the compile as a whole hold of all its words
-        // together: none where one part has what another lacks.
-        assert!(nvcc("--objdir-as-tempdir -O3").is_empty());
-        let left = |flags: &str| every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Nvcc, words, with_source.then_some("probe.cu")), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).1;
-        assert_eq!(left("-O2 -Xcompiler -fipa-pta"), ["-O2"].map(OsString::from));
-        assert_eq!(left("--compiler-options -pg -Xcompiler -Wall"), ["-Xcompiler", "-Wall"].map(OsString::from));
-        // A word read as a second source, once a refused flag is out: said.
-        let reasons = gcc("-O2 --coverage -L /opt/lib -g");
-        assert!(reasons.len() == 3 && reasons[1] == "there is more than one input file (/opt/lib is read as one)" && reasons[2].starts_with("-L "), "{reasons:?}");
-        // The stray word after a value the reader takes apart from its
-        // flag; two stray words, each said.
-        for (flags, stray) in [("-O2 -I /usr/include /opt/x.a", "/opt/x.a"), ("-D NDEBUG CCTK_DEBUG", "CCTK_DEBUG"), ("-include stdio.h extra.o", "extra.o"), ("-isystem /usr/include /usr/local/include", "/usr/local/include")] {
-            let reasons = gcc(flags);
-            assert_eq!(reasons, [format!("there is more than one input file ({stray} is read as one)")], "{flags}");
-        }
-        // A word the reader reads -o out of: named, and read on.
-        let reasons = gcc("-O2 -openmp -I /usr/include x.o y.o -fipa-pta");
-        assert_eq!(reasons.len(), 4, "{reasons:?}");
-        for said in ["-openmp is read as -o", "x.o is read", "y.o is read", "-fipa-pta is not"] {
-            assert!(reasons.iter().any(|why| why.contains(said)), "{said}: {reasons:?}");
-        }
-        assert_eq!(reason_subject(&reasons[0]), Some("x.o"));
+        // A word the reader reads -o out of.
+        let why = gcc("-O2 -openmp -g").unwrap();
+        assert_eq!(why, "-o is given more than once (-openmp is read as -o and what follows it)");
+        assert_eq!(reason_subject(&why), Some("-openmp"));
         assert_eq!(reason_subject("-pg is not a flag the cache knows"), Some("-pg"));
         assert_eq!(reason_subject("nvcc compiles without --objdir-as-tempdir are not the same twice"), None);
-        let reasons = gcc("-O2 -L /usr/lib -L /usr/lib64 -pg");
-        assert!(reasons.len() == 4 && !reasons.iter().any(|why| why.contains("unless")), "{reasons:?}");
-        let reasons = gcc("-O2 /a.o /b.o -fipa-pta");
-        assert_eq!(reasons.len(), 3, "{reasons:?}");
-        assert!(reasons[0].contains("/a.o is read") && reasons[1].contains("/b.o is read") && reasons[2].starts_with("-fipa-pta"), "{reasons:?}");
-        let nvcc_reasons = said(identity::Family::Nvcc, "--objdir-as-tempdir --gpu-architecture sm_80 sm_86", "probe.cu");
-        assert_eq!(nvcc_reasons, ["there is more than one input file (sm_86 is read as one)"]);
-        // A value the reader takes apart from its flag is no second input.
-        for flags in ["-O2 -isystem /usr/include -L /opt/lib", "-I /usr/include/x -L /opt/lib", "-D NDEBUG -L /opt/lib", "--param max-inline-insns-single=1000 -L /opt/lib"] {
-            let reasons = gcc(flags);
-            assert!(reasons.iter().any(|why| why.contains("/opt/lib is read as one")) && !reasons.iter().any(|why| why.contains("/usr/include is") || why.contains("NDEBUG is") || why.contains("1000 is")), "{flags}: {reasons:?}");
-        }
-        // And what comes after it is read on.
-        let (reasons, left) = every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-O2", "-fsanitize=address", "-L", "/opt/lib", "-fipa-pta", "-march=native"].map(OsString::from));
-        assert_eq!(reasons.len(), 4, "{reasons:?}");
-        assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
-        // Not the flag before the word, which stays for the key.
-        let left = every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-O2", "-march=native", "/opt/x.a"].map(OsString::from)).1;
-        assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
+        let nvcc = |flags| said(identity::Family::Nvcc, flags, "probe.cu");
+        assert!(nvcc("-Xcompiler -pg --objdir-as-tempdir -x cu").is_some_and(|why| why.starts_with("-pg")));
+        assert_eq!(nvcc("--objdir-as-tempdir -O3"), None);
+        assert_eq!(nvcc("--objdir-as-tempdir --gpu-architecture sm_80 sm_86").as_deref(), Some("there is more than one input file (sm_86 is read as one)"));
     }
 
     /// The checks get the setup's TMPDIR (the build's), set, empty or not

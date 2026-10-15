@@ -2870,6 +2870,31 @@ Also: a two-word reason (`-Xptxas -O3`) takes out only that pair, not
 than 16); a test's script is made executable as the others are (it
 failed once with "Text file busy").
 
+### M5 part 2, round 16 (on `379bfc6`): stopped; the first reason only
+
+B re-ran rounds 1 to 15 (all as recorded; round 15's nvcc fix checked
+against all 165 compiles of the MDB's option lists) and blocked on one
+finding of the every-flag search: a refused flag in two variables of one
+compile was said once, of the first (`CPPFLAGS = -pg`, `CFLAGS = … -pg`).
+A was stopped when Max decided (decision 32) that the doctor says the
+reader's first reason for now, so that the feature merges sooner. The
+commit after this record does that: `doctor::first_reason` (the reader's
+first reason, with the word it takes for a second input or reads `-o` out
+of, as rounds 13 to 15 found them), given to every variable with the word
+(the two-variable case is said of both), a "not checked" note for what
+comes after, and no probe key past it. Kept from the search: the compile's
+words read whole (round 15; nvcc's false "without --objdir-as-tempdir"
+since round 2), the fix texts (`shown_for`), shell syntax "not checked".
+
+**Every flag, on `feature/doctor-every-flag` (at `379bfc6`), for after
+the merge:** open there are round 16's B1 (a word in two variables: say
+it of each, or take out one occurrence at a time), and its notes: a fix
+line naming the first `-o` word where two are in the flags; a stale
+comment over the reading; a host compiler's reason now ends the search
+for all the variables read together; `reason_subject` of a word inside a
+joined value (`--compiler-options=-pg`) falls back to the flags; nvcc's
+`-m 64` (a gap of the wrapper's reader, M4: `-m` unknown, `64` an input).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
