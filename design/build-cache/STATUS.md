@@ -2895,6 +2895,29 @@ for all the variables read together; `reason_subject` of a word inside a
 joined value (`--compiler-options=-pg`) falls back to the flags; nvcc's
 `-m 64` (a gap of the wrapper's reader, M4: `-m` unknown, `64` an input).
 
+### M5 part 2, round 17 (on `7cbe92e`): BLOCKED by both
+
+Both re-ran rounds 1 to 16 (every first reason checked against the
+wrapper's own, by hand and on every MDB option list's compiles: all agree;
+only by decision 32 do the outputs differ). Blocking, fixed in the commit
+after this record:
+- (B, and A's N1) a second input's word was given to every variable with
+  that word, also one where it is a flag's value (`-isystem /dir` in
+  CPPFLAGS, a stray `/dir` in CFLAGS), whose fix would drop a needed
+  directory: a reason about one occurrence (a second input, a second
+  `-o`) goes to the variable at its position (`first_reason` gives it);
+  a refused flag still to every variable with it.
+- (A) with the first reason only, a thorn that takes the configuration's
+  first refused flag out (`$(filter-out -flto%,$(CFLAGS))`) showed the
+  configuration's next one as the thorn's own: a thorn's reason about a
+  word the configuration's own compile has too is dropped.
+- (A, older) a CPPFLAGS finding was traced to `C_OPENMP_FLAGS` (the
+  prefix was the language's): it is the variable's (`CPP_OPENMP_FLAGS`).
+Also: the "only the first" note is said once for the run, of the cache's
+reader, with what to do (it was one for each thorn's directory, of "the
+build environment"); stale docs (the module's, `reason_subject`'s link,
+"Next step").
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3157,9 +3180,9 @@ attempt's frozen environment setup in a shell, which starts `cactup
 __cc-doctor` with the compilers and flags `make` gives the configuration
 (through `config-data/make.config.defn`); that process applies the
 wrapper's own functions in the build's environment (the refused
-variables, the driver's own searches, the compiler's identity, each
-variable of flags on its own, a whole key of a probe compile per
-language) and answers in JSON; `cache doctor` traces each finding to the
+variables, the driver's own searches, the compiler's identity, the
+compile's words read whole and the reader's first reason (decision 32),
+a whole key of a probe compile per language where there is none) and answers in JSON; `cache doctor` traces each finding to the
 user's shell, the machine's setup, the option list or Cactus's defaults,
 with what to change. Named sets of checks (`doctor::CheckSet`). A unit
 test runs every MDB machine's build setup in every universe with each

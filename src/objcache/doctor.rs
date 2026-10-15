@@ -7,9 +7,9 @@
 //! starts `cactup __cc-doctor` ([`DOCTOR_VERB`]) with what to check on
 //! stdin. That process applies to each language's compiler and flags what
 //! a compile through the wrapper would ([`run`]): the environment, the
-//! driver's own searches, the compiler's identity, the flags (each variable
-//! on its own, so that every cause is found and not the first only), and
-//! a whole key of a small probe compile (the preprocessor and the
+//! driver's own searches, the compiler's identity, the flags (the
+//! compile's words read whole; the first reason the wrapper's reader has,
+//! decision 32), and a whole key of a small probe compile (the preprocessor and the
 //! identity's trial compiles run; no object of the build is compiled), and
 //! again where a thorn's compiles get other compilers or flags (read with
 //! make through Cactus's own `make.subdir`, [`thorn_checks`]). It answers
@@ -513,7 +513,12 @@ fn differences(
     let key = (language.name.clone(), variables.iter().map(|variable| ((*variable).clone(), merged.get(*variable).cloned().unwrap_or_default())).collect());
     let again = memo.entry(key).or_insert_with(|| check_language(request, language, &merged, tmp, probe)).clone();
     let already = |raw: &Raw| base.iter().any(|seen| seen.reason == raw.reason && seen.language == raw.language);
-    again.into_iter().filter(|raw| !already(raw)).map(|raw| with_flag_variable(&raw, &merged)).collect()
+    // A reason about a word the configuration's own compile has too is the
+    // configuration's, though its check said another first (only the first
+    // is said: a thorn that takes that one out shows the next).
+    let configuration: Vec<String> = variables.iter().flat_map(|variable| values.get(*variable).map(|value| value.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default()).collect();
+    let its_own = |raw: &Raw| reason_subject(&raw.reason).is_none_or(|word| !configuration.iter().any(|seen| seen == word));
+    again.into_iter().filter(|raw| !already(raw) && its_own(raw)).map(|raw| with_flag_variable(&raw, &merged)).collect()
 }
 
 /// What `make` gives the compiles of one directory of a thorn's.
@@ -786,9 +791,23 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         parts.push((variable, flags));
     }
     let every: Vec<OsString> = parts.iter().flat_map(|(_, words)| words.iter().cloned()).collect();
-    if let Some(why) = first_reason(parse, &every) {
+    if let Some((why, at)) = first_reason(parse, &every) {
+        // The variable of the very word, where the reason is about one
+        // occurrence (a second input, a second `-o`: the same word may be a
+        // value elsewhere, `-isystem /dir`); else every variable with the
+        // word, as each copy of a refused flag is refused.
         let about = reason_subject(&why);
-        let mut owners: Vec<&String> = parts.iter().filter(|(_, words)| about.is_some_and(|about| words.iter().any(|word| *word == about))).map(|(variable, _)| *variable).collect();
+        let mut owners: Vec<&String> = match at {
+            Some(at) => {
+                let mut start = 0;
+                parts.iter().filter(|(_, words)| {
+                    let here = (start..start + words.len()).contains(&at);
+                    start += words.len();
+                    here
+                }).map(|(variable, _)| *variable).collect()
+            }
+            None => parts.iter().filter(|(_, words)| about.is_some_and(|about| words.iter().any(|word| *word == about))).map(|(variable, _)| *variable).collect(),
+        };
         if owners.is_empty() {
             owners.extend(language.flag_variables.last().or(Some(&language.compiler_variable)));
         }
@@ -797,11 +816,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         }
         // The reader stops at its first reason: nothing past it is read,
         // nor the probe's key made (it would stop there too).
-        found.push(raw(
-            Severity::Unchecked,
-            None,
-            "only the first thing the build cache refuses in these compiles is said (its reader stops there): change it, and run cactup cache doctor again to see what else keeps them out, if anything".to_owned(),
-        ));
+        found.push(raw(Severity::Unchecked, None, FIRST_ONLY.to_owned()));
         return found;
     }
     if !probe || gix::interrupt::is_triggered() {
@@ -891,7 +906,7 @@ fn shown_for(reason: &str, value: Option<&String>) -> Option<String> {
     Some(named.join(" "))
 }
 
-/// The word of the flags a reason of [`every_reason`]'s is about: the flag
+/// The word of the flags a reason of [`first_reason`]'s is about: the flag
 /// it names, or the word it says is read as an input or as `-o`; none for a
 /// reason about the compile as a whole.
 fn reason_subject(reason: &str) -> Option<&str> {
@@ -917,7 +932,12 @@ const NO_INPUT: &str = "there is no input file";
 /// (`-openmp`, `-override-limits`), where the compile has its own.
 const SECOND_OUTPUT: &str = "-o is given more than once";
 
-/// The reader's first reason for `flags`, if it has one: where it is a
+/// The note beside a first reason: nothing past it is read. `cache doctor`
+/// says it once, however many compiles have one.
+const FIRST_ONLY: &str = "only the first thing the build cache refuses in a compile is said (its reader stops there)";
+
+/// The reader's first reason for `flags`, if it has one, with the position
+/// of the one word it is about where it is about one occurrence: where it is a
 /// second input, with the word it takes for that input (asked of the
 /// reader, without the probe's source and its `-o`, of each longer start of
 /// the flags: the first that has an input ends at it, so a value the reader
@@ -928,7 +948,7 @@ const SECOND_OUTPUT: &str = "-o is given more than once";
 /// for every reason (taking each flag said out, and reading on) is on the
 /// branch `feature/doctor-every-flag` until it passes its review (Max,
 /// 2026-10-15).
-fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: &[OsString]) -> Option<String> {
+fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: &[OsString]) -> Option<(String, Option<usize>)> {
     let why = parse(flags, true).err()?;
     if why == SECOND_INPUT
         && let Some(end) = (1..=flags.len()).find(|end| match parse(&flags[..*end], false) {
@@ -938,14 +958,14 @@ fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: 
             Ok(()) => true,
         })
     {
-        return Some(format!("{why} ({} is read as one)", flags[end - 1].to_string_lossy()));
+        return Some((format!("{why} ({} is read as one)", flags[end - 1].to_string_lossy()), Some(end - 1)));
     }
     if why == SECOND_OUTPUT
-        && let Some(word) = flags.iter().find(|word| word.to_string_lossy().starts_with("-o") && *word != "-o")
+        && let Some(at) = flags.iter().position(|word| word.to_string_lossy().starts_with("-o") && *word != "-o")
     {
-        return Some(format!("{why} ({} is read as -o and what follows it)", word.to_string_lossy()));
+        return Some((format!("{why} ({} is read as -o and what follows it)", flags[at].to_string_lossy()), Some(at)));
     }
-    Some(why)
+    Some((why, None))
 }
 
 /// The compilers and flags as `make` gives them for the configuration at
@@ -1253,7 +1273,18 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     // (none, when it is about every compile), and the most it matters. A
     // probe's reason with no variable is about a flag of the language's,
     // where one is in it.
-    let found: Vec<Raw> = reply.found.iter().map(|raw| with_flag_variable(raw, &reply.values)).collect();
+    // The note that only the first reason is said: once, however many
+    // compiles (and thorns) it is of.
+    let first_only = reply.found.iter().any(|raw| raw.reason == FIRST_ONLY);
+    if first_only {
+        findings.push(Finding {
+            severity: Severity::Unchecked,
+            what: format!("{FIRST_ONLY}, so what else keeps those compiles out is not checked"),
+            from: "the build cache's reader of compiles".to_owned(),
+            fix: Some("change what is said, and run cactup cache doctor again".to_owned()),
+        });
+    }
+    let found: Vec<Raw> = reply.found.iter().filter(|raw| raw.reason != FIRST_ONLY).map(|raw| with_flag_variable(raw, &reply.values)).collect();
     let mut merged: Vec<(Severity, &Raw, Vec<&str>)> = Vec::new();
     for raw in &found {
         match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && seen.thorn == raw.thorn && (seen.variable == raw.variable || seen.variable.is_none() || raw.variable.is_none())) {
@@ -1406,15 +1437,23 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     if let Some(flag) = first.or(in_variable) {
         // Within the finding's language where it has one (`C_OPTIMISE_FLAGS`
         // for C, not `CXX_OPTIMISE_FLAGS`).
-        let prefix = match raw.language.as_deref() {
-            Some("C") => Some("C_"),
-            Some("C++") => Some("CXX_"),
-            Some("Fortran") => Some("F90_"),
-            Some("Fortran 77") => Some("F77_"),
-            Some("CUDA") => Some("CUCC_"),
+        // Of the variable where there is one (CPPFLAGS: `CPP_OPENMP_FLAGS`,
+        // not `C_OPENMP_FLAGS`), else of the language.
+        let prefix = match (raw.variable.as_deref(), raw.language.as_deref()) {
+            (Some("CPPFLAGS"), _) => Some("CPP_"),
+            (Some("CFLAGS" | "CC"), _) => Some("C_"),
+            (Some("CXXFLAGS" | "CXX"), _) => Some("CXX_"),
+            (Some("F90FLAGS" | "F90"), _) => Some("F90_"),
+            (Some("F77FLAGS" | "F77"), _) => Some("F77_"),
+            (Some("CUCCFLAGS" | "CUCC"), _) => Some("CUCC_"),
+            (_, Some("C")) => Some("C_"),
+            (_, Some("C++")) => Some("CXX_"),
+            (_, Some("Fortran")) => Some("F90_"),
+            (_, Some("Fortran 77")) => Some("F77_"),
+            (_, Some("CUDA")) => Some("CUCC_"),
             _ => None,
         };
-        let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || name == "CPPFLAGS");
+        let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || (name == "CPPFLAGS" && prefix != "CPP_"));
         let has = |values: &BTreeMap<String, String>| {
             values
                 .iter()
@@ -1747,10 +1786,10 @@ mod tests {
         let two: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Two "))).collect();
         // The first only, and a word that the rest is not checked.
         assert!(two.len() == 1 && two[0].reason.contains("--coverage"), "{found:?}");
-        assert!(found.iter().any(|raw| raw.severity == Severity::Unchecked && raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Two ")) && raw.reason.starts_with("only the first")), "{found:?}");
+        assert!(found.iter().any(|raw| raw.severity == Severity::Unchecked && raw.reason == FIRST_ONLY), "{found:?}");
         let mllvm: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Mllvm "))).collect();
         assert!(mllvm.len() == 1 && mllvm[0].reason.starts_with("-mllvm"), "{found:?}");
-        let unchecked: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::Unchecked && !raw.reason.starts_with("only the first")).collect();
+        let unchecked: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::Unchecked && raw.reason != FIRST_ONLY).collect();
         assert!(unchecked.len() == 1 && unchecked[0].thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Own")), "{found:?}");
     }
 
@@ -1760,7 +1799,7 @@ mod tests {
     /// reasons about the compile as a whole are of all its words together.
     #[test]
     fn says_the_first_refused_flag_and_the_word_it_is_about() {
-        let said = |family, flags: &str, source: &str| first_reason(|words: &[OsString], with_source: bool| parse_flags(family, words, with_source.then_some(source)), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>());
+        let said = |family, flags: &str, source: &str| first_reason(|words: &[OsString], with_source: bool| parse_flags(family, words, with_source.then_some(source)), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).map(|(why, _)| why);
         let gcc = |flags| said(identity::Family::Gcc, flags, "probe.c");
         assert_eq!(gcc("-O2 --coverage -pg").as_deref(), Some("--coverage is a flag the cache does not follow"));
         assert_eq!(gcc("-mllvm -inline-threshold=500 -O2").as_deref(), Some("-mllvm is a flag the cache does not follow"));
@@ -1771,6 +1810,9 @@ mod tests {
         for (flags, stray) in [("-O2 -I /usr/include /opt/x.a", "/opt/x.a"), ("-D NDEBUG CCTK_DEBUG", "CCTK_DEBUG"), ("-include stdio.h extra.o", "extra.o"), ("-isystem /usr/include /usr/local/include", "/usr/local/include"), ("-O2 -L /opt/lib", "/opt/lib")] {
             assert_eq!(gcc(flags), Some(format!("there is more than one input file ({stray} is read as one)")), "{flags}");
         }
+        // The position of the word, for its variable.
+        let at = first_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-DFOO", "-isystem", "/usr/local/include", "-g", "/usr/local/include"].map(OsString::from)).and_then(|(_, at)| at);
+        assert_eq!(at, Some(4));
         // A word the reader reads -o out of.
         let why = gcc("-O2 -openmp -g").unwrap();
         assert_eq!(why, "-o is given more than once (-openmp is read as -o and what follows it)");
@@ -1825,6 +1867,30 @@ mod tests {
         let value = "-mllvm -a -O2 -mllvm -b".to_owned();
         assert_eq!(shown_for("-mllvm is a flag the cache does not follow", Some(&value)).unwrap(), "-mllvm -a and -mllvm -b");
         assert_eq!(reason_words("--ptxas-options=-O3 -O3 is not a flag the cache knows"), Some(vec!["--ptxas-options=-O3"]));
+    }
+
+    /// With the first reason only, a thorn that takes the configuration's
+    /// first refused flag out shows its next: that is the configuration's,
+    /// not the thorn's. A second input goes to the variable it is in, not
+    /// to one that has the same word as a flag's value.
+    #[test]
+    fn a_reason_is_the_variable_s_and_the_configuration_s_where_it_is() {
+        if identity::find_program(OsStr::new("gcc")).is_err() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let c: Vec<Language> = languages().into_iter().filter(|language| language.name == "C").collect();
+        let request = Request { config_dir: None, optionlist: BTreeMap::new(), conf: conf(tmp.path()), languages: c.clone() };
+        let values = |cflags: &str, cppflags: &str| -> BTreeMap<String, String> { [("CC", "gcc"), ("CPPFLAGS", cppflags), ("CFLAGS", cflags)].map(|(name, value)| (name.to_owned(), value.to_owned())).into() };
+        let configuration = values("-O2 -flto=auto -fipa-pta", "");
+        let base = check_language(&request, &c[0], &configuration, tmp.path(), false);
+        assert!(base.iter().any(|raw| raw.reason.starts_with("-flto=auto")), "{base:?}");
+        let thorn = values("-O2 -fipa-pta", "");
+        let found = differences(&request, &c[0], &configuration, &thorn, &base, tmp.path(), false, &mut Memo::new());
+        assert!(found.is_empty(), "{found:?}");
+        let found = check_language(&request, &c[0], &values("-g /usr/local/include", "-DFOO -isystem /usr/local/include"), tmp.path(), false);
+        let second: Vec<&Raw> = found.iter().filter(|raw| raw.reason.contains("is read as one")).collect();
+        assert!(second.len() == 1 && second[0].variable.as_deref() == Some("CFLAGS"), "{found:?}");
     }
 
     /// A setup that gives a variable an empty entry where it was not set
