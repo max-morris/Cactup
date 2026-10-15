@@ -2918,6 +2918,28 @@ reader, with what to do (it was one for each thorn's directory, of "the
 build environment"); stale docs (the module's, `reason_subject`'s link,
 "Next step").
 
+### M5 part 2, round 18 (on `b672235`): BLOCKED by both
+
+Both re-ran rounds 1 to 17 (every first reason checked against the
+wrapper's, on every MDB option list too: all agree). Blocking, fixed in the
+commit after this record:
+- (both) round 17's filter dropped a thorn's reason whenever its word was
+  anywhere in the configuration's flags, even where the configuration's
+  check had read them all (a thorn's stray `/usr/local/include` beside
+  the configuration's `-isystem /usr/local/include`): kept out, nothing
+  said. It applies only where the configuration's check stopped at a
+  reason.
+- (B) round 17 gave a word read as `-o` to the first variable with it
+  only; every copy of it is read so (tianhe1a's `CPP_` and `C_OPENMP_FLAGS
+  = -openmp`): of every variable with it again.
+- (A, older) the trace admitted CPPFLAGS for every variable, and it sorts
+  first: a CXXFLAGS or `C_*_FLAGS` finding was traced to CPPFLAGS where
+  it had the same word (whose fix drops a needed directory). CPPFLAGS
+  only for a finding of no variable.
+Also: the "from" of a second `-o` or second input looks for the word it is
+about (`-openmp`, not `-o`), so it names `CPP_OPENMP_FLAGS` and the like;
+the spec says the unknown-flag fix again (`-L /opt/lib`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

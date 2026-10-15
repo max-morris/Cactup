@@ -513,11 +513,14 @@ fn differences(
     let key = (language.name.clone(), variables.iter().map(|variable| ((*variable).clone(), merged.get(*variable).cloned().unwrap_or_default())).collect());
     let again = memo.entry(key).or_insert_with(|| check_language(request, language, &merged, tmp, probe)).clone();
     let already = |raw: &Raw| base.iter().any(|seen| seen.reason == raw.reason && seen.language == raw.language);
-    // A reason about a word the configuration's own compile has too is the
-    // configuration's, though its check said another first (only the first
-    // is said: a thorn that takes that one out shows the next).
+    // Where the configuration's own check stopped at a reason (only the
+    // first is said), what it did not read may show in a thorn's compiles
+    // as the next one (a thorn that takes the first out): a reason about a
+    // word the configuration's compile has too is the configuration's. Not
+    // where its check read all its words.
+    let stopped = base.iter().any(|seen| seen.reason == FIRST_ONLY && seen.language.as_ref() == Some(&language.name));
     let configuration: Vec<String> = variables.iter().flat_map(|variable| values.get(*variable).map(|value| value.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default()).collect();
-    let its_own = |raw: &Raw| reason_subject(&raw.reason).is_none_or(|word| !configuration.iter().any(|seen| seen == word));
+    let its_own = |raw: &Raw| !stopped || reason_subject(&raw.reason).is_none_or(|word| !configuration.iter().any(|seen| seen == word));
     again.into_iter().filter(|raw| !already(raw) && its_own(raw)).map(|raw| with_flag_variable(&raw, &merged)).collect()
 }
 
@@ -792,10 +795,10 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     }
     let every: Vec<OsString> = parts.iter().flat_map(|(_, words)| words.iter().cloned()).collect();
     if let Some((why, at)) = first_reason(parse, &every) {
-        // The variable of the very word, where the reason is about one
-        // occurrence (a second input, a second `-o`: the same word may be a
-        // value elsewhere, `-isystem /dir`); else every variable with the
-        // word, as each copy of a refused flag is refused.
+        // The variable of the very word, where the reason is about that
+        // occurrence only (a second input: the same word may be a value
+        // elsewhere, `-isystem /dir`); else every variable with the word,
+        // as each copy of a refused flag, or of a word read as `-o`, is.
         let about = reason_subject(&why);
         let mut owners: Vec<&String> = match at {
             Some(at) => {
@@ -937,7 +940,8 @@ const SECOND_OUTPUT: &str = "-o is given more than once";
 const FIRST_ONLY: &str = "only the first thing the build cache refuses in a compile is said (its reader stops there)";
 
 /// The reader's first reason for `flags`, if it has one, with the position
-/// of the one word it is about where it is about one occurrence: where it is a
+/// of the one word it is about where it is about that occurrence only (a
+/// second input: the same word elsewhere may be a value): where it is a
 /// second input, with the word it takes for that input (asked of the
 /// reader, without the probe's source and its `-o`, of each longer start of
 /// the flags: the first that has an input ends at it, so a value the reader
@@ -960,10 +964,12 @@ fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: 
     {
         return Some((format!("{why} ({} is read as one)", flags[end - 1].to_string_lossy()), Some(end - 1)));
     }
+    // (Of every variable with that word, where it is read as `-o` too: no
+    // position.)
     if why == SECOND_OUTPUT
-        && let Some(at) = flags.iter().position(|word| word.to_string_lossy().starts_with("-o") && *word != "-o")
+        && let Some(word) = flags.iter().find(|word| word.to_string_lossy().starts_with("-o") && *word != "-o")
     {
-        return Some((format!("{why} ({} is read as -o and what follows it)", flags[at].to_string_lossy()), Some(at)));
+        return Some((format!("{why} ({} is read as -o and what follows it)", word.to_string_lossy()), None));
     }
     Some((why, None))
 }
@@ -1433,7 +1439,9 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     let in_variable = in_variable.filter(|_| !raw.reason.contains("is not a plain command"));
     // (A flag with a comma in it is one: `-Wp,-D_FORTIFY_SOURCE=3`.)
     let named = reason_words(&raw.reason);
-    let first = named.as_ref().map(|words| words[0]).or_else(|| raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')));
+    // The word it is about (`-openmp` of a second `-o`, the word taken for
+    // a second input), where it says one.
+    let first = reason_subject(&raw.reason).or(named.as_ref().map(|words| words[0])).or_else(|| raw.reason.split([' ', ',']).next().filter(|word| word.starts_with('-')));
     if let Some(flag) = first.or(in_variable) {
         // Within the finding's language where it has one (`C_OPTIMISE_FLAGS`
         // for C, not `CXX_OPTIMISE_FLAGS`).
@@ -1453,7 +1461,9 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             (_, Some("CUDA")) => Some("CUCC_"),
             _ => None,
         };
-        let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || (name == "CPPFLAGS" && prefix != "CPP_"));
+        // (CPPFLAGS only for a finding of no variable: its words reach no
+        // other variable, and it sorts before them all.)
+        let own = |name: &str| prefix.is_none_or(|prefix| name.starts_with(prefix) || raw.variable.as_deref() == Some(name) || (name == "CPPFLAGS" && raw.variable.is_none()));
         let has = |values: &BTreeMap<String, String>| {
             values
                 .iter()
@@ -1891,6 +1901,16 @@ mod tests {
         let found = check_language(&request, &c[0], &values("-g /usr/local/include", "-DFOO -isystem /usr/local/include"), tmp.path(), false);
         let second: Vec<&Raw> = found.iter().filter(|raw| raw.reason.contains("is read as one")).collect();
         assert!(second.len() == 1 && second[0].variable.as_deref() == Some("CFLAGS"), "{found:?}");
+        // A word read as -o: of each variable that has it.
+        let found = check_language(&request, &c[0], &values("-g -openmp", "-openmp"), tmp.path(), false);
+        let read: Vec<Option<&str>> = found.iter().filter(|raw| raw.reason.contains("is read as -o")).map(|raw| raw.variable.as_deref()).collect();
+        assert_eq!(read, [Some("CPPFLAGS"), Some("CFLAGS")], "{found:?}");
+        // Where the configuration's check read all its words, a thorn's
+        // reason about a word it has (as a value) is the thorn's.
+        let configuration = values("-O2", "-isystem /usr/local/include");
+        let base = check_language(&request, &c[0], &configuration, tmp.path(), false);
+        let found = differences(&request, &c[0], &configuration, &values("-O2 /usr/local/include", "-isystem /usr/local/include"), &base, tmp.path(), false, &mut Memo::new());
+        assert!(found.iter().any(|raw| raw.reason.contains("/usr/local/include is read as one")), "{found:?}");
     }
 
     /// A setup that gives a variable an empty entry where it was not set
