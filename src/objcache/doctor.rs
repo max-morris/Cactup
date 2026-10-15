@@ -987,9 +987,31 @@ fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: 
 const OPTION_LIST_ONLY: &str = "only the option list's compilers and its CPPFLAGS, CFLAGS, CXXFLAGS, F90FLAGS (Fortran 77's too, as configure gives it Fortran's) and CUCCFLAGS are checked, not the flags its DEBUG, OPTIMISE, PROFILE, WARN and OPENMP switches add (C_OPTIMISE_FLAGS and the like) nor Cactus's defaults";
 
 /// The option list's compilers and flags, as Cactus's configure takes
-/// them: Fortran 77's are Fortran's, whatever the option list says of F77.
+/// them: `${WORD}` expanded from the environment, and Fortran 77's are
+/// Fortran's, whatever the option list says of F77.
 fn option_list_as_configured(optionlist: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut values = optionlist.clone();
+    // `${WORD}` the environment's (here the build's), `$$` a `$`.
+    let expand = |value: &String| {
+        let mut out = String::new();
+        let mut rest = value.as_str();
+        while let Some(at) = rest.find('$') {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            if let Some(after) = after.strip_prefix('$') {
+                out.push('$');
+                rest = after;
+            } else if let Some((word, after)) = after.strip_prefix('{').and_then(|inner| inner.split_once('}')).filter(|(word, _)| !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+                out.push_str(&std::env::var(word).unwrap_or_default());
+                rest = after;
+            } else {
+                out.push('$');
+                rest = after;
+            }
+        }
+        out.push_str(rest);
+        out
+    };
+    let mut values: BTreeMap<String, String> = optionlist.iter().map(|(name, value)| (name.clone(), expand(value))).collect();
     for (f77, f90) in [("F77", "F90"), ("F77FLAGS", "F90FLAGS")] {
         match values.get(f90).cloned() {
             Some(value) => values.insert(f77.to_owned(), value),
@@ -1279,35 +1301,32 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     // (installed when an attempt succeeds): then it configures again when
     // it runs (a build submitted and queued, or one that failed), and what
     // is there now is not what it compiles with.
-    let reconfigures = match configured_with(&meta.config_dir) {
-        // What configure ran with, as Cactus records it (`config-info`).
-        Some(then) => {
-            let now: BTreeMap<String, String> = optionlist_values(&attempt.optionlist_path()).into_iter().map(|(name, value)| (name, value.split_whitespace().collect::<Vec<_>>().join(" "))).collect();
-            let options = |values: &BTreeMap<String, String>| values.iter().filter(|(name, _)| *name != "THORNLIST" && name.chars().all(|c| !c.is_ascii_lowercase())).map(|(name, value)| (name.clone(), value.clone())).collect::<BTreeMap<_, _>>();
-            options(&now) != options(&then)
-        }
-        // Else the option list installed with it (when an attempt succeeds),
-        // or the newest earlier attempt's that succeeded.
-        None => {
-            let installed = std::fs::read(meta.config_dir.join("cactup-optionlist.cfg")).ok().or_else(|| {
-                (0..attempt.id)
-                    .rev()
-                    .filter_map(|id| crate::build::attempt::BuildAttempt::open(&meta.config_dir, id).ok())
-                    .find(|earlier| earlier.meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0)))
-                    .and_then(|earlier| std::fs::read(earlier.optionlist_path()).ok())
-            });
-            std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| installed.is_some_and(|installed| installed != ours))
-        }
-    };
-    let configured = meta.config_dir.join("config-data/make.config.defn").is_file() && !reconfigures;
+    // The option list it was configured with is the one installed with it
+    // when an attempt succeeds (else the newest earlier attempt's that
+    // succeeded), rendered as the attempt's is: compared as written.
+    // (Not Cactus's `config-info`, which records the options with
+    // comments taken out and `${VAR}` expanded.)
+    let installed = std::fs::read(meta.config_dir.join("cactup-optionlist.cfg")).ok().or_else(|| {
+        (0..attempt.id)
+            .rev()
+            .filter_map(|id| crate::build::attempt::BuildAttempt::open(&meta.config_dir, id).ok())
+            .find(|earlier| earlier.meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0)))
+            .and_then(|earlier| std::fs::read(earlier.optionlist_path()).ok())
+    });
+    let reconfigures = std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| installed.is_some_and(|installed| installed != ours));
+    // A configure that failed leaves the one before in place
+    // (`CONFIG-STATUS` in `config-info` is not 0): not what is built.
+    let failed = configure_failed(&meta.config_dir);
+    let configured = meta.config_dir.join("config-data/make.config.defn").is_file() && !reconfigures && !failed;
     let defaults = match configured {
         true => configured_values(&meta.config_dir),
         false => BTreeMap::new(),
     };
     if !configured {
-        let why = match reconfigures {
-            true => "the newest build attempt configures the configuration again, from an option list other than the one it was configured with, when it runs",
-            false => "the configuration is not configured yet",
+        let why = match (reconfigures, failed) {
+            (true, _) => "the newest build attempt configures the configuration again, from an option list other than the one it was configured with, when it runs",
+            (false, true) => "the configuration's last configure failed, and what it left is not what a build compiles with",
+            (false, false) => "the configuration is not configured yet",
         };
         findings.push(Finding { severity: Severity::Unchecked, what: format!("{why}: {OPTION_LIST_ONLY}"), from: "the configuration".to_owned(), fix: None });
         findings.push(Finding {
@@ -1623,30 +1642,37 @@ pub fn hint(why: &str) -> Option<&'static str> {
 
 /// The values of a Cactus option list (`NAME = value` lines).
 fn optionlist_values(path: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .filter_map(|line| line.split_once('='))
-        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
-        .filter(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .collect()
+    // As Cactus's `setup_configuration.pl` reads it: a `#` to the end of
+    // the line is a comment, `keyword = value` or `keyword value`, and the
+    // first setting of a keyword stands (but an empty one). Its `${WORD}`
+    // is expanded where the checks run (`option_list_as_configured`).
+    let mut values = BTreeMap::new();
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let end = line.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(line.len());
+        let (name, rest) = line.split_at(end);
+        if name.is_empty() || !rest.starts_with(['=', ' ', '\t']) {
+            continue;
+        }
+        let value = rest.trim_start_matches(['=', ' ', '\t']).to_owned();
+        let set: &mut String = values.entry(name.to_owned()).or_default();
+        if set.is_empty() {
+            *set = value;
+        }
+    }
+    values
 }
 
-/// The options Cactus's configure ran with for the configuration at
-/// `config_dir`, as it records them (`config-info`, `NAME=value` after
-/// `# CONFIG-OPTIONS`), blanks made one; none where there is no record.
-fn configured_with(config_dir: &Path) -> Option<BTreeMap<String, String>> {
-    let text = std::fs::read_to_string(config_dir.join("config-info")).ok()?;
-    let (_, options) = text.split_once("# CONFIG-OPTIONS")?;
-    Some(
-        options
-            .lines()
-            .filter(|line| !line.starts_with('#'))
-            .filter_map(|line| line.split_once('='))
-            .map(|(name, value)| (name.trim().to_owned(), value.split_whitespace().collect::<Vec<_>>().join(" ")))
-            .collect(),
-    )
+/// Did Cactus's last configure of the configuration at `config_dir` fail
+/// (`# CONFIG-STATUS : n` in `config-info`, n not 0)? Not where there is
+/// no record.
+fn configure_failed(config_dir: &Path) -> bool {
+    std::fs::read_to_string(config_dir.join("config-info"))
+        .unwrap_or_default()
+        .lines()
+        .find_map(|line| line.strip_prefix("# CONFIG-STATUS"))
+        .and_then(|rest| rest.trim_start_matches([' ', ':']).trim().parse::<i32>().ok())
+        .is_some_and(|status| status != 0)
 }
 
 /// The variables configure wrote for the configuration at `config_dir`
@@ -2031,15 +2057,30 @@ mod tests {
         assert!(found.iter().any(|raw| raw.reason.contains("/usr/local/include is read as one")), "{found:?}");
     }
 
-    /// What configure ran with, as Cactus records it.
+    /// A configure that failed, as Cactus records it.
     #[test]
-    fn reads_the_options_configure_ran_with() {
+    fn reads_whether_the_last_configure_failed() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(configured_with(tmp.path()), None);
-        std::fs::write(tmp.path().join("config-info"), "# CONFIGURATION  : et\n# CONFIG-STATUS  : 0\n# CONFIG-OPTIONS :\nCC=gcc\nCFLAGS=-g  -std=gnu99\nTHORNLIST=x.th\n").unwrap();
-        let options = configured_with(tmp.path()).unwrap();
-        assert_eq!(options.get("CFLAGS").map(String::as_str), Some("-g -std=gnu99"));
-        assert_eq!(options.len(), 3);
+        assert!(!configure_failed(tmp.path()));
+        std::fs::write(tmp.path().join("config-info"), "# CONFIGURATION  : et\n# CONFIG-STATUS  : 0\n# CONFIG-OPTIONS :\nCC=gcc\n").unwrap();
+        assert!(!configure_failed(tmp.path()));
+        std::fs::write(tmp.path().join("config-info"), "# CONFIGURATION  : et\n# CONFIG-STATUS  : 1\n# CONFIG-OPTIONS :\nCC=gcc\n").unwrap();
+        assert!(configure_failed(tmp.path()));
+    }
+
+    /// An option list read as Cactus reads it: comments, the first setting,
+    /// `${WORD}` from the environment, `$$`.
+    #[test]
+    fn reads_an_option_list_as_cactus_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("ol.cfg");
+        std::fs::write(&file, "# a comment\nCC = gcc # not -pg\nCFLAGS -O2\nCFLAGS = -O3\nCXX = ${CACTUP_DOCTOR_TEST_CXX}\nLIBS = a$$b\n").unwrap();
+        let values = optionlist_values(&file);
+        assert_eq!(values.get("CC").map(String::as_str), Some("gcc"));
+        assert_eq!(values.get("CFLAGS").map(String::as_str), Some("-O2"));
+        let configured = option_list_as_configured(&values);
+        assert_eq!(configured.get("CXX").map(String::as_str), Some(""));
+        assert_eq!(configured.get("LIBS").map(String::as_str), Some("a$b"));
     }
 
     /// A setup that gives a variable an empty entry where it was not set

@@ -3008,6 +3008,29 @@ both, older than this round, fixed in the commit after this record:
   last successful attempt's.)
 Also: the `id` of a build attempt is read outside tests now.
 
+### M5 part 2, round 23 (on `7723bbf`): BLOCKED by both
+
+Both re-ran rounds 1 to 22, and planted configurations as a real build
+leaves them (Cactus's own configure run). Blocking, fixed in the commit
+after this record:
+- (both; round 22's) the reconfigure check compared Cactus's
+  `config-info` with the option list as written, but Cactus writes it
+  after its own parse (comments out, `${WORD}` expanded, a user's
+  `~/.cactus/config` added): 21 of the MDB's 47 option lists would have
+  been said to configure again, and checked from the option list only.
+  The check compares cactup's own records, as written: the attempt's
+  option list with the one installed with the configuration when an
+  attempt succeeded (or the last successful attempt's).
+- (both) a configure that failed records its new options in
+  `config-info` (`CONFIG-STATUS : 1`) and leaves the old
+  `make.config.defn`: the doctor checked the old flags. A failed last
+  configure is now as not configured, said so.
+- (B) where the option list is read, it was read as written (sciama's
+  `CC = ${CC}` a false "not a plain command"): read as Cactus's
+  `setup_configuration.pl` reads it (`#` comments, `keyword value` too,
+  the first setting standing), `${WORD}` expanded from the build's
+  environment and `$$` a `$` where the checks run.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -6356,9 +6356,12 @@ never built has none to check), without a build (`objcache::doctor`):
   `CUCC` with theirs), read through `config-data/make.config.defn` with its
   conditionals (the optimizing flags where optimizing) by `$(info)`; where
   the configuration is not configured, or `make` cannot read it, or the
-  newest attempt configures it again from another option list (what
-  configure last ran with is Cactus's `config-info`), the option list's
-  compilers and the variables every compile gets, and "not checked" said
+  newest attempt configures it again from another option list (other
+  than the one installed with the configuration when an attempt
+  succeeded), or its last configure failed (`CONFIG-STATUS` in Cactus's
+  `config-info`), the option list's compilers and the variables every
+  compile gets (read as Cactus reads an option list: `#` comments, the
+  first setting, `${WORD}` from the build's environment), and "not checked" said
   of what its switches (`C_OPTIMISE_FLAGS` and the like) and Cactus's
   defaults would add. Fortran 77's compiler and flags are Fortran's, as
   configure makes them (`F77`, `F77FLAGS` and every `F77_*_FLAGS` from
