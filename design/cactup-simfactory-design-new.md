@@ -6355,10 +6355,14 @@ never built has none to check), without a build (`objcache::doctor`):
   compile recipes (`CC` with `CPPFLAGS` and `CFLAGS`, `CXX`, `F90`, `F77`,
   `CUCC` with theirs), read through `config-data/make.config.defn` with its
   conditionals (the optimizing flags where optimizing) by `$(info)`; where
-  the configuration is not configured, or `make` cannot read it, the
-  option list's compilers and the variables every compile gets, and "not
-  checked" said of what its switches (`C_OPTIMISE_FLAGS` and the like)
-  and Cactus's defaults would add. Flags are split as the recipe's shell splits
+  the configuration is not configured, or `make` cannot read it, or the
+  newest attempt configures it again from another option list (what
+  configure last ran with is Cactus's `config-info`), the option list's
+  compilers and the variables every compile gets, and "not checked" said
+  of what its switches (`C_OPTIMISE_FLAGS` and the like) and Cactus's
+  defaults would add. Fortran 77's compiler and flags are Fortran's, as
+  configure makes them (`F77`, `F77FLAGS` and every `F77_*_FLAGS` from
+  F90's): a finding of one is traced to the F90 variable. Flags are split as the recipe's shell splits
   them.
 - The checks: the variables that keep every compile out
   (`CCC_OVERRIDE_OPTIONS` and the like); for each language, what the

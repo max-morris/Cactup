@@ -2986,6 +2986,28 @@ option list's flags were what was checked. It is "not checked" now, with
 what is checked and what is not. (Composing them as configure would was
 left: it takes configure's defaults, more to get wrong.)
 
+### M5 part 2, round 22 (on `05b9b98`): BLOCKED by both
+
+Both re-ran rounds 1 to 21 (all as recorded). Blocking, both raised by
+both, older than this round, fixed in the commit after this record:
+- Cactus's configure sets `F77`, `F77FLAGS` and every `F77_*_FLAGS` from
+  F90's, whatever the option list says (checked by running configure).
+  The doctor traced a Fortran 77 finding to "Cactus's default F77FLAGS
+  … the option list can set F77FLAGS itself" (it cannot: it is
+  overwritten), and where not configured checked the option list's own
+  F77 and F77FLAGS (false findings; a real one only said of Fortran). Now
+  a Fortran 77 finding is traced to its F90 variable and said with
+  Fortran's, and where the option list is read, Fortran 77 gets F90's.
+- a configured configuration whose newest attempt configures it again
+  from another option list (a `build submit` queued, a configure that
+  failed) was checked with the old configure's flags (a false all-clear,
+  or a fix aimed at a flag that is going). What configure last ran with
+  is Cactus's own `config-info`; where the attempt's option list is
+  other, it is as not configured, said so. (Where there is no
+  `config-info`, the option list installed with the configuration, or the
+  last successful attempt's.)
+Also: the `id` of a build attempt is read outside tests now.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

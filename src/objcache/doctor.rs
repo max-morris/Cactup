@@ -211,8 +211,10 @@ pub fn run(request: &Request, probe: bool) -> Reply {
             reply.env.insert((*variable).to_owned(), value.to_string_lossy().into_owned());
         }
     }
-    reply.values = match &request.config_dir {
-        Some(config_dir) => made_values(config_dir, &request.languages).unwrap_or_else(|e| {
+    let made = request.config_dir.as_ref().map(|config_dir| made_values(config_dir, &request.languages));
+    reply.values = match made {
+        Some(Ok(values)) => values,
+        Some(Err(e)) => {
             reply.found.push(Raw {
                 severity: Severity::Unchecked,
                 language: None,
@@ -221,9 +223,9 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 thorn: None,
                 fix: None,
             });
-            request.optionlist.clone()
-        }),
-        None => request.optionlist.clone(),
+            option_list_as_configured(&request.optionlist)
+        }
+        None => option_list_as_configured(&request.optionlist),
     };
     // The environment: what keeps every compile out.
     for reason in environment::refusals(std::env::vars_os()) {
@@ -982,7 +984,20 @@ fn first_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: 
 /// What is checked of a configuration whose compilers and flags make
 /// cannot give: the option list's compilers and the variables every
 /// compile gets, not what configure would add to them.
-const OPTION_LIST_ONLY: &str = "only the option list's compilers and its CPPFLAGS, CFLAGS, CXXFLAGS, F90FLAGS, F77FLAGS and CUCCFLAGS are checked, not the flags its DEBUG, OPTIMISE, PROFILE, WARN and OPENMP switches add (C_OPTIMISE_FLAGS and the like) nor Cactus's defaults";
+const OPTION_LIST_ONLY: &str = "only the option list's compilers and its CPPFLAGS, CFLAGS, CXXFLAGS, F90FLAGS (Fortran 77's too, as configure gives it Fortran's) and CUCCFLAGS are checked, not the flags its DEBUG, OPTIMISE, PROFILE, WARN and OPENMP switches add (C_OPTIMISE_FLAGS and the like) nor Cactus's defaults";
+
+/// The option list's compilers and flags, as Cactus's configure takes
+/// them: Fortran 77's are Fortran's, whatever the option list says of F77.
+fn option_list_as_configured(optionlist: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut values = optionlist.clone();
+    for (f77, f90) in [("F77", "F90"), ("F77FLAGS", "F90FLAGS")] {
+        match values.get(f90).cloned() {
+            Some(value) => values.insert(f77.to_owned(), value),
+            None => values.remove(f77),
+        };
+    }
+    values
+}
 
 /// Cactus's switches of flag variables: `*_<SWITCH>_FLAGS` are the
 /// compiles' where `CCTK_<SWITCH>_MODE` is `yes`, and `*_NO_OPTIMISE_FLAGS`
@@ -1259,20 +1274,47 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
         return Ok(findings);
     }
     let optionlist = optionlist_values(&attempt.optionlist_path());
-    let defaults = configured_values(&meta.config_dir);
-    let configured = meta.config_dir.join("config-data/make.config.defn").is_file();
+    // The configure the newest attempt builds with: the one there, unless
+    // the attempt has an option list other than the one installed with it
+    // (installed when an attempt succeeds): then it configures again when
+    // it runs (a build submitted and queued, or one that failed), and what
+    // is there now is not what it compiles with.
+    let reconfigures = match configured_with(&meta.config_dir) {
+        // What configure ran with, as Cactus records it (`config-info`).
+        Some(then) => {
+            let now: BTreeMap<String, String> = optionlist_values(&attempt.optionlist_path()).into_iter().map(|(name, value)| (name, value.split_whitespace().collect::<Vec<_>>().join(" "))).collect();
+            let options = |values: &BTreeMap<String, String>| values.iter().filter(|(name, _)| *name != "THORNLIST" && name.chars().all(|c| !c.is_ascii_lowercase())).map(|(name, value)| (name.clone(), value.clone())).collect::<BTreeMap<_, _>>();
+            options(&now) != options(&then)
+        }
+        // Else the option list installed with it (when an attempt succeeds),
+        // or the newest earlier attempt's that succeeded.
+        None => {
+            let installed = std::fs::read(meta.config_dir.join("cactup-optionlist.cfg")).ok().or_else(|| {
+                (0..attempt.id)
+                    .rev()
+                    .filter_map(|id| crate::build::attempt::BuildAttempt::open(&meta.config_dir, id).ok())
+                    .find(|earlier| earlier.meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0)))
+                    .and_then(|earlier| std::fs::read(earlier.optionlist_path()).ok())
+            });
+            std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| installed.is_some_and(|installed| installed != ours))
+        }
+    };
+    let configured = meta.config_dir.join("config-data/make.config.defn").is_file() && !reconfigures;
+    let defaults = match configured {
+        true => configured_values(&meta.config_dir),
+        false => BTreeMap::new(),
+    };
     if !configured {
+        let why = match reconfigures {
+            true => "the newest build attempt configures the configuration again, from an option list other than the one it was configured with, when it runs",
+            false => "the configuration is not configured yet",
+        };
+        findings.push(Finding { severity: Severity::Unchecked, what: format!("{why}: {OPTION_LIST_ONLY}"), from: "the configuration".to_owned(), fix: None });
         findings.push(Finding {
             severity: Severity::Unchecked,
-            what: format!("the configuration is not configured yet: {OPTION_LIST_ONLY}"),
+            what: format!("what each thorn's own make files give its compiles is not checked: {why}"),
             from: "the configuration".to_owned(),
-            fix: None,
-        });
-        findings.push(Finding {
-            severity: Severity::Unchecked,
-            what: "what each thorn's own make files give its compiles is not checked: the configuration is not configured yet".to_owned(),
-            from: "the configuration".to_owned(),
-            fix: Some("run cactup cache doctor again once a build has configured it (its first build does, before it compiles)".to_owned()),
+            fix: Some("run cactup cache doctor again once a build has configured it (it does, before it compiles)".to_owned()),
         });
     } else if !meta.config_dir.join("bindings/Configuration").is_dir() {
         findings.push(Finding {
@@ -1307,7 +1349,19 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             fix: Some("change what is said, and run cactup cache doctor again".to_owned()),
         });
     }
-    let found: Vec<Raw> = reply.found.iter().filter(|raw| raw.reason != FIRST_ONLY).map(|raw| with_flag_variable(raw, &reply.values)).collect();
+    // Fortran 77's compiler and flags are Fortran's (configure sets F77,
+    // F77FLAGS and every F77_*_FLAGS from F90's): a configuration's finding
+    // of one is of the other's variable, where the option list sets it.
+    let found: Vec<Raw> = reply
+        .found
+        .iter()
+        .filter(|raw| raw.reason != FIRST_ONLY)
+        .map(|raw| with_flag_variable(raw, &reply.values))
+        .map(|raw| match raw.variable.as_deref().and_then(|variable| variable.strip_prefix("F77")).filter(|_| raw.thorn.is_none()) {
+            Some(rest) => Raw { variable: Some(format!("F90{rest}")), ..raw },
+            None => raw,
+        })
+        .collect();
     let mut merged: Vec<(Severity, &Raw, Vec<&str>)> = Vec::new();
     for raw in &found {
         match merged.iter_mut().find(|(_, seen, _)| seen.reason == raw.reason && seen.thorn == raw.thorn && (seen.variable == raw.variable || seen.variable.is_none() || raw.variable.is_none())) {
@@ -1469,12 +1523,12 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             (Some("CFLAGS" | "CC"), _) => Some("C_"),
             (Some("CXXFLAGS" | "CXX"), _) => Some("CXX_"),
             (Some("F90FLAGS" | "F90"), _) => Some("F90_"),
-            (Some("F77FLAGS" | "F77"), _) => Some("F77_"),
+            (Some("F77FLAGS" | "F77"), _) => Some("F90_"),
             (Some("CUCCFLAGS" | "CUCC"), _) => Some("CUCC_"),
             (_, Some("C")) => Some("C_"),
             (_, Some("C++")) => Some("CXX_"),
             (_, Some("Fortran")) => Some("F90_"),
-            (_, Some("Fortran 77")) => Some("F77_"),
+            (_, Some("Fortran 77")) => Some("F90_"),
             (_, Some("CUDA")) => Some("CUCC_"),
             _ => None,
         };
@@ -1579,6 +1633,22 @@ fn optionlist_values(path: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The options Cactus's configure ran with for the configuration at
+/// `config_dir`, as it records them (`config-info`, `NAME=value` after
+/// `# CONFIG-OPTIONS`), blanks made one; none where there is no record.
+fn configured_with(config_dir: &Path) -> Option<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(config_dir.join("config-info")).ok()?;
+    let (_, options) = text.split_once("# CONFIG-OPTIONS")?;
+    Some(
+        options
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.trim().to_owned(), value.split_whitespace().collect::<Vec<_>>().join(" ")))
+            .collect(),
+    )
+}
+
 /// The variables configure wrote for the configuration at `config_dir`
 /// (`export NAME = value` in `config-data/make.config.defn`), as written.
 fn configured_values(config_dir: &Path) -> BTreeMap<String, String> {
@@ -1627,8 +1697,12 @@ mod tests {
             ("CPPFLAGS", "-DX=1 -DNAME=\"a b\""),
             ("CFLAGS", "-g -O2 -fprofile-generate"),
             ("CUCC", "no-such-nvcc-here"),
-            ("F77", "gfortran"),
-            ("F77FLAGS", "-g -fprofile-generate"),
+            // Fortran 77's are Fortran's, as configure makes them: the
+            // option list's own F77FLAGS are not what it compiles with.
+            ("F90", "gfortran"),
+            ("F90FLAGS", "-g -fprofile-generate"),
+            ("F77", "no-such-f77"),
+            ("F77FLAGS", "-g -fprofile-arcs"),
         ]
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .into();
@@ -1639,7 +1713,8 @@ mod tests {
         assert!(!refused.iter().any(|raw| raw.variable.as_deref() == Some("CPPFLAGS")), "{:?}", reply.found);
         assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("CUDA") && raw.reason.contains("not on PATH")), "{:?}", reply.found);
         if identity::find_program(OsStr::new("gfortran")).is_ok() {
-            assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("Fortran 77") && raw.variable.as_deref() == Some("F77FLAGS")), "{:?}", reply.found);
+            assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("Fortran 77") && raw.reason.starts_with("-fprofile-generate")), "{:?}", reply.found);
+            assert!(!reply.found.iter().any(|raw| raw.reason.contains("-fprofile-arcs") || raw.reason.contains("no-such-f77")), "{:?}", reply.found);
         }
         let raw = refused.iter().find(|raw| raw.variable.as_deref() == Some("CFLAGS")).unwrap();
         let defaults: BTreeMap<String, String> = [("C_OPTIMISE_FLAGS".to_owned(), "-O3".to_owned())].into();
@@ -1954,6 +2029,17 @@ mod tests {
         let base = check_language(&request, &c[0], &configuration, tmp.path(), false);
         let found = differences(&request, &c[0], &configuration, &values("-O2 /usr/local/include", "-isystem /usr/local/include"), &base, tmp.path(), false, &mut Memo::new());
         assert!(found.iter().any(|raw| raw.reason.contains("/usr/local/include is read as one")), "{found:?}");
+    }
+
+    /// What configure ran with, as Cactus records it.
+    #[test]
+    fn reads_the_options_configure_ran_with() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(configured_with(tmp.path()), None);
+        std::fs::write(tmp.path().join("config-info"), "# CONFIGURATION  : et\n# CONFIG-STATUS  : 0\n# CONFIG-OPTIONS :\nCC=gcc\nCFLAGS=-g  -std=gnu99\nTHORNLIST=x.th\n").unwrap();
+        let options = configured_with(tmp.path()).unwrap();
+        assert_eq!(options.get("CFLAGS").map(String::as_str), Some("-g -std=gnu99"));
+        assert_eq!(options.len(), 3);
     }
 
     /// A setup that gives a variable an empty entry where it was not set

@@ -168,9 +168,6 @@ pub struct BuildMeta {
 /// A located build attempt.
 #[derive(Debug)]
 pub struct BuildAttempt {
-    // Pinned foundation API (build submit groundwork); only tests read this
-    // field so far — the command that consumes it lands later.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub id: u32,
     pub dir: PathBuf,
     pub meta: BuildMeta,
