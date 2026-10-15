@@ -3074,6 +3074,27 @@ Also: make's own reason where it cannot read `make.config.defn`, traced
 to the configuration, and that the thorns are not checked then either;
 the help, user docs and spec no longer speak of "Cactus's defaults".
 
+### M5 part 2, round 25 (on `8b84941`): BLOCKED by both
+
+Both re-ran rounds 1 to 24 (all as recorded; the wrapper agrees on every
+first reason, MDB lists too). Blocking, fixed in the commit after this
+record, by asking make and cactup's own records:
+- (A) a word read as a second input that two variables have (`-L
+  /usr/lib` in CFLAGS and `C_OPTIMISE_FLAGS`) was traced by which
+  variable's emptying lowers the copies, which cannot tell one copy from
+  the other: the check now carries where the copy is (`Raw::at`), and
+  `source_of_copy` gives each candidate's value back to make between two
+  marker words to see which variable that place comes from.
+- (A, round 24's) a `make` the setup's `PATH` does not have was traced to
+  the configuration's file: to the setup, with "put make on its PATH".
+- (B, round 23's) an attempt that had run (configure done, a compile
+  failed) was said to "configure again when it runs", its `-flto` unsaid:
+  an attempt configures again only where no configure has run since it
+  was made (Cactus's `config-info` not newer than its option list); a
+  failed configure of it is said as such.
+Also: B's two-stray case (a word a value in one variable, stray in
+another) is traced to the stray one only now; stale comment and docs.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

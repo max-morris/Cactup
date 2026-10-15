@@ -620,9 +620,10 @@ finding says what keeps the cache out, or costs objects shared, where it
 comes from (your shell, the machine's environment setup, the variable of
 the config's `config-data/make.config.defn` that gives the flag, and
 whether the option list has it the same, or a thorn's file) and what to
-change. For a config not configured yet, or one its newest build will
-configure again (a changed option list), the compilers and flags are
-checked once a build has configured it: run the doctor again then.
+change. For a config not configured yet, one its newest build will
+configure again (a changed option list), or one whose last configure
+failed, the compilers and flags are checked once a build has configured
+it: run the doctor again then.
 Then, for the newest build that went through the cache, it lists the
 compiles kept out by reason, with what would let them in where cactup
 knows; for the objects with other sources, the files that differed,

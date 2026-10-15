@@ -846,9 +846,9 @@ pub(crate) enum CacheCommand {
     /// them, so their $(shell ...) commands run). Each finding says where it
     /// comes from (your shell, the machine's environment setup, the variable
     /// of the config's make.config.defn that gives the flag, a thorn's file)
-    /// and what to change. A config that is not configured yet, or that its
-    /// newest build will configure again, has its compilers and flags
-    /// checked once a build has configured it.
+    /// and what to change. A config that is not configured yet, that its
+    /// newest build will configure again, or whose last configure failed,
+    /// has its compilers and flags checked once a build has configured it.
     ///
     /// Then it reads what a build that went through the cache logged of its
     /// compiles (the newest build of the config that did, or --attempt) and

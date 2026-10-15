@@ -6386,9 +6386,14 @@ never built has none to check), without a build (`objcache::doctor`):
   make's command line, takes a copy of it out of the variable the compile
   gets (`C_OPTIMISE_FLAGS`, not `C_DEBUG_FLAGS` where debugging is off;
   `F77_OPTIMISE_FLAGS` as configure wrote it), and the variable itself
-  where none does, or (but for a word read as a second input, one copy)
-  where copies are left with all those emptied; each is said as
-  configure wrote it, with whether the option list has it the same. Nothing of Cactus's
+  where none does, or where copies are left with all those emptied; for
+  a word read as a second input, which is one copy, the variable whose
+  value, given back to make between two marker words, has that copy's
+  place between them (`source_of_copy`); each is said as configure wrote
+  it, with whether the option list has it the same. A `make` that cannot
+  be started is the setup's (its `PATH`). Whether the newest attempt
+  configures again: its option list other than the one installed, and
+  no configure since it was made (Cactus's `config-info` not newer). Nothing of Cactus's
   switches or of which variable feeds which is written into the doctor.
   Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the

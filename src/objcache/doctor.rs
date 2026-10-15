@@ -122,6 +122,10 @@ pub struct Raw {
     /// make says ([`sources`]): the variables whose emptying takes it out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+    /// Where a reason about one copy of a word (a word read as a second
+    /// input) has it: its place among the variable's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<usize>,
 }
 
 /// What the process in the build environment answers.
@@ -233,6 +237,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 thorn: None,
                 fix: None,
                 sources: Vec::new(),
+                at: None,
             });
             false
         }
@@ -241,7 +246,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     // The environment: what keeps every compile out.
     for reason in environment::refusals(std::env::vars_os()) {
         let variable = reason.split_whitespace().next().map(str::to_owned);
-        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason, thorn: None, fix: None, sources: Vec::new() });
+        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason, thorn: None, fix: None, sources: Vec::new(), at: None });
     }
     // Entries of the path variables that are not absolute: some keep a
     // kind of compile out (below, in the probe's key); every one makes each
@@ -258,6 +263,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 thorn: None,
                 fix: None,
                 sources: Vec::new(),
+                at: None,
             });
         }
     }
@@ -272,6 +278,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 thorn: None,
                 fix: None,
                 sources: Vec::new(),
+                at: None,
             });
             return reply;
         }
@@ -280,7 +287,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     // `COMPILER_PATH`, `GCC_EXEC_PREFIX`), where no compiler is checked.
     if !checked && let Some(why) = key::driver_led_elsewhere(std::ffi::OsStr::new("cc"), false, |variable| std::env::var_os(variable)) {
         let variable = why.split_whitespace().next().filter(|word| word.chars().all(|c| c.is_ascii_uppercase() || c == '_')).map(str::to_owned);
-        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason: why, thorn: None, fix: None, sources: Vec::new() });
+        reply.found.push(Raw { severity: Severity::KeepsOut, language: None, variable, reason: why, thorn: None, fix: None, sources: Vec::new(), at: None });
     }
     for language in request.languages.iter().filter(|_| checked) {
         if gix::interrupt::is_triggered() {
@@ -297,7 +304,10 @@ pub fn run(request: &Request, probe: bool) -> Reply {
             }
             *raw = with_flag_variable(raw, &reply.values);
             let (Some(variable), Some(word)) = (raw.variable.clone(), subject_word(raw, &reply.values)) else { continue };
-            raw.sources = sources(config_dir, &variable, &word, !raw.reason.contains(" is read as one)"));
+            raw.sources = match raw.at {
+                Some(at) => source_of_copy(config_dir, &variable, at),
+                None => sources(config_dir, &variable, &word),
+            };
         }
     }
     // What thorns give their own compiles beyond the configuration's.
@@ -333,7 +343,7 @@ fn unusable_tmpdir(given: Option<PathBuf>, scratch: Option<&Path>) -> Option<Raw
         Some(_) => format!("TMPDIR is {}, where no file can be made ({e}), so the build cache keeps every compile out", dir.display()),
         None => format!("TMPDIR is not set and no file can be made in /tmp ({e}), so the build cache keeps every compile out"),
     };
-    Some(Raw { severity: Severity::KeepsOut, language: None, variable: Some("TMPDIR".to_owned()), reason, thorn: None, fix: None, sources: Vec::new() })
+    Some(Raw { severity: Severity::KeepsOut, language: None, variable: Some("TMPDIR".to_owned()), reason, thorn: None, fix: None, sources: Vec::new(), at: None })
 }
 
 /// Do the flags `flags` pass the wrapper's reader of a compile of a source
@@ -394,6 +404,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             thorn: Some(format!("{thorn} ({})", src.join("Makefile").strip_prefix(cactus_root).unwrap_or(&src).display())),
             fix: None,
             sources: Vec::new(),
+            at: None,
         });
     }
     let uses = uses_thorns(config_dir);
@@ -428,7 +439,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             break;
         }
         let shown = dir.strip_prefix(cactus_root).unwrap_or(&dir).display().to_string();
-        let unchecked = |reason: String| Raw { severity: Severity::Unchecked, language: None, variable: None, reason, thorn: Some(format!("{thorn} ({shown})")), fix: None, sources: Vec::new() };
+        let unchecked = |reason: String| Raw { severity: Severity::Unchecked, language: None, variable: None, reason, thorn: Some(format!("{thorn} ({shown})")), fix: None, sources: Vec::new(), at: None };
         let made = match made {
             Ok(made) => made,
             Err(e) => {
@@ -449,7 +460,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
         // A directory whose make files might define compile recipes of
         // their own: the fragment stands down there, and nothing is cached.
         if let Some((reason, fix)) = stands_down(&dir, cactus_root) {
-            found.push(Raw { severity: Severity::KeepsOut, language: None, variable: None, reason, thorn: Some(format!("{thorn} ({shown})")), fix: Some(fix), sources: Vec::new() });
+            found.push(Raw { severity: Severity::KeepsOut, language: None, variable: None, reason, thorn: Some(format!("{thorn} ({shown})")), fix: Some(fix), sources: Vec::new(), at: None });
             continue;
         }
         if let Some(why) = &made.failed {
@@ -750,7 +761,7 @@ fn flag_file(raw: &Raw, theirs: &BTreeMap<String, String>, dir: &Path, config_di
 /// compile of it through the wrapper would be.
 fn check_language(request: &Request, language: &Language, values: &BTreeMap<String, String>, tmp: &Path, probe: bool) -> Vec<Raw> {
     let mut found = Vec::new();
-    let raw = |severity, variable: Option<&str>, reason: String| Raw { severity, language: Some(language.name.clone()), variable: variable.map(str::to_owned), reason, thorn: None, fix: None, sources: Vec::new() };
+    let raw = |severity, variable: Option<&str>, reason: String| Raw { severity, language: Some(language.name.clone()), variable: variable.map(str::to_owned), reason, thorn: None, fix: None, sources: Vec::new(), at: None };
     let Some(compiler) = values.get(&language.compiler_variable).filter(|value| !value.trim().is_empty() && value.trim() != "none") else {
         return found;
     };
@@ -834,22 +845,25 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         // elsewhere, `-isystem /dir`); else every variable with the word,
         // as each copy of a refused flag, or of a word read as `-o`, is.
         let about = reason_subject(&why);
-        let mut owners: Vec<&String> = match at {
+        let mut owners: Vec<(&String, Option<usize>)> = match at {
             Some(at) => {
                 let mut start = 0;
-                parts.iter().filter(|(_, words)| {
-                    let here = (start..start + words.len()).contains(&at);
-                    start += words.len();
-                    here
-                }).map(|(variable, _)| *variable).collect()
+                parts
+                    .iter()
+                    .filter_map(|(variable, words)| {
+                        let here = (start..start + words.len()).contains(&at).then(|| (*variable, Some(at - start)));
+                        start += words.len();
+                        here
+                    })
+                    .collect()
             }
-            None => parts.iter().filter(|(_, words)| about.is_some_and(|about| words.iter().any(|word| *word == about))).map(|(variable, _)| *variable).collect(),
+            None => parts.iter().filter(|(_, words)| about.is_some_and(|about| words.iter().any(|word| *word == about))).map(|(variable, _)| (*variable, None)).collect(),
         };
         if owners.is_empty() {
-            owners.extend(language.flag_variables.last().or(Some(&language.compiler_variable)));
+            owners.extend(language.flag_variables.last().or(Some(&language.compiler_variable)).map(|variable| (variable, None)));
         }
-        for variable in owners {
-            found.push(raw(Severity::KeepsOut, Some(variable), why.clone()));
+        for (variable, at) in owners {
+            found.push(Raw { at, ..raw(Severity::KeepsOut, Some(variable), why.clone()) });
         }
         // The reader stops at its first reason: nothing past it is read,
         // nor the probe's key made (it would stop there too).
@@ -1033,12 +1047,12 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
 /// `word`, as make says it: each variable assigned in its
 /// `make.config.defn` with the word in its text whose emptying (on make's
 /// command line) gives `variable` fewer copies of it; and `variable` itself
-/// where none does (its own setting), or, where `every_copy` (each copy of
-/// the word is the reason: a refused flag, a word read as `-o`; not a word
-/// read as a second input, which is one copy), where copies are left with
-/// all those emptied. Nothing of Cactus's is assumed (its switches, which
-/// flag variable feeds which): make answers.
-fn sources(config_dir: &Path, variable: &str, word: &str, every_copy: bool) -> Vec<String> {
+/// where none does (its own setting), or where copies are left with all
+/// those emptied (each copy of the word is the reason: a refused flag, a
+/// word read as `-o`; a word read as a second input is one copy,
+/// [`source_of_copy`]). Nothing of Cactus's is assumed (its switches,
+/// which flag variable feeds which): make answers.
+fn sources(config_dir: &Path, variable: &str, word: &str) -> Vec<String> {
     let copies = |overrides: &[String]| evaluate_with(config_dir, &[variable.to_owned()], overrides).ok().and_then(|values| values.get(variable).cloned()).map(|value| value.split_whitespace().filter(|seen| *seen == word).count());
     let Some(all) = copies(&[]).filter(|all| *all > 0) else { return Vec::new() };
     let text = std::fs::read_to_string(config_dir.join("config-data/make.config.defn")).unwrap_or_default();
@@ -1057,10 +1071,62 @@ fn sources(config_dir: &Path, variable: &str, word: &str, every_copy: bool) -> V
     names.dedup();
     let mut found: Vec<String> = names.into_iter().filter(|name| copies(&[format!("{name}=")]).is_some_and(|left| left < all)).collect();
     let emptied: Vec<String> = found.iter().map(|name| format!("{name}=")).collect();
-    if found.is_empty() || (every_copy && copies(&emptied).is_some_and(|left| left > 0)) {
+    if found.is_empty() || copies(&emptied).is_some_and(|left| left > 0) {
         found.push(variable.to_owned());
     }
     found
+}
+
+/// Where the configuration gives its `variable` the copy of a word at
+/// place `at` among its words (a word read as a second input: that copy,
+/// not another, nor the same word as a flag's value elsewhere): the
+/// variable of `make.config.defn` whose value, given back to make between
+/// two marker words, has that place between them in `variable`'s value;
+/// `variable` itself where none does. Asked of make: the markers show where
+/// each variable's words land.
+fn source_of_copy(config_dir: &Path, variable: &str, at: usize) -> Vec<String> {
+    const FROM: &str = "cactup-doctor-from";
+    const TO: &str = "cactup-doctor-to";
+    let words = |value: &str| super::cuda::shell_words(value, |name| std::env::var(name).ok()).unwrap_or_else(|_| value.split_whitespace().map(str::to_owned).collect());
+    let Some(value) = evaluate(config_dir, &[variable.to_owned()]).ok().and_then(|values| values.get(variable).cloned()) else { return Vec::new() };
+    let Some(word) = words(&value).get(at).cloned() else { return Vec::new() };
+    let text = std::fs::read_to_string(config_dir.join("config-data/make.config.defn")).unwrap_or_default();
+    let mut names: Vec<String> = text
+        .lines()
+        .filter(|line| line.contains(word.as_str()))
+        .filter_map(|line| {
+            let line = line.trim_start().trim_start_matches("export ").trim_start_matches("override ").trim_start();
+            let end = line.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+            let (name, rest) = line.split_at(end);
+            let rest = rest.trim_start();
+            (!name.is_empty() && name != variable && ["=", ":=", "::=", "+=", "?="].iter().any(|op| rest.starts_with(op))).then(|| name.to_owned())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    let carries = |name: &String| {
+        let Some(own) = evaluate(config_dir, std::slice::from_ref(name)).ok().and_then(|values| values.get(name).cloned()) else { return false };
+        let marked = format!("{name}={FROM} {} {TO}", own.replace('$', "$$"));
+        let Some(value) = evaluate_with(config_dir, &[variable.to_owned()], &[marked]).ok().and_then(|values| values.get(variable).cloned()) else { return false };
+        // The place among the unmarked words, and whether it is between
+        // the markers.
+        let mut place = 0;
+        let mut inside = false;
+        for seen in words(&value) {
+            match seen.as_str() {
+                FROM => inside = true,
+                TO => inside = false,
+                _ if place == at => return inside && seen == word,
+                _ => place += 1,
+            }
+        }
+        false
+    };
+    let found: Vec<String> = names.into_iter().filter(carries).collect();
+    match found.is_empty() {
+        true => vec![variable.to_owned()],
+        false => found,
+    }
 }
 
 /// The word of its variable a finding is about: the one its reason names
@@ -1351,7 +1417,13 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             .find(|earlier| earlier.meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0)))
             .and_then(|earlier| std::fs::read(earlier.optionlist_path()).ok())
     });
-    let reconfigures = std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| installed.is_some_and(|installed| installed != ours));
+    // (Unless configure has run since the attempt was made, which writes
+    // Cactus's `config-info` anew: the attempt has run, and what is there
+    // is what it configured, or failed to. Both on the configuration's
+    // file system.)
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let configured_since = modified(&meta.config_dir.join("config-info")).zip(modified(&attempt.optionlist_path())).is_some_and(|(configured, made)| configured >= made);
+    let reconfigures = !configured_since && std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| installed.is_some_and(|installed| installed != ours));
     // A configure that failed leaves the one before in place
     // (`CONFIG-STATUS` in `config-info` is not 0): not what is built.
     let failed = configure_failed(&meta.config_dir);
@@ -1542,9 +1614,9 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
         };
         return (from, Some(fix));
     }
-    // About a flag: the option list's variable that has it, else Cactus's
-    // defaults for the compiler (what configure wrote). The flag is the
-    // reason's first word, or the word of the variable it names.
+    // About a flag: where make says the configuration's variable gets it
+    // (`Raw::sources`). The flag is the reason's first word, or the word of
+    // the variable it names.
     let compilers = ["CC", "CXX", "F90", "F77", "CUCC"];
     let in_variable = raw.variable.as_ref().and_then(|variable| reply.values.get(variable).map(|value| (variable, value))).and_then(|(variable, value)| {
         // In a compiler variable, its words after the name.
@@ -1604,6 +1676,8 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
         return (from, hint(&raw.reason).map(str::to_owned));
     }
     match raw.reason.starts_with("make could not give the configuration's") {
+        // (make not there to start: the setup's PATH, not the file.)
+        true if raw.reason.contains("Failed to run make") => (setup.to_owned(), Some("put make on the build environment's PATH".to_owned())),
         true => ("the configuration (config-data/make.config.defn)".to_owned(), None),
         false => ("the build environment".to_owned(), hint(&raw.reason).map(str::to_owned)),
     }
@@ -1736,10 +1810,16 @@ mod tests {
             "export SHELL = /bin/sh\nexport CC = gcc\nexport CFLAGS = -g -flto\nexport C_OPTIMISE_FLAGS = -O3 -flto\n\
              export CCTK_OPTIMISE_MODE = yes\nifeq ($(strip $(CCTK_OPTIMISE_MODE)),yes)\n  CFLAGS += $(C_OPTIMISE_FLAGS)\nendif\n",
         );
-        assert_eq!(sources(&two, "CFLAGS", "-flto", true), ["C_OPTIMISE_FLAGS", "CFLAGS"]);
-        // A word read as a second input is one copy: not the variable's
-        // own where another variable gives it.
-        assert_eq!(sources(&two, "CFLAGS", "-flto", false), ["C_OPTIMISE_FLAGS"]);
+        assert_eq!(sources(&two, "CFLAGS", "-flto"), ["C_OPTIMISE_FLAGS", "CFLAGS"]);
+        // A word read as a second input is one copy: the variable that
+        // gives that copy, whichever has the same word too.
+        let strays = configured(
+            "strays",
+            "export SHELL = /bin/sh\nexport CC = gcc\nexport CFLAGS = -g -L /usr/lib\nexport C_OPTIMISE_FLAGS = -O3 -L /usr/lib\n\
+             export CCTK_OPTIMISE_MODE = yes\nifeq ($(strip $(CCTK_OPTIMISE_MODE)),yes)\n  CFLAGS += $(C_OPTIMISE_FLAGS)\nendif\n",
+        );
+        assert_eq!(source_of_copy(&strays, "CFLAGS", 2), ["CFLAGS"]);
+        assert_eq!(source_of_copy(&strays, "CFLAGS", 5), ["C_OPTIMISE_FLAGS"]);
         assert!(!refused.iter().any(|raw| raw.variable.as_deref() == Some("CPPFLAGS")), "{:?}", reply.found);
         assert!(reply.found.iter().any(|raw| raw.language.as_deref() == Some("CUDA") && raw.reason.contains("not on PATH")), "{:?}", reply.found);
         if identity::find_program(OsStr::new("gfortran")).is_ok() {
