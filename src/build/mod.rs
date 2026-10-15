@@ -2112,6 +2112,8 @@ fn prepare_with_cache(
             sh_quote(&attempt.optionlist_path()),
             sh_quote(&attempt.thornlist_path()),
         ));
+        // Which attempt configured the config last (`cache doctor` reads it).
+        steps.push(format!(": > {}", sh_quote(&attempt.configured_stamp_path())));
         if opts.clean {
             steps.push(format!("{make} {name}-clean"));
         }
@@ -3854,16 +3856,18 @@ mod tests {
         let config = "echo yes | /fakemake -j1 sim-config options='/inst/Cactus/configs/sim/.cactup-builds/0000/\
                       cactup-optionlist.cfg' THORNLIST='/inst/Cactus/configs/sim/.cactup-builds/0000/cactup-thornlist.th'";
 
+        let stamp = ": > '/inst/Cactus/configs/sim/.cactup-builds/0000/configured'";
         let (off, wrote) = staged_script(Mode::Off, false);
-        assert_eq!(off, [config, "/fakemake -j1 sim", "/fakemake -j1 sim-utils"]);
+        assert_eq!(off, [config, stamp, "/fakemake -j1 sim", "/fakemake -j1 sim-utils"]);
         assert!(!wrote, "an off build writes nothing for the cache");
 
         let (record, wrote) = staged_script(Mode::Record, false);
         assert!(wrote);
         assert_eq!(record[0], config);
-        assert_eq!(record[1], "CACTUP_CC_MAKEFILES=");
+        assert_eq!(record[1], stamp);
+        assert_eq!(record[2], "CACTUP_CC_MAKEFILES=");
         assert_eq!(
-            record[2],
+            record[3],
             "if '/opt/cactup/bin/cactup-abc1234' __cc-probe '/inst/Cactus/configs/sim/.cactup-builds/0000/cc/config.toml'; then"
         );
         let build = record.iter().position(|l| l == "if [ -n \"$CACTUP_CC_MAKEFILES\" ]; then").unwrap();
@@ -3874,7 +3878,7 @@ mod tests {
         // The probe looks at the configuration's build directory, which a
         // clean removes: it runs after it.
         let (clean, _) = staged_script(Mode::Record, true);
-        assert_eq!(&clean[..3], [config, "/fakemake -j1 sim-clean", "CACTUP_CC_MAKEFILES="]);
+        assert_eq!(&clean[..4], [config, stamp, "/fakemake -j1 sim-clean", "CACTUP_CC_MAKEFILES="]);
     }
 
     /// The staged script, cache steps included, runs to a finished build

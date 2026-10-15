@@ -213,6 +213,14 @@ impl BuildAttempt {
         self.dir.join("cactup-optionlist.cfg")
     }
 
+    /// Touched by the build script once its configure step has succeeded:
+    /// which attempt configured the config last (the newest of these) is
+    /// what `cache doctor` checks a config's flags against. Nothing reads it
+    /// on the build path.
+    pub fn configured_stamp_path(&self) -> PathBuf {
+        self.dir.join("configured")
+    }
+
     /// This attempt's optionlist *source* snapshot (verbatim TOML, pre-render)
     /// — the §7.8 rebuild-decision diff input, installed alongside
     /// [`Self::optionlist_path`] on success.

@@ -3095,6 +3095,26 @@ record, by asking make and cactup's own records:
 Also: B's two-stray case (a word a value in one variable, stray in
 another) is traced to the stray one only now; stale comment and docs.
 
+### M5 part 2, round 26 (on `87b3339`): BLOCKED by both
+
+Both re-ran rounds 1 to 25 (`source_of_copy` right on every real-configure
+plant). Blocking, both raised by both, the same root: which option list
+the configuration was configured from was guessed (the installed list,
+then `config-info`'s time), and every attempt configures with its own
+before it compiles, an older queued one possibly after a newer was made.
+False then: a reverted change after a compile failed (an all-clear, or
+a flag the queued attempt will not have), an unchanged resubmit said to
+configure again, an attempt that had ended said to configure "when it
+runs", a late configure by an older attempt taken for the newest's. Fixed
+in the commit after this record by a record of cactup's own: each build
+script touches its attempt's `configured` stamp right after its configure
+step succeeds (`BuildAttempt::configured_stamp_path`; nothing on the build
+path reads it, nothing compiled changes); the configuration was last
+configured from the option list of the attempt with the newest stamp
+(where none, the one installed with it). Checked on the reviewers' four
+scenarios with stamps as a build leaves them: each right. Also: the
+compiler variable's place counts its name (`source_of_copy`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

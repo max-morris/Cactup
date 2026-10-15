@@ -851,7 +851,10 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
                 parts
                     .iter()
                     .filter_map(|(variable, words)| {
-                        let here = (start..start + words.len()).contains(&at).then(|| (*variable, Some(at - start)));
+                        // (The compiler variable's words start after its
+                        // name: its place among them all is one more.)
+                        let name = usize::from(**variable == language.compiler_variable);
+                        let here = (start..start + words.len()).contains(&at).then(|| (*variable, Some(at - start + name)));
                         start += words.len();
                         here
                     })
@@ -1405,32 +1408,28 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     // (installed when an attempt succeeds): then it configures again when
     // it runs (a build submitted and queued, or one that failed), and what
     // is there now is not what it compiles with.
-    // The option list it was configured with is the one installed with it
-    // when an attempt succeeds (else the newest earlier attempt's that
-    // succeeded), rendered as the attempt's is: compared as written.
-    // (Not Cactus's `config-info`, which records the options with
-    // comments taken out and `${VAR}` expanded.)
-    let installed = std::fs::read(meta.config_dir.join("cactup-optionlist.cfg")).ok().or_else(|| {
-        (0..attempt.id)
-            .rev()
-            .filter_map(|id| crate::build::attempt::BuildAttempt::open(&meta.config_dir, id).ok())
-            .find(|earlier| earlier.meta.outcome.as_ref().is_some_and(|outcome| outcome.complete && outcome.exit_status == Some(0)))
-            .and_then(|earlier| std::fs::read(earlier.optionlist_path()).ok())
-    });
-    // (Unless configure has run since the attempt was made, which writes
-    // Cactus's `config-info` anew: the attempt has run, and what is there
-    // is what it configured, or failed to. Both on the configuration's
-    // file system.)
-    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    let configured_since = modified(&meta.config_dir.join("config-info")).zip(modified(&attempt.optionlist_path())).is_some_and(|(configured, made)| configured >= made);
-    let reconfigures = !configured_since && std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| installed.is_some_and(|installed| installed != ours));
+    // The option list the configuration was last configured from: that of
+    // the attempt whose build configured it last (its stamp, touched once
+    // its configure step succeeded, the newest; both on the
+    // configuration's file system); for a configuration no stamped build
+    // configured, the one installed with it when an attempt succeeded.
+    // Compared as written with the newest attempt's: where they differ, a
+    // build with it configures again. (Not Cactus's `config-info`, which
+    // records the options with comments taken out and `${VAR}` expanded.)
+    let configured_from = (0..=attempt.id)
+        .filter_map(|id| crate::build::attempt::BuildAttempt::open(&meta.config_dir, id).ok())
+        .filter_map(|each| std::fs::metadata(each.configured_stamp_path()).and_then(|stamp| stamp.modified()).ok().map(|at| (at, each)))
+        .max_by_key(|(at, _)| *at)
+        .and_then(|(_, last)| std::fs::read(last.optionlist_path()).ok())
+        .or_else(|| std::fs::read(meta.config_dir.join("cactup-optionlist.cfg")).ok());
+    let reconfigures = std::fs::read(attempt.optionlist_path()).is_ok_and(|ours| configured_from.is_some_and(|from| from != ours));
     // A configure that failed leaves the one before in place
     // (`CONFIG-STATUS` in `config-info` is not 0): not what is built.
     let failed = configure_failed(&meta.config_dir);
     let configured = meta.config_dir.join("config-data/make.config.defn").is_file() && !reconfigures && !failed;
     if !configured {
         let why = match (reconfigures, failed) {
-            (true, _) => "the newest build attempt configures the configuration again, from an option list other than the one it was configured with, when it runs",
+            (true, _) => "the newest build attempt's option list is not the one the configuration was last configured from, and a build with it configures it again first",
             (false, true) => "the configuration's last configure failed, and what it left is not what a build compiles with",
             (false, false) => "the configuration is not configured yet",
         };
