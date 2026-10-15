@@ -6368,9 +6368,9 @@ never built has none to check), without a build (`objcache::doctor`):
   variable of flags on its own (every flag the cache does not follow, not
   the first only: the flag a reason names, as the reason gives it, is taken
   out and the rest read again; with its value where it takes one the reader
-  knows of, and no further where the next word could be the value of a
-  flag the reader does not know, or after a host compiler's flag of
-  nvcc's), and a whole key of a small probe compile with every
+  knows of (the fix names the value too: the flag alone does not compile);
+  a word after a flag the reader does not know is said as what may be its
+  value; no further after a host compiler's flag of nvcc's), and a whole key of a small probe compile with every
   flag (its preprocessor and the identity's trial compiles run; no object
   of the build is compiled), which also says whether keys are relocatable
   and whether files are narrowed; and what each thorn's compiles get
@@ -6399,7 +6399,11 @@ never built has none to check), without a build (`objcache::doctor`):
   between their compiles, stop what they run and give no answer), makes
   it 0.5 s later, and removes the checks' temporary directory, which is
   its own (the checks' `TMPDIR`, the compilers' files too), however they
-  ended.
+  ended. The setup's own `TMPDIR` is the build's: the checks are given it
+  and make a file there, as the wrapper makes its files for a compile (a
+  `TMPDIR` where none can be made keeps every compile out, though the
+  compilers fall back on `/tmp`); `cache doctor`'s own files go in `/tmp`
+  where the user's `TMPDIR` has no room for them.
   Where an object's compiler or flags differ from the configuration's
   (AMReX's capability can make `CXX` `nvcc`), its language is checked
   again as above, probe key and all, once for each set of values, and

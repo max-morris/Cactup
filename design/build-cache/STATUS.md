@@ -2723,6 +2723,32 @@ Also: a British spelling ("canceled" now); a grouped finding names
 six thorns before "and N more"; bindings are not checked for a thorn the
 doctor does not build-check.
 
+### M5 part 2, round 10 (on `cfdc986`): BLOCKED by both
+
+Both re-ran rounds 1 to 9 (all as recorded; Ctrl-C swept across whole
+runs, idle and on a host with a load of 25 to 43: at most 0.69 s in a
+debug build, nothing left; each object's values equal to the build's own
+on `et`, `m5a`, `m5b`). Blocking, fixed in the commit after this record:
+- (B) a setup that sets a `TMPDIR` where no file can be made got an
+  all-clear, where the wrapper keeps every compile out (its key's list of
+  what a compile reads, the shell's lookup of the compiler); round 9's
+  own `TMPDIR` for the checks hid it. The shell now hands the setup's
+  `TMPDIR` to the checks (by `env`, which a `readonly TMPDIR` does not
+  stop), which make a file there; the finding is traced to the setup or
+  the user's shell, with its fix.
+- (A) the fix for a refused flag that takes a value named the flag alone
+  ("leave -mllvm out"), which does not compile: it names the value too.
+Also: a word after a flag the reader does not know is said, as what may be
+that flag's value (round 9 dropped it: `-fipa-pta -fno-tree-pre` said one);
+a two-word reason (`-Xptxas -O3`) does not stop the search; nvcc's joined
+form is named once; a user's `TMPDIR` with no room for `cache doctor`'s
+own files falls back on `/tmp` (it said "could not be checked"); a
+temporary directory the checks cannot make is "not checked" (it skipped
+every check). A grouped finding names five thorns before "and N more"
+(all, up to six). Not taken: the setup runs four times (the checks, and
+three runs for its path entries), so a 30 s setup takes two minutes, with
+progress.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

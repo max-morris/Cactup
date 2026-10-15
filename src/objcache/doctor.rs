@@ -170,8 +170,8 @@ fn relative_entry(variable: &str, entry: &[u8]) -> bool {
 /// stdout. Status 1 if the request cannot be read.
 pub fn run_verb() -> i32 {
     // Stopped by `cache doctor` on Ctrl-C (a TERM to its process group):
-    // what it runs stops, and its temporary files go, as for the user's
-    // Ctrl-C in cactup itself.
+    // what it runs stops, as for the user's Ctrl-C in cactup itself (its
+    // temporary files are in a directory `cache doctor` removes).
     // SAFETY: as in `main`, once, before any thread is started.
     let _ = unsafe { gix::interrupt::init_handler(1, || {}) };
     let mut input = Vec::new();
@@ -179,7 +179,17 @@ pub fn run_verb() -> i32 {
         return 1;
     };
     // Its own process: the probe's compile may run in its own directory.
-    let reply = run(&request, true);
+    let mut reply = run(&request, true);
+    // The build's TMPDIR (this process has one of `cache doctor`'s): where
+    // the wrapper makes its files for a compile.
+    let args: Vec<OsString> = std::env::args_os().skip(2).collect();
+    if let [set, value] = args.as_slice() {
+        let value = (set == "set").then_some(value);
+        if let Some(value) = value {
+            reply.env.insert("TMPDIR".to_owned(), value.to_string_lossy().into_owned());
+        }
+        reply.found.extend(unusable_tmpdir(value.map(PathBuf::from)));
+    }
     // Stopped: no answer, rather than one that looks whole.
     if gix::interrupt::is_triggered() {
         return 1;
@@ -234,7 +244,20 @@ pub fn run(request: &Request, probe: bool) -> Reply {
             });
         }
     }
-    let Ok(tmp) = tempfile::tempdir() else { return reply };
+    let tmp = match tempfile::tempdir() {
+        Ok(tmp) => tmp,
+        Err(e) => {
+            reply.found.push(Raw {
+                severity: Severity::Unchecked,
+                language: None,
+                variable: None,
+                reason: format!("the checks could not make a temporary directory: {e}"),
+                thorn: None,
+                fix: None,
+            });
+            return reply;
+        }
+    };
     for language in &request.languages {
         if gix::interrupt::is_triggered() {
             return reply;
@@ -247,6 +270,25 @@ pub fn run(request: &Request, probe: bool) -> Reply {
         reply.found.extend(thorns);
     }
     reply
+}
+
+/// Can the wrapper make its files for a compile in the build's `TMPDIR`
+/// (`given`; `None`: not set, so `/tmp`)? It makes one there for the
+/// preprocessor's list of what a compile reads, and the recipe's shell for
+/// the compiler's lookup: where none can be made, every compile is kept
+/// out (and compiles, the compiler falling back on `/tmp`). A relative or
+/// empty `TMPDIR` is the compile's directory's, not looked at here.
+fn unusable_tmpdir(given: Option<PathBuf>) -> Option<Raw> {
+    let dir = given.clone().unwrap_or_else(|| PathBuf::from("/tmp"));
+    if !dir.is_absolute() {
+        return None;
+    }
+    let e = tempfile::Builder::new().prefix(".cactup-doctor-").tempfile_in(&dir).err()?;
+    let reason = match given {
+        Some(_) => format!("TMPDIR is {}, where no file can be made ({e}), so the build cache keeps every compile out", dir.display()),
+        None => format!("TMPDIR is not set and no file can be made in /tmp ({e}), so the build cache keeps every compile out"),
+    };
+    Some(Raw { severity: Severity::KeepsOut, language: None, variable: Some("TMPDIR".to_owned()), reason, thorn: None, fix: None })
 }
 
 /// Do the flags `flags` pass the wrapper's reader of a compile of a source
@@ -362,7 +404,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             for raw in differences(request, language, values, own, base, tmp, probe, &mut memo) {
                 let file = flag_file(&raw, own, &dir, config_dir, name);
                 let place = file.as_ref().map(|file| file.strip_prefix(cactus_root).map(Path::to_path_buf).unwrap_or(file.clone()).display().to_string());
-                let fix = thorn_fix(&raw, file.as_deref(), config_dir);
+                let fix = thorn_fix(&raw, file.as_deref(), config_dir, own);
                 let raw = Raw { thorn: Some(place.unwrap_or_else(|| shown.clone())), fix, ..raw };
                 match theirs.iter_mut().find(|(seen, _)| *seen == raw) {
                     Some((_, objects)) => objects.push(object),
@@ -602,8 +644,8 @@ fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
 
 /// What to change for a flag a thorn gives its compiles, set in `file`
 /// where one was found: the thorn's file, or what generates it.
-fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path) -> Option<String> {
-    let flag = reason_words(&raw.reason).map(|words| words.join(" "));
+fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path, values: &BTreeMap<String, String>) -> Option<String> {
+    let flag = reason_words(&raw.reason).map(|words| with_its_value(&words, raw.variable.as_ref().and_then(|variable| values.get(variable))));
     let leave = flag.map(|flag| format!(" (leave {flag} out, if its compiles do not need it)")).unwrap_or_default();
     let generated = file.is_some_and(|file| file.starts_with(config_dir.join("bindings")));
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
@@ -767,8 +809,30 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
 fn reason_words(reason: &str) -> Option<Vec<&str>> {
     const SAYS: [&str; 6] = [", for the host compiler", " is a flag the cache", " is not a flag the cache", " native targets", " records when", " has nothing after it"];
     let at = SAYS.iter().filter_map(|says| reason.find(says)).min()?;
-    let words: Vec<&str> = reason[..at].split(' ').collect();
+    let mut words: Vec<&str> = reason[..at].split(' ').collect();
+    // A value given joined, which the reader says again
+    // (`--ptxas-options=-O3 -O3`): the one word.
+    if let [flag, value] = words[..]
+        && flag.ends_with(&format!("={value}"))
+    {
+        words.truncate(1);
+    }
     words[0].starts_with('-').then_some(words)
+}
+
+/// The words of a reason (`reason_words`) as the variable `value` has
+/// them: with the value a flag takes as the next word, where the reader
+/// knows it takes one (`-mllvm -x86-asm-syntax=intel`; the flag alone does
+/// not compile).
+fn with_its_value(words: &[&str], value: Option<&String>) -> String {
+    let given: Vec<&str> = value.map(|value| value.split_whitespace().collect()).unwrap_or_default();
+    match words {
+        [flag] if super::compile::NOT_CACHED_WITH_VALUE.contains(flag) => match given.iter().position(|word| word == flag).and_then(|at| given.get(at + 1)) {
+            Some(next) => format!("{flag} {next}"),
+            None => (*flag).to_owned(),
+        },
+        _ => words.join(" "),
+    }
 }
 
 /// Is `flag` what the reason `reason` is about, or a word of it?
@@ -780,22 +844,22 @@ fn names_flag(reason: &str, flag: &str) -> bool {
 /// so the flag it names is taken out and the rest read again. A flag it
 /// refuses stands alone, or takes the next word as its value
 /// (`compile::NOT_CACHED_WITH_VALUE`); one it does not know may take the
-/// next word or not: a word not like a flag goes with it, one like a flag
-/// stays, and a reason that names it ends the search unsaid (it may be the
-/// value). So does a host compiler's flag nvcc is given with `-Xcompiler`:
+/// next word or not, so a reason about that word says it may be the value.
+/// A host compiler's flag nvcc is given with `-Xcompiler` ends the search:
 /// taking it out would leave that flag reading the next.
 fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsString]) -> Vec<String> {
     let mut rest = flags.to_vec();
     let mut said: Vec<String> = Vec::new();
-    let mut maybe_values: Vec<OsString> = Vec::new();
+    // Words right after a flag it does not know, with that flag.
+    let mut maybe_values: Vec<(OsString, OsString)> = Vec::new();
     while let Err(why) = parse(&rest) {
         // The words it names, where they stand in what is left.
         let named: Option<Vec<OsString>> = reason_words(&why).map(|words| words.into_iter().map(OsString::from).collect()).filter(|words: &Vec<OsString>| rest.windows(words.len()).any(|at| at == words.as_slice()));
         match named {
-            Some(named) if said.is_empty() || (!maybe_values.contains(&named[0]) && said.len() < 16) => {
+            Some(named) if said.len() < 16 => {
                 let host = why.contains("for the host compiler");
                 let valued = named.len() == 1 && super::compile::NOT_CACHED_WITH_VALUE.iter().any(|known| named[0] == *known);
-                let unknown = why.contains("not a flag the cache knows");
+                let unknown = named.len() == 1 && why.contains("not a flag the cache knows");
                 let mut kept = Vec::new();
                 let mut words = std::mem::take(&mut rest).into_iter().peekable();
                 while let Some(word) = words.next() {
@@ -809,12 +873,16 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                     }
                     match words.peek() {
                         Some(_) if valued => drop(words.next()),
-                        Some(next) if unknown && !next.to_string_lossy().starts_with('-') => drop(words.next()),
-                        Some(next) if unknown => maybe_values.push(next.clone()),
+                        Some(next) if unknown => maybe_values.push((next.clone(), named[0].clone())),
                         _ => {}
                     }
                 }
                 rest = kept;
+                // The reader takes it for a flag; the build may not.
+                let why = match maybe_values.iter().find(|(value, _)| *value == named[0]) {
+                    Some((_, flag)) => format!("{why} (unless it is the value of {} before it)", flag.to_string_lossy()),
+                    None => why,
+                };
                 said.push(why);
                 if host {
                     break;
@@ -855,7 +923,7 @@ fn evaluate(config_dir: &Path, variables: &[String]) -> Res<BTreeMap<String, Str
     if !defn.is_file() {
         anyhow::bail!("{} is not there", defn.display());
     }
-    let dir = tempfile::tempdir().context("Failed to make a temporary directory")?;
+    let dir = temp_dir()?;
     // `$(info)`: no shell between make and the values (a quote in one is
     // its own).
     let mut makefile = format!("TOP := {}\nCONFIG := {}/config-data\ninclude {}\n", config_dir.display(), config_dir.display(), defn.display());
@@ -960,11 +1028,8 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
     // The checks' temporary files (theirs, and the compilers' they run)
     // all go in a directory of this process's, which goes when they are
     // done, however they ended (a Ctrl-C that had to kill them too).
-    let work = tempfile::tempdir().context("Failed to make a temporary directory")?;
-    let script = setup_then(
-        env,
-        &format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexport TMPDIR={}\nexec {} {DOCTOR_VERB}", crate::build::sh_quote(work.path()), crate::build::sh_quote(cactup)),
-    );
+    let work = temp_dir()?;
+    let script = setup_then(env, &checks_command(work.path(), cactup));
     let input = serde_json::to_vec(request).context("Failed to write the checks' request")?;
     let out = run_to_files(Command::new("/bin/sh").arg("-c").arg(&script).current_dir(cactus_root), Some(input), true);
     drop(work);
@@ -987,6 +1052,29 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
     serde_json::from_slice(&out.stdout).context("The checks in the build environment answered in a form this cactup cannot read")
 }
 
+/// What the shell runs once the setup is through: the line that says so,
+/// then the checks, with `work` as their TMPDIR and the setup's own TMPDIR
+/// (the build's) as arguments; by `env`, which a `readonly TMPDIR` does
+/// not stop.
+fn checks_command(work: &Path, cactup: &Path) -> String {
+    format!(
+        "printf '%s\\n' '{SETUP_DONE}' >&2\nexec env TMPDIR={} {} {DOCTOR_VERB} \"${{TMPDIR+set}}\" \"${{TMPDIR-}}\"",
+        crate::build::sh_quote(work),
+        crate::build::sh_quote(cactup)
+    )
+}
+
+/// A temporary directory, in TMPDIR, else in /tmp (as the compilers fall
+/// back on it: a TMPDIR that is not there is a finding, not a failure).
+fn temp_dir() -> Res<tempfile::TempDir> {
+    tempfile::tempdir().or_else(|_| tempfile::tempdir_in("/tmp")).context("Failed to make a temporary directory")
+}
+
+/// A temporary file, as [`temp_dir`] places it.
+fn temp_file() -> Res<std::fs::File> {
+    tempfile::tempfile().or_else(|_| tempfile::tempfile_in("/tmp")).context("Failed to make a temporary file")
+}
+
 /// Wait for `child`, stopping it on Ctrl-C (`CLAUDE.md`'s interrupt
 /// contract): a module system's setup can take a while.
 fn wait_interruptibly(mut child: std::process::Child, group: bool) -> Res<std::process::ExitStatus> {
@@ -1000,7 +1088,7 @@ fn wait_interruptibly(mut child: std::process::Child, group: bool) -> Res<std::p
         if gix::interrupt::is_triggered() {
             // The child's process group, where it has one of its own: what
             // it started too. Asked to stop first (the checks then stop
-            // what they run, and clean up), then made to.
+            // what they run), then made to.
             match rustix::process::Pid::from_raw(child.id() as i32).filter(|_| group) {
                 Some(group) => {
                     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
@@ -1027,8 +1115,8 @@ fn wait_interruptibly(mut child: std::process::Child, group: bool) -> Res<std::p
 /// what was written by the time it ends is all there is), with `input` on
 /// its stdin. Ctrl-C stops it.
 fn run_to_files(command: &mut Command, input: Option<Vec<u8>>, group: bool) -> Res<std::process::Output> {
-    let stdout = tempfile::tempfile().context("Failed to make a temporary file")?;
-    let stderr = tempfile::tempfile().context("Failed to make a temporary file")?;
+    let stdout = temp_file()?;
+    let stderr = temp_file()?;
     if group {
         command.process_group(0);
     }
@@ -1217,7 +1305,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     // variable (with the entries found) before the setup ran, else the
     // setup.
     let variable = raw.variable.clone().or_else(|| raw.reason.split_whitespace().next().filter(|word| word.chars().all(|c| c.is_ascii_uppercase() || c == '_')).map(str::to_owned));
-    if let Some(variable) = variable.as_deref().filter(|variable| reply.env.contains_key(*variable) || PATH_VARIABLES.contains(variable) || environment::REFUSED.contains(variable) || *variable == "LD_AUDIT") {
+    if let Some(variable) = variable.as_deref().filter(|variable| reply.env.contains_key(*variable) || PATH_VARIABLES.contains(variable) || environment::REFUSED.contains(variable) || ["LD_AUDIT", "TMPDIR"].contains(variable)) {
         // The shell's where the setup left the value as the shell had it,
         // or kept entries of the shell's (a non-empty value) it found.
         let inner = reply.env.get(variable).cloned().unwrap_or_default();
@@ -1225,7 +1313,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
         let not_absolute = |value: &str| value.split(':').filter(|entry| !entry.starts_with('/')).map(str::to_owned).collect::<Vec<_>>();
         let from_shell = match &outer {
             Some(outer) if *outer == inner => true,
-            Some(outer) if raw.reason.contains("is set") || outer.is_empty() => false,
+            Some(outer) if raw.reason.contains("is set") || outer.is_empty() || variable == "TMPDIR" => false,
             Some(outer) => {
                 let theirs = not_absolute(outer);
                 not_absolute(&inner).iter().all(|entry| theirs.contains(entry))
@@ -1237,6 +1325,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             false => setup.to_owned(),
         };
         let fix = match () {
+            _ if variable == "TMPDIR" => "make the directory TMPDIR names, writable, before the build (or set TMPDIR to one that is)".to_owned(),
             _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
             _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
             _ => format!("give {variable} absolute directories only: export {variable}=\"/dir${{{variable}:+:${variable}}}\" adds one without an empty entry"),
@@ -1281,7 +1370,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             (None, Some(name)) => format!("Cactus's default {name} for this compiler (configure wrote it to config-data/make.config.defn; the option list can set {name} itself)"),
             (None, None) => format!("{source} or Cactus's defaults, {}", raw.variable.as_deref().unwrap_or("the flags")),
         };
-        let shown = named.as_ref().map(|words| words.join(" ")).unwrap_or_else(|| flag.to_owned());
+        let shown = named.as_ref().map(|words| with_its_value(words, raw.variable.as_ref().and_then(|variable| reply.values.get(variable)))).unwrap_or_else(|| flag.to_owned());
         let fix = hint(&raw.reason).map(str::to_owned).or_else(|| Some(format!("leave {shown} out, if the build does not need it")));
         return (from, fix);
     }
@@ -1606,11 +1695,42 @@ mod tests {
         assert_eq!(reasons.len(), 7, "{reasons:?}");
         assert!(!reasons.iter().any(|why| why.starts_with("-x86")), "{reasons:?}");
         assert_eq!(reason_words(&reasons[1]), Some(vec!["-Wp,-D_FORTIFY_SOURCE=3"]));
+        // Two flags it does not know, side by side: both, the second as
+        // what may be the first's value.
+        let reasons = gcc("-O2 -fipa-pta -fno-tree-pre");
+        assert!(reasons.len() == 2 && reasons[1].contains("unless it is the value of -fipa-pta"), "{reasons:?}");
         let nvcc = |flags| said(identity::Family::Nvcc, flags, "probe.cu");
         for flags in ["-Xcompiler -pg --objdir-as-tempdir -x cu", "-Xcompiler -pg -Xcompiler -fopenmp"] {
             let reasons = nvcc(flags);
             assert!(reasons.len() == 1 && reasons[0].starts_with("-pg"), "{flags}: {reasons:?}");
         }
+    }
+
+    /// The checks get the setup's TMPDIR (the build's), set, empty or not
+    /// set, a read-only one too, and make their files in their own; one
+    /// where no file can be made keeps every compile out.
+    #[test]
+    fn the_checks_get_the_build_s_tmpdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("cactup");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s|%s|%s' \"$TMPDIR\" \"$2\" \"$3\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let work = tmp.path().join("work");
+        let run = |env: &str| {
+            let out = Command::new("/bin/sh").arg("-c").arg(setup_then(env, &checks_command(&work, &fake))).env_remove("TMPDIR").output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let work = work.display();
+        assert_eq!(run(""), format!("{work}||"));
+        assert_eq!(run("export TMPDIR=/nowhere/x"), format!("{work}|set|/nowhere/x"));
+        assert_eq!(run("export TMPDIR=/nowhere/x\nreadonly TMPDIR"), format!("{work}|set|/nowhere/x"));
+        assert!(unusable_tmpdir(Some("/nowhere/x".into())).is_some_and(|raw| raw.severity == Severity::KeepsOut));
+        assert!(unusable_tmpdir(Some(tmp.path().to_owned())).is_none());
+        assert!(unusable_tmpdir(Some("relative".into())).is_none());
+        // A flag's value goes with it in what to leave out.
+        let value = "-O2 -mllvm -x86-asm-syntax=intel".to_owned();
+        assert_eq!(with_its_value(&["-mllvm"], Some(&value)), "-mllvm -x86-asm-syntax=intel");
+        assert_eq!(reason_words("--ptxas-options=-O3 -O3 is not a flag the cache knows"), Some(vec!["--ptxas-options=-O3"]));
     }
 
     /// A setup that gives a variable an empty entry where it was not set
