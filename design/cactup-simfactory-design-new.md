@@ -6364,17 +6364,22 @@ never built has none to check), without a build (`objcache::doctor`):
   shell can run, another wrapper such as `ccache` in front, a name the
   recipe's shell gives a meaning of its own), the driver's
   own searches (`COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LD_PRELOAD`,
-  `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, each
-  variable of flags on its own (every flag the cache does not follow, not
-  the first only: the flag a reason names, as the reason gives it, is taken
-  out and the rest read again; with its value where it takes one the reader
+  `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, the
+  compile's words read whole, as the recipe has them, each reason given to
+  the variable that has the word it is about (one about the compile as a
+  whole, as nvcc's reader has some, to the language's flags), and every
+  flag the cache does not follow said, not the first only (the flag a
+  reason names, as the reason gives it, is taken out and the rest read
+  again; with its value where it takes one the reader
   knows of (the fix names the value too: the flag alone does not compile);
   a word after a flag the reader does not know is said as what may be its
   value; a word read as a second input is named and taken out alone, and
-  the rest read on: the reader is asked, without the probe's source, of
-  each longer start of the flags, and the first that has an input ends at
-  it (a value the reader takes apart from its flag, `-I /dir`, is none;
-  two such words are found one after the other);
+  the rest read on: the reader is asked, without the probe's source and
+  its `-o`, of each longer start of the flags, and the first that has an
+  input ends at it (a value the reader takes apart from its flag, `-I
+  /dir`, is none; two such words are found one after the other); a word
+  the reader reads `-o` out of (`-openmp`, `-override-limits`) is named
+  whole and taken out;
   a variable with shell syntax the recipe's shell expands first is "not
   checked"; a host compiler's flag of nvcc's is taken out with
   its `-Xcompiler`, and the search ends there), and a whole

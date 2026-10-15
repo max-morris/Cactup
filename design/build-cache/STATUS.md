@@ -2843,6 +2843,33 @@ longer word is named whole at thorn level too; a "value of" note only
 where the variable has the two words side by side; the second-input fix
 only where a word is named.
 
+### M5 part 2, round 15 (on `d9f93a1`): BLOCKED by both
+
+Both re-ran rounds 1 to 14 (all as recorded; B read all 870 flag
+variables of the MDB's option lists with the real reader: what is left
+parses, every word named is in its variable). Blocking, fixed in the
+commit after this record:
+- (A) the prefix reading gave the reader its own `-o probe.o`, so a start
+  ending in a word it reads `-o` out of (`-openmp`, `-override-limits`:
+  fuchs, tianhe1a) was "-o is given more than once", taken for an input
+  and named as one; and that reason, naming `-o`, which is no word of
+  the flags, ended the search (tianhe1a: one finding of a dozen). The
+  prefixes are read with `-c` alone (an input shows as any answer but
+  "there is no input file"), and such a word is named whole, taken out,
+  and the rest read on.
+- (B, there since round 2) each variable was read on its own, so what
+  nvcc's reader says of the compile as a whole failed on the part that
+  lacked another's word: a bare `CUCC = nvcc` (qbd, delta, athena,
+  saturn, generic) got a false "without --objdir-as-tempdir", graham's
+  `CXX = nvcc -x cu` a false "not CUDA". The compiler's words and every
+  flag variable are read as one, as the recipe has them; each reason is
+  the variable's that has the word it is about, a reason about the whole
+  compile the language's flags'.
+Also: a two-word reason (`-Xptxas -O3`) takes out only that pair, not
+`-Xptxas -v`; the search's guard is 64 reasons (an Intel list has more
+than 16); a test's script is made executable as the others are (it
+failed once with "Text file busy").
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
