@@ -2643,6 +2643,36 @@ for where the flag's file comes from (the thorn's, its configuration's,
 a capability's); the stand-down names its line; short make runs are no
 longer rounded up to the 50 ms poll. `et`: 1.9 s.
 
+### M5 part 2, round 7 (on `da03847`): BLOCKED by both
+
+Both re-ran rounds 1 to 6 and compared every object's values on `et` (302
+directories, 2043 objects) with real `make -n` of the build's sub-make:
+equal. Nothing changes a build or what is served; no `+` or `$(MAKE)` line
+ran, under make 4.2.1, 4.3 and 4.4.1 and with `GNUMAKEFLAGS` set.
+Blocking, fixed in the commit after this record:
+- (both) `$(shell)` ran in `/bin/sh` (dash on plato), not the
+  configuration's `SHELL` (bash): bash syntax missed a flag or named a
+  wrong one. `.SHELLFLAGS` now names `$(SHELL)`, and the recipe shell runs
+  `$(shell)` in it.
+- (A) an existing, unreadable `make.code.deps` gave an all-clear where the
+  fragment stands down (grep's status 2): the doctor asks grep as the
+  fragment does, and says the file cannot be read.
+- (B) Ctrl-C left the per-directory makes and their `$(shell)` running,
+  and `__cc-doctor`'s temporary directories behind: the makes stay in the
+  setup's process group, which is sent a TERM first (`__cc-doctor` takes
+  it as an interrupt and cleans up), then a KILL 0.3 s later. A run with a
+  20 s `$(shell)` stops in 0.12 s, nothing left.
+- (B) a configuration not yet configured got an all-clear though no
+  thorn was checked: "not checked" now.
+Also: `USESTHORNS` and `SRCDIR` (`src/.`) as the build passes them; a
+thorn with its own `Makefile` "not checked"; capabilities "not checked"
+while the bindings are not written; one capability's flag one finding for
+all the thorns that require it; a note carries no fix; a flag of a
+variable the option list could set is not said to be "not the option
+list's". Not taken: the language checks run one at a time (the probe's key
+moves the process's directory), so 300 thorns with 300 different sets of
+flags take about 13 s, with progress.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
