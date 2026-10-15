@@ -6366,12 +6366,14 @@ never built has none to check), without a build (`objcache::doctor`):
   own searches (`COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LD_PRELOAD`,
   `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, each
   variable of flags on its own (every flag the cache does not follow, not
-  the first only), and a whole key of a small probe compile with every
+  the first only: the flag a reason names is taken out and the rest read
+  again), and a whole key of a small probe compile with every
   flag (its preprocessor and the identity's trial compiles run; no object
   of the build is compiled), which also says whether keys are relocatable
   and whether files are narrowed; and what each thorn's compiles get
   beyond the configuration's: for each directory a thorn compiles (its
-  `src` and its `SUBDIRS`, as make reads them, links and all), Cactus's own
+  `src` and its `SUBDIRS`, as make reads them, links and all, and its
+  bindings, `bindings/build/<thorn>`), Cactus's own
   `make.subdir` is run as the build's sub-make there runs it (the
   variables the build passes it and exports to it, `USESTHORNS` and
   `SRCDIR` as `make.thornlib` writes them, its goal), with
@@ -6390,8 +6392,9 @@ never built has none to check), without a build (`objcache::doctor`):
   configuration's own `SHELL` (bash, where `/bin/sh` may be dash), as a
   build would (a `$(shell …)` inside a recipe of a target the build would
   make runs too). On Ctrl-C, `cache doctor` asks the setup's process group
-  to stop (a TERM: the checks stop what they run and clean up), and makes
-  it 0.3 s later.
+  to stop (a TERM: the checks, which look for it between languages and
+  between their compiles, stop what they run, clean up and give no
+  answer), and makes it 0.5 s later.
   Where an object's compiler or flags differ from the configuration's
   (AMReX's capability can make `CXX` `nvcc`), its language is checked
   again as above, probe key and all, once for each set of values, and
@@ -6403,11 +6406,12 @@ never built has none to check), without a build (`objcache::doctor`):
   with a fix for where that file comes from (the thorn's own, or written
   from its configuration or a capability's). A directory whose
   `make.code.defn` or `make.code.deps` the fragment would stand down for
-  (`probe::STAND_DOWN`, or a file there that `grep` cannot read: the
-  fragment wraps only on its "no match") keeps the cache out of its
+  (`probe::STAND_DOWN`, or a file there, as `[ -e ]` has it, that `grep`
+  cannot read: the fragment wraps only on its "no match") keeps the cache out of its
   compiles, said so with the line. A directory whose make files `make`
   cannot read through is "not checked"; one it cannot read at all compiles
-  nothing, in a build too, and is passed over. A thorn with a `Makefile`
+  nothing, in a build too, and is passed over (but a thorn's
+  `src/make.code.defn` there and unreadable, at which a build stops). A thorn with a `Makefile`
   of its own (built by it, not by Cactus's) is "not checked"; so are the
   capabilities' flags while the configuration's bindings are not written,
   and every thorn's while the configuration is not configured. The thorns and their files are read as they are

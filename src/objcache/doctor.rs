@@ -180,6 +180,10 @@ pub fn run_verb() -> i32 {
     };
     // Its own process: the probe's compile may run in its own directory.
     let reply = run(&request, true);
+    // Stopped: no answer, rather than one that looks whole.
+    if gix::interrupt::is_triggered() {
+        return 1;
+    }
     let _ = std::io::stdout().lock().write_all(&serde_json::to_vec(&reply).unwrap_or_default());
     0
 }
@@ -232,10 +236,13 @@ pub fn run(request: &Request, probe: bool) -> Reply {
     }
     let Ok(tmp) = tempfile::tempdir() else { return reply };
     for language in &request.languages {
+        if gix::interrupt::is_triggered() {
+            return reply;
+        }
         reply.found.extend(check_language(request, language, &reply.values, tmp.path(), probe));
     }
     // What thorns give their own compiles beyond the configuration's.
-    if let Some(config_dir) = &request.config_dir {
+    if let Some(config_dir) = request.config_dir.as_ref().filter(|_| !gix::interrupt::is_triggered()) {
         let thorns = thorn_checks(request, config_dir, &reply.values, &reply.found, tmp.path(), probe);
         reply.found.extend(thorns);
     }
@@ -289,16 +296,6 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             fix: None,
         });
     }
-    if !config_dir.join("bindings/Configuration").is_dir() {
-        found.push(Raw {
-            severity: Severity::Unchecked,
-            language: None,
-            variable: None,
-            reason: "the configuration's bindings are not written yet (a build writes them before it compiles): what the capabilities a thorn requires give its compiles is not checked".to_owned(),
-            thorn: None,
-            fix: None,
-        });
-    }
     let uses = uses_thorns(config_dir);
     let tops = crate::par::parallel_map(&tops, |(thorn, src)| (thorn.clone(), src.clone(), made_compiles(request, config_dir, thorn, src, true, &uses)));
     let Ok(tops) = tops else { return Vec::new() };
@@ -309,6 +306,13 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             subdirs.extend(made.subdirs.iter().map(|sub| (thorn.clone(), src.join(sub))));
         }
         dirs.push((thorn, src, made));
+    }
+    // And each thorn's bindings, which make.thornlib compiles the same way.
+    for thorn in &thorns {
+        let bindings = config_dir.join("bindings/build").join(thorn.rsplit('/').next().unwrap_or(thorn));
+        if bindings.is_dir() {
+            subdirs.push((thorn.clone(), bindings));
+        }
     }
     let subdirs = crate::par::parallel_map(&subdirs, |(thorn, dir)| (thorn.clone(), dir.clone(), made_compiles(request, config_dir, thorn, dir, false, &uses)));
     let Ok(subdirs) = subdirs else { return Vec::new() };
@@ -332,6 +336,12 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             }
         };
         if made.compiles.is_empty() && made.failed.is_none() {
+            // The thorn's `src/make.code.defn`, there but unreadable: the
+            // build stops at make.thornlib's `include` of it.
+            let defn = dir.join("make.code.defn");
+            if dir == cactus_root.join("arrangements").join(&thorn).join("src") && defn.exists() && std::fs::File::open(&defn).is_err() {
+                found.push(unchecked(format!("{} cannot be read: a build stops there", defn.strip_prefix(cactus_root).unwrap_or(&defn).display())));
+            }
             continue;
         }
         let name = thorn.rsplit('/').next().unwrap_or(&thorn);
@@ -559,7 +569,9 @@ fn made_compiles(request: &Request, config_dir: &Path, thorn: &str, dir: &Path, 
 /// or fail to read one (the fragment wraps only on grep's "no match")? The
 /// finding's reason and fix.
 fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
-    let files: Vec<PathBuf> = [dir.join("make.code.defn"), dir.join("make.code.deps")].into_iter().filter(|file| std::fs::symlink_metadata(file).is_ok()).collect();
+    // Those that are there as the fragment's `[ -e ]` has it (a link to
+    // nothing is not).
+    let files: Vec<PathBuf> = [dir.join("make.code.defn"), dir.join("make.code.deps")].into_iter().filter(|file| file.exists()).collect();
     let grep = |args: &[&str]| Command::new("grep").args(["-E"]).args(args).args(["-e", super::probe::STAND_DOWN, "/dev/null"]).args(&files).stdin(Stdio::null()).stderr(Stdio::null()).output();
     let shown = |file: &Path| file.strip_prefix(cactus_root).unwrap_or(file).display().to_string();
     let fix = "the cache stays out of this directory's compiles only. It stands down wherever a thorn's make.code.defn or make.code.deps has an include, a define, an $(eval) or a COMPILE_ name (a comment too), or cannot be read";
@@ -596,7 +608,7 @@ fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path) -> Option<String
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
     let r#where = match (file, capability, generated) {
         (None, _, _) => "its make files make it (make.code.defn, make.code.deps, or what they include), maybe of a variable the option list can set too".to_owned(),
-        (Some(_), true, _) => "it comes with a capability the thorn requires: the file named is written by the thorn that provides the capability (an ExternalLibraries thorn takes it from its configuration, or from the option list's variables for that library), so change it there".to_owned(),
+        (Some(_), true, _) => "it comes with a capability: the file named is written by the thorn that provides the capability (an ExternalLibraries thorn takes it from its configuration, or from the option list's variables for that library), so change it there".to_owned(),
         (Some(_), false, true) => "the file named is written from the thorn's configuration.ccl and what it requires: change it there".to_owned(),
         (Some(_), false, false) => "the file named sets it: the thorn's to change, not the option list's".to_owned(),
     };
@@ -653,7 +665,10 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     let cc_dir = tmp.join(format!("cc-{}", language.suffix));
     let _ = std::fs::create_dir_all(&cc_dir);
     // Make runs Cactus's recipes with bash (Cactus sets SHELL).
-    let shell = ["/bin/bash", "/bin/sh"].into_iter().map(Path::new).find(|shell| shell.is_file()).unwrap_or(Path::new("/bin/sh"));
+    // The configuration's shell, which runs the recipe (else bash, as
+    // Cactus's configure mostly finds it).
+    let configured = values.get("SHELL").map(|shell| Path::new(shell.trim())).filter(|shell| shell.is_absolute() && shell.is_file());
+    let shell = configured.or_else(|| ["/bin/bash", "/bin/sh"].into_iter().map(Path::new).find(|shell| shell.is_file())).unwrap_or(Path::new("/bin/sh"));
     if let Err(why) = super::lookup::shell_runs_program(&cc_dir, shell, &name) {
         found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), format!("{why}, so the recipe's shell runs it")));
         return found;
@@ -661,6 +676,9 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     let fortran = language.name.starts_with("Fortran");
     if let Some(why) = key::driver_led_elsewhere(&name, fortran, |variable| std::env::var_os(variable)) {
         found.push(raw(Severity::KeepsOut, None, why));
+    }
+    if gix::interrupt::is_triggered() {
+        return found;
     }
     let compiler = match identity::identify_watching(&cc_dir, &name) {
         Ok((compiler, _)) => compiler,
@@ -680,9 +698,35 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     // not follow is found, with the variable it is in.
     let source = format!("probe.{}", language.suffix);
     let parse = |flags: &[OsString]| parse_flags(compiler.family, flags, &source);
+    // Every reason in `flags`: the reader says the first, so the flag it
+    // names is taken out and the rest read again (while what it names is a
+    // flag: a word after one taken out could read as something else).
+    let reasons = |flags: &[OsString]| {
+        let mut rest = flags.to_vec();
+        let mut said = Vec::new();
+        while let Err(why) = parse(&rest) {
+            let named = why.split([' ', ',']).find(|word| word.starts_with('-') && rest.iter().any(|flag| flag == *word)).map(OsString::from);
+            let first = said.is_empty();
+            match named {
+                Some(flag) if said.len() < 16 => {
+                    rest.retain(|word| *word != flag);
+                    said.push(why);
+                }
+                // What it names is no flag of the variable's: said only
+                // when nothing was taken out before it.
+                _ => {
+                    if first {
+                        said.push(why);
+                    }
+                    break;
+                }
+            }
+        }
+        said
+    };
     // The compiler's own words after its name (`g++ -std=c++17`): the
     // compiler variable's, checked once.
-    if let Err(why) = parse(&words[1..]) {
+    for why in reasons(&words[1..]) {
         found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), why));
     }
     let mut every_flag = Vec::new();
@@ -693,12 +737,12 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             Ok(words) => words.into_iter().map(OsString::from).collect(),
             Err(_) => value.split_whitespace().map(OsString::from).collect(),
         };
-        if let Err(why) = parse(&flags) {
+        for why in reasons(&flags) {
             found.push(raw(Severity::KeepsOut, Some(variable), why));
         }
         every_flag.extend(flags);
     }
-    if !probe {
+    if !probe || gix::interrupt::is_triggered() {
         return found;
     }
     // A whole key of a probe compile with every flag, as the wrapper makes
@@ -749,6 +793,8 @@ fn made_values(config_dir: &Path, languages: &[Language]) -> Res<BTreeMap<String
         variables.push(language.compiler_variable.clone());
         variables.extend(language.flag_variables.iter().cloned());
     }
+    // And the shell the recipes run in.
+    variables.push("SHELL".to_owned());
     variables.sort();
     variables.dedup();
     evaluate(config_dir, &variables)
@@ -901,7 +947,7 @@ fn wait_interruptibly(mut child: std::process::Child, group: bool) -> Res<std::p
             match rustix::process::Pid::from_raw(child.id() as i32).filter(|_| group) {
                 Some(group) => {
                     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
                     while std::time::Instant::now() < deadline && child.try_wait().ok().flatten().is_none() {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
@@ -985,6 +1031,13 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             what: "what each thorn's own make files give its compiles is not checked: the configuration is not configured yet".to_owned(),
             from: "the configuration".to_owned(),
             fix: Some("run cactup cache doctor again once a build has configured it (its first build does, before it compiles)".to_owned()),
+        });
+    } else if !meta.config_dir.join("bindings/Configuration").is_dir() {
+        findings.push(Finding {
+            severity: Severity::Unchecked,
+            what: "the configuration's bindings are not written yet: what the capabilities a thorn requires give its compiles, and the bindings' own compiles, are not checked".to_owned(),
+            from: "the configuration".to_owned(),
+            fix: Some("run cactup cache doctor again once a build has written them (a build does, before it compiles)".to_owned()),
         });
     }
     let request = Request {
@@ -1097,6 +1150,7 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
     // A thorn's own flag: only that thorn's compiles get it.
     if let Some(thorn) = &raw.thorn {
         let from = match &raw.variable {
+            Some(variable) if thorn.split(" (").next().is_some_and(|names| names.contains(", ")) => format!("thorns {thorn}: their compiles get it in {variable}, the configuration's do not"),
             Some(variable) => format!("thorn {thorn}: its compiles get it in {variable}, the configuration's do not"),
             None => format!("thorn {thorn}"),
         };
@@ -1356,7 +1410,7 @@ mod tests {
             config.join("config-data/make.config.rules"),
             &format!("define COMPILE_C\n$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@\nendef\n%.c.o: $(SRCDIR)/%.c\n\t$(COMPILE_C)\n%.c.d: $(SRCDIR)/%.c\n\t+touch {}/dependencies-made\n", root.display()),
         );
-        let thorns = ["Plain", "Deps", "Sub", "Cap", "Cap2", "Tgt", "Pat", "Inc", "Objs", "Top", "Cond", "Stem", "Ind", "Priv", "Run", "Shell", "Rem", "Dup", "Bash", "Uses", "Unread", "Own"];
+        let thorns = ["Plain", "Deps", "Sub", "Cap", "Cap2", "Tgt", "Pat", "Inc", "Objs", "Top", "Cond", "Stem", "Ind", "Priv", "Run", "Shell", "Rem", "Dup", "Bash", "Uses", "Unread", "Own", "Dangle", "Two", "Bnd"];
         write(config.join("ThornList"), &format!("# thorns\n{}\n", thorns.map(|thorn| format!("Arr/{thorn}")).join(" # its own\n")));
         let thorn = |name: &str, defn: &str, deps: Option<&str>| {
             let src = root.join("arrangements/Arr").join(name).join("src");
@@ -1418,6 +1472,17 @@ mod tests {
         // Built by a Makefile of its own.
         thorn("Own", "SRCS = a.c\n", None);
         write(root.join("arrangements/Arr/Own/src/Makefile"), "all:\n");
+        // A link to nothing: no file, for make and the fragment alike.
+        thorn("Dangle", "SRCS = a.c\n", None);
+        std::os::unix::fs::symlink(root.join("nowhere.deps"), root.join("arrangements/Arr/Dangle/src/make.code.deps")).unwrap();
+        // Two flags of one variable the cache refuses: both said.
+        thorn("Two", "SRCS = a.c\nCFLAGS += --coverage -pg\n", None);
+        // No source of its own; its bindings, compiled as a directory of
+        // its, get the capability's flag.
+        thorn("Bnd", "SRCS =\n", None);
+        write(config.join("bindings/Configuration/Thorns/make.Bnd.defn"), &format!("include {}/bindings/Configuration/Capabilities/make.FOO.defn\n", config.display()));
+        write(config.join("bindings/build/Bnd/make.code.defn"), "SRCS = cctk_ThornBindings.c\n");
+        write(config.join("bindings/build/Bnd/cctk_ThornBindings.c"), "int b(void) { return 0; }\n");
         let c: Vec<Language> = languages().into_iter().filter(|language| language.name == "C").collect();
         let values: BTreeMap<String, String> = [("CC", "gcc"), ("CPPFLAGS", ""), ("CFLAGS", "-O2")].map(|(name, value)| (name.to_owned(), value.to_owned())).into();
         let request = Request { config_dir: Some(config.clone()), optionlist: BTreeMap::new(), conf: BuildConf { cactus_root: root.clone(), ..conf(&root) }, languages: c };
@@ -1428,7 +1493,7 @@ mod tests {
         let about = |flag: &str| kept.iter().find(|raw| raw.reason.contains(flag)).and_then(|raw| raw.thorn.clone());
         assert!(about("--coverage").is_some_and(|thorn| thorn.starts_with("Arr/Deps") && thorn.contains("make.code.deps")), "{found:?}");
         assert!(about("-fprofile-generate").is_some_and(|thorn| thorn.starts_with("Arr/Sub")), "{found:?}");
-        assert!(about("-fauto-profile").is_some_and(|thorn| thorn.starts_with("Arr/Cap, Arr/Cap2 (") && thorn.contains("make.FOO.defn")), "{found:?}");
+        assert!(about("-fauto-profile").is_some_and(|thorn| thorn.starts_with("Arr/Cap, Arr/Cap2, Arr/Bnd (") && thorn.contains("make.FOO.defn")), "{found:?}");
         assert_eq!(kept.iter().filter(|raw| raw.reason.contains("-fauto-profile")).count(), 1, "{found:?}");
         assert!(kept.iter().find(|raw| raw.reason.contains("-fauto-profile")).and_then(|raw| raw.fix.clone()).is_some_and(|fix| fix.contains("provides the capability")), "{found:?}");
         assert!(about("-fprofile-use").is_none(), "a directory no thorn compiles: {found:?}");
@@ -1452,6 +1517,9 @@ mod tests {
             assert!(kept.iter().any(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Unread")) && raw.reason.contains("cannot be read")), "{found:?}");
         }
         std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        assert!(of("Arr/Dangle").is_empty(), "{found:?}");
+        let two: Vec<&&Raw> = kept.iter().filter(|raw| raw.thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Two "))).collect();
+        assert!(two.iter().any(|raw| raw.reason.contains("--coverage")) && two.iter().any(|raw| raw.reason.contains("-pg")), "{found:?}");
         let unchecked: Vec<&Raw> = found.iter().filter(|raw| raw.severity == Severity::Unchecked).collect();
         assert!(unchecked.len() == 1 && unchecked[0].thorn.as_deref().is_some_and(|thorn| thorn.starts_with("Arr/Own")), "{found:?}");
     }

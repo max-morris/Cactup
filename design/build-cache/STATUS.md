@@ -2673,6 +2673,29 @@ list's". Not taken: the language checks run one at a time (the probe's key
 moves the process's directory), so 300 thorns with 300 different sets of
 flags take about 13 s, with progress.
 
+### M5 part 2, round 8 (on `4a7ef30`): BLOCKED by both
+
+Both re-ran rounds 1 to 7 (all as recorded) and compared each object's
+values with the build's own (`make.thornlib`'s sub-makes under `make -n`):
+equal on `et`, `m5a`, `m5b` and the planted thorns. Blocking, both raised
+by both, fixed in the commit after this record:
+- a link to nothing as `make.code.deps` was said to keep the cache out:
+  round 7 kept it by `symlink_metadata`, where the fragment's `[ -e ]`
+  follows the link (and wraps). Now `Path::exists`, as `[ -e ]`.
+- Ctrl-C during the language checks left `__cc-doctor`'s temporary
+  directory (it polled the flag only among the thorns, and was killed):
+  it looks between languages and between a language's compiles, and gives
+  no answer once interrupted (no partial one that looks whole); the KILL
+  follows the TERM after 0.5 s. Stopped at 0.3 s and 0.8 s: 0.3 s and
+  0.2 s, nothing left.
+Also: every flag of a variable the cache refuses is said (it said the
+first); each thorn's bindings (`bindings/build/<thorn>`) are checked as
+its directories are; a thorn's unreadable `src/make.code.defn` is "not
+checked"; the bindings-not-written finding is the configuration's; the
+compiler's name is checked in the configuration's `SHELL`; grouped
+findings say "thorns". Not taken: the doctor's makes use `make` from
+`PATH` (every MDB machine has plain `make`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
