@@ -2817,6 +2817,32 @@ unknown flag with a word after it that is no flag names both
 first (a command substitution) is "not checked" instead of read word by
 word.
 
+### M5 part 2, round 14 (on `c4d6420`): BLOCKED by both
+
+Both re-ran rounds 1 to 13 (all as recorded). Blocking, both raised by
+both, in round 13's second-input search, fixed in the commit after this
+record:
+- the word whose taking out stops "there is more than one input file"
+  is not always the second input: after a value the reader takes apart
+  from its flag (`-D NDEBUG libm.a`, `-I /dir x.o`, nvcc's `-ccbin g++
+  x`), taking the value out lets the flag take the stray word, so the
+  value was named (and the stray word, left for the probe's key, gave a
+  false "the preprocessor failed").
+- with two stray words no one word stops it, so nothing was named and the
+  search ended: on frontera, graham and the Intel Fortran lists most
+  findings went unsaid.
+The reader is now asked directly: without the probe's source, of each
+longer start of what is left (the compile's own words first, so a start
+ending in a flag that wants a value has nothing after it); the first
+start that has an input ends at the second input. Two are found one after
+the other, and what follows is read on (frontera: every flag said).
+Also: the fix for a refused flag that takes no value names it alone
+(`--coverage`, not the stray word after it); an unknown flag's fix names
+its value word too (`-L /usr/lib and -L /usr/lib64`); a flag read out of a
+longer word is named whole at thorn level too; a "value of" note only
+where the variable has the two words side by side; the second-input fix
+only where a word is named.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

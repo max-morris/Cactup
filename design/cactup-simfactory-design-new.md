@@ -6370,8 +6370,11 @@ never built has none to check), without a build (`objcache::doctor`):
   out and the rest read again; with its value where it takes one the reader
   knows of (the fix names the value too: the flag alone does not compile);
   a word after a flag the reader does not know is said as what may be its
-  value; a word read as a second input, the one without which the reader
-  no longer says so, is named and taken out alone, and the rest read on;
+  value; a word read as a second input is named and taken out alone, and
+  the rest read on: the reader is asked, without the probe's source, of
+  each longer start of the flags, and the first that has an input ends at
+  it (a value the reader takes apart from its flag, `-I /dir`, is none;
+  two such words are found one after the other);
   a variable with shell syntax the recipe's shell expands first is "not
   checked"; a host compiler's flag of nvcc's is taken out with
   its `-Xcompiler`, and the search ends there), and a whole

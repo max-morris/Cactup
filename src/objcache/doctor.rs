@@ -304,10 +304,19 @@ fn unusable_tmpdir(given: Option<PathBuf>, scratch: Option<&Path>) -> Option<Raw
 }
 
 /// Do the flags `flags` pass the wrapper's reader of a compile of a source
-/// named `source` with a compiler of `family`?
-fn parse_flags(family: identity::Family, flags: &[OsString], source: &str) -> Result<(), String> {
-    let mut args: Vec<OsString> = flags.to_vec();
-    args.extend(["-c", "-o", "probe.o", source].map(OsString::from));
+/// named `source` with a compiler of `family`? (Without a source, the
+/// reader says "there is no input file" unless `flags` have one.)
+fn parse_flags(family: identity::Family, flags: &[OsString], source: Option<&str>) -> Result<(), String> {
+    // Without a source, the compile's own words first: a flag at the end
+    // of `flags` that wants a value has nothing after it, rather than
+    // taking `-c` for it.
+    let mut args: Vec<OsString> = match source {
+        Some(_) => flags.to_vec(),
+        None => ["-c", "-o", "probe.o"].map(OsString::from).into_iter().chain(flags.iter().cloned()).collect(),
+    };
+    if let Some(source) = source {
+        args.extend(["-c", "-o", "probe.o", source].map(OsString::from));
+    }
     match family {
         identity::Family::Nvcc => compile::parse_cuda(&args).map(|_| ()),
         _ => compile::parse(&args).map(|_| ()),
@@ -657,7 +666,7 @@ fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
 /// What to change for a flag a thorn gives its compiles, set in `file`
 /// where one was found: the thorn's file, or what generates it.
 fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path, values: &BTreeMap<String, String>) -> Option<String> {
-    let flag = reason_words(&raw.reason).map(|words| with_its_value(&words, raw.variable.as_ref().and_then(|variable| values.get(variable))));
+    let flag = shown_for(&raw.reason, raw.variable.as_ref().and_then(|variable| values.get(variable)));
     let leave = flag.map(|flag| format!(" (leave {flag} out, if its compiles do not need it)")).unwrap_or_default();
     let generated = file.is_some_and(|file| file.starts_with(config_dir.join("bindings")));
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
@@ -752,7 +761,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     // Each variable of flags on its own, so that every flag the cache does
     // not follow is found, with the variable it is in.
     let source = format!("probe.{}", language.suffix);
-    let parse = |flags: &[OsString]| parse_flags(compiler.family, flags, &source);
+    let parse = |flags: &[OsString], with_source: bool| parse_flags(compiler.family, flags, with_source.then_some(source.as_str()));
     let reasons = |flags: &[OsString]| every_reason(parse, flags);
     // The compiler's own words after its name (`g++ -std=c++17`): the
     // compiler variable's, checked once. The probe's key (below) is made
@@ -772,7 +781,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             // Shell syntax the recipe's shell would expand first (`echo`
             // in backquotes): what the compile gets is not known here.
             Err(_) => {
-                found.push(raw(Severity::Unchecked, Some(variable), format!("{variable} has shell syntax the recipe's shell expands before the compiler runs (a command substitution, say), which this check does not, so its flags are not checked")));
+                found.push(raw(Severity::Unchecked, Some(variable), format!("{variable} has shell syntax the recipe's shell expands before the compiler runs (a command substitution, a ~ or a pattern), which this check does not, so its flags are not checked")));
                 continue;
             }
         };
@@ -842,23 +851,32 @@ fn reason_words(reason: &str) -> Option<Vec<&str>> {
     words[0].starts_with('-').then_some(words)
 }
 
-/// The words of a reason (`reason_words`) as the variable `value` has
-/// them: with the value a flag takes as the next word, where the reader
-/// knows it takes one (`-mllvm -x86-asm-syntax=intel`; the flag alone does
-/// not compile), or a word after it that is no flag (`-L /opt/lib`: the
-/// reader takes that word for an input, so it goes too).
-fn with_its_value(words: &[&str], value: Option<&String>) -> String {
+/// What a reason of the reader's is about, as the variable `value` has
+/// it, for "leave … out": the word a flag is read out of (`-o` of
+/// `-override-limits`); a flag with the value it takes as the next word,
+/// where the reader knows it takes one (`-mllvm -x86-asm-syntax=intel`:
+/// the flag alone does not compile); a flag the reader does not know, with
+/// a word after it that is no flag (`-L /opt/lib`: the reader takes that
+/// word for an input, so it goes too). A flag the reader refuses that takes
+/// no value is named alone (`--coverage`, whatever follows it).
+fn shown_for(reason: &str, value: Option<&String>) -> Option<String> {
+    let named = reason_words(reason).or_else(|| reason.split([' ', ',']).next().filter(|word| word.starts_with('-')).map(|word| vec![word]))?;
     let given: Vec<&str> = value.map(|value| value.split_whitespace().collect()).unwrap_or_default();
-    match words {
-        [flag] if super::compile::NOT_CACHED_WITH_VALUE.contains(flag) || given.windows(2).any(|pair| pair[0] == *flag && !pair[1].starts_with('-')) => {
-            let each: Vec<String> = given.windows(2).filter(|pair| pair[0] == *flag && (super::compile::NOT_CACHED_WITH_VALUE.contains(flag) || !pair[1].starts_with('-'))).map(|pair| format!("{flag} {}", pair[1])).collect();
-            match each.is_empty() {
-                true => (*flag).to_owned(),
-                false => each.join(" and "),
-            }
-        }
-        _ => words.join(" "),
+    let flag = named[0];
+    if named.len() == 1 && !given.contains(&flag)
+        && let Some(word) = given.iter().find(|word| word.starts_with(flag))
+    {
+        return Some((*word).to_owned());
     }
+    let valued = super::compile::NOT_CACHED_WITH_VALUE.contains(&flag);
+    let unknown = reason.contains("not a flag the cache knows");
+    if named.len() == 1 && (valued || unknown) {
+        let each: Vec<String> = given.windows(2).filter(|pair| pair[0] == flag && (valued || !pair[1].starts_with('-'))).map(|pair| format!("{flag} {}", pair[1])).collect();
+        if !each.is_empty() {
+            return Some(each.join(" and "));
+        }
+    }
+    Some(named.join(" "))
 }
 
 /// Is `flag` what the reason `reason` is about, or a word of it?
@@ -869,6 +887,9 @@ fn names_flag(reason: &str, flag: &str) -> bool {
 /// The reader's reason for a word it takes for a second input file.
 const SECOND_INPUT: &str = "there is more than one input file";
 
+/// The reader's reason for a compile with no input file.
+const NO_INPUT: &str = "there is no input file";
+
 /// Every reason the reader (`parse`) has for `flags`: it says the first,
 /// so the flag it names is taken out and the rest read again. A flag it
 /// refuses stands alone, or takes the next word as its value
@@ -877,12 +898,12 @@ const SECOND_INPUT: &str = "there is more than one input file";
 /// A host compiler's flag nvcc is given with `-Xcompiler` ends the search:
 /// taking it out would leave that flag reading the next. With the reasons,
 /// what is left of `flags` once the flags they are about are taken out.
-fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsString]) -> (Vec<String>, Vec<OsString>) {
+fn every_reason(parse: impl Fn(&[OsString], bool) -> Result<(), String>, flags: &[OsString]) -> (Vec<String>, Vec<OsString>) {
     let mut rest = flags.to_vec();
     let mut said: Vec<String> = Vec::new();
     // Words right after a flag it does not know, with that flag.
     let mut maybe_values: Vec<(OsString, OsString)> = Vec::new();
-    while let Err(why) = parse(&rest) {
+    while let Err(why) = parse(&rest, true) {
         // The words it names, where they stand in what is left.
         let named: Option<Vec<OsString>> = reason_words(&why).map(|words| words.into_iter().map(OsString::from).collect()).filter(|words: &Vec<OsString>| rest.windows(words.len()).any(|at| at == words.as_slice()));
         match named {
@@ -910,7 +931,14 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                         Some(_) if valued => drop(words.next()),
                         // (Not after one that has a value joined to it:
                         // `-L/opt/lib`, `-wd810`, `-fx=y`.)
-                        Some(next) if unknown && *next != named[0] && !named[0].to_string_lossy().contains(|c: char| c == '=' || c == '/' || c.is_ascii_digit()) => {
+                        // (As the variable has them: not a word that came
+                        // to follow it as others were taken out.)
+                        Some(next)
+                            if unknown
+                                && *next != named[0]
+                                && !named[0].to_string_lossy().contains(|c: char| c == '=' || c == '/' || c.is_ascii_digit())
+                                && flags.windows(2).any(|pair| pair[0] == named[0] && pair[1] == *next) =>
+                        {
                             later.push((next.clone(), named[0].clone()))
                         }
                         _ => {}
@@ -928,16 +956,19 @@ fn every_reason(parse: impl Fn(&[OsString]) -> Result<(), String>, flags: &[OsSt
                     break;
                 }
             }
-            // A second input: the word the reader takes for it is the one
-            // without which it no longer says so (not a value of a flag it
-            // takes apart, `-I /dir`). Named, taken out alone (the flag
-            // before it, where the reader does not know it, is said next,
-            // as what is read on finds it), and the rest read on.
-            _ if why == SECOND_INPUT && said.len() < 16 && let Some(at) = (0..rest.len()).find(|at| {
-                let mut without = rest.clone();
-                without.remove(*at);
-                parse(&without).err().as_deref() != Some(SECOND_INPUT)
-            }) => {
+            // A second input: the first word the reader takes for an input
+            // of its own, which the probe's source then is a second to.
+            // Asked of the reader, without that source, of each longer
+            // start of the flags: the first that has an input ends at it (a
+            // value the reader takes apart from its flag, `-I /dir`, is no
+            // input; a start that ends in a flag wanting its value is not
+            // yet one). Named, taken out alone (the flag before it, where
+            // the reader does not know it, is said next, as what is read on
+            // finds it), and the rest read on.
+            _ if why == SECOND_INPUT && said.len() < 16 && let Some(at) = (1..=rest.len()).find(|end| match parse(&rest[..*end], false) {
+                Err(why) => why != NO_INPUT && !why.ends_with("has nothing after it"),
+                Ok(()) => true,
+            }).map(|end| end - 1) => {
                 let word = rest.remove(at);
                 said.push(format!("{why} ({} is read as one)", word.to_string_lossy()));
             }
@@ -1443,11 +1474,16 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, defaul
             let words: Vec<&str> = value.split_whitespace().collect();
             (!words.contains(&flag)).then(|| words.into_iter().find(|word| word.starts_with(flag))).flatten()
         });
-        let shown = match whole {
-            Some(word) => word.to_owned(),
-            None => named.as_ref().map(|words| with_its_value(words, value)).unwrap_or_else(|| flag.to_owned()),
+        let shown = shown_for(&raw.reason, value).unwrap_or_else(|| flag.to_owned());
+        let flag = whole.unwrap_or(flag);
+        let fix = match hint(&raw.reason) {
+            // An unknown flag with a word after it that is no flag: both.
+            Some(_) if raw.reason.contains("is not a flag the cache knows") && shown != flag => {
+                Some(format!("if {flag} is not needed, leave {shown} out (the option list can set the variable that has it); if it is, the cache does not know it yet"))
+            }
+            Some(hint) => Some(hint.to_owned()),
+            None => Some(format!("leave {shown} out, if the build does not need it")),
         };
-        let fix = hint(&raw.reason).map(str::to_owned).or_else(|| Some(format!("leave {shown} out, if the build does not need it")));
         return (from, fix);
     }
     // About the compiler: the option list's, else the one configure chose.
@@ -1471,7 +1507,7 @@ pub fn hint(why: &str) -> Option<&'static str> {
         ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
         ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
         ("is not a flag the cache knows", "if the flag is not needed, leave it out (the option list can set the variable that has it); if it is, the cache does not know it yet"),
-        ("more than one input file", "the word named is read as a second source: leave it out, with the flag it belongs to, if the build does not need them (the cache takes a value apart from its flag only for flags it knows: -I, -D, -isystem and the like)"),
+        ("is read as one)", "the word named is read as a second source: leave it out, with the flag it belongs to, if the build does not need them (the cache takes a value apart from its flag only for flags it knows: -I, -D, -isystem and the like)"),
         ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
         ("Disk quota exceeded", "a quota is used up (on the build cache's file system or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
         ("No space left on device", "a file system is full (the build cache's or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
@@ -1761,7 +1797,7 @@ mod tests {
     /// are all said.
     #[test]
     fn says_every_refused_flag_and_no_value_of_one() {
-        let said = |family, flags: &str, source: &str| every_reason(|words: &[OsString]| parse_flags(family, words, source), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).0;
+        let said = |family, flags: &str, source: &str| every_reason(|words: &[OsString], with_source: bool| parse_flags(family, words, with_source.then_some(source)), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).0;
         let gcc = |flags| said(identity::Family::Gcc, flags, "probe.c");
         assert_eq!(gcc("-O2 --coverage -pg").len(), 2);
         assert_eq!(gcc("-mllvm -inline-threshold=500 -O2"), ["-mllvm is a flag the cache does not follow"]);
@@ -1780,7 +1816,7 @@ mod tests {
         assert!(!gcc("-O2 -wd810 -wd981").iter().any(|why| why.contains("unless")), "{:?}", gcc("-O2 -wd810 -wd981"));
         assert_eq!(gcc("-O2 -fipa-pta -fipa-pta"), ["-fipa-pta is not a flag the cache knows"]);
         // What is left for the probe's key: the flags not said.
-        let left = every_reason(|words: &[OsString]| parse_flags(identity::Family::Gcc, words, "probe.c"), &["-O2", "-fipa-pta", "-march=native"].map(OsString::from)).1;
+        let left = every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-O2", "-fipa-pta", "-march=native"].map(OsString::from)).1;
         assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
         let nvcc = |flags| said(identity::Family::Nvcc, flags, "probe.cu");
         for flags in ["-Xcompiler -pg --objdir-as-tempdir -x cu", "-Xcompiler -pg -Xcompiler -fopenmp"] {
@@ -1788,23 +1824,36 @@ mod tests {
             assert!(reasons.len() == 1 && reasons[0].starts_with("-pg"), "{flags}: {reasons:?}");
         }
         // What is left for the key: the host flag with its -Xcompiler.
-        let left = |flags: &str| every_reason(|words: &[OsString]| parse_flags(identity::Family::Nvcc, words, "probe.cu"), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).1;
+        let left = |flags: &str| every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Nvcc, words, with_source.then_some("probe.cu")), &flags.split_whitespace().map(OsString::from).collect::<Vec<_>>()).1;
         assert_eq!(left("-O2 -Xcompiler -fipa-pta"), ["-O2"].map(OsString::from));
         assert_eq!(left("--compiler-options -pg -Xcompiler -Wall"), ["-Xcompiler", "-Wall"].map(OsString::from));
         // A word read as a second source, once a refused flag is out: said.
         let reasons = gcc("-O2 --coverage -L /opt/lib -g");
         assert!(reasons.len() == 3 && reasons[1] == "there is more than one input file (/opt/lib is read as one)" && reasons[2].starts_with("-L "), "{reasons:?}");
+        // The stray word after a value the reader takes apart from its
+        // flag; two stray words, each said.
+        for (flags, stray) in [("-O2 -I /usr/include /opt/x.a", "/opt/x.a"), ("-D NDEBUG CCTK_DEBUG", "CCTK_DEBUG"), ("-include stdio.h extra.o", "extra.o"), ("-isystem /usr/include /usr/local/include", "/usr/local/include")] {
+            let reasons = gcc(flags);
+            assert_eq!(reasons, [format!("there is more than one input file ({stray} is read as one)")], "{flags}");
+        }
+        let reasons = gcc("-O2 -L /usr/lib -L /usr/lib64 -pg");
+        assert!(reasons.len() == 4 && !reasons.iter().any(|why| why.contains("unless")), "{reasons:?}");
+        let reasons = gcc("-O2 /a.o /b.o -fipa-pta");
+        assert_eq!(reasons.len(), 3, "{reasons:?}");
+        assert!(reasons[0].contains("/a.o is read") && reasons[1].contains("/b.o is read") && reasons[2].starts_with("-fipa-pta"), "{reasons:?}");
+        let nvcc_reasons = said(identity::Family::Nvcc, "--objdir-as-tempdir --gpu-architecture sm_80 sm_86", "probe.cu");
+        assert_eq!(nvcc_reasons, ["there is more than one input file (sm_86 is read as one)"]);
         // A value the reader takes apart from its flag is no second input.
         for flags in ["-O2 -isystem /usr/include -L /opt/lib", "-I /usr/include/x -L /opt/lib", "-D NDEBUG -L /opt/lib", "--param max-inline-insns-single=1000 -L /opt/lib"] {
             let reasons = gcc(flags);
             assert!(reasons.iter().any(|why| why.contains("/opt/lib is read as one")) && !reasons.iter().any(|why| why.contains("/usr/include is") || why.contains("NDEBUG is") || why.contains("1000 is")), "{flags}: {reasons:?}");
         }
         // And what comes after it is read on.
-        let (reasons, left) = every_reason(|words: &[OsString]| parse_flags(identity::Family::Gcc, words, "probe.c"), &["-O2", "-fsanitize=address", "-L", "/opt/lib", "-fipa-pta", "-march=native"].map(OsString::from));
+        let (reasons, left) = every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-O2", "-fsanitize=address", "-L", "/opt/lib", "-fipa-pta", "-march=native"].map(OsString::from));
         assert_eq!(reasons.len(), 4, "{reasons:?}");
         assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
         // Not the flag before the word, which stays for the key.
-        let left = every_reason(|words: &[OsString]| parse_flags(identity::Family::Gcc, words, "probe.c"), &["-O2", "-march=native", "/opt/x.a"].map(OsString::from)).1;
+        let left = every_reason(|words: &[OsString], with_source: bool| parse_flags(identity::Family::Gcc, words, with_source.then_some("probe.c")), &["-O2", "-march=native", "/opt/x.a"].map(OsString::from)).1;
         assert_eq!(left, ["-O2", "-march=native"].map(OsString::from));
     }
 
@@ -1840,11 +1889,15 @@ mod tests {
         assert!(unusable_tmpdir(Some("".into()), Some(&scratch)).is_none());
         // A flag's value goes with it in what to leave out.
         let value = "-O2 -mllvm -x86-asm-syntax=intel".to_owned();
-        assert_eq!(with_its_value(&["-mllvm"], Some(&value)), "-mllvm -x86-asm-syntax=intel");
+        assert_eq!(shown_for("-mllvm is a flag the cache does not follow", Some(&value)).unwrap(), "-mllvm -x86-asm-syntax=intel");
         let value = "-O2 -L /opt/lib -g".to_owned();
-        assert_eq!(with_its_value(&["-L"], Some(&value)), "-L /opt/lib");
+        assert_eq!(shown_for("-L is not a flag the cache knows", Some(&value)).unwrap(), "-L /opt/lib");
+        let value = "-O2 --coverage /opt/x.a".to_owned();
+        assert_eq!(shown_for("--coverage is a flag the cache does not follow", Some(&value)).unwrap(), "--coverage");
+        let value = "-O3 -override-limits".to_owned();
+        assert_eq!(shown_for("-o is given more than once", Some(&value)).unwrap(), "-override-limits");
         let value = "-mllvm -a -O2 -mllvm -b".to_owned();
-        assert_eq!(with_its_value(&["-mllvm"], Some(&value)), "-mllvm -a and -mllvm -b");
+        assert_eq!(shown_for("-mllvm is a flag the cache does not follow", Some(&value)).unwrap(), "-mllvm -a and -mllvm -b");
         assert_eq!(reason_words("--ptxas-options=-O3 -O3 is not a flag the cache knows"), Some(vec!["--ptxas-options=-O3"]));
     }
 
