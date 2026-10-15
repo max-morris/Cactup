@@ -6399,9 +6399,11 @@ never built has none to check), without a build (`objcache::doctor`):
   configure writes, is not newer than the stamp; or, for an attempt of a
   cactup from before the stamp, it succeeded, its option list is the one
   installed with the configuration, and `make.config.defn` is not newer
-  than that. Otherwise (queued, ended before or in its configure,
-  configured again since) "not checked", said why; nothing of who
-  configured last, or from what, is reconstructed. Nothing of Cactus's
+  than that. Otherwise "not checked", said by what the record shows: no
+  record that the attempt configured it as it is now (it may be queued
+  or running; an older cactup's builds record none), or configured again
+  since; nothing of who configured last, or from what, is reconstructed.
+  The stamp step never stops a build (`|| true`). Nothing of Cactus's
   switches or of which variable feeds which is written into the doctor.
   Only the first (decision 32): that what
   comes after it is not checked is said once, to be seen by running the

@@ -3161,6 +3161,23 @@ rewrite, prune, hand configure, late configure, revert, resubmit,
 virtual, failed, not configured) says true things; `et`, `m5a`, `m5b`
 clean.
 
+### M5 part 2, round 29 (on `8617302`): BLOCKED by both
+
+A re-ran rounds 1 to 28 (round 28's blockers fixed; the gate's
+assumptions checked in Cactus: only configure writes `make.config.defn`,
+through a temporary file in `config-data` and `mv`; a failed `-config`
+exits 2, so `set -e` leaves no stamp). Blocking, fixed in the commit
+after this record: the reason for "not checked" where the newest
+attempt has no stamp listed causes ("queued, or ended before or in its
+configure") that are not the only ones (an older cactup's build that
+configured and failed in a compile; a build running): it says what the
+record shows, that the attempt left no record that it configured the
+configuration as it is now (B raised the same: a pre-stamp build that
+configured and failed, `m5pb25-ranfail`). Also: help and user docs say
+when the compilers and flags are checked (B: they had round 27's gate,
+and called a failed last configure unchecked, where the newest build's
+stamp vouches for what it left); the stamp step ends `|| true`.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

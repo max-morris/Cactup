@@ -2115,7 +2115,8 @@ fn prepare_with_cache(
         // Which attempt configured the config last (`cache doctor` reads it).
         // A byte written, so that the time is the file server's, also where
         // the step runs again (CLAUDE.md, locking).
-        steps.push(format!("echo > {}", sh_quote(&attempt.configured_stamp_path())));
+        // (Never what stops a build: `cache doctor` then says it cannot tell.)
+        steps.push(format!("echo > {} || true", sh_quote(&attempt.configured_stamp_path())));
         if opts.clean {
             steps.push(format!("{make} {name}-clean"));
         }
@@ -3858,7 +3859,7 @@ mod tests {
         let config = "echo yes | /fakemake -j1 sim-config options='/inst/Cactus/configs/sim/.cactup-builds/0000/\
                       cactup-optionlist.cfg' THORNLIST='/inst/Cactus/configs/sim/.cactup-builds/0000/cactup-thornlist.th'";
 
-        let stamp = "echo > '/inst/Cactus/configs/sim/.cactup-builds/0000/configured'";
+        let stamp = "echo > '/inst/Cactus/configs/sim/.cactup-builds/0000/configured' || true";
         let (off, wrote) = staged_script(Mode::Off, false);
         assert_eq!(off, [config, stamp, "/fakemake -j1 sim", "/fakemake -j1 sim-utils"]);
         assert!(!wrote, "an off build writes nothing for the cache");
