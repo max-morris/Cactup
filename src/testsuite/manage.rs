@@ -266,12 +266,33 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
     match job_state(sched, &job_id)? {
         Job::Unread => {
             if let Err(e) = send_stop(sched, &job_id) {
-                println!("{}, and would not stop it, so it may have ended: {e:#}", unread(&job_id));
+                let refused = format!("{e:#}");
+                if run.lock_live()? {
+                    println!(
+                        "{}, and would not stop it ({}), but the run's running.lock is held: nothing recorded",
+                        sentence(unread(&job_id)),
+                        refused.trim_end()
+                    );
+                    return Ok(());
+                }
+                // Not stopped, and nothing of the run holds its lock:
+                // over (Torque's `qdel` refuses a completed job), so
+                // `delete` and a new run go ahead.
+                println!(
+                    "{}, and would not stop it ({}); nothing of the run holds its lock, so cactup takes it as ended",
+                    sentence(unread(&job_id)),
+                    refused.trim_end()
+                );
+                run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
+                run.meta.status = Some("U".to_owned());
+                run.store_meta()?;
                 return Ok(());
             }
-            println!("{}; it took the stop", unread(&job_id));
+            // Taken: stopped, or over before (Slurm's `scancel` takes an
+            // ended job without a word); over either way.
+            println!("{}; asked the scheduler to stop it (if it had not ended already)", sentence(unread(&job_id)));
             run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
-            run.log("test-stop", &format!("stopped job {job_id}"));
+            run.log("test-stop", &format!("asked the scheduler to stop job {job_id}"));
         }
         Job::Live => {
             send_stop(sched, &job_id)?;
@@ -303,8 +324,10 @@ enum Job {
     /// Listed in a state no pattern of the machine's reads
     /// (`JobStatus::Error`): suspended (Slurm's `S`), exiting (Torque's
     /// `E`), or over (Slurm and Torque list an ended job for a while: `CD`,
-    /// `F`, `CA`, `C`). Whether the scheduler takes a stop for it tells
-    /// which: one it will not stop is not taken for live.
+    /// `F`, `CA`, `C`). Which is not known: a stop the scheduler takes ends
+    /// it either way (Slurm's `scancel` takes an ended job too); one it
+    /// refuses (Torque's `qdel` of a completed job) is over where nothing
+    /// of the run holds its lock.
     Unread,
     /// Not listed, or the query failed.
     Absent,
@@ -321,6 +344,15 @@ fn job_state(sched: &Scheduler, job_id: &str) -> Res<Job> {
 /// The scheduler's stop of `job_id`, with what failed named.
 fn send_stop(sched: &Scheduler, job_id: &str) -> Res<()> {
     sched.stop(job_id).with_context(|| format!("the scheduler's stop command failed for test job {job_id}"))
+}
+
+/// `text` with its first letter capitalized, for a line of its own.
+fn sentence(text: String) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
 }
 
 /// What `stop` and `delete` say of a [`Job::Unread`] job.
@@ -357,12 +389,15 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
-                        "{}, would not stop it ({e:#}), and the run's running.lock is held; delete it \
-                         once it has ended",
-                        unread(job_id)
+                        "{}, would not stop it ({}), and the run's running.lock is held: delete it once \
+                         the run has let go of the lock (a lock left by a run that ended expires \
+                         within {} minutes)",
+                        unread(job_id),
+                        format!("{e:#}").trim_end(),
+                        crate::lock::LOCK_STALE_SECS / 60
                     );
                 }
-                println!("{}, and would not stop it, so it may have ended; deleting the run", unread(job_id));
+                println!("{}, and would not stop it; nothing of the run holds its lock, so cactup takes it as ended: deleting it", sentence(unread(job_id)));
             }
         }
     }
@@ -694,14 +729,21 @@ mod tests {
         )
         .unwrap();
         let refusing = Scheduler::new(&refusing);
-        let mut ended = open(true, false, "JOB-7");
-        stop_run(&mut ended, &refusing, "t").unwrap();
-        assert_eq!(TestRun::open(&ended.dir).unwrap().pending_job(), Some("JOB-7"));
+        let ended = open(true, false, "JOB-7");
         assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("use -f"));
         clear_to_delete(&ended, &refusing, "t", true).unwrap();
         let held_ended = crate::lock::LinkLock::acquire(&ended.running_lock_path()).unwrap();
         assert!(clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string().contains("running.lock is held"));
+        // With the lock held, `stop` records nothing; without it, the run
+        // has ended, and `delete` then goes ahead without `-f`.
+        let mut ended = TestRun::open(&ended.dir).unwrap();
+        stop_run(&mut ended, &refusing, "t").unwrap();
+        assert_eq!(TestRun::open(&ended.dir).unwrap().pending_job(), Some("JOB-7"));
         drop(held_ended);
+        stop_run(&mut ended, &refusing, "t").unwrap();
+        let ended = TestRun::open(&ended.dir).unwrap();
+        assert_eq!(ended.pending_job(), None);
+        clear_to_delete(&ended, &refusing, "t", false).unwrap();
     }
 
     /// `list`'s whole point is one `get_statuses` call instead of one

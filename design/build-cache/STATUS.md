@@ -3449,6 +3449,19 @@ scheduler refuses, goes ahead unless the run's lock is held; a failed
 stop command is named. Not blocking: the guard before a new run counts
 only R, Q and H as live (as master and sims).
 
+Round 6 (on `9377920`): BLOCKED by both. A: Slurm's `scancel` takes an
+ended job without a word (exit 0), so `stop` said "it took the stop" of a
+job that had ended (ran with a fake `scancel` as Slurm's source has it).
+B: on Torque a completed job (`C`), which `qdel` refuses, kept `delete`
+refusing, its advice (`test stop` first) never unblocking it (ran; master
+trashed it). Not blocking: the refusal of `delete -f` with the lock held
+did not say the lock expires; the docs on `--force`; the lines' first
+letter; a suspended job whose lock lapsed and whose stop fails at that
+moment is taken as ended (needs a coincidence). Fixed in the commit after
+this record: `stop` says only that it asked the scheduler; where the
+scheduler refuses and nothing of the run holds its lock, `stop` takes the
+run as ended and records it, so `delete` goes ahead; the texts.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

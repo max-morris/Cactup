@@ -4327,10 +4327,14 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   scheduler lists in a state no pattern of the machine's reads may be
   suspended (Slurm's `S`), exiting (Torque's `E`) or over (Slurm and
   Torque list an ended job for a while: `CD`, `F`, `CA`, `C`): `stop` asks
-  the scheduler to stop it, and records `finished` only if it took the
-  stop (one it refuses may have ended, said so); `delete` refuses it
-  without `-f`, and with `-f` stops it, or, where the scheduler refuses,
-  goes ahead unless the run's `running.lock` is held. `stop` records
+  the scheduler to stop it, and records `finished` if it took the request
+  (stopped, or ended before: Slurm's `scancel` takes an ended job without
+  a word, so `stop` says only that it asked); where it refuses (Torque's
+  `qdel` of a completed job), `stop` records `finished` too unless the
+  run's `running.lock` is held (nothing of the run is left, so it is taken
+  as ended), and `delete` then goes ahead. `delete` refuses it without
+  `-f`, and with `-f` stops it, or, where the scheduler refuses, goes ahead
+  unless the run's `running.lock` is held. `stop` records
   `finished` once it has sent the stop (a status
   query that fails reads as "not in the queue", so nothing else does). On a
   machine whose scheduler is the host's own processes (the generic machine
