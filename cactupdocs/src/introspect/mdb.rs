@@ -109,12 +109,74 @@ pub fn introspect(repo_root: &Path) -> Result<MdbModel> {
         }
     }
 
+    // A key whose type is a string enum (`job-ids`, `default-action`) names
+    // its values, not a table.
+    let enums: HashMap<String, String> = meta_file
+        .items
+        .iter()
+        .chain(&optionlist_file.items)
+        .filter_map(|item| match item {
+            syn::Item::Enum(e) => string_enum(e).map(|desc| (e.ident.to_string(), desc)),
+            _ => None,
+        })
+        .collect();
+    for table in meta_tables.iter_mut().chain([&mut optionlist_header, &mut optionlist_runs_on]) {
+        for field in &mut table.fields {
+            for (name, desc) in &enums {
+                field.type_desc = field.type_desc.replace(&format!("table ({name})"), desc);
+            }
+        }
+    }
+
     Ok(MdbModel {
         meta_tables,
         optionlist_header,
         optionlist_runs_on,
         template_vars: Vec::new(),
     })
+}
+
+/// How a key whose type is the enum `e` reads in TOML, when `e` is a
+/// deserializable enum of unit variants: `string: "a" or "b"`, each value
+/// as serde spells it (`rename`, else `rename_all` lowercase or kebab-case,
+/// else the variant's name). `None` for any other enum.
+fn string_enum(e: &syn::ItemEnum) -> Option<String> {
+    if !has_deserialize_derive(&e.attrs) {
+        return None;
+    }
+    let rename_all = serde_string_arg(&e.attrs, "rename_all");
+    let mut values = Vec::new();
+    for variant in &e.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return None;
+        }
+        let name = variant.ident.to_string();
+        let value = match (serde_string_arg(&variant.attrs, "rename"), rename_all.as_deref()) {
+            (Some(renamed), _) => renamed,
+            (None, Some("lowercase")) => name.to_lowercase(),
+            (None, Some("kebab-case")) => camel_to_kebab(&name),
+            (None, Some(_)) => return None,
+            (None, None) => name,
+        };
+        values.push(format!("\"{value}\""));
+    }
+    let (last, rest) = values.split_last()?;
+    Some(match rest {
+        [] => format!("string: {last}"),
+        rest => format!("string: {} or {last}", rest.join(", ")),
+    })
+}
+
+/// `BlockingSubmit` → `blocking-submit`.
+fn camel_to_kebab(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('-');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 /// The struct that actually defines a table's TOML schema: the private
@@ -462,4 +524,50 @@ fn has_deserialize_derive(attrs: &[Attribute]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Every key the schema reference calls a table is one: its type is a
+    /// struct of `meta.rs` or `optionlist.rs`, never an enum or anything
+    /// else that fell through `describe_type`; a string enum names its
+    /// values.
+    #[test]
+    fn no_key_is_called_a_table_that_is_not_one() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let model = introspect(&repo).unwrap();
+        let mut structs = std::collections::HashSet::new();
+        for file in ["meta.rs", "optionlist.rs"] {
+            let source = std::fs::read_to_string(repo.join("src/mdb").join(file)).unwrap();
+            for item in parse_file(&source).unwrap().items {
+                if let syn::Item::Struct(s) = item {
+                    structs.insert(s.ident.to_string());
+                }
+            }
+        }
+        let tables = model.meta_tables.iter().chain([&model.optionlist_header, &model.optionlist_runs_on]);
+        let mut bad = Vec::new();
+        let mut seen = HashMap::new();
+        for table in tables {
+            for field in &table.fields {
+                seen.insert(field.toml_key.clone(), field.type_desc.clone());
+                let mut rest = field.type_desc.as_str();
+                while let Some(at) = rest.find("table (") {
+                    let name = &rest[at + "table (".len()..];
+                    let name = &name[..name.find(')').unwrap_or(name.len())];
+                    if !structs.contains(name) {
+                        bad.push(format!("{} {}: {}", table.struct_name, field.toml_key, field.type_desc));
+                    }
+                    rest = &rest[at + 1..];
+                }
+                assert!(!field.type_desc.contains("unknown"), "{} {}: {}", table.struct_name, field.toml_key, field.type_desc);
+            }
+        }
+        assert!(bad.is_empty(), "keys called a table that are not one:\n{}", bad.join("\n"));
+        assert_eq!(seen["job-ids"], "string: \"scheduler\" or \"pids\"");
+        assert_eq!(seen["default-action"], "string: \"run\" or \"submit\"");
+    }
 }

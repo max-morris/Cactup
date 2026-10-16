@@ -420,7 +420,7 @@ fn start_impl(
     if let Some(sub_script_name) = &sub_script_name {
         // Submit-phase ENV_SETUP under the submit universe (§6.1).
         let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
+        submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
         let submit_script =
             generate_script(machine, ScriptKind::Submit, sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
@@ -916,6 +916,7 @@ mod tests {
             full_rebuild: false,
             make: None,
             build_env: String::new(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: None,
             config_meta: toml::from_str(

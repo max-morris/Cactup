@@ -315,9 +315,6 @@ Edit `submitscripts/default.sh`. Here's a complete SLURM example:
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
 
-# Source environment
-@ENV_SETUP@
-
 # Set up checkpoint walltime
 export CHECKPOINT_WALLTIME=@CHECKPOINT_WALLTIME@
 
@@ -325,6 +322,12 @@ cd @RUNDIR@-active
 
 srun @EXECUTABLE@ @PARFILE@
 ```
+
+The script does not write the environment setup: cactup puts the machine's
+setup (and any provisioning steps) into every `.sh` submit and run script
+itself, after the directives, so writing `@ENV_SETUP@` as well would run it
+twice. Only a `.py` script prints `ENV_SETUP` itself (see
+[Scripts & Variables](scripts-and-variables.html#environment-setup-env_setup)).
 
 If your cluster uses modules or special configurations, adjust accordingly.
 
@@ -347,8 +350,6 @@ Create `submitscripts/test.sh` for test submissions (smaller, faster):
 #SBATCH --output=@STDOUT_FILE@
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
-
-@ENV_SETUP@
 
 cd @RUNDIR@-active
 
@@ -396,7 +397,7 @@ cpus-per-task  = 32
 ```
 
 The script itself is structurally identical to `submitscripts/default.sh` —
-same `#SBATCH` directives, same `@ENV_SETUP@` — except the final line
+same `#SBATCH` directives — except the final line
 re-invokes cactup to build instead of to run:
 
 ```bash
@@ -410,8 +411,6 @@ re-invokes cactup to build instead of to run:
 #SBATCH --output=@STDOUT_FILE@
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
-
-@ENV_SETUP@
 
 cd @SOURCEDIR@
 
@@ -441,8 +440,6 @@ Edit `runscripts/default.sh`:
 
 set -e
 
-@ENV_SETUP@
-
 cd @RUNDIR@-active
 
 if [ @RUNDEBUG@ -eq 0 ]; then
@@ -458,8 +455,6 @@ Edit `runscripts/test.sh` for interactive test runs:
 #!/bin/bash
 
 set -e
-
-@ENV_SETUP@
 
 cd @RUNDIR@-active
 

@@ -28,7 +28,7 @@ A change that would break those binaries starts a new generation instead.
 
 - **`mdb/GENERATION`** holds the current generation, a single integer.
   cactup reads it at build time, and `cactup --version` shows it
-  (`… mdb generation 2`).
+  (`… mdb generation 3`).
 - **`mdb/GENERATIONS.md`** is the changelog: one `## Generation N` entry per
   generation, saying what changed and how to bring an overlay machine
   forward. It is published with the MDB, so every user has a copy at
@@ -111,7 +111,7 @@ generation it was written for in its `meta.toml`:
 
 ```toml
 [cactup]
-mdb-generation = 2
+mdb-generation = 3
 ```
 
 `cactup machine create` writes the current generation for you. A machine

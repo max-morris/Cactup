@@ -4,7 +4,7 @@
 //! Every table below is `deny_unknown_fields`: a key cactup does not model is
 //! a hard parse error naming it, so a typo (`max-cpu-per-node`) fails loudly
 //! at load instead of silently doing nothing. simfactory's informational-only
-//! keys were therefore either modelled here or dropped from the ported
+//! keys were therefore either modeled here or dropped from the ported
 //! machines — a fact worth keeping is a TOML comment, not a dead key.
 
 use crate::template::{Syntax, VarSet};
@@ -29,18 +29,34 @@ static IMPLICIT_HOST: Universe = Universe {
     wrapper: None,
     environment: Environment {
         env_setup: None,
-        env_build_setup: None,
-        env_submit_setup: None,
-        env_run_setup: None,
+        build_env_setup: None,
+        submit_env_setup: None,
+        run_env_setup: None,
+        provision: None,
+        build_provision: None,
+        submit_provision: None,
+        run_provision: None,
     },
 };
 
-/// The three execution phases an `env-<phase>-setup` can target (§4.2, §6.1).
+/// The three execution phases a `<phase>-env-setup` or `<phase>-provision`
+/// can target (§4.2, §6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Build,
     Submit,
     Run,
+}
+
+impl Phase {
+    /// The phase's own provisioning key, as a generated script names it.
+    pub fn provision_key(&self) -> &'static str {
+        match self {
+            Phase::Build => "build-provision",
+            Phase::Submit => "submit-provision",
+            Phase::Run => "run-provision",
+        }
+    }
 }
 
 /// The per-queue script kinds (§4.4). `BuildSubmit` is opt-in: a machine
@@ -118,7 +134,7 @@ pub struct MachineInfo {
     pub hostname: Option<String>,
     pub location: Option<String>,
     pub description: Option<String>,
-    /// Purely informational (as are `location`/`description`) — modelled so a
+    /// Purely informational (as are `location`/`description`) — modeled so a
     /// ported machine can keep the fact rather than lose it to the strict
     /// schema.
     pub webpage: Option<String>,
@@ -252,32 +268,113 @@ pub enum BuildAction {
     Submit,
 }
 
+// §4.2, §6.1. The doc comments below are rendered into the schema
+// reference, so they carry no section references.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Environment {
+    /// Shell setup for every phase, usually module loads and exports: run
+    /// at the top of the build script, of the submit and build-submit
+    /// scripts and of the run script, and before cactup's scheduler
+    /// commands. Must only set the environment (see `provision`).
     pub env_setup: Option<String>,
-    pub env_build_setup: Option<String>,
-    pub env_submit_setup: Option<String>,
-    pub env_run_setup: Option<String>,
+    /// Appended to `env-setup` in the build script only (not in a
+    /// build-submit script, which is the submit phase's).
+    pub build_env_setup: Option<String>,
+    /// Appended to `env-setup` in the submit and build-submit scripts and
+    /// before cactup's scheduler commands: `submit` and `blocking-submit`
+    /// with the submit universe's keys over these, `get-status`,
+    /// `get-status-many`, `stop` and `exec-host` with these alone.
+    pub submit_env_setup: Option<String>,
+    /// Appended to `env-setup` in the run script only.
+    pub run_env_setup: Option<String>,
+    /// A provisioning step for every phase: commands that make or fetch
+    /// what the phase needs (a software environment, a file), run in the
+    /// build, submit, build-submit and run scripts after the setup, in a
+    /// subshell of its own under `set -e`. What it exports or changes in
+    /// its shell is lost when it ends; a failure stops the script. Never
+    /// run before cactup's scheduler commands or by `cache doctor`.
+    pub provision: Option<String>,
+    /// A provisioning step for the build script only, run after
+    /// `provision`.
+    pub build_provision: Option<String>,
+    /// A provisioning step for the submit and build-submit scripts only,
+    /// run after `provision`.
+    pub submit_provision: Option<String>,
+    /// A provisioning step for the run script only, run after `provision`.
+    pub run_provision: Option<String>,
 }
 
 impl Environment {
+    fn phase_setup(&self, phase: Phase) -> &Option<String> {
+        match phase {
+            Phase::Build => &self.build_env_setup,
+            Phase::Submit => &self.submit_env_setup,
+            Phase::Run => &self.run_env_setup,
+        }
+    }
+
+    fn phase_provision(&self, phase: Phase) -> &Option<String> {
+        match phase {
+            Phase::Build => &self.build_provision,
+            Phase::Submit => &self.submit_provision,
+            Phase::Run => &self.run_provision,
+        }
+    }
+
     /// The effective env block for a phase: `env-setup` followed by the
-    /// matching `env-<phase>-setup`, each empty when unset (§4.2).
+    /// matching `<phase>-env-setup`, each empty when unset (§4.2).
     pub fn effective(&self, phase: Phase) -> String {
-        let extra = match phase {
-            Phase::Build => &self.env_build_setup,
-            Phase::Submit => &self.env_submit_setup,
-            Phase::Run => &self.env_run_setup,
-        };
         let mut out = String::new();
-        for block in [&self.env_setup, extra].into_iter().flatten() {
+        for block in [&self.env_setup, self.phase_setup(phase)].into_iter().flatten() {
             if !out.is_empty() && !out.ends_with('\n') {
                 out.push('\n');
             }
             out.push_str(block);
         }
         out
+    }
+
+    /// The phase's provisioning steps as a script runs them, after the
+    /// effective setup (§6.1): `provision`, then the matching
+    /// `<phase>-provision`, each in a subshell of its own under `set -e`
+    /// (what it sets cannot reach the phase), each stopping the script with
+    /// its status when it fails, whether or not the script runs `set -e`
+    /// itself. Empty when the phase has none.
+    pub fn provisioning(&self, phase: Phase) -> String {
+        let steps = [("provision", &self.provision), (phase.provision_key(), self.phase_provision(phase))];
+        let mut out = String::new();
+        for (key, text) in steps {
+            let Some(text) = text.as_deref().filter(|text| !text.trim().is_empty()) else { continue };
+            let newline = if text.ends_with('\n') { "" } else { "\n" };
+            // The `:` after the text makes the step's status what `set -e`
+            // makes of it: a failing command stops it, `exit N` gives N, and
+            // a false `a && b` at its end (which `set -e` passes over) is
+            // not a failure. `$?` in the case's arm is still the subshell's
+            // status: the word a case tests runs no command. Not
+            // `( … ) || exit`, which would turn the subshell's `set -e` off.
+            out.push_str(&format!(
+                "# {key}, in a subshell: what it sets stays there; a failure stops this script\n\
+                 (\nset -e\n{text}{newline}:\n)\ncase $? in 0) ;; *) exit $? ;; esac\n"
+            ));
+        }
+        out
+    }
+
+    /// This environment's keys where set, `base`'s where not: a universe's
+    /// table over the machine's `[environment]` (§6.1).
+    fn over(&self, base: &Environment) -> Environment {
+        let pick = |o: &Option<String>, b: &Option<String>| o.clone().or_else(|| b.clone());
+        Environment {
+            env_setup: pick(&self.env_setup, &base.env_setup),
+            build_env_setup: pick(&self.build_env_setup, &base.build_env_setup),
+            submit_env_setup: pick(&self.submit_env_setup, &base.submit_env_setup),
+            run_env_setup: pick(&self.run_env_setup, &base.run_env_setup),
+            provision: pick(&self.provision, &base.provision),
+            build_provision: pick(&self.build_provision, &base.build_provision),
+            submit_provision: pick(&self.submit_provision, &base.submit_provision),
+            run_provision: pick(&self.run_provision, &base.run_provision),
+        }
     }
 }
 
@@ -331,6 +428,34 @@ pub struct Scheduler {
     /// self-allocates from the head node). Accepts a string or a list.
     #[serde(default, deserialize_with = "string_or_seq")]
     pub allocation_env: Vec<String>,
+    // §10; the third of the questions decision 35 answers (design/
+    // build-cache/DECISIONS.md, 35; not its decision 3): declared now,
+    // read by the liveness work later.
+    /// What a job id is: `"scheduler"` (the default), an id the batch
+    /// system hands out, or `"pids"`, the pid of a process on the host the
+    /// job was submitted from, where the scheduler is that host's own
+    /// processes (`ps`, `kill`). Declares a fact; cactup does not yet act
+    /// on it.
+    #[serde(default)]
+    pub job_ids: JobIds,
+    /// A regular expression matching a line of `get-status`'s output
+    /// (stdout or stderr) that says the scheduler does not know the job,
+    /// `@JOB_ID@` substituted as in the other patterns. Tells a job the
+    /// scheduler has forgotten from a status query that failed. Declares a
+    /// fact; cactup does not yet act on it.
+    pub unknown_job_pattern: Option<String>,
+}
+
+/// `[scheduler].job-ids`: where a machine's job ids come from.
+// §10.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobIds {
+    /// Handed out by a batch system.
+    #[default]
+    Scheduler,
+    /// The pid of a process on the submitting host.
+    Pids,
 }
 
 /// Deserialize a TOML string OR array-of-strings into a `Vec<String>` — lets
@@ -557,15 +682,30 @@ struct UniverseRaw {
     wrapper_argv: Option<Vec<String>>,
     /// Template form: one shell command containing exactly one `@COMMAND@`.
     wrapper: Option<String>,
-    /// Replaces the machine `[environment]` key of the same name for work run
-    /// in this universe (§6.1, `Meta::effective_env`).
+    // Each environment key below replaces the machine `[environment]` key
+    // of the same name for work run in this universe (§6.1,
+    // `Meta::effective_env`, `Meta::effective_provisioning`).
+    /// Replaces the machine `[environment].env-setup` for what runs in
+    /// this universe: the script of a phase this universe is that phase's
+    /// universe for, and `submit`/`blocking-submit` when it is the submit
+    /// universe (`get-status`, `stop` and the other scheduler queries keep
+    /// the machine's keys). Each key below likewise; an empty value turns
+    /// the machine's off here.
     env_setup: Option<String>,
-    /// Replaces the machine `[environment].env-build-setup` (§6.1).
-    env_build_setup: Option<String>,
-    /// Replaces the machine `[environment].env-submit-setup` (§6.1).
-    env_submit_setup: Option<String>,
-    /// Replaces the machine `[environment].env-run-setup` (§6.1).
-    env_run_setup: Option<String>,
+    /// Replaces the machine `[environment].build-env-setup`.
+    build_env_setup: Option<String>,
+    /// Replaces the machine `[environment].submit-env-setup`.
+    submit_env_setup: Option<String>,
+    /// Replaces the machine `[environment].run-env-setup`.
+    run_env_setup: Option<String>,
+    /// Replaces the machine `[environment].provision`.
+    provision: Option<String>,
+    /// Replaces the machine `[environment].build-provision`.
+    build_provision: Option<String>,
+    /// Replaces the machine `[environment].submit-provision`.
+    submit_provision: Option<String>,
+    /// Replaces the machine `[environment].run-provision`.
+    run_provision: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for Universe {
@@ -579,9 +719,13 @@ impl<'de> Deserialize<'de> for Universe {
             wrapper: raw.wrapper,
             environment: Environment {
                 env_setup: raw.env_setup,
-                env_build_setup: raw.env_build_setup,
-                env_submit_setup: raw.env_submit_setup,
-                env_run_setup: raw.env_run_setup,
+                build_env_setup: raw.build_env_setup,
+                submit_env_setup: raw.submit_env_setup,
+                run_env_setup: raw.run_env_setup,
+                provision: raw.provision,
+                build_provision: raw.build_provision,
+                submit_provision: raw.submit_provision,
+                run_provision: raw.run_provision,
             },
         })
     }
@@ -846,24 +990,45 @@ impl Meta {
         self.universes.get(HOST_UNIVERSE)
     }
 
-    /// Effective env block for `phase` when executing in `universe` (§6.1):
-    /// the universe's set env keys replace the machine `[environment]` ones
-    /// KEY-BY-KEY; unset keys inherit. `None` (bare / --no-universe /
-    /// implicit host) and unknown names fall back to the machine env.
-    pub fn effective_env(&self, universe: Option<&str>, phase: Phase) -> String {
-        let base = &self.environment;
+    /// The environment keys in force in `universe` (§6.1): the universe's
+    /// set keys replace the machine `[environment]` ones KEY-BY-KEY; unset
+    /// keys inherit. `None` (bare / --no-universe / implicit host) and
+    /// unknown names give the machine's.
+    fn environment_in(&self, universe: Option<&str>) -> std::borrow::Cow<'_, Environment> {
         match universe.and_then(|u| self.universes.get(u)) {
-            None => base.effective(phase),
-            Some(u) => {
-                let over = &u.environment;
-                let pick = |o: &Option<String>, b: &Option<String>| o.clone().or_else(|| b.clone());
-                Environment {
-                    env_setup: pick(&over.env_setup, &base.env_setup),
-                    env_build_setup: pick(&over.env_build_setup, &base.env_build_setup),
-                    env_submit_setup: pick(&over.env_submit_setup, &base.env_submit_setup),
-                    env_run_setup: pick(&over.env_run_setup, &base.env_run_setup),
-                }
-                .effective(phase)
+            None => std::borrow::Cow::Borrowed(&self.environment),
+            Some(u) => std::borrow::Cow::Owned(u.environment.over(&self.environment)),
+        }
+    }
+
+    /// Effective env block for `phase` when executing in `universe` (§6.1):
+    /// `env-setup` then `<phase>-env-setup`, as `environment_in` resolves
+    /// them. The setup alone, without the provisioning steps: what the build
+    /// cache digests and `cache doctor` runs, and what precedes the
+    /// scheduler's own commands.
+    pub fn effective_env(&self, universe: Option<&str>, phase: Phase) -> String {
+        self.environment_in(universe).effective(phase)
+    }
+
+    /// The provisioning steps for `phase` in `universe` (§6.1), as a script
+    /// runs them right after the effective setup: `provision`, then
+    /// `<phase>-provision`, each in a subshell. Empty when there are none.
+    pub fn effective_provisioning(&self, universe: Option<&str>, phase: Phase) -> String {
+        self.environment_in(universe).provisioning(phase)
+    }
+
+    /// What a generated submit or run script gets (§6.1): the effective
+    /// setup followed by the provisioning steps. `@ENV_SETUP@` holds this,
+    /// and a `.sh` script has it prepended.
+    pub fn phase_env(&self, universe: Option<&str>, phase: Phase) -> String {
+        let env = self.environment_in(universe);
+        let (setup, provisioning) = (env.effective(phase), env.provisioning(phase));
+        match (setup.is_empty(), provisioning.is_empty()) {
+            (_, true) => setup,
+            (true, false) => provisioning.trim_end_matches('\n').to_owned(),
+            (false, false) => {
+                let newline = if setup.ends_with('\n') { "" } else { "\n" };
+                format!("{setup}{newline}{}", provisioning.trim_end_matches('\n'))
             }
         }
     }
@@ -922,7 +1087,7 @@ impl Meta {
             }
         }
 
-        // §10: `blocking-submit` is an extra *flavour* of `submit`, never a
+        // §10: `blocking-submit` is an extra *flavor* of `submit`, never a
         // replacement for it — only `build submit --block` reaches for it, and
         // every other submission on the machine still goes through `submit`.
         // Declaring one without the other is therefore always a mistake, and a
@@ -930,8 +1095,17 @@ impl Meta {
         if self.scheduler.blocking_submit.is_some() && self.scheduler.submit.is_none() {
             bail!(
                 "[scheduler].blocking-submit is declared without [scheduler].submit; it is the \
-                 blocking flavour of that command, not a substitute for it"
+                 blocking flavor of that command, not a substitute for it"
             );
+        }
+
+        // §10: the pattern is compiled per query with the job id put in, as
+        // the other status patterns are; any id must leave it valid.
+        if let Some(pattern) = &self.scheduler.unknown_job_pattern {
+            let pattern = pattern.replace("@JOB_ID@", &regex::escape("12345.server"));
+            if let Err(e) = regex::Regex::new(&pattern) {
+                bail!("[scheduler].unknown-job-pattern is not a valid regular expression: {e}");
+            }
         }
 
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
@@ -1209,7 +1383,7 @@ mod tests {
 
         [environment]
         env-setup = "module load gcc/11 openmpi/4"
-        env-build-setup = "module load cmake/3.27"
+        build-env-setup = "module load cmake/3.27"
 
         [queues.checkpt]
         gpu = false
@@ -1272,7 +1446,7 @@ mod tests {
         // Top level.
         let msg = err(format!("{MIKE}\n[bogus]\nx = 1\n"));
         assert!(msg.contains("unknown field `bogus`"), "{msg}");
-        // A modelled table — `allocation` is a knob, never a machine key.
+        // A modeled table — `allocation` is a knob, never a machine key.
         let msg = err(MIKE.replace("[scheduler]", "[scheduler]\n        allocation = \"proj\""));
         assert!(msg.contains("unknown field `allocation`"), "{msg}");
         // Per-queue.
@@ -1291,7 +1465,7 @@ mod tests {
     }
 
     /// The two keys §4.2/§4.8 keep for the human reader alone: a closed schema
-    /// means they have to be modelled to be writable at all.
+    /// means they have to be modeled to be writable at all.
     #[test]
     fn documentation_only_keys_still_parse() {
         let text = MIKE.replace("[paths]", "webpage = \"https://hpc.lsu.edu/mike\"\n\n        [paths]");
@@ -1610,7 +1784,7 @@ mod tests {
         assert!(!mike().can_submit_builds());
     }
 
-    /// §10: the blocking flavour of `submit` cannot stand in for it.
+    /// §10: the blocking flavor of `submit` cannot stand in for it.
     #[test]
     fn blocking_submit_without_submit_is_rejected() {
         let meta: Meta = toml::from_str(
@@ -1760,7 +1934,7 @@ mod tests {
 
         [environment]
         env-setup = "export BASE=1"
-        env-build-setup = "module load base-build"
+        build-env-setup = "module load base-build"
 
         [queues.gpu]
         gpu = true
@@ -1777,7 +1951,7 @@ mod tests {
 
         # Identity universe (§4.8): no wrapper, just a build-env override.
         [universes.host]
-        env-build-setup = "module load gcc/9"
+        build-env-setup = "module load gcc/9"
 
         [universes.et-sing]
         wrapper-argv = ["apptainer", "exec", "--nv", "et.sif"]
@@ -1957,7 +2131,7 @@ mod tests {
         let meta = db();
         // No universe: the machine [environment] as before.
         assert_eq!(meta.effective_env(None, Phase::Build), "export BASE=1\nmodule load base-build");
-        // host overrides env-build-setup only; env-setup is inherited (§6.1).
+        // host overrides build-env-setup only; env-setup is inherited (§6.1).
         assert_eq!(meta.effective_env(Some("host"), Phase::Build), "export BASE=1\nmodule load gcc/9");
         // Unset phase keys inherit, concatenation semantics unchanged.
         assert_eq!(meta.effective_env(Some("host"), Phase::Run), "export BASE=1");
@@ -1965,6 +2139,141 @@ mod tests {
         assert_eq!(meta.effective_env(Some("et-sing"), Phase::Build), "export BASE=1\nmodule load base-build");
         // Unknown names fall back to the machine env (resolution errors first).
         assert_eq!(meta.effective_env(Some("nope"), Phase::Build), "export BASE=1\nmodule load base-build");
+    }
+
+    /// The provisioning keys (§6.1): `provision` in every phase, then the
+    /// phase's own, each in a subshell after the setup, overridden by a
+    /// universe key by key like the setups; never part of the setup itself.
+    #[test]
+    fn provisioning_follows_the_setup_key_by_key() {
+        let text = DB
+            .replace(
+                "build-env-setup = \"module load base-build\"",
+                "build-env-setup = \"module load base-build\"\n        provision = \"mkdir -p /tmp/all\"\n        run-provision = \"touch /tmp/run\"",
+            )
+            .replace(
+                "build-env-setup = \"module load gcc/9\"",
+                "build-env-setup = \"module load gcc/9\"\n        build-provision = \"fetch-it\"",
+            );
+        let meta: Meta = toml::from_str(&text).unwrap();
+        meta.validate("db").unwrap();
+        // The setup is the setup alone.
+        assert_eq!(meta.effective_env(Some("host"), Phase::Build), "export BASE=1\nmodule load gcc/9");
+        // The machine's: `provision` only for a build, then `run-provision`
+        // for a run, each a subshell of its own.
+        let build = meta.effective_provisioning(None, Phase::Build);
+        assert_eq!(build.matches("\n(\nset -e\n").count(), 1, "{build}");
+        assert!(build.starts_with("# provision, in a subshell") && build.contains("mkdir -p /tmp/all\n:\n)\ncase $? in"), "{build}");
+        let run = meta.effective_provisioning(None, Phase::Run);
+        let (all, own) = (run.find("mkdir -p /tmp/all").unwrap(), run.find("touch /tmp/run").unwrap());
+        assert!(all < own && run.contains("# run-provision, in a subshell"), "{run}");
+        assert_eq!(meta.effective_provisioning(None, Phase::Submit), meta.effective_provisioning(None, Phase::Build));
+        // The host universe adds a build-provision and inherits `provision`.
+        let host = meta.effective_provisioning(Some("host"), Phase::Build);
+        assert!(host.find("mkdir -p /tmp/all").unwrap() < host.find("fetch-it").unwrap(), "{host}");
+        // What a script gets: the setup, then the steps.
+        let phase = meta.phase_env(Some("host"), Phase::Build);
+        assert!(phase.starts_with("export BASE=1\nmodule load gcc/9\n# provision,") && phase.ends_with("esac"), "{phase}");
+        assert_eq!(meta.phase_env(Some("et-sing"), Phase::Submit).lines().next(), Some("export BASE=1"));
+        // None at all: nothing is added.
+        assert_eq!(db().phase_env(None, Phase::Run), "export BASE=1");
+        assert_eq!(db().effective_provisioning(None, Phase::Run), "");
+    }
+
+    /// A universe inherits the machine's provisioning keys unless it sets
+    /// its own (§6.1), and an empty one turns the machine's off there: what
+    /// a generation-2 universe with its own setup never ran (the creation
+    /// lines were in the machine's setup it replaced) stays off with
+    /// `provision = ""`.
+    #[test]
+    fn an_empty_universe_provisioning_key_turns_the_machine_s_off() {
+        let text = DB
+            .replace("env-setup = \"export BASE=1\"", "env-setup = \"export BASE=1\"\n        provision = \"python3 -m venv ~/venv\"\n        build-provision = \"fetch-it\"")
+            .replace("wrapper-argv = [\"apptainer\", \"exec\", \"et.sif\"]", "wrapper-argv = [\"apptainer\", \"exec\", \"et.sif\"]\n        env-setup = \"export SING=1\"\n        provision = \"\"");
+        let meta: Meta = toml::from_str(&text).unwrap();
+        meta.validate("db").unwrap();
+        // et-sing sets no provisioning key: it inherits the machine's.
+        for phase in [Phase::Build, Phase::Submit, Phase::Run] {
+            assert!(meta.effective_provisioning(Some("et-sing"), phase).contains("python3 -m venv"), "{phase:?}");
+        }
+        // et-sing-cpu's empty `provision` turns the machine's off, and only
+        // that key: the machine's `build-provision` still runs there.
+        for phase in [Phase::Submit, Phase::Run] {
+            assert_eq!(meta.effective_provisioning(Some("et-sing-cpu"), phase), "", "{phase:?}");
+            assert_eq!(meta.phase_env(Some("et-sing-cpu"), phase), "export SING=1");
+        }
+        let build = meta.effective_provisioning(Some("et-sing-cpu"), Phase::Build);
+        assert!(!build.contains("venv") && build.contains("fetch-it"), "{build}");
+    }
+
+    /// A provisioning step runs under `set -e` in its subshell, keeps what
+    /// it sets there, and stops the script with its status when it fails,
+    /// in a script with `set -e` or without (§6.1).
+    #[test]
+    fn a_provisioning_step_is_contained_and_stops_on_failure() {
+        let env = Environment {
+            env_setup: Some("export SEEN=setup".to_owned()),
+            provision: Some("export SEEN=provision\nfalse\necho not reached\n".to_owned()),
+            run_provision: Some("echo run".to_owned()),
+            ..Environment::default()
+        };
+        let run = |script: &str| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        for errexit in ["", "set -e\n"] {
+            let script = format!("{errexit}{}\n{}echo after", env.effective(Phase::Run), env.provisioning(Phase::Run));
+            assert_eq!(run(&script), (Some(1), String::new()), "{script}");
+        }
+        let env = Environment { provision: Some("export SEEN=provision\nexit 0\n".to_owned()), ..env };
+        let script = format!("{}\n{}echo \"$SEEN\"", env.effective(Phase::Run), env.provisioning(Phase::Run));
+        assert_eq!(run(&script), (Some(0), "run\nsetup\n".to_owned()), "{script}");
+        let env = Environment { run_provision: Some("exit 7".to_owned()), ..env };
+        assert_eq!(run(&format!("{}echo after", env.provisioning(Phase::Run))).0, Some(7));
+        // As `set -e` has it: a false `&&` at the end passes, a failure
+        // mid-step stops it, an explicit exit gives its status.
+        for (text, expected) in [
+            ("[ -e /nonexistent ] && echo made", (Some(0), "after\n")),
+            ("false\necho not reached", (Some(1), "")),
+            ("exit 3", (Some(3), "")),
+        ] {
+            let env = Environment { provision: Some(text.to_owned()), ..Environment::default() };
+            for errexit in ["", "set -e\n"] {
+                let script = format!("{errexit}{}echo after", env.provisioning(Phase::Build));
+                assert_eq!(run(&script), (expected.0, expected.1.to_owned()), "{script}");
+            }
+        }
+    }
+
+    /// The generation-2 names of the phase setups are gone (§17.5): the
+    /// generation is the only compatibility, so they fail as any unknown
+    /// key does, in `[environment]` and in a universe.
+    #[test]
+    fn the_old_phase_setup_names_are_unknown_keys() {
+        for old in ["env-build-setup", "env-submit-setup", "env-run-setup"] {
+            let msg = toml::from_str::<Meta>(&MIKE.replace("build-env-setup", old)).unwrap_err().to_string();
+            assert!(msg.contains(&format!("unknown field `{old}`")), "{msg}");
+            let msg = toml::from_str::<Meta>(&DB.replace("build-env-setup = \"module load gcc/9\"", &format!("{old} = \"x\""))).unwrap_err().to_string();
+            assert!(msg.contains(&format!("unknown field `{old}`")), "{msg}");
+        }
+    }
+
+    /// `[scheduler].job-ids` and `unknown-job-pattern` (§10): parsed and
+    /// checked; a value or a pattern cactup cannot use fails the load.
+    #[test]
+    fn the_job_id_keys_parse_and_validate() {
+        assert_eq!(mike().scheduler.job_ids, JobIds::Scheduler);
+        assert!(mike().scheduler.unknown_job_pattern.is_none());
+        let with = |keys: &str| MIKE.replace("[scheduler]", &format!("[scheduler]\n        {keys}"));
+        let meta: Meta = toml::from_str(&with("job-ids = \"pids\"\n        unknown-job-pattern = 'Unknown Job Id @JOB_ID@'")).unwrap();
+        meta.validate("mike").unwrap();
+        assert_eq!(meta.scheduler.job_ids, JobIds::Pids);
+        assert_eq!(meta.scheduler.unknown_job_pattern.as_deref(), Some("Unknown Job Id @JOB_ID@"));
+        let msg = toml::from_str::<Meta>(&with("job-ids = \"pid\"")).unwrap_err().to_string();
+        assert!(msg.contains("unknown variant `pid`") && msg.contains("pids"), "{msg}");
+        let meta: Meta = toml::from_str(&with("unknown-job-pattern = 'Unknown (Job'")).unwrap();
+        let err = format!("{:#}", meta.validate("mike").unwrap_err());
+        assert!(err.contains("unknown-job-pattern is not a valid regular expression"), "{err}");
     }
 
     #[test]

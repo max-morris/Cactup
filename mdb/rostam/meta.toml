@@ -113,9 +113,10 @@ export LANG=C.UTF-8
 # the system gcc 11.5 those modules were built with. cactup's shells are not
 # login shells, so Lmod is initialized here.
 #
-# Formaline's makeblob.pl says `use diagnostics`, which only makes Perl's
-# warnings verbose, and Rostam's perl lacks the module (perl-diagnostics is
-# not installed), so a no-op diagnostics.pm is put on PERL5LIB.
+# Formaline's makeblob.pl, which runs in the build, says `use diagnostics`,
+# which only makes Perl's warnings verbose, and Rostam's perl lacks the module
+# (perl-diagnostics is not installed), so the build puts a no-op
+# diagnostics.pm on PERL5LIB: build-provision writes it the first time.
 env-setup = """
 export MODULEPATH=/opt/apps/modulefiles
 . /usr/share/lmod/lmod/init/bash
@@ -123,12 +124,16 @@ module purge
 module load openmpi/5.0.7 hdf5/1.14.6
 export PATH=/usr/local/cuda-12.8/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+"""
+build-env-setup = """
+export PERL5LIB=$HOME/.cache/cactup-rostam-perl5${PERL5LIB:+:$PERL5LIB}
+"""
+build-provision = """
 perl_stub=$HOME/.cache/cactup-rostam-perl5
 if [ ! -e "$perl_stub/diagnostics.pm" ]; then
     mkdir -p "$perl_stub"
     printf 'package diagnostics;\nsub import {}\nsub unimport {}\n1;\n' > "$perl_stub/diagnostics.pm"
 fi
-export PERL5LIB=$perl_stub${PERL5LIB:+:$PERL5LIB}
 """
 
 [universes.arm-conda]
@@ -138,7 +143,7 @@ export PERL5LIB=$perl_stub${PERL5LIB:+:$PERL5LIB}
 # conda-forge environment each user keeps at /work/$USER/spark-deps/env (the
 # flavor's optionlist names the same place as /work/@USER@/spark-deps/env).
 # The first build creates it, on the spark node it runs on, since it must be
-# linux-aarch64: env-build-setup fetches micromamba and solves the packages
+# linux-aarch64: build-provision fetches micromamba and solves the packages
 # below, which takes a few minutes. The packages it was made from are recorded
 # in env/.cactup-spec; when they change here, the next build installs them into
 # the environment in place (never removing it, since runs may be using it). A
@@ -148,7 +153,7 @@ env-setup = """
 export PATH=/work/$USER/spark-deps/env/bin:/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/work/$USER/spark-deps/env/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 """
-env-build-setup = """
+build-provision = """
 deps=/work/$USER/spark-deps
 spec='gcc=13 gxx=13 gfortran=13 mpich hdf5=1.14.*=mpi_mpich* gsl fftw openblas liblapack yaml-cpp zlib libboost-devel libhwloc openssl libjpeg-turbo cmake make perl pkg-config'
 if [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" != "$spec" ]; then
@@ -172,6 +177,8 @@ fi
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
 blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
+# What squeue says (on stderr) of a job Slurm no longer knows.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"

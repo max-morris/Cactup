@@ -506,7 +506,7 @@ pub fn set_machine_vars(v: &mut VarSet, machine: &Machine, queue: &str, run_univ
     v.set("MAX_GPUS_PER_NODE", hw.max_gpus_per_node.unwrap_or(0) as u64);
     v.set("MEMORY", hw.memory.unwrap_or(0));
     v.set("THREADS_PER_CPU", hw.threads_per_cpu() as u64);
-    v.set("ENV_SETUP", machine.meta.effective_env(run_universe, Phase::Run));
+    v.set("ENV_SETUP", machine.meta.phase_env(run_universe, Phase::Run));
     Ok(())
 }
 
@@ -1131,7 +1131,7 @@ mod tests {
         let mut machine = test_machine();
         machine.meta.environment.env_setup = Some("export M=1".to_owned());
         // An identity universe carrying only a run-phase env override (§6.1).
-        let sing: crate::mdb::Universe = toml::from_str("env-run-setup = \"module load sing\"").unwrap();
+        let sing: crate::mdb::Universe = toml::from_str("run-env-setup = \"module load sing\"").unwrap();
         machine.meta.universes.insert("sing".to_owned(), sing);
 
         let mut v = VarSet::new();

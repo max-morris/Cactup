@@ -208,7 +208,7 @@ pub(crate) fn generate_script(
         let substituted = vars
             .substitute(&template, Syntax::Shell)
             .with_context(|| format!("substituting {}", script.path.display()))?;
-        Ok(prepend_env(&substituted, &machine.meta.effective_env(universe, phase), kind))
+        Ok(prepend_env(&substituted, &machine.meta.phase_env(universe, phase), kind))
     }
 }
 
@@ -416,7 +416,7 @@ fn submit_impl(
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
         let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
+        submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
         let submit_script = generate_script(machine, ScriptKind::Submit, &sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
 
@@ -1251,6 +1251,7 @@ mod tests {
                 full_rebuild: false,
                 make: None,
                 build_env: String::new(),
+                build_provisioning: String::new(),
                 virtual_executable: None,
                 universe: None,
                 config_meta: toml::from_str(
@@ -1469,7 +1470,7 @@ mod tests {
 
         // 5'. A DECLARED host becomes the final fallback of both chains
         // (§4.8); --no-universe still bypasses it.
-        let host: Universe = toml::from_str("env-run-setup = \"module load x\"").unwrap();
+        let host: Universe = toml::from_str("run-env-setup = \"module load x\"").unwrap();
         machine.meta.universes.insert("host".to_owned(), host);
         let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, false).unwrap();
         assert_eq!(got.unwrap().0, "host");

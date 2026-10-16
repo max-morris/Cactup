@@ -2195,7 +2195,7 @@ fn prepare_with_cache(
     // comment), and resolving either of these afresh there would mean
     // reading the MDB. `None`/empty for a `--virtual-executable` build, which
     // never runs `make` at all.
-    let (make, build_env) = if virtual_executable.is_none() {
+    let (make, build_env, build_provisioning) = if virtual_executable.is_none() {
         // The default (`DEFAULT_MAKE`) templates @MAKEJOBS@ so
         // `[build].make-jobs` (§7.6: --make-jobs > machine make-jobs > 1) is
         // honored as the default -j even on machines that don't hand-write a
@@ -2205,13 +2205,15 @@ fn prepare_with_cache(
             .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::Shell)
             .context("substituting the machine make command")?;
         // Build-phase env for the resolved universe (§6.1): universe env keys
-        // override the machine [environment] key-by-key.
-        let env = machine
-            .meta
-            .effective_env(universe_spec.as_ref().map(|u| u.name.as_str()), Phase::Build);
-        (Some(make), env)
+        // override the machine [environment] key-by-key. The provisioning
+        // steps likewise, kept apart: the setup alone is what the cache
+        // digests and `cache doctor` runs.
+        let universe = universe_spec.as_ref().map(|u| u.name.as_str());
+        let env = machine.meta.effective_env(universe, Phase::Build);
+        let provisioning = machine.meta.effective_provisioning(universe, Phase::Build);
+        (Some(make), env, provisioning)
     } else {
-        (None, String::new())
+        (None, String::new(), String::new())
     };
 
     // The fully-formed config metadata to store on success, minus `built`
@@ -2265,6 +2267,7 @@ fn prepare_with_cache(
         full_rebuild,
         make: make.clone(),
         build_env: build_env.clone(),
+        build_provisioning: build_provisioning.clone(),
         virtual_executable,
         universe: universe_spec,
         config_meta,
@@ -2343,12 +2346,7 @@ fn prepare_with_cache(
         // `scratch`, and `datestamp.o` — never the config dir wholesale,
         // never dot-prefixed entries — so a live build.out survives even the
         // realclean step above.
-        let script = format!(
-            "#!/bin/sh\nset -e\ncd {}\n{}{}\n",
-            sh_quote(&cactus_root),
-            if build_env.is_empty() { String::new() } else { format!("{build_env}\n") },
-            steps.join("\n"),
-        );
+        let script = build_script(&cactus_root, &build_env, &build_provisioning, &steps);
         write_executable(&attempt.script_path(), &script)?;
     }
 
@@ -2650,15 +2648,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             let make = attempt.meta.make.as_deref().context(
                 "a from-scratch rebuild was needed but no `make` command was frozen for this attempt",
             )?;
-            let realclean_script = format!(
-                "#!/bin/sh\nset -e\ncd {}\n{}{make} {name}-realclean\n",
-                sh_quote(&cactus_root),
-                if attempt.meta.build_env.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}\n", attempt.meta.build_env)
-                },
-            );
+            let realclean_script = realclean_script(&cactus_root, &attempt.meta.build_env, make, &name);
             let realclean_path = attempt.dir.join("build-script-realclean");
             write_executable(&realclean_path, &realclean_script)?;
             let cmd = script_command(&realclean_path, universe.as_ref(), &vset, &cactus_root)?;
@@ -2845,6 +2835,29 @@ fn generate_id(kind: &str, name: &str, machine: &str, now: DateTime<Utc>) -> Str
 
 pub(crate) fn sh_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+/// The build script (§6.1, §7.2): `set -e`, the Cactus root, the frozen
+/// build setup, then the provisioning steps (each in a subshell that stops
+/// the script when it fails), then `steps`.
+fn build_script(cactus_root: &Path, build_env: &str, build_provisioning: &str, steps: &[String]) -> String {
+    format!(
+        "#!/bin/sh\nset -e\ncd {}\n{}{build_provisioning}{}\n",
+        sh_quote(cactus_root),
+        match build_env {
+            "" => String::new(),
+            env if env.ends_with('\n') => env.to_owned(),
+            env => format!("{env}\n"),
+        },
+        steps.join("\n"),
+    )
+}
+
+/// The realclean script `execute` adds when the flesh has moved since
+/// `prepare`: the setup alone, no provisioning (it only cleans; the build
+/// script that follows provisions), then `<make> <name>-realclean`.
+fn realclean_script(cactus_root: &Path, build_env: &str, make: &str, name: &str) -> String {
+    build_script(cactus_root, build_env, "", &[format!("{make} {name}-realclean")])
 }
 
 #[cfg(test)]
@@ -4056,6 +4069,35 @@ mod tests {
         for sub in ["build", "lib", "scratch", "config-data"] {
             assert!(!config_dir.join(sub).exists(), "{sub}/ must not exist before execute() runs");
         }
+    }
+
+    /// §6.1: the build script runs the setup, then the provisioning steps,
+    /// then make; the attempt freezes the two apart; the escalated
+    /// realclean script carries the setup alone.
+    #[test]
+    fn the_build_script_runs_the_setup_then_the_provisioning_then_make() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (_mdb, mut machine, inst, opts) = fake_tree(root, "sim-config) exit 1 ;;\nsim) exit 1 ;;");
+        machine.meta.environment.env_setup = Some("export FOO=/opt/foo".to_owned());
+        machine.meta.environment.build_provision = Some("mkdir -p \"$HOME/x\"".to_owned());
+        let attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a, _) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        assert_eq!(attempt.meta.build_env, "export FOO=/opt/foo");
+        assert!(attempt.meta.build_provisioning.starts_with("# build-provision,"), "{}", attempt.meta.build_provisioning);
+        let script = fs::read_to_string(attempt.script_path()).unwrap();
+        let at = |what: &str| script.find(what).unwrap_or_else(|| panic!("no {what:?} in\n{script}"));
+        assert!(script.starts_with("#!/bin/sh\nset -e\ncd "), "{script}");
+        assert!(at("export FOO=/opt/foo\n") < at("# build-provision,"), "{script}");
+        assert!(at("(\nset -e\nmkdir -p \"$HOME/x\"\n:\n)\ncase $? in") < at("echo yes | "), "{script}");
+        let cactus = root.join("inst/Cactus");
+        let realclean = realclean_script(&cactus, &attempt.meta.build_env, "/fakemake -j1", "sim");
+        assert_eq!(realclean, format!("#!/bin/sh\nset -e\ncd {}\nexport FOO=/opt/foo\n/fakemake -j1 sim-realclean\n", sh_quote(&cactus)));
+        // A setup that ends its own line gets no blank line after it.
+        let script = build_script(&cactus, "export FOO=/opt/foo\n", &attempt.meta.build_provisioning, &["make".to_owned()]);
+        assert!(script.contains("export FOO=/opt/foo\n# build-provision,"), "{script}");
     }
 
     /// The build script `prepare` stages with the build cache in `mode`,

@@ -742,14 +742,14 @@ mod tests {
             assert_eq!(db1.select_optionlist(Some(v)).unwrap(), v);
         }
         // The native flavor builds in the DECLARED host universe — an identity
-        // universe (§4.8) carrying only a module-loading env-build-setup
+        // universe (§4.8) carrying only a module-loading build-env-setup
         // override (§6.1) — reached via the declared-host fallback, so
         // [build].universe is unset; the Singularity flavors name their own
         // build universe in the optionlist header, --nv vs not.
         assert!(db1.meta.build.universe.is_none());
         let host = db1.meta.universe("host").unwrap();
         assert!(host.wrapper.is_none() && host.wrapper_argv.is_none());
-        assert!(host.environment.env_build_setup.as_deref().unwrap().contains("module load gcc/9.3.0"));
+        assert!(host.environment.build_env_setup.as_deref().unwrap().contains("module load gcc/9.3.0"));
         assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-nv")).unwrap().universe.as_deref(), Some("et-sing"));
         assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-cpu")).unwrap().universe.as_deref(), Some("et-sing-cpu"));
         for v in ["sing-nv", "sing-cpu"] {

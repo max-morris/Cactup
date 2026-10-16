@@ -137,6 +137,15 @@ pub struct BuildMeta {
     /// the MDB there. Empty for a `--virtual-executable` build.
     #[serde(default)]
     pub build_env: String,
+    /// The build's provisioning steps (`provision`, then `build-provision`,
+    /// §6.1), as the build script runs them after `build_env`, each in a
+    /// subshell: frozen for the same D11 reason. Kept apart from
+    /// `build_env` because they cannot change the environment the build
+    /// runs in: not part of the build cache's key, never run by `cache
+    /// doctor`. Empty when the machine has none, and for a
+    /// `--virtual-executable` build.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub build_provisioning: String,
     /// `--virtual-executable`'s source path (§7.7), canonicalized at
     /// `prepare` time; `execute` copies it into place instead of running
     /// `make`. Not run through the build universe or a spawned shell — a
@@ -411,6 +420,7 @@ mod tests {
             full_rebuild: true,
             make: Some("make -j4".to_owned()),
             build_env: "module load gcc".to_owned(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: Some(UniverseSpec {
                 name: "et-sif".to_owned(),

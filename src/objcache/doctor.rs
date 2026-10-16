@@ -2385,20 +2385,24 @@ mod tests {
 
     /// Every machine of the MDB, in every universe: its build environment
     /// setup gives no path variable an empty or relative entry, however the
-    /// variable was before (§18.12, M5 part 2: the cache's rules on paths).
-    /// A setup that stops before its end here (one that makes what it needs
-    /// on its own machine) is checked as far as it ran, and must be one of
-    /// `STOPS_HERE`, which names each with why; one that no longer stops
-    /// must leave it.
+    /// variable was before, and runs to its end (§18.12, M5 part 2: the
+    /// cache's rules on paths). What makes or fetches what a build needs on
+    /// its own machine is provisioning (`build-provision`), which this
+    /// check, like `cache doctor`, never runs; a setup only sets the
+    /// environment, so it runs through anywhere. A setup that sources a
+    /// module system's init file this host has would run the real module
+    /// system here (the check's `module` does nothing only while there is
+    /// none): it is said not checked on this host, and checked where the
+    /// file is not there. In CI (the environment variable `CI` set to
+    /// anything but empty, `0` or `false`, case and surrounding blanks
+    /// ignored) such a skip fails the test, so a runner image that gains a module system
+    /// cannot hide setups from the check.
     #[test]
     fn no_mdb_machine_build_environment_gives_an_empty_or_relative_entry() {
-        /// Machine and universe of each setup that stops before its end
-        /// off its own machine, with why.
-        const STOPS_HERE: &[(&str, &str, &str)] = &[("rostam", "arm-conda", "makes its conda environment under /work/$USER on a spark node")];
         let mdb = crate::mdb::Mdb::with_roots(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"), PathBuf::from("/nonexistent-user-mdb"));
         let mut checked = 0;
         let mut bad = Vec::new();
-        let mut stops = Vec::new();
+        let ci = std::env::var("CI").is_ok_and(|ci| !matches!(ci.trim().to_ascii_lowercase().as_str(), "" | "0" | "false"));
         for (name, _) in mdb.machines().unwrap() {
             let machine = mdb.load(&name).unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
             let mut universes: Vec<Option<String>> = vec![None];
@@ -2408,15 +2412,19 @@ mod tests {
                 if env.trim().is_empty() {
                     continue;
                 }
+                if let Some(file) = sources_a_module_system_here(&env) {
+                    let why = format!("{name} (universe {universe:?}): not checked on this host: its build setup sources {file}, a module system's init file this host has");
+                    println!("{why}");
+                    if ci {
+                        bad.push(format!("{why}; in CI every setup must be checked, so the runner must not have a module system"));
+                    }
+                    continue;
+                }
                 checked += 1;
                 match fragile_entries(&env, None) {
                     Ok(fragile) => {
                         if !fragile.stopped.is_empty() {
-                            let listed = STOPS_HERE.iter().any(|(machine, listed, _)| *machine == name && universe.as_deref() == Some(*listed));
-                            if !listed {
-                                bad.push(format!("{name} (universe {universe:?}): with the path variables (PATH aside) {} before it, the setup stopped before its end here; if it must (it makes what it needs on its own machine), name it in STOPS_HERE with why", fragile.stopped.join(" or ")));
-                            }
-                            stops.push((name.clone(), universe.clone()));
+                            bad.push(format!("{name} (universe {universe:?}): with the path variables (PATH aside) {} before it, the setup stopped before its end here; a setup only sets the environment: what makes or fetches what the build needs belongs in build-provision", fragile.stopped.join(" or ")));
                         }
                         for (variable, state, value) in fragile.found {
                             bad.push(format!("{name} (universe {universe:?}): with {variable} {state} before, it is \"{value}\""));
@@ -2426,12 +2434,53 @@ mod tests {
                 }
             }
         }
-        for (machine, universe, _) in STOPS_HERE {
-            if !stops.iter().any(|(name, stopped)| name == machine && stopped.as_deref() == Some(*universe)) {
-                bad.push(format!("{machine} (universe {universe}): in STOPS_HERE, but its setup no longer stops here; take it out"));
-            }
-        }
-        assert!(bad.is_empty(), "build environment setups that give a path variable an entry that is not an absolute path (write `export X=\"/dir${{X:+:$X}}\"`), or that this check cannot run through:\n{}", bad.join("\n"));
+        assert!(bad.is_empty(), "build environment setups that give a path variable an entry that is not an absolute path (write `export X=\"/dir${{X:+:$X}}\"`), or that do not run through:\n{}", bad.join("\n"));
         assert!(checked > 20, "only {checked} setups checked");
+    }
+
+    /// A module system's init file (Lmod's, Environment Modules': a path
+    /// that names `lmod` or `modules`) that the setup `env` sources (`.
+    /// FILE`, `source FILE`) and that is there on this host, its name
+    /// expanded as the MDB's check runs the setup (`HOME` not there,
+    /// nothing else set). Another file sourced (`/etc/profile`, an MPI's
+    /// `vars.sh`) is run as it always was.
+    fn sources_a_module_system_here(env: &str) -> Option<String> {
+        env.lines().find_map(|line| {
+            let mut words = line.split_whitespace();
+            let file = match words.next()? {
+                "." | "source" => words.next()?,
+                _ => return None,
+            };
+            let expanded = Command::new("/bin/sh")
+                .args(["-c", "eval \"printf '%s' $1\"", "sh", file])
+                .env_clear()
+                .env("HOME", "/nonexistent-home")
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .ok()?;
+            let expanded = String::from_utf8_lossy(&expanded.stdout).into_owned();
+            let lower = expanded.to_lowercase();
+            let module_system = lower.contains("lmod") || lower.contains("modules");
+            (module_system && Path::new(&expanded).is_file()).then_some(expanded)
+        })
+    }
+
+    /// The host check above: a module system's init file named literally
+    /// or through a default, there or not; any other file is not one.
+    #[test]
+    fn a_setup_sourcing_a_module_system_here_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("lmod/init");
+        std::fs::create_dir_all(&init).unwrap();
+        let here = init.join("bash");
+        std::fs::write(&here, "").unwrap();
+        let other = dir.path().join("profile");
+        std::fs::write(&other, "").unwrap();
+        let (here, other) = (here.display().to_string(), other.display().to_string());
+        assert_eq!(sources_a_module_system_here(&format!("export A=1\n. {here}\n")), Some(here.clone()));
+        assert_eq!(sources_a_module_system_here(&format!("source \"${{UNSET_HERE:-{here}}}\"\n")), Some(here.clone()));
+        assert_eq!(sources_a_module_system_here(&format!(". {other}\n")), None);
+        assert_eq!(sources_a_module_system_here(". /nonexistent/lmod/init/bash\nmodule load x\n"), None);
+        assert_eq!(sources_a_module_system_here(". $HOME/.modules\n"), None);
     }
 }
