@@ -626,7 +626,10 @@ It first checks the configuration's build environment as its newest build
 set it up: your environment, the compilers and the flags, by the cache's
 own rules (it runs the compilers on small probe sources; it builds
 nothing), and what each thorn's own make files add for its compiles (read
-with `make` as a build reads them, so a `$(shell ...)` in them runs). Each
+with `make` as a build reads them, so a `$(shell ...)` in them runs). It
+runs the machine's environment setup as a build does, a few times over,
+so whatever that setup does runs too (a setup that creates a software
+environment the first time it runs does that here, if no build has yet). Each
 finding says what keeps the cache out, or costs objects shared, where it
 comes from (your shell, the machine's environment setup, the variable of
 the config's `config-data/make.config.defn` that gives the flag, and

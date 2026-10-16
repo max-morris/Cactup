@@ -3278,6 +3278,25 @@ in the MDB check must be in the test's `STOPS_HERE` with why (rostam's
 re-running both reviewers' reproductions, a syntax error put into mike's
 setup (the test fails, naming it), and both reviewers' plants.
 
+Round 34 (on `3d87ace`): BLOCKED by both. B: the setup check
+`exec`ed the checks, which drops a trap the setup set on its exit (the
+build runs it): a setup's lock removed by its trap was left, so the
+path-variable runs that follow said it stopped, and every build after
+failed on the lock (older than this diff, made false by it). A: the
+doctor's run stubbed `module`, where the build (bash as `/bin/sh`, as on
+RHEL) runs the user's exported one: a `module load` that sets
+`CUDA_HOME` gave a false entry. Both: the spec still said "run in bash,
+module commands doing nothing, a missing sourced file passed over" of
+the doctor's run. Fixed in the commit after this record: the checks run
+as a child of the setup's shell, which then ends with their status,
+anything after (the setup's trap) on stderr; the doctor's run has no
+stubs (the MDB check keeps them: no module system there); spec, the
+function's comment and the user docs (the setup runs, a few times, with
+whatever it does) say so. Not blocking, for after the merge: the MDB
+check runs rostam's provisioning on a host where `/work` can be written
+(`/work//spark-deps`, network); a setup that closes stderr is said not
+to run through (the doctor's own line fails under `set -e`).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

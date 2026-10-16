@@ -1211,10 +1211,10 @@ const PATH_AS_YOURS: &str = "as it is in your environment";
 /// in bash, in an environment of nothing but `HOME` (not there), `PATH`
 /// (`/usr/bin:/bin`) and the path variables (the MDB's check, the same on
 /// every host), where a file it sources that is not there does not stop
-/// it. Either way commands of module systems (`module`, `ml`) do nothing,
-/// and the setup is given no arguments. An error if neither its end nor
-/// where it stopped is known (it set a trap on its exit of its own, or
-/// `exec`ed).
+/// it and commands of module systems (`module`, `ml`) do nothing. Either
+/// way the setup is given no arguments, and is read (`-n`) first. An
+/// error if it cannot be read, or neither its end nor where it stopped is
+/// known (it set a trap on its exit of its own, or `exec`ed).
 pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, String> {
     const END: &str = "cactup: the end of the setup";
     const STOPPED: &str = "cactup: the setup stopped";
@@ -1242,7 +1242,11 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
         // which runs inside the setup's redirections, and wherever it
         // changed directory). Once through, a trap the setup set of its own
         // is left to run, as in the build.
-        let mut script = format!("cactup_doctor_out=${OUT}\nunset {OUT}\nmodule() {{ :; }}; ml() {{ :; }}\ncactup_doctor_values() {{\n{{\nprintf '%s\\n' \"$1\"\n");
+        // The MDB's check has no module system: its commands do nothing
+        // there. The build runs the user's (an exported function, as bash
+        // run as `sh` reads them), so the doctor does too.
+        let modules = if build.is_none() { "module() { :; }; ml() { :; }\n" } else { "" };
+        let mut script = format!("cactup_doctor_out=${OUT}\nunset {OUT}\n{modules}cactup_doctor_values() {{\n{{\nprintf '%s\\n' \"$1\"\n");
         for variable in PATH_VARIABLES {
             script.push_str(&format!("printf '%s=%s\\n' {variable} \"${{{variable}-<unset>}}\"\n"));
         }
@@ -1355,7 +1359,15 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
 /// then the checks, given `work` for their TMPDIR (they read the build's
 /// own, as exported, first).
 fn checks_command(work: &Path, cactup: &Path) -> String {
-    format!("printf '%s\\n' '{SETUP_DONE}' >&2\nexec {} {DOCTOR_VERB} {}", crate::build::sh_quote(cactup), crate::build::sh_quote(work))
+    format!("printf '%s\\n' '{SETUP_DONE}' >&2\n{}", then_exit(&format!("{} {DOCTOR_VERB} {}", crate::build::sh_quote(cactup), crate::build::sh_quote(work))))
+}
+
+/// `command` run as a child of the setup's shell (not `exec`ed: that
+/// would drop a trap the setup set on its exit, which the build runs), its
+/// stdout the answer; then the shell ends with its status, anything else
+/// (that trap's) going to stderr.
+fn then_exit(command: &str) -> String {
+    format!("cactup_doctor_status=0\n{command} || cactup_doctor_status=$?\nexec >&2\nexit $cactup_doctor_status")
 }
 
 /// A temporary directory, in TMPDIR, else in /tmp (as the compilers fall
@@ -1950,6 +1962,16 @@ mod tests {
         }
         let out = run("false\nexport X=1");
         assert!(!out.status.success() && out.stdout.is_empty());
+        // A trap the setup sets on its exit runs, as in the build, and what
+        // it prints is not the answer; the answer's status is the shell's.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("setup.lock");
+        let env = format!("mkdir {0}\ntrap 'rmdir {0}; echo bye' EXIT", lock.display());
+        for (then, status) in [("echo answer", 0), ("echo answer; exit 3", 3)] {
+            let out = Command::new("/bin/sh").arg("-c").arg(setup_then(&env, &then_exit(&format!("sh -c '{then}'")))).output().unwrap();
+            assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref(), lock.exists()), (Some(status), "answer\n", false), "{then}");
+            assert!(String::from_utf8_lossy(&out.stderr).contains("bye"));
+        }
         assert!(fragile_entries("", None).unwrap().found.is_empty() && fragile_entries("# only this", None).unwrap().found.is_empty());
         assert!(fragile_entries("export LD_PRELOAD=libc.so.6\n", None).unwrap().found.is_empty(), "a name the loader searches for");
         assert_eq!(fragile_entries("export LD_PRELOAD=lib/x.so\n", None).unwrap().found[0].0, "LD_PRELOAD");

@@ -6500,15 +6500,17 @@ never built has none to check), without a build (`objcache::doctor`):
   now, not as the attempt froze them (the doctor speaks of the next
   build). On the Einstein Toolkit (334 directories) this costs under two
   seconds; entries of the path variables that are
-  not absolute; and the setup itself, run in bash with each path variable
-  unset, empty and set (module commands doing nothing, a sourced file that
-  is not there passed over), for one it gives an entry that is not
+  not absolute; and the setup itself, run with each path variable but
+  `PATH` unset, empty and set, for one it gives an entry that is not
   absolute (`export X=/dir:$X` with `X` unset). It runs as the build script
   runs it: `/bin/sh` with `set -e`, no arguments, in the Cactus tree and
   the user's environment, `PATH` included, but for the other path
   variables (a setup that makes what it needs on its own machine, the
-  first time, finds it made: rostam's `arm-conda`); an entry of `PATH`
-  that the user's own `PATH` has is not the setup's. A setup that stops
+  first time, finds it made: rostam's `arm-conda`), with the module
+  system the build gets (where `/bin/sh` is bash, an exported `module`
+  function) and a sourced file that is not there as fatal as in the
+  build; an entry of `PATH` that the user's own `PATH` has is not the
+  setup's. A setup that stops
   before its end (an `exit`, a command that fails) is checked as far as it
   ran (a trap on the shell's exit writes the values to a file of the
   doctor's, named in its environment and taken out of it before the setup
