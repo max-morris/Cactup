@@ -217,12 +217,15 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let mut run = TestRun::locate(&inst, name)?;
     let _lock = run.lock()?;
+    stop_run(&mut run, &Scheduler::new(&machine.meta), name)
+}
 
-    let Some(job_id) = stoppable_job(&run)?.map(str::to_owned) else {
+/// [`stop`], on `run` (locked), by `sched`.
+fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
+    let Some(job_id) = stoppable_job(run)?.map(str::to_owned) else {
         println!("Test run {} has no live job; nothing to stop", name.bold());
         return Ok(());
     };
-    let sched = Scheduler::new(&machine.meta);
     match sched.get_status(&job_id)? {
         JobStatus::Running | JobStatus::Queued | JobStatus::Holding => {
             sched.stop(&job_id)?;
@@ -230,6 +233,10 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
         }
         _ => println!("Test job {job_id} is not in the queue; nothing to stop"),
     }
+    // Over, as far as cactup is concerned (as `build stop` records an
+    // outcome): its job id is never asked of the scheduler again, where it
+    // may be a pid (the generic machine's submit) that another process gets.
+    run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
     run.meta.status = Some("U".to_owned());
     run.store_meta()?;
     run.log("test-stop", &format!("stopped job {}", run.meta.job_id));
@@ -421,6 +428,39 @@ mod tests {
         assert_eq!(open(true, true, "JOB-1").pending_job(), None);
         assert_eq!(stoppable_job(&open(true, true, "JOB-1")).unwrap(), None);
         assert_eq!(open(true, false, NO_JOB_ID).pending_job(), None);
+
+        // A submitted run `test stop` stopped is over: its job id (on the
+        // generic machine, a pid) is not asked of the scheduler again.
+        let stopped = tmp.path().join("stopped");
+        let meta: Meta = toml::from_str(&format!(
+            r#"
+            [machine]
+            nickname = "fake"
+            [scheduler]
+            get-status = "echo '@JOB_ID@ R'"
+            status-pattern = "^@JOB_ID@ "
+            running-pattern = " R"
+            stop = "touch {}"
+            [queues.local]
+            default = true
+            [submitscripts]
+            "default" = ["local"]
+            [runscripts]
+            "default" = ["local"]
+            "#,
+            stopped.display()
+        ))
+        .unwrap();
+        let sched = Scheduler::new(&meta);
+        let mut run = open(true, false, "JOB-2");
+        stop_run(&mut run, &sched, "t").unwrap();
+        assert!(stopped.exists());
+        let mut run = TestRun::open(&run.dir).unwrap();
+        assert!(run.meta.timestamps.finished.is_some());
+        assert_eq!(run.pending_job(), None);
+        fs::remove_file(&stopped).unwrap();
+        stop_run(&mut run, &sched, "t").unwrap();
+        assert!(!stopped.exists(), "stopped twice");
     }
 
     /// `list`'s whole point is one `get_statuses` call instead of one

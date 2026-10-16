@@ -4307,13 +4307,17 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   state is coarser than a sim's (no restart chain): `RUNNING`/`QUEUED`/`HOLDING`
   from the active result set's live job status, `DONE (passed/failed)` once the
   job is `U` and a summary was recorded, `ERROR` on `E`. Only a submitted run
-  that has not recorded `finished` has a job to ask the scheduler about: an
-  interactive run's `job-id` is the pid of the cactup that ran it, and once
-  that cactup is gone the pid can be any other process's (on the generic
-  machine, `ps` would find it, and `stop` would stop its process group). An
-  interactive run is `RUNNING` while its `running.lock` is held, and `stop`
-  and `delete` hand its pid to the scheduler only then (the lock checks the
-  holder's start time, §2.3).
+  that has not recorded `finished` (its end records it, and so does `test
+  stop`) has a job to ask the scheduler about: an interactive run's
+  `job-id` is the pid of the cactup that ran it, and once that cactup is
+  gone the pid can be any other process's (on the generic machine, `ps`
+  would find it, and `stop` would stop its process group). An interactive
+  run is `RUNNING` while its `running.lock` is held, and `stop` and
+  `delete` hand its pid to the scheduler only then (the lock checks the
+  holder's start time, §2.3). On the generic machine a submitted run's job
+  is a pid too (its `submit` backgrounds the script): one that ended
+  without recording it (killed, or the host rebooted) still has that pid
+  asked, as a simulation's restart there does.
 - **`cactup test show <name>`** — one test run in detail.
 - **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs

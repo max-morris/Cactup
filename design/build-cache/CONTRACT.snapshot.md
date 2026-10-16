@@ -121,8 +121,12 @@ the planned keying and serving will rely on.
   compiler write a second file — with one exception, added for the speed
   side's `C_DEPEND_COMPILE_FLAGS` recipe (seen in `~/cacti/speedup-build`
   on 2026-10-01): **dependency output written by the compile is
-  understood** in the form `-MD` or `-MMD`, optional `-MP`, **`-MF <file>`
-  given explicitly**, optional `-MT`/`-MQ <target>`. Those flags are not
+  understood** in the form `-MD`, optional `-MP`, **`-MF <file>`
+  given explicitly**, optional `-MT`/`-MQ <target>`. (Since 2026-10-13,
+  decision 28 of the cache: a compile with `-MMD`, whose list leaves out
+  system headers, is not cached, because the cache checks every stored
+  compile's own list of what it read; `-MD -MP` as the speed side uses
+  loses nothing.) Those flags are not
   part of the key (same object with and without them) and are kept from
   the cache's preprocessor runs. When the cache serves an object it will
   have the dependency file written by its own preprocessor run with the
@@ -181,8 +185,13 @@ Changes the cache side can adapt to if told in advance (please add a
 
 ## What the cache side adds that the speed side should know about
 
-With the knob `build-cache` off (the default), nothing at all: the build
-script is byte for byte what it is without the cache.
+With the knob `build-cache` off, nothing at all: the build script is byte
+for byte what it is without the cache. **The default changes to `serve`**
+(cache-side decision 34, see "Cache-side planned changes", 2026-10-16):
+on master `off` is still the default, until that change lands and is
+deployed; after it, a build with no `build-cache` knob set serves from the
+cache. A timing build must then say `-K build-cache=off` (per build: the
+knob in `~/.cactup`'s database is shared with Max's own builds).
 
 With `build-cache = record` (M0a, on `feature/build-cache` only):
 
@@ -253,6 +262,16 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   recipe asked for (A6) is written by the cache's preprocessor run.
   Timings taken with the cache serving are not comparable with ones
   taken without it.
+
+- 2026-10-16: **The cache on by default** (decision 34, Max), on
+  `feature/build-cache` at `e2a95f3`, in review, not on master yet. The
+  knob `build-cache` unset means `serve`; `off` (and a value or database
+  that cannot be read) means `off`. For the speed side: every build
+  through cactup that does not say `-K build-cache=off` will serve and
+  publish objects, so its timings are not comparable with a plain build's.
+  Pass `-K build-cache=off` for timings, from now on (it is harmless while
+  `off` is still the default). Entry moves to "landed" with the master
+  commit.
 
 ## Cache-side landed changes
 
@@ -418,3 +437,25 @@ every milestone.
 - 2026-10-08  cache side  **Load on plato:** five more Einstein Toolkit builds (the Fortran gate after review fixes) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:03 local, for about an hour.
 - 2026-10-08  cache side  **Load on plato:** five more Einstein Toolkit builds (the Fortran gate on the reviewed commit) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:49 local, for about an hour.
 - 2026-10-08  cache side  M2a (gfortran) passed its review gate at `a14f279`; its Einstein Toolkit audit builds on plato are done.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (GCC and gfortran, line directives, Clang) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 13:13 local, for about an hour: the gate of M3a (the check after a compile without a second compiler run).
+- 2026-10-09  cache side  **Load on plato:** six more Einstein Toolkit builds (the M3a gate on its review commit) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 14:39 local, for about an hour, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six more Einstein Toolkit builds (the M3a gate after review round 1) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 16:07 local, for about an hour.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 2) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 16:48 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 3) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 17:36 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 4) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 18:26 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 5) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:10 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 20:10 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 7) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 20:52 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 8) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 21:24 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 9) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 22:03 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 10) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:10 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 11) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:37 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-10  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 00:41 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-10  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 3) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:06 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-10  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 4) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:41 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 5) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 15:37 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 6) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 17:21 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 7) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 18:08 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the follow-up to review 7 after M3a) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:01 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-12  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the last fixes after M3a, before landing) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:40 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-16  cache side  planned: `build-cache` defaults to `serve` (decision 34); timing builds must pass `-K build-cache=off`; the default line under "What the cache side adds" says so
