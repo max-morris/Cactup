@@ -6503,8 +6503,14 @@ never built has none to check), without a build (`objcache::doctor`):
   not absolute; and the setup itself, run in bash with each path variable
   unset, empty and set (module commands doing nothing, a sourced file that
   is not there passed over), for one it gives an entry that is not
-  absolute (`export X=/dir:$X` with `X` unset); a setup that does not reach
-  its end there (an `exit`) is said so.
+  absolute (`export X=/dir:$X` with `X` unset). It runs as the build runs
+  it, in the Cactus tree and the user's environment but for the path
+  variables (a setup that makes what it needs on its own machine, the
+  first time, finds it made: rostam's `arm-conda`). A setup that stops
+  before its end (an `exit`, `set -e` and a command that fails) is checked
+  as far as it ran (a trap on the shell's exit writes the values to a file
+  of the doctor's), and the stop is said; one that ends the shell its own
+  way (a trap of its own, an `exec`) is said not known.
 - Each finding says how much it matters (keeps the cache out; costs
   objects shared or time; worth knowing), what, where it comes from, and
   what to change. An environment variable is the user's shell's when it
@@ -6518,7 +6524,11 @@ never built has none to check), without a build (`objcache::doctor`):
   that a general `cactup doctor` can run them with others.
 
 **The MDB's setups.** A unit test runs every in-repository machine's
-build environment setup, in every universe, as above, and fails on one
-that gives a path variable an entry that is not an absolute path, or that
-does not run to its end: CI runs it on every change to the MDB.
+build environment setup, in every universe, as above but in an
+environment of nothing but the path variables (the same on every host),
+and fails on one that gives a path variable an entry that is not an
+absolute path, or whose stop is not known: CI runs it on every change to
+the MDB. A setup that stops before its end there (one that makes what it
+needs on its own machine, which CI is not) is checked as far as it ran and
+named in the test's output.
 

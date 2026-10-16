@@ -1184,30 +1184,65 @@ fn evaluate_with(config_dir: &Path, variables: &[String], overrides: &[String]) 
         .collect())
 }
 
+/// What `fragile_entries` found in an environment setup.
+#[derive(Debug, Default)]
+pub struct Fragile {
+    /// Each path variable it gives an entry that is not an absolute path:
+    /// the variable, how it was before, its value after.
+    pub found: Vec<(String, &'static str, String)>,
+    /// How the path variables were before it, where it stopped before its
+    /// end (an `exit`, `set -e` and a command that fails): what it set
+    /// before that is in `found`, what it would set after is not known.
+    pub stopped: Option<&'static str>,
+}
+
 /// The path variables an environment setup `env` gives an entry that is not
 /// an absolute path, run with each of them unset, empty and set: `export
 /// X=/dir:$X` gives `X` an empty entry (the working directory) where `X`
-/// was not set before. Commands of module systems (`module`, `ml`) do
-/// nothing here, and a file it sources that is not there does not stop it
-/// (it runs in bash, which goes on). Each finding: the variable, how it was
-/// before, its value after. An error if the setup does not run to its end
-/// (an `exit`, `set -e` and a command that fails): what it would set after
-/// is not known.
-pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>, String> {
+/// was not set before. `build`: run it as the build does, in that
+/// directory and in this process's environment but for the path
+/// variables (a setup that makes what it needs there, the first time,
+/// finds it made); `None`, in an environment of nothing but `HOME` (not
+/// there) and the path variables (the MDB's check, the same on every
+/// host). Commands of module systems (`module`, `ml`) do nothing here,
+/// and a file it sources that is not there does not stop it (it runs in
+/// bash, which goes on). An error if neither its end nor where it stopped
+/// is known (it set a trap on its exit of its own, or `exec`ed).
+pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, String> {
     const END: &str = "cactup: the end of the setup";
-    let mut found = Vec::new();
+    const STOPPED: &str = "cactup: the setup stopped";
+    let mut fragile = Fragile::default();
     for state in ["unset", "empty", "set"] {
-        // What the setup prints goes to stderr; stdout is the values.
-        let mut script = format!("module() {{ :; }}; ml() {{ :; }}\n{{\n:\n{env}\n}} >&2 </dev/null\nprintf '%s\\n' '{END}'\n");
+        // What the setup prints goes to stderr; the values go to a file of
+        // ours (named by the shell's first argument), on its end or where it
+        // stops (a trap on the shell's exit, which runs inside the setup's
+        // redirections, and wherever it changed directory).
+        let mut script = String::from("cactup_doctor_out=$1\nmodule() { :; }; ml() { :; }\ncactup_doctor_values() {\n{\nprintf '%s\\n' \"$1\"\n");
         for variable in PATH_VARIABLES {
             script.push_str(&format!("printf '%s=%s\\n' {variable} \"${{{variable}-<unset>}}\"\n"));
         }
+        script.push_str(&format!("}} >\"$cactup_doctor_out\"\n}}\ntrap \"cactup_doctor_values '{STOPPED}'\" EXIT\n{{\n:\n{env}\n}} >&2 </dev/null\ntrap - EXIT\ncactup_doctor_values '{END}'\n"));
+        let work = temp_dir().map_err(|e| format!("{e:#}"))?;
+        let values_file = work.path().join("values");
         let shell = ["/bin/bash", "/bin/sh"].into_iter().find(|shell| Path::new(shell).is_file()).unwrap_or("/bin/sh");
         let mut command = Command::new(shell);
-        command.arg("-c").arg(&script).env_clear().env("HOME", "/nonexistent-home");
+        command.arg("-c").arg(&script).arg("cactup-doctor").arg(&values_file);
+        match build {
+            Some(dir) => {
+                command.current_dir(dir);
+                for variable in PATH_VARIABLES.into_iter().filter(|variable| *variable != "PATH") {
+                    command.env_remove(variable);
+                }
+            }
+            None => {
+                command.env_clear().env("HOME", "/nonexistent-home").env("PATH", "/usr/bin:/bin");
+            }
+        }
         for variable in PATH_VARIABLES {
             match state {
-                "set" => {
+                // PATH is never unset or empty: the build's own, or the
+                // system's.
+                "set" if variable != "PATH" || build.is_none() => {
                     command.env(variable, if variable == "PATH" { "/usr/bin:/bin" } else { "/opt/x" });
                 }
                 "empty" if variable != "PATH" => {
@@ -1216,13 +1251,16 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
                 _ => {}
             }
         }
-        if state != "set" {
-            command.env("PATH", "/usr/bin:/bin");
-        }
-        let out = run_to_files(&mut command, None, true).map_err(|e| format!("{e:#}"))?;
-        let out = String::from_utf8_lossy(&out.stdout).into_owned();
-        let Some((_, values)) = out.split_once(&format!("{END}\n")) else {
-            return Err(format!("with the path variables {state} before it, the setup did not run to its end (an exit, a command that failed under set -e, an unset variable under set -u), so what it sets is not known"));
+        run_to_files(&mut command, None, true).map_err(|e| format!("{e:#}"))?;
+        let out = std::fs::read(&values_file).map(|out| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default();
+        drop(work);
+        let values = match (out.rsplit_once(&format!("{END}\n")), out.rsplit_once(&format!("{STOPPED}\n"))) {
+            (Some((_, values)), _) => values,
+            (None, Some((_, values))) => {
+                fragile.stopped.get_or_insert(state);
+                values
+            }
+            (None, None) => return Err(format!("with the path variables {state} before it, the setup did not run to its end, and where it stopped is not known (it ends the shell its own way: a trap of its own on its exit, an exec), so what it sets is not known")),
         };
         for line in values.lines() {
             let Some((variable, value)) = line.split_once('=').filter(|(variable, _)| PATH_VARIABLES.contains(variable)) else { continue };
@@ -1234,12 +1272,12 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
                 "LD_PRELOAD" => value.split([':', ' ']).collect(),
                 _ => value.split(':').collect(),
             };
-            if entries.iter().any(|entry| relative_entry(variable, entry.as_bytes())) && !found.iter().any(|(found, _, _): &(String, _, _)| found == variable) {
-                found.push((variable.to_owned(), state, value.to_owned()));
+            if entries.iter().any(|entry| relative_entry(variable, entry.as_bytes())) && !fragile.found.iter().any(|(found, _, _)| found == variable) {
+                fragile.found.push((variable.to_owned(), state, value.to_owned()));
             }
         }
     }
-    Ok(found)
+    Ok(fragile)
 }
 
 /// What the checks' shell says on stderr once the setup is through.
@@ -1522,9 +1560,17 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     }
     // A setup that gives a path variable an empty entry where it was not
     // set before: fine for this user now, not for one who has it unset.
-    match fragile_entries(&meta.build_env) {
+    match fragile_entries(&meta.build_env, Some(&meta.cactus_root)) {
         Ok(fragile) => {
-            for (variable, state, value) in fragile {
+            if let Some(state) = fragile.stopped {
+                findings.push(Finding {
+                    severity: Severity::Unchecked,
+                    what: format!("with the path variables {state} before it, the setup stopped before its end (an exit, a command that failed under set -e, an unset variable under set -u): what it sets after that, with them so, is not checked"),
+                    from: setup.clone(),
+                    fix: None,
+                });
+            }
+            for (variable, state, value) in fragile.found {
                 findings.push(Finding {
                     severity: Severity::Note,
                     what: format!("with {variable} {state} before it runs, the setup makes it \"{value}\", with an entry that is not an absolute path (an empty one is the working directory)"),
@@ -1878,9 +1924,9 @@ mod tests {
         }
         let out = run("false\nexport X=1");
         assert!(!out.status.success() && out.stdout.is_empty());
-        assert!(fragile_entries("").unwrap().is_empty() && fragile_entries("# only this").unwrap().is_empty());
-        assert!(fragile_entries("export LD_PRELOAD=libc.so.6\n").unwrap().is_empty(), "a name the loader searches for");
-        assert_eq!(fragile_entries("export LD_PRELOAD=lib/x.so\n").unwrap()[0].0, "LD_PRELOAD");
+        assert!(fragile_entries("", None).unwrap().found.is_empty() && fragile_entries("# only this", None).unwrap().found.is_empty());
+        assert!(fragile_entries("export LD_PRELOAD=libc.so.6\n", None).unwrap().found.is_empty(), "a name the loader searches for");
+        assert_eq!(fragile_entries("export LD_PRELOAD=lib/x.so\n", None).unwrap().found[0].0, "LD_PRELOAD");
     }
 
     /// A process the setup leaves in the background does not hold the run
@@ -1889,10 +1935,10 @@ mod tests {
     #[test]
     fn a_setup_that_leaves_a_process_behind_and_a_blank_in_a_path() {
         let start = std::time::Instant::now();
-        let found = fragile_entries("sleep 20 &\nexport CPATH=/opt/inc:$CPATH\n").unwrap();
+        let found = fragile_entries("sleep 20 &\nexport CPATH=/opt/inc:$CPATH\n", None).unwrap().found;
         assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
         assert_eq!(found.iter().map(|(variable, _, _)| variable.as_str()).collect::<Vec<_>>(), ["CPATH"]);
-        assert!(fragile_entries("export PATH=\"/opt/My Tools/bin:$PATH\"\n").unwrap().is_empty());
+        assert!(fragile_entries("export PATH=\"/opt/My Tools/bin:$PATH\"\n", None).unwrap().found.is_empty());
     }
 
     /// What a thorn's compiles get beyond the configuration's is checked,
@@ -2185,22 +2231,44 @@ mod tests {
     /// before is found; the idiom that does not, is not.
     #[test]
     fn finds_a_setup_that_gives_an_empty_entry() {
-        let found = fragile_entries("export LD_LIBRARY_PATH=/opt/mpi/lib:$LD_LIBRARY_PATH\nexport CPATH=\"${CPATH:+$CPATH:}/opt/inc\"\nmodule load gcc\n").unwrap();
+        let found = fragile_entries("export LD_LIBRARY_PATH=/opt/mpi/lib:$LD_LIBRARY_PATH\nexport CPATH=\"${CPATH:+$CPATH:}/opt/inc\"\nmodule load gcc\n", None).unwrap().found;
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!((found[0].0.as_str(), found[0].1, found[0].2.as_str()), ("LD_LIBRARY_PATH", "unset", "/opt/mpi/lib:"));
-        assert!(fragile_entries("export PATH=/opt/bin:$PATH\n").unwrap().is_empty(), "PATH is always set");
-        assert_eq!(fragile_entries("export LIBRARY_PATH=lib\n").unwrap()[0].0, "LIBRARY_PATH");
+        assert!(fragile_entries("export PATH=/opt/bin:$PATH\n", None).unwrap().found.is_empty(), "PATH is always set");
+        assert_eq!(fragile_entries("export LIBRARY_PATH=lib\n", None).unwrap().found[0].0, "LIBRARY_PATH");
         // What the setup prints is not taken for a value; a file it sources
         // that is not there does not hide what it sets after.
-        let found = fragile_entries("echo CPATH=:x\necho 'Loading gcc (default=14)'\n. /nonexistent/init/bash\nexport CPATH=/opt/inc:$CPATH\n").unwrap();
+        let found = fragile_entries("echo CPATH=:x\necho 'Loading gcc (default=14)'\n. /nonexistent/init/bash\nexport CPATH=/opt/inc:$CPATH\n", None).unwrap().found;
         assert_eq!((found.len(), found[0].0.as_str()), (1, "CPATH"), "{found:?}");
-        // A setup that stops early says so.
-        assert!(fragile_entries("exit 0\n").is_err());
+        // A setup that stops early says so, and what it set before is
+        // checked (in any shell redirection, wherever it went); one whose
+        // stop is not known is an error.
+        let stopped = fragile_entries("export CPATH=/opt/inc:$CPATH\nexit 0\nexport LIBRARY_PATH=lib\n", None).unwrap();
+        assert_eq!((stopped.stopped, stopped.found.len(), stopped.found[0].0.as_str()), (Some("unset"), 1, "CPATH"), "{stopped:?}");
+        let stopped = fragile_entries("cd /\nexec >/dev/null\nexport CPATH=/opt/inc:$CPATH\nfalse || exit 1\n", None).unwrap();
+        assert_eq!((stopped.stopped, stopped.found.len()), (Some("unset"), 1), "{stopped:?}");
+        // Stopped with CPATH unset, through with it empty.
+        let stopped = fragile_entries("set -u\nexport CPATH=/opt/inc:$CPATH\n", None).unwrap();
+        assert_eq!((stopped.stopped, stopped.found.len(), stopped.found[0].1), (Some("unset"), 1, "empty"), "{stopped:?}");
+        // Run as the build runs it (its directory, this process's
+        // environment), a setup that finds there what it makes on its own
+        // machine runs through; the MDB's check, without them, stops.
+        let made = tempfile::tempdir().unwrap();
+        std::fs::write(made.path().join("made"), "").unwrap();
+        let env = "[ -f made ] && [ \"$HOME\" != /nonexistent-home ] || exit 1\nexport CPATH=/opt/inc:$CPATH\n";
+        let through = fragile_entries(env, Some(made.path())).unwrap();
+        assert_eq!((through.stopped, through.found.len()), (None, 1), "{through:?}");
+        assert_eq!(fragile_entries(env, None).unwrap().stopped, Some("unset"));
+        assert!(fragile_entries("trap 'echo bye' EXIT\nexit 0\n", None).is_err());
+        assert!(fragile_entries("exec true\n", None).is_err());
     }
 
     /// Every machine of the MDB, in every universe: its build environment
     /// setup gives no path variable an empty or relative entry, however the
     /// variable was before (§18.12, M5 part 2: the cache's rules on paths).
+    /// A setup that stops before its end here (one that makes what it needs
+    /// on its own machine: rostam's `arm-conda`) is checked as far as it
+    /// ran, and named.
     #[test]
     fn no_mdb_machine_build_environment_gives_an_empty_or_relative_entry() {
         let mdb = crate::mdb::Mdb::with_roots(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mdb"), PathBuf::from("/nonexistent-user-mdb"));
@@ -2216,9 +2284,12 @@ mod tests {
                     continue;
                 }
                 checked += 1;
-                match fragile_entries(&env) {
+                match fragile_entries(&env, None) {
                     Ok(fragile) => {
-                        for (variable, state, value) in fragile {
+                        if let Some(state) = fragile.stopped {
+                            eprintln!("{name} (universe {universe:?}): with the path variables {state} before it, the setup stopped before its end here; checked as far as it ran");
+                        }
+                        for (variable, state, value) in fragile.found {
                             bad.push(format!("{name} (universe {universe:?}): with {variable} {state} before, it is \"{value}\""));
                         }
                     }

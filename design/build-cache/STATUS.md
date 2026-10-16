@@ -3227,6 +3227,30 @@ where the script has it through `sh_quote`, so a `'` in the path would
 read as an older cactup's script. `feature/build-cache` merges to master
 next (decision 27).
 
+### M5 part 2 meets master: round 33
+
+Pushing master was refused: master had moved (PRs 2 to 5: the db1 and
+rostam MDB entries, test selection, untracked thorn edits). Merged into
+`feature/build-cache` (`4203c0b`, no conflicts); the MDB check then
+failed on rostam's `arm-conda` universe, whose build setup makes a conda
+environment on its spark node (`mkdir -p /work/$USER/spark-deps || exit
+1`, micromamba fetched), so it stops early anywhere else. Neither side
+had met the other: the check is on this branch only, rostam on master
+only. It also showed a fault in the doctor: it ran the setup in an
+environment of nothing (`USER` unset), so on rostam it would have aimed at
+`/work//spark-deps`, said the setup stopped, or made an environment
+there. Max chose to fix the doctor with a short review round before the
+push. The fix: `fragile_entries` runs the setup as the build does (the
+Cactus tree, the user's environment but for the path variables) for
+the doctor; the MDB check keeps an environment of nothing but them. A
+setup that stops before its end is checked as far as it ran (a trap on
+the shell's exit writes the values to a file of the doctor's, past any
+redirection or `cd` of the setup's), and the stop said (the doctor: "not
+checked" for after it; the MDB check: named in its output, not failed);
+one that ends the shell its own way (its own exit trap, `exec`) is an
+error, as before. The real configurations `m5a`, `m5b` and `et` read the
+same as before it, byte for byte.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3443,7 +3467,8 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M5 part 2 passed its gate at `92c3089` (round 32), and with it M5:
+M5 part 2 passed its gate at `92c3089` (round 32), and with it M5;
+master had moved, and the merge needs round 33 (below), then
 `feature/build-cache` fast-forwards master as the feature's first
 version (decision 27). Then, in order: the pid-reuse fix in
 `guard_no_live_attempt` (round 31); the every-flag search on
