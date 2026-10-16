@@ -1391,7 +1391,8 @@ fn report_configs(
     // fetch itself, and a report must never fail the refetch.
     let fresh_shapes = live_list
         .as_ref()
-        .and_then(|list| crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list).ok());
+        .and_then(|list| crate::build::thorn_shapes_with_progress(&inst.cactus_root(), list).ok())
+        .map(|scan| scan.shapes);
 
     println!("{}", "Existing configs pick the refetched sources up on their next build:".bold());
     for (name, meta) in configs {

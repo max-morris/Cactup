@@ -31,8 +31,7 @@ export OMP_PLACES=cores
 
 # The flesh testsuite harness substitutes the literal placeholders
 # $nprocs/$exe/$parfile into this command (design §11.6); single quotes keep
-# them out of the shell's hands. The launcher mirrors runscripts/default.sh
-# (its GRES branch depends on $QUEUE, which is unset here, so it is omitted).
+# them out of the shell's hands. The launcher mirrors runscripts/default.sh.
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
 export CCTK_TESTSUITE_RUN_COMMAND='srun --overlap -n $nprocs --cpus-per-task=@CPUS_PER_TASK@ --gpus-per-task=@GPUS_PER_TASK@ $exe $parfile'
 

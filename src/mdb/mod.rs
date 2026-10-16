@@ -765,6 +765,11 @@ mod tests {
         assert_eq!(rs.route("gpu", "host", false).unwrap().0, "default");
         assert_eq!(rs.route("gpu", "et-sing", false).unwrap().0, "sing");
         assert_eq!(rs.route("gpu", "et-sing-cpu", true).unwrap().0, "sing-test");
+        // Every flavor's build is queued through the one build-submit script.
+        let bs = db1.meta.scripts(ScriptKind::BuildSubmit);
+        for u in ["host", "et-sing", "et-sing-cpu"] {
+            assert_eq!(bs.route("gpu", u, false).unwrap().0, "default");
+        }
 
         // qbd (LSU/LONI Queen Bee 4) runs SLURM, though upstream's 2026-07-07
         // regeneration flipped it to PBS with a blank queue: the port keeps
@@ -800,6 +805,78 @@ mod tests {
         // than merely parsing.
         assert!(qbd.meta.can_submit_builds());
         assert_eq!(qbd.meta.build.default_action, Some(BuildAction::Submit));
+
+        // rostam (LSU CCT) mixes x86, Arm and RISC-V partitions, so its
+        // flavors are named <ISA>-<accelerator>-<how built>, and each queue's
+        // build-universes keeps a binary off the nodes it cannot run on.
+        let rostam = mdb.load("rostam").unwrap();
+        assert_eq!(rostam.select_optionlist(None).unwrap(), "x86-cuda-image");
+        assert_eq!(
+            rostam.flavors().unwrap(),
+            ["arm-cuda-native", "x86-cpu-image", "x86-cuda-image", "x86-cuda-native"]
+        );
+        let header = |flavor: &str| optionlist::load_header(&rostam.optionlist_path(flavor)).unwrap();
+        for (flavor, universe) in [
+            ("x86-cuda-image", "cactus-cuda"),
+            ("x86-cuda-native", "x86-modules"),
+            ("arm-cuda-native", "arm-conda"),
+            ("x86-cpu-image", "cactus-cpu"),
+        ] {
+            assert_eq!(header(flavor).universe.as_deref(), Some(universe), "{flavor}");
+        }
+        // The default queue is the default flavor's; the spark universe has
+        // one queue, which is therefore its default; the CPU flavor names
+        // its own, Rostam's default partition.
+        assert_eq!(rostam.meta.default_queue(Some("cactus-cuda")), Some("cuda-A100"));
+        assert_eq!(rostam.meta.default_queue(Some("arm-conda")), Some("spark"));
+        assert_eq!(header("x86-cpu-image").runs_on.default_queue.as_deref(), Some("medusa"));
+        assert!(!header("x86-cpu-image").runs_on.gpu);
+        // The x86 CUDA flavors compile for sm_70 and sm_80, so they serve
+        // every NVIDIA x86 partition, V100 and A100 alike, and nothing else.
+        let x86_gpu = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"];
+        for flavor in ["x86-cuda-image", "x86-cuda-native"] {
+            assert_eq!(header(flavor).runs_on.queues, x86_gpu, "{flavor}");
+        }
+        for queue in x86_gpu {
+            let q = &rostam.meta.queues[queue];
+            assert!(q.gpu && q.compatible_with("cactus-cuda") && q.compatible_with("x86-modules"), "{queue}");
+            assert!(!q.compatible_with("arm-conda") && !q.compatible_with("cactus-cpu"), "{queue}");
+        }
+        assert!(!rostam.meta.queues["spark"].compatible_with("cactus-cuda"));
+        for queue in ["medusa", "buran"] {
+            let q = &rostam.meta.queues[queue];
+            assert!(!q.gpu && q.compatible_with("cactus-cpu") && !q.compatible_with("cactus-cuda"), "{queue}");
+        }
+        // Partitions deliberately left out (meta.toml says why).
+        for queue in ["marvin", "mi100", "risc5", "jenkins-compute", "jenkins-cuda", "jenkins-A100", "jenkins-amdgpu"] {
+            assert!(!rostam.meta.queues.contains_key(queue), "{queue}");
+        }
+        // Per-queue hardware: a mixed partition carries the intersection of
+        // its nodes (cuda: bahram's), and the fill-the-node default gives one
+        // rank per GPU.
+        let hw = rostam.meta.effective_hardware("cuda").unwrap();
+        assert_eq!((hw.max_cpus_per_node, hw.max_gpus_per_node, hw.memory), (Some(20), Some(2), Some(124200)));
+        let hw = rostam.meta.effective_hardware("DGX-A100").unwrap();
+        assert_eq!(
+            (hw.max_cpus_per_node, hw.default_cpus_per_task, hw.max_gpus_per_node, hw.threads_per_cpu()),
+            (Some(256), Some(32), Some(8), 2)
+        );
+        assert_eq!(rostam.meta.effective_max_walltime("cuda").unwrap().total_seconds(), 86400);
+        // One submit script serves every queue; the run script follows the
+        // config's build universe, each flavor launching its own way.
+        let rs = rostam.meta.scripts(ScriptKind::Run);
+        assert_eq!(rs.route("cuda-V100", "cactus-cuda", false).unwrap().0, "x86-cuda-image");
+        assert_eq!(rs.route("cuda-V100", "x86-modules", false).unwrap().0, "x86-cuda-native");
+        assert_eq!(rs.route("spark", "arm-conda", true).unwrap().0, "test-arm-cuda-native");
+        assert_eq!(rs.route("buran", "cactus-cpu", false).unwrap().0, "x86-cpu-image");
+        assert!(rs.route("medusa", "cactus-cuda", false).is_err());
+        let ss = rostam.meta.scripts(ScriptKind::Submit);
+        assert_eq!(ss.route("medusa", "cactus-cpu", false).unwrap().0, "default");
+        assert!(rostam.script_path(ScriptKind::Submit, "default").unwrap().python);
+        // The spark build's conda environment is each user's own.
+        let arm = optionlist::Optionlist::load(&rostam.optionlist_path("arm-cuda-native")).unwrap();
+        assert!(arm.render().contains("MPI_DIR = /work/@USER@/spark-deps/env"));
+        assert!(!arm.source.contains("mmorris"));
 
         // graham unifies one Compute Canada cluster's CPU (g++) and CUDA (nvcc)
         // build flavors into two flavors. The CUDA flavor carries

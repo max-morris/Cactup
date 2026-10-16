@@ -708,9 +708,12 @@ network. They differ in the **baseline** they compare against:
   says so rather than rendering every repo as diverged; local modifications
   are still reported.
 - **`config delta [<name>]`** — against **the last build of that config**
-  (`sources` in its metadata, §7.4): *what would rebuilding pick up*. This is
-  exactly the input the rebuild decision acts on (§7.8 rule 5), so the two can
-  never disagree.
+  (`sources`, `thorn-providers`, `thorn-shapes` and `thorn-stamps` in its
+  metadata, §7.4): *what would rebuilding pick up*. These are exactly the
+  source-derived inputs the rebuild decision acts on (§7.8 rules 4 and 5), so
+  the two can never disagree. A changed thorn is named once, under the
+  strongest of its changes: a new provider, then a new shape (both cost the
+  thorn its build state), then edited files.
 
 **`installation delta` reports two independent things, because the tree can
 diverge in two independent ways.**
@@ -2526,6 +2529,13 @@ landed:
   already gets body-code edits right, and hashing bodies would discard a
   thorn's whole build directory on every such edit — the opposite of what
   this tracking is for.
+- **`thorn-stamps`** — thorn name → a hash of the path, mtime and size of
+  every file `thorn-shapes` lists, mtime-based like the `make` that consumes
+  them. It is what sees a body edit to a thorn git does not track — one
+  generated into a checkout without being committed, or one in no repo at
+  all — which `sources` cannot: its worktree summary counts tracked files
+  only. A config rebuilt off regenerated kernels in such a thorn otherwise
+  read as up to date and never recompiled them.
 
 A thorn whose recorded provider or shape has moved since the last build has
 its `build/<Thorn>/` and `libthorn_<Thorn>.a` deleted before the reconfigure
@@ -2783,8 +2793,8 @@ config was last built with:
 2. the resolved build **universe** against the recorded one (§7.4);
 3. the **processed thornlist** against the stored
    `configs/<name>/cactup-thornlist.th` (§7.5);
-4. each thorn's recorded **provider** and **shape** (§7.4) against the stored
-   `thorn-providers`/`thorn-shapes` maps — independent of the thornlist-text
+4. each thorn's recorded **provider**, **shape** and **stamp** (§7.4) against
+   the stored `thorn-providers`/`thorn-shapes`/`thorn-stamps` maps — independent of the thornlist-text
    diff above, since a thornlist can be byte-for-byte unchanged while what a
    name resolves to underneath it, or what that thorn contains, is not;
 5. the live **source-tree state** against the stored `sources` map (§7.4) — a
@@ -2827,6 +2837,13 @@ thorn's existing source-file bodies do **not** appear in either map and so
 never trigger this: `make` recompiles what such an edit affects on its own,
 the same trust extended to an edited flesh above.
 
+A thorn whose **stamp** alone differs — files rewritten, nothing added or
+removed — triggers a reconfigure + `make` and deletes nothing, the same
+response as an edited worktree below. It is the weakest of the source-derived
+reasons and only ever replaces "up to date": for a thorn in a tracked repo the
+worktree summary sees the same edit first. A thorn missing from the fresh
+stamps is not a stamp change; its shape entry already reports it.
+
 A **source-tree** difference is graded by what moved. A repo on a different
 commit, or one that can no longer be read at all, triggers a reconfigure +
 `make`; the same for the **flesh** triggers a full realclean + rebuild, since
@@ -2846,9 +2863,10 @@ The processed thornlist may be a CRL list or a plain Cactus `ThornList`. A
 plain list is resolved through the tree: each `arrangements/<A>/<T>` that links
 into `repos/<repo>/…` counts as that repo, and the flesh is whatever repo the
 root `Makefile` links into. A thorn that is no such link keeps its provider and
-shape entries but has no source state, and neither the up-to-date line nor
-`config delta` may then claim "same sources" without naming it (nor the flesh,
-when the `Makefile` is not a link). Resolving reads the tree rather than the
+shape entries but has no source state. Its stamp still sees its files edited,
+but nothing sees the flesh's (when the `Makefile` is not a link) nor a thorn's
+without a stamp, so neither the up-to-date line nor `config delta` may then
+claim "same sources" without naming them. Resolving reads the tree rather than the
 installation's CRL list, because the links are what the build compiles from.
 
 A source tree cactup cannot read at all yields no reading. That happens when the
@@ -4108,8 +4126,14 @@ cactup test delete     <name> [-f] [--purge]      # move a test run to test-home
 Notes:
 - `[<test>…]` is the optional test selection (`test run` / `test submit`). Omitted
   ⇒ run **all** tests (the successor to simfactory's `--select-tests all`
-  default). A selector is a test name, a thorn (`arrangement/Thorn`), or an
-  arrangement; cactup passes the resolved selection to the flesh harness (§11.6).
+  default). A selector is a test name, a thorn (`Thorn` or `arrangement/Thorn`),
+  a `Thorn/test` pair, or an arrangement; a bare name that is both an
+  arrangement and a thorn means the arrangement (`arrangement/Thorn` spells the
+  thorn). cactup resolves the selection against the config's `ThornList` at
+  submit time into the flesh's `CCTK_TESTSUITE_RUN_TESTS` format, which knows
+  only `Thorn` and `Thorn/test`, and freezes that into `@TESTSUITE_SELECT@`
+  (§11.6, D11). A selector naming nothing with tests is an error before any
+  job is queued.
 - `--config C` defaults to the **active config** (§7.4); both `test run` and
   `test submit` fail fast in the null-config state with guidance to
   `cactup build`. The config must be a complete build.

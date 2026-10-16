@@ -1,0 +1,326 @@
+# rostam — LSU CCT's Rostam cluster (rostam1.rostam.cct.lsu.edu; Slurm).
+#
+# Rostam mixes instruction sets and accelerators from partition to partition,
+# so every flavor is named <ISA>-<accelerator>-<how it is built>:
+#
+#   flavor           build universe  where it builds        queues
+#   ---------------  --------------  ---------------------  ------------------
+#   x86-cuda-image   cactus-cuda     login node, Apptainer  the x86 CUDA
+#   (default)                                               partitions
+#   x86-cuda-native  x86-modules     login node, Lmod       the x86 CUDA
+#                                                           partitions
+#   arm-cuda-native  arm-conda       a spark node           spark
+#   x86-cpu-image    cactus-cpu      login node, Apptainer  medusa, buran
+#
+#   The x86 CUDA partitions hold A100s (sm_80) and V100s (sm_70), and both
+#   x86 CUDA flavors compile for both; their compile flags name no -march,
+#   so one binary also runs on every host CPU (Haswell to Ice Lake, EPYC
+#   Rome).
+#   - x86-cuda-image builds and runs inside Steve Brandt's
+#     docker://stevenrbrandt/cactus-cuda image under Apptainer, which carries
+#     CUDA 12.9, MPICH and every ExternalLibrary prebuilt; ported from his
+#     rostam1 overlay.
+#   - x86-cuda-native builds on the host from Rostam's modules and the
+#     system's CUDA 12.8, with the same compile flags, to compare against the
+#     image build.
+#   - arm-cuda-native is for the four DGX Spark nodes (aarch64, one NVIDIA
+#     GB10, sm_121), which run Ubuntu 24.04 with CUDA 13.0 and no MPI, Fortran
+#     or Apptainer of their own, so it builds natively against a conda-forge
+#     environment (see [universes.arm-conda]). An x86_64 cactup cannot run
+#     there: use an aarch64 cactup with its own CACTUP_HOME on a spark node
+#     (e.g. `CACTUP_HOME=$HOME/.cactup-arm`), and build there with `cactup
+#     build run`.
+#   - x86-cpu-image builds and runs inside docker://stevenrbrandt/cactus,
+#     Steve Brandt's CPU-only sibling of the cactus-cuda image, for x86-64-v3
+#     (AVX2), which every medusa and buran node has.
+#
+# Partitions this entry leaves out, on purpose:
+#   - marvin (16 × Sandy Bridge-EP nodes: 16 cores, 37 GB, 10-day limit):
+#     Sandy Bridge has AVX but not AVX2 or FMA, so the x86-cpu-image build
+#     cannot run there. Covering it takes one more flavor: a copy of
+#     x86-cpu-image.toml with -march=sandybridge and runs-on marvin, a
+#     marvin queue, and marvin in the routes of the x86-cpu-image scripts.
+#   - mi100 (kamand[0-1]: 2 × AMD MI100, gfx908, ROCm 5.4 to 7.x installed):
+#     it needs a HIP flavor, which nothing here has built or run yet, and the
+#     partition has no GPU GRES configured, so Slurm cannot hand a job its
+#     own GPUs.
+#   - risc5 (sven[0-1]: 64-core rv64imafdcv, Fedora 38): cactup ships no
+#     riscv64 build, and there is neither an HDF5 module nor a riscv64
+#     image to build against.
+#   - jenkins-compute, jenkins-cuda, jenkins-A100, jenkins-amdgpu: CI
+#     partitions over nodes of the partitions above.
+
+[machine]
+name        = "rostam"
+nickname    = "rostam"
+location    = "LSU CCT"
+description = "LSU CCT Rostam cluster (Slurm): x86 CPU, A100, V100 and DGX Spark GPU nodes"
+status      = "production"
+hostname    = "rostam1.rostam.cct.lsu.edu"
+
+[paths]
+install-home    = "/work/@USER@/cactup"
+simulation-home = "/work/@USER@/simulations"
+test-home       = "/work/@USER@/tests"
+
+# The login node; each queue below overrides what differs on its nodes.
+[hardware]
+max-cpus-per-node = 24
+memory            = 94620
+
+[build]
+make      = "make -j@MAKEJOBS@"
+make-jobs = 16
+
+[universes.cactus-cuda]
+kind = "apptainer"
+# --nv exposes the CUDA driver; /work holds the Cactus tree (and is an autofs
+# map, so it must be bound explicitly). $HOME is bound by default. Apptainer
+# pulls the image on first use and caches a SIF under ~/.apptainer.
+wrapper-argv = [
+    "apptainer", "exec", "--nv", "--no-pid",
+    "--bind", "/work", "--bind", "/dev/shm",
+    "docker://stevenrbrandt/cactus-cuda",
+]
+# The image's /usr/bin/mpirun is OpenMPI; the optionlist builds against MPICH.
+env-setup = """
+export MPI_FLAVOR=mpich
+export PATH=/opt/mpi/mpich/bin:$PATH
+"""
+
+[universes.cactus-cpu]
+kind = "apptainer"
+# Steve Brandt's CPU-only image (Debian trixie, gcc 14, MPICH, and the CarpetX
+# I/O stack prebuilt), bound like cactus-cuda but without --nv. Every Rostam
+# x86 node has Apptainer.
+wrapper-argv = [
+    "apptainer", "exec", "--no-pid",
+    "--bind", "/work", "--bind", "/dev/shm",
+    "docker://stevenrbrandt/cactus",
+]
+# The image's /usr/bin/mpirun is OpenMPI; the optionlist builds against MPICH.
+# Unlike cactus-cuda, this image has no en_US.UTF-8 locale, which Rostam's
+# LANG names, so every Perl step of a build would warn about it.
+env-setup = """
+export MPI_FLAVOR=mpich
+export PATH=/opt/mpi/mpich/bin:$PATH
+export LANG=C.UTF-8
+"""
+
+[universes.x86-modules]
+# Identity universe for the native x86 build (flavor x86-cuda-native): OpenMPI
+# 5.0.7 and parallel HDF5 1.14.6 from Rostam's Lmod modules, CUDA 12.8, and
+# the system gcc 11.5 those modules were built with. cactup's shells are not
+# login shells, so Lmod is initialized here.
+#
+# Formaline's makeblob.pl says `use diagnostics`, which only makes Perl's
+# warnings verbose, and Rostam's perl lacks the module (perl-diagnostics is
+# not installed), so a no-op diagnostics.pm is put on PERL5LIB.
+env-setup = """
+export MODULEPATH=/opt/apps/modulefiles
+. /usr/share/lmod/lmod/init/bash
+module purge
+module load openmpi/5.0.7 hdf5/1.14.6
+export PATH=/usr/local/cuda-12.8/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+perl_stub=$HOME/.cache/cactup-rostam-perl5
+if [ ! -e "$perl_stub/diagnostics.pm" ]; then
+    mkdir -p "$perl_stub"
+    printf 'package diagnostics;\nsub import {}\nsub unimport {}\n1;\n' > "$perl_stub/diagnostics.pm"
+fi
+export PERL5LIB=$perl_stub${PERL5LIB:+:$PERL5LIB}
+"""
+
+[universes.arm-conda]
+# Identity universe for the native aarch64 build (flavor arm-cuda-native).
+# The spark nodes carry CUDA 13.0 but no MPI or Fortran, so the compilers
+# (conda-forge gcc, g++ and gfortran 13) and every ExternalLibrary come from a
+# conda-forge environment each user keeps at /work/$USER/spark-deps/env (the
+# flavor's optionlist names the same place as /work/@USER@/spark-deps/env).
+# The first build creates it, on the spark node it runs on, since it must be
+# linux-aarch64: env-build-setup fetches micromamba and solves the packages
+# below, which takes a few minutes. The packages it was made from are recorded
+# in env/.cactup-spec; when they change here, the next build installs them into
+# the environment in place (never removing it, since runs may be using it). A
+# lock keeps concurrent builds from doing this twice. HDF5 is pinned to 1.14,
+# the series the ET's HDF5 thorn knows.
+env-setup = """
+export PATH=/work/$USER/spark-deps/env/bin:/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/work/$USER/spark-deps/env/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+"""
+env-build-setup = """
+deps=/work/$USER/spark-deps
+spec='gcc=13 gxx=13 gfortran=13 mpich hdf5=1.14.*=mpi_mpich* gsl fftw openblas liblapack yaml-cpp zlib libboost-devel libhwloc openssl libjpeg-turbo cmake make perl pkg-config'
+if [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" != "$spec" ]; then
+    mkdir -p $deps || exit 1
+    (
+        flock 9
+        [ "$(cat $deps/env/.cactup-spec 2>/dev/null)" = "$spec" ] && exit 0
+        if [ ! -x $deps/bin/micromamba ]; then
+            curl -fsSL https://micro.mamba.pm/api/micromamba/linux-aarch64/latest | tar -xj -C $deps bin/micromamba || exit 1
+        fi
+        if [ -d $deps/env/conda-meta ]; then verb=install; else verb=create; fi
+        echo "Setting up the conda-forge environment $deps/env ($verb; a few minutes)..."
+        MAMBA_ROOT_PREFIX=$deps/mamba $deps/bin/micromamba $verb -y -q -p $deps/env -c conda-forge $spec || exit 1
+        printf '%s' "$spec" > $deps/env/.cactup-spec
+    ) 9> $deps/.cactup-lock || exit 1
+fi
+"""
+
+[scheduler]
+# Grab stderr so we can see submit problems in the log.
+submit          = "sbatch @SCRIPTFILE@ 2>&1"
+blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
+get-status      = "squeue -j @JOB_ID@"
+# One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
+# is what keeps the patterns below matching.
+get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+stop            = "scancel @JOB_ID@"
+submit-pattern   = 'Submitted batch job (\d+)'
+status-pattern   = '@JOB_ID@ '
+queued-pattern   = ' PD '
+running-pattern  = ' (CF|CG|R|TO) '
+holding-pattern  = '\(JobHeldUser\)'
+exec-host        = "hostname -s"
+exec-host-pattern = '(\S+)'
+# Machine-level fallback ceiling (design §4.2); every queue sets its own.
+max-walltime    = "72:00:00"
+# Set inside every Slurm allocation; gates `test run` (design §11.6).
+allocation-env  = "SLURM_JOB_ID"
+
+# Queues are Rostam's partitions (`sinfo`, `scontrol show partition|node`,
+# 2026-10-12). Hyperthreading is off unless noted, so Slurm's CPUs are cores.
+# A queue spanning several node types carries the intersection of their
+# limits, so a job fits whichever node it lands on. On the GPU queues,
+# `default-cpus-per-task` splits a node's cores evenly between its GPUs, so a
+# job given no -c runs one rank per GPU and fills the node (the db1/qbd
+# shape).
+
+# cuda-A100 spans nasrin[0-1] (2 × A100 80GB PCIe, 128 cores, AMD EPYC Rome)
+# and toranj[0-1] (4 × A100 40GB PCIe, 64 cores, Intel Ice Lake). The -amd
+# and -intel partitions are the same nodes split by type, for runs that must
+# land on identical hardware.
+[queues.cuda-A100]
+gpu                   = true
+default               = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 64
+max-gpus-per-node     = 2
+default-cpus-per-task = 32
+memory                = 252763
+
+[queues.cuda-A100-amd]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 128
+max-gpus-per-node     = 2
+default-cpus-per-task = 64
+memory                = 506849
+
+[queues.cuda-A100-intel]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 64
+max-gpus-per-node     = 4
+default-cpus-per-task = 16
+memory                = 252763
+
+# cuda is every NVIDIA x86 node behind one 1-day partition: anvil, nasrin,
+# toranj, bahram and diablo (below). Its intersection is bahram's.
+[queues.cuda]
+gpu                   = true
+max-walltime          = "1-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 2
+default-cpus-per-task = 10
+memory                = 124200
+
+# cuda-V100 spans bahram (2 × V100 PCIe 32GB, 20 cores, Intel Haswell,
+# 124 GB) and diablo (4 × V100 SXM2 32GB, 40 cores, Intel Skylake, 368 GB);
+# the intersection is bahram's. sc15 is bahram alone, under a partition name
+# kept from SC15.
+[queues.cuda-V100]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 2
+default-cpus-per-task = 10
+memory                = 124200
+
+[queues.sc15]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 2
+default-cpus-per-task = 10
+memory                = 124200
+
+# DGX-A100 is anvil: 8 × A100 SXM4 80GB and 2 × 64-core AMD EPYC Rome with
+# hyperthreading on, so Slurm counts 256 CPUs, two per core; 2 TB.
+[queues.DGX-A100]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cuda", "x86-modules"]
+max-cpus-per-node     = 256
+max-gpus-per-node     = 8
+default-cpus-per-task = 32
+threads-per-cpu       = 2
+memory                = 2030746
+
+# spark-[00-03]: one GB10 (sm_121) and 20 Arm cores (10 Cortex-X925, 10
+# Cortex-A725) sharing 128 GB of unified memory. Only an aarch64 build can run
+# here, which build-universes enforces.
+[queues.spark]
+gpu                   = true
+max-walltime          = "3-00:00:00"
+build-universes       = ["arm-conda"]
+max-cpus-per-node     = 20
+max-gpus-per-node     = 1
+default-cpus-per-task = 20
+memory                = 120000
+
+# The x86 CPU partitions, for flavor x86-cpu-image. Rostam's default partition
+# is medusa, but this machine's default queue stays cuda-A100, the default
+# flavor's; x86-cpu-image names medusa as its own default-queue. On these
+# queues `default-cpus-per-task` gives four ranks per node, two per socket.
+# medusa[00-15]: 2 × 20-core Intel Xeon Gold 6148 (Skylake), 92 GB.
+[queues.medusa]
+gpu                   = false
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cpu"]
+max-cpus-per-node     = 40
+default-cpus-per-task = 10
+memory                = 92697
+
+# buran[00-15]: 2 × 24-core AMD EPYC 7352 (Rome), 252 GB.
+[queues.buran]
+gpu                   = false
+max-walltime          = "3-00:00:00"
+build-universes       = ["cactus-cpu"]
+max-cpus-per-node     = 48
+default-cpus-per-task = 12
+memory                = 252909
+
+# One submit script for every queue. The run scripts are picked by the
+# config's build universe, since each flavor launches differently: the image
+# through Apptainer, the native builds directly, OpenMPI with PMIx and MPICH
+# with PMI-2.
+[submitscripts]
+"default" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark", "medusa", "buran"] }
+"test"    = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15", "spark", "medusa", "buran"], test = true }
+
+[runscripts]
+"x86-cuda-image"       = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["cactus-cuda"] }
+"x86-cuda-native"      = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["x86-modules"] }
+"arm-cuda-native"      = { queues = ["spark"], build-universes = ["arm-conda"] }
+"x86-cpu-image"        = { queues = ["medusa", "buran"], build-universes = ["cactus-cpu"] }
+"test-x86-cuda-image"  = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["cactus-cuda"], test = true }
+"test-x86-cuda-native" = { queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"], build-universes = ["x86-modules"], test = true }
+"test-arm-cuda-native" = { queues = ["spark"], build-universes = ["arm-conda"], test = true }
+"test-x86-cpu-image"   = { queues = ["medusa", "buran"], build-universes = ["cactus-cpu"], test = true }

@@ -75,7 +75,7 @@ fn assemble_test_vars(
     cactus_root: &Path,
     machine: &Machine,
     topo: &Topology,
-    select: &str,
+    flesh_select: &str,
     identity: &Identity,
     alias: &str,
     run_universe: Option<&str>,
@@ -96,10 +96,10 @@ fn assemble_test_vars(
     v.set("TEST_NAME", name);
     v.set("RESULTS_ID", results_id as u64);
     v.set("TESTSUITE_RESULTS_DIR", results_dir(run_dir, results_id).display().to_string());
-    // @TESTSUITE_SELECT@ carries the flesh's CCTK_TESTSUITE_RUN_TESTS format:
-    // empty = run everything, else space-separated Thorn / Thorn/test entries
-    // (metadata and logs keep the human-facing "all").
-    v.set("TESTSUITE_SELECT", if select == "all" { "" } else { select });
+    // @TESTSUITE_SELECT@ carries the flesh's CCTK_TESTSUITE_RUN_TESTS format
+    // (`select::resolve`): empty = run everything, else space-separated
+    // Thorn / Thorn/test entries (metadata and logs keep what the user typed).
+    v.set("TESTSUITE_SELECT", flesh_select);
 
     // Shared §6.3 names a test script uses (§11.9): the LIVE built binary —
     // a test run freezes no private copy (§11.5).
@@ -260,6 +260,9 @@ fn start_impl(
     let fit = BinaryFit::for_config(machine, &cfg)?;
     let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
+    // Resolved before anything is created or registered: a selection that
+    // names nothing fails here, not as a queued job that runs zero tests.
+    let flesh_select = crate::testsuite::select::resolve(&cactus_root, &cfg_name, &args.tests)?;
 
     // 3. TEST scripts for the queue (§11.2: test-marked scripts only, never a
     //    normal one) and the universes (§4.8); selection
@@ -398,7 +401,7 @@ fn start_impl(
         &cactus_root,
         machine,
         &topo,
-        &select,
+        &flesh_select,
         &identity,
         &inst.alias,
         run_uni_name,
@@ -689,6 +692,12 @@ mod tests {
         .unwrap();
         fs::create_dir_all(root.join("exe")).unwrap();
         fs::write(root.join("exe/cactus_tests"), "#!/bin/sh\n").unwrap();
+        fs::write(cfg_dir.join("ThornList"), "McLachlan/ML_BSSN\nArrangement/Thorn\n").unwrap();
+        for thorn in ["McLachlan/ML_BSSN", "Arrangement/Thorn"] {
+            let test_dir = root.join("arrangements").join(thorn).join("test");
+            fs::create_dir_all(test_dir.join("t1")).unwrap();
+            fs::write(test_dir.join("t1.par"), "").unwrap();
+        }
         inst
     }
 
@@ -778,6 +787,9 @@ mod tests {
         let results = run.meta.results.as_ref().unwrap();
         assert_eq!((results.passed, results.failed, results.results_id), (5, 2, 1));
         assert_eq!(run.meta.select, "McLachlan/ML_BSSN Arrangement");
+        // The flesh sees thorn names, never arrangement/Thorn (§11.3).
+        let harness = fs::read_to_string(run_dir.join("harness.txt")).unwrap();
+        assert_eq!(harness.trim(), "selection=ML_BSSN Thorn procs=2 config=tests");
 
         // --overwrite reuses the active set instead of allocating (§11.5);
         // an explicit -T beats the testsuite tasks default.
