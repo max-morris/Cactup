@@ -1710,7 +1710,15 @@ pub fn prepare(
     opts: &BuildOpts,
     submit: Option<&SubmitReservation>,
 ) -> Res<Prepared> {
-    prepare_with_cache(installation, machine, name, opts, submit, None)
+    // A unit test's builds keep the cache out, whatever the knob (on by
+    // default, decision 34) says in the real global DB a test reads: the
+    // binary it runs as is the test harness, not cactup. Tests of the cache
+    // give a mode through `prepare_with_cache`.
+    #[cfg(test)]
+    let cache = Some((crate::objcache::Mode::Off, "/nonexistent/cactup"));
+    #[cfg(not(test))]
+    let cache = None;
+    prepare_with_cache(installation, machine, name, opts, submit, cache)
 }
 
 /// [`prepare`], with the build cache's mode and the cactup that wraps the

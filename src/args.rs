@@ -339,11 +339,12 @@ pub(crate) enum Commands {
     /// Five machine-global knobs control the build cache, which reuses the
     /// objects earlier builds compiled:
     ///
-    ///   build-cache          off (the default); serve: compile only what no
+    ///   build-cache          serve (the default): compile only what no
     ///                        build compiled before, and keep what is
-    ///                        compiled; audit: serve, but compile anyway
-    ///                        and check that every served object is the
-    ///                        same; record: only measure, changing nothing.
+    ///                        compiled; off: build without the cache;
+    ///                        audit: serve, but compile anyway and check
+    ///                        that every served object is the same;
+    ///                        record: only measure, changing nothing.
     ///   build-cache-home     where cached objects are kept, as an absolute
     ///                        path (default: .cactup-build-cache beside
     ///                        your installations, in the install-home).

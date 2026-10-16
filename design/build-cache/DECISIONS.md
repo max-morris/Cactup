@@ -568,6 +568,13 @@ Asked as seven questions with options; the answers, in Max's numbering.
     (decision 17's: any false statement blocks), with fixes checked
     against the real tools before review.
 
+34. **The cache is on by default** (2026-10-16). After the merge Max:
+    "I want it on by default." The knob `build-cache` is `serve` where it
+    is not set; `off` turns it off. A value that cannot be read, or a
+    database that cannot be, still means `off` (fail open). Every build
+    then keeps its objects in the store, which nothing removes but `cache
+    gc` (`build-cache-size` says when it has grown past a size).
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

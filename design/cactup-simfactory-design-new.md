@@ -1892,8 +1892,8 @@ one is no value), winning over the machine's value of that key for the user
 who sets it. Where a job needs one, it is frozen like the machine's would be.
 
 And maintenance knobs for the build cache (D15, §18): `build-cache`
-(`off`, the default, `record`, `serve` or `audit`; read leniently — garbage
-means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8),
+(`serve`, the default since decision 34, `off`, `record` or `audit`; read
+leniently — garbage, or a database that cannot be read, means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8),
 `build-cache-preserve-exact-warnings` (`false`, the default, or `true`:
 §18.5, decision 31) and `build-cache-size` (§18.9); the store's root is the path knob
 `build-cache-home` (below, §18.7). They are not in the snapshot either, but a build does
