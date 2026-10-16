@@ -576,20 +576,20 @@ cactup build native-build --no-universe
 cactup has a build cache shared by all the installations of one
 `~/.cactup`, so that a new installation or a from-scratch rebuild reuses the
 objects an earlier build already compiled. It caches C and C++, and Fortran
-compiled with gfortran, and CUDA compiled with `nvcc`, and it is off unless you turn it
-on with the `build-cache` knob:
+compiled with gfortran, and CUDA compiled with `nvcc`. It is on unless you
+turn it off with the `build-cache` knob:
 
 | Value | What a build does |
 |-------|-------------------|
-| `off` (the default) | Nothing: the build is exactly what it is without the cache |
-| `serve` | Each compile that some build of this `~/.cactup` already made is taken from the cache instead of compiled; each one compiled is kept for the next build |
+| `serve` (the default) | Each compile that some build of this `~/.cactup` already made is taken from the cache instead of compiled; each one compiled is kept for the next build |
+| `off` | Nothing: the build is exactly what it is without the cache |
 | `audit` | As `serve`, but every object the cache has is compiled anyway and compared, to check the cache: slower than a plain build, and the way to trust it |
 | `record` | Only measures: works out what each compile would be cached under and logs it. Nothing is stored or reused, and the build is exactly what it is without the cache |
 
 ```sh
-cactup -K build-cache=serve build myconfig    # for this one build
-cactup knob build-cache serve                 # for every build from now on
-cactup knob delete build-cache                # back to the default, off
+cactup -K build-cache=off build myconfig      # this one build without it
+cactup knob build-cache off                   # every build from now on
+cactup knob delete build-cache                # back to the default, serve
 ```
 
 With `serve`, the compile step ends with what the cache did: how many
@@ -673,7 +673,7 @@ set substitute-path /cactup-root /path/to/Cactus
 Or turn this off for a build you mean to debug:
 
 ```sh
-cactup -K build-cache=serve -K build-cache-relocate=no build myconfig
+cactup -K build-cache-relocate=no build myconfig
 ```
 
 Its objects then keep the full paths, and are shared only between builds of
@@ -689,7 +689,7 @@ exact either way. To have every warning exactly this build's own, at the
 cost of sharing fewer objects between configurations:
 
 ```sh
-cactup -K build-cache=serve -K build-cache-preserve-exact-warnings=true build myconfig
+cactup -K build-cache-preserve-exact-warnings=true build myconfig
 ```
 
 With `record`, each compile of a Cactus source file adds one line to

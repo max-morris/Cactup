@@ -340,7 +340,7 @@ impl Database {
             "autoupdate" => Some(crate::update::AutoUpdate::Auto.name().to_owned()),
             "update-url" => Some(crate::update::DEFAULT_UPDATE_URL.to_owned()),
             "mdb-url" => Some(crate::update::DEFAULT_MDB_URL.to_owned()),
-            "build-cache" => Some(crate::objcache::Mode::Off.name().to_owned()),
+            "build-cache" => Some(crate::objcache::Mode::Serve.name().to_owned()),
             "build-cache-relocate" => Some("yes".to_owned()),
             "build-cache-preserve-exact-warnings" => Some("false".to_owned()),
             _ => None,

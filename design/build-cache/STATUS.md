@@ -20,11 +20,13 @@ the last milestone, for when that host is not at hand.
   alias `build-cache-b` for cross-installation measurements.
   `/home/max/Cactus-2026` is read-only reference. Never write in
   `~/cacti/speedup-build`.
-- While developing on this shared instance, turn the cache on per command
-  (`cactup -K build-cache=record build …`), not with `cactup knob`: the
-  instance's database is shared with other sessions and with installed
-  cactup builds that do not know the knob yet. (Users of a released cactup
-  set the knob normally.)
+- While developing on this shared instance, give a build the cache's mode
+  and store per command (`-K build-cache=off`, `-K build-cache=record`,
+  `-K build-cache-home=<a directory of your own>`), not with `cactup knob`:
+  since decision 34 a build with no knob set serves into the default store,
+  and the instance's database is shared with other sessions and with
+  installed cactup builds. (Users of a released cactup set the knob
+  normally.)
 - While reviewers are at work, leave the worktree alone: they build and
   read in it, and edits appearing under them cost them a clean export.
   Prepare fixes only once both have reported (or in a second worktree).
@@ -3327,6 +3329,39 @@ blocking:
 - The doctor's look for the stamp step takes the stamp path raw (round
   32).
 
+### After the merge: the cache on by default, and the doctor's fixes
+
+On 2026-10-16, master at `2b7bfbd`, Max asked for three of round 35's
+items after the merge (`guard_no_live_attempt` and pid reuse; the setup
+read as one block, an alias it defines then uses misread; a setup that
+closes stderr said not to run through), and the cache on by default
+(decision 34). Eight review rounds
+followed on branch `feature/test-run-liveness` (its STATUS has their
+records). Its parts for the cache passed early (round 1's two findings
+on them, the contract with the build-speed work and stale texts, fixed
+in its `d9c8da1` and `468e97a`; round 2's notes on the contract in its
+`f146bd7`); every round after was on test runs'
+liveness (`test stop`, `test delete` on batch and `ps`-style schedulers),
+which grew from item 1. Max (decision 35): land the cache's parts now;
+the test-run work goes on, on `feature/test-run-liveness`, to be merged
+soon. Landed here, taken from that branch as it is at `a4e53e8`:
+
+- Pid reuse, for builds: only a submitted attempt with no recorded outcome
+  is asked of the scheduler (`guard_no_live_attempt`,
+  `pending_job_query`, `attempt_is_live`); a foreground attempt's job id
+  is a pid, which `running.lock` alone vouches for.
+- The setup read as one block, and one that closes stderr: the doctor runs the setup from a script file at its top
+  level, as the build does (an alias the setup defines works after), and
+  its request, answer and the mark of the setup's end are files (a setup
+  that closes stderr runs through); a whole answer is taken whatever the
+  shell's status after it (a setup's own failing exit trap).
+- Decision 34: `build-cache` is `serve` where it is not set; the contract
+  with the build-speed work says so (timing builds pass
+  `-K build-cache=off`).
+
+`cache doctor` on `m5a`, `m5b`, `et` prints byte for byte what master
+prints; `cargo test --workspace --locked` passes.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3543,13 +3578,16 @@ gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
 
-M5 part 2 passed its gate at `92c3089` (round 32), and with it M5;
-master had moved, and the merge passed rounds 33 to 35 (below, at
-`b6a974b`); then `feature/build-cache` fast-forwards master as the feature's first
-version (decision 27). Then, in order: the pid-reuse fix in
-`guard_no_live_attempt` (round 31); the every-flag search on
-`feature/doctor-every-flag` (round 16's open findings); M4b (Cray), M5b
-(the whole-file cases), M6 (HIP).
+The cache is on master with `cache doctor` and on by default (above).
+Then, in parallel (decision 35): the test-run liveness work on
+`feature/test-run-liveness` (its round 8's open finding, a requeued job
+waiting in the queue, waits on the scheduler keys of decision 35's
+third question); MDB generation 3 on its own branch and PR: a
+`*-provision` key beside each `*-env-setup`, the `env-*-setup` keys
+renamed `*-env-setup`, and the scheduler keys decision 35 asks for (job
+ids that are pids, a scheduler's "no such job"), in one bump. Then M4b
+(Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on
+`feature/doctor-every-flag` is shelved (Max, 2026-10-16).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.
 Part 1 passed its gate at `ad236d2` (spec §18.12):

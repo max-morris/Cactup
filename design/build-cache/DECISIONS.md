@@ -568,6 +568,31 @@ Asked as seven questions with options; the answers, in Max's numbering.
     (decision 17's: any false statement blocks), with fixes checked
     against the real tools before review.
 
+34. **The cache is on by default** (2026-10-16). After the merge Max:
+    "I want it on by default." The knob `build-cache` is `serve` where it
+    is not set; `off` turns it off. A value that cannot be read, or a
+    database that cannot be, still means `off` (fail open). Every build
+    then keeps its objects in the store, which nothing removes but `cache
+    gc` (`build-cache-size` says when it has grown past a size).
+
+35. **Land the cache's parts; the rest on branches of their own**
+    (2026-10-16). After eight review rounds on the post-merge fixes, the
+    later ones all on test runs' liveness, Max: "I still want all those
+    fixed, but I wanna get cache-on and the doctor fixes in now. The rest
+    should continue to be worked on and merged soon." The build's pid
+    fix, the doctor's two fixes and decision 34 land on master; the
+    test-run work goes on on `feature/test-run-liveness`. On the MDB's
+    setups that provision (round 35's item on the MDB check running
+    rostam's provisioning and real Lmod), Max chose a key of its
+    own, and more: a `*-provision` key beside each kind of environment
+    setup (`provision` runs wherever `env-setup` does, `build-provision`
+    after `env-build-setup`, and so on), and the `env-*-setup` keys
+    renamed `*-env-setup`, on a branch of its own that delivers a PR; and
+    for the scheduler's job ids that are pids (the third question put to
+    him then, not decision 3 above): record the host and the process's start
+    time and ask only there, and tell a scheduler's "no such job" from a
+    query that failed. The two share one MDB generation bump.
+
 ## Still open
 
 - (Answered: decision 3's cluster check, on qbd's site-built GCC and on

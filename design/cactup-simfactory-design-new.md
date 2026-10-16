@@ -35,7 +35,7 @@ These were settled during design review and are treated as fixed below.
 | D12 | Optionlist flavor ↔ queue compatibility | **The optionlist flavor declares where its binary may run** (`[cactup.runs-on]`: `queues` and `gpu`). `sim submit`/`sim run` and `test run`/`test submit` enforce it; a `build submit` job's queue is never checked against it, since that job runs `make`, not the binary (see §4.4, §7.4, §7.9). |
 | D13 | Linking & system libraries | **Fully static MUSL binary.** cactup deploys to clusters as a single copyable binary: the release artifact targets `x86_64-unknown-linux-musl` and must stay fully statically linked (`ldd`: "statically linked"). No crate that binds a system shared library (no openssl/native-tls — reqwest uses rustls; no libgit2 — git is pure-Rust gix; no pkg-config'd C deps); C code a dependency compiles in statically at cargo-build time is fine. Our own code never uses the `libc` crate directly — OS facts come from `/proc` or std (e.g. §2.3's pid probing). What neither offers, the build cache's compiler wrapper (§18.4) gets from `rustix`: sending a signal to another process and waiting on it by pid (`kill(2)`, `waitpid(2)`). `rustix` makes Linux system calls itself, without libc, so the binary stays static: the point is not to depend on the system's C library, not to avoid system calls std happens not to wrap. |
 | D14 | Distribution, self-update & MDB generations | **CI builds, publishes and deploys; installed binaries keep themselves current.** Every passing `master` push builds static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (reused unchanged when no build input changed), publishes `mdb/` as the `mdb` git branch, and deploys docs + binaries + `cactup-init.sh` + `latest.json` to GitHub Pages. A binary is a **dist** build iff CI stamped it (`CACTUP_DIST=1`, build id, date); any local cargo build is a **dev** build (repo `mdb/`, no sync, no self-update). Dist builds clone the MDB into `~/.cactup/mdb`, sync the newest commit of their own **MDB generation** (warning loudly when a newer generation exists), and update themselves per the `autoupdate` knob (`auto`/`notify`/`off`). Each build lives at `~/.cactup/bin/cactup-<build>` behind a `bin/cactup` symlink and substitutes that path for `@CACTUP@`, so a job runs the exact build it was submitted with. The published MDB is the one on-disk artifact with a compatibility promise, and the generation is its only mechanism (§17). |
-| D15 | Shared build cache | **A compiler wrapper inside cactup, over an instance-wide store.** Objects one installation or configuration of an instance built are reused by the others whenever, and only when, compiling afresh would produce the same bytes. No existing compiler cache fits (none handles Fortran module files, and none shares a directory between hosts over NFS without POSIX locks), so cactup is its own: it stands in front of Cactus's object compiles, injected by a makefile fragment that leaves the optionlist and `config-data` untouched. The cache may only ever cost a miss: anything it does not fully understand compiles as if it were not there. Objects will be keyed by the cactup machine and by the host that compiles them, so that one filesystem spanning several architectures never mixes them, and nothing will be evicted automatically. Being brought up in stages (§18); so far only the interposition exists: nothing is keyed, stored or served. |
+| D15 | Shared build cache | **A compiler wrapper inside cactup, over an instance-wide store.** Objects one installation or configuration of an instance built are reused by the others whenever, and only when, compiling afresh would produce the same bytes. No existing compiler cache fits (none handles Fortran module files, and none shares a directory between hosts over NFS without POSIX locks), so cactup is its own: it stands in front of Cactus's object compiles, injected by a makefile fragment that leaves the optionlist and `config-data` untouched. The cache may only ever cost a miss: anything it does not fully understand compiles as if it were not there. Objects will be keyed by the cactup machine and by the host that compiles them, so that one filesystem spanning several architectures never mixes them, and nothing will be evicted automatically. On by default (knob `build-cache`, `serve`; decision 34); §18 says what it caches and how. |
 
 Everything marked **ASSUMPTION** in this document is a smaller decision made to
 keep the spec complete; flag any you want changed.
@@ -1892,8 +1892,8 @@ one is no value), winning over the machine's value of that key for the user
 who sets it. Where a job needs one, it is frozen like the machine's would be.
 
 And maintenance knobs for the build cache (D15, §18): `build-cache`
-(`off`, the default, `record`, `serve` or `audit`; read leniently — garbage
-means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8),
+(`serve`, the default since decision 34, `off`, `record` or `audit`; read
+leniently — garbage, or a database that cannot be read, means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8),
 `build-cache-preserve-exact-warnings` (`false`, the default, or `true`:
 §18.5, decision 31) and `build-cache-size` (§18.9); the store's root is the path knob
 `build-cache-home` (below, §18.7). They are not in the snapshot either, but a build does
@@ -3113,6 +3113,10 @@ wanted: submitting refuses (unless `-f`) whenever an attempt is already live,
 using the same liveness protocol §8.3 uses to decide whether a restart is
 really dead — the per-config lock (below) held, or the attempt's
 `running.lock`/heartbeat still fresh, or its scheduler status still live.
+The scheduler is asked only about a submitted attempt that has recorded no
+outcome: a foreground attempt's `job-id` is the pid of the cactup that ran
+it, which `running.lock` alone vouches for; once that cactup is gone the pid
+can be any other process's, and `-f` would stop it.
 
 **Locking across submit → queue → execute.** `LinkLock::acquire` (§2.3) fails
 fast and never blocks, so it cannot span a queue wait — a build's lock
@@ -6366,12 +6370,17 @@ never built has none to check), without a build (`objcache::doctor`):
 
 - It runs the setup four times (once for the checks, three times for the
   path variables): a slow module system's setup takes that much longer.
-- It starts the setup in a shell, as the build script does (`set -e`),
-  from the Cactus root, with the setup's own stdin `/dev/null` and its
-  stdout sent to stderr, and the shell then starts `cactup __cc-doctor`
-  with what to check on stdin. The checks run in that process, in the
+- It writes a script as the build script is written (the setup at its top
+  level, after `set -e`), which `/bin/sh` reads a command at a time, so
+  an alias the setup defines works in the lines after, as in the build;
+  it runs it from the Cactus root, stdin `/dev/null`, what the setup
+  prints sent to stderr. Once the setup is through, the script marks that
+  in a file and starts `cactup __cc-doctor`, with what to check in
+  another. The checks run in that process, in the
   build's own environment, with the functions a compile through the wrapper
-  runs; the answer comes back as JSON on stdout. A setup that does not run
+  runs; the answer comes back as JSON in a third file. Files, not the
+  shell's stdin, stdout or stderr: the setup may read, redirect or close
+  those (one that closes its stderr runs through). A setup that does not run
   to its end is said so ("not checked"), and the all-clear is given only
   where everything was checked. Ctrl-C stops it. A configuration built in
   a container universe is not checked (said so).
@@ -6503,7 +6512,8 @@ never built has none to check), without a build (`objcache::doctor`):
   not absolute; and the setup itself, run with each path variable but
   `PATH` unset, empty and set, for one it gives an entry that is not
   absolute (`export X=/dir:$X` with `X` unset). It runs as the build script
-  runs it: `/bin/sh` with `set -e`, no arguments, in the Cactus tree and
+  runs it: a script file `/bin/sh` reads, the setup at its top level after
+  `set -e`, no arguments, in the Cactus tree and
   the user's environment, `PATH` included, but for the other path
   variables (a setup that makes what it needs on its own machine, the
   first time, finds it made: rostam's `arm-conda`), with the module

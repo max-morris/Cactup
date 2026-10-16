@@ -4,8 +4,8 @@
 //!
 //! The checks run in the build's own environment: `cactup cache doctor`
 //! starts the attempt's frozen environment setup in a shell, and the shell
-//! starts `cactup __cc-doctor` ([`DOCTOR_VERB`]) with what to check on
-//! stdin. That process applies to each language's compiler and flags what
+//! starts `cactup __cc-doctor` ([`DOCTOR_VERB`]) with what to check in a
+//! file of the doctor's. That process applies to each language's compiler and flags what
 //! a compile through the wrapper would ([`run`]): the environment, the
 //! driver's own searches, the compiler's identity, the flags (the
 //! compile's words read whole; the first reason the wrapper's reader has,
@@ -13,7 +13,7 @@
 //! identity's trial compiles run; no object of the build is compiled), and
 //! again where a thorn's compiles get other compilers or flags (read with
 //! make through Cactus's own `make.subdir`, [`thorn_checks`]). It answers
-//! in JSON on stdout; `cache doctor` says where each finding comes from (the
+//! in JSON in another; `cache doctor` says where each finding comes from (the
 //! user's shell, the machine's environment setup, the variable of
 //! `make.config.defn` make says gives a flag, [`sources`], a thorn's file)
 //! and what to change ([`Finding`]).
@@ -36,8 +36,16 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 /// The verb the build environment's shell runs the checks by: `cactup
-/// __cc-doctor`, with a [`Request`] on stdin.
+/// __cc-doctor <work>`, with a [`Request`] in [`REQUEST`] there.
 pub const DOCTOR_VERB: &str = "__cc-doctor";
+
+/// The files in the work directory `cache doctor` gives the checks: the
+/// [`Request`], the [`Reply`], and the mark that the setup ran to its end
+/// (files, not the shell's stdin, stdout and stderr, which the setup may
+/// read, redirect or close).
+const REQUEST: &str = "request.json";
+const REPLY: &str = "reply.json";
+const THROUGH: &str = "through";
 
 /// How much a finding matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -174,9 +182,10 @@ fn relative_entry(variable: &str, entry: &[u8]) -> bool {
     }
 }
 
-/// `cactup __cc-doctor`: read a [`Request`] on stdin, run the checks in
-/// this process's environment (the build's), and write the [`Reply`] on
-/// stdout. Status 1 if the request cannot be read.
+/// `cactup __cc-doctor <work>`: read a [`Request`] in `<work>`, run the
+/// checks in this process's environment (the build's), and write the
+/// [`Reply`] there. Status 1 if the request cannot be read, or the reply
+/// written.
 pub fn run_verb() -> i32 {
     // Stopped by `cache doctor` on Ctrl-C (a TERM to its process group):
     // what it runs stops, as for the user's Ctrl-C in cactup itself (its
@@ -187,12 +196,10 @@ pub fn run_verb() -> i32 {
     // its files for a compile); the checks' own files, and the compilers'
     // they run, go in the directory `cache doctor` gave, which it removes.
     let tmpdir = std::env::var_os("TMPDIR");
-    if let Some(work) = std::env::args_os().nth(2) {
-        // SAFETY: no other thread is running yet.
-        unsafe { std::env::set_var("TMPDIR", work) };
-    }
-    let mut input = Vec::new();
-    let Ok(request) = std::io::stdin().read_to_end(&mut input).map_err(|e| e.to_string()).and_then(|_| serde_json::from_slice::<Request>(&input).map_err(|e| e.to_string())) else {
+    let Some(work) = std::env::args_os().nth(2).map(PathBuf::from) else { return 1 };
+    // SAFETY: no other thread is running yet.
+    unsafe { std::env::set_var("TMPDIR", &work) };
+    let Some(request) = std::fs::read(work.join(REQUEST)).ok().and_then(|input| serde_json::from_slice::<Request>(&input).ok()) else {
         return 1;
     };
     // Its own process: the probe's compile may run in its own directory.
@@ -206,8 +213,10 @@ pub fn run_verb() -> i32 {
     if gix::interrupt::is_triggered() {
         return 1;
     }
-    let _ = std::io::stdout().lock().write_all(&serde_json::to_vec(&reply).unwrap_or_default());
-    0
+    match std::fs::write(work.join(REPLY), serde_json::to_vec(&reply).unwrap_or_default()) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
 }
 
 /// The checks, in this process's environment; with `probe`, a whole key of
@@ -1229,19 +1238,21 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
     };
     // A setup the shell cannot read is no setup that stopped: its trap on
     // exit would run before any of it did.
-    let read = run_to_files(Command::new(shell).arg("-n").arg("-c").arg(format!("{{\n:\n{env}\n}}\n")).env_clear(), None, true).map_err(|e| format!("{e:#}"))?;
+    let read = run_to_files(Command::new(shell).arg("-n").arg("-c").arg(env).env_clear(), None, true).map_err(|e| format!("{e:#}"))?;
     if !read.status.success() {
         let said = String::from_utf8_lossy(&read.stderr);
         return Err(format!("{shell} cannot read the setup ({}), so what it sets is not known", said.trim()));
     }
     let mut fragile = Fragile::default();
     for state in ["unset", "empty", "set"] {
-        // What the setup prints goes to stderr; the values go to a file of
-        // ours (named in the environment, taken out of it before the setup
-        // runs), on its end or where it stops (a trap on the shell's exit,
-        // which runs inside the setup's redirections, and wherever it
-        // changed directory). Once through, a trap the setup set of its own
-        // is left to run, as in the build.
+        // The setup runs at the script's top level, from a file, as the
+        // build script runs it (read a command at a time: an alias it
+        // defines works in the lines after). What it prints goes to stderr;
+        // the values go to a file of ours (named in the environment, taken
+        // out of it before the setup runs), on its end or where it stops (a
+        // trap on the shell's exit, which runs inside the setup's
+        // redirections, and wherever it changed directory). Once through, a
+        // trap the setup set of its own is left to run, as in the build.
         // The MDB's check has no module system: its commands do nothing
         // there. The build runs the user's (an exported function, as bash
         // run as `sh` reads them), so the doctor does too.
@@ -1251,9 +1262,12 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
             script.push_str(&format!("printf '%s=%s\\n' {variable} \"${{{variable}-<unset>}}\"\n"));
         }
         let errexit = if build.is_some() { "set -e\n" } else { "" };
-        script.push_str(&format!("}} >\"$cactup_doctor_out\"\n}}\ntrap \"[ -n \\\"\\${{cactup_doctor_through-}}\\\" ] || cactup_doctor_values '{STOPPED}'\" EXIT\n{errexit}{{\n:\n{env}\n}} >&2 </dev/null\ncactup_doctor_through=1\ncactup_doctor_values '{END}'\n"));
+        script.push_str(&format!("}} >\"$cactup_doctor_out\"\n}}\ntrap \"[ -n \\\"\\${{cactup_doctor_through-}}\\\" ] || cactup_doctor_values '{STOPPED}'\" EXIT\nexec >&2\n{errexit}{env}\ncactup_doctor_through=1\ncactup_doctor_values '{END}'\n"));
         let work = temp_dir().map_err(|e| format!("{e:#}"))?;
-        let values_file = work.path().join("values");
+        let work_path = std::path::absolute(work.path()).map_err(|e| format!("Failed to find the temporary directory: {e}"))?;
+        let values_file = work_path.join("values");
+        let script_file = work_path.join("setup");
+        std::fs::write(&script_file, &script).map_err(|e| format!("Failed to write a script: {e}"))?;
         let mut command = Command::new(shell);
         match build {
             Some(dir) => {
@@ -1266,7 +1280,7 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
                 command.env_clear().env("HOME", "/nonexistent-home").env("PATH", "/usr/bin:/bin");
             }
         }
-        command.arg("-c").arg(&script).env(OUT, &values_file);
+        command.arg(&script_file).env(OUT, &values_file);
         for variable in PATH_VARIABLES.into_iter().filter(|variable| *variable != "PATH") {
             match state {
                 "set" => {
@@ -1310,64 +1324,65 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
     Ok(fragile)
 }
 
-/// What the checks' shell says on stderr once the setup is through.
-const SETUP_DONE: &str = "cactup: the environment setup ran to its end";
-
 /// A script that runs the environment setup `env` as the build script does
-/// (`set -e`), with its stdin `/dev/null` and its stdout sent to stderr,
-/// and then `then`. (`:` first: a group with nothing in it, as an empty
-/// setup or one of comments makes, is a syntax error.)
+/// (`set -e`, at its top level), what it prints sent to stderr, and then
+/// `then`.
 fn setup_then(env: &str, then: &str) -> String {
-    format!("set -e\n{{\n:\n{env}\n}} >&2 </dev/null\n{then}\n")
+    format!("exec >&2\nset -e\n{env}\n{then}\n")
 }
 
 /// Run the checks of [`Request`] in the build environment `env` (the
 /// attempt's frozen setup), from `cactus_root`, by `cactup`.
 pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, request: &Request) -> Res<Reply> {
-    // As the build script runs it (`set -e`), but what the setup prints goes
-    // to stderr: stdout is the checks' answer.
-    // A line on stderr once the setup is through: one that ends the shell
-    // with status 0 (an `exit`, a `return`) is told from the checks.
-    // The checks' temporary files (theirs, and the compilers' they run)
-    // all go in a directory of this process's, which goes when they are
-    // done, however they ended (a Ctrl-C that had to kill them too).
+    // As the build script runs it: a script file `/bin/sh` reads (`set
+    // -e`), its stdin `/dev/null`. The request, the answer and the mark
+    // that the setup ran to its end (one that ends the shell with status 0,
+    // an `exit`, is told from the checks) are files in a directory of this
+    // process's, as are the checks' temporary files (theirs, and the
+    // compilers' they run); it goes when they are done, however they ended
+    // (a Ctrl-C that had to kill them too).
     let work = temp_dir()?;
-    let script = setup_then(env, &checks_command(work.path(), cactup));
-    let input = serde_json::to_vec(request).context("Failed to write the checks' request")?;
-    let out = run_to_files(Command::new("/bin/sh").arg("-c").arg(&script).current_dir(cactus_root), Some(input), true);
+    let work_path = std::path::absolute(work.path()).context("Failed to find the temporary directory")?;
+    std::fs::write(work_path.join(REQUEST), serde_json::to_vec(request).context("Failed to write the checks' request")?).context("Failed to write the checks' request")?;
+    let script = work_path.join("setup");
+    std::fs::write(&script, setup_then(env, &checks_command(&work_path, cactup))).context("Failed to write a script")?;
+    let out = run_to_files(Command::new("/bin/sh").arg(&script).current_dir(cactus_root), None, true);
+    let reply = std::fs::read(work_path.join(REPLY)).ok();
+    let through = work_path.join(THROUGH).exists();
     drop(work);
     let out = out?;
-    // An answer is the proof the setup ran through (its stderr may be gone:
-    // `exec 2>/dev/null`).
-    if out.status.success()
-        && let Ok(reply) = serde_json::from_slice::<Reply>(&out.stdout)
-    {
+    // A reply is whole once there (written at the checks' end), whatever
+    // the shell's status after it: a trap of the setup's own on its exit
+    // can fail, as it would in the build.
+    if let Some(reply) = reply.as_deref().and_then(|reply| serde_json::from_slice::<Reply>(reply).ok()) {
         return Ok(reply);
     }
     let said = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() && !said.contains(SETUP_DONE) {
-        let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
+    let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
+    if !through && !out.status.success() {
         anyhow::bail!("the build environment setup did not run to its end ({}): {last}", out.status);
     }
-    if !said.contains(SETUP_DONE) {
+    if !through {
         anyhow::bail!("the build environment setup ended the shell before its end (an exit, or a return), as the build's would");
     }
-    serde_json::from_slice(&out.stdout).context("The checks in the build environment answered in a form this cactup cannot read")
+    if !out.status.success() {
+        anyhow::bail!("the checks in the build environment failed ({}): {last}", out.status);
+    }
+    anyhow::bail!("the checks in the build environment answered in a form this cactup cannot read")
 }
 
-/// What the shell runs once the setup is through: the line that says so,
-/// then the checks, given `work` for their TMPDIR (they read the build's
-/// own, as exported, first).
+/// What the shell runs once the setup is through: the mark that says so,
+/// then the checks, given `work` for their files and TMPDIR (they read the
+/// build's own, as exported, first).
 fn checks_command(work: &Path, cactup: &Path) -> String {
-    format!("printf '%s\\n' '{SETUP_DONE}' >&2\n{}", then_exit(&format!("{} {DOCTOR_VERB} {}", crate::build::sh_quote(cactup), crate::build::sh_quote(work))))
+    format!(": >{}\n{}", crate::build::sh_quote(&work.join(THROUGH)), then_exit(&format!("{} {DOCTOR_VERB} {}", crate::build::sh_quote(cactup), crate::build::sh_quote(work))))
 }
 
 /// `command` run as a child of the setup's shell (not `exec`ed: that
-/// would drop a trap the setup set on its exit, which the build runs), its
-/// stdout the answer; then the shell ends with its status, anything else
-/// (that trap's) going to stderr.
+/// would drop a trap the setup set on its exit, which the build runs);
+/// then the shell ends with its status.
 fn then_exit(command: &str) -> String {
-    format!("cactup_doctor_status=0\n{command} || cactup_doctor_status=$?\nexec >&2\nexit $cactup_doctor_status")
+    format!("cactup_doctor_status=0\n{command} || cactup_doctor_status=$?\nexit $cactup_doctor_status")
 }
 
 /// A temporary directory, in TMPDIR, else in /tmp (as the compilers fall
@@ -1950,31 +1965,69 @@ mod tests {
         assert!(fix.is_some_and(|fix| fix.starts_with("name the compiler alone")));
     }
 
-    /// The setup runs as the build script runs it: an empty one or one of
-    /// comments runs, what it prints is not the answer, one that fails
+    /// The setup runs as the build script runs it: from a file, at its top
+    /// level (an alias it defines works in the lines after), an empty one or
+    /// one of comments runs, what it prints goes to stderr, one that fails
     /// stops there.
     #[test]
     fn a_setup_runs_as_the_build_script_runs_it() {
-        let run = |env: &str| Command::new("/bin/sh").arg("-c").arg(setup_then(env, "echo answer")).output().unwrap();
-        for env in ["", "# nothing but a comment", "echo banner; export X=1"] {
-            let out = run(env);
-            assert_eq!((out.status.success(), String::from_utf8_lossy(&out.stdout).as_ref()), (true, "answer\n"), "{env:?}");
-        }
-        let out = run("false\nexport X=1");
-        assert!(!out.status.success() && out.stdout.is_empty());
-        // A trap the setup sets on its exit runs, as in the build, and what
-        // it prints is not the answer; the answer's status is the shell's.
         let tmp = tempfile::tempdir().unwrap();
+        let answer = tmp.path().join("answer");
+        let run = |env: &str, then: &str| {
+            let _ = std::fs::remove_file(&answer);
+            let script = tmp.path().join("script");
+            std::fs::write(&script, setup_then(env, then)).unwrap();
+            Command::new("/bin/sh").arg(&script).stdin(Stdio::null()).output().unwrap()
+        };
+        let then = format!("echo answer >{}", crate::build::sh_quote(&answer));
+        for env in ["", "# nothing but a comment", "echo banner; export X=1", "alias say='echo said'\nsay one"] {
+            let out = run(env, &then);
+            assert!(out.status.success() && out.stdout.is_empty(), "{env:?}: {out:?}");
+            assert_eq!(std::fs::read_to_string(&answer).unwrap(), "answer\n", "{env:?}");
+        }
+        let out = run("false\nexport X=1", &then);
+        assert!(!out.status.success() && !answer.exists());
+        // A trap the setup sets on its exit runs, as in the build; the
+        // shell's status is the checks'.
         let lock = tmp.path().join("setup.lock");
         let env = format!("mkdir {0}\ntrap 'rmdir {0}; echo bye' EXIT", lock.display());
-        for (then, status) in [("echo answer", 0), ("echo answer; exit 3", 3)] {
-            let out = Command::new("/bin/sh").arg("-c").arg(setup_then(&env, &then_exit(&format!("sh -c '{then}'")))).output().unwrap();
-            assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).as_ref(), lock.exists()), (Some(status), "answer\n", false), "{then}");
+        for (then, status) in [("true", 0), ("exit 3", 3)] {
+            let out = run(&env, &then_exit(&format!("sh -c '{then}'")));
+            assert_eq!((out.status.code(), lock.exists()), (Some(status), false), "{then}");
             assert!(String::from_utf8_lossy(&out.stderr).contains("bye"));
         }
+        // An alias the setup defines, used after: what it sets is checked.
+        let found = fragile_entries("alias addinc='export CPATH=inc'\naddinc\n", Some(tmp.path())).unwrap();
+        assert!(found.stopped.is_empty(), "{found:?}");
+        assert_eq!(found.found.iter().map(|(variable, _, _)| variable.as_str()).collect::<Vec<_>>(), ["CPATH"]);
         assert!(fragile_entries("", None).unwrap().found.is_empty() && fragile_entries("# only this", None).unwrap().found.is_empty());
         assert!(fragile_entries("export LD_PRELOAD=libc.so.6\n", None).unwrap().found.is_empty(), "a name the loader searches for");
         assert_eq!(fragile_entries("export LD_PRELOAD=lib/x.so\n", None).unwrap().found[0].0, "LD_PRELOAD");
+    }
+
+    /// Whether the setup ran to its end is known from a file, not from the
+    /// shell's stderr: one that closes its stderr or stdout, or uses an
+    /// alias it defines, is checked; one that ends the shell (`exit 0`) or
+    /// fails is said not to run through; checks that fail are told from
+    /// both.
+    #[test]
+    fn the_checks_run_after_any_setup_that_runs_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("cactup");
+        std::fs::write(&fake, "#!/bin/sh\n[ -f \"$2/request.json\" ] || exit 1\nprintf '%s' '{\"env\":{},\"values\":{},\"found\":[]}' >\"$2/reply.json\"\n").unwrap();
+        super::super::make_executable(&fake);
+        let failing = tmp.path().join("failing");
+        std::fs::write(&failing, "#!/bin/sh\necho broken >&2\nexit 1\n").unwrap();
+        super::super::make_executable(&failing);
+        let request = Request { config_dir: None, optionlist: BTreeMap::new(), conf: conf(tmp.path()), languages: Vec::new() };
+        let run = |cactup: &Path, env: &str| in_build_environment(cactup, tmp.path(), env, &request).map_err(|e| format!("{e:#}"));
+        for env in ["", "exec 2>&-", "exec >&- 2>&-", "alias say='echo said'\nsay one", "cd /", "trap false EXIT"] {
+            assert_eq!(run(&fake, env), Ok(Reply::default()), "{env:?}");
+        }
+        assert!(run(&fake, "exit 0").unwrap_err().contains("ended the shell before its end"));
+        assert!(run(&fake, "false").unwrap_err().contains("did not run to its end"));
+        let failed = run(&failing, "").unwrap_err();
+        assert!(failed.contains("the checks in the build environment failed") && failed.ends_with("broken"), "{failed}");
     }
 
     /// A process the setup leaves in the background does not hold the run
@@ -2182,9 +2235,10 @@ mod tests {
         std::fs::write(&fake, "#!/bin/sh\nprintf '%s|%s|%s' \"${TMPDIR-unset}\" \"$1\" \"$2\"\n").unwrap();
         super::super::make_executable(&fake);
         let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
         let run = |env: &str| {
             let out = Command::new("/bin/sh").arg("-c").arg(setup_then(env, &checks_command(&work, &fake))).env_remove("TMPDIR").output().unwrap();
-            String::from_utf8_lossy(&out.stdout).into_owned()
+            String::from_utf8_lossy(&out.stderr).into_owned()
         };
         let work = work.display();
         assert_eq!(run(""), format!("unset|{DOCTOR_VERB}|{work}"));

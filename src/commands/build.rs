@@ -152,27 +152,28 @@ fn missing_to_submit_builds(machine: &Machine) -> Option<&'static str> {
 /// executing right now; nothing here can safely kill this process's own
 /// `make` from outside it). Builds never chain (§7.9): two live attempts of
 /// one config is never wanted. Shared by the foreground and submit paths,
-/// mirroring `testsuite::run::start_impl`'s same-shaped guard.
+/// as `testsuite::run::start_impl` guards a test run.
+///
+/// Only [`pending_job_query`]'s job goes to the scheduler: a foreground
+/// attempt's job id is the pid of the cactup that ran it, and once that
+/// cactup is gone the pid can be any other process's — asking the
+/// scheduler about it (on the generic machine, `ps`) would find that
+/// process live, and `-f` would stop its process group.
 fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force: bool) -> Res<()> {
     let Some(id) = BuildAttempt::latest_id(config_dir)? else { return Ok(()) };
     let attempt = BuildAttempt::open(config_dir, id)?;
-    if attempt.meta.job_id != NO_JOB_ID
-        && !LinkLock::is_held_live(&attempt.running_lock_path())?
-        && matches!(
-            sched.get_status(&attempt.meta.job_id)?,
-            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-        )
-    {
+    if LinkLock::is_held_live(&attempt.running_lock_path())? {
+        bail!("config \"{name}\" is currently building (running.lock is held)");
+    }
+    let Some(job_id) = pending_job_query(&attempt.meta) else { return Ok(()) };
+    if matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding) {
         if !force {
             bail!(
-                "config \"{name}\" already has a live build attempt ({}); \
-                 `cactup build stop {name}` first, or pass -f to stop it",
-                attempt.meta.job_id
+                "config \"{name}\" already has a live build attempt ({job_id}); \
+                 `cactup build stop {name}` first, or pass -f to stop it"
             );
         }
-        sched.stop(&attempt.meta.job_id)?;
-    } else if LinkLock::is_held_live(&attempt.running_lock_path())? {
-        bail!("config \"{name}\" is currently building (running.lock is held)");
+        sched.stop(job_id)?;
     }
     Ok(())
 }
@@ -695,11 +696,14 @@ fn state_str(state: BuildDisplayState) -> colored::ColoredString {
 }
 
 /// The job id worth a live scheduler query, if any: an attempt with a
-/// recorded outcome is done (BUILT/FAILED) whatever the queue says now, and
-/// `NO_JOB_ID` was never submitted anywhere. Shared by `list`'s batching and
-/// `show`'s per-attempt history.
+/// recorded outcome is done (BUILT/FAILED) whatever the queue says now,
+/// `NO_JOB_ID` was never submitted anywhere, and a foreground attempt's job
+/// id is a pid, not a job (`build::build`): `running.lock` alone says
+/// whether it runs, and the pid may be another process's by now. Shared by
+/// `list`'s batching, `show`'s per-attempt history, `prune` and the guard
+/// before a new attempt.
 fn pending_job_query(meta: &BuildMeta) -> Option<&str> {
-    (meta.outcome.is_none() && meta.job_id != NO_JOB_ID).then_some(meta.job_id.as_str())
+    (meta.outcome.is_none() && meta.submitted && meta.job_id != NO_JOB_ID).then_some(meta.job_id.as_str())
 }
 
 /// Best-effort, ready-to-print description of `name`'s in-flight build
@@ -1177,11 +1181,7 @@ fn attempt_is_live(attempt: &BuildAttempt, sched: &Scheduler) -> Res<bool> {
     if attempt.meta.outcome.is_some() {
         return Ok(false);
     }
-    let status = if attempt.meta.job_id != NO_JOB_ID {
-        sched.get_status(&attempt.meta.job_id).ok()
-    } else {
-        None
-    };
+    let status = pending_job_query(&attempt.meta).and_then(|job| sched.get_status(job).ok());
     let lock_live = LinkLock::is_held_live(&attempt.running_lock_path())?;
     Ok(matches!(
         build_state(None, status, lock_live),
@@ -1726,7 +1726,7 @@ mod tests {
     }
 
     /// Without the key, `--block` is not a different submission — it is the
-    /// ordinary one plus a wait the caller performs afterwards, so what
+    /// ordinary one plus a wait the caller performs afterward, so what
     /// reaches the scheduler here is unchanged.
     #[test]
     fn block_without_a_blocking_submit_key_submits_normally() {
@@ -1974,6 +1974,60 @@ mod tests {
         forced.opts.force = true;
         submit_impl(&inst, &machine, &db, &forced, Some("h")).unwrap();
         assert_eq!(BuildAttempt::latest_id(&cactus.join("configs/sim")).unwrap(), Some(1));
+    }
+
+    /// A foreground attempt's job id is the pid of the cactup that ran it;
+    /// once that cactup is gone the pid can be anyone's, and the scheduler
+    /// (here: every id reads as queued, as `ps` reads a reused pid) must
+    /// never be asked about it — whether the attempt finished or was killed
+    /// before recording an outcome. Neither `build` nor `-f` stops anything,
+    /// and `build list`'s state matrix calls the killed one STALE.
+    #[test]
+    fn a_foreground_attempts_pid_is_never_taken_for_a_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let mut machine = fake_submit_machine(
+            &tmp.path().join("mdb/fake"),
+            &completing_make_body(&cactus, "sim"),
+            "",
+            true,
+        );
+        let stopped = tmp.path().join("stopped");
+        machine.meta.scheduler.stop = Some(format!("touch {}", stopped.display()));
+        fs::create_dir_all(cactus.join("thornlists")).unwrap();
+        fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+        let inst = Installation::new("et", tmp.path().join("inst"));
+        let db = Database::new();
+        let config_dir = cactus.join("configs/sim");
+        let foreground = |force: bool| {
+            let mut args = start_args(None, None);
+            args.name = Some("sim".to_owned());
+            args.opts.force = force;
+            run_with(&machine, &inst, args)
+        };
+
+        foreground(false).unwrap();
+        let finished = BuildAttempt::open(&config_dir, 0).unwrap();
+        assert!(!finished.meta.submitted && finished.meta.outcome.is_some());
+        assert_eq!(finished.meta.job_id, std::process::id().to_string());
+
+        // Finished: a second foreground build and a submit both go ahead.
+        foreground(false).unwrap();
+        submit_impl(&inst, &machine, &db, &submit_args("sim", bare_topology()), Some("h")).unwrap();
+        assert!(!stopped.exists(), "the scheduler's stop ran on a foreground attempt's pid");
+
+        // Killed before recording an outcome: the same, -f included.
+        let mut killed = BuildAttempt::open(&config_dir, BuildAttempt::latest_id(&config_dir).unwrap().unwrap()).unwrap();
+        killed.meta.submitted = false;
+        killed.meta.outcome = None;
+        killed.meta.job_id = std::process::id().to_string();
+        killed.store_meta().unwrap();
+        assert_eq!(pending_job_query(&killed.meta), None);
+        let sched = Scheduler::new(&machine.meta);
+        assert!(!attempt_is_live(&killed, &sched).unwrap());
+        guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
+        guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap();
+        assert!(!stopped.exists(), "the scheduler's stop ran on a foreground attempt's pid");
     }
 
     /// A nameless build in the null-config state explains the naming rule

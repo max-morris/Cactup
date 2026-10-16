@@ -68,11 +68,14 @@ pub const SUMMARY_VERB: &str = "__cc-summary";
 /// (126/127 from the shell), which the build script reports itself.
 pub const PROBE_DECLINED: i32 = 3;
 
-/// What the cache does for a build (knob `build-cache`).
+/// What the cache does for a build (knob `build-cache`, `serve` when it is
+/// not set: decision 34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     /// Not involved: the build script is exactly what it is without the cache.
+    /// The default of the type, not of the knob: what a value that cannot
+    /// be read, or a database that cannot be, means.
     #[default]
     Off,
     /// Wrap the compilers, work out the key each compile would be cached
@@ -570,6 +573,18 @@ mod tests {
         assert_eq!(validate_mode("serve").unwrap(), "serve");
         assert_eq!(validate_relocate(" no ").unwrap(), "no");
         assert!(validate_relocate("off").is_err());
+    }
+
+    /// On where the knob is not set (decision 34); off where it is set so,
+    /// and where its value cannot be read.
+    #[test]
+    fn the_cache_serves_by_default() {
+        let mut db = Database::new();
+        assert_eq!(Mode::from_db(&db), Mode::Serve);
+        db.set_knob("build-cache", "off".to_owned());
+        assert_eq!(Mode::from_db(&db), Mode::Off);
+        db.set_knob("build-cache", "on".to_owned());
+        assert_eq!(Mode::from_db(&db), Mode::Off);
     }
 
     /// The knob, then the machine's place, then beside the installations.
