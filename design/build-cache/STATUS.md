@@ -3211,6 +3211,22 @@ stop command on an unrelated process group (in the sandbox's pid
 namespace it stopped itself); `build list` shows such an attempt
 RUNNING. It should check the recorded outcome and `submitted` first.
 
+### M5 part 2, round 32 (on `92c3089`): PASSED, both signed off
+
+A: sign-off (220 plants replayed, equal to round 31's but for its
+rewording; real builds hung up in realclean and in configure, a double
+Ctrl-C in CST, a hand realclean after a stamped build, the doctor run
+during a build; Ctrl-C; every MDB option list against the wrapper; direct
+wrapper runs). B: sign-off (271 plants replayed, likewise; real builds
+killed by SIGHUP and SIGINT in configure; Ctrl-C; wrapper runs). Neither
+blocks, both for after the merge: the `guard_no_live_attempt` pid reuse
+of round 31 (seen again by both: `-f` stopped A's harness twice); and
+(B, unreachable: Cactus's make fails on such a path first) the doctor's
+look for the stamp step in a build script takes the stamp path raw,
+where the script has it through `sh_quote`, so a `'` in the path would
+read as an older cactup's script. `feature/build-cache` merges to master
+next (decision 27).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3426,6 +3442,13 @@ served and audited across both installations with GCC, Clang and
 gfortran, 0 wrong, with the fallback count reported.
 
 ## Next step
+
+M5 part 2 passed its gate at `92c3089` (round 32), and with it M5:
+`feature/build-cache` fast-forwards master as the feature's first
+version (decision 27). Then, in order: the pid-reuse fix in
+`guard_no_live_attempt` (round 31); the every-flag search on
+`feature/doctor-every-flag` (round 16's open findings); M4b (Cray), M5b
+(the whole-file cases), M6 (HIP).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.
 Part 1 passed its gate at `ad236d2` (spec §18.12):
