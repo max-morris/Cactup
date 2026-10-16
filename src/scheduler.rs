@@ -219,6 +219,12 @@ impl<'m> Scheduler<'m> {
         let cmd = self.command_for("get-status", self.meta.scheduler.get_status.as_deref(), &vars, None)?;
 
         let output = self.spawn_sh(&cmd, true)?;
+        // Ctrl-C reaches the query too, which then prints nothing: that is
+        // no answer, not "not in the queue" (CLAUDE.md's interrupt
+        // contract), and a caller must not act on it.
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted");
+        }
         classify(&output, job_id, self.meta)
     }
 
@@ -307,7 +313,8 @@ impl<'m> Scheduler<'m> {
     pub fn stop(&self, job_id: &str) -> Res<()> {
         let vars = Self::query_vars(job_id);
         let cmd = self.command_for("stop", self.meta.scheduler.stop.as_deref(), &vars, None)?;
-        self.spawn_sh(&cmd, false)?;
+        // A stop command Ctrl-C ended is no failure of the scheduler's.
+        self.spawn_sh(&cmd, false).map_err(|e| if gix::interrupt::is_triggered() { anyhow!("interrupted") } else { e })?;
         Ok(())
     }
 

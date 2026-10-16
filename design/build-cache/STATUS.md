@@ -3475,6 +3475,23 @@ a stale test comment; capitals. Fixed in the commit after this record:
 "asked to stop or is over"; an interrupted stop command bails with
 "interrupted"; the rest as said.
 
+Round 8 (on `5735121`): BLOCKED by both. A: a Ctrl-C during the status
+query (`squeue`/`qstat`) made it print nothing, read as "not in the
+queue": `delete` trashed (`-f`: removed) a queued run, `stop` said it was
+not in the queue (ran; master the same). B: a job the scheduler requeues
+after its run recorded `finished` (preemption, `scontrol requeue`,
+`qrerun`) is not asked about again: `stop` misses it and `delete` trashes
+it (ran with faked tools; master asked, and stopped it). Not blocking:
+an interrupted stop command on a live job gave the command's error, not
+"interrupted"; the comment's section; a missing verb; the spec on the
+status cache. Fixed in the commit after this record: an interrupted
+status query or stop command fails with "interrupted"
+(`Scheduler::get_status`, `Scheduler::stop`); a requeued job's run clears
+`finished` when it runs again. Open, put to Max: such a job while it
+waits in the queue (asking about a job after its run ended needs telling
+a job id from a pid, the `ps`-style question). Round 9 waits for Max's
+answer on the scope of this batch.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

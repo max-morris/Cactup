@@ -455,6 +455,11 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
         // (which it does holding the lock), and would write the record
         // back without it.
         run = TestRun::open(dir)?;
+        // Running, so not ended: a job the scheduler requeued after the
+        // run recorded its end (preemption, `scontrol requeue`, Torque's
+        // `qrerun`) is a job to ask the scheduler about again
+        // (`TestRun::pending_job`); `execute_testsuite` stores this.
+        run.meta.timestamps.finished = None;
         // The set was activated at submit time; re-assert defensively.
         fs::create_dir_all(results_dir(dir, results_id))?;
         activate_results(dir, results_id)?;

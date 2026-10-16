@@ -4337,8 +4337,15 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   `-f`, and with `-f` stops it, or, where the scheduler refuses, goes ahead
   unless the run's `running.lock` is held. `stop` records `finished` once the scheduler took its stop, or refused
   it with nothing of the run holding the lock (a status query that fails
-  reads as "not in the queue", and that alone records nothing); a stop
-  command Ctrl-C ends is no refusal (the command stops, "interrupted"). On a
+  reads as "not in the queue", and that alone records no end, though the
+  status cache says `U`); a status query or a stop command Ctrl-C ends is
+  no answer and no refusal: the command stops, "interrupted", and nothing
+  is deleted or recorded. A job the scheduler requeues after its run
+  recorded `finished` (preemption, `scontrol requeue`, Torque's `qrerun`)
+  clears it when it runs again; while it waits in the queue it is not
+  asked about, so `stop` misses it and `delete` removes the run (asking
+  about a job after its run ended needs telling a scheduler's job id from
+  a pid, above: open). On a
   machine whose scheduler is the host's own processes (the generic machine
   and those `machine create` makes from it; in the MDB athena, et-juphub,
   hal1, hal2, hedges, mel5, omnia, saturn and spine) a submitted run's job

@@ -266,7 +266,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
     match job_state(sched, &job_id)? {
         Job::Unread => {
             if let Err(e) = send_stop(sched, &job_id) {
-                // A stop command Ctrl-C ended is no refusal (§2.3).
+                // A stop command Ctrl-C ended is no refusal (§2.4).
                 if gix::interrupt::is_triggered() {
                     bail!("interrupted");
                 }
@@ -275,7 +275,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                     println!(
                         "{}, and would not stop it ({refused}), but the run's running.lock is held: nothing \
                          recorded. Once the run lets go of it (a lock left by a run that ended expires \
-                         within {} minutes), `cactup test stop {name}` again.",
+                         within {} minutes), run `cactup test stop {name}` again.",
                         sentence(unread(&job_id)),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
