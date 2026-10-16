@@ -213,12 +213,17 @@ fn without_job(run: &TestRun, name: &str) -> String {
     if run.meta.timestamps.submitted.is_some() {
         format!(
             "test run \"{name}\" was submitted and its job was stopped, but its running.lock is \
-             still held: it is ending, or runs where this scheduler cannot see it (another host?)"
+             still held: it is ending, or it ended without letting go of the lock (which then \
+             expires within {} minutes)",
+            crate::lock::LOCK_STALE_SECS / 60
         )
     } else {
         format!(
-            "test run \"{name}\" is running in the foreground (its running.lock is held), with no \
-             queued job cactup can stop: interrupt it (Ctrl-C) where it runs"
+            "test run \"{name}\" ran in the foreground and its running.lock is held, with no queued \
+             job cactup can stop: it is running (interrupt it with Ctrl-C where it runs), or it \
+             ended without letting go of the lock (a host lost, a hangup; the lock then expires \
+             within {} minutes)",
+            crate::lock::LOCK_STALE_SECS / 60
         )
     }
 }
@@ -259,7 +264,10 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
         return Ok(());
     };
     match sched.get_status(&job_id)? {
-        JobStatus::Running | JobStatus::Queued | JobStatus::Holding => {
+        // Listed: in a state cactup reads, or in another (`Error`: Torque's
+        // exiting `E`, Slurm's suspended `S`), which is the scheduler's job
+        // all the same and stops as one.
+        JobStatus::Running | JobStatus::Queued | JobStatus::Holding | JobStatus::Error => {
             sched.stop(&job_id)?;
             println!("Stopped test job {}", job_id.bold());
             // Over, as far as cactup is concerned (as `build stop` records
@@ -288,7 +296,8 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         bail!("{}; delete it once it has ended", without_job(run, name));
     }
     let job_live = match run.pending_job() {
-        Some(job_id) => matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding),
+        // Listed, in whatever state (as `stop_run`).
+        Some(job_id) => !matches!(sched.get_status(job_id)?, JobStatus::Unknown),
         None => false,
     };
     // Held, but not a job the scheduler here lists: not stopped or removed
@@ -515,7 +524,7 @@ mod tests {
         let sched = Scheduler::new(&meta);
         stop_run(&mut live, &sched, "t").unwrap();
         for force in [false, true] {
-            assert!(clear_to_delete(&live, &sched, "t", force).unwrap_err().to_string().contains("running in the foreground"));
+            assert!(clear_to_delete(&live, &sched, "t", force).unwrap_err().to_string().contains("ran in the foreground"));
         }
         assert!(!stopped.exists(), "an interactive run's pid went to the scheduler");
         assert!(TestRun::open(&live.dir).unwrap().meta.timestamps.finished.is_none());
@@ -577,6 +586,36 @@ mod tests {
         assert!(clear_to_delete(&listed, &sched, "t", false).unwrap_err().to_string().contains("has a live job (JOB-5)"));
         assert!(!stopped.exists());
         clear_to_delete(&listed, &sched, "t", true).unwrap();
+        assert!(stopped.exists());
+
+        // Listed in a state cactup does not read (Torque's exiting `E`):
+        // the scheduler's job all the same, refused by `delete` without
+        // `-f`, stopped by `stop`, with its lock held or not.
+        fs::remove_file(&stopped).unwrap();
+        let exiting: Meta = toml::from_str(&format!(
+            r#"
+            [machine]
+            nickname = "fake"
+            [scheduler]
+            get-status = "echo '@JOB_ID@ E'"
+            status-pattern = "^@JOB_ID@ "
+            running-pattern = " R"
+            stop = "touch {}"
+            [queues.local]
+            default = true
+            [submitscripts]
+            "default" = ["local"]
+            [runscripts]
+            "default" = ["local"]
+            "#,
+            stopped.display()
+        ))
+        .unwrap();
+        let exiting = Scheduler::new(&exiting);
+        let mut ending = open(true, false, "JOB-6");
+        let _held_ending = crate::lock::LinkLock::acquire(&ending.running_lock_path()).unwrap();
+        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("has a live job (JOB-6)"));
+        stop_run(&mut ending, &exiting, "t").unwrap();
         assert!(stopped.exists());
     }
 

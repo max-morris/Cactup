@@ -4315,11 +4315,19 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   run is `RUNNING` while its `running.lock` is held; its pid never goes to
   the scheduler (a batch scheduler knows no pid, and the lock may be
   another host's): `stop` says to interrupt it where it runs (Ctrl-C), as
-  `build stop` does, and `delete` refuses, `-f` too. A submitted run whose
+  `build stop` does, or that it ended without letting go of the lock (on
+  another host, which a lost host or a hangup leaves until it expires), and
+  `delete` refuses, `-f` too; so for a submitted run that `stop` stopped
+  whose lock lingers (it is ending, or ended without letting go). A
+  submitted run whose
   `running.lock` is held though the scheduler here does not list its job
   runs where that scheduler cannot see it (another host), or the query
   failed, or it ended without letting go of the lock (which expires, §2.3):
-  `stop` and `delete` say which it may be and leave it, `-f` too. `stop` records `finished` once it has sent the stop (a status
+  `stop` and `delete` say which it may be and leave it, `-f` too. A job the
+  scheduler lists in a state cactup does not read (Torque's exiting `E`,
+  Slurm's suspended `S`) is the scheduler's all the same: `stop` stops it,
+  `delete` refuses it without `-f` and stops it with. `stop` records
+  `finished` once it has sent the stop (a status
   query that fails reads as "not in the queue", so nothing else does). On a
   machine whose scheduler is the host's own processes (the generic machine
   and those `machine create` makes from it; in the MDB athena, et-juphub,
@@ -4329,7 +4337,8 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   host rebooted) still has that pid asked, as a simulation's restart there
   does, and so does one running on another host sharing the home, where
   the pid may be a process of this one; `stop`, `delete -f` and the `-f` of
-  a new `test run` or `test submit` then stop that process's group.
+  a new `test run` or `test submit` then stop that process (its whole
+  group, where the machine's `stop` is `pkill -g`).
 - **`cactup test show <name>`** — one test run in detail.
 - **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs

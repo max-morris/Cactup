@@ -3421,6 +3421,20 @@ what it covers (a foreground run's start, a window of milliseconds, is
 not; fixed); the spec now says a new run's `-f` also stops a `ps`-style
 job; the docs on `--force`.
 
+Round 4 (on `7bbda47`): BLOCKED by both. Both: a job the scheduler
+lists in a state no pattern matches (`JobStatus::Error`: Torque's exiting
+`E`, Slurm's suspended `S`) was said not to be listed (ran, with each
+machine's own patterns and a fake `qstat`/`squeue` printing as the real
+ones do). A: the sibling message `without_job` still said "another
+host?" of a stopped Slurm job whose lock lingers, and "is running in the
+foreground" of a foreground run on another host killed without letting
+go of its lock (ran). B, not blocking: the spec said every `ps`-style
+`stop` stops a process group (five of them `kill` one process). Fixed in
+the commit after this record: a listed job, in whatever state, is the
+scheduler's (`stop` stops it; `delete` refuses it without `-f`, stops it
+with); `without_job` names the lock that outlives its run, and drops
+"another host?"; the spec.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
