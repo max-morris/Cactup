@@ -3178,6 +3178,20 @@ when the compilers and flags are checked (B: they had round 27's gate,
 and called a failed last configure unchecked, where the newest build's
 stamp vouches for what it left); the stamp step ends `|| true`.
 
+### M5 part 2, round 30 (on `7ff5cb2`): B signed off; BLOCKED by A
+
+B: sign-off (262 plants replayed, real configurations, Ctrl-C, wrapper
+runs: all as recorded or right). A, with a real `cactup build`
+interrupted in its realclean step: the "no record" reason offered only
+"queued or running" or "an older cactup's", which the record ruled out
+(it ended, its script has the stamp step). Fixed in the commit after
+this record: the reason is the record's: not ended; ended without
+recording that its configure succeeded; its script, an older
+cactup's, records none; or its script is not there to tell. Also (both): help and user docs state the rule
+(checked where what is configured now is the newest build's own
+configure) rather than a list of cases; the setup check's "did not run
+to its end" names an unset variable under `set -u` too.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

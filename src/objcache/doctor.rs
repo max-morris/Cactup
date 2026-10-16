@@ -1222,7 +1222,7 @@ pub fn fragile_entries(env: &str) -> Result<Vec<(String, &'static str, String)>,
         let out = run_to_files(&mut command, None, true).map_err(|e| format!("{e:#}"))?;
         let out = String::from_utf8_lossy(&out.stdout).into_owned();
         let Some((_, values)) = out.split_once(&format!("{END}\n")) else {
-            return Err(format!("with the path variables {state} before it, the setup did not run to its end (an exit, or a command that failed under set -e), so what it sets is not known"));
+            return Err(format!("with the path variables {state} before it, the setup did not run to its end (an exit, a command that failed under set -e, an unset variable under set -u), so what it sets is not known"));
         };
         for line in values.lines() {
             let Some((variable, value)) = line.split_once('=').filter(|(variable, _)| PATH_VARIABLES.contains(variable)) else { continue };
@@ -1431,7 +1431,19 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
         let why = match () {
             _ if defn.is_none() => "the configuration is not configured yet".to_owned(),
             _ if failed => "the configuration's last configure failed, and what it left is not what a build compiles with".to_owned(),
-            _ if vouched_at.is_none() => format!("build attempt {id:04}, the newest that builds, has left no record that it configured the configuration as it is now (it may be queued or running; an older cactup's builds record none), so what it compiles with is not known"),
+            // What its record shows: whether it ended, and whether its
+            // script records a configure (one of an older cactup's does not).
+            _ if vouched_at.is_none() => {
+                let ended = meta.outcome.is_some() || meta.timestamps.finished.is_some();
+                let records = std::fs::read_to_string(attempt.script_path()).ok().map(|script| script.contains(&attempt.configured_stamp_path().display().to_string()));
+                let how = match (ended, records) {
+                    (false, Some(true)) => "it has not ended, and has not recorded that its configure step succeeded (it is queued, or running before that)",
+                    (true, Some(true)) => "it ended without recording that its configure step succeeded",
+                    (_, Some(false)) => "its build script, of an older cactup's, records nothing of its configure",
+                    (_, None) => "its build script is not there to tell",
+                };
+                format!("build attempt {id:04}, the newest that builds, has left no record that it configured the configuration as it is now ({how}), so what it compiles with is not known")
+            }
             _ => format!("the configuration has been configured again since build attempt {id:04}, the newest that builds, configured it, so what it is configured from is not known"),
         };
         findings.push(Finding { severity: Severity::Unchecked, what: format!("{why}: its compilers and flags are not checked"), from: "the configuration".to_owned(), fix: None });
