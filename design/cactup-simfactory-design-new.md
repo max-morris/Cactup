@@ -3113,6 +3113,10 @@ wanted: submitting refuses (unless `-f`) whenever an attempt is already live,
 using the same liveness protocol §8.3 uses to decide whether a restart is
 really dead — the per-config lock (below) held, or the attempt's
 `running.lock`/heartbeat still fresh, or its scheduler status still live.
+The scheduler is asked only about a submitted attempt that has recorded no
+outcome: a foreground attempt's `job-id` is the pid of the cactup that ran
+it, which `running.lock` alone vouches for; once that cactup is gone the pid
+can be any other process's, and `-f` would stop it.
 
 **Locking across submit → queue → execute.** `LinkLock::acquire` (§2.3) fails
 fast and never blocks, so it cannot span a queue wait — a build's lock
@@ -4302,7 +4306,14 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   installation's with `--all` (the §8.1 cross-install discipline). Per-run display
   state is coarser than a sim's (no restart chain): `RUNNING`/`QUEUED`/`HOLDING`
   from the active result set's live job status, `DONE (passed/failed)` once the
-  job is `U` and a summary was recorded, `ERROR` on `E`.
+  job is `U` and a summary was recorded, `ERROR` on `E`. Only a submitted run
+  that has not recorded `finished` has a job to ask the scheduler about: an
+  interactive run's `job-id` is the pid of the cactup that ran it, and once
+  that cactup is gone the pid can be any other process's (on the generic
+  machine, `ps` would find it, and `stop` would stop its process group). An
+  interactive run is `RUNNING` while its `running.lock` is held, and `stop`
+  and `delete` hand its pid to the scheduler only then (the lock checks the
+  holder's start time, §2.3).
 - **`cactup test show <name>`** — one test run in detail.
 - **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs

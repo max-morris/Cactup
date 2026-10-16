@@ -330,23 +330,19 @@ fn start_impl(
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
     if let Ok(old) = TestRun::open(&run_dir) {
-        if old.meta.job_id != NO_JOB_ID
-            && !LinkLock::is_held_live(&old.running_lock_path())?
-            && matches!(
-                sched.get_status(&old.meta.job_id)?,
-                JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-            )
+        if old.lock_live()? {
+            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+        }
+        if let Some(job_id) = old.pending_job()
+            && matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
         {
             if !args.force {
                 bail!(
-                    "test run \"{name}\" still has a live job ({}); \
-                     `cactup test stop {name}` first, or pass -f to stop it",
-                    old.meta.job_id
+                    "test run \"{name}\" still has a live job ({job_id}); \
+                     `cactup test stop {name}` first, or pass -f to stop it"
                 );
             }
-            sched.stop(&old.meta.job_id)?;
-        } else if LinkLock::is_held_live(&old.running_lock_path())? {
-            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+            sched.stop(job_id)?;
         }
     }
 

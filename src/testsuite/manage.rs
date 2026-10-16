@@ -1,5 +1,5 @@
 //! `test list` / `show` / `stop` / `delete` (§11.7): managing test runs.
-//! Coarser than the sim analogues — no restart chain, no clean, no reaper.
+//! Coarser than the sim counterparts — no restart chain, no clean, no reaper.
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
@@ -14,12 +14,15 @@ use std::fs;
 use std::path::PathBuf;
 
 /// The §11.7 display state, coarser than a sim's. `status` is the
-/// already-resolved live status (`None` for no job / a failed query) —
-/// callers resolve it themselves so `list` can batch the query across every
-/// row instead of round-tripping the scheduler once per row.
-fn state_line(run: &TestRun, status: Option<JobStatus>) -> colored::ColoredString {
+/// already-resolved live status of [`TestRun::pending_job`] (`None` for no
+/// such job / a failed query) — callers resolve it themselves so `list` can
+/// batch the query across every row instead of round-tripping the scheduler
+/// once per row. `lock_live` is the run's `running.lock`, the one sign of an
+/// interactive run, and of a submitted one the queue has forgotten.
+fn state_line(run: &TestRun, status: Option<JobStatus>, lock_live: bool) -> colored::ColoredString {
     match status {
         Some(JobStatus::Running) => "RUNNING".green().bold(),
+        _ if lock_live => "RUNNING".green().bold(),
         Some(JobStatus::Queued) => "QUEUED".cyan(),
         Some(JobStatus::Holding) => "HOLDING".yellow(),
         Some(JobStatus::Error) => "ERROR".red().bold(),
@@ -93,7 +96,7 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
     let ids: Vec<&str> = rows
         .iter()
         .filter_map(|row| match row {
-            Row::Listed { run, .. } if run.meta.job_id != NO_JOB_ID => Some(run.meta.job_id.as_str()),
+            Row::Listed { run, .. } => run.pending_job(),
             _ => None,
         })
         .collect();
@@ -123,12 +126,9 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
                     if long {
                         extra.push_str(&format!(", job {}, {}", run.meta.job_id, run.dir.display()));
                     }
-                    let status = if run.meta.job_id != NO_JOB_ID {
-                        statuses.get(&run.meta.job_id).copied()
-                    } else {
-                        None
-                    };
-                    println!("  {:24} {:24} {}", name.bold(), state_line(&run, status), extra);
+                    let status = run.pending_job().and_then(|job| statuses.get(job).copied());
+                    let lock_live = run.lock_live().unwrap_or(false);
+                    println!("  {:24} {:24} {}", name.bold(), state_line(&run, status, lock_live), extra);
                 }
             }
         }
@@ -142,13 +142,9 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
 /// Reprint the last run's results (§11.6 step 7) and the result-set history.
 fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
     let run = TestRun::locate(inst, name)?;
-    let status = if run.meta.job_id != NO_JOB_ID {
-        sched.get_status(&run.meta.job_id).ok()
-    } else {
-        None
-    };
+    let status = run.pending_job().and_then(|job| sched.get_status(job).ok());
     println!("{}", name.bold());
-    println!("  state:       {}", state_line(&run, status));
+    println!("  state:       {}", state_line(&run, status, run.lock_live()?));
     println!("  directory:   {}", run.dir.display());
     println!("  config:      {} (build-id {})", run.meta.config, run.meta.build_id);
     println!("  machine:     {}", run.meta.machine);
@@ -201,6 +197,19 @@ pub fn log_cmd(ctx: &Ctx, name: &str, mode: crate::tail::FollowMode) -> Res<()> 
     crate::tail::tail_log(&sources, mode, &subject)
 }
 
+/// The job `stop` and `delete` may hand to the scheduler: a submitted run's
+/// ([`TestRun::pending_job`]), or an interactive run's pid while its
+/// `running.lock` is held — the lock is held by that very process and
+/// checks its start time, so the pid is still the run's; once the lock is
+/// gone, the pid may be any other process's.
+fn stoppable_job(run: &TestRun) -> Res<Option<&str>> {
+    if let Some(job) = run.pending_job() {
+        return Ok(Some(job));
+    }
+    let interactive = run.meta.timestamps.submitted.is_none() && run.meta.job_id != NO_JOB_ID;
+    Ok((interactive && run.lock_live()?).then_some(run.meta.job_id.as_str()))
+}
+
 /// `test stop` (§11.7): the §8.6 stop semantics for the active result
 /// set's job; no clean beyond removing the active symlink.
 pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
@@ -209,17 +218,17 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
     let mut run = TestRun::locate(&inst, name)?;
     let _lock = run.lock()?;
 
-    if run.meta.job_id == NO_JOB_ID {
-        println!("Test run {} has no job; nothing to stop", name.bold());
+    let Some(job_id) = stoppable_job(&run)?.map(str::to_owned) else {
+        println!("Test run {} has no live job; nothing to stop", name.bold());
         return Ok(());
-    }
+    };
     let sched = Scheduler::new(&machine.meta);
-    match sched.get_status(&run.meta.job_id)? {
+    match sched.get_status(&job_id)? {
         JobStatus::Running | JobStatus::Queued | JobStatus::Holding => {
-            sched.stop(&run.meta.job_id)?;
-            println!("Stopped test job {}", run.meta.job_id.bold());
+            sched.stop(&job_id)?;
+            println!("Stopped test job {}", job_id.bold());
         }
-        _ => println!("Test job {} is not in the queue; nothing to stop", run.meta.job_id),
+        _ => println!("Test job {job_id} is not in the queue; nothing to stop"),
     }
     run.meta.status = Some("U".to_owned());
     run.store_meta()?;
@@ -255,20 +264,16 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
 
     let run = TestRun::locate(&inst, name)?;
     let sched = Scheduler::new(&machine.meta);
-    if run.meta.job_id != NO_JOB_ID
-        && matches!(
-            sched.get_status(&run.meta.job_id)?,
-            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-        )
+    if let Some(job_id) = stoppable_job(&run)?
+        && matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
     {
         if !force {
             bail!(
-                "test run \"{name}\" has a live job ({}); `cactup test stop {name}` first, \
-                 or use -f to stop and delete",
-                run.meta.job_id
+                "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, \
+                 or use -f to stop and delete"
             );
         }
-        sched.stop(&run.meta.job_id)?;
+        sched.stop(job_id)?;
     }
 
     if purge || force {
@@ -354,6 +359,69 @@ mod tests {
     use super::*;
     use crate::mdb::meta::Meta;
     use std::path::Path;
+
+    /// An interactive run's job id is the pid of the cactup that ran it:
+    /// only while its `running.lock` is held is that pid still the run's.
+    /// Finished or killed, it is never handed to the scheduler — its stop
+    /// command would stop whatever process has the pid now. A submitted
+    /// run's job is, until the run records its end.
+    #[test]
+    fn an_interactive_runs_pid_is_a_job_only_while_its_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = |submitted: bool, finished: bool, job_id: &str| {
+            let dir = tmp.path().join(format!("run-{submitted}-{finished}-{job_id}"));
+            fs::create_dir_all(dir.join(".cactup")).unwrap();
+            let mut timestamps = String::new();
+            if submitted {
+                timestamps.push_str("submitted = \"2026-10-16T00:00:00Z\"\n");
+            }
+            if finished {
+                timestamps.push_str("finished = \"2026-10-16T01:00:00Z\"\n");
+            }
+            fs::write(
+                TestRun::meta_path(&dir),
+                format!(
+                    r#"
+                    name = "t"
+                    config = "c"
+                    config-id = "c"
+                    build-id = "b"
+                    machine = "m"
+                    alias = "a"
+                    test-run-id = "t"
+                    select = "all"
+                    queue = "q"
+                    nodes = 1
+                    tasks = 1
+                    tpn = 1
+                    cpus = 1
+                    walltime = "1:00:00"
+                    job-id = "{job_id}"
+                    [timestamps]
+                    {timestamps}
+                    "#
+                ),
+            )
+            .unwrap();
+            TestRun::open(&dir).unwrap()
+        };
+        let pid = std::process::id().to_string();
+
+        for finished in [false, true] {
+            let run = open(false, finished, &pid);
+            assert_eq!(run.pending_job(), None);
+            assert_eq!(stoppable_job(&run).unwrap(), None);
+        }
+        let live = open(false, false, &pid);
+        let _held = crate::lock::LinkLock::acquire(&live.running_lock_path()).unwrap();
+        assert_eq!(live.pending_job(), None);
+        assert_eq!(stoppable_job(&live).unwrap(), Some(pid.as_str()));
+
+        assert_eq!(open(true, false, "JOB-1").pending_job(), Some("JOB-1"));
+        assert_eq!(open(true, true, "JOB-1").pending_job(), None);
+        assert_eq!(stoppable_job(&open(true, true, "JOB-1")).unwrap(), None);
+        assert_eq!(open(true, false, NO_JOB_ID).pending_job(), None);
+    }
 
     /// `list`'s whole point is one `get_statuses` call instead of one
     /// `get_status` per row (§10); pin that a duplicate job id in the batch
