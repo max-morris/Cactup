@@ -3297,6 +3297,36 @@ check runs rostam's provisioning on a host where `/work` can be written
 (`/work//spark-deps`, network); a setup that closes stderr is said not
 to run through (the doctor's own line fails under `set -e`).
 
+Round 35 (on `b6a974b`): PASSED, both signed off. A: round 34's two
+findings fixed (an exported `module` under bash run as `sh`: the
+doctor's values equal the build's in every state; a setup's lock removed
+by its own trap); 13 new setups compared with the build under dash and
+bash as `sh`; every earlier plant, the real configurations and Ctrl-C as
+before. B: likewise (the lock, the own trap, the rostam-like setup
+provisioning once, where the build would; new probes; the merge is
+exactly `git merge-tree 2e1fa14 ba0b0ec`). For after the merge, none
+blocking:
+- The setup is read as one block, the build reads it line by line: an
+  alias it defines and then uses is "not found" in the doctor (older
+  than round 33; no MDB setup uses one).
+- The spec's paragraph on the MDB's setups should say the check still
+  makes `module` and `ml` do nothing.
+- `cache doctor --help` should say the doctor runs the machine's setup
+  (a few times, with whatever it does), as the user docs now do.
+- On a host where `/bin/sh` is bash, the unset and empty runs keep the
+  user's module bookkeeping while the path variables are emptied: a
+  `module load` of a loaded module does nothing there (can only miss).
+- The MDB check can run rostam's provisioning (`/work//spark-deps`,
+  network) where `/work` can be written, and real Lmod where
+  `/usr/share/lmod` is (`x86-modules` sources it).
+- The doctor runs the attempt's frozen setup: an older configuration's
+  frozen rostam `arm-conda` package list would re-install itself into the
+  shared environment.
+- A setup that closes stderr is said not to run through.
+- `guard_no_live_attempt` and pid reuse (round 31).
+- The doctor's look for the stamp step takes the stamp path raw (round
+  32).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3514,8 +3544,8 @@ gfortran, 0 wrong, with the fallback count reported.
 ## Next step
 
 M5 part 2 passed its gate at `92c3089` (round 32), and with it M5;
-master had moved, and the merge needs round 33 (below), then
-`feature/build-cache` fast-forwards master as the feature's first
+master had moved, and the merge passed rounds 33 to 35 (below, at
+`b6a974b`); then `feature/build-cache` fast-forwards master as the feature's first
 version (decision 27). Then, in order: the pid-reuse fix in
 `guard_no_live_attempt` (round 31); the every-flag search on
 `feature/doctor-every-flag` (round 16's open findings); M4b (Cray), M5b
