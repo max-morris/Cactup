@@ -3382,6 +3382,27 @@ contract and its snapshot say the default changes and that timing builds
 pass `-K build-cache=off`; the doctor takes a whole reply whatever the
 shell's status after it; the texts.
 
+Round 2 (on `468e97a`): BLOCKED by both. A: (1) `test delete` (no
+`-f`) trashed a live submitted run that another host runs on a
+`ps`-style scheduler (its pid unknown here, its lock held; ran); (2) on
+such a scheduler another host's pid still reaches this host's `ps` and
+`pkill -g` (ran). B: (1) `test stop` recorded `finished` though no stop
+was sent: a failed `squeue` reads as "not in the queue", and the live
+job was then taken for ended for good (ran, new in `d9c8da1`). Not
+blocking: a compute-side `test run` read its record before taking the
+lock and could write it back without the job id (A); `delete` took no
+lock (B); the contract's record of decision 28 and of master, and what a
+build with the cache on gets (A, B); the user docs on `test stop` (A);
+the spec named only the generic machine where ten have a `ps`-style
+scheduler (B). Fixed in the commit after this record: `stop` records
+`finished` only once it sent the stop; a submitted run whose lock is
+held but whose job the scheduler here does not have is said to run
+where it cannot see, and is neither stopped nor deleted (`-f` neither);
+`delete` holds the test lock while it looks; `run_compute` reads the
+record again under the lock; the contract, the docs, the spec. A's (2)
+(another host's pid on a `ps`-style scheduler) is the generic machine's
+pid-as-job design, put to Max with its sims; the spec says it.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -179,12 +179,18 @@ If a test fails:
 
 ## Stopping and managing test runs
 
-Stop a queued or running test:
+Stop a test run you submitted to the queue (`test stop` asks the
+scheduler to cancel its job):
 
 ```sh
-cactup test stop mytest          # Graceful stop
-cactup test stop mytest --force  # Kill immediately
+cactup test stop mytest
 ```
+
+A test run you started in the foreground has no queued job: cactup does
+not stop it for you (the run's own process number is not something a
+scheduler knows). Interrupt it with Ctrl-C in the terminal running it.
+`test delete` refuses to remove a test run that is running; for one
+you submitted, `--force` cancels its job first.
 
 Move a test to trash:
 

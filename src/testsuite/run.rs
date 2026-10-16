@@ -450,6 +450,11 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
     let mut run = TestRun::open(dir)?;
     {
         let _lock = run.lock_wait()?;
+        // Read again under the lock: a job the generic machine starts at
+        // once may get here before its submitter has recorded the job id
+        // (which it does holding the lock), and would write the record
+        // back without it.
+        run = TestRun::open(dir)?;
         // The set was activated at submit time; re-assert defensively.
         fs::create_dir_all(results_dir(dir, results_id))?;
         activate_results(dir, results_id)?;

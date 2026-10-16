@@ -4315,10 +4315,20 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   run is `RUNNING` while its `running.lock` is held; its pid never goes to
   the scheduler (a batch scheduler knows no pid, and the lock may be
   another host's): `stop` says to interrupt it where it runs (Ctrl-C), as
-  `build stop` does, and `delete` refuses, `-f` too. On the generic machine a submitted run's job
-  is a pid too (its `submit` backgrounds the script): one that ended
-  without recording it (killed, or the host rebooted) still has that pid
-  asked, as a simulation's restart there does.
+  `build stop` does, and `delete` refuses, `-f` too. A submitted run whose
+  `running.lock` is held but whose job the scheduler here does not have
+  runs where it cannot see (another host): `stop` and `delete` say so and
+  leave it. `stop` records `finished` once it has sent the stop (a status
+  query that fails reads as "not in the queue", so nothing else does). On a
+  machine whose scheduler is the host's own processes (the generic machine
+  and those `machine create` makes from it; in the MDB athena, et-juphub,
+  hal1, hal2, hedges, mel5, omnia, saturn and spine) a submitted run's job
+  is a pid too (its `submit` backgrounds the script), which only the host
+  that ran it knows: one that ended without recording it (killed, or the
+  host rebooted) still has that pid asked, as a simulation's restart there
+  does, and so does one running on another host sharing the home, where
+  the pid may be a process of this one; `stop` and `delete -f` then stop
+  that process's group.
 - **`cactup test show <name>`** — one test run in detail.
 - **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs

@@ -34,10 +34,12 @@ may assume the other remembers anything that is not written here.
 
 ## Where each side's durable state lives
 
-- **Cache side**: cactup repo (`/home/max/src/Cactup`), branch
+- **Cache side**: cactup repo (`/home/max/src/Cactup`). The cache is on
+  master (since 2026-10-12; master `2b7bfbd` on 2026-10-16 has all of it
+  up to `cactup cache doctor`); work continues on branch
   `feature/build-cache`, worktree `.claude/worktrees/build-cache`. Plan:
   `design/build-cache/PLAN.md`; current status and next step:
-  `design/build-cache/STATUS.md` (both on that branch).
+  `design/build-cache/STATUS.md`.
 - **Speed side**: (speed side: please fill in the repo, branch, worktree,
   and any plan or status file.)
 
@@ -165,7 +167,8 @@ object target names, `make.config.defn`, exported compiler variables.
 Changes the cache side can adapt to if told in advance (please add a
 "Planned changes" entry rather than avoiding them):
 
-- Merging dependency generation into the compile (`-MD`/`-MMD -MF ...`).
+- Merging dependency generation into the compile (`-MD -MF ...`; a
+  compile with `-MMD` is not cached since 2026-10-13, see A6).
   The copied recipe carries it along automatically; the cache would later
   store the depfile as an extra output and rewrite its paths on restore.
 - Precompiled headers, unity or batched compiles.
@@ -193,7 +196,8 @@ deployed; after it, a build with no `build-cache` knob set serves from the
 cache. A timing build must then say `-K build-cache=off` (per build: the
 knob in `~/.cactup`'s database is shared with Max's own builds).
 
-With `build-cache = record` (M0a, on `feature/build-cache` only):
+With `build-cache = record` (M0a; `serve` and `audit` do all of this too,
+and more, under "Cache-side landed changes"):
 
 - **C1.** One probe run and three tiny self-test `make` runs per build, after
   `make <config>-config` (and after `-clean`). The probe creates
@@ -268,7 +272,11 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   knob `build-cache` unset means `serve`; `off` (and a value or database
   that cannot be read) means `off`. For the speed side: every build
   through cactup that does not say `-K build-cache=off` will serve and
-  publish objects, so its timings are not comparable with a plain build's.
+  publish objects: it gets the probe and self-test makes (C1), `MAKEFILES`
+  naming the injection (C2), the wrapper in front of each object compile,
+  `-ffile-prefix-map` in real compiles (objects differ from a plain
+  build's), and publishing into the shared store; so its timings are not
+  comparable with a plain build's.
   Pass `-K build-cache=off` for timings, from now on (it is harmless while
   `off` is still the default). Entry moves to "landed" with the master
   commit.
@@ -313,6 +321,21 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   writes the module files into `scratch` itself, only those whose bytes
   differ. Store entries are format 2 (`v2/`). In record mode the compile
   is unchanged. Timings with the cache serving are not comparable.
+- 2026-10-12: **The cache is on master** (`5e661fc`, a fast-forward of
+  `feature/build-cache`): everything above, with `build-cache` still off
+  by default. Released builds of cactup carry it from then on.
+- 2026-10-13, on `feature/build-cache` (cache decision 28): a compile
+  with `-MMD` is no longer cached (its dependency list leaves out system
+  headers, and the cache checks each stored compile against its own list
+  of what it read); A6 says so. `-MD -MP`, which the speed side uses,
+  loses nothing. On master since 2026-10-16.
+- 2026-10-16: **master at `2b7bfbd`** (released): CUDA compiled with
+  `nvcc` is cached (M4), and `cactup cache doctor` says what keeps a
+  configuration's compiles out of the cache and why a build's were not
+  served (M5). The doctor runs the machine's environment setup and the
+  configuration's compilers on small probe sources, and reads the
+  thorns' make files with make; it builds nothing and writes nothing in
+  the Cactus tree. `build-cache` is still off by default on master.
 
 ## Speed-side planned changes
 
@@ -459,3 +482,5 @@ every milestone.
 - 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the follow-up to review 7 after M3a) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:01 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
 - 2026-10-12  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the last fixes after M3a, before landing) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:40 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
 - 2026-10-16  cache side  planned: `build-cache` defaults to `serve` (decision 34); timing builds must pass `-K build-cache=off`; the default line under "What the cache side adds" says so
+- 2026-10-16  cache side  landed entries caught up: the cache on master (2026-10-12, `5e661fc`), `-MMD` not cached (decision 28, 2026-10-13; A6 and "Changes the cache side can adapt to" say so), master at `2b7bfbd` (CUDA, `cache doctor`); "Where each side's durable state lives" names master
+- 2026-10-16  cache side  the decision-34 entry lists what a build with the cache on gets (C1, C2, the wrapper, `-ffile-prefix-map`, publishing); the `record` heading no longer says "on `feature/build-cache` only"
