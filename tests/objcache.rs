@@ -1612,18 +1612,16 @@ fn the_doctor_checks_a_build_environment_in_a_process_of_its_own() {
            "languages":[{{"name":"C","compiler_variable":"CC","flag_variables":["CPPFLAGS","CFLAGS"],"suffix":"c","probe":"int probe(void) {{ return 0; }}\n"}}]}}"#,
         root = tmp.path().display()
     );
+    // The request and the reply are files in the work directory it is
+    // given (also its TMPDIR).
+    let work = tmp.path().join("work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("request.json"), &request).unwrap();
     let ask = |env: &[(&str, &str)]| {
-        let mut child = Command::new(CACTUP)
-            .arg("__cc-doctor")
-            .envs(env.iter().copied())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        std::io::Write::write_all(&mut child.stdin.take().unwrap(), request.as_bytes()).unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success());
-        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+        let _ = fs::remove_file(work.join("reply.json"));
+        let status = Command::new(CACTUP).arg("__cc-doctor").arg(&work).envs(env.iter().copied()).stdin(std::process::Stdio::null()).status().unwrap();
+        assert!(status.success());
+        serde_json::from_slice::<serde_json::Value>(&fs::read(work.join("reply.json")).unwrap()).unwrap()
     };
     let reply = ask(&[]);
     let kept_out = |reply: &serde_json::Value| reply["found"].as_array().unwrap().iter().filter(|raw| raw["severity"] == "keeps-out").count();

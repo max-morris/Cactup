@@ -6377,12 +6377,17 @@ never built has none to check), without a build (`objcache::doctor`):
 
 - It runs the setup four times (once for the checks, three times for the
   path variables): a slow module system's setup takes that much longer.
-- It starts the setup in a shell, as the build script does (`set -e`),
-  from the Cactus root, with the setup's own stdin `/dev/null` and its
-  stdout sent to stderr, and the shell then starts `cactup __cc-doctor`
-  with what to check on stdin. The checks run in that process, in the
+- It writes a script as the build script is written (the setup at its top
+  level, after `set -e`), which `/bin/sh` reads a command at a time, so
+  an alias the setup defines works in the lines after, as in the build;
+  it runs it from the Cactus root, stdin `/dev/null`, what the setup
+  prints sent to stderr. Once the setup is through, the script marks that
+  in a file and starts `cactup __cc-doctor`, with what to check in
+  another. The checks run in that process, in the
   build's own environment, with the functions a compile through the wrapper
-  runs; the answer comes back as JSON on stdout. A setup that does not run
+  runs; the answer comes back as JSON in a third file. Files, not the
+  shell's stdin, stdout or stderr: the setup may read, redirect or close
+  those (one that closes its stderr runs through). A setup that does not run
   to its end is said so ("not checked"), and the all-clear is given only
   where everything was checked. Ctrl-C stops it. A configuration built in
   a container universe is not checked (said so).
@@ -6514,7 +6519,8 @@ never built has none to check), without a build (`objcache::doctor`):
   not absolute; and the setup itself, run with each path variable but
   `PATH` unset, empty and set, for one it gives an entry that is not
   absolute (`export X=/dir:$X` with `X` unset). It runs as the build script
-  runs it: `/bin/sh` with `set -e`, no arguments, in the Cactus tree and
+  runs it: a script file `/bin/sh` reads, the setup at its top level after
+  `set -e`, no arguments, in the Cactus tree and
   the user's environment, `PATH` included, but for the other path
   variables (a setup that makes what it needs on its own machine, the
   first time, finds it made: rostam's `arm-conda`), with the module
