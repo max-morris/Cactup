@@ -190,7 +190,11 @@ A test run you started in the foreground has no queued job: cactup does
 not stop it for you (the run's own process number is not something a
 scheduler knows). Interrupt it with Ctrl-C in the terminal running it.
 `test delete` refuses to remove a test run that is running; for one
-you submitted, `--force` cancels its job first.
+you submitted whose job the scheduler lists, `--force` cancels its job
+first. One whose lock is held while the scheduler does not list its job
+(it runs on another host, the scheduler could not be asked, or it ended
+without letting go of its lock, which expires within 15 minutes) is left
+as it is, `--force` too.
 
 Move a test to trash:
 

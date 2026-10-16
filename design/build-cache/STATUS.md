@@ -3403,6 +3403,24 @@ record again under the lock; the contract, the docs, the spec. A's (2)
 (another host's pid on a `ps`-style scheduler) is the generic machine's
 pid-as-job design, put to Max with its sims; the spec says it.
 
+Round 3 (on `f146bd7`): BLOCKED by both, the same finding: on a batch
+scheduler a run whose lock is held though the scheduler does not list
+its job was said to run "where this one cannot see it (another host?)";
+Slurm sees every node, so it is a query that failed or a run that ended
+without letting go of its lock (ran, both, with a fake `squeue` that
+answers as Slurm does). Fixed in the commit after this record: `stop` and
+`delete` say only that (another host, a query that failed, or a lock
+that expires within 15 minutes) and leave the run; the spec likewise.
+Not blocking: a failed `squeue -j` reads as "not in the queue" (Slurm
+exits 1 for both), so `delete` trashes a queued run on a failed query
+and `stop` says it is not in the queue (as on master and for sims: put to
+Max with the `ps`-style schedulers); "stopped job" was logged when no
+stop was sent (fixed); `delete`'s checks had no test (now
+`clear_to_delete`, tested); the comment on `delete`'s lock overstated
+what it covers (a foreground run's start, a window of milliseconds, is
+not; fixed); the spec now says a new run's `-f` also stops a `ps`-style
+job; the docs on `--force`.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
