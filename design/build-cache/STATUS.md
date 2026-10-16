@@ -3435,6 +3435,20 @@ scheduler's (`stop` stops it; `delete` refuses it without `-f`, stops it
 with); `without_job` names the lock that outlives its run, and drops
 "another host?"; the spec.
 
+Round 5 (on `6601c23`): BLOCKED by both, the same finding: round 4
+took every job listed in an unread state (`JobStatus::Error`) for live,
+but Slurm and Torque list an ended job for a while (`CD`, `F`, `CA`,
+Torque's `C`): `delete` said a completed job "has a live job", and `stop`
+and `delete -f` failed on Torque's `qdel` refusing it (ran, with fake
+`squeue`/`qstat`/`qdel` answering as Torque 6 and Slurm do). Fixed in the
+commit after this record: such a job is its own case (suspended,
+exiting or ended); `stop` asks the scheduler to stop it and records the
+end only if it took the stop, saying one it refuses may have ended;
+`delete` refuses it without `-f`, and with `-f` stops it or, where the
+scheduler refuses, goes ahead unless the run's lock is held; a failed
+stop command is named. Not blocking: the guard before a new run counts
+only R, Q and H as live (as master and sims).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

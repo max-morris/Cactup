@@ -4324,9 +4324,13 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   runs where that scheduler cannot see it (another host), or the query
   failed, or it ended without letting go of the lock (which expires, §2.3):
   `stop` and `delete` say which it may be and leave it, `-f` too. A job the
-  scheduler lists in a state cactup does not read (Torque's exiting `E`,
-  Slurm's suspended `S`) is the scheduler's all the same: `stop` stops it,
-  `delete` refuses it without `-f` and stops it with. `stop` records
+  scheduler lists in a state no pattern of the machine's reads may be
+  suspended (Slurm's `S`), exiting (Torque's `E`) or over (Slurm and
+  Torque list an ended job for a while: `CD`, `F`, `CA`, `C`): `stop` asks
+  the scheduler to stop it, and records `finished` only if it took the
+  stop (one it refuses may have ended, said so); `delete` refuses it
+  without `-f`, and with `-f` stops it, or, where the scheduler refuses,
+  goes ahead unless the run's `running.lock` is held. `stop` records
   `finished` once it has sent the stop (a status
   query that fails reads as "not in the queue", so nothing else does). On a
   machine whose scheduler is the host's own processes (the generic machine

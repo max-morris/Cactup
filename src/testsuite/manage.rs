@@ -263,13 +263,19 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
         println!("Test run {} has no live job; nothing to stop", name.bold());
         return Ok(());
     };
-    match sched.get_status(&job_id)? {
-        // Listed: in a state cactup reads, or in another (`Error`: Torque's
-        // exiting `E`, Slurm's suspended `S`), which is the scheduler's job
-        // all the same and stops as one.
-        JobStatus::Running | JobStatus::Queued | JobStatus::Holding | JobStatus::Error => {
-            sched.stop(&job_id)?;
-            println!("Stopped test job {}", job_id.bold());
+    match job_state(sched, &job_id)? {
+        Job::Unread => {
+            if let Err(e) = send_stop(sched, &job_id) {
+                println!("{}, and would not stop it, so it may have ended: {e:#}", unread(&job_id));
+                return Ok(());
+            }
+            println!("{}; it took the stop", unread(&job_id));
+            run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
+            run.log("test-stop", &format!("stopped job {job_id}"));
+        }
+        Job::Live => {
+            send_stop(sched, &job_id)?;
+            println!("Asked the scheduler to stop test job {}", job_id.bold());
             // Over, as far as cactup is concerned (as `build stop` records
             // an outcome): its job id is never asked of the scheduler
             // again, where it may be a pid (the generic machine's submit)
@@ -278,15 +284,51 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
             run.log("test-stop", &format!("stopped job {job_id}"));
         }
-        _ if run.lock_live()? => {
+        Job::Absent if run.lock_live()? => {
             println!("{}", running_elsewhere(run, name));
             return Ok(());
         }
-        _ => println!("Test job {job_id} is not in the queue; nothing to stop"),
+        Job::Absent => println!("Test job {job_id} is not in the queue; nothing to stop"),
     }
     run.meta.status = Some("U".to_owned());
     run.store_meta()?;
     Ok(())
+}
+
+/// What the scheduler says of a submitted run's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Job {
+    /// Running, queued or held.
+    Live,
+    /// Listed in a state no pattern of the machine's reads
+    /// (`JobStatus::Error`): suspended (Slurm's `S`), exiting (Torque's
+    /// `E`), or over (Slurm and Torque list an ended job for a while: `CD`,
+    /// `F`, `CA`, `C`). Whether the scheduler takes a stop for it tells
+    /// which: one it will not stop is not taken for live.
+    Unread,
+    /// Not listed, or the query failed.
+    Absent,
+}
+
+fn job_state(sched: &Scheduler, job_id: &str) -> Res<Job> {
+    Ok(match sched.get_status(job_id)? {
+        JobStatus::Running | JobStatus::Queued | JobStatus::Holding => Job::Live,
+        JobStatus::Error => Job::Unread,
+        JobStatus::Unknown => Job::Absent,
+    })
+}
+
+/// The scheduler's stop of `job_id`, with what failed named.
+fn send_stop(sched: &Scheduler, job_id: &str) -> Res<()> {
+    sched.stop(job_id).with_context(|| format!("the scheduler's stop command failed for test job {job_id}"))
+}
+
+/// What `stop` and `delete` say of a [`Job::Unread`] job.
+fn unread(job_id: &str) -> String {
+    format!(
+        "the scheduler lists test job {job_id} in a state cactup does not read (suspended, exiting, or \
+         ended)"
+    )
 }
 
 /// Refuse to delete `run` while it runs, unless `force` and it is a job the
@@ -295,24 +337,34 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
     if running_without_job(run)? {
         bail!("{}; delete it once it has ended", without_job(run, name));
     }
-    let job_live = match run.pending_job() {
-        // Listed, in whatever state (as `stop_run`).
-        Some(job_id) => !matches!(sched.get_status(job_id)?, JobStatus::Unknown),
-        None => false,
-    };
-    // Held, but not a job the scheduler here lists: not stopped or removed
-    // from here, `-f` neither.
-    if !job_live && run.lock_live()? {
-        bail!("{}", running_elsewhere(run, name));
-    }
-    if let Some(job_id) = run.pending_job().filter(|_| job_live) {
-        if !force {
-            bail!(
-                "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, \
-                 or use -f to stop and delete"
-            );
+    let Some(job_id) = run.pending_job() else { return Ok(()) };
+    match job_state(sched, job_id)? {
+        // Held, but not a job the scheduler here lists: not stopped or
+        // removed from here, `-f` neither.
+        Job::Absent if run.lock_live()? => bail!("{}", running_elsewhere(run, name)),
+        Job::Absent => {}
+        Job::Live if !force => bail!(
+            "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
+             -f to stop and delete"
+        ),
+        Job::Live => send_stop(sched, job_id)?,
+        Job::Unread if !force => bail!(
+            "{}: `cactup test stop {name}` first, or use -f to stop it and delete",
+            unread(job_id)
+        ),
+        Job::Unread => {
+            if let Err(e) = send_stop(sched, job_id) {
+                // Not stopped: over, unless something still holds the lock.
+                if run.lock_live()? {
+                    bail!(
+                        "{}, would not stop it ({e:#}), and the run's running.lock is held; delete it \
+                         once it has ended",
+                        unread(job_id)
+                    );
+                }
+                println!("{}, and would not stop it, so it may have ended; deleting the run", unread(job_id));
+            }
         }
-        sched.stop(job_id)?;
     }
     Ok(())
 }
@@ -614,9 +666,42 @@ mod tests {
         let exiting = Scheduler::new(&exiting);
         let mut ending = open(true, false, "JOB-6");
         let _held_ending = crate::lock::LinkLock::acquire(&ending.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("has a live job (JOB-6)"));
+        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state cactup does not read"));
+        assert!(!stopped.exists());
         stop_run(&mut ending, &exiting, "t").unwrap();
         assert!(stopped.exists());
+        assert!(TestRun::open(&ending.dir).unwrap().meta.timestamps.finished.is_some());
+
+        // Listed so, and the scheduler will not stop it (Torque's `qdel` of
+        // a completed `C` job): it may have ended. `stop` records nothing;
+        // `delete -f` goes ahead without a lock held, and not with one.
+        let refusing: Meta = toml::from_str(
+            r#"
+            [machine]
+            nickname = "fake"
+            [scheduler]
+            get-status = "echo '@JOB_ID@ C'"
+            status-pattern = "^@JOB_ID@ "
+            running-pattern = " R"
+            stop = "echo 'qdel: Invalid state for job - COMPLETE' >&2; exit 170"
+            [queues.local]
+            default = true
+            [submitscripts]
+            "default" = ["local"]
+            [runscripts]
+            "default" = ["local"]
+            "#,
+        )
+        .unwrap();
+        let refusing = Scheduler::new(&refusing);
+        let mut ended = open(true, false, "JOB-7");
+        stop_run(&mut ended, &refusing, "t").unwrap();
+        assert_eq!(TestRun::open(&ended.dir).unwrap().pending_job(), Some("JOB-7"));
+        assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("use -f"));
+        clear_to_delete(&ended, &refusing, "t", true).unwrap();
+        let held_ended = crate::lock::LinkLock::acquire(&ended.running_lock_path()).unwrap();
+        assert!(clear_to_delete(&ended, &refusing, "t", true).unwrap_err().to_string().contains("running.lock is held"));
+        drop(held_ended);
     }
 
     /// `list`'s whole point is one `get_statuses` call instead of one
