@@ -3251,6 +3251,33 @@ one that ends the shell its own way (its own exit trap, `exec`) is an
 error, as before. The real configurations `m5a`, `m5b` and `et` read the
 same as before it, byte for byte.
 
+Round 33 (on `efa55c3`), A: BLOCKED. The doctor ran the setup in
+`bash -c` with the values file as an argument, not as the build does: a
+relative entry of the user's own `PATH` was laid to the setup "with PATH
+unset"; `BASH_ENV` was read (the build's `/bin/sh` does not); the setup
+saw an argument (conda's `activate` passes its own on, and failed). Also:
+only the first way a setup stopped was said; the spec claimed more than
+the code. Fixed in the commit after this record: run as the build script
+does (`/bin/sh`, `set -e`, no arguments; the values file named in the
+environment, taken out before the setup runs); an entry of `PATH` the
+user's own has is not the setup's, and `PATH` is said "as it is in your
+environment"; every way it stopped is said. A's plants (67) and the real
+configurations read as before but for the findings above.
+
+B: BLOCKED, the same two (`BASH_ENV`, `SHELLOPTS`; the argument), and:
+a setup with a syntax error was taken for one that stopped (the trap
+ran before any of it), so the MDB check passed it; a setup's own trap on
+exit was dropped once it was through (`trap - EXIT`), leaving its
+temporary files; the MDB check's naming of a stopped setup never showed
+in CI (a passing test's output is not shown). Fixed in the same commit:
+the shell reads the setup with `-n` first, and one it cannot read is an
+error; the doctor's trap writes only while a flag says the setup is not
+through, so a trap of the setup's own is left to run; a setup that stops
+in the MDB check must be in the test's `STOPS_HERE` with why (rostam's
+`arm-conda`), and one there that no longer stops fails too. Checked by
+re-running both reviewers' reproductions, a syntax error put into mike's
+setup (the test fails, naming it), and both reviewers' plants.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -345,7 +345,9 @@ cactup's tests run every machine's build setup (with the path variables
 unset, empty and set) and fail on one that leaves such an entry. A setup
 that does more than set variables, say one that creates a software
 environment the first time it runs, stops early off its own machine; the
-tests then check what it set before it stopped, so put its `export`s first.
+tests then check what it set before it stopped, so put its `export`s first,
+and name it, with why, in the test's `STOPS_HERE` list
+(`src/objcache/doctor.rs`), or the tests fail.
 
 This is sourced before every build, submit, and run command.
 
