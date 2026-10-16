@@ -212,9 +212,9 @@ fn running_without_job(run: &TestRun) -> Res<bool> {
 fn without_job(run: &TestRun, name: &str) -> String {
     if run.meta.timestamps.submitted.is_some() {
         format!(
-            "test run \"{name}\" was submitted and its job was stopped, but its running.lock is \
-             still held: it is ending, or it ended without letting go of the lock (which then \
-             expires within {} minutes)",
+            "test run \"{name}\" was submitted and its job was asked to stop or is over, but its \
+             running.lock is still held: it is ending, or it ended without letting go of the lock \
+             (which then expires within {} minutes)",
             crate::lock::LOCK_STALE_SECS / 60
         )
     } else {
@@ -256,7 +256,7 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
 /// [`stop`], on `run` (locked), by `sched`.
 fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
     if running_without_job(run)? {
-        println!("{}", without_job(run, name));
+        println!("{}", sentence(without_job(run, name)));
         return Ok(());
     }
     let Some(job_id) = run.pending_job().map(str::to_owned) else {
@@ -266,12 +266,18 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
     match job_state(sched, &job_id)? {
         Job::Unread => {
             if let Err(e) = send_stop(sched, &job_id) {
-                let refused = format!("{e:#}");
+                // A stop command Ctrl-C ended is no refusal (§2.3).
+                if gix::interrupt::is_triggered() {
+                    bail!("interrupted");
+                }
+                let refused = refusal(&e);
                 if run.lock_live()? {
                     println!(
-                        "{}, and would not stop it ({}), but the run's running.lock is held: nothing recorded",
+                        "{}, and would not stop it ({refused}), but the run's running.lock is held: nothing \
+                         recorded. Once the run lets go of it (a lock left by a run that ended expires \
+                         within {} minutes), `cactup test stop {name}` again.",
                         sentence(unread(&job_id)),
-                        refused.trim_end()
+                        crate::lock::LOCK_STALE_SECS / 60
                     );
                     return Ok(());
                 }
@@ -279,13 +285,14 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 // over (Torque's `qdel` refuses a completed job), so
                 // `delete` and a new run go ahead.
                 println!(
-                    "{}, and would not stop it ({}); nothing of the run holds its lock, so cactup takes it as ended",
-                    sentence(unread(&job_id)),
-                    refused.trim_end()
+                    "{}, and would not stop it ({refused}); nothing of the run holds its lock, so cactup \
+                     takes it as ended",
+                    sentence(unread(&job_id))
                 );
                 run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
                 run.meta.status = Some("U".to_owned());
                 run.store_meta()?;
+                run.log("test-stop", &format!("job {job_id}: the scheduler would not stop it, and nothing held the lock; taken as ended"));
                 return Ok(());
             }
             // Taken: stopped, or over before (Slurm's `scancel` takes an
@@ -306,7 +313,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             run.log("test-stop", &format!("stopped job {job_id}"));
         }
         Job::Absent if run.lock_live()? => {
-            println!("{}", running_elsewhere(run, name));
+            println!("{}", sentence(running_elsewhere(run, name)));
             return Ok(());
         }
         Job::Absent => println!("Test job {job_id} is not in the queue; nothing to stop"),
@@ -344,6 +351,15 @@ fn job_state(sched: &Scheduler, job_id: &str) -> Res<Job> {
 /// The scheduler's stop of `job_id`, with what failed named.
 fn send_stop(sched: &Scheduler, job_id: &str) -> Res<()> {
     sched.stop(job_id).with_context(|| format!("the scheduler's stop command failed for test job {job_id}"))
+}
+
+/// A stop command's failure on one line, for inside a sentence.
+fn refusal(e: &anyhow::Error) -> String {
+    let lines: Vec<String> = format!("{e:#}").lines().map(str::trim).filter(|line| !line.is_empty()).map(|line| line.trim_end_matches(':').to_owned()).collect();
+    match lines.is_empty() {
+        true => "it said nothing".to_owned(),
+        false => lines.join("; "),
+    }
 }
 
 /// `text` with its first letter capitalized, for a line of its own.
@@ -386,6 +402,9 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         ),
         Job::Unread => {
             if let Err(e) = send_stop(sched, job_id) {
+                if gix::interrupt::is_triggered() {
+                    bail!("interrupted");
+                }
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
@@ -393,7 +412,7 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                          the run has let go of the lock (a lock left by a run that ended expires \
                          within {} minutes)",
                         unread(job_id),
-                        format!("{e:#}").trim_end(),
+                        refusal(&e),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
                 }
@@ -708,8 +727,9 @@ mod tests {
         assert!(TestRun::open(&ending.dir).unwrap().meta.timestamps.finished.is_some());
 
         // Listed so, and the scheduler will not stop it (Torque's `qdel` of
-        // a completed `C` job): it may have ended. `stop` records nothing;
-        // `delete -f` goes ahead without a lock held, and not with one.
+        // a completed `C` job): `delete -f` goes ahead without a lock held,
+        // and not with one; `stop` records nothing with the lock held, and
+        // takes the run as ended without it.
         let refusing: Meta = toml::from_str(
             r#"
             [machine]

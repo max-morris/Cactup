@@ -3462,6 +3462,19 @@ this record: `stop` says only that it asked the scheduler; where the
 scheduler refuses and nothing of the run holds its lock, `stop` takes the
 run as ended and records it, so `delete` goes ahead; the texts.
 
+Round 7 (on `996b2d5`): B signed off; BLOCKED by A: `without_job` said
+"its job was stopped" of a job that ended on its own (Slurm's `NF`) and
+that `stop` then only asked the scheduler about, its lock lingering (ran,
+with Slurm's and Torque's own patterns and fake tools as their sources
+have them). Not blocking (A, B): a Ctrl-C that ended `scancel`/`qdel`
+read as the scheduler refusing, so `stop` could take a run as ended
+(against the interrupt contract); `stop`'s refusal with the lock held gave
+no next step; the scheduler's message broke the line; no log line for a
+run taken as ended; the spec's and docs' wording of the refused branch;
+a stale test comment; capitals. Fixed in the commit after this record:
+"asked to stop or is over"; an interrupted stop command bails with
+"interrupted"; the rest as said.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

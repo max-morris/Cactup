@@ -4317,8 +4317,9 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   another host's): `stop` says to interrupt it where it runs (Ctrl-C), as
   `build stop` does, or that it ended without letting go of the lock (on
   another host, which a lost host or a hangup leaves until it expires), and
-  `delete` refuses, `-f` too; so for a submitted run that `stop` stopped
-  whose lock lingers (it is ending, or ended without letting go). A
+  `delete` refuses, `-f` too; so for a submitted run whose job `stop` dealt
+  with (asked the scheduler to stop it, or found it over) and whose lock
+  lingers (it is ending, or ended without letting go). A
   submitted run whose
   `running.lock` is held though the scheduler here does not list its job
   runs where that scheduler cannot see it (another host), or the query
@@ -4331,12 +4332,13 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   (stopped, or ended before: Slurm's `scancel` takes an ended job without
   a word, so `stop` says only that it asked); where it refuses (Torque's
   `qdel` of a completed job), `stop` records `finished` too unless the
-  run's `running.lock` is held (nothing of the run is left, so it is taken
-  as ended), and `delete` then goes ahead. `delete` refuses it without
+  run's `running.lock` is held (nothing of the run holds the lock, so it is
+  taken as ended, though the scheduler still lists the job), and `delete` then goes ahead. `delete` refuses it without
   `-f`, and with `-f` stops it, or, where the scheduler refuses, goes ahead
-  unless the run's `running.lock` is held. `stop` records
-  `finished` once it has sent the stop (a status
-  query that fails reads as "not in the queue", so nothing else does). On a
+  unless the run's `running.lock` is held. `stop` records `finished` once the scheduler took its stop, or refused
+  it with nothing of the run holding the lock (a status query that fails
+  reads as "not in the queue", and that alone records nothing); a stop
+  command Ctrl-C ends is no refusal (the command stops, "interrupted"). On a
   machine whose scheduler is the host's own processes (the generic machine
   and those `machine create` makes from it; in the MDB athena, et-juphub,
   hal1, hal2, hedges, mel5, omnia, saturn and spine) a submitted run's job

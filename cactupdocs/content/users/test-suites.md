@@ -191,8 +191,10 @@ not stop it for you (the run's own process number is not something a
 scheduler knows). Interrupt it with Ctrl-C in the terminal running it.
 `test delete` refuses to remove a test run that is running; for one
 you submitted whose job the scheduler lists, `--force` cancels its job
-first (where the scheduler refuses, as for a job it lists as ended,
-`--force` deletes the run unless it is still running). A job the
+first (where the scheduler refuses, as Torque does for a completed job,
+`--force` deletes the run unless its lock is held: it is running, or it
+ended without letting go of the lock, which then expires within 15
+minutes). A job the
 scheduler lists in a state cactup does not know (suspended, exiting, or
 ended) is not deleted without `--force`; `test stop` asks the scheduler
 to stop it, and once it is over `test delete` goes ahead. One whose lock is held while the scheduler does not list its job
