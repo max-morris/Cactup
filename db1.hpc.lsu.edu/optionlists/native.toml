@@ -13,7 +13,7 @@
 [cactup]
 # Names no universe, so it falls back to the declared [universes.host] (§4.8
 # "implicit host universe": loads the host gcc/cuda/mpich modules, via
-# env-build-setup, around make). The run must NOT be coerced into it — the
+# build-env-setup, around make). The run must NOT be coerced into it — the
 # native runscript loads those modules itself. Routing to the "default"
 # run/submit scripts comes from this config's build universe ("host"),
 # matched against the `build-universes` list on the meta.toml scripts

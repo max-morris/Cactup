@@ -52,6 +52,8 @@ submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $
 # The pid is printed before the wait, so the job id parses immediately.
 blocking-submit = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & pid=$!; echo $pid; wait $pid"
 get-status      = "ps @JOB_ID@"
+# The job id is the pid of the backgrounded script, on this host.
+job-ids = "pids"
 stop            = "kill @JOB_ID@"
 submit-pattern   = "(.*)"
 status-pattern   = "^ *@JOB_ID@ "

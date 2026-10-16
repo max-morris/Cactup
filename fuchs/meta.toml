@@ -59,6 +59,8 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env  = "SLURM_JOB_ID"
 #getstatus (old alternative): squeue | awk '$1 == @JOB_ID@ {print $1,$5}'
 get-status      = "squeue -j @JOB_ID@"
+# What squeue says (on stderr) of a job Slurm no longer knows.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
