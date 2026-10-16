@@ -20,11 +20,13 @@ the last milestone, for when that host is not at hand.
   alias `build-cache-b` for cross-installation measurements.
   `/home/max/Cactus-2026` is read-only reference. Never write in
   `~/cacti/speedup-build`.
-- While developing on this shared instance, turn the cache on per command
-  (`cactup -K build-cache=record build …`), not with `cactup knob`: the
-  instance's database is shared with other sessions and with installed
-  cactup builds that do not know the knob yet. (Users of a released cactup
-  set the knob normally.)
+- While developing on this shared instance, give a build the cache's mode
+  and store per command (`-K build-cache=off`, `-K build-cache=record`,
+  `-K build-cache-home=<a directory of your own>`), not with `cactup knob`:
+  since decision 34 a build with no knob set serves into the default store,
+  and the instance's database is shared with other sessions and with
+  installed cactup builds. (Users of a released cactup set the knob
+  normally.)
 - While reviewers are at work, leave the worktree alone: they build and
   read in it, and edits appearing under them cost them a clean export.
   Prepare fixes only once both have reported (or in a second worktree).
@@ -3355,6 +3357,30 @@ and the cache on by default (decision 34). Three commits on `2b7bfbd`:
 - `e2a95f3`: decision 34. Unit tests' builds keep the cache out whatever
   the real global DB says (they read it: nothing points `CACTUP_HOME`
   elsewhere for them).
+
+Round 1 (on `0430bac`): BLOCKED by both. A: (1) a submitted test run
+on the generic machine has a pid for its job too, and `test stop` set
+no `finished`, so a stopped run's reused pid read as RUNNING and `test
+delete -f` ran `pkill -g` on it (ran); (2) the contract with the
+build-speed work still said the cache is off by default, and their
+timing builds would serve from it. B: (1) `test stop`/`delete` handed a
+running interactive run's pid to the scheduler: on Slurm `squeue` knows
+no pid, so `stop` said "not in the queue" and `delete` trashed the live
+run (ran; master the same); (2) across hosts the lock's start time is not
+checked, so another host's pid went to the local `pkill -g` (ran); (3)
+the contract, as A's (2). Non-blocking from B: the doctor took a setup's
+own failing exit trap (`trap false EXIT`) for failed checks; text still
+saying to turn the cache on (this file's rules, the help's `knob`
+example, the spec's D15 row); a submitted test run on the generic
+machine that ended without recording it still has its pid asked (as the
+generic machine's sims: put to Max); a native blocking submit's late job
+id (as on master). Fixed in `d9c8da1` and the commit after this record:
+`test stop` records `finished`; an interactive run's pid never goes to
+the scheduler (`stop` says to interrupt it where it runs, as `build stop`
+does; `delete` refuses while its lock is held, `-f` too); the live
+contract and its snapshot say the default changes and that timing builds
+pass `-K build-cache=off`; the doctor takes a whole reply whatever the
+shell's status after it; the texts.
 
 ## Decisions
 

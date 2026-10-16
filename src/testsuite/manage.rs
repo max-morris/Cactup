@@ -5,7 +5,6 @@ use crate::commands::Ctx;
 use crate::installation::Installation;
 use crate::scheduler::{JobStatus, Scheduler};
 use crate::sim::cache;
-use crate::sim::restart::NO_JOB_ID;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
 use anyhow::{bail, Context};
@@ -197,17 +196,13 @@ pub fn log_cmd(ctx: &Ctx, name: &str, mode: crate::tail::FollowMode) -> Res<()> 
     crate::tail::tail_log(&sources, mode, &subject)
 }
 
-/// The job `stop` and `delete` may hand to the scheduler: a submitted run's
-/// ([`TestRun::pending_job`]), or an interactive run's pid while its
-/// `running.lock` is held — the lock is held by that very process and
-/// checks its start time, so the pid is still the run's; once the lock is
-/// gone, the pid may be any other process's.
-fn stoppable_job(run: &TestRun) -> Res<Option<&str>> {
-    if let Some(job) = run.pending_job() {
-        return Ok(Some(job));
-    }
-    let interactive = run.meta.timestamps.submitted.is_none() && run.meta.job_id != NO_JOB_ID;
-    Ok((interactive && run.lock_live()?).then_some(run.meta.job_id.as_str()))
+/// Whether the run executes now with no job the scheduler can stop: its
+/// `running.lock` is held, and it has no [`TestRun::pending_job`] (an
+/// interactive run, whose job id is a pid no scheduler knows, and which may
+/// be another host's). `stop` and `delete` leave such a run alone, as
+/// `build stop` leaves a foreground build: it is interrupted where it runs.
+fn running_without_job(run: &TestRun) -> Res<bool> {
+    Ok(run.pending_job().is_none() && run.lock_live()?)
 }
 
 /// `test stop` (§11.7): the §8.6 stop semantics for the active result
@@ -222,7 +217,15 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
 
 /// [`stop`], on `run` (locked), by `sched`.
 fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
-    let Some(job_id) = stoppable_job(run)?.map(str::to_owned) else {
+    if running_without_job(run)? {
+        println!(
+            "Test run {} is running (its running.lock is held) with no queued job to stop; \
+             cactup cannot stop it for you — interrupt it (Ctrl-C) where it runs.",
+            name.bold()
+        );
+        return Ok(());
+    }
+    let Some(job_id) = run.pending_job().map(str::to_owned) else {
         println!("Test run {} has no live job; nothing to stop", name.bold());
         return Ok(());
     };
@@ -271,7 +274,13 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
 
     let run = TestRun::locate(&inst, name)?;
     let sched = Scheduler::new(&machine.meta);
-    if let Some(job_id) = stoppable_job(&run)?
+    if running_without_job(&run)? {
+        bail!(
+            "test run \"{name}\" is running (its running.lock is held) with no queued job cactup \
+             can stop; interrupt it (Ctrl-C) where it runs, then delete it"
+        );
+    }
+    if let Some(job_id) = run.pending_job()
         && matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
     {
         if !force {
@@ -364,6 +373,7 @@ fn clean_tree(cactus_root: &std::path::Path) -> Res<Vec<std::path::PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::restart::NO_JOB_ID;
     use crate::mdb::meta::Meta;
     use std::path::Path;
 
@@ -417,16 +427,18 @@ mod tests {
         for finished in [false, true] {
             let run = open(false, finished, &pid);
             assert_eq!(run.pending_job(), None);
-            assert_eq!(stoppable_job(&run).unwrap(), None);
+            assert!(!running_without_job(&run).unwrap());
         }
-        let live = open(false, false, &pid);
+        // Running now, interactively: never handed to the scheduler (its pid
+        // is no job the scheduler knows, and the lock may be another
+        // host's); `stop` stops nothing and leaves the run as it is.
+        let mut live = open(false, false, &pid);
         let _held = crate::lock::LinkLock::acquire(&live.running_lock_path()).unwrap();
         assert_eq!(live.pending_job(), None);
-        assert_eq!(stoppable_job(&live).unwrap(), Some(pid.as_str()));
+        assert!(running_without_job(&live).unwrap());
 
         assert_eq!(open(true, false, "JOB-1").pending_job(), Some("JOB-1"));
         assert_eq!(open(true, true, "JOB-1").pending_job(), None);
-        assert_eq!(stoppable_job(&open(true, true, "JOB-1")).unwrap(), None);
         assert_eq!(open(true, false, NO_JOB_ID).pending_job(), None);
 
         // A submitted run `test stop` stopped is over: its job id (on the
@@ -452,6 +464,9 @@ mod tests {
         ))
         .unwrap();
         let sched = Scheduler::new(&meta);
+        stop_run(&mut live, &sched, "t").unwrap();
+        assert!(!stopped.exists(), "an interactive run's pid went to the scheduler");
+        assert!(TestRun::open(&live.dir).unwrap().meta.timestamps.finished.is_none());
         let mut run = open(true, false, "JOB-2");
         stop_run(&mut run, &sched, "t").unwrap();
         assert!(stopped.exists());

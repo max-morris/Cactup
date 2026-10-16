@@ -1351,9 +1351,10 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
     let through = work_path.join(THROUGH).exists();
     drop(work);
     let out = out?;
-    if out.status.success()
-        && let Some(reply) = reply.as_deref().and_then(|reply| serde_json::from_slice::<Reply>(reply).ok())
-    {
+    // A reply is whole once there (written at the checks' end), whatever
+    // the shell's status after it: a trap of the setup's own on its exit
+    // can fail, as it would in the build.
+    if let Some(reply) = reply.as_deref().and_then(|reply| serde_json::from_slice::<Reply>(reply).ok()) {
         return Ok(reply);
     }
     let said = String::from_utf8_lossy(&out.stderr);
@@ -2020,7 +2021,7 @@ mod tests {
         super::super::make_executable(&failing);
         let request = Request { config_dir: None, optionlist: BTreeMap::new(), conf: conf(tmp.path()), languages: Vec::new() };
         let run = |cactup: &Path, env: &str| in_build_environment(cactup, tmp.path(), env, &request).map_err(|e| format!("{e:#}"));
-        for env in ["", "exec 2>&-", "exec >&- 2>&-", "alias say='echo said'\nsay one", "cd /"] {
+        for env in ["", "exec 2>&-", "exec >&- 2>&-", "alias say='echo said'\nsay one", "cd /", "trap false EXIT"] {
             assert_eq!(run(&fake, env), Ok(Reply::default()), "{env:?}");
         }
         assert!(run(&fake, "exit 0").unwrap_err().contains("ended the shell before its end"));

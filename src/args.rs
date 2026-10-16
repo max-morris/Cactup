@@ -365,7 +365,7 @@ pub(crate) enum Commands {
     ///
     /// Set them with `cactup knob`, or for one build with -K:
     ///
-    ///   cactup knob build-cache serve
+    ///   cactup knob build-cache off
     ///   cactup -K build-cache=audit build
     #[command(args_conflicts_with_subcommands = true)]
     #[clap(verbatim_doc_comment)]
