@@ -1437,12 +1437,12 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
                 let ended = meta.outcome.is_some() || meta.timestamps.finished.is_some();
                 let records = std::fs::read_to_string(attempt.script_path()).ok().map(|script| script.contains(&attempt.configured_stamp_path().display().to_string()));
                 let how = match (ended, records) {
-                    (false, Some(true)) => "it has not ended, and has not recorded that its configure step succeeded (it is queued, or running before that)",
+                    (false, Some(true)) => "it has recorded neither an end nor that its configure step succeeded",
                     (true, Some(true)) => "it ended without recording that its configure step succeeded",
                     (_, Some(false)) => "its build script, of an older cactup's, records nothing of its configure",
                     (_, None) => "its build script is not there to tell",
                 };
-                format!("build attempt {id:04}, the newest that builds, has left no record that it configured the configuration as it is now ({how}), so what it compiles with is not known")
+                format!("build attempt {id:04}, the newest that builds, has left no record that it configured the configuration as it is now, so what it compiles with is not known ({how})")
             }
             _ => format!("the configuration has been configured again since build attempt {id:04}, the newest that builds, configured it, so what it is configured from is not known"),
         };

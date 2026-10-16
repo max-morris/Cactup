@@ -3192,6 +3192,25 @@ cactup's, records none; or its script is not there to tell. Also (both): help an
 configure) rather than a list of cases; the setup check's "did not run
 to its end" names an unset variable under `set -u` too.
 
+### M5 part 2, round 31 (on `13944e1`): BLOCKED by both
+
+Both, the same finding: an attempt that recorded no end was said to be
+"queued, or running before that"; a build killed in its configure
+(SIGHUP, a second Ctrl-C, the OOM killer, a job cancelled with the
+scheduler's own command) records no end either, and `build show` calls
+it STALE (A: a real build hung up in its realclean; B: planted). Fixed
+in the commit after this record: the doctor guesses nothing of what such
+an attempt is doing ("it has recorded neither an end nor that its
+configure step succeeded"), and the reason goes after "so what it
+compiles with is not known", in one pair of parentheses. Not part 2 (A;
+on master since `9f9dc8d`), a follow-up after the merge:
+`guard_no_live_attempt` (`src/commands/build.rs`) takes a finished
+foreground attempt's job id, the pid of the cactup that ran it, as live
+when that pid is reused, so `cactup build` refuses and `-f` runs the
+stop command on an unrelated process group (in the sandbox's pid
+namespace it stopped itself); `build list` shows such an attempt
+RUNNING. It should check the recorded outcome and `submitted` first.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
