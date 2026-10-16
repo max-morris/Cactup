@@ -1,0 +1,109 @@
+# hopper — the GH200 nodes of "Frank", the University of Oregon closet cluster
+# (hopper1/hopper2.nic.uoregon.edu). Written 2026-10-14 from measurements on
+# hopper1, as a copy of mdb/athena (same cluster, same scheduler-less shape);
+# the facts this entry depends on:
+#
+#   - RHEL 9.8, aarch64; `hostname` = hopper1 (hostname.regexp claims both
+#     nodes, short or qualified).
+#   - 1 x NVIDIA Grace (Neoverse-V2: SVE2, asimd/fp16), 72 cores, 1 thread per
+#     core; MemTotal 592421320 kB.
+#   - 1 x NVIDIA GH200 480GB (Hopper, sm_90, 97871 MiB HBM, max SM clock 1980
+#     MHz); driver 610.43.02; persistence on, compute mode Default, MIG off.
+#   - GPU performance counters are open to ordinary users
+#     (NVreg_RestrictProfilingToAdminUsers=0). ncu and nsys ship in the CUDA
+#     tree below.
+#   - CUDA 13.3.1 at /packages/cuda/13.3.1 (this node's aarch64 package tree;
+#     nvcc 13.3 accepts host gcc up to 15).
+#   - gcc-toolset-13 (gcc/g++/gfortran 13.3.1) under /opt/rh.
+#   - MPI: HPC-X 2.24 from the NVIDIA HPC SDK 25.9 (Linux_aarch64), as on athena.
+#   - zlib-devel and openssl-devel are installed; no libudev headers.
+#
+# Scheduling. Slurm lists hopper1/hopper2 in partitions `hopper` and `arm64`,
+# but on 2026-10-14 both were DOWN ("Node unexpectedly rebooted", since
+# 2026-10-06 and 2026-10-01, still so on 2026-10-16) although hopper1 was up
+# and idle. So this is
+# athena's scheduler-less shape: "submit" backgrounds the script and prints
+# its PID; ps/pkill do status/stop. hopper2 was not reachable from orthus
+# (host key verification failed), so only hopper1 is measured.
+#
+# Filesystems: the shared NFS home /storage/users (as on athena); /packages is
+# the aarch64 tree; /tmp is on the node-local root disk.
+
+[machine]
+name        = "hopper"
+nickname    = "hopper"
+location    = "University of Oregon"
+description = "GH200 nodes of the Frank closet cluster: 72-core Grace + 1 x GH200 (sm_90), no batch system in practice (nohup), shared NFS home."
+status      = "experimental"
+hostname    = "hopper1.nic.uoregon.edu"
+
+[paths]
+install-home    = "/storage/users/@USER@/.cactup/cacti"
+simulation-home = "/storage/users/@USER@/simulations"
+test-home       = "/storage/users/@USER@/tests"
+
+[hardware]
+max-cpus-per-node     = 72
+# One rank on the one GPU with every core.
+default-cpus-per-task = 72
+threads-per-cpu       = 1
+max-gpus-per-node     = 1
+memory                = 578536    # MB per node (MemTotal 592421320 kB)
+
+[build]
+# Half of the 72 cores, as athena restrains -j on a node others use.
+make      = "make -j@MAKEJOBS@"
+make-jobs = 36
+
+[environment]
+# Self-contained, as on athena: absolute paths only, no `module` calls.
+# gcc-toolset-13 is the compiler and nvcc's host compiler; CUDA 13.3.1; HPC-X
+# 2.24 (aarch64) with OPAL_PREFIX because HPC-X is installed relocated; hcoll
+# off as on athena; CMake 3.31.1 for the Cactus-built AMReX.
+env-setup = """
+export CUDA_HOME=/packages/cuda/13.3.1
+export HPCX_HOME=/packages/nvhpc/25.9_cuda13.0/Linux_aarch64/25.9/comm_libs/13.0/hpcx/hpcx-2.24
+export MPI_HOME=${HPCX_HOME}/ompi
+export OPAL_PREFIX=${MPI_HOME}
+export PATH="/opt/rh/gcc-toolset-13/root/usr/bin:/packages/cmake/3.31.1/bin:${CUDA_HOME}/bin:${MPI_HOME}/bin:${HPCX_HOME}/ucx/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64:${CUDA_HOME}/lib64:${MPI_HOME}/lib:${HPCX_HOME}/ucx/lib:${HPCX_HOME}/ucx/lib/ucx:${HPCX_HOME}/ucc/lib:${HPCX_HOME}/ucc/lib/ucc:${HPCX_HOME}/hcoll/lib:${HPCX_HOME}/sharp/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export OMPI_MCA_coll_hcoll_enable=0
+"""
+
+[scheduler]
+# No batch system (see the header): background the script, echo its PID as
+# the job id; ps/pkill for status/stop. The same as mdb/athena's.
+# @STDOUT_FILE@/@STDERR_FILE@ default to @RUNDIR@/@SIMULATION_NAME@.{out,err}
+# unless -o/-e are given (design §8.3.1).
+# setsid: every job gets its own session and process group. Without it the
+# jobs submitted from one shell share a process group, and `stop`'s pkill -g
+# on one of them kills the others (seen on athena, 2026-09-30).
+submit            = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+# The pid is printed before the wait, so the job id parses immediately.
+blocking-submit   = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+get-status        = "ps @JOB_ID@"
+# Kill the whole process group descending from @JOB_ID@ (mpirun and every
+# rank), not just the top process.
+stop              = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+submit-pattern    = "(.*)"
+status-pattern    = "^ *@JOB_ID@ "
+queued-pattern    = "$^"          # never "queued"
+running-pattern   = "^"           # in ps => running
+holding-pattern   = "$^"          # never "held"
+exec-host         = "echo localhost"
+exec-host-pattern = "(.*)"
+# No max-walltime: the built-in one-year fallback applies (§4.2).
+# No allocation-env: nothing allocates here, so `test run` needs no gate.
+
+# One cactup queue on the one node; no scheduler sees its name.
+[queues.local]
+gpu     = true
+default = true
+
+[submitscripts]
+"default" = { queues = ["local"] }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
+
+[runscripts]
+"default" = { queues = ["local"] }
+"test"    = { queues = ["local"], test = true }   # used by `cactup test run`
