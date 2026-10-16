@@ -3327,6 +3327,35 @@ blocking:
 - The doctor's look for the stamp step takes the stamp path raw (round
   32).
 
+### After the merge: round 1
+
+On 2026-10-16, master at `2b7bfbd` (CI passed, published and deployed),
+Max: "Fix 1, 3-4" of round 35's list, shelve the every-flag search, make
+the case for or against an MDB extension for item 2 (a setup that
+provisions on its own machine, rostam's `arm-conda`), then M4b, M5b, M6;
+and the cache on by default (decision 34). Three commits on `2b7bfbd`:
+
+- `0784992`: the pid reuse of round 31. A foreground build attempt's
+  job id, and an interactive test run's, is the pid of the cactup that
+  ran it; only a submitted attempt with no recorded outcome, or a
+  submitted test run not finished, is asked of the scheduler now, and
+  `running.lock` answers for the rest (`build list`/`show`/`prune`, the
+  guard before a build, `test list`/`show`/`stop`/`delete`, the guard
+  before a test run). An interactive test run's pid is stopped only while
+  its lock is held. Sims are left as they are: on the generic machine a
+  sim's job is a pid by design (said to Max, not decided).
+- `669dcbc`: the setup is read as one block (round 35's first item) and a
+  setup closing stderr is said not to run through. The doctor writes its
+  script as the build script is written, the setup at its top level, and
+  runs it from a file (dash and bash in POSIX mode both run an alias the
+  setup defines in the lines after; both say "not found" inside a block,
+  tried). The request, the answer and the mark of the setup's end are
+  files in the doctor's work directory. `m5a`, `m5b`, `et`: the doctor's
+  output is byte for byte master's.
+- `e2a95f3`: decision 34. Unit tests' builds keep the cache out whatever
+  the real global DB says (they read it: nothing points `CACTUP_HOME`
+  elsewhere for them).
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3544,12 +3573,13 @@ gfortran, 0 wrong, with the fallback count reported.
 ## Next step
 
 M5 part 2 passed its gate at `92c3089` (round 32), and with it M5;
-master had moved, and the merge passed rounds 33 to 35 (below, at
-`b6a974b`); then `feature/build-cache` fast-forwards master as the feature's first
-version (decision 27). Then, in order: the pid-reuse fix in
-`guard_no_live_attempt` (round 31); the every-flag search on
-`feature/doctor-every-flag` (round 16's open findings); M4b (Cray), M5b
-(the whole-file cases), M6 (HIP).
+master had moved, and the merge passed rounds 33 to 35 (at `b6a974b`);
+master is `2b7bfbd` (decision 27), released. Now "After the merge: round
+1" (above): items 1, 3 and 4 of round 35's list and decision 34, in
+review; item 2 (the MDB check running a setup's provisioning) waits on
+Max's choice between the proposals put to him. Then M4b (Cray), M5b (the
+whole-file cases), M6 (HIP). The every-flag search on
+`feature/doctor-every-flag` is shelved (Max, 2026-10-16).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.
 Part 1 passed its gate at `ad236d2` (spec §18.12):
