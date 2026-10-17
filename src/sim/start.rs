@@ -443,6 +443,8 @@ fn submit_impl(
                 walltime: job_wall,
                 checkpt_buffer: buffer,
                 job_id: NO_JOB_ID.to_owned(),
+                job_host: None,
+                job_start: None,
                 chained_job_id: chained,
                 status: None,
                 terminated: false,
@@ -459,10 +461,11 @@ fn submit_impl(
             restart::make_active(&sim.dir, id)?;
         }
 
-        let job_id = sched
+        let submitted = sched
             .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
             .with_context(|| format!("submitting restart {}", restart::dir_name(id)))?;
-        r.meta.job_id = job_id.clone();
+        r.meta.set_job(&submitted);
+        let job_id = submitted.id;
         r.meta.status = None;
         r.store()?;
 
@@ -633,9 +636,10 @@ fn run_interactive(
             allocation: topo.allocation.clone(),
             walltime: job_wall,
             checkpt_buffer: buffer,
-            // The interactive run IS the job; our pid is what `ps`-style
-            // get-status commands can see (matches the generic machine).
-            job_id: std::process::id().to_string(),
+            // Set from `own_job` below.
+            job_id: NO_JOB_ID.to_owned(),
+            job_host: None,
+            job_start: None,
             chained_job_id: None,
             status: None,
             terminated: false,
@@ -644,6 +648,10 @@ fn run_interactive(
             knobs: restart::freeze_knobs(&vset),
         },
     };
+    // The interactive run IS the job; our pid is what `ps`-style
+    // get-status commands can see (matches the generic machine), recorded
+    // with its host and start time where the machine's job ids are pids.
+    r.meta.set_job(&sched.own_job());
     r.store()?;
     restart::make_active(&sim.dir, id)?;
     // A fresh heartbeat before the sim lock drops: between here and
@@ -783,6 +791,11 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     r.touch_heartbeat();
     r.meta.started = Some(Utc::now());
     r.meta.status = Some("R".to_owned());
+    // Running, so not ended: a job the scheduler requeued after its run
+    // recorded its end (preemption, `scontrol requeue`) runs again here,
+    // and records its end again when it is over (§8.6).
+    r.meta.terminated = false;
+    r.meta.finished = None;
     r.store()?;
 
     let tee_files = tee.then(|| {
@@ -1245,6 +1258,8 @@ mod tests {
                 install_root: cactus_root.clone(),
                 submitted: false,
                 job_id: "999".to_owned(),
+                job_host: None,
+                job_start: None,
                 status: None,
                 reservation: None,
                 decision: "test decision".to_owned(),

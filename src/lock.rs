@@ -99,7 +99,9 @@ fn file_mtime(file: &fs::File) -> std::io::Result<SystemTime> {
     file.metadata().and_then(|m| m.modified())
 }
 
-fn our_hostname() -> String {
+/// This host's name, as lock stamps and the origin of a job whose id is a
+/// pid (`scheduler::JobRef`) record it.
+pub(crate) fn our_hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 

@@ -3,13 +3,14 @@
 
 use crate::commands::Ctx;
 use crate::installation::{Installation, SimEntry};
-use crate::scheduler::{display_state, DisplayState, JobStatus, Scheduler};
+use crate::scheduler::{
+    display_state, DisplayState, JobRecord, JobRef, JobStatus, Scheduler, Statuses, Stopped, UnverifiedPid,
+};
 use crate::sim::restart::{self, Restart, NO_JOB_ID};
 use crate::sim::{cache, Simulation};
 use crate::Res;
 use anyhow::{bail, Context};
 use colored::Colorize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +30,7 @@ const GRACEFUL_WAIT_SECS: u64 = 30;
 fn run_is_live(sched: &Scheduler, r: &Restart) -> Res<bool> {
     if r.meta.job_id != NO_JOB_ID {
         return Ok(matches!(
-            sched.get_status(&r.meta.job_id)?,
+            sched.get_status(r.meta.job())?,
             JobStatus::Running | JobStatus::Queued | JobStatus::Holding
         ));
     }
@@ -132,8 +133,11 @@ pub fn stop(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     } else {
         if r.meta.job_id != NO_JOB_ID {
             let sched = Scheduler::new(&machine.meta);
-            sched.stop(&r.meta.job_id)?;
-            println!("Stopped job {} via the scheduler", r.meta.job_id.bold());
+            match sched.stop(r.meta.job())? {
+                Stopped::Sent => println!("Stopped job {} via the scheduler", r.meta.job_id.bold()),
+                // A pid whose process is not the job's any more (§10).
+                Stopped::Gone => println!("Job {} had ended already; nothing to stop", r.meta.job_id),
+            }
         }
         sim.log("stop", &format!("stopped job {} ({})", r.meta.job_id, restart::dir_name(active)));
     }
@@ -292,32 +296,24 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     let _lock = sim.lock()?;
 
     // Live-job guard (§8.7).
-    let mut live: Vec<(u32, String)> = Vec::new();
-    for id in restart::list_ids(&sim.dir)? {
-        let Ok(r) = Restart::load(&sim.dir, id) else { continue };
-        if r.meta.job_id == NO_JOB_ID || r.meta.terminated {
-            continue;
-        }
-        if matches!(
-            sched.get_status(&r.meta.job_id)?,
-            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-        ) {
-            live.push((id, r.meta.job_id.clone()));
-        }
-    }
+    let live = live_jobs(&sim, &sched)?;
     if !live.is_empty() {
         if !force {
             bail!(
                 "simulation \"{name}\" has live jobs ({}); `cactup sim stop {name}` first, \
                  or use -f to stop and delete",
                 live.iter()
-                    .map(|(id, job)| format!("{} = job {job}", restart::dir_name(*id)))
+                    .map(|(id, job)| format!("{} = job {}", restart::dir_name(*id), job.id))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
         }
         for (_, job) in &live {
-            sched.stop(job).with_context(|| format!("stopping job {job}"))?;
+            // A pid cactup cannot vouch for (§10) says itself that nothing ran.
+            sched.stop(job.job()).map_err(|e| match e.downcast_ref::<UnverifiedPid>() {
+                Some(_) => e,
+                None => e.context(format!("stopping job {}", job.id)),
+            })?;
         }
     }
 
@@ -348,6 +344,27 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     Ok(())
 }
 
+/// The restarts of `sim` whose jobs the scheduler lists live (§8.7). A
+/// restart whose run recorded its end is still asked about where a batch
+/// scheduler may have requeued its job; where job ids are pids it is done
+/// (§10). A status query that fails is an error: `delete` refuses with it.
+fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<(u32, JobRecord)>> {
+    let mut live = Vec::new();
+    for id in restart::list_ids(&sim.dir)? {
+        let Ok(r) = Restart::load(&sim.dir, id) else { continue };
+        if r.meta.job_id == NO_JOB_ID || (r.meta.terminated && !sched.may_requeue()) {
+            continue;
+        }
+        if matches!(
+            sched.get_status(r.meta.job())?,
+            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
+        ) {
+            live.push((id, r.meta.job().to_record()));
+        }
+    }
+    Ok(live)
+}
+
 /// One simulation's derived display state (§8.6, §10) with the live scheduler
 /// query held back: [`SimState::state`] is exact once the queried status is
 /// folded in, and [`SimState::job_to_query`] names the only job whose status
@@ -357,7 +374,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
 struct SimState {
     /// The restart the state is derived from: the active one, else the latest.
     subject: Option<u32>,
-    job: Option<String>,
+    job: Option<JobRecord>,
     active: bool,
     chained: bool,
     terminated: bool,
@@ -382,12 +399,14 @@ impl SimState {
     /// The job whose live status still has to be queried, if any. Only an
     /// active restart — or a non-active one holding a pre-submitted chain
     /// (§8.6) — is sensitive to it; anything else is INACTIVE whatever the
-    /// queue says, so a long finished history costs no scheduler calls.
-    fn job_to_query(&self) -> Option<&str> {
-        if self.forced.is_some() || !(self.active || self.chained) {
+    /// queue says, so a long finished history costs no scheduler calls. A
+    /// restart whose run recorded its end is asked about only where a batch
+    /// scheduler may have requeued its job (`may_requeue`, §10).
+    fn job_to_query(&self, may_requeue: bool) -> Option<JobRef<'_>> {
+        if self.forced.is_some() || !(self.active || self.chained) || (self.terminated && !may_requeue) {
             return None;
         }
-        self.job.as_deref()
+        self.job.as_ref().map(JobRecord::job)
     }
 
     /// The derived state, given the live status of [`SimState::job_to_query`]
@@ -409,7 +428,7 @@ fn sim_state(sim: &Simulation, scan: &restart::Scan) -> SimState {
     };
     SimState {
         subject: Some(subject),
-        job: (r.meta.job_id != NO_JOB_ID).then(|| r.meta.job_id.clone()),
+        job: (r.meta.job_id != NO_JOB_ID).then(|| r.meta.job().to_record()),
         active: active.is_some(),
         chained: r.meta.chained_job_id.is_some(),
         terminated: r.meta.terminated,
@@ -426,8 +445,8 @@ fn sim_state_now(
         return (DisplayState::Inactive, None, None);
     };
     let st = sim_state(sim, &scan);
-    let status = st.job_to_query().and_then(|job| sched.get_status(job).ok());
-    (st.state(status), st.subject, st.job)
+    let status = st.job_to_query(sched.may_requeue()).and_then(|job| sched.get_status(job).ok());
+    (st.state(status), st.subject, st.job.map(|job| job.id))
 }
 
 fn state_str(state: DisplayState) -> colored::ColoredString {
@@ -470,9 +489,9 @@ enum Row {
 }
 
 impl Row {
-    fn job_to_query(&self) -> Option<&str> {
+    fn job_to_query(&self, may_requeue: bool) -> Option<JobRef<'_>> {
         match self {
-            Row::Listed { state, .. } => state.job_to_query(),
+            Row::Listed { state, .. } => state.job_to_query(may_requeue),
             _ => None,
         }
     }
@@ -520,7 +539,7 @@ fn gather_rows(entries: &[(&String, &SimEntry)]) -> Vec<Row> {
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
-fn print_row(name: &str, row: &Row, statuses: &HashMap<String, JobStatus>, long: bool) {
+fn print_row(name: &str, row: &Row, statuses: &Statuses, may_requeue: bool, long: bool) {
     match row {
         Row::Missing(dir) => println!(
             "  {:24} {:12} {} (prune with `cactup sim delete {name}`)",
@@ -530,10 +549,10 @@ fn print_row(name: &str, row: &Row, statuses: &HashMap<String, JobStatus>, long:
         ),
         Row::Broken(e) => println!("  {:24} {:12} {e}", name.bold(), "BROKEN".red()),
         Row::Listed { config, restarts, dir, state } => {
-            let status = state.job_to_query().and_then(|job| statuses.get(job).copied());
+            let status = state.job_to_query(may_requeue).and_then(|job| statuses.get(job).copied());
             let mut extra = format!("config {config}, {restarts} restart(s)");
             if let Some(job) = &state.job {
-                extra.push_str(&format!(", job {job}"));
+                extra.push_str(&format!(", job {}", job.id));
             }
             if long {
                 if let Some(s) = state.subject {
@@ -581,7 +600,7 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
     let rows = gather_rows(&entries);
     // One batched query for the simulations whose state the queue can still
     // change; the rest of the history needs no scheduler round-trip at all.
-    let pending: Vec<&str> = rows.iter().filter_map(Row::job_to_query).collect();
+    let pending: Vec<JobRef> = rows.iter().filter_map(|row| row.job_to_query(sched.may_requeue())).collect();
     let statuses = sched.get_statuses(&pending);
 
     let mut rows = rows.iter();
@@ -594,7 +613,7 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
         }
         for name in registry.simulations.keys() {
             let row = rows.next().expect("one row per registry entry");
-            print_row(name, row, &statuses, long);
+            print_row(name, row, &statuses, sched.may_requeue(), long);
         }
     }
     Ok(())
@@ -641,11 +660,14 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
     // one batched query instead of a scheduler round-trip each (§10).
     let loaded: Vec<Res<Restart>> =
         scan.ids.iter().map(|&id| Restart::load(&sim.dir, id)).collect();
-    let queries: Vec<&str> = loaded
+    // A restart whose run recorded its end is asked about only where a
+    // batch scheduler may have requeued its job (§10).
+    let asked = |r: &Restart| r.meta.job_id != NO_JOB_ID && (!r.meta.terminated || sched.may_requeue());
+    let queries: Vec<JobRef> = loaded
         .iter()
         .filter_map(|r| r.as_ref().ok())
-        .map(|r| r.meta.job_id.as_str())
-        .filter(|job| *job != NO_JOB_ID)
+        .filter(|r| asked(r))
+        .map(|r| r.meta.job())
         .collect();
     let statuses = sched.get_statuses(&queries);
 
@@ -653,7 +675,7 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
         let marker = if active == Some(id) { " (active)" } else { "" };
         match loaded {
             Ok(r) => {
-                let status = statuses.get(&r.meta.job_id).copied();
+                let status = asked(r).then(|| statuses.get(r.meta.job()).copied()).flatten();
                 let state = display_state(
                     active == Some(id),
                     status,
@@ -905,7 +927,7 @@ mod tests {
         assert!(matches!(&rows[5], Row::Missing(_)), "missing directory");
         assert!(matches!(&rows[6], Row::Broken(_)), "no simulation.toml");
 
-        let pending: Vec<&str> = rows.iter().filter_map(Row::job_to_query).collect();
+        let pending: Vec<&str> = rows.iter().filter_map(|row| row.job_to_query(true)).map(|job| job.id).collect();
         assert_eq!(
             pending,
             vec!["200", "300"],
@@ -949,6 +971,52 @@ mod tests {
 
         let nojob_state = listed_state(&rows[3]);
         assert_eq!(nojob_state.state(None), display_state(true, None, false, false));
+    }
+
+    /// A restart whose run recorded its end (`terminated`): on a batch
+    /// scheduler its job is still asked about, so a requeued one is a live
+    /// job to `delete` and the display; where job ids are pids it is done,
+    /// never asked. A status query that fails is an error to `delete`.
+    #[test]
+    fn a_terminated_restarts_job_is_asked_about_only_where_it_may_be_requeued() {
+        use crate::mdb::meta::Meta;
+        let fake = |scheduler: &str| -> Meta {
+            toml::from_str(&format!(
+                "[machine]\nnickname = \"fake\"\n[scheduler]\n{scheduler}\n[queues.local]\ndefault = true\n\
+                 [submitscripts]\n\"default\" = [\"local\"]\n[runscripts]\n\"default\" = [\"local\"]\n"
+            ))
+            .unwrap()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("calls.log");
+        let entry = fake_sim(tmp.path(), "requeued", "4242", true, None, true);
+        let sim = Simulation::open("requeued", &entry.dir).unwrap();
+        let listing = format!(
+            "get-status = \"echo @JOB_ID@ >> {}; echo '@JOB_ID@ PD'\"\nstatus-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" PD\"",
+            log.display()
+        );
+
+        let batch = fake(&listing);
+        let batch = Scheduler::new(&batch);
+        let live = live_jobs(&sim, &batch).unwrap();
+        assert_eq!(live.iter().map(|(id, job)| (*id, job.id.as_str())).collect::<Vec<_>>(), [(0, "4242")]);
+        let (state, _, _) = sim_state_now(&sim, &batch);
+        assert_eq!(state, DisplayState::Queued);
+
+        let pids = fake(&format!("job-ids = \"pids\"\n{listing}"));
+        let pids = Scheduler::new(&pids);
+        fs::remove_file(&log).unwrap();
+        assert!(live_jobs(&sim, &pids).unwrap().is_empty());
+        let (state, _, _) = sim_state_now(&sim, &pids);
+        assert_eq!(state, DisplayState::Finished);
+        assert!(!log.exists(), "a pid was asked about after its run's end");
+
+        let failing = fake(
+            "get-status = \"echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1\"\n\
+             unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'\nstatus-pattern = \"^@JOB_ID@ \"",
+        );
+        let err = format!("{:#}", live_jobs(&sim, &Scheduler::new(&failing)).unwrap_err());
+        assert!(err.contains("could not ask the scheduler about job 4242"), "{err}");
     }
 
     /// The graceful path must confirm the run actually left before finishing
@@ -1041,7 +1109,7 @@ mod tests {
         let sched = Scheduler::new(&m);
 
         // "10" appears twice among the pending jobs.
-        let pending = ["10", "20", "10", "30"];
+        let pending: Vec<JobRef> = ["10", "20", "10", "30"].into_iter().map(JobRef::bare).collect();
         let statuses = sched.get_statuses(&pending);
         assert_eq!(statuses.len(), 3, "distinct pending ids resolved");
 

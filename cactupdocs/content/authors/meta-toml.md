@@ -271,17 +271,31 @@ running-pattern = " R "
 `get-status-many` is optional: one call instead of one per job. It must list every
 live job of `@USER@`, one per line, with the job id as the first field; the rest of
 the line is classified by the same `status`/`queued`/`running`/`holding` patterns
-used for `get-status`. A job id absent from the listing is treated as not queued.
+used for `get-status`. A job id absent from the listing is treated as not queued
+(a listing says nothing of the jobs it leaves out, so `unknown-job-pattern`
+plays no part there).
 
 `unknown-job-pattern` (optional) is a regular expression matching a line of
 `get-status`'s output, stdout or stderr, that says the scheduler does not
 know the job, `@JOB_ID@` substituted as in the other patterns. For Slurm's
 `squeue -j` that is `slurm_load_jobs error: Invalid job id specified`; for
 Torque's `qstat`, `Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has
-finished` (the second for a finished job, when job history is on). It declares a fact for now:
-cactup will use it to tell a job the scheduler has forgotten from a status
-query that failed, with the test-run and simulation liveness work; today it
-changes nothing.
+finished` (the second for a finished job, when job history is on).
+
+With it set, cactup tells a job the scheduler has forgotten from a status
+query that failed: output with no line for the job (no line matching
+`status-pattern`) means the job is gone only if a line matches
+`unknown-job-pattern`. Otherwise the query failed (the controller timed out,
+say), and a command that would act on the answer (`sim stop`, `sim delete`,
+`test stop`, `test delete`, `build stop`, and the checks before a new
+submission or run) refuses, naming the command and what it printed;
+`sim list`, `test list` and the like show the run as its own record has it. Without
+the key, no line for the job means the job is gone, as before: a query that
+failed reads as a job no longer in the queue. Check the pattern against
+what the command really prints for a job the scheduler no longer knows (an
+old job id will do): one that never matches makes every job the scheduler has
+forgotten look like a failed query, and `sim delete` and the like then
+refuse.
 
 `blocking-submit` is optional too: the same submission, but expressed so the
 command doesn't return until the job has finished, for `cactup build submit
@@ -337,10 +351,16 @@ it parses immediately instead of only once the job is already done.
 Set `job-ids = "pids"` on such a machine (the default is `"scheduler"`): it
 declares that a job id is the pid of a process on the host the job was
 submitted from, so the scheduler is that host's own processes. A pid means
-nothing on another host and is reused once its process is gone; cactup will
-use the key to record the host and the process's start time with the id and
-ask only there, with the test-run and simulation liveness work. Today it
-changes nothing.
+nothing on another host and is reused once its process is gone, so cactup
+records with each job id the host it was submitted from and the start time
+of the process with that pid, read as soon as the id is known. Later it runs
+`get-status` or `stop` for the job only on that host, and only while the
+process with that pid is still the one that started then; otherwise the job
+is taken as gone, and nothing is run. A job recorded by an older cactup,
+without its host and start time, is asked about only where a process with
+its pid runs on this host, and cactup never stops it (it may be another
+process): stop it yourself if it is the job. A run that has recorded its end
+is not asked about again on such a machine, where nothing requeues a job.
 
 ## Environment variables
 

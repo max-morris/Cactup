@@ -453,20 +453,24 @@ pub struct Scheduler {
     #[serde(default, deserialize_with = "string_or_seq")]
     pub allocation_env: Vec<String>,
     // §10; the third of the questions decision 35 answers (design/
-    // build-cache/DECISIONS.md, 35; not its decision 3): declared now,
-    // read by the liveness work later.
-    /// What a job id is (a cactup addition): `"scheduler"` (the default), an
-    /// id the batch system hands out, or `"pids"`, the pid of a process on
-    /// the host the job was submitted from, where the scheduler is that
-    /// host's own processes (`ps`, `kill`). Declares a fact; cactup does not
-    /// yet act on it.
+    // build-cache/DECISIONS.md, 35; not its decision 3), read by
+    // `Scheduler::get_status`, `get_statuses` and `stop`.
+    /// What a job id is: `"scheduler"` (the default), an id the batch
+    /// system hands out, or `"pids"`, the pid of a process on the host the
+    /// job was submitted from, where the scheduler is that host's own
+    /// processes (`ps`, `kill`). With `"pids"`, cactup records the host and
+    /// the process's start time with each job id, and asks `get-status` or
+    /// `stop` about the job only on that host while the pid's process is
+    /// the one that started then; otherwise the job is gone.
     #[serde(default)]
     pub job_ids: JobIds,
-    /// A regular expression (a cactup addition) matching a line of
-    /// `get-status`'s output (stdout or stderr) that says the scheduler does
-    /// not know the job, `@JOB_ID@` substituted as in the other patterns.
-    /// Tells a job the scheduler has forgotten from a status query that
-    /// failed. Declares a fact; cactup does not yet act on it.
+    /// A regular expression matching a line of `get-status`'s output
+    /// (stdout or stderr) that says the scheduler does not know the job,
+    /// `@JOB_ID@` substituted as in the other patterns. Where it is set,
+    /// output with no line for the job is a job gone only if a line matches
+    /// it; otherwise the query failed, and a command that would act on the
+    /// answer refuses. Where it is not set, no line for the job is a job
+    /// gone.
     pub unknown_job_pattern: Option<String>,
 }
 

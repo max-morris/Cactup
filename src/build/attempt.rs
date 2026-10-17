@@ -2,7 +2,7 @@
 //! one run of `make` for one config, recorded under
 //! `configs/<name>/.cactup-builds/%04d/` so a queued build can be monitored
 //! and a compute node can execute it without touching the global DB, the
-//! installation registry, the MDB, or knobs (D11). Modelled closely on
+//! installation registry, the MDB, or knobs (D11). Modeled closely on
 //! `testsuite::{TestMeta, TestRun}` and `sim::restart::{RestartMeta, Restart}`.
 //!
 //! Unlike a simulation restart's `output-%04d`, there is no nested `.cactup/`
@@ -103,6 +103,17 @@ pub struct BuildMeta {
     /// The scheduler's job id, `restart::NO_JOB_ID` when submission failed,
     /// or the pid for a foreground build.
     pub job_id: String,
+    // `job-ids = "pids"` (§10): where `job-id`'s process started.
+    /// On a machine whose job ids are pids: the host the job's process was
+    /// started on, recorded with its id. Absent on a batch scheduler's
+    /// machine, and in a record an older cactup made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_host: Option<String>,
+    /// With `job-host`: that process's start time, from `/proc/<pid>/stat`.
+    /// Absent with `job-host` set when the process had ended already when
+    /// cactup read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_start: Option<u64>,
     /// Last observed live status letter (cached; the live query is the
     /// source of truth, mirroring `TestMeta::status`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +183,21 @@ pub struct BuildMeta {
     pub timestamps: Timestamps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<BuildOutcomeRecord>,
+}
+
+impl BuildMeta {
+    /// The recorded job, as the scheduler is asked about it.
+    pub fn job(&self) -> crate::scheduler::JobRef<'_> {
+        crate::scheduler::JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start)
+    }
+
+    /// Record `job` (a submitted one, or a foreground run's pid) as this
+    /// attempt's job.
+    pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.job_id = job.id.clone();
+        self.job_host = job.host.clone();
+        self.job_start = job.start;
+    }
 }
 
 /// A located build attempt.
@@ -405,6 +431,8 @@ mod tests {
             install_root: PathBuf::from("/home/user/et"),
             submitted: false,
             job_id: "12345".to_owned(),
+            job_host: None,
+            job_start: None,
             status: Some("R".to_owned()),
             reservation: Some(Reservation {
                 queue: "checkpt".to_owned(),

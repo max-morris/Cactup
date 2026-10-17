@@ -3198,7 +3198,7 @@ to its end" names an unset variable under `set -u` too.
 
 Both, the same finding: an attempt that recorded no end was said to be
 "queued, or running before that"; a build killed in its configure
-(SIGHUP, a second Ctrl-C, the OOM killer, a job cancelled with the
+(SIGHUP, a second Ctrl-C, the OOM killer, a job canceled with the
 scheduler's own command) records no end either, and `build show` calls
 it STALE (A: a real build hung up in its realclean; B: planted). Fixed
 in the commit after this record: the doctor guesses nothing of what such
@@ -3450,6 +3450,71 @@ a job while it waits in the queue, which needed telling a scheduler's
 job id from a pid: MDB generation 3's `job-ids` (decision 35), read now
 by the work below.
 
+### Test-run liveness: decision 35's scheduler behavior
+
+On 2026-10-17, master at `17b1079` (MDB generation 3, PR #7, declared
+`[scheduler] job-ids` and `unknown-job-pattern`), the branch rebased onto
+it (the section above) and given what the keys declare, for simulations,
+test runs and builds. `Scheduler` takes the job as recorded (`JobRef`:
+the id, and `job-host`/`job-start` where it is a pid), so every status
+query, batch status and stop goes through the checks:
+
+- `job-ids = "pids"`: `submit` and `blocking-submit` return the id with
+  this host and `/proc/<pid>/stat`'s start time, read at once (a process
+  already gone: a host, no start); a foreground `sim run` records its own
+  pid so. `RestartMeta`, `TestMeta`, `BuildMeta` gain optional `job-host`
+  and `job-start` (absence tolerated, no schema bump). A pid is asked of
+  `get-status`/`stop` only on its host while its process has that start
+  time; otherwise it is gone, nothing run (`Stopped::Gone`).
+- Records an older cactup made (no `job-host`), on a `pids` machine:
+  asked about only where the pid has a process here (else gone, nothing
+  run), and never stopped: `stop` refuses (`UnverifiedPid`), so `sim
+  stop -f`, `test stop`, `delete -f` and a new run's `-f` refuse, naming
+  the pid, rather than stop what may be another process.
+- `unknown-job-pattern`: where set, no line for the job is gone only if a
+  line matches it; otherwise `get_status` fails naming the command and its
+  output, the acting commands refuse with it, the display paths show no
+  status. The batch listing keeps a job it leaves out as gone (a listing
+  says nothing per job), as the spec now says.
+- The `finished` gates: on a `scheduler` machine a test run is asked about
+  whatever `finished` says (round 8's open finding: a requeued job waiting
+  in the queue is seen; `list` shows it QUEUED, `stop` stops it, `delete`
+  refuses it); a job listed in an unread state after `finished` is the
+  ended job (`Job::Ended`: nothing to stop, `delete` goes ahead, `list`
+  says DONE/INACTIVE, not ERROR). On a `pids` machine the gate stays:
+  nothing requeues a job there, and it keeps an older record's pid from
+  reading as a live run. Simulations likewise (`terminated`: `delete`'s
+  live-job guard, `sim list`/`show`, the reaper), and a requeued restart
+  clears `terminated`/`finished` as it starts. Builds: `execute` clears a
+  recorded outcome as it starts (a requeued build that runs is live); the
+  guard before a new attempt and `build stop` ask about the latest
+  attempt's job after its outcome on a `scheduler` machine
+  (`requeue_query`), while `build list`/`show`/`prune` keep a finished
+  history free of scheduler round-trips (`pending_job_query`), showing the
+  recorded outcome until a requeued job runs.
+
+Verified with real binaries (scripts in the session's scratchpad), a
+`CACTUP_HOME` of their own and a fake Cactus tree: on `generic`, `sim
+submit` and `test submit` record this host and the start time `/proc`
+gives; `sim stop -f`/`test stop` stop the job's own process; a live
+unrelated process with the recorded pid and another start time, and one
+stamped with another host, are never asked (`--trace` shows no `ps`) nor
+stopped by `sim stop -f`, `sim delete -f`, `test stop`, `test delete -f`;
+an older record's live pid is RUNNING, and `sim stop -f`, `sim delete
+[-f]`, `test stop`, `test delete [-f]`, `test submit -f` refuse, the
+process alive after. With fake `squeue`/`scancel`/`sbatch` answering as
+Slurm 24.11 does (unknown job: `slurm_load_jobs error: Invalid job id
+specified` on stderr, exit 1; failed query: `Socket timed out on
+send/recv operation`, exit 1): a failed query refuses `test stop`, `test
+delete [-f]`, `test submit -f`, `sim delete [-f]`, `build stop`, `build
+submit`, records nothing, and `test list`/`sim list` show the record's
+state; an unknown job is gone (`delete` goes ahead); a test run requeued
+after `finished` is QUEUED, refused by `delete`, canceled by `stop`,
+then deleted; a terminated restart requeued is a live job to `sim
+delete`; a build attempt requeued after its outcome is refused by `build
+submit` and canceled by `build stop`, while `build list` asks nothing.
+`cargo test --workspace --locked` passes.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -3667,15 +3732,9 @@ gfortran, 0 wrong, with the fallback count reported.
 ## Next step
 
 The cache is on master with `cache doctor` and on by default (above).
-MDB generation 3 is on master too (PR #7, merged 2026-10-17, six review
-rounds on `feature/mdb-gen3`; it took PR #6, `mdb/hopper`): a
-`*-provision` key beside each `*-env-setup`, the `env-*-setup` keys
-renamed `*-env-setup`, and the scheduler keys decision 35 asks for
-(`job-ids`, `unknown-job-pattern`; Slurm's message checked on qbd, Slurm
-24.11.7), read by nothing yet. Now: the test-run liveness work on
-`feature/test-run-liveness`, rebased on master, with the behavior of
-those keys for simulations, test runs and builds (its round 8's open
-finding, a requeued job waiting in the queue, is part of it); then M4b
+MDB generation 3 is on master (PR #7). The test-run liveness work on
+`feature/test-run-liveness`, rebased onto it and with decision 35's
+scheduler behavior (above), goes to the review gate. Then M4b
 (Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on
 `feature/doctor-every-flag` is shelved (Max, 2026-10-16).
 

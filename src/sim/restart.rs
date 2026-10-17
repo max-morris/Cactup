@@ -90,6 +90,17 @@ pub struct RestartMeta {
     pub checkpt_buffer: Walltime,
     /// `-1` = failed/unknown (§8.3).
     pub job_id: String,
+    // `job-ids = "pids"` (§10): where `job-id`'s process started.
+    /// On a machine whose job ids are pids: the host the job's process was
+    /// started on, recorded with its id. Absent on a batch scheduler's
+    /// machine, and in a record an older cactup made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_host: Option<String>,
+    /// With `job-host`: that process's start time, from `/proc/<pid>/stat`.
+    /// Absent with `job-host` set when the process had ended already when
+    /// cactup read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_start: Option<u64>,
     /// The job id this restart's job depends on (pre-submitted chain, §8.3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chained_job_id: Option<String>,
@@ -111,6 +122,21 @@ pub struct RestartMeta {
     /// which never opens the global DB (D11).
     #[serde(default)]
     pub knobs: IndexMap<String, String>,
+}
+
+impl RestartMeta {
+    /// The recorded job, as the scheduler is asked about it.
+    pub fn job(&self) -> crate::scheduler::JobRef<'_> {
+        crate::scheduler::JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start)
+    }
+
+    /// Record `job` (a submitted one, or a foreground run's pid) as this
+    /// restart's job.
+    pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.job_id = job.id.clone();
+        self.job_host = job.host.clone();
+        self.job_start = job.start;
+    }
 }
 
 /// One restart on disk.
@@ -409,11 +435,13 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 
     let restart = Restart::load(&sim.dir, active)?;
 
-    // (a) live job status must be U (gone from the queue).
-    let status = if restart.meta.job_id == NO_JOB_ID {
+    // (a) live job status must be U (gone from the queue). A run that
+    // recorded its end is still asked about where a batch scheduler may
+    // have requeued its job; where job ids are pids it is done (§10).
+    let status = if restart.meta.job_id == NO_JOB_ID || (restart.meta.terminated && !sched.may_requeue()) {
         JobStatus::Unknown
     } else {
-        sched.get_status(&restart.meta.job_id)?
+        sched.get_status(restart.meta.job())?
     };
     if !matches!(status, JobStatus::Unknown) {
         return Ok(false); // still in the queue → chaining, never reaping

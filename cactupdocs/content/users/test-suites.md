@@ -198,9 +198,22 @@ minutes). A job the
 scheduler lists in a state cactup does not know (suspended, exiting, or
 ended) is not deleted without `--force`; `test stop` asks the scheduler
 to stop it, and once it is over `test delete` goes ahead. One whose lock is held while the scheduler does not list its job
-(it runs on another host, the scheduler could not be asked, or it ended
-without letting go of its lock, which expires within 15 minutes) is left
-as it is, `--force` too.
+(it runs on another host, it ended without letting go of its lock, which
+expires within 15 minutes, or, on a machine that cannot tell, the scheduler
+could not be asked) is left as it is, `--force` too.
+
+On a batch system, a job the scheduler puts back in the queue after its run
+ended (preemption, `scontrol requeue`) is seen again: `test list` shows it
+queued, `test stop` cancels it, and `test delete` refuses it without
+`--force`. Where the machine definition says how the scheduler reports a job
+it does not know, a status query that fails stops `test stop`, `test delete`
+and a new `test run` or `test submit` with the scheduler's message rather
+than taking the job for ended. On a machine without a batch system (the
+generic machine), a submitted run's job is a background process: cactup
+asks about it and stops it only on the host that started it and only while
+that very process runs, so a reused process number is never stopped; a run
+submitted by an older cactup is not stopped for you while a process with
+its number runs (check it and stop it yourself).
 
 Move a test to trash:
 

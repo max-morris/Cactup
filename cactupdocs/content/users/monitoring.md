@@ -130,7 +130,7 @@ character you pressed on to the one under the pointer, so you can pull one
 field out of one line instead of taking the whole line. Drag past the right
 edge of a line and it runs to the end of it; drag off the top or bottom of
 the pane and it keeps extending to the edge of what's on screen. The
-selection survives releasing the button, so `y` afterwards copies it, and
+selection survives releasing the button, so `y` afterward copies it, and
 the footer counts what you have — characters inside a single line, lines
 once it spans more than one.
 
@@ -285,6 +285,12 @@ Stop a running or queued build:
 cactup build stop myconfig
 cactup build stop myconfig -f     # kill it directly instead of a graceful stop
 ```
+
+On a batch system, a build job the scheduler puts back in the queue after
+it recorded its result (preemption, `scontrol requeue`) still counts as
+live: `build stop` cancels it, and a new build of that config refuses to
+start while it is queued (`-f` cancels it first). `build list` shows the
+recorded result until the job runs again.
 
 Old build attempts accumulate under `.cactup-builds/` inside the config
 directory; prune them, keeping only the most recent N (never automatic —

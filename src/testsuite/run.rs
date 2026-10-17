@@ -333,16 +333,17 @@ fn start_impl(
         if old.lock_live()? {
             bail!("test run \"{name}\" is currently executing (running.lock is held)");
         }
-        if let Some(job_id) = old.pending_job()
-            && matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
+        if let Some(job) = old.pending_job(&sched)
+            && matches!(sched.get_status(job)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
         {
             if !args.force {
                 bail!(
-                    "test run \"{name}\" still has a live job ({job_id}); \
-                     `cactup test stop {name}` first, or pass -f to stop it"
+                    "test run \"{name}\" still has a live job ({}); \
+                     `cactup test stop {name}` first, or pass -f to stop it",
+                    job.id
                 );
             }
-            sched.stop(job_id)?;
+            sched.stop(job)?;
         }
     }
 
@@ -370,6 +371,8 @@ fn start_impl(
             walltime: topo.total_wall,
             allocation: topo.allocation.clone(),
             job_id: NO_JOB_ID.to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             universe: run_uni_spec,
             results: None,
@@ -422,8 +425,9 @@ fn start_impl(
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
         run.store_meta()?;
 
-        let job_id = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
-        run.meta.job_id = job_id.clone();
+        let submitted = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
+        run.meta.set_job(&submitted);
+        let job_id = submitted.id;
         run.meta.timestamps.submitted = Some(Utc::now());
         run.store_meta()?;
         run.log("test-submit", &format!("submitted {} as job {job_id} (select: {select})", results_name(results_id)));
@@ -916,6 +920,8 @@ mod tests {
             install_root: cactus_root.clone(),
             submitted: true,
             job_id: "JOB-Q1".to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             reservation: None,
             decision: "test decision".to_owned(),

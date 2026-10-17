@@ -16,6 +16,7 @@ use crate::database::SCHEMA;
 use crate::installation::{write_toml, Installation};
 use crate::lock::LinkLock;
 use crate::sim::restart::UniverseSpec;
+use crate::scheduler::{JobRef, Scheduler};
 use crate::walltime::Walltime;
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -79,6 +80,17 @@ pub struct TestMeta {
     pub allocation: Option<String>,
     /// `-1` = failed/unknown, or the interactive runner's pid.
     pub job_id: String,
+    // `job-ids = "pids"` (§10): where `job-id`'s process started.
+    /// On a machine whose job ids are pids: the host the job's process was
+    /// started on, recorded with its id. Absent on a batch scheduler's
+    /// machine, and in a record an older cactup made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_host: Option<String>,
+    /// With `job-host`: that process's start time, from `/proc/<pid>/stat`.
+    /// Absent with `job-host` set when the process had ended already when
+    /// cactup read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_start: Option<u64>,
     /// Last observed live status letter (cached; the live query rules — §8.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -95,6 +107,21 @@ pub struct TestMeta {
     /// alongside `vars` so `@KNOB(…)@` resolves on the compute node (D11).
     #[serde(default)]
     pub knobs: IndexMap<String, String>,
+}
+
+impl TestMeta {
+    /// The recorded job, as the scheduler is asked about it.
+    pub fn job(&self) -> JobRef<'_> {
+        JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start)
+    }
+
+    /// Record `job` (a submitted one, or a foreground run's pid) as this
+    /// test run's job.
+    pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.job_id = job.id.clone();
+        self.job_host = job.host.clone();
+        self.job_start = job.start;
+    }
 }
 
 /// A located test run.
@@ -122,20 +149,23 @@ impl TestRun {
         self.cactup_dir().join("heartbeat")
     }
 
-    /// The job id worth asking the scheduler about, if any: a submitted run
-    /// that has not finished. An interactive run's job id is the pid of the
-    /// cactup that ran it (`run::start_impl`), not a job: `running.lock`
-    /// alone says whether it runs, and once that cactup is gone the pid can
-    /// be any other process's — the scheduler (on the generic machine, `ps`)
-    /// would take that process for the run, and its stop command would stop
-    /// that process's group. Shared by `list`, `show`, `stop`, `delete` and
-    /// the guard before a new run.
-    pub fn pending_job(&self) -> Option<&str> {
+    /// The job worth asking the scheduler about, if any: a submitted run's.
+    /// An interactive run's job id is the pid of the cactup that ran it
+    /// (`run::start_impl`), not a job: `running.lock` alone says whether it
+    /// runs, and once that cactup is gone the pid can be any other
+    /// process's — the scheduler (on the generic machine, `ps`) would take
+    /// that process for the run, and its stop command would stop that
+    /// process's group. A run that recorded `finished` (its end, or `test
+    /// stop`) is still asked about where a batch scheduler may have
+    /// requeued its job (`Scheduler::may_requeue`); on a machine whose job
+    /// ids are pids it is done (§10, §11.7). Shared by `list`, `show`,
+    /// `stop`, `delete` and the guard before a new run.
+    pub fn pending_job(&self, sched: &Scheduler) -> Option<JobRef<'_>> {
         let meta = &self.meta;
         (meta.timestamps.submitted.is_some()
-            && meta.timestamps.finished.is_none()
+            && (meta.timestamps.finished.is_none() || sched.may_requeue())
             && meta.job_id != crate::sim::restart::NO_JOB_ID)
-            .then_some(meta.job_id.as_str())
+            .then(|| meta.job())
     }
 
     /// Whether `running.lock` is held by a live process: the run is

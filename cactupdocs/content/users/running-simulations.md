@@ -373,6 +373,19 @@ cactup sim stop mysim              # Graceful stop (sends TERMINATE signal)
 cactup sim stop mysim --force      # Kill the job (scheduler `stop` command)
 ```
 
+On a machine without a batch system (the generic machine, where a job is a
+background process), cactup records with each job the host it was started on
+and when its process started. It asks about the job, and stops it, only on
+that host and only while that process is still running; a job that has ended
+is taken as gone even if its process number now belongs to another process,
+which is never stopped. A simulation submitted by an older cactup, without
+that record, is not stopped for you if a process with its number is running:
+check that it is the job and stop it yourself (`kill`). On a batch system
+whose machine definition says how the scheduler reports a job it does not
+know, a status query that fails (the scheduler not answering, say) stops
+`sim stop` and `sim delete` with the scheduler's message instead of taking
+the job for ended; try again once the scheduler answers.
+
 Clean up aborted restart data:
 
 ```sh
