@@ -74,8 +74,8 @@ No compiler variable is touched and no recipe's environment changes.
 ## Cache-side dependencies on the Cactus make system
 
 Baseline: flesh `lib/make` at commit `ae66cd2` (Cactus 4.20.0). "M0a" marks
-what the code on `feature/build-cache` relies on today; "later" marks what
-the planned keying and serving will rely on.
+what the cache relied on from its first milestone; "later" marks what keying
+and serving added. Both are on master (since 2026-10-12).
 
 - **A1 (M0a). The compile recipes are canned sequences** named `COMPILE_C`,
   `COMPILE_CXX`, `COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90`,
@@ -236,12 +236,20 @@ and more, under "Cache-side landed changes"):
   `src/objcache/` and `tests/objcache.rs`, and one step in
   `.github/workflows/ci.yml`.
 
-Planned, not there yet: serving (then one preprocessor run on a hit, two on
-a miss, and no compile on a hit); `-ffile-prefix-map=...` flags added by the
-wrapper to the real compile for GCC and Clang family compilers (today they
-go to the extra preprocessor runs only); one call in `execute` after make.
+Planned when this was written (2026-10-01), landed since; what a serving
+build does now is under "Cache-side landed changes". The plan was: serving
+(then one preprocessor run on a hit, two on a miss, and no compile on a
+hit); `-ffile-prefix-map=...` flags added by the wrapper to the real compile
+for GCC and Clang family compilers (then they went to the extra
+preprocessor runs only); one call in `execute` after make.
 
 ## Cache-side planned changes
+
+Nothing planned now changes what the speed side sees (2026-10-17): the
+cache's next milestones (Cray compilers, the whole-file cases, HIP) change
+none of the dependencies listed above. The two entries below are kept for
+the record: what they planned landed with M1, then gfortran (M2a) and CUDA
+(M4) (see "Cache-side landed changes").
 
 - 2026-10-02: M0a, M0b and the measurements (M0c) are done and reviewed
   on `feature/build-cache` (up to `129ecf7`). The cache still only
@@ -319,7 +327,7 @@ go to the extra preprocessor runs only); one call in `execute` after make.
   served (M5). The doctor runs the machine's environment setup and the
   configuration's compilers on small probe sources, and reads the
   thorns' make files with make; it builds nothing and writes nothing in
-  the Cactus tree. `build-cache` is still off by default on master.
+  the Cactus tree. `build-cache` was still off by default at that commit.
 - 2026-10-16: **The cache on by default** (decision 34, Max), on master
   (the commit after `2b7bfbd`; planned here earlier the same day), in
   released builds once deployed. The knob `build-cache` unset means
@@ -480,3 +488,4 @@ every milestone.
 - 2026-10-16  cache side  landed entries caught up: the cache on master (2026-10-12, `5e661fc`), `-MMD` not cached (decision 28, 2026-10-13; A6 and "Changes the cache side can adapt to" say so), master at `2b7bfbd` (CUDA, `cache doctor`); "Where each side's durable state lives" names master
 - 2026-10-16  cache side  the decision-34 entry lists what a build with the cache on gets (C1, C2, the wrapper, `-ffile-prefix-map`, publishing); the `record` heading no longer says "on `feature/build-cache` only"
 - 2026-10-16  cache side  landed: `build-cache` defaults to `serve` on master (decision 34); the entry moved from planned to landed, the default line under "What the cache side adds" and "Where each side's durable state lives" say so
+- 2026-10-17  cache side  stale wording brought up to date, no change in substance: the A-section preamble, the paragraph on serving once planned, a note that the two 2026-10-02 planned entries landed with M1, the `2b7bfbd` entry's default line made past
