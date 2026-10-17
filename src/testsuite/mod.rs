@@ -170,7 +170,7 @@ impl TestRun {
     pub fn pending_job(&self, sched: &Scheduler) -> Option<JobRef<'_>> {
         let meta = &self.meta;
         (meta.timestamps.submitted.is_some()
-            && (meta.timestamps.finished.is_none() || sched.asks_after_end(meta.timestamps.finished))
+            && (meta.timestamps.finished.is_none() || sched.asks_after_end(&meta.machine, meta.timestamps.finished))
             && meta.job_id != crate::sim::restart::NO_JOB_ID)
             .then(|| meta.job())
     }

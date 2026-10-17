@@ -170,16 +170,35 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
     }
     let Some(job) = requeue_query(&attempt.meta, sched) else { return Ok(()) };
     let ended = attempt.meta.outcome.is_some();
-    if is_live(sched.get_status_of(job, ended)?, ended) {
+    // After the outcome: still listed (leaving the queue, or starting
+    // again), or not answered (it may have been queued again): a new
+    // attempt beside it is refused, the safe reading for new work (§10).
+    let (live, answered) = match ended {
+        true => match sched.ask_after_end(job)? {
+            crate::scheduler::AfterEnd::Listed(_) => (true, true),
+            crate::scheduler::AfterEnd::Unanswered => (true, false),
+            crate::scheduler::AfterEnd::Over(_) => (false, true),
+        },
+        false => (is_live(sched.get_status(job)?, false), true),
+    };
+    if live {
         // An older record's pid (§10): never stopped, `-f` neither.
         if sched.unverified(job) {
-            bail!("{}; then build again", crate::scheduler::UnverifiedPid(job.id.to_owned()));
+            bail!("{}; then build again", crate::scheduler::UnverifiedPid::of(job.id));
         }
         if sched.shares_group(job) {
             bail!("{}; then build again", crate::scheduler::SharedGroup(job.id.to_owned()));
         }
-        // After the attempt's outcome, a job the scheduler still lists in
-        // any state: leaving the queue, or starting again (§10).
+        if !force && !answered {
+            bail!(
+                "config \"{name}\"'s last build attempt ended, but the scheduler could not be asked about \
+                 its job {}, which may have been queued again: try again once the scheduler answers, or \
+                 `cactup build stop {name}` to stop it (or pass -f to stop it)",
+                job.id
+            );
+        }
+        // After the attempt's outcome, a job the scheduler still lists in a
+        // state its patterns read: leaving the queue, or starting again.
         if !force && ended {
             bail!(
                 "config \"{name}\"'s last build attempt ended, but the scheduler still lists its job {} \
@@ -288,7 +307,7 @@ fn run_with(machine: &Machine, installation: &Installation, args: BuildStartArgs
     // Builds never chain (§7.9): a config with a live attempt already in
     // flight refuses a second one, foreground included.
     let config_dir = installation.cactus_root().join("configs").join(&name);
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     guard_no_live_attempt(&config_dir, &name, &sched, args.opts.force)?;
 
     let outcome = build::build(installation, machine, &name, &args.opts)?;
@@ -359,7 +378,7 @@ fn submit_impl(
     let name = start_name(inst, args.name.as_deref())?;
     let cactus_root = inst.cactus_root();
     let config_dir = cactus_root.join("configs").join(&name);
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     guard_no_live_attempt(&config_dir, &name, &sched, args.opts.force)?;
 
     // §2: [build] defaults + the MAKEJOBS/CPUS_PER_TASK coupling, resolved
@@ -557,7 +576,7 @@ enum Watch {
 /// a build did (§7.9) — never a relayed exit code.
 fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watch) -> Res<()> {
     let attempt = BuildAttempt::open(config_dir, attempt_id)?;
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     let job_id = attempt.meta.job_id.clone();
     let config_name = attempt.meta.config.clone();
 
@@ -763,7 +782,7 @@ fn pending_job_query(meta: &BuildMeta) -> Option<JobRef<'_>> {
 fn requeue_query<'m>(meta: &'m BuildMeta, sched: &Scheduler) -> Option<JobRef<'m>> {
     (meta.submitted
         && meta.job_id != NO_JOB_ID
-        && (meta.outcome.is_none() || sched.asks_after_end(meta.timestamps.finished)))
+        && (meta.outcome.is_none() || sched.asks_after_end(&meta.machine, meta.timestamps.finished)))
         .then(|| meta.job())
 }
 
@@ -815,7 +834,7 @@ pub fn in_flight_build(config_dir: &Path, name: &str, machine: Option<&Machine>)
     let submitted_suffix = ago.map(|a| format!(", submitted {a}")).unwrap_or_default();
 
     if let Some(machine) = machine {
-        let sched = Scheduler::new(&machine.meta);
+        let sched = Scheduler::for_machine(machine);
         let status = sched.get_status(attempt.meta.job()).ok();
         let word = match build_state(None, status, lock_live) {
             BuildDisplayState::Running => "RUNNING",
@@ -1006,7 +1025,7 @@ fn list_impl(machine: &Machine, installations: &[Installation], all: bool, long:
 
     // One batched query for every row whose state the queue can still
     // change; a finished history costs no scheduler round-trip at all.
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     let pending: Vec<JobRef> = rows.iter().filter_map(Row::job_to_query).collect();
     let statuses = sched.get_statuses_shown(&pending)?;
 
@@ -1061,7 +1080,7 @@ fn show_impl(machine: &Machine, inst: &Installation, name: Option<&str>, long: b
     // of one batched query instead of a scheduler round-trip each (§10).
     let loaded: Vec<Res<BuildAttempt>> =
         ids.iter().map(|&id| BuildAttempt::open(&config_dir, id)).collect();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     let queries: Vec<JobRef> = loaded
         .iter()
         .filter_map(|a| a.as_ref().ok())
@@ -1186,25 +1205,50 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         return Ok(());
     };
     let mut attempt = BuildAttempt::open(&config_dir, id)?;
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     if attempt.meta.outcome.is_some() {
         // Over, unless the scheduler still lists its job after the outcome
         // was recorded (asked only where it may have requeued it,
-        // `requeue_query`): queued again, or leaving the queue (`is_live`).
-        // Asked to stop it either way, harmless if it is leaving; the
-        // outcome stands.
-        if let Some(job) = requeue_query(&attempt.meta, &sched)
-            && is_live(sched.get_status_of(job, true)?, true)
-        {
-            sched.stop(job)?;
-            println!(
-                "Asked the scheduler to stop build job {}, still listed after the attempt recorded its \
-                 outcome (queued again, or leaving the queue)",
-                job.id.bold()
-            );
-            return Ok(());
+        // `requeue_query`: queued again, or leaving the queue) or could
+        // not be asked: the stop is sent either way, harmless if the job is
+        // leaving or gone; the outcome stands. Where it answered that the
+        // job is gone or over, or nothing was asked, nothing is stopped.
+        use crate::scheduler::AfterEnd;
+        let answer = match requeue_query(&attempt.meta, &sched) {
+            Some(job) => Some((job, sched.ask_after_end(job)?)),
+            None => None,
+        };
+        match answer {
+            Some((job, AfterEnd::Listed(_))) => {
+                sched.stop(job)?;
+                println!(
+                    "Asked the scheduler to stop build job {}, still listed after the attempt recorded its \
+                     outcome (queued again, or leaving the queue)",
+                    job.id.bold()
+                );
+            }
+            Some((job, AfterEnd::Unanswered)) => {
+                sched.stop(job)?;
+                println!(
+                    "Could not ask the scheduler about build job {} (the attempt has recorded its outcome); \
+                     asked it to stop the job in case it was queued again",
+                    job.id.bold()
+                );
+            }
+            Some((job, AfterEnd::Over(JobStatus::Unknown))) => println!(
+                "Config {}'s latest build attempt already finished, and the scheduler does not know its job \
+                 {}; nothing to stop",
+                name.bold(),
+                job.id
+            ),
+            Some((job, AfterEnd::Over(_))) => println!(
+                "Config {}'s latest build attempt already finished, and the scheduler lists its job {} as \
+                 over; nothing to stop",
+                name.bold(),
+                job.id
+            ),
+            None => println!("Config {}'s latest build attempt already finished; nothing to stop", name.bold()),
         }
-        println!("Config {}'s latest build attempt already finished; nothing to stop", name.bold());
         return Ok(());
     }
 
@@ -1330,7 +1374,7 @@ fn prune_impl(machine: &Machine, inst: &Installation, name: Option<&str>, keep: 
         return Ok(());
     }
 
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
     for &id in &ids[..ids.len() - keep] {
@@ -2180,7 +2224,7 @@ mod tests {
         killed.meta.job_id = std::process::id().to_string();
         killed.store_meta().unwrap();
         assert_eq!(pending_job_query(&killed.meta), None);
-        let sched = Scheduler::new(&machine.meta);
+        let sched = Scheduler::for_machine(&machine);
         assert!(!attempt_is_live(&killed, &sched).unwrap());
         guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
         guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap();
@@ -2613,10 +2657,20 @@ mod tests {
         guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
         stop_impl(&listing, &inst, Some("sim"), false).unwrap();
         assert!(!stopped.exists(), "CD: stopped the ended job");
+        // A failed query after the outcome: no answer. A new attempt is
+        // not started beside a job that may have been queued again (the
+        // guard refuses, saying so; `-f` stops it); `build stop` sends the
+        // stop, harmless if the job is gone.
         let failing = machine("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
         let failing_sched = Scheduler::new(&failing.meta);
-        guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).unwrap();
+        let refused = guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).unwrap_err().to_string();
+        assert!(refused.contains("could not be asked about its job 4242"), "{refused}");
+        guard_no_live_attempt(&config_dir, "sim", &failing_sched, true).unwrap();
+        assert!(stopped.exists(), "-f sent no stop for an unanswered job");
+        fs::remove_file(&stopped).unwrap();
         stop_impl(&failing, &inst, Some("sim"), false).unwrap();
+        assert!(stopped.exists(), "build stop sent no stop for an unanswered job");
+        fs::remove_file(&stopped).unwrap();
 
         // No outcome yet: the failed query is the guard's refusal, and the
         // display shows the state unknown.
@@ -2654,6 +2708,26 @@ mod tests {
         stop_impl(&machine, &inst, Some("sim"), false).unwrap();
         assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_some());
         assert!(!log.exists(), "another host's pid was asked about");
+    }
+
+    /// An attempt's job is asked about after its outcome only within the
+    /// requeue window, and only for an attempt made for this machine (a
+    /// home two clusters share): fifteen days on, or another machine's
+    /// attempt, the outcome is the end.
+    #[test]
+    fn an_attempts_job_is_asked_about_after_its_outcome_only_within_the_requeue_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cactus = tmp.path().join("inst/Cactus");
+        let done = BuildOutcomeRecord { exit_status: Some(0), complete: true };
+        let mut meta = attempt_meta(&cactus.join("configs/sim"), &cactus, "sim", 0, "4242", true, Some(done));
+        let log = tmp.path().join("calls.log");
+        let machine = logging_status_machine(&tmp.path().join("mdb/fake"), &log);
+        let sched = Scheduler::new(&machine.meta);
+        assert!(requeue_query(&meta, &sched).is_some());
+        assert!(requeue_query(&meta, &Scheduler::named(&machine.meta, &meta.machine)).is_some());
+        assert!(requeue_query(&meta, &Scheduler::named(&machine.meta, "another-machine")).is_none());
+        meta.timestamps.finished = Some(Utc::now() - chrono::Duration::days(15));
+        assert!(requeue_query(&meta, &sched).is_none());
     }
 
     /// The compute side writes its record keeping the job the submitter

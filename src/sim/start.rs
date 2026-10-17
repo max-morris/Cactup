@@ -309,7 +309,7 @@ fn submit_impl(
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
     let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     // Per-simulation mutual exclusion for everything below (§2.3 item 3).
     let _lock = sim.lock()?;
@@ -360,39 +360,52 @@ fn submit_impl(
             }
             // An ended restart still active: the reaper left it, because the
             // scheduler still lists its job (§8.6), or under its throttles,
-            // without asking. Asked here, so what is said is known.
+            // without asking. Asked here, so what is said is known; the safe
+            // reading for new work: chained behind a job still listed or
+            // unanswered (behind one that is gone, harmless).
             true => {
-                let listed = match r.meta.scheduler_job(&sched) {
-                    Some(job) if sched.asks_after_end(r.meta.finished) => {
-                        crate::scheduler::is_live(sched.get_status_of(job, true)?, true)
+                use crate::scheduler::AfterEnd;
+                let dir = restart::dir_name(active);
+                let job_id = &r.meta.job_id;
+                match crate::sim::manage::ask_ended(sim, &sched, &r)? {
+                    Some(AfterEnd::Listed(_)) => {
+                        println!(
+                            "Restart {dir}'s job {job_id} is still listed by the scheduler after the \
+                             restart ended (queued again, or leaving the queue); chaining the new \
+                             submission behind it"
+                        );
+                        true
                     }
-                    _ => false,
-                };
-                if listed {
-                    println!(
-                        "Restart {}'s job {} is still listed by the scheduler after the restart ended \
-                         (queued again, or leaving the queue); chaining the new submission behind it",
-                        restart::dir_name(active),
-                        r.meta.job_id
-                    );
-                    true
-                } else if LinkLock::is_held_live(&r.running_lock_path())? {
-                    println!(
-                        "Restart {} has recorded its end, but its run still holds its lock (it is \
-                         ending); chaining the new submission behind its job {}",
-                        restart::dir_name(active),
-                        r.meta.job_id
-                    );
-                    true
-                } else {
-                    // What the reaper does, but for its throttles.
-                    crate::sim::manage::clean_active(sim)?;
-                    println!(
-                        "Restart {} had ended and the scheduler no longer lists its job {}: cleaned it",
-                        restart::dir_name(active),
-                        r.meta.job_id
-                    );
-                    false
+                    Some(AfterEnd::Unanswered) => {
+                        println!(
+                            "Could not ask the scheduler about restart {dir}'s job {job_id} (the restart \
+                             has ended); chaining the new submission behind it in case it was queued again"
+                        );
+                        true
+                    }
+                    _ if LinkLock::is_held_live(&r.running_lock_path())? => {
+                        println!(
+                            "Restart {dir} has recorded its end, but its run still holds its lock (it is \
+                             ending); chaining the new submission behind its job {job_id}"
+                        );
+                        true
+                    }
+                    answer => {
+                        // What the reaper does, but for its throttles.
+                        crate::sim::manage::clean_active(sim)?;
+                        match answer {
+                            Some(AfterEnd::Over(crate::scheduler::JobStatus::Unknown)) => println!(
+                                "Restart {dir} had ended and the scheduler does not know its job {job_id}: \
+                                 cleaned it"
+                            ),
+                            Some(AfterEnd::Over(_)) => println!(
+                                "Restart {dir} had ended and the scheduler lists its job {job_id} as over: \
+                                 cleaned it"
+                            ),
+                            _ => println!("Restart {dir} had recorded its end: cleaned it"),
+                        }
+                        false
+                    }
                 }
             }
         };
@@ -400,19 +413,30 @@ fn submit_impl(
             prev_job = Some(r.meta.job_id.clone());
             activate_first = false;
         }
-    } else if let Some((id, job, _)) = crate::sim::manage::listed_newest(sim, &sched)? {
-        // The newest restart ended (deactivated: `sim clean`, a stop), but
-        // the scheduler still lists its job (§8.6): queued again, or leaving
-        // the queue. Chained behind it, the new job waits for it either way
-        // (behind a job that is just leaving, a moment).
-        println!(
-            "Restart {}'s job {} is still listed by the scheduler after the restart ended (queued \
-             again, or leaving the queue); chaining the new submission behind it",
-            restart::dir_name(id),
-            job.id
-        );
-        prev_job = Some(job.id);
-        activate_first = false;
+    } else if let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, &sched)? {
+        // The newest ended restart (deactivated: `sim clean`, a stop): its
+        // job still listed (queued again, or leaving the queue) or the
+        // query unanswered, the new job is chained behind it, which waits
+        // for it either way (behind a job that is just leaving, a moment;
+        // behind one that is gone, not at all).
+        use crate::scheduler::AfterEnd;
+        let (dir, job_id) = (restart::dir_name(ended.id), &ended.meta.job_id);
+        let said = match answer {
+            Some(AfterEnd::Listed(_)) => Some(format!(
+                "Restart {dir}'s job {job_id} is still listed by the scheduler after the restart ended \
+                 (queued again, or leaving the queue); chaining the new submission behind it"
+            )),
+            Some(AfterEnd::Unanswered) => Some(format!(
+                "Could not ask the scheduler about restart {dir}'s job {job_id} (the restart has ended); \
+                 chaining the new submission behind it in case it was queued again"
+            )),
+            _ => None,
+        };
+        if let Some(said) = said {
+            println!("{said}");
+            prev_job = Some(ended.meta.job_id.clone());
+            activate_first = false;
+        }
     }
 
     // Scripts for the chosen queue (§4.4) and universes (§4.8);
@@ -584,21 +608,28 @@ pub(crate) fn refuse_beside_listed_for_tests(sim: &Simulation, sched: &Scheduler
     refuse_beside_listed(sim, sched)
 }
 
-/// Refuse to start a foreground run beside the newest restart's job, which
-/// the scheduler still lists after the restart ended (§8.6): leaving the
-/// queue, or starting again, and then both would run.
+/// Refuse to start a foreground run beside the newest ended restart's job,
+/// which the scheduler still lists after the restart ended (§8.6: leaving
+/// the queue, or starting again), or could not be asked about: both might
+/// run. Called once no running active restart refuses first (whose own
+/// message stands), so `sim stop` acts on this job, as the advice says.
 fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler) -> Res<()> {
-    if let Some((id, job, _)) = crate::sim::manage::listed_newest(sim, sched)? {
-        bail!(
-            "restart {} of simulation \"{}\" ended, but the scheduler still lists its job {} (leaving \
-             the queue, or starting again): wait until it leaves, or `cactup sim stop {}` to stop it",
-            restart::dir_name(id),
-            sim.name,
-            job.id,
-            sim.name
-        );
+    use crate::scheduler::AfterEnd;
+    let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, sched)? else { return Ok(()) };
+    let (dir, job_id, name) = (restart::dir_name(ended.id), &ended.meta.job_id, &sim.name);
+    match answer {
+        Some(AfterEnd::Listed(_)) => bail!(
+            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job \
+             {job_id} (leaving the queue, or starting again): wait until it leaves the queue, or \
+             `cactup sim stop {name}` to stop it"
+        ),
+        Some(AfterEnd::Unanswered) => bail!(
+            "restart {dir} of simulation \"{name}\" ended, but the scheduler could not be asked about \
+             its job {job_id}, which may have been queued again: try again once the scheduler answers, \
+             or `cactup sim stop {name}` to stop it"
+        ),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// `sim run` (§8.4): dispatches to the compute-node path (`--sim-dir`,
@@ -651,12 +682,19 @@ fn run_interactive(
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
     let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     let lock = sim.lock()?;
     restart::reap_stale(sim, &sched)?;
-    refuse_beside_listed(sim, &sched)?;
-    if let Some(active) = restart::active_id(&sim.dir)? {
+    // A running active restart refuses first, with its own message (`sim
+    // stop` acts on it before anything else); then a job still listed after
+    // its restart's end (or unanswered), which `sim stop` then acts on.
+    let active = restart::active_id(&sim.dir)?;
+    let running = active.is_some_and(|id| Restart::load(&sim.dir, id).is_ok_and(|r| !r.meta.terminated));
+    if !running {
+        refuse_beside_listed(sim, &sched)?;
+    }
+    if let Some(active) = active {
         bail!(
             "simulation \"{}\" already has an active restart ({}); wait for it, or \
              `cactup sim stop {}` first",

@@ -186,17 +186,32 @@ pub enum Stopped {
 /// start time (by an older cactup): a live process with that pid here may
 /// be another one, so it is never stopped.
 #[derive(Debug)]
-pub struct UnverifiedPid(pub String);
+pub struct UnverifiedPid {
+    pub id: String,
+    /// The pid's process leads its own process group, which a stop by hand
+    /// can take whole.
+    leads_group: bool,
+}
+
+impl UnverifiedPid {
+    pub fn of(id: &str) -> UnverifiedPid {
+        let leads_group = id.parse::<u32>().is_ok_and(|pid| crate::lock::proc_pgrp(pid) == Some(pid));
+        UnverifiedPid { id: id.to_owned(), leads_group }
+    }
+}
 
 impl std::fmt::Display for UnverifiedPid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let how = match self.leads_group {
+            true => format!("`kill -- -{0}` stops it and the process group it leads", self.id),
+            false => format!("`kill {0}` stops it", self.id),
+        };
         write!(
             f,
             "job {0} was recorded by an older cactup, without the host and start time of its \
              process, and a process with pid {0} runs here: it may be the job or another process, \
-             so cactup does not stop it (stop it yourself if it is the job, or try again once it \
-             has ended)",
-            self.0
+             so cactup does not stop it (if it is the job, {how}; or try again once it has ended)",
+            self.id
         )
     }
 }
@@ -259,6 +274,30 @@ enum PidCheck {
 /// scheduler may requeue it ([`Scheduler::asks_after_end`]).
 pub const REQUEUE_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(14);
 
+/// The note for a status query that failed after its record's end, taken
+/// as ended by what only reads or removes records (displays, deletes).
+pub fn note_taken_as_ended(job_id: &str) {
+    eprintln!(
+        "{} the status query for job {job_id} failed, and its run had recorded its end: taken as \
+         ended (if this repeats, check that unknown-job-pattern in the machine's [scheduler] table \
+         matches what get-status prints for a job the scheduler does not know)",
+        "note:".yellow()
+    );
+}
+
+/// What the scheduler said of a job asked about after its record's end
+/// ([`Scheduler::ask_after_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterEnd {
+    /// Listed in a state the patterns read: queued again, or leaving.
+    Listed(JobStatus),
+    /// Not known (`Unknown`), or listed in a state no pattern reads
+    /// (`Error`): the ended job.
+    Over(JobStatus),
+    /// The status query failed: no answer.
+    Unanswered,
+}
+
 /// How much later than its record a process with an older record's pid may
 /// have started and still be the job: its submission takes moments, but the
 /// boot-time clock is coarse.
@@ -306,11 +345,28 @@ impl Statuses {
 /// Scheduler driver for one machine.
 pub struct Scheduler<'m> {
     meta: &'m Meta,
+    /// The machine whose scheduler this is, where known: a record made for
+    /// another machine is not asked about after its end (two clusters
+    /// sharing a home).
+    machine: Option<&'m str>,
 }
 
 impl<'m> Scheduler<'m> {
+    /// A scheduler that does not know its machine's name (tests).
+    #[cfg(test)]
     pub fn new(meta: &'m Meta) -> Scheduler<'m> {
-        Scheduler { meta }
+        Scheduler { meta, machine: None }
+    }
+
+    /// The scheduler of `machine`, knowing its name.
+    pub fn for_machine(machine: &'m crate::mdb::Machine) -> Scheduler<'m> {
+        Scheduler { meta: &machine.meta, machine: Some(&machine.name) }
+    }
+
+    /// The same scheduler, taking itself for machine `name` (tests).
+    #[cfg(test)]
+    pub fn named(meta: &'m Meta, name: &'m str) -> Scheduler<'m> {
+        Scheduler { meta, machine: Some(name) }
     }
 
     /// Submit a job: run the machine `submit` command (already carrying
@@ -509,13 +565,7 @@ impl<'m> Scheduler<'m> {
     pub fn get_status_of(&self, job: JobRef<'_>, ended: bool) -> Res<JobStatus> {
         match self.get_status(job) {
             Err(e) if ended && e.downcast_ref::<FailedQuery>().is_some() => {
-                eprintln!(
-                    "{} the status query for job {} failed, and its run had recorded its end: taken as \
-                     ended (if this repeats, check that unknown-job-pattern in the machine's [scheduler] \
-                     table matches what get-status prints for a job the scheduler does not know)",
-                    "note:".yellow(),
-                    job.id
-                );
+                note_taken_as_ended(job.id);
                 Ok(JobStatus::Unknown)
             }
             other => other,
@@ -547,14 +597,40 @@ impl<'m> Scheduler<'m> {
         self.job_ids() == JobIds::Scheduler
     }
 
-    /// Whether a job whose record ended at `ended_at` is still asked about:
-    /// where a batch scheduler may requeue it ([`Self::may_requeue`]), and
-    /// only within [`REQUEUE_WINDOW`] of the end. Later its id may by now
-    /// name an unrelated job (ids wrap around, a cluster is reinstalled, two
-    /// clusters share a home), which would refuse a delete or be stopped by
-    /// its `-f`; and a record with no end time is taken as ended too.
-    pub fn asks_after_end(&self, ended_at: Option<DateTime<Utc>>) -> bool {
-        self.may_requeue() && ended_at.is_some_and(|ended| Utc::now() - ended < REQUEUE_WINDOW)
+    /// Whether a job of a record made for machine `record_machine`, whose
+    /// record ended at `ended_at`, is still asked about: where a batch
+    /// scheduler may requeue it ([`Self::may_requeue`]), only for a record of
+    /// this machine (another's, in a home two clusters share, names a job of
+    /// that cluster's), and only within [`REQUEUE_WINDOW`] of the end. Later
+    /// its id may by now name an unrelated job (ids wrap around, a cluster is
+    /// reinstalled), which would refuse a delete or be stopped by its `-f`;
+    /// and a record with no end time is taken as ended too.
+    pub fn asks_after_end(&self, record_machine: &str, ended_at: Option<DateTime<Utc>>) -> bool {
+        self.may_requeue()
+            && self.machine.is_none_or(|machine| machine == record_machine)
+            && ended_at.is_some_and(|ended| Utc::now() - ended < REQUEUE_WINDOW)
+    }
+
+    /// Ask about `job` after its record's end (within the requeue window):
+    /// still listed in a state the patterns read, said to be gone or over
+    /// (not known, absent from a listing, a state no pattern reads), or not
+    /// answered (a failed query). What each command does with it is its own
+    /// safe reading (§10): stops are sent unless the scheduler answered that
+    /// the job is gone; new work is not started beside an unanswered job.
+    pub fn ask_after_end(&self, job: JobRef<'_>) -> Res<AfterEnd> {
+        match self.get_status(job) {
+            Ok(status) if is_live(status, true) => Ok(AfterEnd::Listed(status)),
+            Ok(status) => Ok(AfterEnd::Over(status)),
+            Err(e) if e.downcast_ref::<FailedQuery>().is_some() => Ok(AfterEnd::Unanswered),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The machine's stop command for `job_id`, as the user may run it by
+    /// hand (without the environment setup cactup prepends).
+    pub fn stop_command(&self, job_id: &str) -> Option<String> {
+        let template = self.meta.scheduler.stop.as_deref()?;
+        Self::query_vars(job_id).substitute(template, Syntax::Shell).ok()
     }
 
     /// Whether `job` is the job's own process here but does not lead its
@@ -777,7 +853,7 @@ impl<'m> Scheduler<'m> {
         match self.pid_check(job) {
             Some(PidCheck::Gone) => return Ok(Stopped::Gone),
             Some(PidCheck::Elsewhere) => return Ok(Stopped::Elsewhere(job.host.unwrap_or_default().to_owned())),
-            Some(PidCheck::Unverified) => return Err(UnverifiedPid(job.id.to_owned()).into()),
+            Some(PidCheck::Unverified) => return Err(UnverifiedPid::of(job.id).into()),
             Some(PidCheck::Here) => {
                 let pid: u32 = job.id.parse()?;
                 if crate::lock::proc_pgrp(pid) != Some(pid) {
@@ -1411,11 +1487,17 @@ mod tests {
         let pids = meta(r#"job-ids = "pids""#);
         let pids = Scheduler::new(&pids);
         let days = |n: i64| Some(Utc::now() - chrono::Duration::days(n));
-        assert!(batch.asks_after_end(days(0)));
-        assert!(batch.asks_after_end(days(13)));
-        assert!(!batch.asks_after_end(days(15)));
-        assert!(!batch.asks_after_end(None));
-        assert!(!pids.asks_after_end(days(0)));
+        assert!(batch.asks_after_end("m", days(0)));
+        assert!(batch.asks_after_end("m", days(13)));
+        assert!(!batch.asks_after_end("m", days(15)));
+        assert!(!batch.asks_after_end("m", None));
+        assert!(!pids.asks_after_end("m", days(0)));
+        // A record made for another machine (a home two clusters share):
+        // never asked after its end.
+        let m = meta("");
+        let here = Scheduler::named(&m, "qb");
+        assert!(here.asks_after_end("qb", days(0)));
+        assert!(!here.asks_after_end("mike", days(0)));
     }
 
     /// The point of the streaming parse (§10): the job id has to reach the

@@ -297,13 +297,18 @@ delete`, `sim stop`'s graceful wait (a forced `sim stop -f` asks nothing),
 submit`/`sim run`, `test run`/`test submit` and build; `sim list`, `test
 list`, `build list` and their `show`s print the state as `UNKNOWN`, and
 `build prune` keeps the attempt. For a run that has recorded its end (a
-finished simulation restart, test run or build), asking is only the check
-for a job the scheduler put back in the queue, made for 14 days after the
-end (later, the job id may name an unrelated job, and the record is taken
-as ended without asking), so a failed query is taken as the job ended, with
-a one-line note, and nothing is held up: `sim stop`, `sim submit`, `sim
-run`, `sim delete`, `test stop`, `test delete`, `build stop` and the checks
-before a new test run or build go ahead. Without the key, no line for the
+finished simulation restart, test run or build), asking is the check for a
+job the scheduler put back in the queue, made for 14 days after the end and
+only on the machine the record was made for (later, or elsewhere, the job
+id may name an unrelated job, and the record is taken as ended without
+asking). A failed query then is taken as the job ended where cactup only
+shows records (`sim list`, `test list`, their `show`s: the recorded end) or
+removes them (`sim delete`, `test delete`: with a one-line note); the commands that act take the
+safe reading, since the job may have been queued again: `sim stop`, `test
+stop` and `build stop` ask the scheduler to stop the job anyway (a stop
+does no harm to a job that is gone), saying they could not ask; `sim
+submit` chains behind it; `sim run`, and a new test run or build without
+`-f`, refuse until the scheduler answers. Without the key, no line for the
 job means the job is gone, as before: a query that failed reads as a job no
 longer in the queue. Check the pattern against what the command really
 prints for a job the scheduler no longer knows (an old job id will do): one
@@ -380,7 +385,8 @@ goes stale) it is taken as ended. A job recorded by an older cactup,
 without its host and start time, is asked about only where a process with
 its pid runs on this host and started no later than the record was made,
 and cactup never stops it (it may be another process): stop it yourself if
-it is the job. A run that has recorded its end is not asked about again on
+it is the job, with the command cactup prints (`kill -- -<pid>` where it
+leads a process group, `kill <pid>` where it does not). A run that has recorded its end is not asked about again on
 such a machine, where nothing requeues a job.
 
 The `submit` (and `blocking-submit`) of such a machine must start each job

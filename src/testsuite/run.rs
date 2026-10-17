@@ -325,7 +325,7 @@ fn start_impl(
     }
 
     let identity = Identity::resolve(db, hostname_override);
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
@@ -333,21 +333,40 @@ fn start_impl(
         if old.lock_live()? {
             bail!("test run \"{name}\" is currently executing (running.lock is held)");
         }
-        // After the old run's end, a job the scheduler still lists in any
-        // state is live (leaving the queue, or starting again: a new run
-        // beside it is refused); a query that fails is taken as the job
-        // ended (§10).
+        // After the old run's end, a job the scheduler still lists in a
+        // state its patterns read (leaving the queue, or starting again),
+        // or could not be asked about, may run beside a new run: refused,
+        // the safe reading for starting new work (§10).
+        use crate::scheduler::AfterEnd;
         let finished = old.meta.timestamps.finished.is_some();
+        let live = |job| -> Res<Option<bool>> {
+            Ok(match finished {
+                true => match sched.ask_after_end(job)? {
+                    AfterEnd::Listed(_) => Some(true),
+                    AfterEnd::Unanswered => Some(false),
+                    AfterEnd::Over(_) => None,
+                },
+                false => crate::scheduler::is_live(sched.get_status(job)?, false).then_some(true),
+            })
+        };
         if let Some(job) = old.pending_job(&sched)
-            && crate::scheduler::is_live(sched.get_status_of(job, finished)?, finished)
+            && let Some(listed) = live(job)?
         {
             // An older record's pid, or one sharing its process group (§10):
             // never stopped, `-f` neither.
             if sched.unverified(job) {
-                bail!("{}; then run the tests again", crate::scheduler::UnverifiedPid(job.id.to_owned()));
+                bail!("{}; then run the tests again", crate::scheduler::UnverifiedPid::of(job.id));
             }
             if sched.shares_group(job) {
                 bail!("{}; then run the tests again", crate::scheduler::SharedGroup(job.id.to_owned()));
+            }
+            if !args.force && finished && !listed {
+                bail!(
+                    "test run \"{name}\" ended, but the scheduler could not be asked about its job {}, which \
+                     may have been queued again: try again once the scheduler answers, or `cactup test stop \
+                     {name}` to stop it (or pass -f to stop it)",
+                    job.id
+                );
             }
             if !args.force && finished {
                 bail!(

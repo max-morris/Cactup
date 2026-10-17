@@ -3759,7 +3759,7 @@ Round 6 (on `b19b5f6`): BLOCKED by both. (1) A, B (ran; a regression from
 `bd29ca0`, master stopped it): `sim stop` asked `listed_newest` first, so
 at every chain handover, restart 0 ended with its job listed `TO`/`CD`
 for MinJobAge and restart 1 active and running, `sim stop` (either form)
-cancelled restart 0's ended job and left restart 1 running; `sim
+canceled restart 0's ended job and left restart 1 running; `sim
 delete`'s advice that `sim stop` stops it was false. (2) A (ran, fake
 `qdel`): on Torque a completed job listed `C` within keep_completed was
 "still listed" (round 5's rule took an unread state after the end as
@@ -3793,7 +3793,7 @@ this record:
   restart, as the reaper would, and submits on its own.
 - `reap_stale`'s comment states the rule above.
 Checked with real binaries: the fake Slurm (a handover: `sim stop -f`
-cancelled restart 1's job 4266 only, `sim show` showing restart 0 `STILL
+canceled restart 1's job 4266 only, `sim show` showing restart 0 `STILL
 LISTED` and restart 1 `RUNNING`, `sim delete` naming `sim stop` for
 output-0001; `sim submit` under the throttles with the old job gone
 (cleaned, unchained) and listed `R` (chained); `CD` after the end:
@@ -3804,6 +3804,70 @@ ended, `sim stop` said it had ended and ran no `qdel`, `sim delete`,
 `test submit`, `build submit` and `build -f` went ahead, `build stop`
 said it had finished; listed `R` after the end it was still listed and
 `qdel` stopped it; the earlier scenarios as before.
+
+Round 7 (on `1f49019`): BLOCKED. (1) `sim stop` (either form) of an
+active restart that had recorded its end ran no stop when the status
+query failed (taken as ended) and said it had ended, though the job may
+have been queued again; `test stop` and `build stop` the same. (2) `sim
+submit`'s "the scheduler no longer lists its job: cleaned it" stated an
+answer it had not had (a failed query, or none asked), and after a failed
+query it submitted unchained. (3) `sim run` at a handover named `sim
+stop` for the ended restart's leaving job, while `sim stop` acts on the
+running restart. Also: a record made for another machine (two clusters
+sharing a home) was asked about after its end; the docs called `TO`
+listed everywhere, though Slurm's `squeue -u` without `-t` leaves it out;
+`sim stop` said nothing of a restart chained behind the job it stopped;
+the `UnverifiedPid`/`SharedGroup` refusals did not say how to stop the pid
+by hand. The lead's rule: a failed status query after a record's end is
+taken as ended for what only reads or removes records (displays, `sim
+delete`, `test delete`); a command takes the safe reading for what it
+does (a stop is safe to send; starting new work beside a job that may
+have been queued again is not); and no message states a scheduler answer
+cactup did not get. The fixes, in the commit after this record:
+- `Scheduler::ask_after_end` answers `Listed`, `Over` or `Unanswered`.
+  `sim stop`, `test stop` and `build stop` send the stop for `Listed` and
+  `Unanswered` ("could not ask the scheduler about job N ...; asked it to
+  stop the job in case it was queued again"); `Over` says what the
+  scheduler said (does not know job N, or lists it as over); nothing asked
+  (pids, past the window, another machine's record) says the record's
+  end; "nothing to stop" in each. An active ended restart is deactivated
+  only where no stop was sent.
+- `sim submit` chains behind an `Unanswered` job too (active restart or
+  not), saying so, and its "cleaned it" says what was learned. `sim run`,
+  a new test run and a new build refuse beside an `Unanswered` job without
+  `-f` (try again once the scheduler answers, or stop it).
+- `sim run` checks a running active restart first (its own refusal), then
+  the ended restart's job, so each refusal names what `sim stop` stops.
+  The reaper's note says what it learned instead of "job N gone".
+- `Scheduler::for_machine` carries the machine's name, and
+  `asks_after_end` asks after the end only for a record whose `machine` is
+  it (restarts, test runs, build attempts; unit-tested for each).
+- Whatever it did, `sim stop` names the later restarts chained behind a
+  job that have not run, with the scheduler's command to stop each; never
+  stopped unasked.
+- `UnverifiedPid` says `kill -- -N` where the pid leads its process group
+  and `kill N` where not; `SharedGroup` says `kill N`.
+- Docs and spec: §§7.9, 8.6, 10; `running-simulations.md` (the `TO`
+  difference between listing and single query, `sim show`'s "listed
+  running"), `test-suites.md`, `monitoring.md`, `meta-toml.md`, the
+  `unknown-job-pattern` doc comment.
+Checked with real binaries: the fake Slurm (its `squeue -u` now lists
+only `PD`, `R`, `CG`, `CF`, `S`, as the real one without `-t`): an ended
+active restart with `squeue` down, `sim stop` and `-f` each sent
+`scancel` and kept it active; answered unknown or `CD`, said so, no
+`scancel`, deactivated; `sim submit` beside it: `CD` cleaned ("lists its
+job as over"), down chained (active and deactivated); `sim run` at a
+handover refused naming the active restart, beside a `PD` or unanswered
+ended job naming `sim stop` for it; `sim stop` of a requeued job named
+the restart chained behind it and `scancel N`, which it did not run; `TO`
+after the end: `sim list`/`show` `FINISHED`, `sim run` refused, `sim
+stop` sent `scancel`; test and build: down, `test stop`/`build stop` sent
+it and `test submit`/`build submit` refused; unknown, "does not know";
+another machine's simulation: no `squeue`, "has recorded its end;
+nothing to stop". The fake Torque: `C` and unknown cleaned with what was
+said, `qstat` down chained; `sim stop` with `qstat` down sent `qdel`.
+The generic machine: an older record's pid leading its group refused
+with `kill -- -N`, which stopped it.
 
 ## Decisions
 

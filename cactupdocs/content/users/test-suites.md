@@ -202,8 +202,8 @@ to stop it, and once it is over `test delete` goes ahead. One whose lock is held
 expires within 15 minutes, or, on a machine that cannot tell, the scheduler
 could not be asked) is left as it is, `--force` too.
 
-On a batch system, for 14 days after a test run ended, a job the scheduler
-still lists is taken for what it may be: put back in the queue
+On a batch system, for 14 days after a test run ended (asked only on the
+machine the run was made for), a job the scheduler still lists is taken for what it may be: put back in the queue
 (preemption, `scontrol requeue`), or just leaving it (Slurm lists an ended
 job as completing for a moment, or timed out for a few minutes), which
 cactup cannot tell apart; a job listed as completed (Slurm's `CD`, Torque's
@@ -214,8 +214,16 @@ stop`). Where the machine definition
 says how the scheduler reports a job it does not know, a status query that
 fails stops `test stop`, `test delete` and a new `test run` or `test submit`
 with the scheduler's output rather than taking the job for ended, and `test
-list` shows `UNKNOWN`; for a run that had already finished, the failed query
-is only noted. On a machine without a batch system (the generic machine), a
+list` shows `UNKNOWN`. For a run that had already finished, `test list`
+shows its recorded end and `test delete` notes the failed query and goes
+ahead, while
+the commands that act take the safe reading, since the job may have been
+queued again: `test stop` asks the scheduler to cancel it anyway (harmless
+if it is gone), saying it could not ask, and a new `test run` or `test
+submit` refuses until the scheduler answers (`--force` cancels the job
+first). When `test stop` has nothing to cancel, it says what it knows (the
+scheduler does not know the job, or lists it as over, or the run has
+recorded its end). On a machine without a batch system (the generic machine), a
 submitted run's job is a background process: cactup asks about it and stops
 it only on the host that started it and only while that very process runs,
 so a reused process number is never stopped, and only where the process has
@@ -223,8 +231,9 @@ a process group of its own (the machine's `submit` starts it with
 `setsid`). From another host, `test stop` says the run's job runs on the
 host that submitted it and to stop it there, and `test delete` refuses,
 while the run holds its lock. A run submitted by an older cactup is not
-stopped for you while a process with its number runs (check it and stop it
-yourself).
+stopped for you while a process with its number runs: check it and stop it
+yourself, with the command cactup prints (`kill -- -<pid>` where the
+process leads a process group, `kill <pid>` where it does not).
 
 Move a test to trash:
 

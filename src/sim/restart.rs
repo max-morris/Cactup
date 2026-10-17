@@ -469,8 +469,26 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
     // scheduler's machine: its lock says, below), or one past asking after
     // its end (`Scheduler::asks_after_end`).
     let ended = restart.meta.terminated;
+    let job_id = &restart.meta.job_id;
+    // What was learned, for the note below: never an answer not had.
+    let mut learned = None;
     let status = match restart.meta.scheduler_job(sched) {
-        Some(job) if !ended || sched.asks_after_end(restart.meta.finished) => sched.get_status_of(job, ended)?,
+        Some(job) if !ended || sched.asks_after_end(&sim.meta.machine, restart.meta.finished) => {
+            match sched.get_status(job) {
+                Err(e) if ended && e.downcast_ref::<crate::scheduler::FailedQuery>().is_some() => {
+                    crate::scheduler::note_taken_as_ended(job.id);
+                    JobStatus::Unknown
+                }
+                Err(e) => return Err(e),
+                Ok(status) => {
+                    learned = Some(match status {
+                        JobStatus::Unknown => format!("the scheduler no longer lists job {job_id}"),
+                        _ => format!("the scheduler lists job {job_id} as over"),
+                    });
+                    status
+                }
+            }
+        }
         _ => JobStatus::Unknown,
     };
     let in_queue = match ended {
@@ -493,12 +511,11 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
         return Ok(false); // possibly a scheduler hiccup (transient U)
     }
 
-    eprintln!(
-        "{} reaping stale active restart {} (job {} gone)",
-        "note:".yellow(),
-        dir_name(active),
-        restart.meta.job_id
-    );
+    let learned = learned.unwrap_or_else(|| match ended {
+        true => "it had recorded its end".to_owned(),
+        false => "nothing of its run holds its lock".to_owned(),
+    });
+    eprintln!("{} reaping stale active restart {} ({learned})", "note:".yellow(), dir_name(active));
     crate::sim::manage::clean_active(sim)?;
     let _ = fs::write(&marker, b"");
     sim.log("reap", &format!("reaped stale active restart {}", dir_name(active)));

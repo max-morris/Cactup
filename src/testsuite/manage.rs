@@ -3,7 +3,7 @@
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::scheduler::{is_live, JobRef, JobStatus, Scheduler, SharedGroup, Stopped, UnverifiedPid};
+use crate::scheduler::{AfterEnd, JobRef, JobStatus, Scheduler, SharedGroup, Stopped, UnverifiedPid};
 use crate::sim::cache;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
@@ -54,7 +54,7 @@ fn state_line(run: &TestRun, query: Option<Option<JobStatus>>, lock_live: bool) 
 /// `test show`: one test run in detail.
 pub fn show(ctx: &Ctx, name: &str) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(&machine);
     let inst = Installation::resolve(ctx)?;
     show_one(&inst, &sched, name)
 }
@@ -73,7 +73,7 @@ enum Row {
 /// `test list`: list test runs; `--all` unions every installation.
 pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(&machine);
 
     let installations: Vec<Installation> = if all {
         let db = ctx.db.read()?;
@@ -290,7 +290,7 @@ pub fn stop(ctx: &Ctx, name: &str, _force: bool) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let mut run = TestRun::locate(&inst, name)?;
     let _lock = run.lock()?;
-    stop_run(&mut run, &Scheduler::new(&machine.meta), name)
+    stop_run(&mut run, &Scheduler::for_machine(&machine), name)
 }
 
 /// [`stop`], on `run` (locked), by `sched`.
@@ -349,8 +349,13 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
         // Still listed after the run's end (queued again, or leaving the
         // queue): the scheduler is asked to stop it (harmless if it is
         // leaving), and the run's end stands.
-        Job::Listed => {
+        state @ (Job::Listed | Job::Unanswered) => {
             match send_stop(sched, job.job()) {
+                Ok(Stopped::Sent) if state == Job::Unanswered => println!(
+                    "Could not ask the scheduler about test job {} (the run has ended); asked it to stop \
+                     the job in case it was queued again",
+                    job_id.bold()
+                ),
                 Ok(Stopped::Sent) => println!(
                     "Asked the scheduler to stop test job {}, still listed after the run ended (queued \
                      again, or leaving the queue)",
@@ -364,11 +369,19 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                     if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
                         return Err(e);
                     }
-                    println!(
-                        "The scheduler still lists test job {job_id} after the run ended, and would not stop \
-                         it ({}): the run's end stands",
-                        refusal(&e)
-                    );
+                    match state {
+                        Job::Unanswered => println!(
+                            "Could not ask the scheduler about test job {job_id} (the run has ended), and \
+                             its stop command failed too ({}): the run's end stands; try again once the \
+                             scheduler answers",
+                            refusal(&e)
+                        ),
+                        _ => println!(
+                            "The scheduler still lists test job {job_id} after the run ended, and would not \
+                             stop it ({}): the run's end stands",
+                            refusal(&e)
+                        ),
+                    }
                 }
             }
             run.log("test-stop", &format!("asked the scheduler to stop job {job_id}, still listed after the end"));
@@ -404,9 +417,11 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             println!("{}", sentence(held_without_listed_job(run, sched, name)));
             return Ok(());
         }
-        Job::Ended => println!("Test job {job_id} has ended (the scheduler still lists it as over); nothing to stop"),
+        Job::Ended => println!("The scheduler lists test job {job_id} as over (the run has ended); nothing to stop"),
         // After the run's end, unlisted or a query that failed: ended.
-        Job::Absent if run.meta.timestamps.finished.is_some() => println!("Test job {job_id} has ended; nothing to stop"),
+        Job::Absent if run.meta.timestamps.finished.is_some() => {
+            println!("The scheduler does not know test job {job_id} (the run has ended); nothing to stop")
+        }
         Job::Absent => println!("Test job {job_id} is not in the queue; nothing to stop"),
     }
     run.meta.status = Some("U".to_owned());
@@ -438,6 +453,10 @@ enum Job {
     /// the ended job (Torque's `C`, Slurm's `CD`, `F`, `CA`): a requeued job
     /// passes through read states. Nothing to stop; `delete` goes ahead.
     Ended,
+    /// The status query failed after the run recorded its end: no answer.
+    /// `stop` sends the stop (harmless if the job is gone), `delete` takes
+    /// it as ended, with a note.
+    Unanswered,
     /// Not listed (the scheduler does not know it; where the machine cannot
     /// tell, a query that failed reads so too; after the run's end, a query
     /// that failed is taken so).
@@ -451,18 +470,23 @@ enum Job {
 /// What the scheduler says of `run`'s job. Before the run records its end,
 /// running, queued or held is live; after it, the same states are
 /// `Listed`, a state no pattern reads is `Ended` (`is_live`), and a query
-/// that failed is taken as the job ended (`Scheduler::get_status_of`).
+/// that failed is `Unanswered` (`Scheduler::ask_after_end`): `stop` sends
+/// the stop, `delete` takes it as ended, a new run refuses beside it.
 fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
     if sched.recorded_elsewhere(job).is_some() {
         return Ok(Job::OnHost);
     }
-    let finished = run.meta.timestamps.finished.is_some();
-    let status = sched.get_status_of(job, finished)?;
-    Ok(match status {
-        _ if finished && is_live(status, true) => Job::Listed,
+    if run.meta.timestamps.finished.is_some() {
+        return Ok(match sched.ask_after_end(job)? {
+            AfterEnd::Listed(_) => Job::Listed,
+            AfterEnd::Over(JobStatus::Unknown) => Job::Absent,
+            AfterEnd::Over(_) => Job::Ended,
+            AfterEnd::Unanswered => Job::Unanswered,
+        });
+    }
+    Ok(match sched.get_status(job)? {
         JobStatus::Running | JobStatus::Queued | JobStatus::Holding => Job::Live,
         JobStatus::Unknown => Job::Absent,
-        JobStatus::Error if finished => Job::Ended,
         JobStatus::Error => Job::Unread,
     })
 }
@@ -527,12 +551,20 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         // Held, but not a job the scheduler here lists live: not stopped or
         // removed from here, `-f` neither.
         Job::OnHost if run.lock_live()? => bail!("{}; delete it once it has ended", on_host(job, name)),
+        // Unanswered after the run's end: what only removes a record takes
+        // it as ended (§10), with the note.
+        Job::Unanswered => {
+            crate::scheduler::note_taken_as_ended(job_id);
+            if run.lock_live()? {
+                bail!("{}", held_without_listed_job(run, sched, name));
+            }
+        }
         Job::Ended | Job::Absent if run.lock_live()? => bail!("{}", held_without_listed_job(run, sched, name)),
         Job::Ended | Job::Absent | Job::OnHost => {}
         // An older record's pid, or one sharing its process group (§10):
         // never stopped, `-f` neither.
         Job::Live | Job::Listed if sched.unverified(job) => {
-            bail!("{}; then delete the test run", UnverifiedPid(job_id.to_owned()))
+            bail!("{}; then delete the test run", UnverifiedPid::of(job_id))
         }
         Job::Live | Job::Listed if sched.shares_group(job) => {
             bail!("{}; then delete the test run", SharedGroup(job_id.to_owned()))
@@ -614,7 +646,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
     // until its job id is recorded) is not taken for one with no job. Let
     // go just before the directory goes (the lock is in it).
     let lock = run.lock()?;
-    clear_to_delete(&run, &Scheduler::new(&machine.meta), name, force)?;
+    clear_to_delete(&run, &Scheduler::for_machine(&machine), name, force)?;
     drop(lock);
     if purge || force {
         fs::remove_dir_all(&run.dir)?;
@@ -1115,7 +1147,7 @@ mod tests {
         assert!(err.contains("recorded by an older cactup"), "{err}");
         assert!(!err.contains("stop command failed"), "no command ran: {err}");
         let refused = format!("{:#}", clear_to_delete(&old, &sched, "t", false).unwrap_err());
-        assert!(refused.contains("recorded by an older cactup") && refused.contains("stop it yourself"), "{refused}");
+        assert!(refused.contains("recorded by an older cactup") && refused.contains(&format!("kill -- -{pid}")), "{refused}");
         assert!(format!("{:#}", clear_to_delete(&old, &sched, "t", true).unwrap_err()).contains("recorded by an older cactup"));
         assert!(!stopped.exists(), "an older record's pid was stopped");
         assert!(TestRun::open(&old.dir).unwrap().meta.timestamps.finished.is_none());
@@ -1190,9 +1222,12 @@ mod tests {
             "#,
         );
         let failing = Scheduler::new(&failing);
+        // After the end, a failed query is no answer: `stop` sends the stop
+        // (harmless if the job is gone), `delete` takes it as ended.
         let mut ended = submitted_run(&tmp.path().join("ended"), "4243", None, true);
-        assert_eq!(job_state(&failing, &ended, ended.meta.job()).unwrap(), Job::Absent);
+        assert_eq!(job_state(&failing, &ended, ended.meta.job()).unwrap(), Job::Unanswered);
         stop_run(&mut ended, &failing, "t").unwrap();
+        clear_to_delete(&ended, &failing, "t", false).unwrap();
         clear_to_delete(&ended, &failing, "t", true).unwrap();
         let open = submitted_run(&tmp.path().join("open"), "4244", None, false);
         assert!(clear_to_delete(&open, &failing, "t", false).is_err());
@@ -1210,6 +1245,22 @@ mod tests {
         assert!(run.pending_job(&batch).is_some());
         run.meta.timestamps.finished = Some(chrono::Utc::now() - chrono::Duration::days(15));
         assert!(run.pending_job(&batch).is_none());
+    }
+
+    /// A test run made for another machine (a home two clusters share):
+    /// after its end its job is not asked about; before it, as ever.
+    #[test]
+    fn another_machines_finished_test_run_is_not_asked_about() {
+        let tmp = tempfile::tempdir().unwrap();
+        let meta = fake_meta("");
+        let other = Scheduler::named(&meta, "other");
+        let own = Scheduler::named(&meta, "m");
+        let ended = submitted_run(&tmp.path().join("ended"), "4242", None, true);
+        assert_eq!(ended.meta.machine, "m");
+        assert!(ended.pending_job(&other).is_none());
+        assert!(ended.pending_job(&own).is_some());
+        let open = submitted_run(&tmp.path().join("open"), "4243", None, false);
+        assert!(open.pending_job(&other).is_some());
     }
 
     /// `list`'s whole point is one `get_statuses` call instead of one

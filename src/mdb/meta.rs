@@ -472,9 +472,11 @@ pub struct Scheduler {
     /// `@JOB_ID@` substituted as in the other patterns. Where it is set,
     /// output with no line for the job is a job gone only if a line matches
     /// it; otherwise the query failed: a command that would act on the
-    /// answer refuses, unless the run had recorded its end, which is then
-    /// noted and taken as ended. Where it is not set, no line for the job
-    /// is a job gone.
+    /// answer refuses. After the run recorded its end, listings show that end
+    /// and deletes note the failure and take the job as ended, while the commands that act take
+    /// the safe reading (a stop is sent anyway; new work refuses, or a
+    /// submission chains behind the job). Where it is not set, no line for
+    /// the job is a job gone.
     pub unknown_job_pattern: Option<String>,
 }
 
