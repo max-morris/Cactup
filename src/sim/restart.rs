@@ -460,9 +460,11 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
     // (a) live job status must be U (gone from the queue). A run that
     // recorded its end is still asked about where a batch scheduler may
     // have requeued its job; where job ids are pids it is done (§10).
-    // After the end only a job put back in the queue counts (a running
-    // or unread one is the ended job still listed), and a query that
-    // fails is taken as the job ended (§10, `Scheduler::get_status_of`).
+    // After the end a job the scheduler lists in a state its patterns
+    // read (queued, held, running) is still listed: leaving the queue, or
+    // starting again, never reaped; one in a state no pattern reads is the
+    // ended job (Torque's `C`, Slurm's `CD`), and a query that fails is
+    // taken as the job ended (§10, `is_live`, `Scheduler::get_status_of`).
     // No job to ask about (none submitted, or a foreground run on a batch
     // scheduler's machine: its lock says, below), or one past asking after
     // its end (`Scheduler::asks_after_end`).

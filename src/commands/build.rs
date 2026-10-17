@@ -2595,7 +2595,7 @@ mod tests {
         // or starting again: `CF`, `R` before the requeued job's run clears
         // the outcome): a new build waits (or `-f` stops it), and `build
         // stop` asks the scheduler to stop it, the outcome standing.
-        for letter in ["CF", "R", "CG", "TO", "CD"] {
+        for letter in ["CF", "R", "CG", "TO"] {
             fs::write(&state, letter).unwrap();
             let refused = guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap_err().to_string();
             assert!(refused.contains("still lists its job 4242"), "{letter}: {refused}");
@@ -2607,6 +2607,12 @@ mod tests {
             assert!(stopped.exists(), "{letter}: -f left a still-listed job");
             fs::remove_file(&stopped).unwrap();
         }
+        // `CD`, a state no pattern reads after the outcome: the ended job;
+        // no refusal, and nothing stopped.
+        fs::write(&state, "CD").unwrap();
+        guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
+        stop_impl(&listing, &inst, Some("sim"), false).unwrap();
+        assert!(!stopped.exists(), "CD: stopped the ended job");
         let failing = machine("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
         let failing_sched = Scheduler::new(&failing.meta);
         guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).unwrap();

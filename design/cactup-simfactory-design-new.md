@@ -3219,8 +3219,10 @@ ask, on a batch scheduler, about the latest attempt's job after its outcome
 was recorded, within the requeue window (14 days after its `finished`,
 §10): a scheduler that requeues it (preemption, `scontrol requeue`)
 lists it, and it is then a live attempt, though `list` and `show` show its
-recorded outcome until it runs. After the outcome a job listed in any state
-is "still listed" (§10): queued again, or leaving the queue, which cactup
+recorded outcome until it runs. After the outcome a job listed in a state
+the machine's patterns read (queued, held, running) is "still listed"
+(§10; one in a state no pattern reads, as Torque's completed `C` or
+Slurm's `CD`, is the ended job): queued again, or leaving the queue, which cactup
 cannot tell apart; the guard refuses a new attempt beside it without `-f`
 (wait until it leaves, or `build stop` it; `-f` stops it), and `build stop`
 asks the scheduler to stop it, saying it is still listed (queued again, or
@@ -3775,9 +3777,11 @@ name an unrelated job (ids wrap around, a cluster is reinstalled, two
 clusters share a home) that would refuse a `delete` or be stopped by its
 `-f` (a requeued job that
 runs again clears `terminated` and `finished` as it starts, and records
-them again when it is over); after the end a job listed in any state is
-still listed (§10: queued again, or leaving the queue), and one whose
-status query failed is taken as ended;
+them again when it is over); after the end a job listed in a state the
+patterns read (queued, held, running) is still listed (§10: queued again,
+or leaving the queue), and one listed in a state no pattern reads (the
+ended job: Torque's `C`, Slurm's `CD`), or whose status query failed, is
+taken as ended;
 where job ids are pids, it is not asked about again (§10): `sim
 list`/`show`, the reaper (§8.3) and `delete` (§8.7) take it as gone. A
 restart that has not recorded its end and whose status query failed is
@@ -3806,27 +3810,37 @@ Display-state derivation for `cactup sim show`:
   LISTED (`sim list`, `sim show`) = a restart, active or not, that has
   reached termination and whose job the scheduler still lists (asked about
   only for the newest ended restart within the requeue window): queued or held
-  (QUEUED AGAIN), or running or in a state no pattern reads (STILL LISTED:
-  leaving the queue, or starting again; `sim show` adds the listed state).
+  (QUEUED AGAIN), or running (STILL LISTED: leaving the queue, or starting
+  again; `sim show` adds the listed state).
 
-After a restart's end its job, still listed in any state, is either leaving
-the queue or starting again (a requeued Slurm job goes `PD`, `CF` while a
-node boots, `R`, before its cactup clears the end; an ended one lingers as
-`CG`, `TO`, `CD`), and each command takes the safe reading for what it
-does. `sim stop` (with or without `-f`) looks at the newest ended restart first:
-if it has recorded its end and, within the requeue window, its job is still
-listed, `sim stop` asks the scheduler to stop that job directly (stopping a
-job that is leaving is harmless), says so ("still listed after the restart
-ended, queued again, or leaving the queue"), and records nothing else on
-the restart (its end stands). There is no graceful path for it: a restart
-that has recorded its end has no Cactus reading its `TERMINATE` (a
-requeued job's own run recreates the file and runs in full). A query that
-fails there is the after-end rule (a note, taken as ended), and `sim stop`
-goes on to the active restart as below. `sim submit` chains the new
-submission behind such a job (`CHAINED_JOB_ID`: behind a job that is just
-leaving, a moment's wait), active restart or not, and the reaper (§8.3)
-never reaps a restart whose job is still listed; `sim run` refuses to start
-beside it (wait until it leaves, or `sim stop` it). `sim submit` also
+After a restart's end its job, still listed in a state the patterns read,
+is either leaving the queue or starting again (a requeued Slurm job goes
+`PD`, `CF` while a node boots, `R`, before its cactup clears the end; an
+ended one lingers as `CG`, `TO`), and each command takes the safe reading
+for what it does. `sim stop` (with or without `-f`) acts on the active
+restart first while it has not recorded its end (gracefully or forced, as
+below: at a chain's handover the restart before it has ended, its job
+still listed while it leaves, and the active one is the run). Only when
+there is no active restart, or the active one has recorded its end, does
+it look at the newest ended restart: if, within the requeue window, its
+job is still listed, `sim stop` asks the scheduler to stop that job
+directly (stopping a job that is leaving is harmless), says so ("still
+listed after the restart ended, queued again, or leaving the queue"), and
+records nothing else on the restart (its end stands). There is no
+graceful path for it: a restart that has recorded its end has no Cactus
+reading its `TERMINATE` (a requeued job's own run recreates the file and
+runs in full). An active restart that has recorded its end and whose job
+is not still listed (gone, listed as over, or a query that failed: the
+note) has ended: `sim stop` says so, runs no stop command (Torque's `qdel`
+refuses a completed job) and deactivates it. `sim submit` chains the new
+submission behind a still-listed job (`CHAINED_JOB_ID`: behind a job that
+is just leaving, a moment's wait), active restart or not, and the reaper
+(§8.3) never reaps a restart whose job is still listed; where the reaper
+left an ended active restart under its throttles, `sim submit` asks the
+scheduler before saying so: still listed, chained; its run still holding
+its lock, chained; else it cleans the restart, as the reaper would, and
+the new submission runs on its own. `sim run` refuses to start beside a
+still-listed job (wait until it leaves, or `sim stop` it). `sim submit` also
 refuses while the active restart is a foreground run on a batch scheduler's
 machine (whose pid no scheduler could chain a job behind): wait for it, or
 interrupt it. What this costs where the job is only leaving: a new `sim
@@ -3848,15 +3862,16 @@ has a queued/holding/running job, unless `-f`** — as the "bypass all nagging"
 umbrella (§3), `-f` overrides the live-job guard (cactup first `stop`s the
 running/queued jobs, §8.6, then deletes), the trash/purge default, *and* the
 `--purge` prompt. Without `-f` on a live simulation, cactup refuses with
-advice that works: `sim stop` stops one job, the newest ended restart's if the
-scheduler still lists it after the restart ended (named so: leaving the
-queue, or starting again; waiting until it leaves works too), else the
-active restart's; `-f` stops the rest (a pre-submitted chain's). A pid that
+advice that works: `sim stop` stops one job, the one it acts on (§8.6):
+the active restart's while it has not recorded its end, else the newest
+ended restart's still-listed job (named so: leaving the queue, or
+starting again; waiting until it leaves works too); `-f` stops the rest (a
+pre-submitted chain's, an ended restart's behind a running one). A pid that
 does not lead its own process group, like an older record's, is never
 stopped: the refusal says to stop it by hand (§10). Which restarts' jobs are asked about, and how,
 is §8.6's and §10's: on a batch scheduler every restart with a job that has
 not recorded its end, and the newest ended restart within the requeue window
-after its end (live then while listed in any state), where job
+after its end (live then while listed in a state the patterns read), where job
 ids are pids
 only those that have not recorded their end, each only on its recorded host
 with its process start time. They are asked in one batch (the machine's
@@ -4308,22 +4323,27 @@ and start time beside it), so no caller can skip the checks.
   unrelated job (ids wrap around, a cluster is reinstalled, two clusters
   share a home). After a record's end (a restart's
   `terminated`, a test run's `finished`, a build attempt's outcome) a job
-  the scheduler lists in any state is "still listed" (`is_live`): the
-  scheduler has not let it go, and it is either leaving the queue (Slurm's
-  `CG`, `TO`, both in the MDB's running patterns, or `CD`, `F`, `CA`) or
-  starting again (`PD`, then `CF` while a node boots and `R` before its
-  cactup clears the record's end: preemption with requeue reaches exactly
-  this, the run recording its end on SIGTERM), which the patterns cannot
-  tell apart. Each command takes the safe reading for what it does: those
+  the scheduler lists in a state the machine's patterns read (queued,
+  held, running) is "still listed" (`is_live`): the scheduler has not let
+  it go, and it is either leaving the queue (Slurm's `CG`, `TO`, both in
+  the MDB's running patterns) or starting again (`PD`, then `CF` while a
+  node boots and `R` before its cactup clears the record's end: preemption
+  with requeue reaches exactly this, the run recording its end on
+  SIGTERM), which the patterns cannot tell apart. A job listed in a state
+  no pattern reads after the end is the ended job (Torque's completed `C`
+  within keep_completed, whose `qdel` refuses it; Slurm's `CD`, `F`,
+  `CA`, `OOM`, `NF`): a requeued job always passes through read states
+  (Slurm `PD`, `CF`, `R`; Torque `Q`, `R`), and so the listing paths,
+  which omit `CD`, and the single queries agree. Each command takes the safe reading for what it does: those
   that would start new work beside it (`sim run`, `test run`/`test
   submit`, a new build) refuse, saying it is still listed and to wait or
   stop it, and `sim submit` chains behind it; `sim stop`, `test stop` and
   `build stop` ask the scheduler to stop it (harmless for a job that is
   leaving), with no graceful path and nothing else recorded; `sim delete`
   and `test delete` refuse without `-f` and stop it with `-f`; displays
-  show QUEUED AGAIN (queued or held) or STILL LISTED (running, unread). Not
-  listed (the unknown-job line, or absent from a listing that ran), or
-  past the requeue window: ended. A failed query: the note, taken as
+  show QUEUED AGAIN (queued or held) or STILL LISTED (running). Not listed
+  (the unknown-job line, or absent from a listing that ran), listed in a
+  state no pattern reads, or past the requeue window: ended. A failed query: the note, taken as
   ended. A requeued job that starts clears the record's end itself
   (`execute_restart`, `build::execute`, the test run's compute side), and is
   live by the ordinary rule from then on.
@@ -4702,8 +4722,9 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   from the active result set's live job status, `DONE (passed/failed)` once the
   job is `U` and a summary was recorded, `ERROR` on `E` (after the run
   recorded `finished`, a job the scheduler still lists is `QUEUED AGAIN`
-  when queued or held, `STILL LISTED` when running or unread: leaving the
-  queue, or starting again), and `UNKNOWN` where the status query failed for a
+  when queued or held, `STILL LISTED` when running: leaving the queue, or
+  starting again; listed in a state no pattern reads, it is the ended job),
+  and `UNKNOWN` where the status query failed for a
   run that has not recorded `finished` and whose lock does not say it runs. The rules below are shared
   by `list`, `show`, `stop`, `delete` and the guard before a new run
   (`TestRun::pending_job`).
@@ -4718,8 +4739,10 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
     Torque's `qrerun`), within the requeue window (14 days after
     `finished`, §10), and a requeued job that runs clears `finished` as it
     starts (the compute side, under the test lock). After `finished` a job
-    listed in any state is still listed (`Job::Listed`: queued again, or
-    leaving the queue, §10): `list` shows it `QUEUED AGAIN` or `STILL
+    listed in a state the patterns read is still listed (`Job::Listed`:
+    queued again, or leaving the queue, §10; one in a state no pattern
+    reads is the ended job, `Job::Ended`: nothing to stop, `delete` goes
+    ahead): `list` shows it `QUEUED AGAIN` or `STILL
     LISTED`, `stop` asks the scheduler to stop it (recording nothing else;
     one the scheduler will not stop leaves the run's end standing),
     `delete` refuses it without `-f` (wait until it leaves, or `test stop`
@@ -4771,7 +4794,7 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
     lock, so it is taken as ended, though the scheduler still lists the
     job). `delete` refuses it without `-f`, and with `-f` stops it, or,
     where the scheduler refuses, goes ahead unless the run's `running.lock`
-    is held. Listed so after the run recorded its end, it is still listed
+    is held. Listed so after the run recorded its end, it is the ended job
     (above).
   - **What `stop` records.** `finished`, once the scheduler took its stop,
     or refused it with nothing of the run holding the lock; a status query

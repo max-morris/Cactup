@@ -20,17 +20,20 @@ use std::path::PathBuf;
 /// `running.lock`, the one sign of an interactive run, and of a submitted
 /// one the queue has forgotten. Before the run records its end a failed
 /// query is UNKNOWN, never a state the query did not give; after it, a
-/// failed query, or a job listed running (Slurm's `CG`, `TO`) or in a state
-/// no pattern reads, is the ended job on its way out of the queue, and
-/// only a queued or held one is a job put back in the queue (`is_live`).
+/// job the scheduler still lists in a state its patterns read is QUEUED
+/// AGAIN (queued, held) or STILL LISTED (running: leaving the queue, or
+/// starting again), and a failed query, or a job listed in a state no
+/// pattern reads, is the ended job (`is_live`).
 fn state_line(run: &TestRun, query: Option<Option<JobStatus>>, lock_live: bool) -> colored::ColoredString {
     let finished = run.meta.timestamps.finished.is_some();
     let status = match query {
         Some(None) if !finished && !lock_live => return "UNKNOWN (status query failed)".yellow(),
         // After the run's end, a job the scheduler still lists: queued again,
-        // or (running, unread) leaving the queue or starting again.
+        // or (running) leaving the queue or starting again.
         Some(Some(JobStatus::Queued | JobStatus::Holding)) if finished => return "QUEUED AGAIN".yellow(),
-        Some(Some(JobStatus::Running | JobStatus::Error)) if finished => return "STILL LISTED".yellow(),
+        Some(Some(JobStatus::Running)) if finished => return "STILL LISTED".yellow(),
+        // A state no pattern reads after the end: the ended job.
+        Some(Some(JobStatus::Error)) if finished => Some(JobStatus::Unknown),
         Some(status) => status,
         None => None,
     };
@@ -397,10 +400,11 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             "Test job {job_id} was submitted on host {}, and nothing of the run holds its lock: taken as ended",
             job.host.as_deref().unwrap_or_default()
         ),
-        Job::Absent if run.lock_live()? => {
+        Job::Ended | Job::Absent if run.lock_live()? => {
             println!("{}", sentence(held_without_listed_job(run, sched, name)));
             return Ok(());
         }
+        Job::Ended => println!("Test job {job_id} has ended (the scheduler still lists it as over); nothing to stop"),
         // After the run's end, unlisted or a query that failed: ended.
         Job::Absent if run.meta.timestamps.finished.is_some() => println!("Test job {job_id} has ended; nothing to stop"),
         Job::Absent => println!("Test job {job_id} is not in the queue; nothing to stop"),
@@ -423,13 +427,17 @@ enum Job {
     /// takes an ended job too); one it refuses (Torque's `qdel` of a
     /// completed job) is over where nothing of the run holds its lock.
     Unread,
-    /// Listed in any state after the run recorded its end (within the
-    /// requeue window): queued again, or leaving the queue, which cactup
-    /// cannot tell apart (Slurm lists a requeued job `CF` and `R` before its
-    /// run clears the end, an ended one `CG`, `TO`, `CD`, `CA`). `stop` asks
+    /// Listed in a state the patterns read after the run recorded its end
+    /// (within the requeue window): queued again, or leaving the queue, which
+    /// cactup cannot tell apart (Slurm lists a requeued job `CF` and `R`
+    /// before its run clears the end, an ended one `CG`, `TO`). `stop` asks
     /// the scheduler to stop it, `delete` refuses it without `-f`, a new run
     /// refuses to start beside it.
     Listed,
+    /// Listed in a state no pattern reads after the run recorded its end:
+    /// the ended job (Torque's `C`, Slurm's `CD`, `F`, `CA`): a requeued job
+    /// passes through read states. Nothing to stop; `delete` goes ahead.
+    Ended,
     /// Not listed (the scheduler does not know it; where the machine cannot
     /// tell, a query that failed reads so too; after the run's end, a query
     /// that failed is taken so).
@@ -441,9 +449,9 @@ enum Job {
 }
 
 /// What the scheduler says of `run`'s job. Before the run records its end,
-/// running, queued or held is live; after it, listed in any state is
-/// `Listed` (`is_live`), and a query that failed is taken as the job ended
-/// (`Scheduler::get_status_of`).
+/// running, queued or held is live; after it, the same states are
+/// `Listed`, a state no pattern reads is `Ended` (`is_live`), and a query
+/// that failed is taken as the job ended (`Scheduler::get_status_of`).
 fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
     if sched.recorded_elsewhere(job).is_some() {
         return Ok(Job::OnHost);
@@ -454,6 +462,7 @@ fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
         _ if finished && is_live(status, true) => Job::Listed,
         JobStatus::Running | JobStatus::Queued | JobStatus::Holding => Job::Live,
         JobStatus::Unknown => Job::Absent,
+        JobStatus::Error if finished => Job::Ended,
         JobStatus::Error => Job::Unread,
     })
 }
@@ -518,8 +527,8 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         // Held, but not a job the scheduler here lists live: not stopped or
         // removed from here, `-f` neither.
         Job::OnHost if run.lock_live()? => bail!("{}; delete it once it has ended", on_host(job, name)),
-        Job::Absent if run.lock_live()? => bail!("{}", held_without_listed_job(run, sched, name)),
-        Job::Absent | Job::OnHost => {}
+        Job::Ended | Job::Absent if run.lock_live()? => bail!("{}", held_without_listed_job(run, sched, name)),
+        Job::Ended | Job::Absent | Job::OnHost => {}
         // An older record's pid, or one sharing its process group (§10):
         // never stopped, `-f` neither.
         Job::Live | Job::Listed if sched.unverified(job) => {
@@ -940,13 +949,14 @@ mod tests {
         stop_run(&mut ended, &refusing, "t").unwrap();
         let ended = TestRun::open(&ended.dir).unwrap();
         assert!(ended.meta.timestamps.finished.is_some());
-        // Still listed `C`, now after the run's end: still listed (leaving
-        // the queue, or starting again), so `delete` refuses it without `-f`;
-        // with `-f` the scheduler refuses the stop, nothing of the run holds
-        // the lock, and it goes ahead.
-        assert_eq!(job_state(&refusing, &ended, ended.pending_job(&refusing).unwrap()).unwrap(), Job::Listed);
-        let refused = clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string();
-        assert!(refused.contains("still lists its job JOB-7") && refused.contains("wait until it leaves"), "{refused}");
+        // Still listed `C` (Torque's completed state, within
+        // keep_completed), now after the run's end: a state no pattern
+        // reads, the ended job (a requeued one passes through `Q`, `R`).
+        // `stop` says it has ended and runs no `qdel`; `delete` goes ahead.
+        assert_eq!(job_state(&refusing, &ended, ended.pending_job(&refusing).unwrap()).unwrap(), Job::Ended);
+        let mut again = TestRun::open(&ended.dir).unwrap();
+        stop_run(&mut again, &refusing, "t").unwrap();
+        clear_to_delete(&ended, &refusing, "t", false).unwrap();
         clear_to_delete(&ended, &refusing, "t", true).unwrap();
     }
 
@@ -1146,7 +1156,7 @@ mod tests {
         let sched = Scheduler::new(&meta);
         let mut run = submitted_run(&tmp.path().join("run"), "4242", None, true);
         let before = fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap();
-        for letter in ["CF", "R", "CG", "TO", "CD", "PD"] {
+        for letter in ["CF", "R", "CG", "TO", "PD"] {
             fs::write(&state, letter).unwrap();
             assert_eq!(job_state(&sched, &run, run.meta.job()).unwrap(), Job::Listed, "{letter}");
             let refused = clear_to_delete(&run, &sched, "t", false).unwrap_err().to_string();
@@ -1154,14 +1164,22 @@ mod tests {
             stop_run(&mut run, &sched, "t").unwrap();
             assert_eq!(fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap(), before, "{letter}: recorded something");
         }
-        assert_eq!(fs::read_to_string(&stopped).unwrap().lines().count(), 6);
+        assert_eq!(fs::read_to_string(&stopped).unwrap().lines().count(), 5);
+        // `CD`, a state no pattern reads: the ended job; nothing to stop,
+        // `delete` goes ahead.
+        fs::write(&state, "CD").unwrap();
+        assert_eq!(job_state(&sched, &run, run.meta.job()).unwrap(), Job::Ended);
+        stop_run(&mut run, &sched, "t").unwrap();
+        clear_to_delete(&run, &sched, "t", false).unwrap();
+        assert_eq!(fs::read_to_string(&stopped).unwrap().lines().count(), 5);
+        fs::write(&state, "R").unwrap();
         assert_eq!(state_line(&run, Some(Some(JobStatus::Running)), false).to_string(), "STILL LISTED".yellow().to_string());
-        assert_eq!(state_line(&run, Some(Some(JobStatus::Error)), false).to_string(), "STILL LISTED".yellow().to_string());
+        assert_eq!(state_line(&run, Some(Some(JobStatus::Error)), false).to_string(), "INACTIVE".normal().to_string());
         assert_eq!(state_line(&run, Some(Some(JobStatus::Queued)), false).to_string(), "QUEUED AGAIN".yellow().to_string());
         assert_eq!(state_line(&run, Some(None), false).to_string(), "INACTIVE".normal().to_string());
         // With -f, delete stops it and goes ahead.
         clear_to_delete(&run, &sched, "t", true).unwrap();
-        assert_eq!(fs::read_to_string(&stopped).unwrap().lines().count(), 7);
+        assert_eq!(fs::read_to_string(&stopped).unwrap().lines().count(), 6);
 
         let failing = fake_meta(
             r#"

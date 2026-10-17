@@ -349,23 +349,57 @@ fn submit_impl(
                 sim.name
             );
         }
-        match r.meta.terminated {
-            // The reaper (above) leaves an ended restart whose job the
-            // scheduler still lists (§8.6): queued again, or leaving.
-            true => println!(
-                "Restart {}'s job {} is still listed by the scheduler after the restart ended (queued \
-                 again, or leaving the queue); chaining the new submission behind it",
-                restart::dir_name(active),
-                r.meta.job_id
-            ),
-            false => println!(
-                "Restart {} is still live (job {}); chaining the new submission behind it",
-                restart::dir_name(active),
-                r.meta.job_id
-            ),
+        let chain = match r.meta.terminated {
+            false => {
+                println!(
+                    "Restart {} is still live (job {}); chaining the new submission behind it",
+                    restart::dir_name(active),
+                    r.meta.job_id
+                );
+                true
+            }
+            // An ended restart still active: the reaper left it, because the
+            // scheduler still lists its job (§8.6), or under its throttles,
+            // without asking. Asked here, so what is said is known.
+            true => {
+                let listed = match r.meta.scheduler_job(&sched) {
+                    Some(job) if sched.asks_after_end(r.meta.finished) => {
+                        crate::scheduler::is_live(sched.get_status_of(job, true)?, true)
+                    }
+                    _ => false,
+                };
+                if listed {
+                    println!(
+                        "Restart {}'s job {} is still listed by the scheduler after the restart ended \
+                         (queued again, or leaving the queue); chaining the new submission behind it",
+                        restart::dir_name(active),
+                        r.meta.job_id
+                    );
+                    true
+                } else if LinkLock::is_held_live(&r.running_lock_path())? {
+                    println!(
+                        "Restart {} has recorded its end, but its run still holds its lock (it is \
+                         ending); chaining the new submission behind its job {}",
+                        restart::dir_name(active),
+                        r.meta.job_id
+                    );
+                    true
+                } else {
+                    // What the reaper does, but for its throttles.
+                    crate::sim::manage::clean_active(sim)?;
+                    println!(
+                        "Restart {} had ended and the scheduler no longer lists its job {}: cleaned it",
+                        restart::dir_name(active),
+                        r.meta.job_id
+                    );
+                    false
+                }
+            }
+        };
+        if chain {
+            prev_job = Some(r.meta.job_id.clone());
+            activate_first = false;
         }
-        prev_job = Some(r.meta.job_id.clone());
-        activate_first = false;
     } else if let Some((id, job, _)) = crate::sim::manage::listed_newest(sim, &sched)? {
         // The newest restart ended (deactivated: `sim clean`, a stop), but
         // the scheduler still lists its job (§8.6): queued again, or leaving

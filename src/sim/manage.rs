@@ -96,13 +96,19 @@ pub fn stop(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
 
 /// [`stop`], on `sim` (locked), by `sched`.
 fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res<()> {
-    // The newest restart's job, still listed after the restart recorded
-    // its end (§8.6): queued again, or leaving the queue, which cactup
-    // cannot tell apart. No Cactus of that restart reads its TERMINATE any
-    // more (a requeued job's own run recreates the file), so the scheduler
-    // is asked to stop the job, with or without `-f` (stopping a job that
-    // is leaving is harmless), and the restart's end stands.
-    if let Some((id, job, _)) = listed_newest(sim, sched)? {
+    // The active restart comes first while it has not recorded its end (at
+    // a chain's handover the restart before it has ended, its job still
+    // listed while it leaves the queue, and the active one is the run).
+    // With no active restart, or an active one that has ended: the newest
+    // ended restart's job, still listed after its end (§8.6: queued again,
+    // or leaving the queue, which cactup cannot tell apart). No Cactus of
+    // that restart reads its TERMINATE any more (a requeued job's own run
+    // recreates the file), so the scheduler is asked to stop the job, with
+    // or without `-f` (stopping a job that is leaving is harmless), and the
+    // restart's end stands.
+    if !active_runs(sim)?
+        && let Some((id, job, _)) = listed_newest(sim, sched)?
+    {
         match sched.stop(job.job())? {
             Stopped::Sent => println!(
                 "Asked the scheduler to stop job {}, still listed after {} ended (queued again, or \
@@ -125,6 +131,20 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
     };
     let mut r = Restart::load(&sim.dir, active)?;
     let terminate = r.dir.join("TERMINATE");
+
+    // The active restart has recorded its end, and its job is not still
+    // listed (above): ended, or listed as over (Torque's `C`, whose `qdel`
+    // refuses it). Nothing to stop; finished as a stop finishes it.
+    if r.meta.terminated {
+        println!(
+            "{} has ended (its job {} is not listed live by the scheduler); nothing to stop",
+            restart::dir_name(active),
+            r.meta.job_id
+        );
+        restart::deactivate(&sim.dir)?;
+        sim.log("stop", &format!("{} had ended; deactivated", restart::dir_name(active)));
+        return Ok(());
+    }
 
     if terminate.is_file() && !force {
         fs::write(&terminate, b"1\n")
@@ -374,7 +394,11 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     }
     if !live.is_empty() {
         if !force {
-            bail!("{}", live_jobs_refusal(name, &live, restart::active_id(&sim.dir)?));
+            let stops = match active_runs(&sim)? {
+                true => restart::active_id(&sim.dir)?,
+                false => live.iter().find(|l| l.ended).map(|l| l.id),
+            };
+            bail!("{}", live_jobs_refusal(name, &live, stops));
         }
         for l in &live {
             // A pid cactup cannot vouch for (§10) says itself that nothing ran.
@@ -410,6 +434,15 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
         eprintln!("Reaped orphaned executable cache entries: {}", reaped.join(", "));
     }
     Ok(())
+}
+
+/// Whether `sim` has an active restart that has not recorded its end: the
+/// one `sim stop` stops (gracefully or forced), before anything else.
+fn active_runs(sim: &Simulation) -> Res<bool> {
+    Ok(match restart::active_id(&sim.dir)? {
+        Some(id) => Restart::load(&sim.dir, id).is_ok_and(|r| !r.meta.terminated),
+        None => false,
+    })
 }
 
 /// The newest of `sim`'s restarts whose run recorded its end: the one a
@@ -539,12 +572,13 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
 }
 
 /// `delete`'s refusal of `live` without `-f`, with advice that works:
-/// `sim stop` stops one job, the newest restart's if the scheduler still
-/// lists it after the restart ended (only the newest is asked about after
-/// its end; waiting until it leaves the queue works too), else the active
-/// restart's; any other (a pre-submitted chain's) only `-f` stops.
-fn live_jobs_refusal(name: &str, live: &[LiveJob], active: Option<u32>) -> String {
-    let stoppable = live.iter().find(|l| l.ended).or_else(|| live.iter().find(|l| Some(l.id) == active));
+/// `sim stop` stops one job, restart `stops`'s (see [`stop_sim`]: the
+/// active restart's while it has not recorded its end, else the newest
+/// ended restart's still-listed job, which waiting until it leaves the
+/// queue also clears); any other (a pre-submitted chain's, an ended one
+/// behind a running restart) only `-f` stops.
+fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String {
+    let stoppable = live.iter().find(|l| Some(l.id) == stops);
     let advice = match stoppable {
         Some(_) if live.len() == 1 => format!("`cactup sim stop {name}` first, or use -f to stop it and delete"),
         Some(l) => format!(
@@ -558,7 +592,7 @@ fn live_jobs_refusal(name: &str, live: &[LiveJob], active: Option<u32>) -> Strin
         .map(|l| match l.ended {
             true => format!(
                 "{} = job {}, still listed by the scheduler after the restart ended (leaving the \
-                 queue, or starting again: wait until it leaves, or stop it)",
+                 queue, or starting again)",
                 restart::dir_name(l.id),
                 l.job.id
             ),
@@ -646,13 +680,15 @@ impl SimState {
 /// the job ended; a job the scheduler still lists is shown for what is
 /// known of it, whether the restart is still active or not (`sim stop`
 /// stops it): QUEUED AGAIN where queued or held (`Requeued`), STILL LISTED
-/// where running or in a state no pattern reads (`StillListed`: leaving
-/// the queue, or starting again).
+/// where running (`StillListed`: leaving the queue, or starting again). A
+/// state no pattern reads after the end is the ended job (`is_live`).
 fn shown(active: bool, chained: bool, terminated: bool, query: Option<Option<JobStatus>>) -> DisplayState {
     let status = match query {
         Some(None) if !terminated => return DisplayState::Unknown,
         Some(Some(JobStatus::Queued | JobStatus::Holding)) if terminated => return DisplayState::Requeued,
-        Some(Some(JobStatus::Running | JobStatus::Error)) if terminated => return DisplayState::StillListed,
+        Some(Some(JobStatus::Running)) if terminated => return DisplayState::StillListed,
+        // A state no pattern reads after the end: the ended job.
+        Some(Some(JobStatus::Error)) if terminated => Some(JobStatus::Unknown),
         Some(status) => status,
         None => None,
     };
@@ -1308,9 +1344,10 @@ mod tests {
         let (state, _, _) = sim_state_now(&sim, &failing);
         assert_eq!(state, DisplayState::Unknown);
 
-        // Ended, and the scheduler still lists the job, in any state:
-        // leaving the queue (`CG`, `TO`, `CD`) or starting again (`PD`,
-        // `CF`, `R`), live either way, shown QUEUED AGAIN or STILL LISTED.
+        // Ended, and the scheduler still lists the job in a state its
+        // patterns read: leaving the queue (`CG`, `TO`) or starting again
+        // (`PD`, `CF`, `R`), live either way, shown QUEUED AGAIN or STILL
+        // LISTED; in a state no pattern reads (`CD`), the ended job.
         let text = fs::read_to_string(&path).unwrap().replace("terminated = false", "terminated = true");
         fs::write(&path, text).unwrap();
         for (state_letter, live, shown) in [
@@ -1318,7 +1355,7 @@ mod tests {
             ("R", true, DisplayState::StillListed),
             ("CG", true, DisplayState::StillListed),
             ("TO", true, DisplayState::StillListed),
-            ("CD", true, DisplayState::StillListed),
+            ("CD", false, DisplayState::Finished),
             ("PD", true, DisplayState::Requeued),
         ] {
             let m = fake(&format!(
@@ -1437,7 +1474,7 @@ mod tests {
         let sched = Scheduler::new(&m);
         let live = live_jobs(&sim, &sched).unwrap();
         assert_eq!(live.iter().map(|l| (l.id, l.ended)).collect::<Vec<_>>(), [(0, true)]);
-        let refusal = live_jobs_refusal("requeued", &live, None);
+        let refusal = live_jobs_refusal("requeued", &live, Some(0));
         assert!(refusal.contains("job 1003, still listed by the scheduler after the restart ended"), "{refusal}");
         assert!(refusal.ends_with("`cactup sim stop requeued` first, or use -f to stop it and delete"), "{refusal}");
         assert_eq!(shown(false, false, true, Some(Some(JobStatus::Queued))), DisplayState::Requeued);
@@ -1603,6 +1640,99 @@ mod tests {
         assert_eq!(listed_newest(&sim, &sched).unwrap().map(|(id, job, _)| (id, job.id)), Some((0, "4260".to_owned())));
         let live = live_jobs(&sim, &sched).unwrap();
         assert_eq!(live.iter().map(|l| (l.id, l.ended)).collect::<Vec<_>>(), [(0, true), (1, false)]);
+    }
+
+    /// At a chain's handover restart 0 has ended, its job still listed
+    /// while it leaves the queue (`TO`) or done (`CD`), and restart 1,
+    /// chained behind it, is active and running: `sim stop` stops restart
+    /// 1 (gracefully, or forced with `-f`), never restart 0's job, and
+    /// `sim delete`'s advice names what `sim stop` stops.
+    #[test]
+    fn sim_stop_at_a_chains_handover_stops_the_running_restart() {
+        use crate::mdb::meta::Meta;
+        for zero in ["TO", "CD"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let stopped = tmp.path().join("stopped");
+            let entry = fake_sim(tmp.path(), "chain", "1000", false, None, true);
+            let sim = Simulation::open("chain", &entry.dir).unwrap();
+            let first = fs::read_to_string(restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml")).unwrap();
+            let second = first
+                .lines()
+                .filter(|l| !l.starts_with("terminated") && !l.starts_with("finished"))
+                .map(|l| if l.starts_with("job-id") { "job-id = \"1001\"\nchained-job-id = \"1000\"".to_owned() } else { l.to_owned() })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let one = restart::restart_dir(&sim.dir, 1);
+            fs::create_dir_all(one.join(".cactup")).unwrap();
+            fs::write(one.join(".cactup/restart.toml"), second + "\n").unwrap();
+            restart::make_active(&sim.dir, 1).unwrap();
+            let terminate = one.join("TERMINATE");
+            let m: Meta = toml::from_str(&format!(
+                "[machine]\nnickname = \"fake\"\n[scheduler]\n\
+                 get-status = \"case @JOB_ID@ in 1000) echo '1000 {zero} ';; 1001) grep -q 1 {t} 2>/dev/null || echo '1001 R ';; esac\"\n\
+                 stop = \"echo @JOB_ID@ >> {s}\"\nstatus-pattern = \"^@JOB_ID@ \"\nrunning-pattern = \" (CF|CG|R|TO) \"\n\
+                 [queues.local]\ndefault = true\n[submitscripts]\n\"default\" = [\"local\"]\n[runscripts]\n\"default\" = [\"local\"]\n",
+                t = terminate.display(),
+                s = stopped.display()
+            ))
+            .unwrap();
+            let sched = Scheduler::new(&m);
+
+            let live = live_jobs(&sim, &sched).unwrap();
+            let stops = if active_runs(&sim).unwrap() { restart::active_id(&sim.dir).unwrap() } else { None };
+            let refusal = live_jobs_refusal("chain", &live, stops);
+            assert!(refusal.contains("output-0001 = job 1001"), "{zero}: {refusal}");
+            match zero {
+                "TO" => assert!(refusal.contains("`cactup sim stop chain` stops output-0001's job"), "{refusal}"),
+                _ => assert!(refusal.ends_with("`cactup sim stop chain` first, or use -f to stop it and delete"), "{refusal}"),
+            }
+
+            // Forced: restart 1's job, not restart 0's.
+            stop_sim(&sim, &sched, "chain", true).unwrap();
+            assert_eq!(fs::read_to_string(&stopped).unwrap(), "1001\n", "{zero}");
+            assert!(restart::active_id(&sim.dir).unwrap().is_none());
+
+            // Graceful: restart 1 active again, its TERMINATE file there.
+            fs::remove_file(&stopped).unwrap();
+            fs::write(one.join(".cactup/restart.toml"), fs::read_to_string(one.join(".cactup/restart.toml")).unwrap().replace("terminated = true", "terminated = false")).unwrap();
+            restart::make_active(&sim.dir, 1).unwrap();
+            fs::write(&terminate, b"0\n").unwrap();
+            stop_sim(&sim, &sched, "chain", false).unwrap();
+            assert_eq!(fs::read_to_string(&terminate).unwrap(), "1\n", "{zero}: no graceful request");
+            assert!(!stopped.exists(), "{zero}: restart 0's job stopped");
+        }
+    }
+
+    /// A completed job a scheduler lists in a state no pattern reads after
+    /// the restart's end (Torque's `C` within keep_completed, whose `qdel`
+    /// refuses it): the ended job. `sim delete` goes ahead, and `sim stop`
+    /// runs no stop command for it.
+    #[test]
+    fn a_completed_job_listed_after_the_end_is_the_ended_job() {
+        use crate::mdb::meta::Meta;
+        let tmp = tempfile::tempdir().unwrap();
+        let stopped = tmp.path().join("stopped");
+        let entry = fake_sim(tmp.path(), "torque", "4242.qb", true, None, true);
+        let sim = Simulation::open("torque", &entry.dir).unwrap();
+        let m: Meta = toml::from_str(&format!(
+            "[machine]\nnickname = \"fake\"\n[scheduler]\nget-status = \"echo '@JOB_ID@ job x C batch'\"\n\
+             stop = \"echo @JOB_ID@ >> {}; echo 'qdel: Invalid state for job - COMPLETE' >&2; exit 15\"\n\
+             status-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" Q \"\nrunning-pattern = \" R \"\n\
+             [queues.local]\ndefault = true\n[submitscripts]\n\"default\" = [\"local\"]\n[runscripts]\n\"default\" = [\"local\"]\n",
+            stopped.display()
+        ))
+        .unwrap();
+        let sched = Scheduler::new(&m);
+        assert!(live_jobs(&sim, &sched).unwrap().is_empty());
+        assert!(listed_newest(&sim, &sched).unwrap().is_none());
+        assert_eq!(sim_state_now(&sim, &sched).0, DisplayState::Finished);
+        // Still active (as after any run): it has ended, nothing to stop,
+        // and it is deactivated; then nothing is active, `-f` likewise.
+        stop_sim(&sim, &sched, "torque", false).unwrap();
+        assert!(restart::active_id(&sim.dir).unwrap().is_none());
+        stop_sim(&sim, &sched, "torque", true).unwrap();
+        assert!(!stopped.exists(), "qdel ran for a completed job");
+        assert_eq!(sim_state_now(&sim, &sched).0, DisplayState::Inactive);
     }
 
     /// The graceful path must confirm the run actually left before finishing

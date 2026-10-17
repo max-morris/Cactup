@@ -206,7 +206,8 @@ On a batch system, for 14 days after a test run ended, a job the scheduler
 still lists is taken for what it may be: put back in the queue
 (preemption, `scontrol requeue`), or just leaving it (Slurm lists an ended
 job as completing for a moment, or timed out for a few minutes), which
-cactup cannot tell apart. `test list` shows it `QUEUED AGAIN` or `STILL
+cactup cannot tell apart; a job listed as completed (Slurm's `CD`, Torque's
+`C`) has simply ended. `test list` shows it `QUEUED AGAIN` or `STILL
 LISTED`, `test stop` cancels it, `test delete` refuses it without `--force`,
 and a new `test run` or `test submit` waits for it to leave (or for `test
 stop`). Where the machine definition

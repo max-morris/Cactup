@@ -3755,6 +3755,56 @@ build (`CG`) after their end: `test submit`, `test delete`, `build submit`
 refused, `test stop` and `build stop` asking the scheduler; the earlier
 scenarios with the new readings.
 
+Round 6 (on `b19b5f6`): BLOCKED by both. (1) A, B (ran; a regression from
+`bd29ca0`, master stopped it): `sim stop` asked `listed_newest` first, so
+at every chain handover, restart 0 ended with its job listed `TO`/`CD`
+for MinJobAge and restart 1 active and running, `sim stop` (either form)
+cancelled restart 0's ended job and left restart 1 running; `sim
+delete`'s advice that `sim stop` stops it was false. (2) A (ran, fake
+`qdel`): on Torque a completed job listed `C` within keep_completed was
+"still listed" (round 5's rule took an unread state after the end as
+listed), so the refusals advised `sim stop`/`-f`, which failed on `qdel`'s
+"Invalid state for job - COMPLETE"; `build -f` and `build stop` failed
+too. (3) B (ran): under the reaper's throttles `sim submit` said an ended
+restart's job was still listed without asking. Not blocking: the comment
+in `reap_stale`. The lead's decisions, and the fixes in the commit after
+this record:
+- `sim stop` acts on the active restart first while it has not recorded
+  its end (graceful or forced, as before round 4); only with no active
+  restart, or an active one that has ended, does it turn to the newest
+  ended restart's still-listed job. An active restart that has ended and
+  whose job is not still listed has ended: `sim stop` says so, runs no
+  stop command and deactivates it. `sim delete`'s advice names what `sim
+  stop` will stop in each shape (the running restart's job at a handover).
+- Round 5's rule refined: after a record's end only a state the
+  machine's patterns read (queued, held, running) is still listed; a state
+  no pattern reads is the ended job (Torque's `C`, Slurm's `CD`, `F`,
+  `CA`, `OOM`, `NF`). Why: a requeued job always passes through read
+  states (Slurm `PD`, `CF`, `R`; Torque `Q`, `R`), so taking an unread
+  state as the ended job loses nothing of round 5's case, and it ends the
+  refusals whose advice failed on Torque (`qdel` refuses a completed job)
+  and the minutes of refusal behind Slurm's `CD`; the listing paths, which
+  omit `CD`, and the single queries now agree. `STILL LISTED` is shown
+  for running only; test runs have `Job::Ended` again for an unread state
+  after the end (nothing to stop, `delete` goes ahead).
+- `sim submit`, finding an ended active restart the reaper left (its
+  throttles), asks the scheduler before saying anything: still listed,
+  chained; its run still holding its lock, chained; else it cleans the
+  restart, as the reaper would, and submits on its own.
+- `reap_stale`'s comment states the rule above.
+Checked with real binaries: the fake Slurm (a handover: `sim stop -f`
+cancelled restart 1's job 4266 only, `sim show` showing restart 0 `STILL
+LISTED` and restart 1 `RUNNING`, `sim delete` naming `sim stop` for
+output-0001; `sim submit` under the throttles with the old job gone
+(cleaned, unchained) and listed `R` (chained); `CD` after the end:
+`FINISHED`/`INACTIVE`, nothing refused); a fake Torque (`qstat` listing
+`C`, `qdel` refusing it with "Invalid state for job - COMPLETE", exit
+15): a restart, a test run and a build ended with their job `C` showed
+ended, `sim stop` said it had ended and ran no `qdel`, `sim delete`,
+`test submit`, `build submit` and `build -f` went ahead, `build stop`
+said it had finished; listed `R` after the end it was still listed and
+`qdel` stopped it; the earlier scenarios as before.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

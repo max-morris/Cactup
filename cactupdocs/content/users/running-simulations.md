@@ -404,12 +404,14 @@ On a batch system, the job of a simulation's newest restart is looked at
 for 14 days after the restart finished: if the scheduler still lists it,
 it is either put back in the queue (preemption, `scontrol requeue`) or just
 leaving it (Slurm lists an ended job as completing for a moment, or timed
-out for a few minutes), and cactup cannot tell which. `sim list` and `sim
-show` then show that restart as `QUEUED AGAIN` (queued or held) or `STILL
-LISTED`, `sim stop` cancels the job (with or without `--force`), `sim
+out for a few minutes), and cactup cannot tell which (a job listed as
+completed, Slurm's `CD` or Torque's `C`, has simply ended). `sim list` and
+`sim show` then show that restart as `QUEUED AGAIN` (queued or held) or
+`STILL LISTED` (running), `sim stop` cancels the job (with or without `--force`), `sim
 delete` refuses until it has left or is stopped (or with `--force`, which
 cancels it), `sim submit` chains the new submission behind it, and `sim
-run` refuses to start beside it. `sim submit` also refuses while the simulation runs
+run` refuses to start beside it. `sim stop` stops a simulation's running
+restart first: only when none is running does it turn to such a job. `sim submit` also refuses while the simulation runs
 in the foreground on a batch system: wait for that run, or interrupt it. A simulation run in the foreground (`cactup sim run`) on a batch
 system has no job the scheduler knows: `sim stop --force` tells you to
 interrupt it where it runs, and `sim delete` refuses while it runs.
