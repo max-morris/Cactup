@@ -3216,7 +3216,8 @@ process's, and `-f` would stop it. `build list`, `show` and `prune` ask only
 about one that has recorded no outcome (a finished history costs no
 scheduler round-trip). The guard before a new attempt and `build stop` also
 ask, on a batch scheduler, about the latest attempt's job after its outcome
-was recorded: a scheduler that requeues it (preemption, `scontrol requeue`)
+was recorded, within the requeue window (14 days after its `finished`,
+§10): a scheduler that requeues it (preemption, `scontrol requeue`)
 lists it queued, and it is then a live attempt (the guard refuses it
 without `-f`; `build stop` stops it), though `list` and `show` show its
 recorded outcome until it runs. After the outcome only a queued or held job
@@ -3764,10 +3765,12 @@ restart metadata for display, but the symlink + live query remain the source of
 truth (per D4's "state inferred, not stored" principle — `simfactory-docs.txt`
 §24). The simulation's newest restart, if its run recorded its end
 (`terminated`), is still asked about on a batch scheduler, which may
-requeue its job; an older terminated restart is taken as ended without a
-query, since its job id may by now name an unrelated job (ids wrap around,
-a cluster is reinstalled, two clusters share a home) that would refuse a
-`delete` or be stopped by its `-f` (a requeued job that
+requeue its job, for 14 days after its `finished` (the requeue window,
+§10); an older terminated restart, one past the window, or one with no
+`finished`, is taken as ended without a query, since its job id may by now
+name an unrelated job (ids wrap around, a cluster is reinstalled, two
+clusters share a home) that would refuse a `delete` or be stopped by its
+`-f` (a requeued job that
 runs again clears `terminated` and `finished` as it starts, and records
 them again when it is over); after the end only a queued or held job is
 such a job, and one listed running (Slurm's `CG`, `TO`) or in a state no
@@ -3775,7 +3778,17 @@ pattern reads is the ended job, as is one whose status query failed (§10);
 where job ids are pids, it is not asked about again (§10): `sim
 list`/`show`, the reaper (§8.3) and `delete` (§8.7) take it as gone. A
 restart that has not recorded its end and whose status query failed is
-shown `UNKNOWN` (never a state the query did not give).
+shown `UNKNOWN` (never a state the query did not give). A foreground `sim
+run` records its own pid as `job-id` and `foreground = true` in
+`restart.toml` (absent: a submitted restart, as older records are): on a
+batch scheduler's machine that pid is never asked about or stopped
+(`RestartMeta::scheduler_job`), its `running.lock` alone saying whether it
+runs: `sim stop -f` says to interrupt it where it runs and records
+nothing while the lock is live, `delete` refuses, `-f` too, and `sim
+list`/`show` ask nothing for it. On a `job-ids = "pids"` machine its pid
+is asked of `ps` like a submitted job's (§10). `sim show` asks one batch
+for the header and every row (one job, one state); `sim list` and `sim
+show` ask under a progress line and fail with "interrupted" on Ctrl-C.
 
 Display-state derivation for `cactup sim show`:
 - **PRESUBMITTED** = a restart that has a `job-id` and a `chained-job-id` (it was
@@ -3786,7 +3799,11 @@ Display-state derivation for `cactup sim show`:
 - RUNNING/QUEUED/HOLDING follow `R`/`Q`/`H` of the *active* restart; FINISHED =
   active restart whose job is `U` and that has reached termination; ERROR = `E`;
   INACTIVE = no active restart; UNKNOWN = a restart that has not reached
-  termination whose status query failed (§10).
+  termination whose status query failed (§10); `INACTIVE (job queued
+  again)` (`sim list`, `sim show`) = a restart that is not active and has reached
+  termination whose job the scheduler lists queued or held again (asked
+  about only for the newest restart within the requeue window): `sim
+  delete -f` stops it (`sim stop` acts on the active restart only).
 
 `--long` additionally prints the build provenance snapshotted into
 `.cactup/cfg/` at create time (§8.2) — the paths of the simulation's optionlist
@@ -3801,11 +3818,15 @@ Port of `purge`/`trash()` (`simfactory-docs.txt` §14.10): **fatal if any restar
 has a queued/holding/running job, unless `-f`** — as the "bypass all nagging"
 umbrella (§3), `-f` overrides the live-job guard (cactup first `stop`s the
 running/queued jobs, §8.6, then deletes), the trash/purge default, *and* the
-`--purge` prompt. Without `-f` on a live simulation, cactup refuses and tells
-the user to `sim stop` first. Which restarts' jobs are asked about, and how,
+`--purge` prompt. Without `-f` on a live simulation, cactup refuses with
+advice that works: `sim stop` first where a live job is the active
+restart's (it stops that one only), `-f` for the rest (a job the scheduler
+queued again after its restart ended, named so, or a pre-submitted
+chain's). Which restarts' jobs are asked about, and how,
 is §8.6's and §10's: on a batch scheduler every restart with a job that has
-not recorded its end, and the newest restart after its end (live then only
-queued or held: a requeued one), where job ids are pids
+not recorded its end, and the newest restart within the requeue window
+after its end (live then only queued or held: a requeued one), where job
+ids are pids
 only those that have not recorded their end, each only on its recorded host
 with its process start time. They are asked in one batch (the machine's
 `get-status-many` listing, else the bounded pool of per-job queries) under a
@@ -3813,9 +3834,12 @@ progress line, Ctrl-C stopping it. A status query that failed (where the
 machine sets `unknown-job-pattern`) refuses the delete for a restart that
 has not recorded its end, and is taken as the job ended for one that has; a
 job recorded on another host (pids) refuses it, `-f` too, while its
-restart's `running.lock` is live; `-f` refuses a restart recorded by an
-older cactup whose pid has a process here, or whose process does not lead
-its own group, rather than stop it. Deletion otherwise does a `shutil.move`-equivalent
+restart's `running.lock` is live, and so does a foreground run on a batch
+scheduler's machine (§8.6); a restart recorded by an older cactup whose pid
+has a process here refuses it, `-f` too, saying to stop that pid by hand
+if it is the job (cactup cannot tell it from another process); `-f`
+refuses a restart whose process does not lead its own group rather than
+stop it. Deletion otherwise does a `shutil.move`-equivalent
 of the whole simulation dir into `<sim-home>/TRASH/<simulation-id>/`, removes the
 simulation's entry from the per-installation registry (§8.1), and then **runs
 executable-cache GC** — if this was the last live-or-trashed sim referencing its
@@ -4108,8 +4132,9 @@ a simulation is never a testsuite — testsuite state lives in the `cactup test`
 subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carries
 `schema` plus the submit/run keys
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
-`checkpt-buffer`, `job-id`, `submitted` (when the job id was recorded),
-`chained-job-id`, and where job ids are pids
+`checkpt-buffer`, `job-id`, `foreground` (a foreground `sim run`'s own
+pid, §8.6; absent for a submitted restart), `chained-job-id`, and where job
+ids are pids
 the `job-host` and `job-start` recorded with `job-id` (§10; `build.toml` and
 `test.toml` carry them too), the last observed `status`, the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
@@ -4221,10 +4246,9 @@ and start time beside it), so no caller can skip the checks.
     machine's submit must.
   - **Records made by an older cactup** (no `job-host`): asked about only
     where a process with that pid runs on this host and started no later
-    than the record was made (when the job id was recorded: a restart's
-    `submitted`, a test run's or build attempt's `timestamps.submitted`;
-    else the record's creation, which for a restart comes before the
-    submit's environment setup runs; give or
+    than the record was made (a test run's or build attempt's
+    `timestamps.submitted`, else the record's creation, as a restart's
+    `created`, which comes a moment before the submit runs; give or
     take a minute, the wall-clock start being the boot time from
     `/proc/stat`'s `btime` plus the start time in clock ticks): else `U`,
     nothing run, so a long-lived unrelated process that took the pid later
@@ -4245,7 +4269,13 @@ and start time beside it), so no caller can skip the checks.
   On a `"scheduler"` machine a job id is the batch system's, asked about
   whatever the run recorded (a batch scheduler may requeue a job after its
   run recorded its end: preemption, `scontrol requeue`, Torque's `qrerun`),
-  except where a section says otherwise. After a record's end (a restart's
+  except where a section says otherwise, for 14 days after the record's
+  end (the requeue window, `Scheduler::asks_after_end`: a restart's
+  `finished`, a test run's `finished`, a build attempt's `finished`, which
+  its outcome is recorded with); later, or with no end time recorded, the
+  job is taken as ended without a query, since its id may by now name an
+  unrelated job (ids wrap around, a cluster is reinstalled, two clusters
+  share a home). After a record's end (a restart's
   `terminated`, a test run's `finished`, a build attempt's outcome) only a
   queued or held job is live (`is_live`): Slurm still lists the ended job
   for a while as `CG` or `TO` (both in the MDB's running patterns) or `CD`,
@@ -4285,7 +4315,19 @@ and start time beside it), so no caller can skip the checks.
   or that Ctrl-C cuts short, says nothing of any job: cactup falls back to
   the per-job queries, whose failures are handled as above (a refusal for
   a record with no end, a note after it, `UNKNOWN` on display). An empty
-  listing exits 0, and lists no job. The MDB sets the
+  listing exits 0, and lists no job. Which paths ask through the batch
+  (`Scheduler::get_statuses_shown`: the listing where the machine has one,
+  else the per-job pool; under a progress line, failing with "interrupted"
+  on Ctrl-C): `sim list`/`show`, `test list`/`show`, `build list`/`show`
+  and `sim delete`. Every other path asks one job with `get-status`: `sim
+  stop`'s graceful wait, the reaper, `test stop`/`delete`, the guards before
+  a new test run or build, `build stop`, `build prune`, `--follow`/`--block`.
+  So a never-matching `unknown-job-pattern` (one that misses the
+  scheduler's real unknown-job message) shows only on the per-job paths,
+  where every job the scheduler has forgotten reads as a failed query;
+  where a working listing answers, such a job is simply not listed, so
+  gone (`sim list`, `sim delete` take it so, and `sim show` with them, its
+  header and rows from one answer). The MDB sets the
   key where the real tool's message is known: Slurm's `squeue -j`
   (`slurm_load_jobs error: Invalid job id specified`, on stderr with
   nothing on stdout and exit 1, once the job has aged out of the
@@ -4628,7 +4670,8 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
     records it, and so does `test stop`) is still asked about on a batch
     scheduler (`job-ids = "scheduler"`, §10), which may requeue its job
     after its run recorded its end (preemption, `scontrol requeue`,
-    Torque's `qrerun`): `list` shows such a job `QUEUED`, `stop` stops it,
+    Torque's `qrerun`), within the requeue window (14 days after
+    `finished`, §10): `list` shows such a job `QUEUED`, `stop` stops it,
     `delete` refuses it without `-f`, and a requeued job that runs clears
     `finished` as it starts (the compute side, under the test lock). After
     `finished` only a queued or held job is such a job; listed running

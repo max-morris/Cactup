@@ -203,8 +203,8 @@ expires within 15 minutes, or, on a machine that cannot tell, the scheduler
 could not be asked) is left as it is, `--force` too.
 
 On a batch system, a job the scheduler puts back in the queue after its run
-ended (preemption, `scontrol requeue`) is seen again: `test list` shows it
-queued, `test stop` cancels it, and `test delete` refuses it without
+ended (preemption, `scontrol requeue`), within 14 days of the end, is seen
+again: `test list` shows it queued, `test stop` cancels it, and `test delete` refuses it without
 `--force`. (A finished run's job that the scheduler still lists as
 completing or completed is just the ended job.) Where the machine definition
 says how the scheduler reports a job it does not know, a status query that

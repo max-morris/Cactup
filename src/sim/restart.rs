@@ -69,11 +69,6 @@ pub struct RestartMeta {
     #[serde(default = "default_schema")]
     pub schema: u32,
     pub created: DateTime<Utc>,
-    /// When the job id was recorded: just after the submit command returned
-    /// (or, for a foreground run, as it began). Absent in a record an older
-    /// cactup made, which `created` then stands for.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub submitted: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +101,11 @@ pub struct RestartMeta {
     /// cactup read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_start: Option<u64>,
+    /// A foreground `sim run`, whose `job-id` is the pid of the cactup that
+    /// runs it: no batch scheduler knows it. Absent (false) for a submitted
+    /// restart, as in records older cactups made.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub foreground: bool,
     /// The job id this restart's job depends on (pre-submitted chain, §8.3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chained_job_id: Option<String>,
@@ -137,14 +137,24 @@ impl RestartMeta {
             &self.job_id,
             self.job_host.as_deref(),
             self.job_start,
-            Some(self.submitted.unwrap_or(self.created)),
+            Some(self.created),
         )
     }
 
+    /// The job the scheduler is asked about and stops, if any: none for a
+    /// restart never submitted (`NO_JOB_ID`), nor for a foreground run on a
+    /// batch scheduler's machine, whose pid that scheduler knows nothing of
+    /// (its `running.lock` alone says whether it runs). On a `job-ids =
+    /// "pids"` machine a foreground run's pid is asked of `ps` like a
+    /// submitted job's (§10).
+    pub fn scheduler_job(&self, sched: &crate::scheduler::Scheduler) -> Option<crate::scheduler::JobRef<'_>> {
+        let batch_foreground = self.foreground && sched.job_ids() == crate::mdb::meta::JobIds::Scheduler;
+        (self.job_id != NO_JOB_ID && !batch_foreground).then(|| self.job())
+    }
+
     /// Record `job` (a submitted one, or a foreground run's pid) as this
-    /// restart's job, submitted now.
+    /// restart's job.
     pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
-        self.submitted = Some(Utc::now());
         self.job_id = job.id.clone();
         self.job_host = job.host.clone();
         self.job_start = job.start;
@@ -453,11 +463,13 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
     // After the end only a job put back in the queue counts (a running
     // or unread one is the ended job still listed), and a query that
     // fails is taken as the job ended (§10, `Scheduler::get_status_of`).
+    // No job to ask about (none submitted, or a foreground run on a batch
+    // scheduler's machine: its lock says, below), or one past asking after
+    // its end (`Scheduler::asks_after_end`).
     let ended = restart.meta.terminated;
-    let status = if restart.meta.job_id == NO_JOB_ID || (ended && !sched.may_requeue()) {
-        JobStatus::Unknown
-    } else {
-        sched.get_status_of(restart.meta.job(), ended)?
+    let status = match restart.meta.scheduler_job(sched) {
+        Some(job) if !ended || sched.asks_after_end(restart.meta.finished) => sched.get_status_of(job, ended)?,
+        _ => JobStatus::Unknown,
     };
     let in_queue = match ended {
         true => crate::scheduler::is_live(status, true),
@@ -494,22 +506,6 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The time an older record's pid is checked against (§10) is when
-    /// the job id was recorded, where the record says (`submitted`, which
-    /// `set_job` stamps), else its creation.
-    #[test]
-    fn a_restarts_job_is_dated_by_its_submission_else_its_creation() {
-        let text = "created = \"2026-10-01T00:00:00Z\"\nnodes = 1\ntasks = 1\ntpn = 1\ncpus = 1\n\
-                    queue = \"q\"\nwalltime = \"1:00:00\"\ncheckpt-buffer = \"0:10:00\"\njob-id = \"7\"\n";
-        let mut meta: RestartMeta = toml::from_str(text).unwrap();
-        assert_eq!(meta.job().since, Some(meta.created));
-        let job = crate::scheduler::JobRecord { id: "8".to_owned(), host: None, start: None, since: None };
-        meta.set_job(&job);
-        let submitted = meta.submitted.expect("set_job stamps the submission");
-        assert!(submitted > meta.created);
-        assert_eq!(meta.job().since, Some(submitted));
-    }
 
     #[test]
     fn dir_names_and_discovery() {

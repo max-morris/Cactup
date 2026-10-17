@@ -163,13 +163,14 @@ impl TestRun {
     /// that process for the run, and its stop command would stop that
     /// process's group. A run that recorded `finished` (its end, or `test
     /// stop`) is still asked about where a batch scheduler may have
-    /// requeued its job (`Scheduler::may_requeue`); on a machine whose job
-    /// ids are pids it is done (§10, §11.7). Shared by `list`, `show`,
+    /// requeued its job, within the requeue window after `finished`
+    /// (`Scheduler::asks_after_end`); on a machine whose job ids are pids,
+    /// or later, it is done (§10, §11.7). Shared by `list`, `show`,
     /// `stop`, `delete` and the guard before a new run.
     pub fn pending_job(&self, sched: &Scheduler) -> Option<JobRef<'_>> {
         let meta = &self.meta;
         (meta.timestamps.submitted.is_some()
-            && (meta.timestamps.finished.is_none() || sched.may_requeue())
+            && (meta.timestamps.finished.is_none() || sched.asks_after_end(meta.timestamps.finished))
             && meta.job_id != crate::sim::restart::NO_JOB_ID)
             .then(|| meta.job())
     }

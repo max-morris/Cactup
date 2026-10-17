@@ -68,6 +68,9 @@ pub enum DisplayState {
     /// The status query failed (where the machine can tell, §10) for a
     /// restart whose run has not recorded its end: no state is known.
     Unknown,
+    /// A restart that is not active and whose run recorded its end, whose
+    /// job the scheduler queued (or holds) again (§8.6).
+    Requeued,
 }
 
 /// The §8.6 display-state derivation. `status` is `None` when the restart has
@@ -247,6 +250,10 @@ enum PidCheck {
     /// here that may be the job: asked about, never stopped.
     Unverified,
 }
+
+/// How long after a record's end its job is still asked about where a batch
+/// scheduler may requeue it ([`Scheduler::asks_after_end`]).
+pub const REQUEUE_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(14);
 
 /// How much later than its record a process with an older record's pid may
 /// have started and still be the job: its submission takes moments, but the
@@ -535,6 +542,44 @@ impl<'m> Scheduler<'m> {
         self.job_ids() == JobIds::Scheduler
     }
 
+    /// Whether a job whose record ended at `ended_at` is still asked about:
+    /// where a batch scheduler may requeue it ([`Self::may_requeue`]), and
+    /// only within [`REQUEUE_WINDOW`] of the end. Later its id may by now
+    /// name an unrelated job (ids wrap around, a cluster is reinstalled, two
+    /// clusters share a home), which would refuse a delete or be stopped by
+    /// its `-f`; and a record with no end time is taken as ended too.
+    pub fn asks_after_end(&self, ended_at: Option<DateTime<Utc>>) -> bool {
+        self.may_requeue() && ended_at.is_some_and(|ended| Utc::now() - ended < REQUEUE_WINDOW)
+    }
+
+    /// Whether `job` is a pid an older cactup recorded (no host, no start
+    /// time) whose process here may be the job: asked about, never stopped
+    /// ([`UnverifiedPid`]).
+    pub fn unverified(&self, job: JobRef<'_>) -> bool {
+        self.pid_check(job) == Some(PidCheck::Unverified)
+    }
+
+    /// [`Self::get_statuses`] for a display path (`sim list`/`show`, `test
+    /// list`/`show`, `build list`/`show`) or `sim delete`: under a progress
+    /// line (the per-job fallback after a failed listing can take a while),
+    /// failing with "interrupted" on Ctrl-C rather than handing back the
+    /// statuses it did not get.
+    pub fn get_statuses_shown(&self, jobs: &[JobRef<'_>]) -> Res<Statuses> {
+        let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+        let asking = progress.add_child("ask the scheduler");
+        asking.init(Some(jobs.len()), Some(prodash::unit::label("jobs")));
+        let asking = std::sync::Mutex::new(asking);
+        let statuses = self.get_statuses_counted(jobs, &|n| asking.lock().expect("progress poisoned").inc_by(n));
+        drop(asking);
+        if let Some(renderer) = renderer {
+            renderer.shutdown_and_wait();
+        }
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted");
+        }
+        Ok(statuses)
+    }
+
     /// Whether this machine's status query tells a job it does not know
     /// from a query that failed: it sets `unknown-job-pattern` (§10).
     pub fn tells_failed_queries(&self) -> bool {
@@ -592,6 +637,8 @@ impl<'m> Scheduler<'m> {
     /// the result — the same tolerance the display paths already get from
     /// `get_status(..).ok()`. A pid the `job-ids = "pids"` checks take for
     /// gone is U with nothing run, as in [`Self::get_status`].
+    // Every command asks through `get_statuses_shown`; tests ask directly.
+    #[cfg(test)]
     pub fn get_statuses(&self, jobs: &[JobRef<'_>]) -> Statuses {
         self.get_statuses_counted(jobs, &|_| {})
     }
@@ -1337,6 +1384,24 @@ mod tests {
         ));
         let statuses = Scheduler::new(&listing).get_statuses(&bare(&["1", "2"]));
         assert_eq!(statuses.get(JobRef::bare("2")), Some(&JobStatus::Unknown));
+    }
+
+    /// After a record's end its job is asked about only on a batch
+    /// scheduler and only within the requeue window (14 days): a job id
+    /// that old may name an unrelated job; a record with no end time is
+    /// taken as ended.
+    #[test]
+    fn a_job_is_asked_about_after_its_end_only_within_the_requeue_window() {
+        let batch = meta("");
+        let batch = Scheduler::new(&batch);
+        let pids = meta(r#"job-ids = "pids""#);
+        let pids = Scheduler::new(&pids);
+        let days = |n: i64| Some(Utc::now() - chrono::Duration::days(n));
+        assert!(batch.asks_after_end(days(0)));
+        assert!(batch.asks_after_end(days(13)));
+        assert!(!batch.asks_after_end(days(15)));
+        assert!(!batch.asks_after_end(None));
+        assert!(!pids.asks_after_end(days(0)));
     }
 
     /// The point of the streaming parse (§10): the job id has to reach the

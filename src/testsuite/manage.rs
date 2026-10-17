@@ -111,7 +111,7 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
             _ => None,
         })
         .collect();
-    let statuses = sched.get_statuses(&ids);
+    let statuses = sched.get_statuses_shown(&ids)?;
 
     let mut any = false;
     let mut rows = rows.into_iter();
@@ -153,7 +153,10 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
 /// Reprint the last run's results (§11.6 step 7) and the result-set history.
 fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
     let run = TestRun::locate(inst, name)?;
-    let query = run.pending_job(sched).map(|job| sched.get_status(job).ok());
+    // One query, as `list` asks: under a progress line, Ctrl-C failing it.
+    let pending: Vec<JobRef> = run.pending_job(sched).into_iter().collect();
+    let statuses = sched.get_statuses_shown(&pending)?;
+    let query = run.pending_job(sched).map(|job| statuses.get(job).copied());
     println!("{}", name.bold());
     println!("  state:       {}", state_line(&run, query, run.lock_live()?));
     println!("  directory:   {}", run.dir.display());
@@ -485,6 +488,8 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         Job::OnHost if run.lock_live()? => bail!("{}; delete it once it has ended", on_host(job, name)),
         Job::Ended | Job::Absent if run.lock_live()? => bail!("{}", held_without_listed_job(run, sched, name)),
         Job::Ended | Job::Absent | Job::OnHost => {}
+        // An older record's pid (§10): never stopped, `-f` neither.
+        Job::Live if sched.unverified(job) => bail!("{}; then delete the test run", UnverifiedPid(job_id.to_owned())),
         Job::Live if !force => bail!(
             "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
              -f to stop and delete"
@@ -681,7 +686,8 @@ mod tests {
                 timestamps.push_str("submitted = \"2026-10-16T00:00:00Z\"\n");
             }
             if finished {
-                timestamps.push_str("finished = \"2026-10-16T01:00:00Z\"\n");
+                // Within the requeue window: now.
+                timestamps.push_str(&format!("finished = \"{}\"\n", chrono::Utc::now().to_rfc3339()));
             }
             fs::write(
                 TestRun::meta_path(&dir),
@@ -904,9 +910,10 @@ mod tests {
                 keys.push_str(&format!("job-start = {start}\n"));
             }
         }
+        // Within the requeue window: now.
         let finished = match finished {
-            true => "finished = \"2026-10-16T01:00:00Z\"",
-            false => "",
+            true => format!("finished = \"{}\"", chrono::Utc::now().to_rfc3339()),
+            false => String::new(),
         };
         fs::write(
             TestRun::meta_path(dir),
@@ -1046,7 +1053,8 @@ mod tests {
         let err = format!("{:#}", stop_run(&mut old, &sched, "t").unwrap_err());
         assert!(err.contains("recorded by an older cactup"), "{err}");
         assert!(!err.contains("stop command failed"), "no command ran: {err}");
-        assert!(clear_to_delete(&old, &sched, "t", false).unwrap_err().to_string().contains("has a live job"));
+        let refused = format!("{:#}", clear_to_delete(&old, &sched, "t", false).unwrap_err());
+        assert!(refused.contains("recorded by an older cactup") && refused.contains("stop it yourself"), "{refused}");
         assert!(format!("{:#}", clear_to_delete(&old, &sched, "t", true).unwrap_err()).contains("recorded by an older cactup"));
         assert!(!stopped.exists(), "an older record's pid was stopped");
         assert!(TestRun::open(&old.dir).unwrap().meta.timestamps.finished.is_none());
@@ -1106,6 +1114,19 @@ mod tests {
         let open = submitted_run(&tmp.path().join("open"), "4244", None, false);
         assert!(clear_to_delete(&open, &failing, "t", false).is_err());
         assert_eq!(state_line(&open, Some(None), false).to_string(), "UNKNOWN (status query failed)".yellow().to_string());
+    }
+
+    /// A test run's job is asked about after its `finished` only within
+    /// the requeue window: fifteen days on, it is done.
+    #[test]
+    fn a_finished_test_runs_job_is_asked_about_only_within_the_requeue_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let batch = fake_meta("");
+        let batch = Scheduler::new(&batch);
+        let mut run = submitted_run(&tmp.path().join("run"), "4242", None, true);
+        assert!(run.pending_job(&batch).is_some());
+        run.meta.timestamps.finished = Some(chrono::Utc::now() - chrono::Duration::days(15));
+        assert!(run.pending_job(&batch).is_none());
     }
 
     /// `list`'s whole point is one `get_statuses` call instead of one

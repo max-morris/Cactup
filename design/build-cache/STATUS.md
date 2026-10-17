@@ -3617,6 +3617,54 @@ refuses the live job and `-f` stops it before deleting; with both failing,
 `sim list`/`show`, `test list`, `build list`/`show` print UNKNOWN and
 `sim delete [-f]` refuse; the generic machine's checks as before.
 
+Round 3 (on `0e221da`): B signed off; BLOCKED by A (ran): the newest
+restart, ended and deactivated (`sim clean`, a stop), whose job the
+scheduler queued again: `sim delete` advised `cactup sim stop` first, which
+finds no active restart and can never work, and `sim show` called the
+restart INACTIVE while `delete` called its job live. Not blocking: asking
+after a record's end was unbounded in time (a job-id collision months
+later) (A); `sim delete` of an older record's live pid advised `sim stop`
+or `-f`, both refusing (A); the display paths' per-job fallback after a
+failed listing ran silent, and Ctrl-C there printed UNKNOWN rows and exit
+0 (B); a never-matching `unknown-job-pattern` is seen only on the per-job
+paths, and `sim show`'s header and rows came from two queries (B); a
+foreground `sim run` on a batch machine handed its pid to `squeue -j` and
+`scancel`, and `sim delete` trashed a running foreground sim (B, ran;
+master the same); `submitted` on restarts (B). Fixed in the commit after
+this record:
+- `sim delete`'s refusal names what works (`live_jobs_refusal`): `sim
+  stop` for the active restart's job only, `-f` for the rest, a requeued
+  job named as one the scheduler queued again after its restart ended;
+  `sim list` and `sim show` show such a restart `INACTIVE (job queued
+  again)` (`DisplayState::Requeued`). Test runs and builds give advice that
+  works already (`test stop` and `build stop` act on a finished record's
+  requeued job).
+- After a record's end, a job is asked about only within 14 days of the
+  record's `finished` (`Scheduler::asks_after_end`, `REQUEUE_WINDOW`), for
+  sims, test runs and builds; with no end time recorded, never.
+- An older record's live pid: `sim delete`, `test delete`, the guards
+  before a new test run or build say to stop that pid by hand
+  (`UnverifiedPid`), `-f` too.
+- The display paths and `sim delete` ask through
+  `Scheduler::get_statuses_shown`: a progress line, and "interrupted" on
+  Ctrl-C. `sim show` asks one batch for its header and rows. `meta-toml.md`
+  and the spec say which paths use the listing and what a never-matching
+  pattern does there.
+- A foreground `sim run` records `foreground = true`
+  (`RestartMeta::scheduler_job`): on a batch machine its pid is never
+  asked about or stopped; `sim stop -f` says to interrupt it where it runs
+  while its lock is live, and `delete` refuses, `-f` too.
+- `submitted` on restarts is dropped: it mattered only for records without
+  `job-host`, which an older cactup made and which never carry it, so it
+  served nothing; such records use `created`.
+Checked as before, with these added (fake Slurm): a deactivated newest
+restart's requeued job (`sim show` `INACTIVE (job queued again)`, `sim
+delete` naming `-f` only); fifteen days after the end, `sim delete` and
+`test delete` go ahead with no `squeue`; a foreground `sim run` (no
+`squeue`/`scancel` of its pid, `sim stop -f` and `sim delete -f` say to
+interrupt it, `delete` goes ahead once it ended); Ctrl-C during `sim
+list`'s per-job fallback exits 1, "interrupted".
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

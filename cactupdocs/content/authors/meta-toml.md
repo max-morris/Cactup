@@ -275,7 +275,9 @@ used for `get-status`. A job id absent from the listing is treated as not queued
 (a listing says nothing of the jobs it leaves out, so `unknown-job-pattern`
 plays no part there). A listing command that exits non-zero has failed:
 cactup then asks job by job with `get-status`, so the listing must exit 0
-when it ran, also when it lists nothing.
+when it ran, also when it lists nothing. The listing serves `sim list`, `sim
+show`, `test list`, `test show`, `build list`, `build show` and `sim
+delete`; every other command asks job by job with `get-status`.
 
 `unknown-job-pattern` (optional) is a regular expression matching a line of
 `get-status`'s output, stdout or stderr, that says the scheduler does not
@@ -296,14 +298,19 @@ submit`/`sim run`, `test run`/`test submit` and build; `sim list`, `test
 list`, `build list` and their `show`s print the state as `UNKNOWN`, and
 `build prune` keeps the attempt. For a run that has recorded its end (a
 finished simulation restart, test run or build), asking is only the check
-for a job the scheduler put back in the queue, so a failed query is taken
-as the job ended, with a one-line note, and nothing is held up. Without
-the key, no line for the job means the job is gone, as before: a query that
-failed reads as a job no longer in the queue. Check the pattern against
-what the command really prints for a job the scheduler no longer knows (an
-old job id will do): one that never matches makes every job the scheduler has
-forgotten look like a failed query, and `sim delete` and the like then
-refuse.
+for a job the scheduler put back in the queue, made for 14 days after the
+end (later, the job id may name an unrelated job, and the record is taken
+as ended without asking), so a failed query is taken as the job ended, with
+a one-line note, and nothing is held up. Without the key, no line for the
+job means the job is gone, as before: a query that failed reads as a job no
+longer in the queue. Check the pattern against what the command really
+prints for a job the scheduler no longer knows (an old job id will do): one
+that never matches makes every job the scheduler has forgotten look like a
+failed query wherever cactup asks job by job (`sim stop`'s wait, `test
+stop` and `delete`, `build stop`, the checks before a new run or build),
+which then refuse; where the listing answers instead (`sim list`/`show`,
+`sim delete`, `test list`, `build list`), such a job is just not listed,
+and so gone.
 
 `blocking-submit` is optional too: the same submission, but expressed so the
 command doesn't return until the job has finished, for `cactup build submit

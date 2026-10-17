@@ -171,6 +171,10 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
     let Some(job) = requeue_query(&attempt.meta, sched) else { return Ok(()) };
     let ended = attempt.meta.outcome.is_some();
     if is_live(sched.get_status_of(job, ended)?, ended) {
+        // An older record's pid (§10): never stopped, `-f` neither.
+        if sched.unverified(job) {
+            bail!("{}; then build again", crate::scheduler::UnverifiedPid(job.id.to_owned()));
+        }
         if !force {
             bail!(
                 "config \"{name}\" already has a live build attempt ({}); \
@@ -737,13 +741,16 @@ fn pending_job_query(meta: &BuildMeta) -> Option<JobRef<'_>> {
 
 /// What the guard before a new attempt and `build stop` ask the scheduler
 /// about: [`pending_job_query`]'s job, and, where a batch scheduler may
-/// have requeued it (`Scheduler::may_requeue`), a submitted attempt's job
+/// have requeued it, within the requeue window after the outcome
+/// (`Scheduler::asks_after_end`), a submitted attempt's job
 /// after its outcome was recorded too: a requeued build waiting in the
 /// queue is live, though it shows its last outcome until it runs again
 /// (`build::execute` then clears it). Where job ids are pids, a recorded
 /// outcome is the end (§10).
 fn requeue_query<'m>(meta: &'m BuildMeta, sched: &Scheduler) -> Option<JobRef<'m>> {
-    (meta.submitted && meta.job_id != NO_JOB_ID && (meta.outcome.is_none() || sched.may_requeue()))
+    (meta.submitted
+        && meta.job_id != NO_JOB_ID
+        && (meta.outcome.is_none() || sched.asks_after_end(meta.timestamps.finished)))
         .then(|| meta.job())
 }
 
@@ -988,7 +995,7 @@ fn list_impl(machine: &Machine, installations: &[Installation], all: bool, long:
     // change; a finished history costs no scheduler round-trip at all.
     let sched = Scheduler::new(&machine.meta);
     let pending: Vec<JobRef> = rows.iter().filter_map(Row::job_to_query).collect();
-    let statuses = sched.get_statuses(&pending);
+    let statuses = sched.get_statuses_shown(&pending)?;
 
     let mut rows = rows.iter();
     for (inst, configs) in installations.iter().zip(&configs_per_inst) {
@@ -1047,7 +1054,7 @@ fn show_impl(machine: &Machine, inst: &Installation, name: Option<&str>, long: b
         .filter_map(|a| a.as_ref().ok())
         .filter_map(|a| pending_job_query(&a.meta))
         .collect();
-    let statuses = sched.get_statuses(&queries);
+    let statuses = sched.get_statuses_shown(&queries)?;
 
     let latest_id = *ids.last().expect("checked non-empty above");
     match loaded.last().expect("checked non-empty above") {
@@ -2363,7 +2370,11 @@ mod tests {
             config_meta: sample_config_meta_named(config),
             vars: Default::default(),
             knobs: Default::default(),
-            timestamps: crate::build::attempt::Timestamps::default(),
+            // A recorded outcome is recorded with its time, as `execute` does.
+            timestamps: crate::build::attempt::Timestamps {
+                finished: outcome.is_some().then(Utc::now),
+                ..Default::default()
+            },
             outcome,
         }
     }

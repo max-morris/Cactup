@@ -431,7 +431,6 @@ fn submit_impl(
             meta: RestartMeta {
                 schema: SCHEMA,
                 created: Utc::now(),
-                submitted: None,
                 started: None,
                 finished: None,
                 nodes: topo.nodes,
@@ -446,6 +445,7 @@ fn submit_impl(
                 job_id: NO_JOB_ID.to_owned(),
                 job_host: None,
                 job_start: None,
+                foreground: false,
                 chained_job_id: chained,
                 status: None,
                 terminated: false,
@@ -626,7 +626,6 @@ fn run_interactive(
         meta: RestartMeta {
             schema: SCHEMA,
             created: Utc::now(),
-            submitted: None,
             started: None,
             finished: None,
             nodes: topo.nodes,
@@ -642,6 +641,7 @@ fn run_interactive(
             job_id: NO_JOB_ID.to_owned(),
             job_host: None,
             job_start: None,
+            foreground: true,
             chained_job_id: None,
             status: None,
             terminated: false,

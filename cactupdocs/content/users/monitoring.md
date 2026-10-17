@@ -287,8 +287,8 @@ cactup build stop myconfig -f     # kill it directly instead of a graceful stop
 ```
 
 On a batch system, a build job the scheduler puts back in the queue after
-it recorded its result (preemption, `scontrol requeue`) still counts as
-live: `build stop` cancels it, and a new build of that config refuses to
+it recorded its result (preemption, `scontrol requeue`), within 14 days of
+the result, still counts as live: `build stop` cancels it, and a new build of that config refuses to
 start while it is queued (`-f` cancels it first). `build list` shows the
 recorded result until the job runs again. A finished build's job that the
 scheduler still lists as completing is just the ended job, and if the

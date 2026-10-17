@@ -339,6 +339,10 @@ fn start_impl(
         if let Some(job) = old.pending_job(&sched)
             && crate::scheduler::is_live(sched.get_status_of(job, finished)?, finished)
         {
+            // An older record's pid (§10): never stopped, `-f` neither.
+            if sched.unverified(job) {
+                bail!("{}; then run the tests again", crate::scheduler::UnverifiedPid(job.id.to_owned()));
+            }
             if !args.force {
                 bail!(
                     "test run \"{name}\" still has a live job ({}); \
