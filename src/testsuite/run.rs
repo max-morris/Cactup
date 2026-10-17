@@ -339,18 +339,20 @@ fn start_impl(
         // the safe reading for starting new work (§10).
         use crate::scheduler::AfterEnd;
         let finished = old.meta.timestamps.finished.is_some();
-        let live = |job| -> Res<Option<bool>> {
+        // `Some(failed)`: live, `failed` the failed query's text where the
+        // scheduler could not be asked after the end.
+        let live = |job| -> Res<Option<Option<String>>> {
             Ok(match finished {
                 true => match sched.ask_after_end(job)? {
-                    AfterEnd::Listed(_) => Some(true),
-                    AfterEnd::Unanswered => Some(false),
+                    AfterEnd::Listed(_) => Some(None),
+                    AfterEnd::Unanswered(failed) => Some(Some(failed)),
                     AfterEnd::Over(_) => None,
                 },
-                false => crate::scheduler::is_live(sched.get_status(job)?, false).then_some(true),
+                false => crate::scheduler::is_live(sched.get_status(job)?, false).then_some(None),
             })
         };
         if let Some(job) = old.pending_job(&sched)
-            && let Some(listed) = live(job)?
+            && let Some(failed) = live(job)?
         {
             // An older record's pid, or one sharing its process group (§10):
             // never stopped, `-f` neither.
@@ -360,11 +362,13 @@ fn start_impl(
             if sched.shares_group(job) {
                 bail!("{}; then run the tests again", crate::scheduler::SharedGroup(job.id.to_owned()));
             }
-            if !args.force && finished && !listed {
+            if let Some(failed) = failed.as_deref()
+                && !args.force
+            {
                 bail!(
-                    "test run \"{name}\" ended, but the scheduler could not be asked about its job {}, which \
-                     may have been queued again: try again once the scheduler answers, or `cactup test stop \
-                     {name}` to stop it (or pass -f to stop it)",
+                    "test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
+                     queued again: {failed}\n`cactup test stop {name}` asks the scheduler to stop the job (one \
+                     it has forgotten is then taken as ended); or pass -f to stop it and run the tests",
                     job.id
                 );
             }
@@ -383,7 +387,22 @@ fn start_impl(
                     job.id
                 );
             }
-            sched.stop(job)?;
+            match finished {
+                // After the end, a stop the scheduler refuses (a job it has
+                // forgotten) is taken as the job ended.
+                true => {
+                    if let crate::scheduler::EndedStop::Refused(said) = sched.stop_after_end(job)? {
+                        println!(
+                            "The scheduler would not stop test job {} (its stop command said: {said}): \
+                             taken as ended",
+                            job.id
+                        );
+                    }
+                }
+                false => {
+                    sched.stop(job)?;
+                }
+            }
         }
     }
 

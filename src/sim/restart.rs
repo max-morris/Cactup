@@ -73,6 +73,12 @@ pub struct RestartMeta {
     pub started: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<DateTime<Utc>>,
+    /// When cactup, after the record's end, asked the scheduler to stop the
+    /// job without its having said the job was listed (its status query
+    /// failed), or the scheduler refused a stop: the job is over from then
+    /// on, and asked about again only after a later end (a requeued run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_stopped: Option<DateTime<Utc>>,
     pub nodes: u32,
     pub tasks: u32,
     pub tpn: u32,
@@ -130,6 +136,12 @@ pub struct RestartMeta {
 }
 
 impl RestartMeta {
+    /// The end its job is asked about after (`Scheduler::asks_after_end`):
+    /// `finished`, unless a stop after it settled the job (`job-stopped`).
+    pub fn requeue_end(&self) -> Option<DateTime<Utc>> {
+        crate::scheduler::end_to_ask(self.finished, self.job_stopped)
+    }
+
     /// The recorded job, as the scheduler is asked about it, with when the
     /// record was made (its submission, else its creation).
     pub fn job(&self) -> crate::scheduler::JobRef<'_> {
@@ -473,7 +485,7 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
     // What was learned, for the note below: never an answer not had.
     let mut learned = None;
     let status = match restart.meta.scheduler_job(sched) {
-        Some(job) if !ended || sched.asks_after_end(&sim.meta.machine, restart.meta.finished) => {
+        Some(job) if !ended || sched.asks_after_end(&sim.meta.machine, restart.meta.requeue_end()) => {
             match sched.get_status(job) {
                 Err(e) if ended && e.downcast_ref::<crate::scheduler::FailedQuery>().is_some() => {
                     crate::scheduler::note_taken_as_ended(job.id);
@@ -481,7 +493,12 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
                 }
                 Err(e) => return Err(e),
                 Ok(status) => {
+                    // Where job ids are pids, the pid checks may have ruled
+                    // the job out without running anything: say so.
+                    let pids = sched.job_ids() == crate::mdb::meta::JobIds::Pids;
                     learned = Some(match status {
+                        _ if sched.ruled_out(job).is_some() => sched.ruled_out(job).unwrap_or_default(),
+                        JobStatus::Unknown if pids => format!("process {job_id} is gone"),
                         JobStatus::Unknown => format!("the scheduler no longer lists job {job_id}"),
                         _ => format!("the scheduler lists job {job_id} as over"),
                     });

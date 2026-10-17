@@ -3869,6 +3869,87 @@ said, `qstat` down chained; `sim stop` with `qstat` down sent `qdel`.
 The generic machine: an older record's pid leading its group refused
 with `kill -- -N`, which stopped it.
 
+Round 8 (on `863644b`): BLOCKED by both. (1) A (ran): after a record's
+end an unanswered job's stop was sent on the theory that stopping a gone
+job costs nothing, but `scancel` refuses a forgotten job (exit 1,
+"Invalid job id specified") and `qdel` too (153): with an
+`unknown-job-pattern` that never matches, `sim stop`, `build stop`, `-f`
+failed on the raw error, the guards refused for 14 days with advice that
+never worked, and `sim submit` chained behind the forgotten id, which
+Slurm rejects ("Job dependency problem"); none showed the failed query.
+(2) A, B (ran): `sim stop` named a later chained restart without asking
+whether its job existed (canceled or killed), and on a pids machine with
+a reused pid printed a `pkill -g` that would kill an unrelated group. (3)
+B (ran; a regression from master): the `kill <pid>` advice for a pid not
+leading its group stopped only the top cactup, leaving the run-script,
+exe and Cactus orphaned; master's `stop -f` stopped such a job (submitted
+without `setsid` from an interactive shell, its group holds only the
+job). (4) A: the reaper's note on a pids machine said "the scheduler no
+longer lists job N" for a pid the pid checks ruled out. Not blocking:
+`sim run` does not look at a later chained restart queued behind a job
+(master the same): left, as the lead allowed. The lead's decisions, and
+the fixes in the commit after this record:
+- `Scheduler::stop_after_end`: after a record's end a stop command that
+  fails is `EndedStop::Refused` (what it said, then its exit status), not
+  an error: "the scheduler would not stop job N (its stop command said:
+  ...): taken as ended", an ended active restart deactivated; Ctrl-C is
+  still "interrupted". Used by `sim stop`, `sim delete -f` (ended jobs),
+  `test stop`, `build stop`, and the `-f` of `sim submit`, `sim run`, a
+  new build and a new test run.
+- The guards before new work (`sim run`, `sim submit`, `build`/`build
+  submit`, `test submit`/`test run`) refuse beside an unanswered job,
+  printing the `FailedQuery` text (query, both patterns, output, the
+  `unknown-job-pattern` hint) and naming the stop command; `-f` stops it
+  and goes ahead. `sim submit` never chains behind an unanswered job.
+- A stop that settles the job (sent for an unanswered job, or refused) is
+  recorded: `job-stopped` (`restart.toml`; `[timestamps]` of `test.toml`
+  and `build.toml`, the latter under `record.lock`); `end_to_ask` then
+  takes the job as ended without a query unless a requeued run records a
+  later `finished`. So the named stop always resolves the refusal. An
+  ended restart's settled stop also deactivates it (no requeued run to
+  hand over to).
+- `note_chained_after` names a chained restart only when its job is
+  verified waiting: the scheduler lists it queued or held (a failed query:
+  said so, no "runs after it"); on a pids machine `stoppable_pid` (the pid
+  checks and a group of its own), so its stop command stops exactly it.
+- `lock::proc_group`: a group is the pid's own when every process in it
+  (from `/proc/*/stat`) is the pid or a descendant by the parent links.
+  `stop` runs the machine's command for such a group whether or not the
+  pid leads it (master's case); `SharedGroup` is only a group holding
+  other processes, and says no single command stops the job alone: stop
+  the pid and what it started (`pstree -p`), or interrupt the run.
+  `UnverifiedPid` advises `kill -- -<pgid>` for an own group, else names
+  the pid and its descendants. Unit tests run each advised command against
+  real process trees (a run-script and its child, the leader gone) and
+  check that it stops the whole run and nothing else.
+- The reaper's note says what was learned: the process is gone or is
+  another process now, or it ran on another host and nothing holds its
+  lock.
+- Docs and spec: §§7.9, 8.6, 9.3 (the field), 10, 11.7/11.8;
+  `running-simulations.md`, `test-suites.md`, `monitoring.md`,
+  `meta-toml.md`, the `job-ids` doc comment.
+Checked with real binaries: the generic machine with real processes: a
+job submitted by master's binary and MDB (no `setsid`) from an
+interactive shell (its own group, leader gone) refused as an older
+record with `kill -- -<pgid>`, which stopped all five of its processes
+(the script, cactup, the run-script, the exe); the same submitted by this
+branch with master's MDB: `sim stop -f` ran `pkill -g` and stopped all
+five; submitted from a script (the script's group): refused with the
+`pstree` advice, `sim delete -f` too, nothing stopped; the reaper's note
+for a reused pid. The fake Slurm (`sbatch` failing a dependency on a
+forgotten job with "Job dependency problem"; `scancel` of one exiting 1,
+"Invalid job id specified") with an overlay whose `unknown-job-pattern`
+never matches: `sim run` and `sim submit` refused with the failed query,
+no submission; `sim stop` said the scheduler would not stop the job,
+taken as ended, recorded `job-stopped`; `sim submit` then submitted
+unchained; `sim submit -f` and `sim stop -f` the same in one step; `test
+submit` and `build submit` refused, `test stop`/`build stop` settled it,
+and the next submission went ahead; `-f` went ahead. A chained restart
+whose job was canceled or forgotten was not named. The fake Torque:
+`qstat` down after the end, `sim run` refused, `sim stop` with `qdel`
+exiting 153 said so and took the job as ended; `sim submit` then
+submitted unchained. The earlier scenarios as before.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

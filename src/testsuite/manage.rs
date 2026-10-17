@@ -3,7 +3,7 @@
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::scheduler::{AfterEnd, JobRef, JobStatus, Scheduler, SharedGroup, Stopped, UnverifiedPid};
+use crate::scheduler::{AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, Stopped, UnverifiedPid};
 use crate::sim::cache;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
@@ -350,41 +350,38 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
         // queue): the scheduler is asked to stop it (harmless if it is
         // leaving), and the run's end stands.
         state @ (Job::Listed | Job::Unanswered) => {
-            match send_stop(sched, job.job()) {
-                Ok(Stopped::Sent) if state == Job::Unanswered => println!(
+            // A stop sent for a job the scheduler could not be asked about,
+            // or one it refused, settles the job: recorded (`job-stopped`),
+            // so the next command takes it as ended rather than ask a query
+            // that may keep failing.
+            let mut settled = state == Job::Unanswered;
+            match sched.stop_after_end(job.job())? {
+                EndedStop::Sent if state == Job::Unanswered => println!(
                     "Could not ask the scheduler about test job {} (the run has ended); asked it to stop \
                      the job in case it was queued again",
                     job_id.bold()
                 ),
-                Ok(Stopped::Sent) => println!(
+                EndedStop::Sent => println!(
                     "Asked the scheduler to stop test job {}, still listed after the run ended (queued \
                      again, or leaving the queue)",
                     job_id.bold()
                 ),
-                Ok(_) => println!("Test job {job_id} has ended; nothing to stop"),
-                Err(e) => {
-                    if gix::interrupt::is_triggered() {
-                        bail!("interrupted");
-                    }
-                    if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
-                        return Err(e);
-                    }
-                    match state {
-                        Job::Unanswered => println!(
-                            "Could not ask the scheduler about test job {job_id} (the run has ended), and \
-                             its stop command failed too ({}): the run's end stands; try again once the \
-                             scheduler answers",
-                            refusal(&e)
-                        ),
-                        _ => println!(
-                            "The scheduler still lists test job {job_id} after the run ended, and would not \
-                             stop it ({}): the run's end stands",
-                            refusal(&e)
-                        ),
-                    }
+                // After the run's end, a stop the scheduler refuses (a job it
+                // has forgotten, or holds completed) is taken as the job
+                // ended; the run's end stands.
+                EndedStop::Refused(said) => {
+                    settled = true;
+                    println!(
+                        "The scheduler would not stop test job {job_id}, whose run has ended (its stop \
+                         command said: {said}): taken as ended"
+                    );
                 }
             }
             run.log("test-stop", &format!("asked the scheduler to stop job {job_id}, still listed after the end"));
+            if settled {
+                run.meta.timestamps.job_stopped = Some(chrono::Utc::now());
+                run.store_meta()?;
+            }
             return Ok(());
         }
         Job::Live => {
@@ -481,7 +478,7 @@ fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
             AfterEnd::Listed(_) => Job::Listed,
             AfterEnd::Over(JobStatus::Unknown) => Job::Absent,
             AfterEnd::Over(_) => Job::Ended,
-            AfterEnd::Unanswered => Job::Unanswered,
+            AfterEnd::Unanswered(_) => Job::Unanswered,
         });
     }
     Ok(match sched.get_status(job)? {
@@ -1227,6 +1224,25 @@ mod tests {
         let mut ended = submitted_run(&tmp.path().join("ended"), "4243", None, true);
         assert_eq!(job_state(&failing, &ended, ended.meta.job()).unwrap(), Job::Unanswered);
         stop_run(&mut ended, &failing, "t").unwrap();
+        // The stop settles the job: recorded, and not asked about again.
+        let reread = TestRun::open(&ended.dir).unwrap();
+        assert!(reread.meta.timestamps.job_stopped.is_some());
+        assert!(reread.pending_job(&failing).is_none());
+        // A job the scheduler has forgotten (its message one the pattern
+        // misses): the stop refused, `test stop` still succeeds, taken as
+        // ended and settled.
+        let forgetting = fake_meta(
+            r#"
+            get-status = "echo 'error: no such job @JOB_ID@' >&2; exit 1"
+            unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+            stop = "echo 'scancel: error: Kill job error on job id @JOB_ID@: Invalid job id specified' >&2; exit 1"
+            status-pattern = "^@JOB_ID@ "
+            "#,
+        );
+        let forgetting = Scheduler::new(&forgetting);
+        let mut forgotten = submitted_run(&tmp.path().join("forgotten"), "4245", None, true);
+        stop_run(&mut forgotten, &forgetting, "t").unwrap();
+        assert!(TestRun::open(&forgotten.dir).unwrap().pending_job(&forgetting).is_none());
         clear_to_delete(&ended, &failing, "t", false).unwrap();
         clear_to_delete(&ended, &failing, "t", true).unwrap();
         let open = submitted_run(&tmp.path().join("open"), "4244", None, false);

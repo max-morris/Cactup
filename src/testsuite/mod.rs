@@ -47,6 +47,12 @@ pub struct Timestamps {
     pub created: Option<DateTime<Utc>>,
     pub submitted: Option<DateTime<Utc>>,
     pub finished: Option<DateTime<Utc>>,
+    /// When cactup, after the record's end, asked the scheduler to stop the
+    /// job without its having said the job was listed (its status query
+    /// failed), or the scheduler refused a stop: the job is over from then
+    /// on, and asked about again only after a later end (a requeued run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_stopped: Option<DateTime<Utc>>,
 }
 
 /// `<TestName>/.cactup/test.toml` (§11.8). The frozen `[vars]` table is the
@@ -170,7 +176,7 @@ impl TestRun {
     pub fn pending_job(&self, sched: &Scheduler) -> Option<JobRef<'_>> {
         let meta = &self.meta;
         (meta.timestamps.submitted.is_some()
-            && (meta.timestamps.finished.is_none() || sched.asks_after_end(&meta.machine, meta.timestamps.finished))
+            && (meta.timestamps.finished.is_none() || sched.asks_after_end(&meta.machine, crate::scheduler::end_to_ask(meta.timestamps.finished, meta.timestamps.job_stopped)))
             && meta.job_id != crate::sim::restart::NO_JOB_ID)
             .then(|| meta.job())
     }

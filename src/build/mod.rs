@@ -2275,7 +2275,7 @@ fn prepare_with_cache(
         config_meta,
         vars: freeze_vars(&vars),
         knobs: freeze_knobs(&vars),
-        timestamps: Timestamps { created: Some(Utc::now()), submitted: None, started: None, finished: None },
+        timestamps: Timestamps { created: Some(Utc::now()), submitted: None, started: None, finished: None, job_stopped: None },
         outcome: None,
     };
     // Creates the attempt directory and writes build.toml; from here on the

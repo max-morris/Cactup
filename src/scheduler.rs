@@ -188,24 +188,44 @@ pub enum Stopped {
 #[derive(Debug)]
 pub struct UnverifiedPid {
     pub id: String,
-    /// The pid's process leads its own process group, which a stop by hand
-    /// can take whole.
-    leads_group: bool,
+    /// The pid's process group, read when the refusal was made.
+    group: Option<crate::lock::ProcGroup>,
 }
 
 impl UnverifiedPid {
     pub fn of(id: &str) -> UnverifiedPid {
-        let leads_group = id.parse::<u32>().is_ok_and(|pid| crate::lock::proc_pgrp(pid) == Some(pid));
-        UnverifiedPid { id: id.to_owned(), leads_group }
+        let group = id.parse::<u32>().ok().and_then(crate::lock::proc_group);
+        UnverifiedPid { id: id.to_owned(), group }
+    }
+}
+
+/// How to stop by hand the run whose top process is `pid`: the whole
+/// process group where it holds nothing else (`kill -- -<pgid>`, which
+/// stops the pid and every process it started, and nothing else); else no
+/// single command does, and the processes are named.
+fn stop_by_hand(id: &str, group: Option<&crate::lock::ProcGroup>) -> String {
+    match group {
+        Some(group) if group.own => format!("`kill -- -{}` stops it and every process it started", group.pgid),
+        Some(group) if group.tree.len() > 1 => {
+            let tree: Vec<String> = group.tree.iter().map(u32::to_string).collect();
+            format!(
+                "no single command stops it alone, as its process group holds processes it did not start: \
+                 stop pid {id} and the processes it started (now pids {}; `pstree -p {id}` shows them), or \
+                 interrupt the run where it runs (Ctrl-C)",
+                tree.join(", ")
+            )
+        }
+        _ => format!(
+            "no single command stops it alone, as its process group holds processes it did not start: \
+             stop pid {id} and any process it started (`pstree -p {id}` shows them), or interrupt the run \
+             where it runs (Ctrl-C)"
+        ),
     }
 }
 
 impl std::fmt::Display for UnverifiedPid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let how = match self.leads_group {
-            true => format!("`kill -- -{0}` stops it and the process group it leads", self.id),
-            false => format!("`kill {0}` stops it", self.id),
-        };
+        let how = stop_by_hand(&self.id, self.group.as_ref());
         write!(
             f,
             "job {0} was recorded by an older cactup, without the host and start time of its \
@@ -226,13 +246,16 @@ pub struct SharedGroup(pub String);
 
 impl std::fmt::Display for SharedGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let group = self.0.parse::<u32>().ok().and_then(crate::lock::proc_group);
+        let pgid = group.as_ref().map(|g| format!(" ({})", g.pgid)).unwrap_or_default();
         write!(
             f,
-            "job {0} shares a process group with other processes (its process does not lead a \
-             group of its own), so cactup does not stop it: the machine's stop command would stop \
-             them too. Stop pid {0} by hand (`kill {0}`), or, for a foreground `cactup sim run` \
-             started from a script or after the first command of a pipeline, interrupt it where it runs (Ctrl-C); a submit \
-             command that starts each job with `setsid` gives it a group of its own",
+            "job {0} shares its process group{pgid} with processes it did not start, so cactup does \
+             not stop it: the machine's stop command would stop them too, and no single command stops \
+             the job alone. Stop pid {0} and the processes it started by hand (`pstree -p {0}` shows \
+             them), or interrupt the run where it runs (Ctrl-C; a foreground `cactup sim run` started \
+             from a script or later in a pipeline is one); a submit command that starts each job with \
+             `setsid` gives it a group of its own",
             self.0
         )
     }
@@ -287,15 +310,53 @@ pub fn note_taken_as_ended(job_id: &str) {
 
 /// What the scheduler said of a job asked about after its record's end
 /// ([`Scheduler::ask_after_end`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AfterEnd {
     /// Listed in a state the patterns read: queued again, or leaving.
     Listed(JobStatus),
     /// Not known (`Unknown`), or listed in a state no pattern reads
     /// (`Error`): the ended job.
     Over(JobStatus),
-    /// The status query failed: no answer.
-    Unanswered,
+    /// The status query failed: no answer. The [`FailedQuery`] text (the
+    /// query, both patterns, its output, the `unknown-job-pattern` hint).
+    Unanswered(String),
+}
+
+/// What a failed stop command said, on one line: its output, then its exit
+/// status (`collect_output`'s "command exited unsuccessfully (<status>):"
+/// heading, turned around).
+pub fn stop_said(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    let (status, rest) = match text.strip_prefix("command exited unsuccessfully (").and_then(|t| t.split_once("):")) {
+        Some((status, rest)) => (Some(status), rest),
+        None => (None, text.as_str()),
+    };
+    let said: Vec<&str> = rest.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    match (said.is_empty(), status) {
+        (true, Some(status)) => status.to_owned(),
+        (true, None) => "nothing".to_owned(),
+        (false, Some(status)) => format!("{} ({status})", said.join(" ")),
+        (false, None) => said.join(" "),
+    }
+}
+
+/// The end a record's job is asked about after (`finished`), unless a stop
+/// sent after it settled the job (`job_stopped`, later than `finished`):
+/// then `None`, taken as ended without a query.
+pub fn end_to_ask(finished: Option<DateTime<Utc>>, job_stopped: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    finished.filter(|finished| job_stopped.is_none_or(|stopped| stopped < *finished))
+}
+
+/// What a stop sent after a record's end did ([`Scheduler::stop_after_end`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndedStop {
+    /// The scheduler took it (or, where job ids are pids, there was
+    /// nothing to stop).
+    Sent,
+    /// The stop command failed: the scheduler would not stop the job (one
+    /// it has forgotten, or completed), what it said attached. After the
+    /// record's end that is taken as the job ended.
+    Refused(String),
 }
 
 /// How much later than its record a process with an older record's pid may
@@ -621,8 +682,25 @@ impl<'m> Scheduler<'m> {
         match self.get_status(job) {
             Ok(status) if is_live(status, true) => Ok(AfterEnd::Listed(status)),
             Ok(status) => Ok(AfterEnd::Over(status)),
-            Err(e) if e.downcast_ref::<FailedQuery>().is_some() => Ok(AfterEnd::Unanswered),
-            Err(e) => Err(e),
+            Err(e) => match e.downcast::<FailedQuery>() {
+                Ok(failed) => Ok(AfterEnd::Unanswered(failed.0)),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// Stop `job` after its record's end (still listed, or unanswered):
+    /// where the stop command fails (Slurm's `scancel` and Torque's `qdel`
+    /// refuse a job they have forgotten, `qdel` a completed one too), the
+    /// scheduler would not stop it, and the job is taken as ended rather
+    /// than the command failing. Ctrl-C is "interrupted" still; the pid
+    /// refusals ([`UnverifiedPid`], [`SharedGroup`]) are errors still.
+    pub fn stop_after_end(&self, job: JobRef<'_>) -> Res<EndedStop> {
+        match self.stop(job) {
+            Ok(_) => Ok(EndedStop::Sent),
+            Err(e) if gix::interrupt::is_triggered() => Err(e),
+            Err(e) if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() => Err(e),
+            Err(e) => Ok(EndedStop::Refused(stop_said(&e))),
         }
     }
 
@@ -633,11 +711,44 @@ impl<'m> Scheduler<'m> {
         Self::query_vars(job_id).substitute(template, Syntax::Shell).ok()
     }
 
-    /// Whether `job` is the job's own process here but does not lead its
-    /// own process group, so [`Self::stop`] refuses it ([`SharedGroup`]).
+    /// Whether `job` is the job's own process here but its process group
+    /// is not the job's own (it holds processes the job did not start), so
+    /// [`Self::stop`] refuses it ([`SharedGroup`]).
     pub fn shares_group(&self, job: JobRef<'_>) -> bool {
-        self.pid_check(job) == Some(PidCheck::Here)
-            && job.id.parse::<u32>().is_ok_and(|pid| crate::lock::proc_pgrp(pid) != Some(pid))
+        self.pid_check(job) == Some(PidCheck::Here) && !Self::own_group(job.id)
+    }
+
+    /// Whether pid `id`'s process group is its own: every process in it is
+    /// the pid or one it started (`lock::proc_group`). Whether the pid
+    /// leads it does not matter: a job started without `setsid` from an
+    /// interactive shell is in the group of the cactup that submitted it,
+    /// which has exited, and holds nothing else.
+    fn own_group(id: &str) -> bool {
+        id.parse::<u32>().ok().and_then(crate::lock::proc_group).is_some_and(|group| group.own)
+    }
+
+    /// What can be said of `job` where the pid checks rule it out without
+    /// running anything (job ids that are pids): its process is gone or is
+    /// another process now, or it is another host's. `None` where the
+    /// checks leave the asking to `get-status` (a batch scheduler, a pid
+    /// whose process is the job's).
+    pub fn ruled_out(&self, job: JobRef<'_>) -> Option<String> {
+        match self.pid_check(job)? {
+            PidCheck::Gone => Some(format!("process {} is gone, or is another process now", job.id)),
+            PidCheck::Elsewhere => Some(format!(
+                "it ran on host {}, and nothing of its run holds its lock",
+                job.host.unwrap_or_default()
+            )),
+            PidCheck::Here | PidCheck::Unverified => None,
+        }
+    }
+
+    /// Whether `job` is verified as the job's own process here, in a group
+    /// of its own, so the machine's stop command stops exactly it: a pid
+    /// with its host and start time ([`PidCheck::Here`]) whose group is its
+    /// own. Never true on a batch scheduler, where the scheduler answers.
+    pub fn stoppable_pid(&self, job: JobRef<'_>) -> bool {
+        self.pid_check(job) == Some(PidCheck::Here) && Self::own_group(job.id)
     }
 
     /// Whether `job` is a pid an older cactup recorded (no host, no start
@@ -854,12 +965,8 @@ impl<'m> Scheduler<'m> {
             Some(PidCheck::Gone) => return Ok(Stopped::Gone),
             Some(PidCheck::Elsewhere) => return Ok(Stopped::Elsewhere(job.host.unwrap_or_default().to_owned())),
             Some(PidCheck::Unverified) => return Err(UnverifiedPid::of(job.id).into()),
-            Some(PidCheck::Here) => {
-                let pid: u32 = job.id.parse()?;
-                if crate::lock::proc_pgrp(pid) != Some(pid) {
-                    return Err(SharedGroup(job.id.to_owned()).into());
-                }
-            }
+            Some(PidCheck::Here) if !Self::own_group(job.id) => return Err(SharedGroup(job.id.to_owned()).into()),
+            Some(PidCheck::Here) => {}
             None => {}
         }
         let vars = Self::query_vars(job.id);
@@ -1364,8 +1471,174 @@ mod tests {
         let err = sched.stop(own).unwrap_err();
         assert!(err.downcast_ref::<SharedGroup>().is_some(), "{err:#}");
         let text = format!("{err:#}");
-        assert!(text.contains("shares a process group") && text.contains(&format!("kill {pid}")), "{text}");
+        assert!(text.contains("shares its process group") && text.contains(&format!("pstree -p {pid}")), "{text}");
+        assert!(!text.contains("kill"), "no single command stops it alone: {text}");
         assert_eq!(marks(dir.path(), "stopped"), 0);
+    }
+
+    /// A run the way a job started without `setsid` from an interactive
+    /// shell is: the group's leader (the cactup that submitted it) gone,
+    /// the group holding only the job's processes, a run-script (`top`)
+    /// and the process it started (`child`).
+    struct OrphanRun {
+        top: u32,
+        child: u32,
+        pgid: u32,
+    }
+
+    impl OrphanRun {
+        fn start() -> OrphanRun {
+            use std::os::unix::process::CommandExt;
+            let out = std::process::Command::new("sh")
+                .args(["-c", "sh -c 'sleep 300 & wait' > /dev/null 2>&1 < /dev/null & echo $!"])
+                .process_group(0)
+                .output()
+                .unwrap();
+            let top: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            let pgid = crate::lock::proc_pgrp(top).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let group = crate::lock::proc_group(top).unwrap();
+                if let Some(&child) = group.tree.iter().find(|&&p| p != top) {
+                    return OrphanRun { top, child, pgid };
+                }
+                assert!(std::time::Instant::now() < deadline, "the run's child never started");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        fn gone(&self) -> bool {
+            // A killed process lingers as a zombie until its parent (init,
+            // or the run-script) reaps it: gone either way.
+            [self.top, self.child].iter().all(|p| {
+                std::fs::read_to_string(format!("/proc/{p}/stat"))
+                    .map(|stat| stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')))
+                    .unwrap_or(true)
+            })
+        }
+
+        fn await_gone(&self) -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !self.gone() {
+                if std::time::Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            true
+        }
+    }
+
+    impl Drop for OrphanRun {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("kill").args(["-9", &self.top.to_string(), &self.child.to_string()]).status();
+        }
+    }
+
+    /// A job whose leader is gone but whose process group holds only the
+    /// job's processes (submitted without `setsid` from an interactive
+    /// shell, as master's MDB did) is the job's own group: the machine's
+    /// stop command is run (the generic machine's real one stops the whole
+    /// run and nothing else), and the advice for an older record of it,
+    /// `kill -- -<pgid>`, stops the whole run too.
+    #[test]
+    fn a_group_holding_only_the_jobs_processes_is_its_own() {
+        let run = OrphanRun::start();
+        assert_ne!(run.pgid, run.top, "the run's top process does not lead its group");
+        let group = crate::lock::proc_group(run.top).unwrap();
+        assert!(group.own, "{group:?}");
+        assert_eq!((group.pgid, group.tree.clone()), (run.pgid, vec![run.top.min(run.child), run.top.max(run.child)]));
+        // Our own group holds the test runner, which no sleeper started.
+        let ours = Sleeper::start_in_our_group();
+        assert!(!crate::lock::proc_group(ours.0.id()).unwrap().own);
+
+        let dir = tempfile::tempdir().unwrap();
+        let marking = pids_machine(dir.path());
+        let sched = Scheduler::new(&marking);
+        let (top, here) = (run.top.to_string(), crate::lock::our_hostname());
+        let start = crate::lock::proc_starttime(run.top);
+        let job = JobRef::new(&top, Some(&here), start, None);
+        assert!(!sched.shares_group(job) && sched.stoppable_pid(job));
+        assert_eq!(sched.stop(job).unwrap(), Stopped::Sent);
+        assert_eq!(marks(dir.path(), "stopped"), 1);
+
+        // The generic machine's own stop command, for real.
+        let generic = meta(
+            r#"
+            job-ids = "pids"
+            get-status = "ps @JOB_ID@"
+            stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+            status-pattern = "^ *@JOB_ID@ "
+            running-pattern = "^"
+            "#,
+        );
+        assert_eq!(Scheduler::new(&generic).stop(job).unwrap(), Stopped::Sent);
+        assert!(run.await_gone(), "the stop command left part of the run");
+        assert!(crate::lock::proc_starttime(ours.0.id()).is_some(), "the stop command reached another group");
+
+        // An older record of such a run: never stopped, and the advice
+        // stops the whole run when followed.
+        let run = OrphanRun::start();
+        let text = UnverifiedPid::of(&run.top.to_string()).to_string();
+        let advice = format!("kill -- -{}", run.pgid);
+        assert!(text.contains(&format!("`{advice}`")), "{text}");
+        assert!(std::process::Command::new("sh").args(["-c", &advice]).status().unwrap().success());
+        assert!(run.await_gone(), "{advice} left part of the run");
+        assert!(crate::lock::proc_starttime(ours.0.id()).is_some(), "{advice} reached another group");
+    }
+
+    /// A run-script in a group that holds processes it did not start (the
+    /// test runner's): no single command stops it alone. An older record
+    /// of it names the processes to stop; a verified one is refused.
+    #[test]
+    fn a_run_sharing_its_group_with_others_names_its_processes() {
+        let mut shell = std::process::Command::new("sh").args(["-c", "sleep 300 & wait"]).spawn().unwrap();
+        let top = shell.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let group = loop {
+            let group = crate::lock::proc_group(top).unwrap();
+            if group.tree.len() == 2 {
+                break group;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run's child never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(!group.own);
+        let text = UnverifiedPid::of(&top.to_string()).to_string();
+        let tree: Vec<String> = group.tree.iter().map(u32::to_string).collect();
+        assert!(text.contains(&format!("now pids {}", tree.join(", "))) && text.contains(&format!("pstree -p {top}")), "{text}");
+        assert!(!text.contains("kill"), "{text}");
+        let _ = std::process::Command::new("kill").args(["-9", &tree[0], &tree[1]]).status();
+        let _ = shell.wait();
+    }
+
+    /// After a record's end, a stop the scheduler refuses (Slurm's
+    /// `scancel` of a job it has forgotten exits 1, Torque's `qdel` 153) is
+    /// no error: what it said is kept, for "taken as ended".
+    #[test]
+    fn a_stop_refused_after_the_end_is_taken_as_ended() {
+        let refusing = meta(
+            r#"
+            stop = "echo 'scancel: error: Kill job error on job id 4242: Invalid job id specified' >&2; exit 1"
+            status-pattern = "^@JOB_ID@ "
+            "#,
+        );
+        let sched = Scheduler::new(&refusing);
+        match sched.stop_after_end(JobRef::bare("4242")).unwrap() {
+            EndedStop::Refused(said) => assert_eq!(
+                said,
+                "scancel: error: Kill job error on job id 4242: Invalid job id specified (exit status: 1)"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(sched.stop(JobRef::bare("4242")).is_err(), "before the end it is an error still");
+        let taking = meta(
+            r#"
+            stop = "true"
+            status-pattern = "^@JOB_ID@ "
+            "#,
+        );
+        assert_eq!(Scheduler::new(&taking).stop_after_end(JobRef::bare("4242")).unwrap(), EndedStop::Sent);
     }
 
     /// A job an older cactup recorded (no host, no start time) on a

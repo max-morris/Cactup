@@ -216,12 +216,14 @@ fails stops `test stop`, `test delete` and a new `test run` or `test submit`
 with the scheduler's output rather than taking the job for ended, and `test
 list` shows `UNKNOWN`. For a run that had already finished, `test list`
 shows its recorded end and `test delete` notes the failed query and goes
-ahead, while
-the commands that act take the safe reading, since the job may have been
-queued again: `test stop` asks the scheduler to cancel it anyway (harmless
-if it is gone), saying it could not ask, and a new `test run` or `test
-submit` refuses until the scheduler answers (`--force` cancels the job
-first). When `test stop` has nothing to cancel, it says what it knows (the
+ahead, while the commands that act take the safe reading, since the job may
+have been queued again: a new `test run` or `test submit` refuses, printing
+the failed query, and `test stop` asks the scheduler to cancel the job
+anyway, saying it could not ask. That settles it: cactup records the stop
+and from then on takes the job as ended, so `test stop` is always the way
+out (`--force` cancels the job and goes ahead). If the scheduler will not
+cancel it (it has forgotten the job), cactup says so and takes it as
+ended. When `test stop` has nothing to cancel, it says what it knows (the
 scheduler does not know the job, or lists it as over, or the run has
 recorded its end). On a machine without a batch system (the generic machine), a
 submitted run's job is a background process: cactup asks about it and stops
@@ -232,8 +234,10 @@ a process group of its own (the machine's `submit` starts it with
 host that submitted it and to stop it there, and `test delete` refuses,
 while the run holds its lock. A run submitted by an older cactup is not
 stopped for you while a process with its number runs: check it and stop it
-yourself, with the command cactup prints (`kill -- -<pid>` where the
-process leads a process group, `kill <pid>` where it does not).
+yourself, as cactup says (`kill -- -<group>` where its process group holds
+only the job; else it names the processes to stop). Nor is a job whose
+process group holds processes it did not start: stop it and the processes
+it started yourself (`pstree -p <pid>` shows them).
 
 Move a test to trash:
 

@@ -40,6 +40,12 @@ pub struct Timestamps {
     pub submitted: Option<DateTime<Utc>>,
     pub started: Option<DateTime<Utc>>,
     pub finished: Option<DateTime<Utc>>,
+    /// When cactup, after the record's end, asked the scheduler to stop the
+    /// job without its having said the job was listed (its status query
+    /// failed), or the scheduler refused a stop: the job is over from then
+    /// on, and asked about again only after a later end (a requeued run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_stopped: Option<DateTime<Utc>>,
 }
 
 /// `[outcome]` in `build.toml`: recorded once the `make` invocation ends.
@@ -505,6 +511,7 @@ mod tests {
                 submitted: None,
                 started: None,
                 finished: None,
+                job_stopped: None,
             },
             outcome: None,
         }

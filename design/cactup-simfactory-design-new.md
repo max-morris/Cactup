@@ -3229,10 +3229,14 @@ asks the scheduler to stop it, saying it is still listed (queued again, or
 leaving the queue), the outcome standing. Only an attempt made for the
 machine cactup runs on is asked about after its outcome (§10). A status
 query that fails after the outcome takes the safe reading for what each
-does: the guard refuses a new attempt without `-f` (the scheduler could
-not be asked about the job, which may have been queued again; `-f` stops
-it, a stop being harmless to a job that is gone), and `build stop` asks the
-scheduler to stop it, saying it could not ask. Where the scheduler answers
+does: the guard refuses a new attempt without `-f`, printing the failed
+query (the job may have been queued again) and naming `build stop`, which
+resolves it; `-f` stops it and builds. `build stop` asks the scheduler to
+stop it, saying it could not ask, and records `job-stopped` in the
+attempt's `[timestamps]` (under its `record.lock`): the job is settled,
+not asked about again (§10). A stop the scheduler refuses after the
+outcome (a job it has forgotten) is said so and taken as the job ended,
+settled too, for `build stop` and `-f` alike. Where the scheduler answers
 that the job is gone or over, `build stop` says which, and nothing to
 stop. A requeued attempt that runs
 again clears its outcome and `finished` as `execute` starts and records new
@@ -3838,8 +3842,11 @@ stop` asks the scheduler to stop that job directly (stopping a job that is
 leaving, or gone, is harmless), says which ("still listed after the
 restart ended, queued again, or leaving the queue"; "could not ask the
 scheduler about job N ... asked it to stop the job in case it was queued
-again"), and records nothing else on the restart (its end stands). There
-is no graceful path for it: a restart that has recorded its end has no
+again"), and records nothing else on the restart (its end stands) but,
+for a job it could not ask about or whose stop the scheduler refused,
+`job-stopped` (§10: settled, not asked about again). A stop the
+scheduler refuses (a job it has forgotten) is said so and taken as the
+job ended, never an error. There is no graceful path for it: a restart that has recorded its end has no
 Cactus reading its `TERMINATE` (a requeued job's own run recreates the
 file and runs in full). Where the scheduler answered that the job is
 gone or over, or nothing was asked (job ids that are pids, past the
@@ -3848,26 +3855,37 @@ scheduler's machine), `sim stop` runs no stop command (Torque's `qdel`
 refuses a completed job) and says only what it knows: the scheduler does
 not know job N, or lists it as over, or the restart has recorded its end;
 nothing to stop. An active restart that has recorded its end is then
-deactivated, as a stop finishes it (not where a stop was sent: a requeued
-job's run hands it over). Whatever it did, `sim stop` names the restarts
-after the one it acted on that were submitted chained (pre-submitted,
-§8.3.2) and have not run, each with the job it is chained behind (it runs
-after that job) and the scheduler's command that stops it
-(`Scheduler::stop_command`); cactup never stops them unasked. `sim submit`
-chains the new submission behind a still-listed job, or one the scheduler
-could not be asked about (`CHAINED_JOB_ID`: behind a job that is just
-leaving, a moment's wait; behind one that is gone, none), active restart
-or not, saying which, and the reaper (§8.3) never reaps a restart whose
-job is still listed; where the reaper left an ended active restart under
-its throttles, `sim submit` asks the scheduler before saying so: still
-listed or unanswered, chained; its run still holding its lock, chained;
-else it cleans the restart, as the reaper would, saying what it learned
-(the scheduler does not know the job, or lists it as over, or, where
-nothing was asked, that the restart had recorded its end), and the new
+deactivated, as a stop finishes it (not where the scheduler took a stop
+of a job it listed: a requeued job's run hands it over). Whatever it
+did, `sim stop` names the restarts after the one it acted on that were
+submitted chained (pre-submitted, §8.3.2) and have not run, but only
+where the job is verified to be waiting: on a batch scheduler, one the
+scheduler lists queued or held (a failed query: said to be that, and no
+"runs after it"); where job ids are pids, one whose pid passes the pid
+checks in a group of its own (§10). Each is named with the job it is
+chained behind (it runs after that job) and the scheduler's command that
+stops it exactly (`Scheduler::stop_command`); one canceled, killed, over
+or another process now is passed over; cactup never stops them unasked.
+`sim submit` chains the new submission behind a still-listed job
+(`CHAINED_JOB_ID`: behind a job that is just leaving, a moment's wait),
+active restart or not, saying so, and the reaper (§8.3) never reaps a
+restart whose job is still listed. Beside a job the scheduler could not
+be asked about it refuses (chaining behind a job the scheduler has
+forgotten fails: Slurm's "Job dependency problem"), printing the failed
+query and naming `sim stop`; `-f` stops the job and submits unchained.
+Where the reaper left an ended active restart under its throttles, `sim
+submit` asks the scheduler before saying so: still listed, chained;
+unanswered, as above; its run still holding its lock, chained; else it
+cleans the restart, as the reaper would, saying what it learned (the
+scheduler does not know the job, or lists it as over, or, where nothing
+was asked, that the restart had recorded its end), and the new
 submission runs on its own. `sim run` refuses to start beside an active
 restart that has not recorded its end (its own refusal, first: `sim stop`
-acts on that one), then beside a still-listed or unanswered job (wait
-until it leaves, or `sim stop` it, which then acts on that job). `sim submit` also
+acts on that one), then beside a still-listed job (wait until it leaves,
+or `sim stop` it, which then acts on that job) or one the scheduler could
+not be asked about (the failed query printed; `sim stop` resolves it,
+`-f` stops it and runs). `sim run` does not look at a later restart
+chained behind a job and queued (as master did not). `sim submit` also
 refuses while the active restart is a foreground run on a batch scheduler's
 machine (whose pid no scheduler could chain a job behind): wait for it, or
 interrupt it. What this costs where the job is only leaving: a new `sim
@@ -4209,7 +4227,9 @@ subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carr
 pid, §8.6; absent for a submitted restart), `chained-job-id`, and where job
 ids are pids
 the `job-host` and `job-start` recorded with `job-id` (§10; `build.toml` and
-`test.toml` carry them too), the last observed `status`, the resolved **run** `universe` (name + expanded
+`test.toml` carry them too), `job-stopped` (when a stop after the
+restart's end settled its job, §10; `build.toml`'s and `test.toml`'s
+`[timestamps]` carry it too), the last observed `status`, the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
 without re-reading the MDB), the frozen `[vars]` table (the §6.3 variable set)
 and `[knobs]` table (the effective knob snapshot, §5.1 — both so the compute
@@ -4302,17 +4322,24 @@ and start time beside it), so no caller can skip the checks.
     `sim stop` watches the lock. Once the lock is not live (its holder
     gone; another host's lock goes stale by its mtime, `LOCK_STALE_SECS`,
     §2.3) the job is taken as ended.
-  - **Only a job leading its own process group is stopped.** The stop
-    commands kill a process group (`pkill -g`) or a process whose group
-    carries on (`kill`); a job started by `sh -c '… &'` shares the
-    submitting shell's group, and stopping it would stop its siblings and
-    the shell. So `stop` runs only where `/proc/<pid>/stat`'s process group
-    is the pid itself, and otherwise refuses (`SharedGroup`), naming the
-    pid to stop by hand. A foreground `sim run` is stopped where it leads
-    its group (typed at an interactive prompt, which gives each job a group
-    of its own, cactup being the pipeline's first command if in one) and
-    refused where it does not (started from a script, or later in a
-    pipeline: interrupted where it runs). Every in-repository
+  - **Only a job whose process group is its own is stopped.** The stop
+    commands kill a process group (`pkill -g`); killing the pid alone
+    (`kill`) would leave the run-script's exe and Cactus running orphaned
+    (a foreground `sim run`'s interrupt path stops only its direct child),
+    and a group that holds other processes takes them with it. A group is
+    the job's own when every process in it (by `/proc/*/stat`'s process
+    group) is the pid or one of its descendants (by the parent links,
+    `lock::proc_group`), whether or not the pid leads it: a job submitted
+    without `setsid` from an interactive shell is in the group of the
+    cactup that submitted it, which has exited, and the group holds the
+    job alone (master's MDB, whose `stop` stopped such a job whole). `stop`
+    runs the machine's stop command only there, and otherwise refuses
+    (`SharedGroup`): no single command stops the job alone, so the refusal
+    names the pid, says to stop it and the processes it started (`pstree -p
+    <pid>`), or to interrupt the run where it runs. A foreground `sim run`
+    typed at an interactive prompt, alone, has a group of its own and is
+    stopped; one started from a script, or with other commands in its
+    pipeline, shares its group and is refused. Every in-repository
     `pids` machine's `submit` and `blocking-submit` start the job with
     `setsid` (which keeps the pid: the backgrounded process does not lead
     a group, so `setsid` makes its session in place), and a `pids`
@@ -4326,7 +4353,10 @@ and start time beside it), so no caller can skip the checks.
     `/proc/stat`'s `btime` plus the start time in clock ticks): else `U`,
     nothing run, so a long-lived unrelated process that took the pid later
     never holds a record up. Never stopped: `stop` refuses
-    (`UnverifiedPid`), naming the pid, so `sim stop`, `test stop`, `delete
+    (`UnverifiedPid`), saying how to stop it by hand if it is the job:
+    `kill -- -<pgid>` where its process group is its own (which stops the
+    pid and every process it started, and nothing else), else naming the
+    pid and its descendants to stop, or the run to interrupt; so `sim stop`, `test stop`, `delete
     -f` and the `-f` of a new run or build refuse rather than stop what may
     be another process. The user stops it by hand if it is the job. This
     is the safe reading of a record that cannot tell its own process from
@@ -4383,13 +4413,34 @@ and start time beside it), so no caller can skip the checks.
   records (the displays, which show the recorded end; `sim delete` and
   `test delete`, with a one-line note); a command takes the safe reading for what it
   does: `sim stop`, `test stop` and `build stop` ask the scheduler to stop
-  the job in case it was queued again (a stop is harmless to a job that
-  is gone), saying the scheduler could not be asked; `sim run`, a new test
-  run and a new build refuse without `-f` (with `-f`, the new test run or
-  build stops it first); `sim submit` chains behind it, saying so. No
-  message states a scheduler answer cactup did not get: "nothing to stop"
-  names what was learned (the scheduler does not know the job, lists it
-  as over, or, where nothing was asked, the record's end). A requeued job that starts clears the record's end itself
+  the job in case it was queued again, saying the scheduler could not be
+  asked; the guards before new work (`sim run`, `sim submit`, a new test
+  run or build) refuse, printing the failed query as `FailedQuery` has it
+  (the query, both patterns, its output, the `unknown-job-pattern` hint)
+  and naming `sim stop`/`test stop`/`build stop`, which always resolves it;
+  with `-f` they send the stop themselves and go ahead (`sim submit` then
+  unchained). `sim submit` never chains behind such a job: a job the
+  scheduler has forgotten fails the dependency (Slurm's `sbatch
+  --dependency=afterany:<id>` says "Job dependency problem"). A stop sent
+  after a record's end whose stop command fails (Slurm's `scancel` of a
+  forgotten job exits 1, "Invalid job id specified"; Torque's `qdel`
+  exits 153, or 15 for a completed job) is no error
+  (`Scheduler::stop_after_end`, `EndedStop::Refused`): the command says
+  so ("the scheduler would not stop job N (its stop command said: …):
+  taken as ended") and takes the job as ended (an ended active restart is
+  deactivated); Ctrl-C is "interrupted" still. A stop sent for a job the
+  scheduler could not be asked about, or one it refused, settles the job:
+  the record gets `job-stopped` (its time; `restart.toml`, and `test.toml`'s
+  and `build.toml`'s `[timestamps]`), and from then on the job is taken as
+  ended without a query (`end_to_ask`), unless a requeued run records a
+  later end. So a scheduler whose `unknown-job-pattern` never matches its
+  message for a forgotten job costs one `stop`, not fourteen days of
+  refusals. No message states a scheduler answer cactup did not get:
+  "nothing to stop" names what was learned (the scheduler does not know
+  the job, lists it as over, or, where nothing was asked, the record's
+  end), and so does the reaper's note (where job ids are pids: the process
+  is gone or is another process now, or it ran on another host and
+  nothing of its run holds its lock). A requeued job that starts clears the record's end itself
   (`execute_restart`, `build::execute`, the test run's compute side), and is
   live by the ordinary rule from then on.
 - **`unknown-job-pattern = '<regex>'`** (optional; `@JOB_ID@` substituted as
@@ -4798,8 +4849,11 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
     `finished` (`Job::Unanswered`) takes the safe reading for each (§10):
     `list` shows the recorded end, `delete` notes it and goes ahead, `stop`
     asks the scheduler to stop the job in case it was queued again, saying
-    it could not ask, and a new `test run` or `test submit` refuses without
-    `-f` (`-f` stops it). Only a run made for this machine (its `machine`)
+    it could not ask, and records `job-stopped` in `[timestamps]` (settled,
+    not asked about again, §10), and a new `test run` or `test submit`
+    refuses without `-f`, printing the failed query and naming `test stop`
+    (`-f` stops it). A stop the scheduler refuses after `finished` is said
+    so and taken as the job ended (settled). Only a run made for this machine (its `machine`)
     is asked about after `finished`. Where
     job ids are pids (`job-ids = "pids"`: the generic machine and those
     `machine create` makes from it; in the MDB athena, et-juphub, hal1,
@@ -4923,6 +4977,7 @@ reads), the test subsystem adds:
   created = "…"
   submitted = "…"
   finished = "…"
+  job-stopped = "…"                 # a stop after the end settled the job (§10)
   ```
   Plus the liveness files under the same `.cactup/`: `running.lock` and
   `heartbeat` (§9.3 semantics; consulted by `test stop`/`show`, not by any

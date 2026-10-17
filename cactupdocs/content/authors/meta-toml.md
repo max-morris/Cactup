@@ -304,11 +304,17 @@ id may name an unrelated job, and the record is taken as ended without
 asking). A failed query then is taken as the job ended where cactup only
 shows records (`sim list`, `test list`, their `show`s: the recorded end) or
 removes them (`sim delete`, `test delete`: with a one-line note); the commands that act take the
-safe reading, since the job may have been queued again: `sim stop`, `test
-stop` and `build stop` ask the scheduler to stop the job anyway (a stop
-does no harm to a job that is gone), saying they could not ask; `sim
-submit` chains behind it; `sim run`, and a new test run or build without
-`-f`, refuse until the scheduler answers. Without the key, no line for the
+safe reading, since the job may have been queued again: `sim submit`, `sim
+run`, and a new test run or build refuse, printing the query, both patterns
+and what it printed, and naming the stop command (`-f` stops the job and
+goes ahead); `sim stop`, `test stop` and `build stop` ask the scheduler to
+stop the job anyway, saying they could not ask, and record the stop, after
+which the job is taken as ended without asking. A stop the scheduler
+refuses after the end (Slurm's `scancel` and Torque's `qdel` refuse a job
+they have forgotten) is taken as the job ended, never an error. So a
+pattern that misses the scheduler's message for a forgotten job costs a
+refusal and one stop per record, and the refusal shows the output to fix
+the pattern against. Without the key, no line for the
 job means the job is gone, as before: a query that failed reads as a job no
 longer in the queue. Check the pattern against what the command really
 prints for a job the scheduler no longer knows (an old job id will do): one
@@ -385,16 +391,17 @@ goes stale) it is taken as ended. A job recorded by an older cactup,
 without its host and start time, is asked about only where a process with
 its pid runs on this host and started no later than the record was made,
 and cactup never stops it (it may be another process): stop it yourself if
-it is the job, with the command cactup prints (`kill -- -<pid>` where it
-leads a process group, `kill <pid>` where it does not). A run that has recorded its end is not asked about again on
+it is the job, as cactup says (`kill -- -<group>` where its process group
+holds only the job; else it names the processes to stop). A run that has recorded its end is not asked about again on
 such a machine, where nothing requeues a job.
 
 The `submit` (and `blocking-submit`) of such a machine must start each job
 in a process group of its own, with `setsid` as above: `stop` stops a whole
-group (`pkill -g`), so cactup runs it only for a job whose process leads its
-own group, and refuses otherwise (a job sharing the submitting shell's group
-would take the shell and its other jobs with it), naming the pid to stop by
-hand. `setsid` keeps the backgrounded pid: it starts a new session in the
+group (`pkill -g`), so cactup runs it only for a job whose group holds
+nothing but the job and the processes it started, and refuses otherwise (a
+job sharing the submitting shell's group would take the shell and its other
+jobs with it), naming the pid to stop by hand with the processes it
+started. `setsid` keeps the backgrounded pid: it starts a new session in the
 same process when that process does not lead a group already, as a
 background job of `sh -c` does not.
 

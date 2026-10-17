@@ -295,9 +295,12 @@ cancels it, and a new build of that config refuses to start until it has
 left (`-f` cancels it first). `build list` shows the recorded result until a
 requeued job runs again. If the scheduler cannot be asked about a finished
 build's job, cactup takes the safe reading, since the job may have been
-queued again: `build stop` asks the scheduler to cancel it anyway
-(harmless if it is gone), saying it could not ask, and a new build of that
-config refuses until the scheduler answers (`-f` cancels the job first).
+queued again: a new build of that config refuses, printing the failed
+query, and `build stop` asks the scheduler to cancel the job anyway,
+saying it could not ask. That settles it: cactup records the stop and from
+then on takes the job as ended, so `build stop` is always the way out
+(`-f` cancels the job and builds). If the scheduler will not cancel it (it
+has forgotten the job), cactup says so and takes it as ended.
 When `build stop` has nothing to cancel, it says what it knows (the
 scheduler does not know the job, or lists it as over, or the build has
 finished). An unfinished build whose status query fails is shown

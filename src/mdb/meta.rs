@@ -464,7 +464,7 @@ pub struct Scheduler {
     /// the one that started then; otherwise the job is gone (or, recorded on
     /// another host, left to that host). `submit` must start each job in a
     /// process group of its own (`setsid`): cactup stops only a job whose
-    /// process leads its own group.
+    /// group holds nothing but the job and the processes it started.
     #[serde(default)]
     pub job_ids: JobIds,
     /// A regular expression matching a line of `get-status`'s output
