@@ -821,24 +821,58 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   **run** — because a Cactus build usually needs the same module environment as
   the eventual run (compilers, MPI, etc.), and requiring the user to duplicate it
   was a common footgun. For phase-specific additions there are three optional
-  companion keys — **`env-build-setup`**, **`env-submit-setup`**, and
-  **`env-run-setup`** — each *appended* to `env-setup` for that phase only. The
+  companion keys — **`build-env-setup`**, **`submit-env-setup`**, and
+  **`run-env-setup`** — each *appended* to `env-setup` for that phase only. The
   effective environment for a phase is `env-setup` followed by the matching
-  `env-<phase>-setup` (empty when unset). This is opt-in granularity: a machine
+  `<phase>-env-setup` (empty when unset). This is opt-in granularity: a machine
   that needs no per-phase difference sets only `env-setup`; a machine that (say)
-  loads a debugger module only when building sets `env-build-setup`. §6.1
+  loads a debugger module only when building sets `build-env-setup`. §6.1
   specifies how each block is injected for `.sh` vs `.py` templates and for the
-  build's `make` invocation.
+  build's `make` invocation. (Generations 1 and 2 spelled the companions
+  `env-build-setup` / `env-submit-setup` / `env-run-setup`; generation 3
+  renamed them, with no reader for the old names — §17.5.)
+- **Provisioning keys (generation 3).** Beside each setup, a provisioning
+  step of its own: **`provision`** runs wherever `env-setup` does (every
+  phase), and **`build-provision`**, **`submit-provision`** and
+  **`run-provision`** in their phase only. A setup *describes* the
+  environment (exports, module loads) and must run through anywhere; a
+  provisioning step *makes or fetches* what the phase needs (a conda
+  environment, a stub file under `$HOME`), which only works on the machine
+  itself. Within a phase the order is: the effective setup (a provisioning
+  step may need it, e.g. a module that provides `curl`), then `provision`,
+  then the phase's own `<phase>-provision`. Each runs in a subshell of its
+  own, under `set -e`, so nothing it exports or changes in its shell reaches
+  the phase, and a failure stops the script it is in (the build, the submit
+  script, the run script) with its status, whether or not that script runs
+  `set -e` itself. They are frozen and injected exactly where the setups are
+  (§6.1), never before the scheduler's own commands (`submit`,
+  `blocking-submit`, `get-status`, `get-status-many`, `stop`, `exec-host`:
+  run on the login node, the queries over and over), never
+  run by `cactup cache doctor` or the MDB's setup check (§18.12), and not
+  part of the build cache's key (§18.5: they cannot change the environment a
+  compile sees).
 - **Universe-level env-setup overrides.** A `[universes.<name>]` table (§4.8)
-  may itself carry `env-setup` / `env-build-setup` / `env-submit-setup` /
-  `env-run-setup`, alongside its wrapper keys (or with no wrapper at all — an
+  may itself carry `env-setup` / `build-env-setup` / `submit-env-setup` /
+  `run-env-setup` and `provision` / `build-provision` / `submit-provision` /
+  `run-provision`, alongside its wrapper keys (or with no wrapper at all — an
   identity universe, §4.8). Where set, a key in the universe table **replaces**
   the machine `[environment]` key of the same name, **key-by-key**, for any
   phase executed in that universe; a key the universe table omits still falls
   back to the machine's `[environment]` value. The concatenation that produces
-  the effective per-phase block (`env-setup` then `env-<phase>-setup`, §6.1) is
+  the effective per-phase block (`env-setup` then `<phase>-env-setup`, §6.1) is
   otherwise unchanged — it is simply evaluated against whichever of the two
-  (universe or machine) key is in force. See §4.8 for the full resolution
+  (universe or machine) key is in force. The provisioning keys follow the
+  same rule, so a universe that sets none inherits the machine's and runs
+  them: inside its wrapper (a container) in a build or run script, which
+  cactup starts through the universe, and wherever the scheduler starts it
+  in a submit script, whose universe only picks the setup and the
+  `submit` command's wrapping; a universe sets
+  an empty value (`provision = ""`, `build-provision = ""`, …) to turn the
+  machine's step off there. (Generation-2 overlays need care here: a
+  universe that set its own `env-setup` used to replace the machine's whole
+  setup, creation lines included, so moving those lines into the machine's
+  `provision` makes that universe run them unless it sets `provision = ""`;
+  `GENERATIONS.md` says so.) See §4.8 for the full resolution
   story (including which universe is "in effect" for a given phase).
 - Scheduler keys carried over (semantics unchanged; names kebab-normalized —
   see the key-naming note below): `submit`, `interactive-cmd`, `get-status`,
@@ -997,14 +1031,16 @@ pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
 `enabled-thorns`, `disabled-thorns`, and the queued-build keys `default-action`,
 `queue`, `walltime`, `nodes`, `tasks`, `cpus-per-task`, `gpus-per-task` — §7.9),
 `[environment]` (`env-setup` and the
-phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
+phase-specific `build-env-setup` / `submit-env-setup` / `run-env-setup`, and the
+provisioning keys `provision` / `build-provision` / `submit-provision` /
+`run-provision` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
-`*-pattern`s, `exec-host`, `max-walltime`), then `[queues.*]`, the script
+`*-pattern`s, `exec-host`, `max-walltime`, `job-ids` — §10), then `[queues.*]`, the script
 route tables `[submitscripts]`, `[runscripts]` and — only on a machine that
 submits builds — `[buildsubmitscripts]` (§4.4, §7.9),
 and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
-`env-*-setup` overrides; the always-available `"host"` universe needs no table
+environment-key overrides; the always-available `"host"` universe needs no table
 at all unless it is being customized).
 
 **The schema is closed.** Every table above rejects keys it does not model: an
@@ -1056,8 +1092,9 @@ get-status = "squeue -j @JOB_ID@"
 env-setup = """
 module load gcc/11 openmpi/4
 """                            # applied to build, submit, AND run (§6.1)
-env-build-setup = "module load cmake/3.27"   # appended only for `cactup build`
-# env-submit-setup / env-run-setup: appended only for submit / run (optional)
+build-env-setup = "module load cmake/3.27"   # appended only for `cactup build`
+# submit-env-setup / run-env-setup: appended only for submit / run (optional)
+# provision / build-provision / …: steps that make what a phase needs (optional)
 
 [queues.checkpt]               # one table per queue
 gpu = false
@@ -1629,7 +1666,7 @@ wrapper-argv = ["apptainer", "exec", "--bind", "@SOURCEDIR@", "/work/@USER@/et.s
 # shape a machine uses to customize the implicit "host" universe (below)
 # without introducing any wrapping:
 # [universes.host]
-# env-build-setup = """
+# build-env-setup = """
 # module purge
 # module load gcc/9.3.0 cuda/12.4.0
 # """
@@ -1694,23 +1731,26 @@ declare it (see step 5).
 the phase's effective env-setup followed by the phase command — build:
 `<ENV_SETUP>\n<make …>`; run: the substituted runscript (with its `ENV_SETUP`
 already prepended for a `.sh` script, §6.1); submit: the `submit` command — so
-the phase's `env-<phase>-setup` module loads resolve against the universe's
+the phase's `<phase>-env-setup` module loads resolve against the universe's
 environment (e.g. the container's modules), which is almost always what a
 containerized phase wants. Authors needing host-then-universe ordering use a
 `.py`-emitted script as usual.
 
 **Universe-level env-setup overrides (§4.2).** A `[universes.<name>]` table
-may itself carry `env-setup` / `env-build-setup` / `env-submit-setup` /
-`env-run-setup`, on top of any wrapper keys — or, per the identity case above,
+may itself carry `env-setup` / `build-env-setup` / `submit-env-setup` /
+`run-env-setup` and the provisioning keys, on top of any wrapper keys — or, per the identity case above,
 with no wrapper at all. Where set, a universe's key **replaces** the machine
 `[environment]` key of the same name, **key-by-key**, for any phase executed
 in that universe; a key the universe table omits still falls back to the
 machine's `[environment]` value. The §6.1 concatenation that produces the
-effective per-phase block (`env-setup` then `env-<phase>-setup`) is otherwise
+effective per-phase block (`env-setup` then `<phase>-env-setup`) is otherwise
 unchanged — it simply reads whichever of the two (universe- or
 machine-scoped) key is in force for each half. Concretely, the effective
 env-setup for phase P in universe U is `(U.env-setup ?? machine.env-setup)`
-followed by `(U.env-<P>-setup ?? machine.env-<P>-setup)`. The env block used
+followed by `(U.<P>-env-setup ?? machine.<P>-env-setup)`, and its
+provisioning steps `(U.provision ?? machine.provision)` then
+`(U.<P>-provision ?? machine.<P>-provision)`, an empty value turning a step
+off. The env block used
 for a given phase always resolves against **the universe in effect for that
 phase** — the same universe the resolution chain below picks — so a
 build-phase env override, for instance, only ever applies while building.
@@ -1718,7 +1758,7 @@ This is what lets a machine give its native build the modules it needs
 without a stray `module purge` in the machine-wide `env-setup` clobbering a
 *different* universe's own loads (a real problem for a machine whose
 container universes rely on the container's own module state): scope the
-purge-and-load sequence to `[universes.host].env-build-setup` instead of
+purge-and-load sequence to `[universes.host].build-env-setup` instead of
 `[environment].env-setup`, and leave the machine-wide block minimal. See the
 MDB porting guide's db1 write-up for the full worked example.
 
@@ -2085,27 +2125,73 @@ environment can judge. `.py` parfiles are not checked.
 
 **`env-setup` handling — the effective block and where it is injected.** For any
 given phase (build/submit/run), the **effective env-setup** is the concatenation
-of the machine's `env-setup` and that phase's optional `env-<phase>-setup`
-(`env-build-setup` / `env-submit-setup` / `env-run-setup`, §4.2), in that order,
-joined by a newline (an unset companion contributes nothing). The `ENV_SETUP`
-variable (§6.3) always holds the **already-combined** effective block for the
-current phase, so scripts and `.py` authors never see the split. Injection then
+of the machine's `env-setup` and that phase's optional `<phase>-env-setup`
+(`build-env-setup` / `submit-env-setup` / `run-env-setup`, §4.2), in that order,
+joined by a newline (an unset companion contributes nothing). The phase's
+**provisioning steps** (§4.2) follow it: `provision`, then `<phase>-provision`,
+each unset one contributing nothing, each written as
+
+```sh
+# build-provision, in a subshell: what it sets stays there; a failure stops this script
+(
+set -e
+<the key's text>
+:
+)
+case $? in 0) ;; *) exit $? ;; esac
+```
+
+so what it exports is lost when it ends, it runs under `set -e` wherever it is
+(not `( … ) || exit`, which would turn that off inside), and its failure ends
+the script with its status (under the build script's own `set -e` the
+subshell's failure already does). The `:` after the text makes the step's
+status exactly what `set -e` makes of it: a command that fails stops the step
+(and the script), `exit N` gives `N`, and a false `a && b` as the text's last
+line, which `set -e` passes over, is no failure (without the `:` the step's
+status would be that last command's, stricter than the same lines in a
+setup). A setup may name what provisioning creates (`PATH` and other
+exports of directories it makes) but must not source or run it: the setup
+runs first, and on a host where the thing does not exist yet `. file` of a
+missing file is fatal in `sh`, so the script would die before provisioning
+could make it. Write the exports instead (rostam's `arm-conda` does). For a
+queued job, `provision` runs twice, as `env-setup` does: in the submit
+script (the job's script, where the scheduler starts it) and again in the
+run or build script that job runs. The `ENV_SETUP` variable (§6.3) always holds
+the **already-combined** block for the current phase, the effective setup and
+then the provisioning steps, so scripts and `.py` authors never see the split
+and a `.py` that emits `ENV_SETUP` provisions with no change. Injection then
 depends on the artifact:
 
 - **Build (`cactup build`, §7.2):** the build has no submit/run *script* — cactup
   drives `make` directly. cactup sources the effective build env-setup
-  (`env-setup` + `env-build-setup`) in the shell it spawns for the `make
+  (`env-setup` + `build-env-setup`) in the shell it spawns for the `make
   <config>-config` / `make <config>` / `make <config>-utils` invocations, so the
   compiler/MPI modules are loaded exactly as they will be at run time. (This is
-  new relative to simfactory, which never applied `env-setup` to builds.)
+  new relative to simfactory, which never applied `env-setup` to builds.) The
+  build script is `set -e`, `cd` to the Cactus root, the setup, the
+  provisioning steps (`provision`, `build-provision`), then the `make` steps.
+  The attempt freezes the two apart (`BuildMeta::build_env`,
+  `BuildMeta::build_provisioning`, D11): the setup alone is what the build
+  cache digests (§18.5) and `cache doctor` runs (§18.12), and the realclean
+  step `execute` adds when the flesh has moved since `prepare` runs the setup
+  alone.
+- **The scheduler's own commands** (`submit`, `blocking-submit`, `get-status`,
+  `get-status-many`, `stop`, `exec-host`, §10) get the effective submit
+  env-setup prepended, the setup alone: `submit` and `blocking-submit` the
+  submit universe's (its keys over the machine's), the others the machine's
+  own `[environment]` (`env-setup` + `submit-env-setup`). They run on the
+  login node, the queries over and over (`sim list`), where provisioning
+  would cost every time and is never what they need.
 - **`.sh` run templates:** cactup **auto-prepends** the effective run env-setup
-  (`env-setup` + `env-run-setup`) to the generated script **right after the
+  (`env-setup` + `run-env-setup`, then `provision` and `run-provision`) to the
+  generated script **right after the
   shebang line**, exactly as simfactory did for the base `env-setup`
   (`simfactory-docs.txt` §6.4, §18 `ExecuteCommand`) — a runscript carries no
   scheduler directive block, so there is nothing ahead of the shebang that
   insertion could disturb.
 - **`.sh` submit templates:** cactup **auto-prepends** the effective submit
-  env-setup (`env-setup` + `env-submit-setup`), but **not** necessarily right
+  env-setup (`env-setup` + `submit-env-setup`, then `provision` and
+  `submit-provision`), but **not** necessarily right
   after the shebang. The insertion point is **after the leading run of
   `#`-comment and/or blank/whitespace-only lines** — i.e. immediately before
   the first substantive (non-comment, non-blank) line — rather than
@@ -2235,8 +2321,10 @@ fact, **not** MPI ranks; from `max-cpus-per-node`),
 rather than one),
 `MEMORY` (per-node MB), `THREADS_PER_CPU` (from `threads-per-cpu`, default 1;
 §8.5 assumption), `ENV_SETUP` (the **effective** env-setup
-block for the current phase — `env-setup` plus the phase's `env-<phase>-setup`,
-already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
+block for the current phase — `env-setup` plus the phase's `<phase>-env-setup`,
+already combined, followed by the phase's provisioning steps, each in its
+subshell (generation 3); auto-prepended for `.sh`, author-emitted for `.py` —
+§6.1).
 
 **Build-time only** (optionlists/build): `MAKEJOBS`, `DEBUGGER`, `RUNDEBUG`.
 
@@ -2260,7 +2348,13 @@ gets the same job-shape and identity variables, just no `CHAINED_JOB_ID`
 `SIMULATION_NAME`/`SIMULATION_ID`/`SIMULATION_DIR`/`RUNDIR`/`RESTART_ID`/
 `PARFILE`/`SIM_HOME`, and none of the testsuite-only group below either. This
 mirrors the no-leak rule §11.9 states for test runs: each phase's variable set
-is exactly what that phase's scripts can legitimately consume.
+is exactly what that phase's scripts can legitimately consume. A
+build-submit script's `ENV_SETUP` is the submit phase's block (§6.1) in the
+**submit** universe (the route's `universe`, else the declared `host`), the
+very block a `.sh` build-submit script gets prepended, so `.sh` and `.py`
+agree; never the build universe's, which is where `make` runs, not the batch
+script. (Until generation 3 a `.py` build-submit script got the build
+universe's setup there.)
 
 **Testsuite-only** (present only for `cactup test run`/`test submit` scripts and
 test runs — never leaked into normal sim/config substitution;
@@ -2347,7 +2441,7 @@ scratch/`, `config-data/cctk_Config.h` (presence ⇒ complete), and the
 options=<OptionList>`, then `make <config>`, `make <config>-utils`; a `VERSION:`
 line change in the optionlist forces a full rebuild). Each `make` runs in a shell
 that has first sourced the effective **build** env-setup (`env-setup` +
-`env-build-setup`, §4.2/§6.1), so the build sees the same compiler/MPI modules
+`build-env-setup`, §4.2/§6.1), so the build sees the same compiler/MPI modules
 the run will. When a **universe** is resolved for the build (§4.8), that whole
 env-setup-plus-`make` shell snippet is what cactup wraps — i.e. the build runs
 inside the universe (container, chroot, …), with env-setup applied inside it.
@@ -3989,10 +4083,50 @@ machine `meta.toml` carries `submit`, `get-status`, `stop`, `submit-pattern`,
   `--block`: it submits normally via `submit` and polls the attempt for an
   outcome instead of blocking natively.
 - Queries status via `get-status` (with `@JOB_ID@`) and classifies via the
-  pattern regexes into `R`/`Q`/`H`/`U`/`E`.
+  pattern regexes into `R`/`Q`/`H`/`U`/`E`. The query's output is read with
+  stdout and stderr together (stdout first), and its exit status is not
+  consulted (`ps <pid>` exits 1 for a process that is gone, which is `U`).
 - Stops via `stop` (with `@JOB_ID@`).
 - The generic "machine" describes a workstation with no batch system (`submit` =
   local `nohup`/exec, `get-status` = `ps`, `stop` = `pkill`) — preserved.
+
+**Two keys for job liveness (generation 3).** Declared now so that one MDB
+generation carries them; cactup's use of them comes with the test-run and
+simulation liveness work (build cache decision 35), and until then nothing
+that reads job status looks at them (`Scheduler::job_ids`,
+`Scheduler::unknown_job` expose them):
+
+- **`job-ids = "scheduler" | "pids"`** (default `"scheduler"`). `"pids"`
+  declares that a job id is the pid of a process on the host the job was
+  submitted from: the scheduler is that host's own processes (`ps`,
+  `kill`/`pkill`), as on `generic`. A pid means nothing on another host and
+  is reused once its process is gone, so the liveness work will record the
+  submitting host and the process's start time with the id and ask only
+  there, taking a pid whose start time differs for a job that is gone. Every
+  in-repository machine whose `get-status` is `ps @JOB_ID@` sets it (athena,
+  et-juphub, generic, hal1, hal2, hedges, hopper, mel5, omnia, saturn,
+  spine).
+- **`unknown-job-pattern = '<regex>'`** (optional; `@JOB_ID@` substituted as
+  in the other patterns, regex-escaped): a line of `get-status`'s output,
+  stdout or stderr, that says the scheduler does not know the job. It lets
+  the liveness work tell a job the scheduler has forgotten (gone: `U`) from
+  a query that failed (the scheduler unreachable, a timeout: no answer at
+  all), which today both read as "no line matched `status-pattern`", hence
+  `U`. Stderr needs no change to be seen: the output already carries it,
+  and `status-pattern` and the state patterns match what they matched
+  before. The MDB sets it where the real tool's message is known: Slurm's
+  `squeue -j` (`slurm_load_jobs error: Invalid job id specified`, once the
+  job has aged out of the controller), Torque's `qstat` (`Unknown Job Id`;
+  qb, smic, thornyflat) and PBS Pro's (crux: `Unknown Job Id`, or `Job has
+  finished` with job history on). Not set: golub (Slurm's `qstat`
+  compatibility wrapper, whose message is not established), sciama (an
+  `squeue -u | awk` filter, which says nothing of a job it does not list),
+  the `ps` machines (`ps` says nothing; `job-ids = "pids"` covers them) and
+  tianhe1a (no `get-status`).
+
+Both are validated at load: `job-ids` takes only the two values, and
+`unknown-job-pattern` must compile as a regular expression with a job id
+put in.
 
 `cactup sim show` maps statuses to ACTIVE / RUNNING / QUEUED / PRESUBMITTED /
 FINISHED / ERROR / INACTIVE as simfactory's `list-simulations` did.
@@ -4751,8 +4885,16 @@ borrow normal scripts); each optionlist
 header's flat `gpu`/`compatible-queues` move into `[cactup.runs-on]` as
 `gpu`/`queues` (alongside a new optional `default-queue`), and the header
 rejects unknown keys; overlays set
-`[cactup] mdb-generation = 2`. `mdb/GENERATIONS.md` carries the step-by-step
-overlay recipe.
+`[cactup] mdb-generation = 2`. *Generation 3* renames the phase setups
+`env-build-setup`/`env-submit-setup`/`env-run-setup` to
+`build-env-setup`/`submit-env-setup`/`run-env-setup` (no reader for the old
+names: an overlay that keeps them fails to load), adds the provisioning keys
+`provision`/`build-provision`/`submit-provision`/`run-provision` (§4.2, §6.1;
+rostam's `arm-conda` micromamba block and `x86-modules` Perl stub moved into
+`build-provision`), and adds `[scheduler]`'s `job-ids` and
+`unknown-job-pattern` (§10); `ENV_SETUP` now carries the provisioning steps
+too. Overlays set `[cactup] mdb-generation = 3`. `mdb/GENERATIONS.md` carries
+the step-by-step overlay recipe for each.
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a
@@ -4831,7 +4973,10 @@ what they are without this section. Otherwise `prepare` writes
 cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
 directory and the Cactus root, what keys objects to their platform
 (§18.5): the machine, the build universe, and a SHA-256 of the build-phase
-environment setup; the store's root (§18.7); and
+environment setup (the setup alone: the provisioning steps, §4.2, run in
+subshells and cannot change the environment a compile sees, so they are not
+keyed, and what they put on disk that a compile reads, a compiler included,
+is keyed where it is read); the store's root (§18.7); and
 whether keys use the path map (§18.8, knob `build-cache-relocate`); and
 whether warnings are kept exact (§18.5, knob
 `build-cache-preserve-exact-warnings`). If that
@@ -6546,9 +6691,20 @@ build environment setup, in every universe, as above but in bash without
 of nothing but `HOME` (not there), `PATH` (`/usr/bin:/bin`) and the path
 variables (the same on every host),
 and fails on one that gives a path variable an entry that is not an
-absolute path, or whose stop is not known: CI runs it on every change to
-the MDB. A setup that stops before its end there (one that makes what it
-needs on its own machine, which CI is not) is checked as far as it ran,
-and must be named, with why, in the test's `STOPS_HERE`; one named there
-that no longer stops fails it too.
+absolute path, whose stop is not known, or that stops before its end at
+all: CI runs it on every change to the MDB. A setup only describes the
+environment, so it runs through anywhere; what makes or fetches what the
+build needs on its own machine is provisioning (`build-provision`, §4.2),
+which neither this test nor `cache doctor` runs (generation 3 moved
+rostam's two such blocks there; until then the test kept a list of setups
+allowed to stop). A setup that sources a module system's init file this
+host has (a path naming `lmod` or `modules`, such as rostam's `x86-modules`
+sourcing Lmod's) would run the real module system here, where the test's
+`module` otherwise does nothing, and make the result depend on the host: the
+test prints that the setup is not checked on this host and goes on; CI,
+which has no such file, checks it, and where the environment variable `CI`
+is set (to anything but empty, `0` or `false`, case and surrounding blanks
+ignored) such a skip fails the test, so a runner image that gains Lmod or
+Environment Modules cannot hide setups from the check. Other sourced files (`/etc/profile`, an
+MPI's `vars.sh`) are run as before.
 

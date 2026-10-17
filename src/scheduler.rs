@@ -8,7 +8,7 @@
 
 // Consumed by the Phase-3 SIM/TEST streams; unused until then.
 
-use crate::mdb::meta::{Meta, Phase, Universe, WrappedCommand};
+use crate::mdb::meta::{JobIds, Meta, Phase, Universe, WrappedCommand};
 use crate::template::{Syntax, VarSet};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
@@ -220,6 +220,29 @@ impl<'m> Scheduler<'m> {
 
         let output = self.spawn_sh(&cmd, true)?;
         classify(&output, job_id, self.meta)
+    }
+
+    /// `[scheduler].job-ids` (§10): whether this machine's job ids are a
+    /// batch system's or pids on the submitting host.
+    // Declared in generation 3 for the test-run and simulation liveness
+    // work (design/build-cache/DECISIONS.md, 35), which will read it; no
+    // status query does yet.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn job_ids(&self) -> JobIds {
+        self.meta.scheduler.job_ids
+    }
+
+    /// Whether `output`, what `get-status` printed for `job_id` (stdout and
+    /// stderr, as [`Self::get_status`] reads it), has a line matching
+    /// `[scheduler].unknown-job-pattern` (§10): the scheduler saying it does
+    /// not know the job. `None` when the machine declares no such pattern.
+    // As `job_ids`: for the liveness work; nothing classifies with it yet.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn unknown_job(&self, output: &str, job_id: &str) -> Res<Option<bool>> {
+        let Some(pattern) = self.meta.scheduler.unknown_job_pattern.as_deref() else { return Ok(None) };
+        let pattern = pattern.replace("@JOB_ID@", &regex::escape(job_id));
+        let regex = Regex::new(&pattern).with_context(|| format!("invalid unknown-job-pattern {pattern:?}"))?;
+        Ok(Some(output.lines().any(|line| regex.is_match(line))))
     }
 
     /// Live status for many jobs at once (§10): dedupes the ids and runs the
@@ -577,11 +600,11 @@ mod tests {
 
     #[test]
     fn submit_env_follows_the_submit_universe() {
-        // The submit universe's env-submit-setup override (§6.1) replaces the
+        // The submit universe's submit-env-setup override (§6.1) replaces the
         // machine key for `submit` only; get-status/stop keep the machine env.
         let mut m = meta(r#"submit = "echo id=@SCRIPTFILE@-$CACTUP_SUB_ENV""#);
-        m.environment.env_submit_setup = Some("CACTUP_SUB_ENV=base".to_owned());
-        let uni: Universe = toml::from_str(r#"env-submit-setup = "CACTUP_SUB_ENV=uni""#).unwrap();
+        m.environment.submit_env_setup = Some("CACTUP_SUB_ENV=base".to_owned());
+        let uni: Universe = toml::from_str(r#"submit-env-setup = "CACTUP_SUB_ENV=uni""#).unwrap();
         m.universes.insert("u".to_owned(), uni);
         let mut vars = VarSet::new();
         vars.set("SCRIPTFILE", "s.sh");
@@ -591,6 +614,36 @@ mod tests {
             sched.submit(&vars, Some(("u", &m.universes["u"]))).unwrap(),
             "id=s.sh-uni"
         );
+    }
+
+    /// The generation-3 job-id keys (§10): exposed as declared, and the
+    /// pattern sees `get-status`'s stderr, where Slurm says it has no such
+    /// job, because the query's output is read with both streams.
+    #[test]
+    fn the_job_id_keys_are_exposed_and_the_pattern_sees_stderr() {
+        let m = meta(r#"get-status = "squeue -j @JOB_ID@""#);
+        let sched = Scheduler::new(&m);
+        assert_eq!(sched.job_ids(), JobIds::Scheduler);
+        assert_eq!(sched.unknown_job("anything", "12").unwrap(), None);
+
+        let m = meta(
+            r#"
+            job-ids = "pids"
+            get-status = "echo JOBID; echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1"
+            unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified|^@JOB_ID@ gone$'
+            "#,
+        );
+        m.validate("fake").unwrap();
+        let sched = Scheduler::new(&m);
+        assert_eq!(sched.job_ids(), JobIds::Pids);
+        let vars = Scheduler::query_vars("12.x");
+        let cmd = sched.command_for("get-status", m.scheduler.get_status.as_deref(), &vars, None).unwrap();
+        let output = sched.spawn_sh(&cmd, true).unwrap();
+        assert_eq!(sched.unknown_job(&output, "12.x").unwrap(), Some(true), "{output}");
+        assert_eq!(sched.unknown_job("JOBID\n12.x gone\n", "12.x").unwrap(), Some(true));
+        assert_eq!(sched.unknown_job("JOBID\n12y gone\n", "12.x").unwrap(), Some(false));
+        // What status the query gives is unchanged by the keys.
+        assert_eq!(sched.get_status("12.x").unwrap(), JobStatus::Unknown);
     }
 
     /// The point of the streaming parse (§10): the job id has to reach the

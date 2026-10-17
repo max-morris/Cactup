@@ -66,7 +66,7 @@ max-walltime = "24:00:00"
 # Overlay machines only (~/.cactup/machines/<name>/): the MDB generation
 # this file was written for. `cactup machine create` fills it in.
 [cactup]
-mdb-generation = 2
+mdb-generation = 3
 ```
 
 See [MDB Generations](mdb-generations.html) for what `mdb-generation` means
@@ -119,6 +119,7 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -220,6 +221,7 @@ submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ &
 blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
+job-ids = "pids"
 stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
 submit-pattern = "(.*)"
 status-pattern = "^ *@JOB_ID@ "
@@ -258,6 +260,7 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 allocation-env = "SLURM_JOB_ID"
 get-status = "squeue -j @JOB_ID@"
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 stop = "scancel @JOB_ID@"
 submit-pattern = "Submitted batch job ([0-9]+)"
 status-pattern = "@JOB_ID@ "
@@ -269,6 +272,16 @@ running-pattern = " R "
 live job of `@USER@`, one per line, with the job id as the first field; the rest of
 the line is classified by the same `status`/`queued`/`running`/`holding` patterns
 used for `get-status`. A job id absent from the listing is treated as not queued.
+
+`unknown-job-pattern` (optional) is a regular expression matching a line of
+`get-status`'s output, stdout or stderr, that says the scheduler does not
+know the job, `@JOB_ID@` substituted as in the other patterns. For Slurm's
+`squeue -j` that is `slurm_load_jobs error: Invalid job id specified`; for
+Torque's `qstat`, `Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has
+finished` (the second for a finished job, when job history is on). It declares a fact for now:
+cactup will use it to tell a job the scheduler has forgotten from a status
+query that failed, with the test-run and simulation liveness work; today it
+changes nothing.
 
 `blocking-submit` is optional too: the same submission, but expressed so the
 command doesn't return until the job has finished, for `cactup build submit
@@ -289,6 +302,8 @@ here — a blocking submit doesn't return until long after that would matter.
 submit = "qsub @SCRIPTFILE@"
 allocation-env = "PBS_JOBID"
 get-status = "qstat @JOB_ID@"
+# PBS Pro with job history on: 'Unknown Job Id|Job has finished'
+unknown-job-pattern = 'Unknown Job Id'
 stop = "qdel @JOB_ID@"
 submit-pattern = "([0-9.]+)"
 status-pattern = "@JOB_ID@"
@@ -307,6 +322,7 @@ submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ &
 blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
+job-ids = "pids"
 stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
 submit-pattern = "(.*)"
 status-pattern = "^ *@JOB_ID@ "
@@ -317,6 +333,14 @@ running-pattern = "^"
 Note the shape change from `submit`: no `exec`, no `nohup` — the shell has
 to survive to reach `wait` — and the job id is echoed *before* the wait so
 it parses immediately instead of only once the job is already done.
+
+Set `job-ids = "pids"` on such a machine (the default is `"scheduler"`): it
+declares that a job id is the pid of a process on the host the job was
+submitted from, so the scheduler is that host's own processes. A pid means
+nothing on another host and is reused once its process is gone; cactup will
+use the key to record the host and the process's start time with the id and
+ask only there, with the test-run and simulation liveness work. Today it
+changes nothing.
 
 ## Environment variables
 
@@ -342,14 +366,109 @@ those places, at a cost on every compile). The same goes for
 value, use `${LIBRARY_PATH:+$LIBRARY_PATH:}`.
 
 cactup's tests run every machine's build setup (with the path variables
-unset, empty and set) and fail on one that leaves such an entry. A setup
-that does more than set variables, say one that creates a software
-environment the first time it runs, stops early off its own machine; the
-tests then check what it set before it stopped, so put its `export`s first,
-and name it, with why, in the test's `STOPS_HERE` list
-(`src/objcache/doctor.rs`), or the tests fail.
+unset, empty and set) and fail on one that leaves such an entry, or that
+stops before its end. A setup only sets the environment, so it runs through
+anywhere; anything that makes or fetches what a phase needs (a software
+environment created the first time, a file under `$HOME`) belongs in a
+provisioning key instead (below), which neither these tests nor
+`cactup cache doctor` run. A setup that sources a module system's init file
+the test host has is not run there: the test says it is not checked on that
+host, and CI, which lacks the file, checks it (where the environment
+variable `CI` is set to anything but empty, `0` or `false`, case and
+surrounding blanks ignored, such a skip
+fails the test).
 
-This is sourced before every build, submit, and run command.
+`env-setup` runs before every build, submit and run. Each phase can add its
+own, appended after `env-setup`:
+
+```toml
+[environment]
+env-setup        = "module load gcc/11 openmpi/4"   # every phase, scheduler commands too
+build-env-setup  = "module load cmake/3.27"         # the build script only
+submit-env-setup = "module load slurm"              # submit and build-submit scripts,
+                                                    # and the scheduler commands
+run-env-setup    = "..."                            # the run script only
+```
+
+cactup's own scheduler commands run after the submit setup, with no
+provisioning: `submit` and `blocking-submit` after the submit universe's
+(its `env-setup` and `submit-env-setup` where it sets them, the machine's
+where not), and `get-status`, `get-status-many`, `stop` and `exec-host`
+after the machine's own `[environment]` `env-setup` and `submit-env-setup`.
+
+### Provisioning
+
+A setup describes the environment; a **provisioning** step makes or fetches
+what a phase needs, once, on the machine itself: a conda environment, a stub
+module under `$HOME`. `provision` runs wherever `env-setup` does in a script
+(the build script, the submit script, the run script); `build-provision`,
+`submit-provision` and `run-provision` in their phase only. Four things run
+the setup without provisioning: cactup's scheduler commands (above), the
+`make <config>-realclean` script a build adds when the Cactus flesh has moved
+since the build was prepared (the build script that follows provisions),
+`cactup cache doctor`, which runs a build attempt's setup to check what it
+sets, and cactup's own tests of the MDB's build setups (above).
+For a queued job, `provision` runs twice, as `env-setup` does: once in the
+submit script (the job's script, where the scheduler starts it) and once in
+the run or build script that job runs. In each phase the order is: the setup
+(`env-setup`, then the phase's `*-env-setup`), then `provision`, then the
+phase's own `*-provision`, so a provisioning step can use what the setup
+loaded (a module that provides `curl`).
+
+```toml
+[environment]
+env-setup = """
+export PATH=/work/$USER/deps/env/bin:$PATH
+"""
+build-provision = """
+if [ ! -d /work/$USER/deps/env ]; then
+    fetch-and-create /work/$USER/deps/env
+fi
+"""
+```
+
+Each provisioning step runs in a subshell of its own, under `set -e`:
+
+- **Nothing it sets reaches the phase.** What it exports, the directory it
+  changes to, a function it defines: all lost when it ends. Put what the
+  phase needs to see (`PATH`, `PERL5LIB`) in the setup, which may name
+  directories the provisioning step creates.
+- **The setup must not source or run what provisioning creates.** The setup
+  runs first: on a host where a Python virtual environment or a conda
+  environment does not exist yet, `. ~/venv/bin/activate` (or a conda
+  `activate`) in the setup is fatal before provisioning ever makes it, and
+  the phase never recovers. Write the exports that the activation would
+  make instead (`export PATH=~/venv/bin:$PATH`, as rostam's `arm-conda`
+  does for its conda environment).
+- **A failure stops the phase, as under `set -e`.** A command that fails
+  ends the build, the submit script or the run script with its status,
+  whether or not the script itself runs `set -e`, and so does `exit N`
+  with a nonzero `N`. As under `set -e`, a false test in `a && b` is not a
+  failure, also on the step's last line (`[ -e "$f" ] || make-it` and
+  `[ ! -e "$f" ] && make-it` both do what they say). `exit 0` ends the step
+  early and the phase goes on.
+- **A universe inherits it.** A universe that sets no provisioning key of
+  its own runs the machine's: in a build or run script inside its wrapper
+  (a container) when it has one, since cactup starts those scripts through
+  the universe, where the tools the step uses (`python3`, `curl`) may be
+  missing; in a submit script wherever the scheduler starts that script.
+  Set the key empty in the universe (`provision = ""`,
+  `build-provision = ""`, …) to turn the machine's step off there.
+- **Unlike a failing setup line in a submit or run script, a failing step
+  is fatal there.** The setup is put at the top of those scripts, ahead of
+  any `set -e` of their own, so a failing setup line goes on (but for `.`
+  of a missing file, which ends a script `/bin/sh` runs, though not one
+  `bash` runs); a failing provisioning step stops the script, in any
+  shell. (The build script runs its setup under `set -e` too.)
+- It runs every time its phase does, so make it cheap when there is nothing
+  to do (check first, as above), and safe when two builds run it at once
+  (a lock, if it must).
+
+Provisioning is not run before cactup's scheduler commands, by
+`cactup cache doctor`, or by the MDB's tests, and it is not part of what the
+build cache keys a compile by: it cannot change the environment a compile
+sees. In a `.py` script, `ENV_SETUP` already carries the steps after the
+setup, so printing it provisions.
 
 ## Universes
 
@@ -370,12 +489,13 @@ containing exactly one `@COMMAND@` token, which must sit **outside** the templat
 own quotes). Declaring neither gives an identity universe, useful purely as a carrier
 for env-setup overrides.
 
-Universes can override environment setup key-by-key (each set `env-*` key replaces the
-machine's; unset keys inherit):
+Universes can override environment setup and provisioning key-by-key (each
+`env-setup`, `*-env-setup`, `provision` or `*-provision` key a universe sets
+replaces the machine's; unset keys inherit):
 
 ```toml
 [universes.intel]
-env-build-setup = """
+build-env-setup = """
 module load intel
 """
 ```
@@ -429,6 +549,8 @@ the required form for the user's own parfiles. Knobs are **not** available in
 - Test-marked scripts should be present in both `[submitscripts]` and `[runscripts]` (used by `cactup test run/submit`)
 - `[buildsubmitscripts]` is the one script table that's allowed to be entirely absent — a machine that never queues a build simply omits the table (and the `buildsubmitscripts/` directory) rather than needing an empty one
 - `[build].default-action = "submit"` only works once a `[buildsubmitscripts]` route and `[scheduler].submit` are both declared; without either, `cactup build submit` errors naming what's missing (`cactup build run` always works regardless)
+- `[scheduler].job-ids` takes only `"scheduler"` or `"pids"`, and `[scheduler].unknown-job-pattern` must be a valid regular expression (with `@JOB_ID@` put in)
+- `env-build-setup`, `env-submit-setup` and `env-run-setup` are generation-2 names: they are unknown keys now (`build-env-setup`, `submit-env-setup`, `run-env-setup`); see [MDB Generations](mdb-generations.html)
 - `[scheduler].blocking-submit` is optional and needs no matching table of its own — a machine that omits it still supports `cactup build submit --block`, just via emulated polling instead of a native blocking submit — but when present, its output must parse with the same `submit-pattern` as `submit`
 
 ## Next steps

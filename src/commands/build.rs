@@ -421,11 +421,6 @@ fn submit_impl(
     vset.set("EMAIL", identity.email.as_str());
     vset.set("JOB_ID", "");
     set_machine_vars(&mut vset, machine, &topo.queue, build_universe)?;
-    // `set_machine_vars` hardcodes the RUN-phase env (§6.1 — it's shared by
-    // three subsystems that mostly want that); a submit script needs the
-    // SUBMIT-phase one instead — the same fix `sim submit` applies rather
-    // than changing the shared helper.
-    vset.set("ENV_SETUP", machine.meta.effective_env(build_universe, Phase::Submit));
 
     // §4: buildsubmitscript + universe, generate + write, submit.
     // Routed by the queue (filtered by the build universe the job's `make`
@@ -438,6 +433,14 @@ fn submit_impl(
         resolve_submit_universe(machine, entry.universe.as_deref())?;
     let submit_uni_name = submit_uni.as_ref().map(|(n, _)| n.as_str());
     let script_name = script_name.to_owned();
+    // `set_machine_vars` hardcodes the RUN-phase env (§6.1 — it's shared by
+    // three subsystems that mostly want that); a submit script needs the
+    // SUBMIT-phase one, in the submit universe, the very block a `.sh`
+    // script gets prepended (`generate_script`), so a `.py` script prints
+    // the same — the same fix `sim submit` applies rather than changing the
+    // shared helper. Never the build universe's: that is where `make` runs,
+    // not the batch script.
+    vset.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
 
     let script =
         generate_script(machine, ScriptKind::BuildSubmit, &script_name, &vset, Phase::Submit, submit_uni_name)?;
@@ -1511,6 +1514,48 @@ mod tests {
         assert!(crate::build::is_complete(&cactus, "sim"));
     }
 
+    /// §6.1: a `.py` build-submit script's `ENV_SETUP` is the block a `.sh`
+    /// one gets prepended: the submit phase's, in the submit universe, never
+    /// the build universe's setup or provisioning.
+    #[test]
+    fn sh_and_py_build_submit_scripts_get_the_same_environment() {
+        let generated = |python: bool| {
+            let tmp = tempfile::tempdir().unwrap();
+            let cactus = tmp.path().join("inst/Cactus");
+            let dir = tmp.path().join("mdb/fake");
+            let mut machine = fake_submit_machine(
+                &dir,
+                &completing_make_body(&cactus, "sim"),
+                "make-jobs = 4\nuniverse = \"bu\"\n\
+                 [universes.bu]\nenv-setup = \"export FROM=bu\"\nprovision = \"echo PROV-BU\"\n\
+                 [environment]\nenv-setup = \"export FROM=machine\"\nsubmit-provision = \"echo PROV-SUBMIT\"",
+                false,
+            );
+            if python {
+                fs::remove_file(dir.join("buildsubmitscripts/default.sh")).unwrap();
+                fs::write(
+                    dir.join("buildsubmitscripts/default.py"),
+                    "print('#!/bin/sh')\nprint(ENV_SETUP)\nprint('exec @CACTUP@')\n",
+                )
+                .unwrap();
+                machine = Machine { meta: toml::from_str(&fs::read_to_string(dir.join("meta.toml")).unwrap()).unwrap(), ..machine };
+            }
+            fs::create_dir_all(cactus.join("thornlists")).unwrap();
+            fs::write(cactus.join("thornlists").join(crate::installation::LIVE_THORNLIST), "A/B\n").unwrap();
+            let inst = Installation::new("et", tmp.path().join("inst"));
+            submit_impl(&inst, &machine, &Database::new(), &submit_args("sim", bare_topology()), Some("subhost")).unwrap();
+            let attempt = BuildAttempt::open(&cactus.join("configs/sim"), 0).unwrap();
+            assert_eq!(attempt.meta.universe.as_ref().map(|u| u.name.as_str()), Some("bu"));
+            fs::read_to_string(attempt.submit_script_path()).unwrap()
+        };
+        for python in [false, true] {
+            let script = generated(python);
+            let (setup, provisioning) = (script.find("export FROM=machine\n"), script.find("echo PROV-SUBMIT\n"));
+            assert!(setup.is_some() && setup < provisioning, "python {python}:\n{script}");
+            assert!(!script.contains("FROM=bu") && !script.contains("PROV-BU"), "python {python}:\n{script}");
+        }
+    }
+
     // ---- the build job's queue is not the binary's (§7.9) ------------------
 
     /// A machine with a GPU and a CPU partition, a GPU and a CPU optionlist
@@ -2221,6 +2266,7 @@ mod tests {
             full_rebuild: false,
             make: None,
             build_env: String::new(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: None,
             config_meta: sample_config_meta_named(config),

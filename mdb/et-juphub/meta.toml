@@ -40,6 +40,8 @@ submit          = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDER
 # The pid is printed before the wait, so the job id parses immediately.
 blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 get-status      = "ps @JOB_ID@"
+# The job id is the pid of the backgrounded script, on this host.
+job-ids = "pids"
 # Kill the whole process group descending from @JOB_ID@, not just the top process.
 stop            = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
 submit-pattern   = "(.*)"

@@ -482,6 +482,7 @@ mod tests {
             full_rebuild: false,
             make: None,
             build_env: String::new(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: None,
             config_meta: toml::from_str(&format!(

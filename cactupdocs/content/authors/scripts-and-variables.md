@@ -50,9 +50,6 @@ Example SLURM submit script:
 #SBATCH --error=@SIMULATION_NAME@.err
 #SBATCH --partition=@QUEUE@
 
-# Source environment
-@ENV_SETUP@
-
 # Run the simulation
 cd @RUNDIR@-active
 srun @EXECUTABLE@ @PARFILE@
@@ -66,7 +63,6 @@ A run script is executed directly (not submitted to a queue). It sets up the env
 #!/bin/bash
 
 set -e
-@ENV_SETUP@
 
 cd @RUNDIR@-active
 
@@ -97,8 +93,6 @@ re-invoking `cactup sim run`, it re-invokes `cactup build run`:
 #SBATCH --output=@STDOUT_FILE@
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
-
-@ENV_SETUP@
 
 cd @SOURCEDIR@
 
@@ -274,8 +268,6 @@ Example test-specific script:
 #SBATCH --ntasks=2           # Small test, low task count
 #SBATCH --time=00:30:00       # 30 minutes for tests
 
-@ENV_SETUP@
-
 cd @RUNDIR@-active
 
 srun @EXECUTABLE@ @PARFILE@
@@ -414,7 +406,7 @@ full traceback, so a typo stays debuggable instead of looking like a site rule.
 
 ## Environment setup: @ENV_SETUP@
 
-The `@ENV_SETUP@` variable expands to shell commands that set up the build environment:
+The `@ENV_SETUP@` variable expands to shell commands that set up the environment of the script's phase: the submit environment in a submit or build-submit script (in the submit universe, never the build universe a build's `make` runs in), the run environment in a run script:
 
 ```bash
 export PATH="/opt/bin:$PATH"
@@ -422,7 +414,22 @@ module load gcc
 export LD_LIBRARY_PATH="/opt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
-This comes from the machine's `[environment]` section in meta.toml, with optional overrides from `[universes.*]`.
+This comes from the machine's `[environment]` section in meta.toml, with optional overrides from `[universes.*]`: `env-setup`, then the phase's own `submit-env-setup` or `run-env-setup`. When the machine has provisioning steps (`provision`, then `submit-provision` or `run-provision`; see [meta.toml](meta-toml.html#provisioning)), they follow the setup, each in a subshell of its own:
+
+```bash
+# run-provision, in a subshell: what it sets stays there; a failure stops this script
+(
+set -e
+mkdir -p "$HOME/.cache/mytool"
+:
+)
+case $? in 0) ;; *) exit $? ;; esac
+```
+
+Where the block goes depends on the script's kind:
+
+- **A `.sh` script gets it at its top, from cactup, and must not write `@ENV_SETUP@` itself.** cactup puts the block into every generated `.sh` script: a run script right after its first line when that is a `#!` line (at its very top otherwise), a submit or build-submit script after its leading run of comment and blank lines (the `#!` line and the `#SBATCH`/`#PBS` directives), so the directives stay first. A `.sh` script that also writes `@ENV_SETUP@` runs the setup, and the provisioning steps, twice.
+- **A `.py` script places it itself.** cactup adds nothing to what a `.py` script prints; print `ENV_SETUP` where the setup belongs, usually right after the directives. A `.py` script that prints it provisions with no change.
 
 ## Output and stdout: @STDOUT_FILE@, @STDERR_FILE@
 
@@ -487,8 +494,6 @@ Here's a minimal SLURM submit script that handles most use cases:
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
 
-@ENV_SETUP@
-
 cd @RUNDIR@-active
 
 srun @EXECUTABLE@ @PARFILE@
@@ -500,7 +505,6 @@ And a minimal run script:
 #!/bin/bash
 
 set -e
-@ENV_SETUP@
 
 cd @RUNDIR@-active
 

@@ -93,15 +93,15 @@ cpus-per-task = 48
 # This universe declares NEITHER wrapper NOR wrapper-argv — it is an identity
 # universe (§4.8 "implicit host universe": Universe::wrap runs the command
 # bare via `sh -c`, exactly like today's no-universe path). It exists only to
-# carry env-build-setup below: cactup's build shell is a non-login `/bin/sh
+# carry build-env-setup below: cactup's build shell is a non-login `/bin/sh
 # -c`, where the `module` function is undefined, so the old approach wrapped
 # the whole build command in `bash -lc 'module … && '@COMMAND@` just to get a
 # shell where `module` works. Sourcing the Modules init script directly in
-# env-build-setup gets the same modules loaded ahead of the build command
+# build-env-setup gets the same modules loaded ahead of the build command
 # without wrapping it, and scopes the modules to the build phase only (§4.8
 # Feature 3: universe-level env-setup overrides).
 [universes.host]
-env-build-setup = """
+build-env-setup = """
 . "${MODULESHOME:-/usr/local/packages/Modules/4.5.0}/init/bash"
 module purge
 module load gcc/9.3.0
@@ -144,6 +144,8 @@ wrapper-argv = [
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
 blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
+# What squeue says (on stderr) of a job Slurm no longer knows.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
