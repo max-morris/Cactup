@@ -143,8 +143,14 @@ telling whether a job is still alive.
   `ps @JOB_ID@`), and `unknown-job-pattern`, a regular expression matching a
   line of `get-status`'s output (stdout or stderr) that says the scheduler
   does not know the job, with `@JOB_ID@` substituted as in the other
-  patterns. cactup does not act on either yet; they are declared now so
-  that the liveness checks that will use them need no further generation.
+  patterns. The first binaries of this generation do not act on either;
+  later ones do, with no further generation: with `"pids"` they record the
+  submitting host and the process's start time with each job id and ask
+  `ps`/`stop` only there and only while the pid is still that process;
+  with `unknown-job-pattern`, a status query whose output has neither a
+  line for the job nor a line the pattern matches is a failed query, which
+  `stop` and `delete` refuse on, so the pattern must match what the command
+  really prints for a job the scheduler no longer knows.
 
 To bring a generation-2 overlay forward:
 
