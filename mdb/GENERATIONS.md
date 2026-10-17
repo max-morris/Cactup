@@ -131,7 +131,10 @@ telling whether a job is still alive.
   in the submit universe (the route's `universe`, else a declared `host`),
   the same block a `.sh` build-submit script gets at its top. Before, it was
   the submit phase's block in the build universe, so a build universe's
-  `env-setup` reached a `.py` build-submit script; it no longer does. Put
+  `env-setup` and `submit-env-setup` reached a `.py` build-submit script
+  (and its provisioning keys would have); they no longer do. The other way
+  round, the submit universe's keys (the route's `universe`, else a
+  declared `host` universe) now reach it, where before they did not. Put
   what the batch script needs in the machine's `submit-env-setup` (or the
   submit universe's).
 - New, optional, in `[scheduler]`: `job-ids = "scheduler" | "pids"` (default
@@ -221,11 +224,14 @@ To bring a generation-2 overlay forward:
    moved into `provision`, `submit-provision` or `run-provision` now stops
    the submit or run script whenever it fails, in any shell. Make sure it
    succeeds wherever it runs, or end what may fail with `|| true`.
-3. If a `.py` build-submit script of yours prints `ENV_SETUP` and relied
-   on a build universe's `env-setup` reaching it, move what the batch
-   script needs into `submit-env-setup` (the machine's, or the submit
-   universe's): a build-submit script now gets the submit universe's
-   block, as a `.sh` one always did.
+3. If a `.py` build-submit script of yours prints `ENV_SETUP`: it now gets
+   the submit universe's block, as a `.sh` one always did, not the build
+   universe's. If it relied on a build universe's `env-setup` or
+   `submit-env-setup` reaching it, move what the batch script needs into
+   `submit-env-setup` (the machine's, or the submit universe's); and check
+   that the submit universe (the route's `universe`, else a declared `host`
+   universe), whose keys never reached it before, does not now set
+   something it should not.
 4. Optionally, in `[scheduler]`: on a machine whose jobs are background
    processes (`get-status = "ps @JOB_ID@"`), add `job-ids = "pids"`; on a
    batch system, add `unknown-job-pattern` with what its status command says

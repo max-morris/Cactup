@@ -3340,11 +3340,11 @@ followed on branch `feature/test-run-liveness` (its STATUS has their
 records). Its parts for the cache passed early (round 1's two findings
 on them, the contract with the build-speed work and stale texts, fixed
 in its `d9c8da1` and `468e97a`; round 2's notes on the contract in its
-`f146bd7`); every round after was on test runs'
-liveness (`test stop`, `test delete` on batch and `ps`-style schedulers),
-which grew from item 1. Max (decision 35): land the cache's parts now;
-the test-run work goes on, on `feature/test-run-liveness`, to be merged
-soon. Landed here, taken from that branch as it is at `a4e53e8`:
+`f146bd7`); every round after was on test runs' liveness (`test stop`,
+`test delete` on batch and `ps`-style schedulers), which grew from the
+pid-reuse fix. Max (decision 35): land the cache's parts now; the
+test-run work goes on, on `feature/test-run-liveness`, to be merged soon.
+Landed here, taken from that branch as it is at `a4e53e8`:
 
 - Pid reuse, for builds: only a submitted attempt with no recorded outcome
   is asked of the scheduler (`guard_no_live_attempt`,
@@ -3579,13 +3579,15 @@ gfortran, 0 wrong, with the fallback count reported.
 ## Next step
 
 The cache is on master with `cache doctor` and on by default (above).
-Then, in parallel (decision 35): the test-run liveness work on
-`feature/test-run-liveness` (its round 8's open finding, a requeued job
-waiting in the queue, waits on the scheduler keys of decision 35's
-third question); MDB generation 3 on its own branch and PR: a
+MDB generation 3 is on master too (PR #7, merged 2026-10-17, six review
+rounds on `feature/mdb-gen3`; it took PR #6, `mdb/hopper`): a
 `*-provision` key beside each `*-env-setup`, the `env-*-setup` keys
-renamed `*-env-setup`, and the scheduler keys decision 35 asks for (job
-ids that are pids, a scheduler's "no such job"), in one bump. Then M4b
+renamed `*-env-setup`, and the scheduler keys decision 35 asks for
+(`job-ids`, `unknown-job-pattern`; Slurm's message checked on qbd, Slurm
+24.11.7), read by nothing yet. Now: the test-run liveness work on
+`feature/test-run-liveness`, rebased on master, with the behavior of
+those keys for simulations, test runs and builds (its round 8's open
+finding, a requeued job waiting in the queue, is part of it); then M4b
 (Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on
 `feature/doctor-every-flag` is shelved (Max, 2026-10-16).
 
