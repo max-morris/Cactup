@@ -36,9 +36,9 @@ export CPATH="${CPATH:+$CPATH:}/usr/local/include:/usr/include:/include"
 # No scheduler: background the script, echo its PID as the job id; ps/pkill
 # for status/stop. The old submit redirected to @RUNDIR@/@SIMULATION_NAME@.{out,err};
 # @STDOUT_FILE@/@STDERR_FILE@ carry the same defaults but honor -o/-e (§8.3.1).
-submit          = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+submit          = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
 # The pid is printed before the wait, so the job id parses immediately.
-blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+blocking-submit = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 get-status      = "ps @JOB_ID@"
 # The job id is the pid of the backgrounded script, on this host.
 job-ids = "pids"
