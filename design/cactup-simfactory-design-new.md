@@ -4440,7 +4440,56 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   installation's with `--all` (the §8.1 cross-install discipline). Per-run display
   state is coarser than a sim's (no restart chain): `RUNNING`/`QUEUED`/`HOLDING`
   from the active result set's live job status, `DONE (passed/failed)` once the
-  job is `U` and a summary was recorded, `ERROR` on `E`.
+  job is `U` and a summary was recorded, `ERROR` on `E`. Only a submitted run
+  that has not recorded `finished` (its end records it, and so does `test
+  stop`) has a job to ask the scheduler about: an interactive run's
+  `job-id` is the pid of the cactup that ran it, and once that cactup is
+  gone the pid can be any other process's (on the generic machine, `ps`
+  would find it, and `stop` would stop its process group). An interactive
+  run is `RUNNING` while its `running.lock` is held; its pid never goes to
+  the scheduler (a batch scheduler knows no pid, and the lock may be
+  another host's): `stop` says to interrupt it where it runs (Ctrl-C), as
+  `build stop` does, or that it ended without letting go of the lock (on
+  another host, which a lost host or a hangup leaves until it expires), and
+  `delete` refuses, `-f` too; so for a submitted run whose job `stop` dealt
+  with (asked the scheduler to stop it, or found it over) and whose lock
+  lingers (it is ending, or ended without letting go). A
+  submitted run whose
+  `running.lock` is held though the scheduler here does not list its job
+  runs where that scheduler cannot see it (another host), or the query
+  failed, or it ended without letting go of the lock (which expires, §2.3):
+  `stop` and `delete` say which it may be and leave it, `-f` too. A job the
+  scheduler lists in a state no pattern of the machine's reads may be
+  suspended (Slurm's `S`), exiting (Torque's `E`) or over (Slurm and
+  Torque list an ended job for a while: `CD`, `F`, `CA`, `C`): `stop` asks
+  the scheduler to stop it, and records `finished` if it took the request
+  (stopped, or ended before: Slurm's `scancel` takes an ended job without
+  a word, so `stop` says only that it asked); where it refuses (Torque's
+  `qdel` of a completed job), `stop` records `finished` too unless the
+  run's `running.lock` is held (nothing of the run holds the lock, so it is
+  taken as ended, though the scheduler still lists the job), and `delete` then goes ahead. `delete` refuses it without
+  `-f`, and with `-f` stops it, or, where the scheduler refuses, goes ahead
+  unless the run's `running.lock` is held. `stop` records `finished` once the scheduler took its stop, or refused
+  it with nothing of the run holding the lock (a status query that fails
+  reads as "not in the queue", and that alone records no end, though the
+  status cache says `U`); a status query or a stop command Ctrl-C ends is
+  no answer and no refusal: the command stops, "interrupted", and nothing
+  is deleted or recorded. A job the scheduler requeues after its run
+  recorded `finished` (preemption, `scontrol requeue`, Torque's `qrerun`)
+  clears it when it runs again; while it waits in the queue it is not
+  asked about, so `stop` misses it and `delete` removes the run (asking
+  about a job after its run ended needs telling a scheduler's job id from
+  a pid, above: open). On a
+  machine whose scheduler is the host's own processes (the generic machine
+  and those `machine create` makes from it; in the MDB athena, et-juphub,
+  hal1, hal2, hedges, mel5, omnia, saturn and spine) a submitted run's job
+  is a pid too (its `submit` backgrounds the script), which only the host
+  that ran it knows: one that ended without recording it (killed, or the
+  host rebooted) still has that pid asked, as a simulation's restart there
+  does, and so does one running on another host sharing the home, where
+  the pid may be a process of this one; `stop`, `delete -f` and the `-f` of
+  a new `test run` or `test submit` then stop that process (its whole
+  group, where the machine's `stop` is `pkill -g`).
 - **`cactup test show <name>`** — one test run in detail.
 - **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs

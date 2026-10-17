@@ -330,23 +330,19 @@ fn start_impl(
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
     if let Ok(old) = TestRun::open(&run_dir) {
-        if old.meta.job_id != NO_JOB_ID
-            && !LinkLock::is_held_live(&old.running_lock_path())?
-            && matches!(
-                sched.get_status(&old.meta.job_id)?,
-                JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-            )
+        if old.lock_live()? {
+            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+        }
+        if let Some(job_id) = old.pending_job()
+            && matches!(sched.get_status(job_id)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
         {
             if !args.force {
                 bail!(
-                    "test run \"{name}\" still has a live job ({}); \
-                     `cactup test stop {name}` first, or pass -f to stop it",
-                    old.meta.job_id
+                    "test run \"{name}\" still has a live job ({job_id}); \
+                     `cactup test stop {name}` first, or pass -f to stop it"
                 );
             }
-            sched.stop(&old.meta.job_id)?;
-        } else if LinkLock::is_held_live(&old.running_lock_path())? {
-            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+            sched.stop(job_id)?;
         }
     }
 
@@ -454,6 +450,16 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
     let mut run = TestRun::open(dir)?;
     {
         let _lock = run.lock_wait()?;
+        // Read again under the lock: a job the generic machine starts at
+        // once may get here before its submitter has recorded the job id
+        // (which it does holding the lock), and would write the record
+        // back without it.
+        run = TestRun::open(dir)?;
+        // Running, so not ended: a job the scheduler requeued after the
+        // run recorded its end (preemption, `scontrol requeue`, Torque's
+        // `qrerun`) is a job to ask the scheduler about again
+        // (`TestRun::pending_job`); `execute_testsuite` stores this.
+        run.meta.timestamps.finished = None;
         // The set was activated at submit time; re-assert defensively.
         fs::create_dir_all(results_dir(dir, results_id))?;
         activate_results(dir, results_id)?;

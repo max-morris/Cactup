@@ -3362,6 +3362,94 @@ Landed here, taken from that branch as it is at `a4e53e8`:
 `cache doctor` on `m5a`, `m5b`, `et` prints byte for byte what master
 prints; `cargo test --workspace --locked` passes.
 
+### Test-run liveness: rounds 1 to 8
+
+The test-run part of the work after the merge, on
+`feature/test-run-liveness` (decision 35), its records condensed. The
+commits named are the branch's before its rebase onto master at
+`17b1079`, where it became one commit of test-run liveness (the build and
+doctor parts it also carried landed in `70b6d2c`). Item 1 of round 35's
+list began it: an interactive test run's job id is the pid of the cactup
+that ran it, so only a submitted run not finished is asked of the
+scheduler, and `running.lock` answers for the rest (`test
+list`/`show`/`stop`/`delete`, the guard before a test run).
+
+Round 1 (on `0430bac`): BLOCKED by both. A: a submitted test run on the
+generic machine has a pid for its job too, and `test stop` set no
+`finished`, so a stopped run's reused pid read as RUNNING and `test
+delete -f` ran `pkill -g` on it. B: `test stop`/`delete` handed a running
+interactive run's pid to the scheduler (on Slurm, "not in the queue", and
+`delete` trashed the live run); across hosts another host's pid went to
+the local `pkill -g`. (The cache's findings of this round, the contract
+and stale texts, landed with `70b6d2c`.) Fixed: `test stop` records
+`finished`; an interactive run's pid never goes to the scheduler (`stop`
+says to interrupt it where it runs, as `build stop` does; `delete`
+refuses while its lock is held, `-f` too).
+
+Round 2 (on `468e97a`): BLOCKED by both. A: `test delete` trashed a live
+submitted run another host runs on a `ps`-style scheduler (its pid
+unknown here, its lock held); another host's pid still reached this
+host's `ps` and `pkill -g`. B: `test stop` recorded `finished` though no
+stop was sent (a failed `squeue` reads as "not in the queue"). Not
+blocking: a compute-side `test run` read its record before taking the
+lock; `delete` took no lock; the docs; the spec named only the generic
+machine. Fixed: `stop` records `finished` only once it sent the stop; a
+submitted run whose lock is held but whose job the scheduler here does
+not have is neither stopped nor deleted (`-f` neither); `delete` holds
+the test lock while it looks; `run_compute` reads the record again under
+the lock. A's second finding (another host's pid on a `ps`-style
+scheduler) was put to Max with the generic machine's sims.
+
+Round 3 (on `f146bd7`): BLOCKED by both: a run whose lock is held though
+a batch scheduler does not list its job was said to run "where this one
+cannot see it (another host?)"; Slurm sees every node, so it is a query
+that failed or a lock that outlived its run. Not blocking: a failed
+`squeue -j` reads as "not in the queue" (put to Max); a log line; no test
+of `delete`'s checks (now `clear_to_delete`, tested). Fixed: `stop` and
+`delete` say only what they know (another host, a failed query, or a lock
+that expires within 15 minutes) and leave the run.
+
+Round 4 (on `7bbda47`): BLOCKED by both: a job listed in a state no
+pattern reads (`JobStatus::Error`: Torque's exiting `E`, Slurm's
+suspended `S`) was said not to be listed; `without_job` still said
+"another host?" and "is running in the foreground" where neither was
+known. Fixed: a listed job, in whatever state, is the scheduler's;
+`without_job` names the lock that outlives its run.
+
+Round 5 (on `6601c23`): BLOCKED by both: Slurm and Torque list an ended
+job for a while (`CD`, `F`, `CA`, `C`), so `delete` said a completed job
+"has a live job", and `stop` and `delete -f` failed on Torque's `qdel`
+refusing it. Fixed: such a job is its own case (suspended, exiting or
+ended); `stop` asks the scheduler to stop it and records the end only if
+it took the stop; `delete` refuses it without `-f`, and with `-f` stops
+it or, where the scheduler refuses, goes ahead unless the run's lock is
+held.
+
+Round 6 (on `9377920`): BLOCKED by both. A: Slurm's `scancel` takes an
+ended job without a word, so `stop` said "it took the stop" of a job that
+had ended. B: on Torque a completed job, which `qdel` refuses, kept
+`delete` refusing for good. Fixed: `stop` says only that it asked the
+scheduler; where the scheduler refuses and nothing of the run holds its
+lock, `stop` takes the run as ended and records it, so `delete` goes
+ahead.
+
+Round 7 (on `996b2d5`): B signed off; BLOCKED by A: `without_job` said
+"its job was stopped" of a job that ended on its own. Not blocking: a
+Ctrl-C that ended `scancel`/`qdel` read as the scheduler refusing; texts.
+Fixed: "asked to stop or is over"; an interrupted stop command bails with
+"interrupted".
+
+Round 8 (on `5735121`): BLOCKED by both. A: a Ctrl-C during the status
+query made it print nothing, read as "not in the queue" (`delete` trashed
+a queued run). B: a job the scheduler requeues after its run recorded
+`finished` (preemption, `scontrol requeue`, `qrerun`) is not asked about
+again. Fixed in `a4e53e8`: an interrupted status query or stop command
+fails with "interrupted" (`Scheduler::get_status`, `Scheduler::stop`); a
+requeued job's run clears `finished` when it runs again. Open then: such
+a job while it waits in the queue, which needed telling a scheduler's
+job id from a pid: MDB generation 3's `job-ids` (decision 35), read now
+by the work below.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

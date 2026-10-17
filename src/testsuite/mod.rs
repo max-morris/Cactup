@@ -122,6 +122,28 @@ impl TestRun {
         self.cactup_dir().join("heartbeat")
     }
 
+    /// The job id worth asking the scheduler about, if any: a submitted run
+    /// that has not finished. An interactive run's job id is the pid of the
+    /// cactup that ran it (`run::start_impl`), not a job: `running.lock`
+    /// alone says whether it runs, and once that cactup is gone the pid can
+    /// be any other process's — the scheduler (on the generic machine, `ps`)
+    /// would take that process for the run, and its stop command would stop
+    /// that process's group. Shared by `list`, `show`, `stop`, `delete` and
+    /// the guard before a new run.
+    pub fn pending_job(&self) -> Option<&str> {
+        let meta = &self.meta;
+        (meta.timestamps.submitted.is_some()
+            && meta.timestamps.finished.is_none()
+            && meta.job_id != crate::sim::restart::NO_JOB_ID)
+            .then_some(meta.job_id.as_str())
+    }
+
+    /// Whether `running.lock` is held by a live process: the run is
+    /// executing right now, here or on a compute node.
+    pub fn lock_live(&self) -> Res<bool> {
+        LinkLock::is_held_live(&self.running_lock_path())
+    }
+
     /// Open the test run at `dir` (detection = `.cactup/test.toml` exists,
     /// mirroring D10).
     pub fn open(dir: &Path) -> Res<TestRun> {
