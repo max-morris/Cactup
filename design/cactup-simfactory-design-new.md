@@ -3728,8 +3728,11 @@ Ports of `simfactory-docs.txt` §14.8 / §14.5:
     is live (another host's lock goes stale by its mtime, §2.3), and taken
     as ended once it is not; a restart recorded by an older cactup (no
     `job-host`) whose pid has a process here, or whose process does not lead
-    its group (a foreground `sim run` in its terminal's job), is refused,
-    not stopped. The graceful path's queue polling fails, and `stop` with
+    its group, is refused, not stopped. A foreground `cactup sim run` typed
+    at an interactive shell's prompt leads its own process group (the shell
+    gives each job one), so `sim stop -f` from another terminal stops it,
+    as before; one started from a script (no job control), or not the first
+    command of a pipeline, shares another process's group and is refused. The graceful path's queue polling fails, and `stop` with
     it, on a status query that failed (where the machine sets
     `unknown-job-pattern`) for a restart that has not recorded its end,
     rather than reading it as a run that left; it watches the lock instead
@@ -3759,8 +3762,12 @@ against the machine `*-pattern` regexes → `R`/`Q`/`H`/`U`/`E`
 (`simfactory-docs.txt` §14.7). cactup may *cache* the last observed status in the
 restart metadata for display, but the symlink + live query remain the source of
 truth (per D4's "state inferred, not stored" principle — `simfactory-docs.txt`
-§24). A restart whose run recorded its end (`terminated`) is still asked
-about on a batch scheduler, which may requeue its job (a requeued job that
+§24). The simulation's newest restart, if its run recorded its end
+(`terminated`), is still asked about on a batch scheduler, which may
+requeue its job; an older terminated restart is taken as ended without a
+query, since its job id may by now name an unrelated job (ids wrap around,
+a cluster is reinstalled, two clusters share a home) that would refuse a
+`delete` or be stopped by its `-f` (a requeued job that
 runs again clears `terminated` and `finished` as it starts, and records
 them again when it is over); after the end only a queued or held job is
 such a job, and one listed running (Slurm's `CG`, `TO`) or in a state no
@@ -3796,8 +3803,9 @@ umbrella (§3), `-f` overrides the live-job guard (cactup first `stop`s the
 running/queued jobs, §8.6, then deletes), the trash/purge default, *and* the
 `--purge` prompt. Without `-f` on a live simulation, cactup refuses and tells
 the user to `sim stop` first. Which restarts' jobs are asked about, and how,
-is §8.6's and §10's: on a batch scheduler every restart with a job (after
-its end, live only queued or held: a requeued one), where job ids are pids
+is §8.6's and §10's: on a batch scheduler every restart with a job that has
+not recorded its end, and the newest restart after its end (live then only
+queued or held: a requeued one), where job ids are pids
 only those that have not recorded their end, each only on its recorded host
 with its process start time. They are asked in one batch (the machine's
 `get-status-many` listing, else the bounded pool of per-job queries) under a
@@ -4100,7 +4108,8 @@ a simulation is never a testsuite — testsuite state lives in the `cactup test`
 subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carries
 `schema` plus the submit/run keys
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
-`checkpt-buffer`, `job-id`, `chained-job-id`, and where job ids are pids
+`checkpt-buffer`, `job-id`, `submitted` (when the job id was recorded),
+`chained-job-id`, and where job ids are pids
 the `job-host` and `job-start` recorded with `job-id` (§10; `build.toml` and
 `test.toml` carry them too), the last observed `status`, the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
@@ -4201,15 +4210,21 @@ and start time beside it), so no caller can skip the checks.
     submitting shell's group, and stopping it would stop its siblings and
     the shell. So `stop` runs only where `/proc/<pid>/stat`'s process group
     is the pid itself, and otherwise refuses (`SharedGroup`), naming the
-    pid to stop by hand; this covers a foreground `sim run`, whose pid is
-    in its terminal's job (interrupted where it runs). Every in-repository
+    pid to stop by hand. A foreground `sim run` is stopped where it leads
+    its group (typed at an interactive prompt, which gives each job a group
+    of its own, cactup being the pipeline's first command if in one) and
+    refused where it does not (started from a script, or later in a
+    pipeline: interrupted where it runs). Every in-repository
     `pids` machine's `submit` and `blocking-submit` start the job with
     `setsid` (which keeps the pid: the backgrounded process does not lead
     a group, so `setsid` makes its session in place), and a `pids`
     machine's submit must.
   - **Records made by an older cactup** (no `job-host`): asked about only
     where a process with that pid runs on this host and started no later
-    than the record was made (its submission, else its creation; give or
+    than the record was made (when the job id was recorded: a restart's
+    `submitted`, a test run's or build attempt's `timestamps.submitted`;
+    else the record's creation, which for a restart comes before the
+    submit's environment setup runs; give or
     take a minute, the wall-clock start being the boot time from
     `/proc/stat`'s `btime` plus the start time in clock ticks): else `U`,
     nothing run, so a long-lived unrelated process that took the pid later
@@ -4265,8 +4280,12 @@ and start time beside it), so no caller can skip the checks.
   output already carries it, and `status-pattern` and the state patterns
   match what they matched before. The batch `get-status-many` listing is
   unchanged: a job it does not list is `U`, since a listing says nothing
-  of the jobs it leaves out (a listing that fails, or that Ctrl-C cuts
-  short, falls back to the per-job queries, as before). The MDB sets the
+  of the jobs it leaves out. A listing that fails (it exits non-zero, as
+  Slurm's `squeue -h -u` does on a timeout, printing nothing on stdout),
+  or that Ctrl-C cuts short, says nothing of any job: cactup falls back to
+  the per-job queries, whose failures are handled as above (a refusal for
+  a record with no end, a note after it, `UNKNOWN` on display). An empty
+  listing exits 0, and lists no job. The MDB sets the
   key where the real tool's message is known: Slurm's `squeue -j`
   (`slurm_load_jobs error: Invalid job id specified`, on stderr with
   nothing on stdout and exit 1, once the job has aged out of the

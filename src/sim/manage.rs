@@ -357,21 +357,33 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     Ok(())
 }
 
+/// Whether restart `id`, whose run recorded its end, is still asked about
+/// (§8.6, §10): only on a batch scheduler, which may requeue a job, and
+/// only the simulation's newest restart, the one a requeue concerns. An
+/// older restart's job id is never asked again: on a batch scheduler it may
+/// by now name an unrelated job (ids wrap around, a cluster is reinstalled,
+/// two clusters share a home), which would refuse a delete or be stopped.
+fn asks_after_end(sched: &Scheduler, id: u32, newest: Option<u32>) -> bool {
+    sched.may_requeue() && newest == Some(id)
+}
+
 /// The restarts of `sim` whose jobs are live (§8.7), asked about in one
 /// batch (`get_statuses`: the machine's listing, else the bounded pool of
-/// per-job queries) under a progress line. A restart whose run recorded its
-/// end is still asked about where a batch scheduler may have requeued its
-/// job, and is live then only queued or held (`is_live`); where job ids are
-/// pids it is done (§10). A job whose query failed is asked once more on
+/// per-job queries) under a progress line. Of the restarts whose run
+/// recorded its end only the newest is asked about, where a batch scheduler
+/// may have requeued its job, and is live then only queued or held
+/// (`is_live`); where job ids are pids none is (`asks_after_end`). A job whose query failed is asked once more on
 /// its own: before its run's end that is an error, and `delete` refuses
 /// with it; after, it is taken as ended. A job recorded on another host
 /// (pids) refuses the delete while its restart's `running.lock` is live,
 /// whatever `-f` says: this host can neither ask about it nor stop it.
 fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<(u32, JobRecord)>> {
     let mut asked: Vec<(u32, Restart)> = Vec::new();
-    for id in restart::list_ids(&sim.dir)? {
+    let ids = restart::list_ids(&sim.dir)?;
+    let newest = ids.last().copied();
+    for id in ids {
         let Ok(r) = Restart::load(&sim.dir, id) else { continue };
-        if r.meta.job_id == NO_JOB_ID || (r.meta.terminated && !sched.may_requeue()) {
+        if r.meta.job_id == NO_JOB_ID || (r.meta.terminated && !asks_after_end(sched, id, newest)) {
             continue;
         }
         if let Some(host) = sched.recorded_elsewhere(r.meta.job()) {
@@ -732,9 +744,12 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
     // one batched query instead of a scheduler round-trip each (§10).
     let loaded: Vec<Res<Restart>> =
         scan.ids.iter().map(|&id| Restart::load(&sim.dir, id)).collect();
-    // A restart whose run recorded its end is asked about only where a
-    // batch scheduler may have requeued its job (§10).
-    let asked = |r: &Restart| r.meta.job_id != NO_JOB_ID && (!r.meta.terminated || sched.may_requeue());
+    // Of the restarts whose run recorded its end, only the newest is asked
+    // about, and only where a batch scheduler may have requeued its job
+    // (`asks_after_end`).
+    let newest = scan.ids.last().copied();
+    let asked =
+        |r: &Restart| r.meta.job_id != NO_JOB_ID && (!r.meta.terminated || asks_after_end(sched, r.id, newest));
     let queries: Vec<JobRef> = loaded
         .iter()
         .filter_map(|r| r.as_ref().ok())
@@ -1141,6 +1156,57 @@ mod tests {
         assert!(live_jobs(&sim, &sched).unwrap().is_empty());
         assert!(!run_is_live(&sched, &r).unwrap());
         assert!(!log.exists(), "another host's pid was asked about");
+    }
+
+    /// `sim delete`'s batch: a failing `get-status-many` listing (exit 1)
+    /// is no job gone; the per-job queries answer, and their failure refuses
+    /// the delete before the restart's end and is taken as ended after it.
+    /// Of the terminated restarts only the newest is asked about: an older
+    /// one's job id may by now name an unrelated job.
+    #[test]
+    fn sim_delete_asks_job_by_job_when_the_listing_fails_and_only_the_newest_ended_restart() {
+        use crate::mdb::meta::Meta;
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("calls.log");
+        let entry = fake_sim(tmp.path(), "s", "4242", true, None, false);
+        let sim = Simulation::open("s", &entry.dir).unwrap();
+        let timeout = "echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1";
+        let fake = |single: &str| -> Meta {
+            toml::from_str(&format!(
+                "[machine]\nnickname = \"fake\"\n[scheduler]\nget-status-many = \"{timeout}\"\n\
+                 get-status = \"echo @JOB_ID@ >> {log}; {single}\"\n\
+                 unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'\n\
+                 status-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" PD\"\nrunning-pattern = \" R\"\n\
+                 [queues.local]\ndefault = true\n[submitscripts]\n\"default\" = [\"local\"]\n\
+                 [runscripts]\n\"default\" = [\"local\"]\n",
+                log = log.display()
+            ))
+            .unwrap()
+        };
+        let answers = fake("echo '@JOB_ID@ R'");
+        let answers = Scheduler::new(&answers);
+        let live = live_jobs(&sim, &answers).unwrap();
+        assert_eq!(live.iter().map(|(_, job)| job.id.as_str()).collect::<Vec<_>>(), ["4242"]);
+
+        let failing = fake(timeout);
+        let failing = Scheduler::new(&failing);
+        let err = format!("{:#}", live_jobs(&sim, &failing).unwrap_err());
+        assert!(err.contains("the status query for job 4242"), "{err}");
+        assert_eq!(sim_state_now(&sim, &failing).0, DisplayState::Unknown);
+        let path = restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml");
+        let ended = fs::read_to_string(&path).unwrap() + "terminated = true\n";
+        fs::write(&path, &ended).unwrap();
+        assert!(live_jobs(&sim, &failing).unwrap().is_empty());
+
+        // A newer restart: the older terminated one is no longer asked about.
+        let newer = restart::restart_dir(&sim.dir, 1);
+        fs::create_dir_all(newer.join(".cactup")).unwrap();
+        fs::write(newer.join(".cactup/restart.toml"), ended.replace("job-id = \"4242\"", "job-id = \"4243\"")).unwrap();
+        fs::remove_file(&log).unwrap();
+        let queued = fake("echo '@JOB_ID@ PD'");
+        let live = live_jobs(&sim, &Scheduler::new(&queued)).unwrap();
+        assert_eq!(live.iter().map(|(id, job)| (*id, job.id.as_str())).collect::<Vec<_>>(), [(1, "4243")]);
+        assert_eq!(fs::read_to_string(&log).unwrap().trim(), "4243", "an older ended restart's job was asked about");
     }
 
     /// The graceful path must confirm the run actually left before finishing

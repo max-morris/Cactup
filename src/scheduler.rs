@@ -208,9 +208,9 @@ impl std::fmt::Display for SharedGroup {
             f,
             "job {0} shares a process group with other processes (its process does not lead a \
              group of its own), so cactup does not stop it: the machine's stop command would stop \
-             them too. A foreground run is part of its terminal's job: interrupt it where it runs \
-             (Ctrl-C). Otherwise stop pid {0} by hand (`kill {0}`); a submit command that starts \
-             each job with `setsid` gives it a group of its own",
+             them too. Stop pid {0} by hand (`kill {0}`), or, for a foreground `cactup sim run` \
+             started from a script or after the first command of a pipeline, interrupt it where it runs (Ctrl-C); a submit \
+             command that starts each job with `setsid` gives it a group of its own",
             self.0
         )
     }
@@ -498,7 +498,9 @@ impl<'m> Scheduler<'m> {
         match self.get_status(job) {
             Err(e) if ended && e.downcast_ref::<FailedQuery>().is_some() => {
                 eprintln!(
-                    "{} the status query for job {} failed, and its run had recorded its end: taken as ended",
+                    "{} the status query for job {} failed, and its run had recorded its end: taken as \
+                     ended (if this repeats, check that unknown-job-pattern in the machine's [scheduler] \
+                     table matches what get-status prints for a job the scheduler does not know)",
                     "note:".yellow(),
                     job.id
                 );
@@ -668,6 +670,11 @@ impl<'m> Scheduler<'m> {
     /// then classified exactly as a single-job query would be. A job the
     /// listing does not mention is U: not in the queue (a listing says nothing
     /// of the jobs it leaves out, so `unknown-job-pattern` has no part here).
+    /// A listing that exits non-zero failed (Slurm's `squeue` exits 1 on a
+    /// timeout, printing nothing on stdout): that is an error, and
+    /// [`Self::get_statuses`] falls back to the per-job queries, whose own
+    /// failures their callers handle. An empty listing exits 0: no job
+    /// listed.
     fn status_listing(
         &self,
         template: &str,
@@ -675,7 +682,7 @@ impl<'m> Scheduler<'m> {
     ) -> Res<HashMap<JobKey, JobStatus>> {
         let vars = Self::query_vars("");
         let cmd = self.command_for("get-status-many", Some(template), &vars, None)?;
-        let output = self.spawn_sh(&cmd, true)?;
+        let output = self.spawn_sh(&cmd, false)?;
         // As in `get_status`: a listing Ctrl-C cut short lists nothing,
         // which says nothing of the jobs.
         if gix::interrupt::is_triggered() {
@@ -1206,7 +1213,7 @@ mod tests {
     }
 
     /// The job's own process that does not lead its own process group (a
-    /// submit without `setsid`, or a foreground run in its terminal's job):
+    /// submit without `setsid`, or a foreground run started from a script):
     /// the stop command (`pkill -g`) would reach the group's other
     /// processes, so nothing is run and the refusal names the pid.
     #[test]
@@ -1585,6 +1592,46 @@ mod tests {
         assert_eq!(statuses.get(JobRef::bare("3774767")).copied(), Some(JobStatus::Holding));
         // Not in the listing at all ⇒ U, not absent.
         assert_eq!(statuses.get(JobRef::bare("9999999")).copied(), Some(JobStatus::Unknown));
+    }
+
+    /// A `get-status-many` listing that exits non-zero failed (Slurm 24.11's
+    /// `squeue -h -u` on a timeout: the message on stderr, nothing on
+    /// stdout, exit 1): it says nothing of any job, so the per-job queries
+    /// answer instead, and their own failure is what callers get (an error
+    /// before a record's end, taken as ended after it). An empty listing
+    /// exits 0: every job asked about is gone.
+    #[test]
+    fn a_failing_listing_falls_back_to_the_per_job_queries() {
+        let timeout = "echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1";
+        let machine = |many: &str, single: &str| {
+            meta(&format!(
+                r#"
+                get-status-many = "{many}"
+                get-status = "{single}"
+                unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+                status-pattern = "^@JOB_ID@ "
+                running-pattern = " R"
+                "#
+            ))
+        };
+        let jobs = bare(&["1", "2"]);
+
+        let per_job_answers = machine(timeout, "echo '@JOB_ID@ R'");
+        let statuses = Scheduler::new(&per_job_answers).get_statuses(&jobs);
+        assert_eq!(statuses.get(JobRef::bare("1")), Some(&JobStatus::Running));
+        assert_eq!(statuses.get(JobRef::bare("2")), Some(&JobStatus::Running));
+
+        let both_fail = machine(timeout, timeout);
+        let sched = Scheduler::new(&both_fail);
+        assert!(sched.get_statuses(&jobs).is_empty(), "a failed listing marked jobs gone");
+        let err = sched.get_status_of(JobRef::bare("1"), false).unwrap_err();
+        assert!(err.downcast_ref::<FailedQuery>().is_some(), "{err:#}");
+        assert_eq!(sched.get_status_of(JobRef::bare("1"), true).unwrap(), JobStatus::Unknown);
+
+        let empty = machine("true", "echo '@JOB_ID@ R'");
+        let statuses = Scheduler::new(&empty).get_statuses(&jobs);
+        assert_eq!(statuses.get(JobRef::bare("1")), Some(&JobStatus::Unknown));
+        assert_eq!(statuses.get(JobRef::bare("2")), Some(&JobStatus::Unknown));
     }
 
     #[test]

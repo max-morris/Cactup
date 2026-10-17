@@ -3581,6 +3581,42 @@ one; a failed query after the end noted and taken as ended for `test
 stop`/`delete`, `test submit -f`, `sim delete`, `build stop`, `build
 submit -f`; the error's text with both patterns.
 
+Round 2 (on `a828a92`): BLOCKED by both, the same finding (both ran it):
+`status_listing` ran `get-status-many` tolerating failure and never
+looked at its exit status, so a failed listing (Slurm's `squeue -h -u` on
+a timeout: the message on stderr, exit 1) marked every job U; with round
+1's batch, `sim delete` then trashed (`-f`: removed) a live simulation,
+and `sim list`/`show`, `test list`, `build list`/`show` showed a definite
+state instead of UNKNOWN. Not blocking: the `SharedGroup` text and
+`running-simulations.md` said a foreground run is left alone, though one
+typed at an interactive prompt leads its own group and is stopped (as on
+master) (A); `sim delete` asked about every terminated restart's job on a
+batch scheduler, where an old id may name an unrelated job (B); the
+older-record time check used a restart's `created`, set before the
+submit's setup runs (B); the after-end note did not point at the pattern
+(B). Fixed in the commit after this record: a listing that exits
+non-zero is a failed listing, and the per-job queries answer instead
+(their failure: a refusal before a record's end, a note after; UNKNOWN
+on display; the fallback keeps its interrupt polling and progress); an
+empty listing exits 0 and lists no job. Of a simulation's terminated
+restarts only the newest is asked about (`asks_after_end`), older ones
+taken as ended without a query (`sim delete`, `sim show`). A restart
+records `submitted` when its job id is recorded, which the older-record
+check uses before `created`. The note names `unknown-job-pattern` as the
+thing to check if it repeats; the texts say exactly when a foreground run
+is stopped (it leads its group: typed at a prompt) and when refused
+(started from a script, or later in a pipeline). The lead decided, not
+changed: an overlay at generation 3 with `job-ids = "pids"` whose
+`submit` lacks `setsid` gets `stop` refused (`SharedGroup`) with the fix
+named, without a generation bump (being put to Max); the hostname is the
+recorded host; the small windows the reviewers listed (between the pid
+and group check and the stop command; an older record's pid within the
+minute's slack) stay. Checked with the fake Slurm, its listing now failing
+on its own: `sim list` asks job by job and shows QUEUED, `sim delete`
+refuses the live job and `-f` stops it before deleting; with both failing,
+`sim list`/`show`, `test list`, `build list`/`show` print UNKNOWN and
+`sim delete [-f]` refuse; the generic machine's checks as before.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

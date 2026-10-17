@@ -273,7 +273,9 @@ live job of `@USER@`, one per line, with the job id as the first field; the rest
 the line is classified by the same `status`/`queued`/`running`/`holding` patterns
 used for `get-status`. A job id absent from the listing is treated as not queued
 (a listing says nothing of the jobs it leaves out, so `unknown-job-pattern`
-plays no part there).
+plays no part there). A listing command that exits non-zero has failed:
+cactup then asks job by job with `get-status`, so the listing must exit 0
+when it ran, also when it lists nothing.
 
 `unknown-job-pattern` (optional) is a regular expression matching a line of
 `get-status`'s output, stdout or stderr, that says the scheduler does not

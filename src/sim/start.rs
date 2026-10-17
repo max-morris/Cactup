@@ -431,6 +431,7 @@ fn submit_impl(
             meta: RestartMeta {
                 schema: SCHEMA,
                 created: Utc::now(),
+                submitted: None,
                 started: None,
                 finished: None,
                 nodes: topo.nodes,
@@ -625,6 +626,7 @@ fn run_interactive(
         meta: RestartMeta {
             schema: SCHEMA,
             created: Utc::now(),
+            submitted: None,
             started: None,
             finished: None,
             nodes: topo.nodes,

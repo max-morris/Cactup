@@ -69,6 +69,11 @@ pub struct RestartMeta {
     #[serde(default = "default_schema")]
     pub schema: u32,
     pub created: DateTime<Utc>,
+    /// When the job id was recorded: just after the submit command returned
+    /// (or, for a foreground run, as it began). Absent in a record an older
+    /// cactup made, which `created` then stands for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,12 +133,18 @@ impl RestartMeta {
     /// The recorded job, as the scheduler is asked about it, with when the
     /// record was made (its submission, else its creation).
     pub fn job(&self) -> crate::scheduler::JobRef<'_> {
-        crate::scheduler::JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start, Some(self.created))
+        crate::scheduler::JobRef::new(
+            &self.job_id,
+            self.job_host.as_deref(),
+            self.job_start,
+            Some(self.submitted.unwrap_or(self.created)),
+        )
     }
 
     /// Record `job` (a submitted one, or a foreground run's pid) as this
-    /// restart's job.
+    /// restart's job, submitted now.
     pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.submitted = Some(Utc::now());
         self.job_id = job.id.clone();
         self.job_host = job.host.clone();
         self.job_start = job.start;
@@ -483,6 +494,22 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The time an older record's pid is checked against (§10) is when
+    /// the job id was recorded, where the record says (`submitted`, which
+    /// `set_job` stamps), else its creation.
+    #[test]
+    fn a_restarts_job_is_dated_by_its_submission_else_its_creation() {
+        let text = "created = \"2026-10-01T00:00:00Z\"\nnodes = 1\ntasks = 1\ntpn = 1\ncpus = 1\n\
+                    queue = \"q\"\nwalltime = \"1:00:00\"\ncheckpt-buffer = \"0:10:00\"\njob-id = \"7\"\n";
+        let mut meta: RestartMeta = toml::from_str(text).unwrap();
+        assert_eq!(meta.job().since, Some(meta.created));
+        let job = crate::scheduler::JobRecord { id: "8".to_owned(), host: None, start: None, since: None };
+        meta.set_job(&job);
+        let submitted = meta.submitted.expect("set_job stamps the submission");
+        assert!(submitted > meta.created);
+        assert_eq!(meta.job().since, Some(submitted));
+    }
 
     #[test]
     fn dir_names_and_discovery() {

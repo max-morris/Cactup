@@ -384,9 +384,11 @@ nothing, and `sim delete` refuses, while the simulation's run still holds
 its lock; once the run has let go of it (a lock left behind by a lost host
 expires within 15 minutes) the job is taken as ended. cactup stops only a
 job that has a process group of its own (the machine's `submit` starts it
-with `setsid`); otherwise, and for a simulation running in the foreground
-of a terminal, it says so and leaves it: stop it where it runs (Ctrl-C) or
-with `kill`. A simulation submitted by an older cactup, without that record,
+with `setsid`), and otherwise says so and leaves it: stop it with `kill`.
+A `cactup sim run` typed at a shell prompt has a group of its own, so `sim
+stop --force` from another terminal stops it; one started from a script, or
+not as the first command of a pipeline, does not, and is left alone: stop
+it where it runs (Ctrl-C) or with `kill`. A simulation submitted by an older cactup, without that record,
 is not stopped for you if a process with its number is running: check that
 it is the job and stop it yourself (`kill`).
 
