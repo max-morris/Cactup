@@ -286,14 +286,14 @@ cactup build stop myconfig
 cactup build stop myconfig -f     # kill it directly instead of a graceful stop
 ```
 
-On a batch system, a build job the scheduler puts back in the queue after
-it recorded its result (preemption, `scontrol requeue`), within 14 days of
-the result, still counts as live: `build stop` cancels it, and a new build of that config refuses to
-start while it is queued (`-f` cancels it first). `build list` shows the
-recorded result until the job runs again. A finished build's job that the
-scheduler still lists as completing is just the ended job, and if the
-scheduler cannot be asked about a finished build at all, cactup notes it and
-goes ahead. An unfinished build whose status query fails is shown
+On a batch system, for 14 days after a build recorded its result, a job the
+scheduler still lists (put back in the queue by preemption or `scontrol
+requeue`, or just leaving it: Slurm lists an ended job as completing for a
+moment, or timed out for a few minutes) still counts as live: `build stop`
+cancels it, and a new build of that config refuses to start until it has
+left (`-f` cancels it first). `build list` shows the recorded result until a
+requeued job runs again. If the scheduler cannot be asked about a finished
+build at all, cactup notes it and goes ahead. An unfinished build whose status query fails is shown
 `UNKNOWN`, `build stop` refuses with the scheduler's output, and `build
 prune` keeps it.
 

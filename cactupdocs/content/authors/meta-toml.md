@@ -301,7 +301,9 @@ finished simulation restart, test run or build), asking is only the check
 for a job the scheduler put back in the queue, made for 14 days after the
 end (later, the job id may name an unrelated job, and the record is taken
 as ended without asking), so a failed query is taken as the job ended, with
-a one-line note, and nothing is held up. Without the key, no line for the
+a one-line note, and nothing is held up: `sim stop`, `sim submit`, `sim
+run`, `sim delete`, `test stop`, `test delete`, `build stop` and the checks
+before a new test run or build go ahead. Without the key, no line for the
 job means the job is gone, as before: a query that failed reads as a job no
 longer in the queue. Check the pattern against what the command really
 prints for a job the scheduler no longer knows (an old job id will do): one

@@ -71,6 +71,10 @@ pub enum DisplayState {
     /// A restart whose run recorded its end, whose job the scheduler lists
     /// queued (or held) again (§8.6): `sim stop` stops it.
     Requeued,
+    /// A restart whose run recorded its end, whose job the scheduler still
+    /// lists running or in a state no pattern reads: leaving the queue, or
+    /// starting again (§8.6). `sim stop` stops it.
+    StillListed,
 }
 
 /// The §8.6 display-state derivation. `status` is `None` when the restart has
@@ -262,16 +266,17 @@ const OLD_RECORD_SLACK: std::time::Duration = std::time::Duration::from_secs(60)
 
 /// Whether a job with `status` is live, for a record whose run has
 /// (`ended`) or has not recorded its end. Before the end, running, queued
-/// or held. After it, only queued or held: a job its scheduler put back in
-/// the queue (a requeued job that starts clears the record's end itself);
-/// a running one is the ended job on its way out (Slurm's `CG`, a timeout's
-/// `TO`, which machines read as running), and one in a state no pattern
-/// reads is the ended job still listed (§10).
+/// or held. After it (asked only within the requeue window), listed in any
+/// state: the scheduler has not let it go, and it is either leaving the
+/// queue (Slurm's `CG`, a timeout's `TO`, read as running; `CD`, `CA`
+/// unread) or starting again (queued, held, or `CF` and `R` before its run
+/// clears the record's end), which the patterns cannot tell apart (§10).
+/// Each command takes the safe reading for what it does with it.
 pub fn is_live(status: JobStatus, ended: bool) -> bool {
     match status {
-        JobStatus::Queued | JobStatus::Holding => true,
-        JobStatus::Running => !ended,
-        JobStatus::Error | JobStatus::Unknown => false,
+        JobStatus::Queued | JobStatus::Holding | JobStatus::Running => true,
+        JobStatus::Error => ended,
+        JobStatus::Unknown => false,
     }
 }
 
@@ -550,6 +555,13 @@ impl<'m> Scheduler<'m> {
     /// its `-f`; and a record with no end time is taken as ended too.
     pub fn asks_after_end(&self, ended_at: Option<DateTime<Utc>>) -> bool {
         self.may_requeue() && ended_at.is_some_and(|ended| Utc::now() - ended < REQUEUE_WINDOW)
+    }
+
+    /// Whether `job` is the job's own process here but does not lead its
+    /// own process group, so [`Self::stop`] refuses it ([`SharedGroup`]).
+    pub fn shares_group(&self, job: JobRef<'_>) -> bool {
+        self.pid_check(job) == Some(PidCheck::Here)
+            && job.id.parse::<u32>().is_ok_and(|pid| crate::lock::proc_pgrp(pid) != Some(pid))
     }
 
     /// Whether `job` is a pid an older cactup recorded (no host, no start
@@ -1315,14 +1327,15 @@ mod tests {
         assert_eq!((marks(dir.path(), "asked"), marks(dir.path(), "stopped")), (2, 0));
     }
 
-    /// After a record's end only a queued or held job is live (put back in
-    /// the queue); a running one (Slurm's `CG`, `TO`, which machines read as
-    /// running) or one in a state no pattern reads is the ended job.
+    /// After a record's end a job listed in any state is live: queued
+    /// again, or leaving the queue (`CG`, `TO`, `CD`), or starting again
+    /// (`CF`, `R` before its run clears the end), which cactup cannot tell
+    /// apart. Before the end, an unread state is not.
     #[test]
-    fn after_the_end_only_a_queued_or_held_job_is_live() {
+    fn after_the_end_a_job_listed_in_any_state_is_live() {
         use JobStatus::*;
         for (status, before, after) in
-            [(Running, true, false), (Queued, true, true), (Holding, true, true), (Error, false, false), (Unknown, false, false)]
+            [(Running, true, true), (Queued, true, true), (Holding, true, true), (Error, false, true), (Unknown, false, false)]
         {
             assert_eq!((is_live(status, false), is_live(status, true)), (before, after), "{status:?}");
         }

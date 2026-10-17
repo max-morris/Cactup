@@ -202,11 +202,14 @@ to stop it, and once it is over `test delete` goes ahead. One whose lock is held
 expires within 15 minutes, or, on a machine that cannot tell, the scheduler
 could not be asked) is left as it is, `--force` too.
 
-On a batch system, a job the scheduler puts back in the queue after its run
-ended (preemption, `scontrol requeue`), within 14 days of the end, is seen
-again: `test list` shows it queued, `test stop` cancels it, and `test delete` refuses it without
-`--force`. (A finished run's job that the scheduler still lists as
-completing or completed is just the ended job.) Where the machine definition
+On a batch system, for 14 days after a test run ended, a job the scheduler
+still lists is taken for what it may be: put back in the queue
+(preemption, `scontrol requeue`), or just leaving it (Slurm lists an ended
+job as completing for a moment, or timed out for a few minutes), which
+cactup cannot tell apart. `test list` shows it `QUEUED AGAIN` or `STILL
+LISTED`, `test stop` cancels it, `test delete` refuses it without `--force`,
+and a new `test run` or `test submit` waits for it to leave (or for `test
+stop`). Where the machine definition
 says how the scheduler reports a job it does not know, a status query that
 fails stops `test stop`, `test delete` and a new `test run` or `test submit`
 with the scheduler's output rather than taking the job for ended, and `test

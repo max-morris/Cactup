@@ -333,15 +333,29 @@ fn start_impl(
         if old.lock_live()? {
             bail!("test run \"{name}\" is currently executing (running.lock is held)");
         }
-        // After the old run's end only a job put back in the queue is live,
-        // and a query that fails is taken as the job ended (§10).
+        // After the old run's end, a job the scheduler still lists in any
+        // state is live (leaving the queue, or starting again: a new run
+        // beside it is refused); a query that fails is taken as the job
+        // ended (§10).
         let finished = old.meta.timestamps.finished.is_some();
         if let Some(job) = old.pending_job(&sched)
             && crate::scheduler::is_live(sched.get_status_of(job, finished)?, finished)
         {
-            // An older record's pid (§10): never stopped, `-f` neither.
+            // An older record's pid, or one sharing its process group (§10):
+            // never stopped, `-f` neither.
             if sched.unverified(job) {
                 bail!("{}; then run the tests again", crate::scheduler::UnverifiedPid(job.id.to_owned()));
+            }
+            if sched.shares_group(job) {
+                bail!("{}; then run the tests again", crate::scheduler::SharedGroup(job.id.to_owned()));
+            }
+            if !args.force && finished {
+                bail!(
+                    "test run \"{name}\" ended, but the scheduler still lists its job {} (leaving the queue, \
+                     or starting again): wait until it leaves, or `cactup test stop {name}` to stop it (or \
+                     pass -f to stop it)",
+                    job.id
+                );
             }
             if !args.force {
                 bail!(

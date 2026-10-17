@@ -3701,6 +3701,60 @@ the job `CA` after); `sim delete`, `sim submit`, `sim run` refusing with
 `sim stop` named; `sim submit` beside a live foreground run refused, with
 no new restart; the earlier scenarios as before.
 
+Round 5 (on `bd29ca0`): BLOCKED by both, the same finding (both ran
+it): after a record's end a job listed running (`CF|CG|R|TO`, every Slurm
+machine's running-pattern) was taken for the ended job leaving the queue,
+but a requeued job goes `PD` → `CF` (minutes while a node boots) → `R`
+before its cactup clears the end, and preemption with requeue reaches
+exactly this (the run records its end on SIGTERM). In that window `sim
+submit` reaped the restart and submitted an unchained second one (two
+Cactus runs on one simulation, reproduced), `sim run` and `test submit`
+started beside it (master refused), and `sim stop` took the graceful path,
+deactivating while the requeued run then ran in full. Round 1's opposite
+finding (`TO`/`CG` after the end taken as live made `sim delete` and the
+next build refuse for minutes) stands too: the patterns cannot tell
+`CF`/`R` from `CG`/`TO`. Not blocking: `sim delete`'s advice for a pid
+sharing its process group named `sim stop`/`-f`, both refusing (A); the
+`unknown-job-pattern` doc and `meta-toml.md` lacked the after-end case
+(A). The lead's decision, and the fixes in the commit after this record:
+- After a record's end (within the requeue window), a job listed in any
+  state is "still listed" (`is_live(status, true)`): leaving the queue, or
+  starting again, which cactup cannot tell apart; each command takes the
+  safe reading. `sim submit` chains behind it (`CHAINED_JOB_ID`, active
+  restart or not) and the reaper never reaps it; `sim run`, `test
+  run`/`test submit` and a new build refuse, saying it is still listed and
+  to wait until it leaves or stop it; `sim stop` (either form), `test
+  stop`, `build stop` ask the scheduler to stop it with no graceful path,
+  recording nothing else; `sim delete`, `test delete` refuse without `-f`
+  and stop it with `-f`; displays show `QUEUED AGAIN` (queued, held) or
+  `STILL LISTED` (running, unread; `sim show` adds the listed letter and
+  "leaving the queue, or starting again"). Not listed, or past the window:
+  ended; a failed query after the end: the note, taken as ended.
+- The ended restart a requeue concerns is the newest one that recorded its
+  end (`newest_ended`), not the newest restart: a restart `sim submit`
+  chains behind it has not run, and `sim stop`/`delete` must still see the
+  listed job.
+- A pid sharing its process group: `sim delete`, `test delete` and the
+  guards before a new test run or build say to stop it by hand (the
+  `SharedGroup` text), as for an older record's pid.
+- The `unknown-job-pattern` doc comment and `meta-toml.md` give the
+  after-end case, including `sim stop`, `sim submit`, `sim run`.
+What round 1's `TO`/`CG` scenarios cost now, where the job is only
+leaving: starting new work beside it (`sim run`, a test run, a build)
+waits until the scheduler lets it go (seconds for `CG`; minutes for
+`TO`, Slurm's `MinJobAge`), or `stop` (harmless) or `-f`; `sim submit`
+chains behind it, a moment's wait; `sim delete` and `test delete` refuse
+until it leaves or is stopped (`-f` stops it), and a job that has been
+stopped but is still listed `CA` for a few minutes keeps them refusing
+until it leaves, or `-f`. Checked with the fake Slurm: `CF`, `R`, `CG`,
+`TO`, `CD` after a restart's end all shown `STILL LISTED`; `sim run`
+refused; `sim submit` (the simulation's file aged past the reaper's
+throttle) chained behind the job, no reaping; `sim delete` naming both
+jobs; `sim stop` asking `scancel` at once; a test run (`R`, `CG`) and a
+build (`CG`) after their end: `test submit`, `test delete`, `build submit`
+refused, `test stop` and `build stop` asking the scheduler; the earlier
+scenarios with the new readings.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

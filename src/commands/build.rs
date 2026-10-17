@@ -175,6 +175,19 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
         if sched.unverified(job) {
             bail!("{}; then build again", crate::scheduler::UnverifiedPid(job.id.to_owned()));
         }
+        if sched.shares_group(job) {
+            bail!("{}; then build again", crate::scheduler::SharedGroup(job.id.to_owned()));
+        }
+        // After the attempt's outcome, a job the scheduler still lists in
+        // any state: leaving the queue, or starting again (§10).
+        if !force && ended {
+            bail!(
+                "config \"{name}\"'s last build attempt ended, but the scheduler still lists its job {} \
+                 (leaving the queue, or starting again): wait until it leaves, or `cactup build stop \
+                 {name}` to stop it (or pass -f to stop it)",
+                job.id
+            );
+        }
         if !force {
             bail!(
                 "config \"{name}\" already has a live build attempt ({}); \
@@ -1175,15 +1188,18 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
     let mut attempt = BuildAttempt::open(&config_dir, id)?;
     let sched = Scheduler::new(&machine.meta);
     if attempt.meta.outcome.is_some() {
-        // Over, unless the scheduler put its job back in the queue after
-        // the outcome was recorded (asked only where it may have,
-        // `requeue_query`; only queued or held is such a job, `is_live`).
+        // Over, unless the scheduler still lists its job after the outcome
+        // was recorded (asked only where it may have requeued it,
+        // `requeue_query`): queued again, or leaving the queue (`is_live`).
+        // Asked to stop it either way, harmless if it is leaving; the
+        // outcome stands.
         if let Some(job) = requeue_query(&attempt.meta, &sched)
             && is_live(sched.get_status_of(job, true)?, true)
         {
             sched.stop(job)?;
             println!(
-                "Stopped build job {}, which the scheduler lists queued again after the attempt recorded its outcome",
+                "Asked the scheduler to stop build job {}, still listed after the attempt recorded its \
+                 outcome (queued again, or leaving the queue)",
                 job.id.bold()
             );
             return Ok(());
@@ -2527,21 +2543,21 @@ mod tests {
         assert!(!log.exists(), "build list asked about a finished attempt");
         let sched = Scheduler::new(&batch.meta);
         let refused = guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap_err().to_string();
-        assert!(refused.contains("already has a live build attempt (4242)"), "{refused}");
+        assert!(refused.contains("still lists its job 4242") && refused.contains("build stop sim"), "{refused}");
         stop_impl(&batch, &inst, Some("sim"), false).unwrap();
         assert!(gone.exists(), "build stop missed the requeued job");
         guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
         assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_some_and(|o| o.complete));
     }
 
-    /// After an attempt's outcome only a queued or held job is a requeued
-    /// one: Slurm's ended job still listed running (`CG`, `TO`) or unread
-    /// (`CD`) neither blocks a new build nor is stopped, and a status query
-    /// that fails is taken as the job ended (a scheduler that cannot be
-    /// asked never blocks `build -f` of a config whose last build finished).
-    /// Before the outcome, a failed query blocks, and `list` shows UNKNOWN.
+    /// After an attempt's outcome, a job the scheduler still lists in any
+    /// state is live (leaving the queue, or starting again, which cactup
+    /// cannot tell apart); a status query that fails is taken as the job
+    /// ended (a scheduler that cannot be asked never blocks `build -f` of a
+    /// config whose last build finished). Before the outcome, a failed query
+    /// blocks, and `list` shows UNKNOWN.
     #[test]
-    fn after_its_outcome_a_build_job_is_live_only_queued_or_held() {
+    fn after_its_outcome_a_build_job_still_listed_in_any_state_is_live() {
         let tmp = tempfile::tempdir().unwrap();
         let cactus = tmp.path().join("inst/Cactus");
         let config_dir = cactus.join("configs/sim");
@@ -2575,11 +2591,21 @@ mod tests {
         };
         let listing = machine(&format!("echo \\\"@JOB_ID@ $(cat {})\\\"", state.display()));
         let sched = Scheduler::new(&listing.meta);
-        for letter in ["CG", "TO", "CD"] {
+        // Still listed in any state after the outcome (leaving the queue,
+        // or starting again: `CF`, `R` before the requeued job's run clears
+        // the outcome): a new build waits (or `-f` stops it), and `build
+        // stop` asks the scheduler to stop it, the outcome standing.
+        for letter in ["CF", "R", "CG", "TO", "CD"] {
             fs::write(&state, letter).unwrap();
-            guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
+            let refused = guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap_err().to_string();
+            assert!(refused.contains("still lists its job 4242"), "{letter}: {refused}");
             stop_impl(&listing, &inst, Some("sim"), false).unwrap();
-            assert!(!stopped.exists(), "{letter}: the ended job was taken for a requeued one");
+            assert!(stopped.exists(), "{letter}: build stop left a still-listed job");
+            fs::remove_file(&stopped).unwrap();
+            assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_some_and(|o| o.complete));
+            guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap();
+            assert!(stopped.exists(), "{letter}: -f left a still-listed job");
+            fs::remove_file(&stopped).unwrap();
         }
         let failing = machine("echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1");
         let failing_sched = Scheduler::new(&failing.meta);

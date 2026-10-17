@@ -471,9 +471,10 @@ pub struct Scheduler {
     /// (stdout or stderr) that says the scheduler does not know the job,
     /// `@JOB_ID@` substituted as in the other patterns. Where it is set,
     /// output with no line for the job is a job gone only if a line matches
-    /// it; otherwise the query failed, and a command that would act on the
-    /// answer refuses. Where it is not set, no line for the job is a job
-    /// gone.
+    /// it; otherwise the query failed: a command that would act on the
+    /// answer refuses, unless the run had recorded its end, which is then
+    /// noted and taken as ended. Where it is not set, no line for the job
+    /// is a job gone.
     pub unknown_job_pattern: Option<String>,
 }
 
