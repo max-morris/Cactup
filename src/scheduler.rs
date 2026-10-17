@@ -68,8 +68,8 @@ pub enum DisplayState {
     /// The status query failed (where the machine can tell, §10) for a
     /// restart whose run has not recorded its end: no state is known.
     Unknown,
-    /// A restart that is not active and whose run recorded its end, whose
-    /// job the scheduler queued (or holds) again (§8.6).
+    /// A restart whose run recorded its end, whose job the scheduler lists
+    /// queued (or held) again (§8.6): `sim stop` stops it.
     Requeued,
 }
 

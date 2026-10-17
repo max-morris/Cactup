@@ -316,10 +316,32 @@ fn submit_impl(
 
     // Reap a stale active restart (§8.3); a live one triggers chaining.
     restart::reap_stale(sim, &sched)?;
+    refuse_beside_requeued(sim, &sched)?;
     let mut prev_job: Option<String> = None;
     let mut activate_first = true;
     if let Some(active) = restart::active_id(&sim.dir)? {
         let r = Restart::load(&sim.dir, active)?;
+        // A foreground run's pid is no job a batch scheduler could chain
+        // behind (§8.6): wait for it, or interrupt it.
+        if r.meta.foreground && r.meta.scheduler_job(&sched).is_none() {
+            match LinkLock::is_held_live(&r.running_lock_path())? {
+                true => bail!(
+                    "restart {} of simulation \"{}\" runs in the foreground (pid {}), which the scheduler \
+                     knows nothing of and cannot chain a job behind: wait for it to end, or interrupt it \
+                     where it runs (Ctrl-C), then submit",
+                    restart::dir_name(active),
+                    sim.name,
+                    r.meta.job_id
+                ),
+                false => bail!(
+                    "restart {} of simulation \"{}\" ran in the foreground and is still active, though \
+                     nothing of it holds its lock: `cactup sim clean {}`, then submit",
+                    restart::dir_name(active),
+                    sim.name,
+                    sim.name
+                ),
+            }
+        }
         if r.meta.job_id == NO_JOB_ID {
             bail!(
                 "restart {} is active but has no job and is not reapable yet; \
@@ -501,6 +523,27 @@ fn submit_impl(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn refuse_beside_requeued_for_tests(sim: &Simulation, sched: &Scheduler) -> Res<()> {
+    refuse_beside_requeued(sim, sched)
+}
+
+/// Refuse to start a run beside the newest restart's job, which the
+/// scheduler queued again after the restart ended (§8.6): both would run.
+fn refuse_beside_requeued(sim: &Simulation, sched: &Scheduler) -> Res<()> {
+    if let Some((id, job)) = crate::sim::manage::requeued_newest(sim, sched)? {
+        bail!(
+            "simulation \"{}\" has a live job ({}, of restart {}, which the scheduler queued again \
+             after the restart ended); `cactup sim stop {}` first",
+            sim.name,
+            job.id,
+            restart::dir_name(id),
+            sim.name
+        );
+    }
+    Ok(())
+}
+
 /// `sim run` (§8.4): dispatches to the compute-node path (`--sim-dir`,
 /// §8.3.1) or the interactive foreground path.
 pub fn run(ctx: &Ctx, args: SimRunArgs) -> Res<()> {
@@ -555,6 +598,7 @@ fn run_interactive(
 
     let lock = sim.lock()?;
     restart::reap_stale(sim, &sched)?;
+    refuse_beside_requeued(sim, &sched)?;
     if let Some(active) = restart::active_id(&sim.dir)? {
         bail!(
             "simulation \"{}\" already has an active restart ({}); wait for it, or \

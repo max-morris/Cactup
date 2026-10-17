@@ -308,9 +308,9 @@ prints for a job the scheduler no longer knows (an old job id will do): one
 that never matches makes every job the scheduler has forgotten look like a
 failed query wherever cactup asks job by job (`sim stop`'s wait, `test
 stop` and `delete`, `build stop`, the checks before a new run or build),
-which then refuse; where the listing answers instead (`sim list`/`show`,
-`sim delete`, `test list`, `build list`), such a job is just not listed,
-and so gone.
+which then refuse; where the listing answers instead (`sim list`, `sim show`, `test list`,
+`test show`, `build list`, `build show`, `sim delete`), such a job is just
+not listed, and so gone.
 
 `blocking-submit` is optional too: the same submission, but expressed so the
 command doesn't return until the job has finished, for `cactup build submit

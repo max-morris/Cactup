@@ -3799,11 +3799,23 @@ Display-state derivation for `cactup sim show`:
 - RUNNING/QUEUED/HOLDING follow `R`/`Q`/`H` of the *active* restart; FINISHED =
   active restart whose job is `U` and that has reached termination; ERROR = `E`;
   INACTIVE = no active restart; UNKNOWN = a restart that has not reached
-  termination whose status query failed (§10); `INACTIVE (job queued
-  again)` (`sim list`, `sim show`) = a restart that is not active and has reached
-  termination whose job the scheduler lists queued or held again (asked
-  about only for the newest restart within the requeue window): `sim
-  delete -f` stops it (`sim stop` acts on the active restart only).
+  termination whose status query failed (§10); QUEUED AGAIN (`sim list`,
+  `sim show`) = a restart, active or not, that has reached termination and
+  whose job the scheduler lists queued or held again (asked about only for
+  the newest restart within the requeue window).
+
+`sim stop` (with or without `-f`) looks at the newest restart first: if it
+has recorded its end and, within the requeue window, its job is listed
+queued or held again, `sim stop` asks the scheduler to stop that job
+directly, says so, and records nothing else on the restart (its end
+stands). There is no graceful path for it: a restart that has recorded its
+end has no Cactus reading its `TERMINATE` (the requeued job's own run
+recreates the file and runs in full). A query that fails there is the
+after-end rule (a note, taken as ended), and `sim stop` goes on to the
+active restart as below. `sim submit` and `sim run` refuse to start beside
+such a job, naming it and `sim stop`; `sim submit` also refuses while the
+active restart is a foreground run on a batch scheduler's machine (whose
+pid no scheduler could chain a job behind): wait for it, or interrupt it.
 
 `--long` additionally prints the build provenance snapshotted into
 `.cactup/cfg/` at create time (§8.2) — the paths of the simulation's optionlist
@@ -3819,10 +3831,9 @@ has a queued/holding/running job, unless `-f`** — as the "bypass all nagging"
 umbrella (§3), `-f` overrides the live-job guard (cactup first `stop`s the
 running/queued jobs, §8.6, then deletes), the trash/purge default, *and* the
 `--purge` prompt. Without `-f` on a live simulation, cactup refuses with
-advice that works: `sim stop` first where a live job is the active
-restart's (it stops that one only), `-f` for the rest (a job the scheduler
-queued again after its restart ended, named so, or a pre-submitted
-chain's). Which restarts' jobs are asked about, and how,
+advice that works: `sim stop` stops one job, the newest restart's if the
+scheduler queued it again after the restart ended (named so), else the
+active restart's; `-f` stops the rest (a pre-submitted chain's). Which restarts' jobs are asked about, and how,
 is §8.6's and §10's: on a batch scheduler every restart with a job that has
 not recorded its end, and the newest restart within the requeue window
 after its end (live then only queued or held: a requeued one), where job

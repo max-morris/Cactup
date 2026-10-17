@@ -3665,6 +3665,42 @@ delete` naming `-f` only); fifteen days after the end, `sim delete` and
 interrupt it, `delete` goes ahead once it ended); Ctrl-C during `sim
 list`'s per-job fallback exits 1, "interrupted".
 
+Round 4 (on `cca5cd2`): BLOCKED by both, the same shape from two sides
+(both ran it): the newest restart has recorded its end and its job is
+queued again (`PD`). A: with the restart still active and its
+`TERMINATE` a file (TerminationTrigger makes it every run), `sim delete`
+named `cactup sim stop`, which took the graceful path, wrote 1 into
+`TERMINATE` and waited 30 s, though the requeued job's run recreates the
+file and runs in full. B: with the restart deactivated (`sim clean`), `sim
+stop` found no active restart while `sim show` said the job was queued
+again. Not blocking: `sim submit` with a live foreground `sim run` on a
+batch machine chained behind its pid (`afterany:<pid>`) (A; master the
+same); `sim submit` beside a requeued job started a second run (B; master
+the same); the 12-wide column (B); `meta-toml.md`'s second list of
+listing paths (B). The lead's decision, and the fixes in the commit after
+this record:
+- `sim stop`, with or without `-f`, looks at the newest restart first
+  (`requeued_newest`): if it recorded its end and, within the requeue
+  window, its job is listed queued or held again, the scheduler is asked
+  to stop that job directly, with no graceful path, and nothing else is
+  recorded on the restart. A failed query there is the after-end rule.
+  `sim delete`'s advice names `cactup sim stop` for such a job in every
+  case; `sim list` and `sim show` show such a restart `QUEUED AGAIN`
+  (active or not), which fits the column.
+- `sim submit` and `sim run` refuse to start beside such a job, naming it
+  and `sim stop`; `sim submit` refuses while the active restart is a
+  foreground run on a batch machine (wait for it, or interrupt it), or
+  one that ended without being cleaned up.
+- `meta-toml.md` lists the same listing paths twice.
+- Not changed (the lead's decision): an older cactup's foreground run on a
+  `pids` machine is refused by `sim stop -f` (the old-record rule); the
+  graceful stop still works.
+Checked with the fake Slurm: both shapes (`sim stop` and `sim stop -f`
+asked `scancel` at once, `TERMINATE` and the restart record untouched,
+the job `CA` after); `sim delete`, `sim submit`, `sim run` refusing with
+`sim stop` named; `sim submit` beside a live foreground run refused, with
+no new restart; the earlier scenarios as before.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
