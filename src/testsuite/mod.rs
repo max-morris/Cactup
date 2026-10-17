@@ -110,9 +110,15 @@ pub struct TestMeta {
 }
 
 impl TestMeta {
-    /// The recorded job, as the scheduler is asked about it.
+    /// The recorded job, as the scheduler is asked about it, with when the
+    /// record was made (its submission, else its creation).
     pub fn job(&self) -> JobRef<'_> {
-        JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start)
+        JobRef::new(
+            &self.job_id,
+            self.job_host.as_deref(),
+            self.job_start,
+            self.timestamps.submitted.or(self.timestamps.created),
+        )
     }
 
     /// Record `job` (a submitted one, or a foreground run's pid) as this

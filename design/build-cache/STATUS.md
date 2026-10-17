@@ -3515,6 +3515,72 @@ delete`; a build attempt requeued after its outcome is refused by `build
 submit` and canceled by `build stop`, while `build list` asks nothing.
 `cargo test --workspace --locked` passes.
 
+Round 1 (on `f13a5b8`): BLOCKED by both. (1) A, B: on a `pids` machine
+the stop command (`pkill -g`, or `kill`) reached the submitting shell's
+whole process group, a job started by `sh -c '… &'` sharing it, so
+stopping one job killed its siblings and the parent script (ran). (2) A,
+B: `sim stop -f` of a pids job recorded on another host said it "had
+ended already" and closed the restart while it may run there (ran). (3)
+B: after a record's end Slurm still lists the ended job as `CG`/`TO`
+(read as running) or `CD`/`F`/`CA`, taken for a requeued live job (ran;
+builds inferred). (4) A, B: a failed query after a record's end locked
+the run up for good, and the message ("could not ask") was not true to
+what happened (ran). (5) A, B: `sim delete` ran one `squeue -j` per
+restart, silently (10 s for 40). Not blocking: compute sides that read
+their record before the submitter's lock (sims, builds); an older
+record's pid held by a long-lived later process could never clear; a
+stale doc comment, `meta-toml.md`'s list, `build prune` on a failed
+query; display paths printing a definite state on a failed query. Max's
+decisions and the fixes in the commit after this record:
+
+- `stop` runs only for a pid whose process leads its own process group
+  (`/proc/<pid>/stat` pgrp), else refuses (`SharedGroup`, naming the pid;
+  a foreground `sim run` in its terminal's job is said to be interrupted
+  where it runs). The in-repo `pids` machines without `setsid` (generic,
+  et-juphub, hal1, hal2, hedges, mel5, omnia, spine) gain it in `submit`
+  and `blocking-submit`, in athena's form: an edited MDB value, no bump
+  (`ci/mdb-generation-guard.sh`).
+- Another host's pid is `Stopped::Elsewhere`/`recorded_elsewhere`, apart
+  from `Gone`: while the run's `running.lock` is live, `sim stop -f`,
+  `test stop`, `build stop` say where it runs and record nothing, and
+  `sim delete`/`test delete` refuse, `-f` too; with the lock gone it is
+  taken as ended.
+- After a record's end only a queued or held job is live (`is_live`), for
+  sims (delete, display, reaper, the graceful wait), test runs
+  (`Job::Ended`) and builds (guard, `build stop`, whose "listed queued
+  again" is now only said of such a job).
+- A failed query after a record's end is taken as the job ended with a
+  one-line note (`Scheduler::get_status_of`); before it, the error
+  (`FailedQuery`) names the query, both patterns and the output, and says
+  to fix `unknown-job-pattern` if the unknown-job message is among the
+  lines. `build -f`/`build submit -f` of a finished config are never held
+  up.
+- `sim delete` asks in one batch (`get_statuses_counted`) under a progress
+  line; Ctrl-C as before.
+- Compute sides read under the submitter's lock: `sim::start::run_compute`
+  loads the restart under the sim lock; builds get an attempt
+  `record.lock` the submitter holds while it submits and records, and
+  `execute`'s writes keep the job fields the submitter recorded
+  (`store_meta_keeping_job`).
+- An older record's pid whose process started more than a minute after
+  the record was made (submission, else creation; wall-clock start from
+  `btime` plus start ticks, `rustix::param` for the tick rate) is gone.
+- Display paths print `UNKNOWN` where the query failed for a record with
+  no end (sims, test runs, builds, unless the lock says it runs); `build
+  prune` keeps such an attempt; the texts.
+
+Checked as in the record above, with these added: two jobs submitted on
+`generic`, one stopped, the other still running; a job submitted without
+`setsid` and a foreground `sim run` refused, alive after; a restart and a
+test run recorded on another host while their run holds the lock (`sim
+stop -f`, `test stop` record nothing, `sim delete -f`, `test delete -f`
+refuse; with the lock gone, taken as ended); an older record whose pid
+belongs to a process started after it, taken as gone; with the fake
+Slurm: `CG`, `R`, `CD` after `finished` are the ended job, `PD` a requeued
+one; a failed query after the end noted and taken as ended for `test
+stop`/`delete`, `test submit -f`, `sim delete`, `build stop`, `build
+submit -f`; the error's text with both patterns.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

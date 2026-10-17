@@ -672,14 +672,17 @@ fn run_interactive(
 /// global DB, the registry, the MDB, or knobs (D11).
 fn run_compute(args: &SimRunArgs, sim_dir: &Path, id: u32) -> Res<()> {
     let sim = Simulation::open(&args.start.sim, sim_dir)?;
-    let mut r = Restart::load(&sim.dir, id)?;
 
     // Chain handoff (§8.3.2), under the per-simulation lock — waiting for the
-    // submitter to let go of it if the job started that quickly.
-    {
+    // submitter to let go of it if the job started that quickly. The restart
+    // is read under it too: the submitter records the job id (and on a
+    // `job-ids = "pids"` machine its host and start time) holding the lock,
+    // and a copy read before that would be written back without them.
+    let mut r = {
         let _lock = sim.lock_wait()?;
         restart::handoff_active(&sim.dir, id)?;
-    }
+        Restart::load(&sim.dir, id)?
+    };
 
     // No recovery step here: the parfile points Cactus at its recovery dir and
     // Cactus loads the newest checkpoint itself (§8.8).

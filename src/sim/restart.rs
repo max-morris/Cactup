@@ -125,9 +125,10 @@ pub struct RestartMeta {
 }
 
 impl RestartMeta {
-    /// The recorded job, as the scheduler is asked about it.
+    /// The recorded job, as the scheduler is asked about it, with when the
+    /// record was made (its submission, else its creation).
     pub fn job(&self) -> crate::scheduler::JobRef<'_> {
-        crate::scheduler::JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start)
+        crate::scheduler::JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start, Some(self.created))
     }
 
     /// Record `job` (a submitted one, or a foreground run's pid) as this
@@ -438,12 +439,20 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
     // (a) live job status must be U (gone from the queue). A run that
     // recorded its end is still asked about where a batch scheduler may
     // have requeued its job; where job ids are pids it is done (§10).
-    let status = if restart.meta.job_id == NO_JOB_ID || (restart.meta.terminated && !sched.may_requeue()) {
+    // After the end only a job put back in the queue counts (a running
+    // or unread one is the ended job still listed), and a query that
+    // fails is taken as the job ended (§10, `Scheduler::get_status_of`).
+    let ended = restart.meta.terminated;
+    let status = if restart.meta.job_id == NO_JOB_ID || (ended && !sched.may_requeue()) {
         JobStatus::Unknown
     } else {
-        sched.get_status(restart.meta.job())?
+        sched.get_status_of(restart.meta.job(), ended)?
     };
-    if !matches!(status, JobStatus::Unknown) {
+    let in_queue = match ended {
+        true => crate::scheduler::is_live(status, true),
+        false => !matches!(status, JobStatus::Unknown),
+    };
+    if in_queue {
         return Ok(false); // still in the queue → chaining, never reaping
     }
     // (b) the per-restart liveness marker must be unheld.

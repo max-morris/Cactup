@@ -12,7 +12,7 @@ use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::meta::{Route, ScriptTable};
 use crate::mdb::{Machine, Phase, ScriptKind, Universe, HOST_UNIVERSE};
-use crate::scheduler::{JobStatus, Scheduler};
+use crate::scheduler::Scheduler;
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{
     generate_script, resolve_run_universe, resolve_submit_universe, script_command,
@@ -333,8 +333,11 @@ fn start_impl(
         if old.lock_live()? {
             bail!("test run \"{name}\" is currently executing (running.lock is held)");
         }
+        // After the old run's end only a job put back in the queue is live,
+        // and a query that fails is taken as the job ended (§10).
+        let finished = old.meta.timestamps.finished.is_some();
         if let Some(job) = old.pending_job(&sched)
-            && matches!(sched.get_status(job)?, JobStatus::Running | JobStatus::Queued | JobStatus::Holding)
+            && crate::scheduler::is_live(sched.get_status_of(job, finished)?, finished)
         {
             if !args.force {
                 bail!(

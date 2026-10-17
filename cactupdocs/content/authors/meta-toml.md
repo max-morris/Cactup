@@ -217,8 +217,8 @@ hostname = "mylab.local"
 autodetect = true
 
 [scheduler]
-submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
-blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+submit = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
 job-ids = "pids"
@@ -286,10 +286,16 @@ With it set, cactup tells a job the scheduler has forgotten from a status
 query that failed: output with no line for the job (no line matching
 `status-pattern`) means the job is gone only if a line matches
 `unknown-job-pattern`. Otherwise the query failed (the controller timed out,
-say), and a command that would act on the answer (`sim stop`, `sim delete`,
-`test stop`, `test delete`, `build stop`, and the checks before a new
-submission or run) refuses, naming the command and what it printed;
-`sim list`, `test list` and the like show the run as its own record has it. Without
+say). For a run that has not recorded its end, a command that acts on the
+answer refuses, printing the query, both patterns and what it printed: `sim
+delete`, `sim stop`'s graceful wait (a forced `sim stop -f` asks nothing),
+`test stop`, `test delete`, `build stop`, and the checks before a new `sim
+submit`/`sim run`, `test run`/`test submit` and build; `sim list`, `test
+list`, `build list` and their `show`s print the state as `UNKNOWN`, and
+`build prune` keeps the attempt. For a run that has recorded its end (a
+finished simulation restart, test run or build), asking is only the check
+for a job the scheduler put back in the queue, so a failed query is taken
+as the job ended, with a one-line note, and nothing is held up. Without
 the key, no line for the job means the job is gone, as before: a query that
 failed reads as a job no longer in the queue. Check the pattern against
 what the command really prints for a job the scheduler no longer knows (an
@@ -332,8 +338,8 @@ running-pattern = " R "
 
 ```toml
 [scheduler]
-submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
-blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+submit = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
 job-ids = "pids"
@@ -356,11 +362,24 @@ records with each job id the host it was submitted from and the start time
 of the process with that pid, read as soon as the id is known. Later it runs
 `get-status` or `stop` for the job only on that host, and only while the
 process with that pid is still the one that started then; otherwise the job
-is taken as gone, and nothing is run. A job recorded by an older cactup,
+is taken as gone, and nothing is run. A job recorded on another host is
+never taken as gone while its run's lock is held: `stop` says it runs on that
+host and to stop it there, and `delete` refuses; once the lock is let go (or
+goes stale) it is taken as ended. A job recorded by an older cactup,
 without its host and start time, is asked about only where a process with
-its pid runs on this host, and cactup never stops it (it may be another
-process): stop it yourself if it is the job. A run that has recorded its end
-is not asked about again on such a machine, where nothing requeues a job.
+its pid runs on this host and started no later than the record was made,
+and cactup never stops it (it may be another process): stop it yourself if
+it is the job. A run that has recorded its end is not asked about again on
+such a machine, where nothing requeues a job.
+
+The `submit` (and `blocking-submit`) of such a machine must start each job
+in a process group of its own, with `setsid` as above: `stop` stops a whole
+group (`pkill -g`), so cactup runs it only for a job whose process leads its
+own group, and refuses otherwise (a job sharing the submitting shell's group
+would take the shell and its other jobs with it), naming the pid to stop by
+hand. `setsid` keeps the backgrounded pid: it starts a new session in the
+same process when that process does not lead a group already, as a
+background job of `sh -c` does not.
 
 ## Environment variables
 

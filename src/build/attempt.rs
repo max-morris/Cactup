@@ -186,9 +186,15 @@ pub struct BuildMeta {
 }
 
 impl BuildMeta {
-    /// The recorded job, as the scheduler is asked about it.
+    /// The recorded job, as the scheduler is asked about it, with when the
+    /// record was made (its submission, else its creation).
     pub fn job(&self) -> crate::scheduler::JobRef<'_> {
-        crate::scheduler::JobRef::new(&self.job_id, self.job_host.as_deref(), self.job_start)
+        crate::scheduler::JobRef::new(
+            &self.job_id,
+            self.job_host.as_deref(),
+            self.job_start,
+            self.timestamps.submitted.or(self.timestamps.created),
+        )
     }
 
     /// Record `job` (a submitted one, or a foreground run's pid) as this
@@ -345,7 +351,13 @@ impl BuildAttempt {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(config_dir: &Path, id: u32) -> Res<BuildAttempt> {
         let dir = Self::attempt_dir(config_dir, id);
-        let path = Self::meta_path(&dir);
+        let meta = Self::read_meta(&dir)?;
+        Ok(BuildAttempt { id, dir, meta })
+    }
+
+    /// The `build.toml` in attempt directory `dir` (schema-guarded).
+    fn read_meta(dir: &Path) -> Res<BuildMeta> {
+        let path = Self::meta_path(dir);
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let mut table: toml::Table =
@@ -369,7 +381,37 @@ impl BuildAttempt {
                 meta.schema
             );
         }
-        Ok(BuildAttempt { id, dir, meta })
+        Ok(meta)
+    }
+
+    /// The lock of attempt directory `dir`'s record, waited for: the
+    /// submitter holds it while it submits and records the job, and the
+    /// compute side's writes take it ([`Self::store_meta_keeping_job`]), so
+    /// a job that starts at once never writes back a copy read before its
+    /// job id (and, where job ids are pids, its host and start time) was
+    /// recorded.
+    pub fn record_lock(dir: &Path) -> Res<crate::lock::LinkLock> {
+        crate::lock::LinkLock::acquire_wait(
+            &dir.join("record.lock"),
+            std::time::Duration::from_secs(crate::lock::HANDOFF_WAIT_SECS),
+        )
+    }
+
+    /// [`Self::store_meta`] under [`Self::record_lock`], keeping the job the
+    /// submitter recorded on disk (its id, host, start time, `submitted` and
+    /// when): what `execute` writes, which may run before the submitter has
+    /// recorded them.
+    pub fn store_meta_keeping_job(&mut self) -> Res<()> {
+        let _lock = Self::record_lock(&self.dir)?;
+        let disk = Self::read_meta(&self.dir)?;
+        if disk.submitted {
+            self.meta.submitted = true;
+            self.meta.job_id = disk.job_id;
+            self.meta.job_host = disk.job_host;
+            self.meta.job_start = disk.job_start;
+            self.meta.timestamps.submitted = disk.timestamps.submitted;
+        }
+        self.store_meta()
     }
 
     /// Create a fresh attempt directory and write its metadata.

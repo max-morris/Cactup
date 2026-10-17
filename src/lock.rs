@@ -131,6 +131,24 @@ pub(crate) fn proc_session(pid: u32) -> Option<u32> {
     proc_stat_field(pid, 6)
 }
 
+/// The process group of `pid`, from `/proc/<pid>/stat` field 5.
+pub(crate) fn proc_pgrp(pid: u32) -> Option<u32> {
+    proc_stat_field(pid, 5)
+}
+
+/// When `pid`'s process started, on the wall clock: the boot time
+/// (`btime` in `/proc/stat`) plus its start time in clock ticks. Coarse
+/// (the boot time is whole seconds, and the clock may have been stepped
+/// since boot), so only good for telling apart times minutes apart.
+pub(crate) fn proc_start_wall(pid: u32) -> Option<SystemTime> {
+    let ticks = proc_starttime(pid)?;
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    let btime: u64 = stat.lines().find_map(|line| line.strip_prefix("btime "))?.trim().parse().ok()?;
+    let hz = rustix::param::clock_ticks_per_second().max(1);
+    let since_boot = Duration::from_millis(ticks.saturating_mul(1000) / hz);
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(btime) + since_boot)
+}
+
 /// Field `n` (1-based, as `proc(5)` numbers them) of `/proc/<pid>/stat`.
 /// Fields are counted after the last `)` because `comm` (field 2) may hold
 /// spaces and parentheses, so field 3 is index 0 of the remainder.

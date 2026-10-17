@@ -4,7 +4,7 @@
 use crate::commands::Ctx;
 use crate::installation::{Installation, SimEntry};
 use crate::scheduler::{
-    display_state, DisplayState, JobRecord, JobRef, JobStatus, Scheduler, Statuses, Stopped, UnverifiedPid,
+    display_state, is_live, DisplayState, JobRecord, JobRef, JobStatus, Scheduler, Statuses, Stopped, UnverifiedPid,
 };
 use crate::sim::restart::{self, Restart, NO_JOB_ID};
 use crate::sim::{cache, Simulation};
@@ -25,14 +25,13 @@ fn machine_and_inst(ctx: &Ctx) -> Res<(crate::mdb::Machine, Installation)> {
 const GRACEFUL_WAIT_SECS: u64 = 30;
 
 /// Is the run behind `r` still alive? The queue is authoritative when the
-/// restart has a job; a foreground run has none, so its liveness marker
-/// answers instead (§9.3).
+/// restart has a job the scheduler here can be asked about; a foreground run
+/// has none, and a pid recorded on another host is none this host can ask
+/// about (§10), so the liveness marker answers instead (§9.3).
 fn run_is_live(sched: &Scheduler, r: &Restart) -> Res<bool> {
-    if r.meta.job_id != NO_JOB_ID {
-        return Ok(matches!(
-            sched.get_status(r.meta.job())?,
-            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-        ));
+    if r.meta.job_id != NO_JOB_ID && sched.recorded_elsewhere(r.meta.job()).is_none() {
+        let status = sched.get_status_of(r.meta.job(), r.meta.terminated)?;
+        return Ok(is_live(status, r.meta.terminated));
     }
     crate::lock::LinkLock::is_held_live(&r.running_lock_path())
 }
@@ -137,6 +136,20 @@ pub fn stop(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
                 Stopped::Sent => println!("Stopped job {} via the scheduler", r.meta.job_id.bold()),
                 // A pid whose process is not the job's any more (§10).
                 Stopped::Gone => println!("Job {} had ended already; nothing to stop", r.meta.job_id),
+                // Another host's pid (§10): its lock says whether it runs.
+                Stopped::Elsewhere(host) if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
+                    println!(
+                        "Job {} runs on host {host}, where it was submitted, and this host cannot stop it: \
+                         stop it there (`cactup sim stop -f {name}` on {host}). Nothing recorded.",
+                        r.meta.job_id
+                    );
+                    return Ok(());
+                }
+                Stopped::Elsewhere(host) => println!(
+                    "Job {} was submitted on host {host}, and nothing of its run holds the restart's \
+                     lock: taken as ended",
+                    r.meta.job_id
+                ),
             }
         }
         sim.log("stop", &format!("stopped job {} ({})", r.meta.job_id, restart::dir_name(active)));
@@ -344,22 +357,63 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
     Ok(())
 }
 
-/// The restarts of `sim` whose jobs the scheduler lists live (§8.7). A
-/// restart whose run recorded its end is still asked about where a batch
-/// scheduler may have requeued its job; where job ids are pids it is done
-/// (§10). A status query that fails is an error: `delete` refuses with it.
+/// The restarts of `sim` whose jobs are live (§8.7), asked about in one
+/// batch (`get_statuses`: the machine's listing, else the bounded pool of
+/// per-job queries) under a progress line. A restart whose run recorded its
+/// end is still asked about where a batch scheduler may have requeued its
+/// job, and is live then only queued or held (`is_live`); where job ids are
+/// pids it is done (§10). A job whose query failed is asked once more on
+/// its own: before its run's end that is an error, and `delete` refuses
+/// with it; after, it is taken as ended. A job recorded on another host
+/// (pids) refuses the delete while its restart's `running.lock` is live,
+/// whatever `-f` says: this host can neither ask about it nor stop it.
 fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<(u32, JobRecord)>> {
-    let mut live = Vec::new();
+    let mut asked: Vec<(u32, Restart)> = Vec::new();
     for id in restart::list_ids(&sim.dir)? {
         let Ok(r) = Restart::load(&sim.dir, id) else { continue };
         if r.meta.job_id == NO_JOB_ID || (r.meta.terminated && !sched.may_requeue()) {
             continue;
         }
-        if matches!(
-            sched.get_status(r.meta.job())?,
-            JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-        ) {
-            live.push((id, r.meta.job().to_record()));
+        if let Some(host) = sched.recorded_elsewhere(r.meta.job()) {
+            if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
+                bail!(
+                    "restart {} of simulation \"{}\" runs on host {host}, where its job {} was \
+                     submitted, and this host can neither ask about it nor stop it: stop it there \
+                     (`cactup sim stop -f {}` on {host}), then delete the simulation",
+                    restart::dir_name(id),
+                    sim.name,
+                    r.meta.job_id,
+                    sim.name
+                );
+            }
+            continue;
+        }
+        asked.push((id, r));
+    }
+    let jobs: Vec<JobRef> = asked.iter().map(|(_, r)| r.meta.job()).collect();
+
+    let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+    let asking = progress.add_child("ask the scheduler");
+    asking.init(Some(jobs.len()), Some(prodash::unit::label("jobs")));
+    let asking = std::sync::Mutex::new(asking);
+    let statuses = sched.get_statuses_counted(&jobs, &|n| asking.lock().expect("progress poisoned").inc_by(n));
+    drop(asking);
+    if let Some(renderer) = renderer {
+        renderer.shutdown_and_wait();
+    }
+    if gix::interrupt::is_triggered() {
+        bail!("interrupted");
+    }
+
+    let mut live = Vec::new();
+    for (id, r) in &asked {
+        let ended = r.meta.terminated;
+        let status = match statuses.get(r.meta.job()) {
+            Some(status) => *status,
+            None => sched.get_status_of(r.meta.job(), ended)?,
+        };
+        if is_live(status, ended) {
+            live.push((*id, r.meta.job().to_record()));
         }
     }
     Ok(live)
@@ -409,12 +463,29 @@ impl SimState {
         self.job.as_ref().map(JobRecord::job)
     }
 
-    /// The derived state, given the live status of [`SimState::job_to_query`]
-    /// (`None` when there was nothing to query, or the query failed).
-    fn state(&self, status: Option<JobStatus>) -> DisplayState {
-        self.forced
-            .unwrap_or_else(|| display_state(self.active, status, self.chained, self.terminated))
+    /// The derived state, given the query of [`SimState::job_to_query`]:
+    /// `None` when there was nothing to query, `Some(None)` when the query
+    /// failed (see [`shown`]).
+    fn state(&self, query: Option<Option<JobStatus>>) -> DisplayState {
+        self.forced.unwrap_or_else(|| shown(self.active, self.chained, self.terminated, query))
     }
+}
+
+/// What a display makes of a restart's queried status (§8.6, §10): `query`
+/// is `None` when nothing was asked, `Some(None)` when the query failed.
+/// Before its run recorded its end, a failed query is UNKNOWN, never a
+/// state the query did not give. After the end, a failed query, a job
+/// listed running (Slurm's `CG`, `TO`) or in a state no pattern reads is
+/// the ended job on its way out of the queue (`is_live`); only a queued or
+/// held one is a job put back in the queue.
+fn shown(active: bool, chained: bool, terminated: bool, query: Option<Option<JobStatus>>) -> DisplayState {
+    let status = match query {
+        Some(None) if !terminated => return DisplayState::Unknown,
+        Some(Some(status)) if terminated && !is_live(status, true) => Some(JobStatus::Unknown),
+        Some(status) => status,
+        None => None,
+    };
+    display_state(active, status, chained, terminated)
 }
 
 /// One simulation's display state from a directory scan already taken, minus
@@ -445,8 +516,8 @@ fn sim_state_now(
         return (DisplayState::Inactive, None, None);
     };
     let st = sim_state(sim, &scan);
-    let status = st.job_to_query(sched.may_requeue()).and_then(|job| sched.get_status(job).ok());
-    (st.state(status), st.subject, st.job.map(|job| job.id))
+    let query = st.job_to_query(sched.may_requeue()).map(|job| sched.get_status(job).ok());
+    (st.state(query), st.subject, st.job.map(|job| job.id))
 }
 
 fn state_str(state: DisplayState) -> colored::ColoredString {
@@ -458,6 +529,7 @@ fn state_str(state: DisplayState) -> colored::ColoredString {
         DisplayState::Active => "ACTIVE".green(),
         DisplayState::Finished => "FINISHED".blue(),
         DisplayState::Error => "ERROR".red().bold(),
+        DisplayState::Unknown => "UNKNOWN".yellow(),
         DisplayState::Inactive => "INACTIVE".normal(),
     }
 }
@@ -549,7 +621,7 @@ fn print_row(name: &str, row: &Row, statuses: &Statuses, may_requeue: bool, long
         ),
         Row::Broken(e) => println!("  {:24} {:12} {e}", name.bold(), "BROKEN".red()),
         Row::Listed { config, restarts, dir, state } => {
-            let status = state.job_to_query(may_requeue).and_then(|job| statuses.get(job).copied());
+            let query = state.job_to_query(may_requeue).map(|job| statuses.get(job).copied());
             let mut extra = format!("config {config}, {restarts} restart(s)");
             if let Some(job) = &state.job {
                 extra.push_str(&format!(", job {}", job.id));
@@ -560,7 +632,7 @@ fn print_row(name: &str, row: &Row, statuses: &Statuses, may_requeue: bool, long
                 }
                 extra.push_str(&format!(", {}", dir.display()));
             }
-            println!("  {:24} {:12} {}", name.bold(), state_str(state.state(status)), extra);
+            println!("  {:24} {:12} {}", name.bold(), state_str(state.state(query)), extra);
         }
     }
 }
@@ -675,13 +747,9 @@ fn show_one(inst: &Installation, sched: &Scheduler, name: &str, long: bool) -> R
         let marker = if active == Some(id) { " (active)" } else { "" };
         match loaded {
             Ok(r) => {
-                let status = asked(r).then(|| statuses.get(r.meta.job()).copied()).flatten();
-                let state = display_state(
-                    active == Some(id),
-                    status,
-                    r.meta.chained_job_id.is_some(),
-                    r.meta.terminated,
-                );
+                let query = asked(r).then(|| statuses.get(r.meta.job()).copied());
+                let status = query.flatten();
+                let state = shown(active == Some(id), r.meta.chained_job_id.is_some(), r.meta.terminated, query);
                 let mut line = format!(
                     "    {}{marker}: {} — job {}, queue {}, wall {}",
                     restart::dir_name(id),
@@ -952,12 +1020,9 @@ mod tests {
         let rows = gather_rows(&entries);
 
         let live_state = listed_state(&rows[0]);
-        assert_eq!(live_state.state(Some(JobStatus::Running)), DisplayState::Running);
-        assert_eq!(
-            live_state.state(None),
-            DisplayState::Active,
-            "query failed or never ran, but the restart is still active"
-        );
+        assert_eq!(live_state.state(Some(Some(JobStatus::Running))), DisplayState::Running);
+        assert_eq!(live_state.state(None), DisplayState::Active, "never asked, but the restart is still active");
+        assert_eq!(live_state.state(Some(None)), DisplayState::Unknown, "a failed query shows no state it did not give");
 
         let hist_state = listed_state(&rows[1]);
         assert_eq!(
@@ -967,7 +1032,7 @@ mod tests {
         );
 
         let chain_state = listed_state(&rows[2]);
-        assert_eq!(chain_state.state(Some(JobStatus::Queued)), DisplayState::Presubmitted);
+        assert_eq!(chain_state.state(Some(Some(JobStatus::Queued))), DisplayState::Presubmitted);
 
         let nojob_state = listed_state(&rows[3]);
         assert_eq!(nojob_state.state(None), display_state(true, None, false, false));
@@ -1015,8 +1080,67 @@ mod tests {
             "get-status = \"echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1\"\n\
              unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'\nstatus-pattern = \"^@JOB_ID@ \"",
         );
-        let err = format!("{:#}", live_jobs(&sim, &Scheduler::new(&failing)).unwrap_err());
-        assert!(err.contains("could not ask the scheduler about job 4242"), "{err}");
+        let failing = Scheduler::new(&failing);
+        // Ended: a failed query is taken as the job ended, never a refusal
+        // for good.
+        assert!(live_jobs(&sim, &failing).unwrap().is_empty());
+        let (state, _, _) = sim_state_now(&sim, &failing);
+        assert_eq!(state, DisplayState::Finished);
+        // Not ended: the query's failure is the delete's refusal, and the
+        // display says the state is unknown.
+        let path = restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml");
+        let text = fs::read_to_string(&path).unwrap().replace("terminated = true", "terminated = false");
+        fs::write(&path, text).unwrap();
+        let err = format!("{:#}", live_jobs(&sim, &failing).unwrap_err());
+        assert!(err.contains("the status query for job 4242"), "{err}");
+        let (state, _, _) = sim_state_now(&sim, &failing);
+        assert_eq!(state, DisplayState::Unknown);
+
+        // Ended, and the scheduler lists the job running (Slurm's `CG` on
+        // its way out) or in a state no pattern reads (`CD`): the ended
+        // job, neither live nor shown as running; queued is a requeued job.
+        let text = fs::read_to_string(&path).unwrap().replace("terminated = false", "terminated = true");
+        fs::write(&path, text).unwrap();
+        for (state_letter, live, shown) in [("CG", false, DisplayState::Finished), ("CD", false, DisplayState::Finished), ("PD", true, DisplayState::Queued)] {
+            let m = fake(&format!(
+                "get-status = \"echo '@JOB_ID@ {state_letter} '\"\nstatus-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" PD \"\nrunning-pattern = \" (CF|CG|R|TO) \""
+            ));
+            let sched = Scheduler::new(&m);
+            assert_eq!(!live_jobs(&sim, &sched).unwrap().is_empty(), live, "{state_letter}");
+            assert_eq!(sim_state_now(&sim, &sched).0, shown, "{state_letter}");
+        }
+    }
+
+    /// Where job ids are pids, a restart's job recorded on another host is
+    /// never asked about or taken for gone while the restart's
+    /// `running.lock` is live: `delete` refuses, `-f` too. With the lock let
+    /// go it is taken as ended.
+    #[test]
+    fn a_job_on_another_host_holds_off_delete_while_its_lock_is_live() {
+        use crate::mdb::meta::Meta;
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("calls.log");
+        let entry = fake_sim(tmp.path(), "away", "4242", true, None, false);
+        let sim = Simulation::open("away", &entry.dir).unwrap();
+        let path = restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml");
+        let text = fs::read_to_string(&path).unwrap().replace("job-id = \"4242\"", "job-id = \"4242\"\njob-host = \"some-other-host\"\njob-start = 7");
+        fs::write(&path, text).unwrap();
+        let m: Meta = toml::from_str(&format!(
+            "[machine]\nnickname = \"fake\"\n[scheduler]\njob-ids = \"pids\"\nget-status = \"echo @JOB_ID@ >> {}\"\n\
+             [queues.local]\ndefault = true\n[submitscripts]\n\"default\" = [\"local\"]\n[runscripts]\n\"default\" = [\"local\"]\n",
+            log.display()
+        ))
+        .unwrap();
+        let sched = Scheduler::new(&m);
+        let r = Restart::load(&sim.dir, 0).unwrap();
+        let held = crate::lock::LinkLock::acquire(&r.running_lock_path()).unwrap();
+        let err = live_jobs(&sim, &sched).unwrap_err().to_string();
+        assert!(err.contains("runs on host some-other-host") && err.contains("stop it there"), "{err}");
+        assert!(run_is_live(&sched, &r).unwrap(), "the graceful stop takes the lock for it");
+        drop(held);
+        assert!(live_jobs(&sim, &sched).unwrap().is_empty());
+        assert!(!run_is_live(&sched, &r).unwrap());
+        assert!(!log.exists(), "another host's pid was asked about");
     }
 
     /// The graceful path must confirm the run actually left before finishing

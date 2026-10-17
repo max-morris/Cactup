@@ -461,7 +461,10 @@ pub struct Scheduler {
     /// processes (`ps`, `kill`). With `"pids"`, cactup records the host and
     /// the process's start time with each job id, and asks `get-status` or
     /// `stop` about the job only on that host while the pid's process is
-    /// the one that started then; otherwise the job is gone.
+    /// the one that started then; otherwise the job is gone (or, recorded on
+    /// another host, left to that host). `submit` must start each job in a
+    /// process group of its own (`setsid`): cactup stops only a job whose
+    /// process leads its own group.
     #[serde(default)]
     pub job_ids: JobIds,
     /// A regular expression matching a line of `get-status`'s output

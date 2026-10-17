@@ -3,7 +3,7 @@
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::scheduler::{JobRef, JobStatus, Scheduler, Stopped, UnverifiedPid};
+use crate::scheduler::{is_live, JobRef, JobStatus, Scheduler, SharedGroup, Stopped, UnverifiedPid};
 use crate::sim::cache;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
@@ -12,22 +12,32 @@ use colored::Colorize;
 use std::fs;
 use std::path::PathBuf;
 
-/// The §11.7 display state, coarser than a sim's. `status` is the
-/// already-resolved live status of [`TestRun::pending_job`] (`None` for no
-/// such job / a failed query) — callers resolve it themselves so `list` can
-/// batch the query across every row instead of round-tripping the scheduler
-/// once per row. `lock_live` is the run's `running.lock`, the one sign of an
-/// interactive run, and of a submitted one the queue has forgotten.
-fn state_line(run: &TestRun, status: Option<JobStatus>, lock_live: bool) -> colored::ColoredString {
+/// The §11.7 display state, coarser than a sim's. `query` is the live
+/// status of [`TestRun::pending_job`]: `None` when there was no such job to
+/// ask about, `Some(None)` when its query failed — callers resolve it
+/// themselves so `list` can batch the query across every row instead of
+/// round-tripping the scheduler once per row. `lock_live` is the run's
+/// `running.lock`, the one sign of an interactive run, and of a submitted
+/// one the queue has forgotten. Before the run records its end a failed
+/// query is UNKNOWN, never a state the query did not give; after it, a
+/// failed query, or a job listed running (Slurm's `CG`, `TO`) or in a state
+/// no pattern reads, is the ended job on its way out of the queue, and
+/// only a queued or held one is a job put back in the queue (`is_live`).
+fn state_line(run: &TestRun, query: Option<Option<JobStatus>>, lock_live: bool) -> colored::ColoredString {
+    let finished = run.meta.timestamps.finished.is_some();
+    let status = match query {
+        Some(None) if !finished && !lock_live => return "UNKNOWN (status query failed)".yellow(),
+        Some(Some(status)) if finished && !is_live(status, true) => Some(JobStatus::Unknown),
+        Some(status) => status,
+        None => None,
+    };
     match status {
         Some(JobStatus::Running) => "RUNNING".green().bold(),
         _ if lock_live => "RUNNING".green().bold(),
         Some(JobStatus::Queued) => "QUEUED".cyan(),
         Some(JobStatus::Holding) => "HOLDING".yellow(),
-        // Listed in a state no pattern reads after the run recorded its end:
-        // the ended job, which a scheduler lists for a while.
-        Some(JobStatus::Error) if run.meta.timestamps.finished.is_none() => "ERROR".red().bold(),
-        Some(JobStatus::Error | JobStatus::Unknown) | None => match &run.meta.results {
+        Some(JobStatus::Error) => "ERROR".red().bold(),
+        Some(JobStatus::Unknown) | None => match &run.meta.results {
             Some(r) if r.failed > 0 => format!("DONE ({} passed, {} failed)", r.passed, r.failed).red(),
             Some(r) => format!("DONE ({} passed, 0 failed)", r.passed).green(),
             None => "INACTIVE".normal(),
@@ -127,9 +137,9 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
                     if long {
                         extra.push_str(&format!(", job {}, {}", run.meta.job_id, run.dir.display()));
                     }
-                    let status = run.pending_job(&sched).and_then(|job| statuses.get(job).copied());
+                    let query = run.pending_job(&sched).map(|job| statuses.get(job).copied());
                     let lock_live = run.lock_live().unwrap_or(false);
-                    println!("  {:24} {:24} {}", name.bold(), state_line(&run, status, lock_live), extra);
+                    println!("  {:24} {:24} {}", name.bold(), state_line(&run, query, lock_live), extra);
                 }
             }
         }
@@ -143,9 +153,9 @@ pub fn list(ctx: &Ctx, long: bool, all: bool) -> Res<()> {
 /// Reprint the last run's results (§11.6 step 7) and the result-set history.
 fn show_one(inst: &Installation, sched: &Scheduler, name: &str) -> Res<()> {
     let run = TestRun::locate(inst, name)?;
-    let status = run.pending_job(sched).and_then(|job| sched.get_status(job).ok());
+    let query = run.pending_job(sched).map(|job| sched.get_status(job).ok());
     println!("{}", name.bold());
-    println!("  state:       {}", state_line(&run, status, run.lock_live()?));
+    println!("  state:       {}", state_line(&run, query, run.lock_live()?));
     println!("  directory:   {}", run.dir.display());
     println!("  config:      {} (build-id {})", run.meta.config, run.meta.build_id);
     println!("  machine:     {}", run.meta.machine);
@@ -293,7 +303,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 if gix::interrupt::is_triggered() {
                     bail!("interrupted");
                 }
-                if e.downcast_ref::<UnverifiedPid>().is_some() {
+                if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
                     return Err(e);
                 }
                 let refused = refusal(&e);
@@ -335,6 +345,8 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 }
                 // Its pid's process went between the query and the stop.
                 Stopped::Gone => println!("Test job {job_id} has ended; nothing to stop"),
+                // `job_state` says `OnHost` of such a job: not reached.
+                Stopped::Elsewhere(host) => bail!("test job {job_id} runs on host {host}: stop it there"),
             }
             // Over, as far as cactup is concerned (as `build stop` records
             // an outcome). Only once the stop was sent: a query that failed
@@ -343,11 +355,21 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             // are pids, never again (`TestRun::pending_job`).
             run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
         }
+        Job::OnHost if run.lock_live()? => {
+            println!("{}. Nothing recorded.", sentence(on_host(job.job(), name)));
+            return Ok(());
+        }
+        Job::OnHost => println!(
+            "Test job {job_id} was submitted on host {}, and nothing of the run holds its lock: taken as ended",
+            job.host.as_deref().unwrap_or_default()
+        ),
         Job::Ended | Job::Absent if run.lock_live()? => {
             println!("{}", sentence(held_without_listed_job(run, sched, name)));
             return Ok(());
         }
         Job::Ended => println!("Test job {job_id} has ended (the scheduler still lists it); nothing to stop"),
+        // After the run's end, unlisted or a query that failed: ended.
+        Job::Absent if run.meta.timestamps.finished.is_some() => println!("Test job {job_id} has ended; nothing to stop"),
         Job::Absent => println!("Test job {job_id} is not in the queue; nothing to stop"),
     }
     run.meta.status = Some("U".to_owned());
@@ -373,25 +395,53 @@ enum Job {
     /// and one waiting is listed queued or held).
     Ended,
     /// Not listed (the scheduler does not know it; where the machine cannot
-    /// tell, a query that failed reads so too).
+    /// tell, a query that failed reads so too; after the run's end, a query
+    /// that failed is taken so).
     Absent,
+    /// A pid recorded on another host (`job-ids = "pids"`, §10): this host
+    /// can neither ask about it nor stop it, and only the run's
+    /// `running.lock` says whether it runs.
+    OnHost,
 }
 
+/// What the scheduler says of `run`'s job. Before the run records its end,
+/// running, queued or held is live; after it, only queued or held is (a
+/// job put back in the queue), and a running one, or one in a state no
+/// pattern reads, is the ended job still listed (`is_live`); a query that
+/// failed is then taken as the job ended (`Scheduler::get_status_of`).
 fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
-    Ok(match sched.get_status(job)? {
-        JobStatus::Running | JobStatus::Queued | JobStatus::Holding => Job::Live,
-        JobStatus::Error if run.meta.timestamps.finished.is_some() => Job::Ended,
-        JobStatus::Error => Job::Unread,
+    if sched.recorded_elsewhere(job).is_some() {
+        return Ok(Job::OnHost);
+    }
+    let finished = run.meta.timestamps.finished.is_some();
+    let status = sched.get_status_of(job, finished)?;
+    Ok(match status {
+        _ if is_live(status, finished) => Job::Live,
+        JobStatus::Running | JobStatus::Error if finished => Job::Ended,
         JobStatus::Unknown => Job::Absent,
+        _ => Job::Unread,
     })
+}
+
+/// What `stop` and `delete` say of a [`Job::OnHost`] job whose run's lock
+/// is live.
+fn on_host(job: JobRef<'_>, name: &str) -> String {
+    let host = job.host.unwrap_or_default();
+    format!(
+        "test job {} runs on host {host}, where it was submitted, and this host cannot stop it: stop \
+         it there (`cactup test stop {name}` on {host})",
+        job.id
+    )
 }
 
 /// The scheduler's stop of `job`, with what failed named.
 fn send_stop(sched: &Scheduler, job: JobRef<'_>) -> Res<Stopped> {
-    sched.stop(job).map_err(|e| match e.downcast_ref::<UnverifiedPid>() {
-        // Says itself what happened: no command ran.
-        Some(_) => e,
-        None => e.context(format!("the scheduler's stop command failed for test job {}", job.id)),
+    sched.stop(job).map_err(|e| {
+        // These say themselves what happened: no command ran.
+        if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
+            return e;
+        }
+        e.context(format!("the scheduler's stop command failed for test job {}", job.id))
     })
 }
 
@@ -432,8 +482,9 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
     match job_state(sched, run, job)? {
         // Held, but not a job the scheduler here lists live: not stopped or
         // removed from here, `-f` neither.
+        Job::OnHost if run.lock_live()? => bail!("{}; delete it once it has ended", on_host(job, name)),
         Job::Ended | Job::Absent if run.lock_live()? => bail!("{}", held_without_listed_job(run, sched, name)),
-        Job::Ended | Job::Absent => {}
+        Job::Ended | Job::Absent | Job::OnHost => {}
         Job::Live if !force => bail!(
             "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
              -f to stop and delete"
@@ -450,7 +501,7 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                 if gix::interrupt::is_triggered() {
                     bail!("interrupted");
                 }
-                if e.downcast_ref::<UnverifiedPid>().is_some() {
+                if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
                     return Err(e);
                 }
                 // Not stopped: over, unless something still holds the lock.
@@ -892,7 +943,7 @@ mod tests {
         let mut run = submitted_run(&tmp.path().join("run"), "4242", None, true);
         let job = run.pending_job(&sched).expect("a batch scheduler's job is asked about after the end");
         assert_eq!(sched.get_status(job).unwrap(), JobStatus::Queued);
-        assert_eq!(state_line(&run, Some(JobStatus::Queued), false).to_string(), "QUEUED".cyan().to_string());
+        assert_eq!(state_line(&run, Some(Some(JobStatus::Queued)), false).to_string(), "QUEUED".cyan().to_string());
         let refused = clear_to_delete(&run, &sched, "t", false).unwrap_err().to_string();
         assert!(refused.contains("has a live job (4242)"), "{refused}");
         stop_run(&mut run, &sched, "t").unwrap();
@@ -921,10 +972,10 @@ mod tests {
         let sched = Scheduler::new(&meta);
         let mut run = submitted_run(&tmp.path().join("run"), "4242", None, false);
         let err = format!("{:#}", stop_run(&mut run, &sched, "t").unwrap_err());
-        assert!(err.contains("could not ask the scheduler about job 4242") && err.contains("Socket timed out"), "{err}");
+        assert!(err.contains("the status query for job 4242") && err.contains("Socket timed out"), "{err}");
         for force in [false, true] {
             let err = format!("{:#}", clear_to_delete(&run, &sched, "t", force).unwrap_err());
-            assert!(err.contains("could not ask the scheduler about job 4242"), "{err}");
+            assert!(err.contains("the status query for job 4242"), "{err}");
         }
         let run = TestRun::open(&run.dir).unwrap();
         assert!(run.meta.timestamps.finished.is_none() && run.meta.status.is_none());
@@ -950,7 +1001,11 @@ mod tests {
             stopped.display()
         ));
         let sched = Scheduler::new(&meta);
-        let mut sleeper = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        // Leading its own process group, as a job `setsid` starts.
+        let mut sleeper = {
+            use std::os::unix::process::CommandExt;
+            std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap()
+        };
         let pid = sleeper.id().to_string();
         let start = crate::lock::proc_starttime(sleeper.id()).unwrap();
         let here = crate::lock::our_hostname();
@@ -962,7 +1017,32 @@ mod tests {
         }
         assert!(!stopped.exists(), "a pid that is not the job's process was stopped");
 
+        // Another host's job whose run holds its lock: it runs there, never
+        // taken for gone; `stop` records nothing, `delete` refuses, `-f` too.
+        let mut away = submitted_run(&tmp.path().join("away"), &pid, Some(("some-other-host", Some(start))), false);
+        let held = crate::lock::LinkLock::acquire(&away.running_lock_path()).unwrap();
+        assert_eq!(job_state(&sched, &away, away.meta.job()).unwrap(), Job::OnHost);
+        stop_run(&mut away, &sched, "t").unwrap();
+        let after = TestRun::open(&away.dir).unwrap();
+        assert!(after.meta.timestamps.finished.is_none() && after.meta.status.is_none());
+        for force in [false, true] {
+            let refused = clear_to_delete(&away, &sched, "t", force).unwrap_err().to_string();
+            assert!(refused.contains("runs on host some-other-host") && refused.contains("stop it there"), "{refused}");
+        }
+        drop(held);
+        clear_to_delete(&away, &sched, "t", false).unwrap();
+        assert!(!stopped.exists());
+
+        // An older record (no host or start time), made long before the
+        // process with its pid started: not the job.
+        let mut stale = submitted_run(&tmp.path().join("stale"), &pid, None, false);
+        stop_run(&mut stale, &sched, "t").unwrap();
+        clear_to_delete(&stale, &sched, "t", true).unwrap();
+        assert!(!stopped.exists(), "an older record's reused pid was stopped");
+        // One made after that process started: it may be the job.
         let mut old = submitted_run(&tmp.path().join("old"), &pid, None, false);
+        old.meta.timestamps.submitted = Some(chrono::Utc::now());
+        old.store_meta().unwrap();
         let err = format!("{:#}", stop_run(&mut old, &sched, "t").unwrap_err());
         assert!(err.contains("recorded by an older cactup"), "{err}");
         assert!(!err.contains("stop command failed"), "no command ran: {err}");
@@ -978,6 +1058,54 @@ mod tests {
         assert_eq!(TestRun::open(&own.dir).unwrap().pending_job(&sched), None);
         let _ = sleeper.kill();
         let _ = sleeper.wait();
+    }
+
+    /// After a run recorded `finished`, Slurm still lists its ended job for a
+    /// while, as running (`CG`, `TO`, which machines read as running) or in a
+    /// state no pattern reads (`CD`): that is the ended job, not live, and
+    /// `delete` goes ahead; only queued or held is a job put back in the
+    /// queue. A status query that fails after the end is taken as the job
+    /// ended; before the end it shows UNKNOWN, never a state.
+    #[test]
+    fn after_its_end_a_test_runs_job_is_live_only_queued_or_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let meta = fake_meta(&format!(
+            r#"
+            get-status = "echo \"@JOB_ID@ $(cat {})\" "
+            stop = "true"
+            status-pattern = "^@JOB_ID@ "
+            queued-pattern = " PD"
+            running-pattern = " (CF|CG|R|TO)"
+            "#,
+            state.display()
+        ));
+        let sched = Scheduler::new(&meta);
+        let run = submitted_run(&tmp.path().join("run"), "4242", None, true);
+        for (letter, want) in [("CG", Job::Ended), ("TO", Job::Ended), ("R", Job::Ended), ("CD", Job::Ended), ("PD", Job::Live)] {
+            fs::write(&state, letter).unwrap();
+            assert_eq!(job_state(&sched, &run, run.meta.job()).unwrap(), want, "{letter}");
+            assert_eq!(clear_to_delete(&run, &sched, "t", false).is_ok(), want == Job::Ended, "{letter}");
+        }
+        assert_eq!(state_line(&run, Some(Some(JobStatus::Running)), false).to_string(), "INACTIVE".normal().to_string());
+        assert_eq!(state_line(&run, Some(None), false).to_string(), "INACTIVE".normal().to_string());
+
+        let failing = fake_meta(
+            r#"
+            get-status = "echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1"
+            unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+            stop = "true"
+            status-pattern = "^@JOB_ID@ "
+            "#,
+        );
+        let failing = Scheduler::new(&failing);
+        let mut ended = submitted_run(&tmp.path().join("ended"), "4243", None, true);
+        assert_eq!(job_state(&failing, &ended, ended.meta.job()).unwrap(), Job::Absent);
+        stop_run(&mut ended, &failing, "t").unwrap();
+        clear_to_delete(&ended, &failing, "t", true).unwrap();
+        let open = submitted_run(&tmp.path().join("open"), "4244", None, false);
+        assert!(clear_to_delete(&open, &failing, "t", false).is_err());
+        assert_eq!(state_line(&open, Some(None), false).to_string(), "UNKNOWN (status query failed)".yellow().to_string());
     }
 
     /// `list`'s whole point is one `get_statuses` call instead of one

@@ -119,9 +119,9 @@ export AMREX_INSTALL_DIR=${CACTUS_EXTERNALS}/install/amrex-hip
 # No batch system: background the script, echo its PID as the job id; ps/pkill
 # for status/stop. @STDOUT_FILE@/@STDERR_FILE@ default to
 # @RUNDIR@/@SIMULATION_NAME@.{out,err} unless -o/-e are given (design §8.3.1).
-submit            = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+submit            = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
 # The pid is printed before the wait, so the job id parses immediately.
-blocking-submit   = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+blocking-submit   = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 get-status        = "ps @JOB_ID@"
 # The job id is the pid of the backgrounded script, on this host.
 job-ids = "pids"

@@ -205,15 +205,22 @@ could not be asked) is left as it is, `--force` too.
 On a batch system, a job the scheduler puts back in the queue after its run
 ended (preemption, `scontrol requeue`) is seen again: `test list` shows it
 queued, `test stop` cancels it, and `test delete` refuses it without
-`--force`. Where the machine definition says how the scheduler reports a job
-it does not know, a status query that fails stops `test stop`, `test delete`
-and a new `test run` or `test submit` with the scheduler's message rather
-than taking the job for ended. On a machine without a batch system (the
-generic machine), a submitted run's job is a background process: cactup
-asks about it and stops it only on the host that started it and only while
-that very process runs, so a reused process number is never stopped; a run
-submitted by an older cactup is not stopped for you while a process with
-its number runs (check it and stop it yourself).
+`--force`. (A finished run's job that the scheduler still lists as
+completing or completed is just the ended job.) Where the machine definition
+says how the scheduler reports a job it does not know, a status query that
+fails stops `test stop`, `test delete` and a new `test run` or `test submit`
+with the scheduler's output rather than taking the job for ended, and `test
+list` shows `UNKNOWN`; for a run that had already finished, the failed query
+is only noted. On a machine without a batch system (the generic machine), a
+submitted run's job is a background process: cactup asks about it and stops
+it only on the host that started it and only while that very process runs,
+so a reused process number is never stopped, and only where the process has
+a process group of its own (the machine's `submit` starts it with
+`setsid`). From another host, `test stop` says the run's job runs on the
+host that submitted it and to stop it there, and `test delete` refuses,
+while the run holds its lock. A run submitted by an older cactup is not
+stopped for you while a process with its number runs (check it and stop it
+yourself).
 
 Move a test to trash:
 

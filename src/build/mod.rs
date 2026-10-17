@@ -2477,7 +2477,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     // again here, and records a new one when it is done (§7.9).
     attempt.meta.outcome = None;
     attempt.meta.timestamps.finished = None;
-    attempt.store_meta()?;
+    attempt.store_meta_keeping_job()?;
 
     // §7.4/D11 re-probe (see this function's doc comment for why it must
     // happen here, not just at `prepare` time), unless `prepare`'s own
@@ -2564,7 +2564,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             "Escalating config {name} to a from-scratch rebuild: the Cactus flesh moved while \
              this build was queued, so the make system and config-data must be regenerated."
         );
-        attempt.store_meta()?;
+        attempt.store_meta_keeping_job()?;
     }
 
     // Two incidents this exists for, both leaving a same-named build/<Thorn>/
@@ -2690,7 +2690,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         && !st.success()
     {
         attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: st.code(), complete: false });
-        attempt.store_meta()?;
+        attempt.store_meta_keeping_job()?;
         eprintln!(
             "\n{} the build failed ({st})\n{} {} and {}",
             "✗".red().bold(),
@@ -2740,7 +2740,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         };
         attempt.meta.outcome =
             Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: false });
-        attempt.store_meta()?;
+        attempt.store_meta_keeping_job()?;
         bail!(
             "the build command finished but {} is missing — the config is incomplete{log_hint}",
             missing.display(),
@@ -2777,7 +2777,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
 
     attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: true });
     attempt.meta.config_meta = meta.clone();
-    attempt.store_meta()?;
+    attempt.store_meta_keeping_job()?;
 
     Ok(meta)
 }

@@ -290,7 +290,12 @@ On a batch system, a build job the scheduler puts back in the queue after
 it recorded its result (preemption, `scontrol requeue`) still counts as
 live: `build stop` cancels it, and a new build of that config refuses to
 start while it is queued (`-f` cancels it first). `build list` shows the
-recorded result until the job runs again.
+recorded result until the job runs again. A finished build's job that the
+scheduler still lists as completing is just the ended job, and if the
+scheduler cannot be asked about a finished build at all, cactup notes it and
+goes ahead. An unfinished build whose status query fails is shown
+`UNKNOWN`, `build stop` refuses with the scheduler's output, and `build
+prune` keeps it.
 
 Old build attempts accumulate under `.cactup-builds/` inside the config
 directory; prune them, keeping only the most recent N (never automatic —
