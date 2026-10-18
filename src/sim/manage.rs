@@ -199,9 +199,10 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
 /// scheduler still lists it (queued again, or leaving the queue) or could
 /// not be asked, with no graceful path (no Cactus of that restart reads its
 /// TERMINATE any more: a requeued job's own run recreates the file) and
-/// nothing else recorded on the restart. A stop the scheduler refuses (it
-/// has forgotten the job, or holds it completed) is said so, and the job
-/// taken as ended. Where the scheduler answered that the job is gone or
+/// nothing else recorded on the restart. A stop command that fails is an
+/// error, nothing recorded, but after a failed query a refusal saying (by
+/// `unknown-job-pattern`) that the scheduler does not know the job: that
+/// is said, and the job taken as ended. Where the scheduler answered that the job is gone or
 /// over, or nothing was asked, nothing is stopped, and only what is known
 /// is said. An active restart that has ended is then deactivated (not
 /// where the scheduler took a stop: a requeued job's run hands it over).
@@ -215,13 +216,13 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
     let dir = restart::dir_name(r.id);
     let job_id = r.meta.job_id.clone();
     // Whether the scheduler took a stop that may leave a requeued job's run
-    // to hand the restart over (a job listed). A stop it refused, or one sent
-    // for a job it could not be asked about (`settles`), settles the job:
-    // recorded, so the next command takes it as ended rather than ask a
-    // query that may keep failing (a pattern that misses the scheduler's
-    // message for a job it has forgotten).
+    // to hand the restart over (a job listed). A stop the scheduler took for
+    // a job it could not be asked about (`settles`), or one it refused as a
+    // job it does not know (by `unknown-job-pattern`), settles the job:
+    // recorded, so the next command takes it as ended. A stop command that
+    // fails otherwise is an error: nothing recorded, nothing deactivated.
     let stop_it = |why: &str, settles: bool| -> Res<bool> {
-        match sched.stop_after_end(r.meta.job())? {
+        match sched.stop_after_end(r.meta.job(), !settles)? {
             EndedStop::Sent => {
                 println!("{why}");
                 sim.log("stop", &format!("asked the scheduler to stop job {job_id} ({dir}), after its end"));
@@ -233,9 +234,9 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
                 }
                 Ok(!settles)
             }
-            EndedStop::Refused(said) => {
+            EndedStop::NotKnown(said) => {
                 println!(
-                    "The scheduler would not stop job {job_id}, of {dir}, which has ended (its stop \
+                    "The scheduler does not know job {job_id}, of {dir}, which has ended (its stop \
                      command said: {said}): taken as ended"
                 );
                 record_job_stopped(sim, r.id)?;
@@ -458,18 +459,10 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
             bail!("{}", live_jobs_refusal(name, &live, stops));
         }
         for l in &live {
-            // After its restart's end, a stop the scheduler refuses (the job
-            // left between the query and the stop, or is forgotten) is
-            // taken as the job ended.
+            // After its restart's end the scheduler listed it: a stop
+            // command that fails is an error, and nothing is deleted.
             if l.ended {
-                if let EndedStop::Refused(said) = sched.stop_after_end(l.job.job())? {
-                    println!(
-                        "The scheduler would not stop job {}, of {}, which has ended (its stop command \
-                         said: {said}): taken as ended",
-                        l.job.id,
-                        restart::dir_name(l.id)
-                    );
-                }
+                sched.stop_after_end(l.job.job(), true)?;
                 continue;
             }
             // A pid cactup cannot vouch for (§10) says itself that nothing ran.
@@ -578,8 +571,8 @@ pub(crate) fn unanswered_refusal(sim: &Simulation, r: &Restart, failed: &str, wh
     let name = &sim.name;
     anyhow::anyhow!(
         "restart {} of simulation \"{name}\" ended, but the scheduler could not be asked whether its job \
-         {} was queued again: {failed}\n`cactup sim stop {name}` asks the scheduler to stop the job (one it \
-         has forgotten is then taken as ended); or pass -f to stop it and {what}",
+         {} was queued again: {failed}\n`cactup sim stop {name}` asks the scheduler to stop the job (a job it \
+         says it does not know is then taken as ended); or pass -f to stop it and {what}",
         restart::dir_name(r.id),
         r.meta.job_id
     )
@@ -595,11 +588,13 @@ fn record_job_stopped(sim: &Simulation, id: u32) -> Res<()> {
 }
 
 /// `-f`'s way past [`unanswered_refusal`]: ask the scheduler to stop ended
-/// restart `r`'s job, saying what came of it (taken, or refused and so
-/// taken as ended); the caller then goes ahead, unchained.
+/// restart `r`'s job, saying what came of it (taken, or refused as a job
+/// the scheduler does not know, and so taken as ended); the caller then
+/// goes ahead, unchained. Any other failure of the stop command is an
+/// error: nothing recorded, and the caller does not go ahead.
 pub(crate) fn stop_unanswered(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<()> {
     let (dir, job_id) = (restart::dir_name(r.id), &r.meta.job_id);
-    let stopped = sched.stop_after_end(r.meta.job())?;
+    let stopped = sched.stop_after_end(r.meta.job(), false)?;
     record_job_stopped(sim, r.id)?;
     match stopped {
         EndedStop::Sent => {
@@ -609,8 +604,8 @@ pub(crate) fn stop_unanswered(sim: &Simulation, sched: &Scheduler, r: &Restart) 
             );
             sim.log("stop", &format!("asked the scheduler to stop job {job_id} ({dir}), after its end"));
         }
-        EndedStop::Refused(said) => println!(
-            "The scheduler would not stop job {job_id}, of {dir}, which has ended (its stop command said: \
+        EndedStop::NotKnown(said) => println!(
+            "The scheduler does not know job {job_id}, of {dir}, which has ended (its stop command said: \
              {said}): taken as ended"
         ),
     }
@@ -1751,7 +1746,8 @@ mod tests {
     /// message for a job it has forgotten): `sim run` refuses, showing the
     /// failed query and naming `sim stop`, which resolves it whether the
     /// scheduler takes the stop or refuses it (taken as ended); `-f` stops
-    /// it and goes ahead, a refused stop taken as ended too.
+    /// it and goes ahead, a stop refused as a job the scheduler does not
+    /// know (by `unknown-job-pattern`) taken as ended too.
     #[test]
     fn sim_run_beside_an_unanswered_ended_job_refuses_and_sim_stop_resolves_it() {
         use crate::mdb::meta::Meta;
@@ -1999,9 +1995,9 @@ mod tests {
         let shapes: [(&str, &str, bool, bool); 6] = [
             ("pd", "echo '@JOB_ID@ PD '", true, false),
             ("failing", "echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1", true, false),
-            // A job the scheduler has forgotten, its message one the
-            // machine's pattern misses: a failed query, and a stop the
-            // scheduler refuses, taken as the job ended.
+            // A job the scheduler has forgotten, the query's message one the
+            // pattern misses (a failed query), the stop's one it matches:
+            // the scheduler saying it does not know the job, taken as ended.
             ("forgotten", "echo 'error: no such job @JOB_ID@' >&2; exit 1", true, true),
             ("unknown", "echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1", false, false),
             ("cd", "echo '@JOB_ID@ CD '", false, false),
@@ -2033,7 +2029,7 @@ mod tests {
             let refusal = if refuses { "; echo 'scancel: error: Invalid job id specified' >&2; exit 1" } else { "" };
             let m: Meta = toml::from_str(&format!(
                 "[machine]\nnickname = \"fake\"\n[scheduler]\nget-status = \"{}\"\nstop = \"echo @JOB_ID@ >> {}{refusal}\"\n\
-                 unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'\n\
+                 unknown-job-pattern = 'Invalid job id specified'\n\
                  status-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" PD \"\nrunning-pattern = \" (CF|CG|R|TO) \"\n\
                  [queues.local]\ndefault = true\n[submitscripts]\n\"default\" = [\"local\"]\n[runscripts]\n\"default\" = [\"local\"]\n",
                 get_status.replace('"', "\\\""),
@@ -2048,8 +2044,9 @@ mod tests {
                 }
                 stop_sim(&sim, &sched, name, force).unwrap();
                 let sent = fs::read_to_string(&stopped).unwrap_or_default();
-                // A stop for a job the scheduler could not be asked about, or
-                // one it refused, settles the job (`job-stopped`): the next
+                // A stop the scheduler took for a job it could not be asked
+                // about, or refused saying it does not know the job, settles
+                // the job (`job-stopped`): the next
                 // `sim stop` asks and sends nothing. Only a job the scheduler
                 // listed, and took the stop of, is asked about again.
                 let listed = name == "pd";
@@ -2144,6 +2141,53 @@ mod tests {
         assert!(lines.len() == 1 && lines[0].contains(&format!("pkill -g $(ps -o pgid= -p {pid})")), "{lines:?}");
         let _ = sleeper.kill();
         let _ = sleeper.wait();
+    }
+
+    /// After a restart's end, a stop command that fails transiently (the
+    /// controller not reached) settles nothing: after the scheduler listed
+    /// the job, and after a failed query, `sim stop` (both forms), `sim
+    /// delete -f` and the `-f` of `sim run` fail with it, record nothing,
+    /// deactivate nothing, and delete nothing.
+    #[test]
+    fn a_stop_that_fails_transiently_after_the_end_settles_nothing() {
+        use crate::mdb::meta::Meta;
+        for (name, get_status) in [
+            ("listed", "echo '@JOB_ID@ PD '"),
+            ("unanswered", "echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let m: Meta = toml::from_str(&format!(
+                "[machine]\nnickname = \"fake\"\n[scheduler]\nget-status = \"{}\"\n\
+                 stop = \"echo 'scancel: error: Kill job error on job id @JOB_ID@: Socket timed out on send/recv operation' >&2; exit 1\"\n\
+                 unknown-job-pattern = 'Invalid job id specified'\n\
+                 status-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" PD \"\nrunning-pattern = \" (CF|CG|R|TO) \"\n\
+                 [queues.local]\ndefault = true\n[submitscripts]\n\"default\" = [\"local\"]\n[runscripts]\n\"default\" = [\"local\"]\n",
+                get_status.replace('"', "\\\""),
+            ))
+            .unwrap();
+            let sched = Scheduler::new(&m);
+            let entry = fake_sim(tmp.path(), name, "1003", true, None, true);
+            let sim = Simulation::open(name, &entry.dir).unwrap();
+            let record = restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml");
+            let before = fs::read_to_string(&record).unwrap();
+            for force in [false, true] {
+                let err = stop_sim(&sim, &sched, name, force).unwrap_err().to_string();
+                assert!(err.contains("Socket timed out"), "{name} -f={force}: {err}");
+                assert!(err.contains(if name == "listed" { "the stop command for job 1003 failed" } else { "may not have been reached" }), "{err}");
+            }
+            // (`sim run -f` stops only a job the scheduler could not be asked
+            // about; beside a listed one it refuses, `-f` too.)
+            let err = crate::sim::start::refuse_beside_listed_for_tests(&sim, &sched, true).unwrap_err().to_string();
+            assert!(err.contains(if name == "listed" { "as queued again" } else { "Socket timed out" }), "{name}: {err}");
+            if name == "listed" {
+                assert!(live_jobs(&sim, &sched).unwrap().iter().any(|l| l.ended));
+                let ctx_err = live_jobs(&sim, &sched).unwrap().iter().map(|l| sched.stop_after_end(l.job.job(), true)).find_map(Result::err);
+                assert!(ctx_err.is_some(), "sim delete -f would go ahead");
+            }
+            assert_eq!(fs::read_to_string(&record).unwrap(), before, "{name}: recorded something");
+            assert_eq!(restart::active_id(&sim.dir).unwrap(), Some(0), "{name}: deactivated");
+            assert!(sim.dir.exists());
+        }
     }
 
     /// A simulation made for another machine (a home two clusters share):

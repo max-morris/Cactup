@@ -350,12 +350,13 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
         // queue): the scheduler is asked to stop it (harmless if it is
         // leaving), and the run's end stands.
         state @ (Job::Listed | Job::Unanswered) => {
-            // A stop sent for a job the scheduler could not be asked about,
-            // or one it refused, settles the job: recorded (`job-stopped`),
-            // so the next command takes it as ended rather than ask a query
-            // that may keep failing.
+            // A stop the scheduler took for a job it could not be asked
+            // about, or refused saying it does not know the job, settles the
+            // job: recorded (`job-stopped`), so the next command takes it as
+            // ended rather than ask a query that may keep failing. Any other
+            // failure of the stop command is an error, nothing recorded.
             let mut settled = state == Job::Unanswered;
-            match sched.stop_after_end(job.job())? {
+            match sched.stop_after_end(job.job(), state == Job::Listed)? {
                 EndedStop::Sent if state == Job::Unanswered => println!(
                     "Could not ask the scheduler about test job {} (the run has ended); asked it to stop \
                      the job in case it was queued again",
@@ -366,13 +367,13 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                      again, or leaving the queue)",
                     job_id.bold()
                 ),
-                // After the run's end, a stop the scheduler refuses (a job it
-                // has forgotten, or holds completed) is taken as the job
-                // ended; the run's end stands.
-                EndedStop::Refused(said) => {
+                // After a failed query, a stop the scheduler refuses as a job
+                // it does not know (by `unknown-job-pattern`) is taken as the
+                // job ended; the run's end stands.
+                EndedStop::NotKnown(said) => {
                     settled = true;
                     println!(
-                        "The scheduler would not stop test job {job_id}, whose run has ended (its stop \
+                        "The scheduler does not know test job {job_id}, whose run has ended (its stop \
                          command said: {said}): taken as ended"
                     );
                 }
@@ -1234,7 +1235,7 @@ mod tests {
         let forgetting = fake_meta(
             r#"
             get-status = "echo 'error: no such job @JOB_ID@' >&2; exit 1"
-            unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+            unknown-job-pattern = 'Invalid job id specified'
             stop = "echo 'scancel: error: Kill job error on job id @JOB_ID@: Invalid job id specified' >&2; exit 1"
             status-pattern = "^@JOB_ID@ "
             "#,
@@ -1243,6 +1244,26 @@ mod tests {
         let mut forgotten = submitted_run(&tmp.path().join("forgotten"), "4245", None, true);
         stop_run(&mut forgotten, &forgetting, "t").unwrap();
         assert!(TestRun::open(&forgotten.dir).unwrap().pending_job(&forgetting).is_none());
+        // A stop that fails transiently (the controller not reached), after
+        // a failed query or after the scheduler listed the job: an error,
+        // nothing recorded.
+        for get_status in ["echo 'Socket timed out' >&2; exit 1", "echo '@JOB_ID@ PD'"] {
+            let transient = fake_meta(&format!(
+                r#"
+                get-status = "{get_status}"
+                unknown-job-pattern = 'Invalid job id specified'
+                stop = "echo 'scancel: error: Unable to contact slurm controller (connect failure)' >&2; exit 1"
+                status-pattern = "^@JOB_ID@ "
+                queued-pattern = " PD"
+                "#
+            ));
+            let transient = Scheduler::new(&transient);
+            let mut run = submitted_run(&tmp.path().join(format!("t{}", get_status.len())), "4246", None, true);
+            let before = fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap();
+            let err = stop_run(&mut run, &transient, "t").unwrap_err().to_string();
+            assert!(err.contains("Unable to contact slurm controller"), "{err}");
+            assert_eq!(fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap(), before, "recorded something");
+        }
         clear_to_delete(&ended, &failing, "t", false).unwrap();
         clear_to_delete(&ended, &failing, "t", true).unwrap();
         let open = submitted_run(&tmp.path().join("open"), "4244", None, false);

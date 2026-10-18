@@ -40,10 +40,11 @@ pub struct Timestamps {
     pub submitted: Option<DateTime<Utc>>,
     pub started: Option<DateTime<Utc>>,
     pub finished: Option<DateTime<Utc>>,
-    /// When cactup, after the record's end, asked the scheduler to stop the
-    /// job without its having said the job was listed (its status query
-    /// failed), or the scheduler refused a stop: the job is over from then
-    /// on, and asked about again only after a later end (a requeued run's).
+    /// When a stop cactup sent after the record's end, its status query
+    /// having failed, settled the job: the scheduler took the stop, or
+    /// refused it saying (by `unknown-job-pattern`) it does not know the
+    /// job. The job is over from then on, and asked about again only after
+    /// a later end (a requeued run's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_stopped: Option<DateTime<Utc>>,
 }

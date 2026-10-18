@@ -473,10 +473,11 @@ pub struct Scheduler {
     /// output with no line for the job is a job gone only if a line matches
     /// it; otherwise the query failed: a command that would act on the
     /// answer refuses. After the run recorded its end, listings show that end
-    /// and deletes note the failure and take the job as ended, while the commands that act take
-    /// the safe reading (a stop is sent anyway; new work refuses, or a
-    /// submission chains behind the job). Where it is not set, no line for
-    /// the job is a job gone.
+    /// and deletes note the failure and take the job as ended, while the
+    /// commands that act take the safe reading: a stop is sent anyway (and
+    /// the job is taken as ended only when the scheduler took it, or the
+    /// stop command's output matches this pattern too), and new work
+    /// refuses. Where it is not set, no line for the job is a job gone.
     pub unknown_job_pattern: Option<String>,
 }
 

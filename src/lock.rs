@@ -147,12 +147,15 @@ pub(crate) struct ProcGroup {
     pub own: bool,
     /// `pid` and its live descendants, in any group.
     pub tree: Vec<u32>,
+    /// Those of `tree` in another group (a descendant that made a group of
+    /// its own): stopping the group leaves them running.
+    pub outside: Vec<u32>,
 }
 
 /// [`ProcGroup`] of `pid`, `None` when it has no process. A descendant
 /// whose parent died has been handed to another parent and no longer
-/// counts as one: the group then holds a process `pid` did not start, and
-/// is not its own (the safe reading).
+/// counts as one: the group then holds a process cactup cannot tell is the
+/// job's, and is not its own (the safe reading).
 pub(crate) fn proc_group(pid: u32) -> Option<ProcGroup> {
     let pgid = proc_pgrp(pid)?;
     // (pid, ppid, pgrp) of every process.
@@ -184,7 +187,8 @@ pub(crate) fn proc_group(pid: u32) -> Option<ProcGroup> {
     let own = procs.iter().filter(|&&(_, _, pgrp)| pgrp == pgid).all(|&(p, _, _)| descends(p));
     let mut tree: Vec<u32> = procs.iter().map(|&(p, _, _)| p).filter(|&p| descends(p)).collect();
     tree.sort_unstable();
-    Some(ProcGroup { pgid, own, tree })
+    let outside = procs.iter().filter(|&&(p, _, pgrp)| pgrp != pgid && tree.contains(&p)).map(|&(p, _, _)| p).collect();
+    Some(ProcGroup { pgid, own, tree, outside })
 }
 
 /// When `pid`'s process started, on the wall clock: the boot time

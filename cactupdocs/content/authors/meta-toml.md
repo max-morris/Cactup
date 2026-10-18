@@ -308,13 +308,18 @@ safe reading, since the job may have been queued again: `sim submit`, `sim
 run`, and a new test run or build refuse, printing the query, both patterns
 and what it printed, and naming the stop command (`-f` stops the job and
 goes ahead); `sim stop`, `test stop` and `build stop` ask the scheduler to
-stop the job anyway, saying they could not ask, and record the stop, after
-which the job is taken as ended without asking. A stop the scheduler
-refuses after the end (Slurm's `scancel` and Torque's `qdel` refuse a job
-they have forgotten) is taken as the job ended, never an error. So a
-pattern that misses the scheduler's message for a forgotten job costs a
-refusal and one stop per record, and the refusal shows the output to fix
-the pattern against. Without the key, no line for the
+stop the job anyway, saying they could not ask. Where the scheduler takes
+the stop, or refuses it with output this pattern matches (it does not
+know the job), cactup records the stop, and the job is taken as ended
+without asking from then on. Any other failure of the stop command (the
+controller not reached) is an error and records nothing. The pattern is
+matched against the stop command's output too: a scheduler whose stop
+says something else of a forgotten job (Slurm's `scancel`: `Kill job error
+on job id N: Invalid job id specified`, where `squeue` says
+`slurm_load_jobs error: Invalid job id specified`) settles such a job only
+where the pattern matches both. So a pattern that misses the scheduler's
+message for a forgotten job settles nothing: the commands refuse, each
+showing the output to fix the pattern against. Without the key, no line for the
 job means the job is gone, as before: a query that failed reads as a job no
 longer in the queue. Check the pattern against what the command really
 prints for a job the scheduler no longer knows (an old job id will do): one

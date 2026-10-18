@@ -430,13 +430,18 @@ end, and `sim delete` notes it and goes ahead. The commands that act take
 the safe reading instead, since the job may have been queued again: `sim
 submit` and `sim run` refuse, printing the failed query, and `sim stop`
 asks the scheduler to cancel the job anyway and says it could not ask.
-That settles it: cactup records the stop, and from then on takes the job
-as ended (unless it really was queued again and runs). So `sim stop` is
-always the way out, and `--force` on `sim submit` or `sim run` does the
-same and goes ahead (the new submission not chained: Slurm refuses a
-dependency on a job it has forgotten). If the scheduler will not cancel
-the job (it has forgotten it: `scancel` says "Invalid job id specified",
-`qdel` exits 153), cactup says so and takes it as ended. When `sim stop`
+Where the scheduler takes the cancel, or refuses it saying it does not
+know the job (by the machine's `unknown-job-pattern`: Torque's `qdel`
+says "Unknown Job Id"), that settles it: cactup records the stop, and from
+then on takes the job as ended (unless it really was queued again and
+runs). `--force` on `sim submit` or `sim run` does the same and goes ahead
+(the new submission not chained: Slurm refuses a dependency on a job it
+has forgotten). If the cancel fails otherwise (the controller not
+reached), or fails for a job the scheduler has just listed, it is an
+error and nothing is recorded: try again once the scheduler answers. If
+the scheduler's message for a forgotten job is among what it printed,
+the machine's `unknown-job-pattern` does not match it, and every message
+on this path says so: fix the pattern. When `sim stop`
 has nothing to cancel, it says what it knows: that the scheduler does not
 know the job, or lists it as over, or (where it did not ask) that the
 restart has recorded its end. Either way, it names the later restarts

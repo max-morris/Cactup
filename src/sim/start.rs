@@ -630,10 +630,9 @@ fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler, force: bool) -> Res
     let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, sched)? else { return Ok(false) };
     let (dir, job_id, name) = (restart::dir_name(ended.id), &ended.meta.job_id, &sim.name);
     match answer {
-        Some(AfterEnd::Listed(_)) => bail!(
-            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job \
-             {job_id} (leaving the queue, or starting again): wait until it leaves the queue, or \
-             `cactup sim stop {name}` to stop it"
+        Some(AfterEnd::Listed(status)) => bail!(
+            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
+            crate::scheduler::listed_after_end(status, &format!("cactup sim stop {name}"))
         ),
         Some(AfterEnd::Unanswered(failed)) if !force => {
             Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "run"))

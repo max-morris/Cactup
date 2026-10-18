@@ -3230,13 +3230,15 @@ leaving the queue), the outcome standing. Only an attempt made for the
 machine cactup runs on is asked about after its outcome (§10). A status
 query that fails after the outcome takes the safe reading for what each
 does: the guard refuses a new attempt without `-f`, printing the failed
-query (the job may have been queued again) and naming `build stop`, which
-resolves it; `-f` stops it and builds. `build stop` asks the scheduler to
-stop it, saying it could not ask, and records `job-stopped` in the
-attempt's `[timestamps]` (under its `record.lock`): the job is settled,
-not asked about again (§10). A stop the scheduler refuses after the
-outcome (a job it has forgotten) is said so and taken as the job ended,
-settled too, for `build stop` and `-f` alike. Where the scheduler answers
+query (the job may have been queued again) and naming `build stop`; `-f`
+stops it and builds. `build stop` asks the scheduler to stop it, saying it
+could not ask; where the scheduler takes the stop, or refuses it saying
+(by `unknown-job-pattern`) that it does not know the job, the job is
+settled: `job-stopped` is recorded in the attempt's `[timestamps]` (under
+its `record.lock`), and it is not asked about again (§10). Any other
+failure of the stop command (the controller not reached) is an error,
+for `build stop` and `-f` alike, and nothing is recorded; so is any
+failure to stop a job the scheduler has just listed. Where the scheduler answers
 that the job is gone or over, `build stop` says which, and nothing to
 stop. A requeued attempt that runs
 again clears its outcome and `finished` as `execute` starts and records new
@@ -3843,10 +3845,12 @@ leaving, or gone, is harmless), says which ("still listed after the
 restart ended, queued again, or leaving the queue"; "could not ask the
 scheduler about job N ... asked it to stop the job in case it was queued
 again"), and records nothing else on the restart (its end stands) but,
-for a job it could not ask about or whose stop the scheduler refused,
-`job-stopped` (§10: settled, not asked about again). A stop the
-scheduler refuses (a job it has forgotten) is said so and taken as the
-job ended, never an error. There is no graceful path for it: a restart that has recorded its end has no
+for a job it could not ask about, `job-stopped` where the scheduler took
+the stop or refused it saying (by `unknown-job-pattern`) that it does not
+know the job, which is said and taken as ended (§10: settled, not asked
+about again). Any other failure of the stop command is an error, with
+nothing recorded and nothing deactivated: a job the scheduler just
+listed, or may have queued again, stands. There is no graceful path for it: a restart that has recorded its end has no
 Cactus reading its `TERMINATE` (a requeued job's own run recreates the
 file and runs in full). Where the scheduler answered that the job is
 gone or over, or nothing was asked (job ids that are pids, past the
@@ -4417,25 +4421,37 @@ and start time beside it), so no caller can skip the checks.
   asked; the guards before new work (`sim run`, `sim submit`, a new test
   run or build) refuse, printing the failed query as `FailedQuery` has it
   (the query, both patterns, its output, the `unknown-job-pattern` hint)
-  and naming `sim stop`/`test stop`/`build stop`, which always resolves it;
-  with `-f` they send the stop themselves and go ahead (`sim submit` then
-  unchained). `sim submit` never chains behind such a job: a job the
-  scheduler has forgotten fails the dependency (Slurm's `sbatch
-  --dependency=afterany:<id>` says "Job dependency problem"). A stop sent
-  after a record's end whose stop command fails (Slurm's `scancel` of a
-  forgotten job exits 1, "Invalid job id specified"; Torque's `qdel`
-  exits 153, or 15 for a completed job) is no error
-  (`Scheduler::stop_after_end`, `EndedStop::Refused`): the command says
-  so ("the scheduler would not stop job N (its stop command said: …):
-  taken as ended") and takes the job as ended (an ended active restart is
-  deactivated); Ctrl-C is "interrupted" still. A stop sent for a job the
-  scheduler could not be asked about, or one it refused, settles the job:
-  the record gets `job-stopped` (its time; `restart.toml`, and `test.toml`'s
+  and naming `sim stop`/`test stop`/`build stop`; with `-f` they send the
+  stop themselves and go ahead (`sim submit` then unchained). `sim submit`
+  never chains behind such a job: a job the scheduler has forgotten fails
+  the dependency (Slurm's `sbatch --dependency=afterany:<id>` says "Job
+  dependency problem"). What a stop after a record's end settles
+  (`Scheduler::stop_after_end`): after the scheduler listed the job
+  (`AfterEnd::Listed`), a stop command that fails is an error ("the stop
+  command for job N failed: …"), nothing recorded or deactivated, and
+  `delete -f` and the guards' `-f` refuse with it. After a failed query
+  (`AfterEnd::Unanswered`), a stop the scheduler takes settles the job,
+  and so does one it refuses with output matching `unknown-job-pattern`
+  (`EndedStop::NotKnown`: Torque's `qdel` of a forgotten job, "Unknown Job
+  Id", exit 153), said so ("the scheduler does not know job N (its stop
+  command said: …): taken as ended"), an ended active restart deactivated;
+  any other failure (Slurm's "Socket timed out on send/recv operation",
+  "Unable to contact slurm controller", exit 1) is an error that says the
+  scheduler may not have been reached, shows the output, and gives the
+  `unknown-job-pattern` hint. A machine without `unknown-job-pattern`
+  never reaches `Unanswered` (no line for the job is a job gone), so
+  nothing is settled there. Ctrl-C is "interrupted" still. A settled job's
+  record gets `job-stopped` (its time; `restart.toml`, and `test.toml`'s
   and `build.toml`'s `[timestamps]`), and from then on the job is taken as
   ended without a query (`end_to_ask`), unless a requeued run records a
-  later end. So a scheduler whose `unknown-job-pattern` never matches its
-  message for a forgotten job costs one `stop`, not fourteen days of
-  refusals. No message states a scheduler answer cactup did not get:
+  later end. The trade-off: a pattern that never matches the scheduler's
+  message for a forgotten job settles nothing (the stop's refusal does not
+  match it either); the guards refuse until the pattern is fixed, and
+  every message on that path names it. The MDB's Slurm pattern matches
+  `squeue`'s message (`slurm_load_jobs error: Invalid job id specified`),
+  not `scancel`'s (`Kill job error on job id N: Invalid job id
+  specified`): on Slurm a stop after a failed query settles only when
+  `scancel` takes it. No message states a scheduler answer cactup did not get:
   "nothing to stop" names what was learned (the scheduler does not know
   the job, lists it as over, or, where nothing was asked, the record's
   end), and so does the reaper's note (where job ids are pids: the process
@@ -4852,8 +4868,11 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
     it could not ask, and records `job-stopped` in `[timestamps]` (settled,
     not asked about again, §10), and a new `test run` or `test submit`
     refuses without `-f`, printing the failed query and naming `test stop`
-    (`-f` stops it). A stop the scheduler refuses after `finished` is said
-    so and taken as the job ended (settled). Only a run made for this machine (its `machine`)
+    (`-f` stops it). After a failed query, a stop the scheduler refuses
+    saying (by `unknown-job-pattern`) it does not know the job is said so
+    and taken as the job ended (settled); any other failure of the stop
+    command, and any after the scheduler listed the job, is an error with
+    nothing recorded. Only a run made for this machine (its `machine`)
     is asked about after `finished`. Where
     job ids are pids (`job-ids = "pids"`: the generic machine and those
     `machine create` makes from it; in the MDB athena, et-juphub, hal1,

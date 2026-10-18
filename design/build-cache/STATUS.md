@@ -3950,6 +3950,75 @@ whose job was canceled or forgotten was not named. The fake Torque:
 exiting 153 said so and took the job as ended; `sim submit` then
 submitted unchained. The earlier scenarios as before.
 
+Round 9 (on `45134e2`): BLOCKED by both, the same finding (both ran it,
+for sims, test runs and builds): `stop_after_end` took every failure of
+the stop command for a refusal, so a transient one ("Socket timed out on
+send/recv operation", "Unable to contact slurm controller") settled the
+job: "the scheduler would not stop job N ... taken as ended" (false: the
+scheduler was not reached, or had just listed the job `PD`),
+`job-stopped` recorded, the restart deactivated, and from then on a
+requeued job was never asked about: new work started beside it and
+`sim delete -f` deleted a simulation whose job then started. Not
+blocking, taken: (A2) the `unknown-job-pattern` doc comment still said a
+submission chains behind an unanswered job; (A3) the guards called a job
+listed `PD` "leaving the queue, or starting again: wait until it
+leaves"; (A4) `proc_group` takes a reparented descendant for not the
+job's, and the refusals then said "processes it did not start"; (B2)
+`kill -- -<pgid>` was said to stop "every process it started" though a
+descendant may have made a group of its own. The lead's decision, and
+the fixes in the commit after this record:
+- `stop_after_end(job, listed)`: after `AfterEnd::Listed` a stop command
+  that fails is an error ("the stop command for job N failed: ..."),
+  nothing recorded or deactivated, and `sim delete -f` and the guards'
+  `-f` refuse with it. After `AfterEnd::Unanswered` it settles only where
+  the stop command's output matches the machine's `unknown-job-pattern`
+  (`EndedStop::NotKnown`: "the scheduler does not know job N (its stop
+  command said: ...): taken as ended"); any other failure is an error
+  saying the scheduler may not have been reached, with the output and the
+  pattern hint. A stop the scheduler takes after a failed query settles
+  the job as before. A machine without `unknown-job-pattern` never
+  reaches `Unanswered` (no line for the job is a job gone there), so
+  nothing is settled on it.
+- The trade-off: a pattern that never matches the scheduler's message
+  for a forgotten job settles nothing now; the commands refuse until the
+  user fixes the pattern, and every message on that path names it. And
+  since the stop's own refusal must match too, the MDB's Slurm pattern
+  (`slurm_load_jobs error: Invalid job id specified`, `squeue`'s words)
+  never matches `scancel`'s (`Kill job error on job id N: Invalid job id
+  specified`): on Slurm a stop after a failed query settles only when
+  `scancel` takes it; otherwise the user tries again once `squeue`
+  answers. Torque's `qdel` ("Unknown Job Id") matches its pattern. A
+  pattern of `Invalid job id specified` would cover both on Slurm (not
+  changed here: an MDB value, for the lead to decide).
+- The guards word a listed job by its state (`listed_after_end`): queued
+  or held, "queued again: `... stop` to stop it, or wait until it has
+  run"; running, "leaving the queue, or starting again: wait until it
+  leaves the queue, or `... stop` to stop it".
+- `proc_group` records `outside`, the job's processes in other groups;
+  `UnverifiedPid` claims "every process it started" only when there are
+  none, else names them. The refusals say "processes cactup cannot tell
+  are the job's". The `unknown-job-pattern` doc comment is exact.
+- Docs and spec say exactly what settles (§§7.9, 8.6, 10, 11.7;
+  `running-simulations.md`, `test-suites.md`, `monitoring.md`,
+  `meta-toml.md`, the record fields' doc comments).
+Checked with real binaries: the fake Slurm, `scancel` failing
+transiently ("Socket timed out on send/recv operation", "Unable to
+contact slurm controller (connect failure)", exit 1): after the end with
+the job listed `PD`, `sim stop`, `sim stop -f` and `sim delete -f` failed
+with it, record unchanged, restart active, simulation kept; with `squeue`
+down too, `sim stop`, `sim submit -f` and `sim run -f` failed saying the
+scheduler may not have been reached, nothing submitted or recorded; test
+runs and builds the same (`test stop`, `test submit -f`, `build stop`,
+`build submit -f`; no `job-stopped`). An overlay matching `Invalid job
+id specified`, `squeue` down and the job forgotten: `sim stop` said the
+scheduler does not know the job, taken as ended, settled. The
+never-matching overlay: every path refused with the output and the
+pattern hint, nothing settled. The fake Torque: `qdel` failing
+transiently (exit 111), an error, nothing recorded, after a failed query
+and after `R`; `qdel` of a forgotten job (153, "Unknown Job Id") after a
+failed query settled it. The generic machine as in round 8, the refusals
+in the new words. The earlier scenarios as before.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

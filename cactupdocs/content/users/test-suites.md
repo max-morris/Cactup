@@ -219,11 +219,14 @@ shows its recorded end and `test delete` notes the failed query and goes
 ahead, while the commands that act take the safe reading, since the job may
 have been queued again: a new `test run` or `test submit` refuses, printing
 the failed query, and `test stop` asks the scheduler to cancel the job
-anyway, saying it could not ask. That settles it: cactup records the stop
-and from then on takes the job as ended, so `test stop` is always the way
-out (`--force` cancels the job and goes ahead). If the scheduler will not
-cancel it (it has forgotten the job), cactup says so and takes it as
-ended. When `test stop` has nothing to cancel, it says what it knows (the
+anyway, saying it could not ask. Where the scheduler takes the cancel, or
+refuses it saying it does not know the job (by the machine's
+`unknown-job-pattern`), that settles it: cactup records the stop and from
+then on takes the job as ended (`--force` cancels the job and goes
+ahead). A cancel that fails otherwise (the controller not reached), or
+fails for a job the scheduler has just listed, is an error and records
+nothing: try again once the scheduler answers, or fix the pattern if the
+scheduler's message for a forgotten job is among what it printed. When `test stop` has nothing to cancel, it says what it knows (the
 scheduler does not know the job, or lists it as over, or the run has
 recorded its end). On a machine without a batch system (the generic machine), a
 submitted run's job is a background process: cactup asks about it and stops

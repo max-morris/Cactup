@@ -201,24 +201,31 @@ impl UnverifiedPid {
 
 /// How to stop by hand the run whose top process is `pid`: the whole
 /// process group where it holds nothing else (`kill -- -<pgid>`, which
-/// stops the pid and every process it started, and nothing else); else no
-/// single command does, and the processes are named.
+/// stops the pid and the processes it started in that group, and nothing
+/// else; any it started in another group named too); else no single
+/// command does, and the processes are named.
 fn stop_by_hand(id: &str, group: Option<&crate::lock::ProcGroup>) -> String {
+    let pids = |list: &[u32]| list.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
     match group {
-        Some(group) if group.own => format!("`kill -- -{}` stops it and every process it started", group.pgid),
-        Some(group) if group.tree.len() > 1 => {
-            let tree: Vec<String> = group.tree.iter().map(u32::to_string).collect();
-            format!(
-                "no single command stops it alone, as its process group holds processes it did not start: \
-                 stop pid {id} and the processes it started (now pids {}; `pstree -p {id}` shows them), or \
-                 interrupt the run where it runs (Ctrl-C)",
-                tree.join(", ")
-            )
+        Some(group) if group.own && group.outside.is_empty() => {
+            format!("`kill -- -{}` stops it and every process it started", group.pgid)
         }
+        Some(group) if group.own => format!(
+            "`kill -- -{}` stops it and the processes it started in its group, but not pids {}, which it \
+             started in groups of their own: stop those too",
+            group.pgid,
+            pids(&group.outside)
+        ),
+        Some(group) if group.tree.len() > 1 => format!(
+            "no single command stops it alone, as its process group holds processes cactup cannot tell \
+             are the job's: stop pid {id} and the processes it started (now pids {}; `pstree -p {id}` shows \
+             them), or interrupt the run where it runs (Ctrl-C)",
+            pids(&group.tree)
+        ),
         _ => format!(
-            "no single command stops it alone, as its process group holds processes it did not start: \
-             stop pid {id} and any process it started (`pstree -p {id}` shows them), or interrupt the run \
-             where it runs (Ctrl-C)"
+            "no single command stops it alone, as its process group holds processes cactup cannot tell are \
+             the job's: stop pid {id} and any process it started (`pstree -p {id}` shows them), or interrupt \
+             the run where it runs (Ctrl-C)"
         ),
     }
 }
@@ -250,7 +257,7 @@ impl std::fmt::Display for SharedGroup {
         let pgid = group.as_ref().map(|g| format!(" ({})", g.pgid)).unwrap_or_default();
         write!(
             f,
-            "job {0} shares its process group{pgid} with processes it did not start, so cactup does \
+            "job {0} shares its process group{pgid} with processes cactup cannot tell are the job's, so cactup does \
              not stop it: the machine's stop command would stop them too, and no single command stops \
              the job alone. Stop pid {0} and the processes it started by hand (`pstree -p {0}` shows \
              them), or interrupt the run where it runs (Ctrl-C; a foreground `cactup sim run` started \
@@ -322,6 +329,21 @@ pub enum AfterEnd {
     Unanswered(String),
 }
 
+/// How a job the scheduler still lists after its record's end reads, by
+/// its state, with what to do about it (`stop`: the cactup command that
+/// stops it): queued or held, queued again; running, leaving the queue or
+/// starting again (the patterns cannot tell which).
+pub fn listed_after_end(status: JobStatus, stop: &str) -> String {
+    match status {
+        JobStatus::Queued => format!("as queued again: `{stop}` to stop it, or wait until it has run"),
+        JobStatus::Holding => format!("as queued again, and held: `{stop}` to stop it"),
+        _ => format!(
+            "as running (leaving the queue, or starting again): wait until it leaves the queue, or `{stop}` \
+             to stop it"
+        ),
+    }
+}
+
 /// What a failed stop command said, on one line: its output, then its exit
 /// status (`collect_output`'s "command exited unsuccessfully (<status>):"
 /// heading, turned around).
@@ -353,10 +375,10 @@ pub enum EndedStop {
     /// The scheduler took it (or, where job ids are pids, there was
     /// nothing to stop).
     Sent,
-    /// The stop command failed: the scheduler would not stop the job (one
-    /// it has forgotten, or completed), what it said attached. After the
-    /// record's end that is taken as the job ended.
-    Refused(String),
+    /// The stop command failed saying, by the machine's
+    /// `unknown-job-pattern`, that the scheduler does not know the job (one
+    /// it has forgotten), what it said attached: taken as the job ended.
+    NotKnown(String),
 }
 
 /// How much later than its record a process with an older record's pid may
@@ -689,19 +711,46 @@ impl<'m> Scheduler<'m> {
         }
     }
 
-    /// Stop `job` after its record's end (still listed, or unanswered):
-    /// where the stop command fails (Slurm's `scancel` and Torque's `qdel`
-    /// refuse a job they have forgotten, `qdel` a completed one too), the
-    /// scheduler would not stop it, and the job is taken as ended rather
-    /// than the command failing. Ctrl-C is "interrupted" still; the pid
+    /// Stop `job` after its record's end: `listed`, the scheduler has just
+    /// listed it ([`AfterEnd::Listed`]); else its status query failed
+    /// ([`AfterEnd::Unanswered`]). A stop command that fails is an error,
+    /// nothing settled, with one exception: after a failed query, a stop
+    /// whose output matches the machine's `unknown-job-pattern` is the
+    /// scheduler saying it does not know the job (Slurm's `scancel` and
+    /// Torque's `qdel` of a job they have forgotten), and the job is taken
+    /// as ended ([`EndedStop::NotKnown`]). A transient failure (the
+    /// controller not reached, a timeout) never settles anything: a job
+    /// the scheduler just listed, or may have queued again, stands. Where
+    /// the machine sets no `unknown-job-pattern`, no query fails (no line
+    /// for the job is a job gone), so `Unanswered` is never reached and
+    /// nothing is settled here. Ctrl-C is "interrupted" still; the pid
     /// refusals ([`UnverifiedPid`], [`SharedGroup`]) are errors still.
-    pub fn stop_after_end(&self, job: JobRef<'_>) -> Res<EndedStop> {
-        match self.stop(job) {
-            Ok(_) => Ok(EndedStop::Sent),
-            Err(e) if gix::interrupt::is_triggered() => Err(e),
-            Err(e) if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() => Err(e),
-            Err(e) => Ok(EndedStop::Refused(stop_said(&e))),
+    pub fn stop_after_end(&self, job: JobRef<'_>, listed: bool) -> Res<EndedStop> {
+        let e = match self.stop(job) {
+            Ok(_) => return Ok(EndedStop::Sent),
+            Err(e) => e,
+        };
+        if gix::interrupt::is_triggered()
+            || e.downcast_ref::<UnverifiedPid>().is_some()
+            || e.downcast_ref::<SharedGroup>().is_some()
+        {
+            return Err(e);
         }
+        let said = stop_said(&e);
+        if listed {
+            bail!("the stop command for job {} failed: {said}", job.id);
+        }
+        if self.unknown_job(&format!("{e:#}"), job.id)? == Some(true) {
+            return Ok(EndedStop::NotKnown(said));
+        }
+        let pattern = self.meta.scheduler.unknown_job_pattern.as_deref().unwrap_or_default();
+        bail!(
+            "the status query for job {} failed, and so did its stop command: the scheduler may not have \
+             been reached: {said}\nIf the scheduler's message for a job it does not know is among \
+             these lines, unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the \
+             machine's [scheduler] table.",
+            job.id
+        )
     }
 
     /// The machine's stop command for `job_id`, as the user may run it by
@@ -712,7 +761,8 @@ impl<'m> Scheduler<'m> {
     }
 
     /// Whether `job` is the job's own process here but its process group
-    /// is not the job's own (it holds processes the job did not start), so
+    /// is not the job's own (it holds processes cactup cannot tell are the
+    /// job's), so
     /// [`Self::stop`] refuses it ([`SharedGroup`]).
     pub fn shares_group(&self, job: JobRef<'_>) -> bool {
         self.pid_check(job) == Some(PidCheck::Here) && !Self::own_group(job.id)
@@ -1488,9 +1538,14 @@ mod tests {
 
     impl OrphanRun {
         fn start() -> OrphanRun {
+            OrphanRun::start_with("sleep 300")
+        }
+
+        /// The run-script runs `child` (in the background) and waits.
+        fn start_with(child: &str) -> OrphanRun {
             use std::os::unix::process::CommandExt;
             let out = std::process::Command::new("sh")
-                .args(["-c", "sh -c 'sleep 300 & wait' > /dev/null 2>&1 < /dev/null & echo $!"])
+                .args(["-c", &format!("sh -c '{child} & wait' > /dev/null 2>&1 < /dev/null & echo $!")])
                 .process_group(0)
                 .output()
                 .unwrap();
@@ -1587,6 +1642,20 @@ mod tests {
         assert!(crate::lock::proc_starttime(ours.0.id()).is_some(), "{advice} reached another group");
     }
 
+    /// A run whose group is its own but one of whose processes made a group
+    /// of its own (`setsid`): `kill -- -<pgid>` would leave that one, so the
+    /// advice names it rather than claim the whole run.
+    #[test]
+    fn the_advice_names_a_process_of_the_run_outside_its_group() {
+        let run = OrphanRun::start_with("setsid sleep 300");
+        let group = crate::lock::proc_group(run.top).unwrap();
+        assert!(group.own, "{group:?}");
+        assert_eq!(group.outside, vec![run.child], "{group:?}");
+        let text = UnverifiedPid::of(&run.top.to_string()).to_string();
+        assert!(text.contains(&format!("`kill -- -{}`", run.pgid)) && text.contains(&format!("but not pids {}", run.child)), "{text}");
+        assert!(!text.contains("every process it started"), "{text}");
+    }
+
     /// A run-script in a group that holds processes it did not start (the
     /// test runner's): no single command stops it alone. An older record
     /// of it names the processes to stop; a verified one is refused.
@@ -1612,33 +1681,49 @@ mod tests {
         let _ = shell.wait();
     }
 
-    /// After a record's end, a stop the scheduler refuses (Slurm's
-    /// `scancel` of a job it has forgotten exits 1, Torque's `qdel` 153) is
-    /// no error: what it said is kept, for "taken as ended".
+    /// After a record's end, a stop command that fails settles nothing,
+    /// but for one exception: after a failed status query, a refusal whose
+    /// output matches `unknown-job-pattern` (the scheduler saying it does
+    /// not know the job: Torque's `qdel` of a forgotten job, exit 153) is
+    /// taken as the job ended, what it said kept. A transient failure (the
+    /// controller not reached) is an error after a failed query, saying so
+    /// with the pattern hint; and any failure is an error after the
+    /// scheduler just listed the job.
     #[test]
-    fn a_stop_refused_after_the_end_is_taken_as_ended() {
-        let refusing = meta(
-            r#"
-            stop = "echo 'scancel: error: Kill job error on job id 4242: Invalid job id specified' >&2; exit 1"
-            status-pattern = "^@JOB_ID@ "
-            "#,
-        );
-        let sched = Scheduler::new(&refusing);
-        match sched.stop_after_end(JobRef::bare("4242")).unwrap() {
-            EndedStop::Refused(said) => assert_eq!(
-                said,
-                "scancel: error: Kill job error on job id 4242: Invalid job id specified (exit status: 1)"
-            ),
+    fn a_stop_that_fails_after_the_end_settles_only_a_job_the_scheduler_does_not_know() {
+        let with_stop = |stop: &str| {
+            meta(&format!(
+                r#"
+                stop = "{stop}"
+                unknown-job-pattern = 'Unknown Job Id'
+                status-pattern = "^@JOB_ID@ "
+                "#
+            ))
+        };
+        let unknown = with_stop("echo 'qdel: Unknown Job Id 4242.qb2' >&2; exit 153");
+        let sched = Scheduler::new(&unknown);
+        match sched.stop_after_end(JobRef::bare("4242"), false).unwrap() {
+            EndedStop::NotKnown(said) => assert_eq!(said, "qdel: Unknown Job Id 4242.qb2 (exit status: 153)"),
             other => panic!("{other:?}"),
         }
+        // Just listed: the same refusal is an error, nothing settled.
+        let err = sched.stop_after_end(JobRef::bare("4242"), true).unwrap_err().to_string();
+        assert!(err.contains("the stop command for job 4242 failed: qdel: Unknown Job Id"), "{err}");
         assert!(sched.stop(JobRef::bare("4242")).is_err(), "before the end it is an error still");
-        let taking = meta(
-            r#"
-            stop = "true"
-            status-pattern = "^@JOB_ID@ "
-            "#,
-        );
-        assert_eq!(Scheduler::new(&taking).stop_after_end(JobRef::bare("4242")).unwrap(), EndedStop::Sent);
+        for transient in [
+            "scancel: error: Kill job error on job id 4242: Socket timed out on send/recv operation",
+            "scancel: error: Unable to contact slurm controller (connect failure)",
+        ] {
+            let m = with_stop(&format!("echo '{transient}' >&2; exit 1"));
+            let sched = Scheduler::new(&m);
+            let err = sched.stop_after_end(JobRef::bare("4242"), false).unwrap_err().to_string();
+            assert!(err.contains("may not have been reached") && err.contains(transient), "{err}");
+            assert!(err.contains("unknown-job-pattern ('Unknown Job Id') does not match it"), "{err}");
+            let err = sched.stop_after_end(JobRef::bare("4242"), true).unwrap_err().to_string();
+            assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
+        }
+        let taking = with_stop("true");
+        assert_eq!(Scheduler::new(&taking).stop_after_end(JobRef::bare("4242"), false).unwrap(), EndedStop::Sent);
     }
 
     /// A job an older cactup recorded (no host, no start time) on a

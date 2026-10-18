@@ -173,15 +173,16 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
     // After the outcome: still listed (leaving the queue, or starting
     // again), or not answered (it may have been queued again): a new
     // attempt beside it is refused, the safe reading for new work (§10).
-    // `-f` stops it, and a stop the scheduler refuses (a job it has
-    // forgotten) is taken as the job ended.
-    let (live, failed) = match ended {
+    // `-f` stops it; after a failed query, a stop the scheduler refuses
+    // saying it does not know the job is taken as the job ended, and any
+    // other failure of the stop command is an error.
+    let (status, live, failed) = match ended {
         true => match sched.ask_after_end(job)? {
-            crate::scheduler::AfterEnd::Listed(_) => (true, None),
-            crate::scheduler::AfterEnd::Unanswered(failed) => (true, Some(failed)),
-            crate::scheduler::AfterEnd::Over(_) => (false, None),
+            crate::scheduler::AfterEnd::Listed(status) => (Some(status), true, None),
+            crate::scheduler::AfterEnd::Unanswered(failed) => (None, true, Some(failed)),
+            crate::scheduler::AfterEnd::Over(_) => (None, false, None),
         },
-        false => (is_live(sched.get_status(job)?, false), None),
+        false => (None, is_live(sched.get_status(job)?, false), None),
     };
     if live {
         // An older record's pid (§10): never stopped, `-f` neither.
@@ -197,18 +198,20 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
             bail!(
                 "config \"{name}\"'s last build attempt ended, but the scheduler could not be asked whether \
                  its job {} was queued again: {failed}\n`cactup build stop {name}` asks the scheduler to \
-                 stop the job (one it has forgotten is then taken as ended); or pass -f to stop it and build",
+                 stop the job (a job it says it does not know is then taken as ended); or pass -f to stop it and build",
                 job.id
             );
         }
         // After the attempt's outcome, a job the scheduler still lists in a
         // state its patterns read: leaving the queue, or starting again.
-        if !force && ended {
+        if let Some(status) = status
+            && !force
+        {
             bail!(
-                "config \"{name}\"'s last build attempt ended, but the scheduler still lists its job {} \
-                 (leaving the queue, or starting again): wait until it leaves, or `cactup build stop \
-                 {name}` to stop it (or pass -f to stop it)",
-                job.id
+                "config \"{name}\"'s last build attempt ended, but the scheduler still lists its job {} {} \
+                 (or pass -f to stop it)",
+                job.id,
+                crate::scheduler::listed_after_end(status, &format!("cactup build stop {name}"))
             );
         }
         if !force {
@@ -220,10 +223,10 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
         }
         match ended {
             true => {
-                if let crate::scheduler::EndedStop::Refused(said) = sched.stop_after_end(job)? {
+                if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_after_end(job, failed.is_none())? {
                     println!(
-                        "The scheduler would not stop build job {} (its stop command said: {said}): taken \
-                         as ended",
+                        "The scheduler does not know build job {} (its stop command said: {said}): taken as \
+                         ended",
                         job.id
                     );
                 }
@@ -1237,16 +1240,17 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         };
         let refused = |job: crate::scheduler::JobRef<'_>, said: &str| {
             println!(
-                "The scheduler would not stop build job {} (its stop command said: {said}): taken as ended",
+                "The scheduler does not know build job {} (its stop command said: {said}): taken as ended",
                 job.id
             )
         };
-        // A stop sent for a job the scheduler could not be asked about, or
-        // one it refused, settles the job: recorded (`job-stopped`), so the
-        // next command takes it as ended rather than ask a query that may
-        // keep failing.
+        // A stop the scheduler took for a job it could not be asked about,
+        // or refused saying it does not know the job, settles the job:
+        // recorded (`job-stopped`), so the next command takes it as ended
+        // rather than ask a query that may keep failing. Any other failure
+        // of the stop command is an error, nothing recorded.
         let settled = match answer {
-            Some((job, AfterEnd::Listed(_))) => match sched.stop_after_end(job)? {
+            Some((job, AfterEnd::Listed(_))) => match sched.stop_after_end(job, true)? {
                 EndedStop::Sent => {
                     println!(
                         "Asked the scheduler to stop build job {}, still listed after the attempt recorded \
@@ -1255,19 +1259,19 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
                     );
                     false
                 }
-                EndedStop::Refused(said) => {
+                EndedStop::NotKnown(said) => {
                     refused(job, &said);
                     true
                 }
             },
             Some((job, AfterEnd::Unanswered(_))) => {
-                match sched.stop_after_end(job)? {
+                match sched.stop_after_end(job, false)? {
                     EndedStop::Sent => println!(
                         "Could not ask the scheduler about build job {} (the attempt has recorded its \
                          outcome); asked it to stop the job in case it was queued again",
                         job.id.bold()
                     ),
-                    EndedStop::Refused(said) => refused(job, &said),
+                    EndedStop::NotKnown(said) => refused(job, &said),
                 }
                 true
             }
@@ -2660,9 +2664,12 @@ mod tests {
         make_attempt(&config_dir, &cactus, "sim", 0, "4242", true, Some(done));
         let inst = Installation::new("et", tmp.path().join("inst"));
         let (state, stopped) = (tmp.path().join("state"), tmp.path().join("stopped"));
-        // While it exists, the stop command refuses, as `scancel` does a
-        // job the scheduler has forgotten.
+        // While it exists, the stop command fails, printing what it holds:
+        // `scancel` refusing a job the scheduler has forgotten, or failing
+        // to reach the controller.
         let refuse = tmp.path().join("refuse");
+        let forgotten = "scancel: error: Kill job error on job id 4242: Invalid job id specified";
+        let transient = "scancel: error: Unable to contact slurm controller (connect failure)";
         let machine = |get_status: &str| {
             let meta: Meta = toml::from_str(&format!(
                 r#"
@@ -2670,8 +2677,8 @@ mod tests {
                 nickname = "fake"
                 [scheduler]
                 get-status = "{get_status}"
-                unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
-                stop = "touch {stopped}; test ! -e {refuse} || {{ echo 'scancel: error: Kill job error on job id @JOB_ID@: Invalid job id specified' >&2; exit 1; }}"
+                unknown-job-pattern = 'Invalid job id specified'
+                stop = "touch {stopped}; test ! -e {refuse} || {{ cat {refuse} >&2; exit 1; }}"
                 status-pattern = "^@JOB_ID@ "
                 queued-pattern = " PD"
                 running-pattern = " (CF|CG|R|TO)"
@@ -2741,21 +2748,36 @@ mod tests {
         stop_impl(&failing, &inst, Some("sim"), false).unwrap();
         assert!(!stopped.exists(), "a settled job was stopped again");
         unsettle();
-        // A job the scheduler has forgotten (a pattern that never matches
-        // its message): the stop is refused, and taken as the job ended:
-        // `-f` and `build stop` succeed rather than fail on it, and the
-        // guard then lets a new build go.
-        fs::write(&refuse, "").unwrap();
+        let settled = || BuildAttempt::open(&config_dir, 0).unwrap().meta.timestamps.job_stopped.is_some();
+        // After the failed query, the stop refused as a job the scheduler
+        // does not know (its output matches `unknown-job-pattern`): taken as
+        // ended, settled; `-f` and `build stop` succeed on it, and the guard
+        // then lets a new build go.
+        fs::write(&refuse, forgotten).unwrap();
         guard_no_live_attempt(&config_dir, "sim", &failing_sched, true).unwrap();
         stop_impl(&failing, &inst, Some("sim"), false).unwrap();
+        assert!(settled());
         guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).unwrap();
         unsettle();
-        // Listed, and the stop refused: taken as ended, settled.
+        // A stop that fails otherwise (the controller not reached) settles
+        // nothing: an error for `-f` and `build stop`, nothing recorded, and
+        // the guard refuses still.
+        fs::write(&refuse, transient).unwrap();
+        let err = guard_no_live_attempt(&config_dir, "sim", &failing_sched, true).unwrap_err().to_string();
+        assert!(err.contains("may not have been reached") && err.contains("Unable to contact"), "{err}");
+        assert!(stop_impl(&failing, &inst, Some("sim"), false).is_err());
+        assert!(!settled());
+        assert!(guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).is_err());
+        // Just listed, and any stop failure (a refusal too): an error,
+        // nothing settled.
         fs::write(&state, "R").unwrap();
-        guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap();
-        stop_impl(&listing, &inst, Some("sim"), false).unwrap();
-        guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap();
-        unsettle();
+        for said in [transient, forgotten] {
+            fs::write(&refuse, said).unwrap();
+            let err = guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap_err().to_string();
+            assert!(err.contains("the stop command for job 4242 failed"), "{err}");
+            assert!(stop_impl(&listing, &inst, Some("sim"), false).is_err());
+            assert!(!settled());
+        }
         fs::remove_file(&refuse).unwrap();
         fs::remove_file(&stopped).unwrap();
 
