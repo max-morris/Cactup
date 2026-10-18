@@ -1648,7 +1648,15 @@ mod tests {
     #[test]
     fn the_advice_names_a_process_of_the_run_outside_its_group() {
         let run = OrphanRun::start_with("setsid sleep 300");
-        let group = crate::lock::proc_group(run.top).unwrap();
+        // The child is forked before it makes its own group: wait for that.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let group = loop {
+            let group = crate::lock::proc_group(run.top).unwrap();
+            if !group.outside.is_empty() || std::time::Instant::now() > deadline {
+                break group;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
         assert!(group.own, "{group:?}");
         assert_eq!(group.outside, vec![run.child], "{group:?}");
         let text = UnverifiedPid::of(&run.top.to_string()).to_string();

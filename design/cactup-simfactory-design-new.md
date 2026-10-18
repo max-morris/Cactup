@@ -4447,11 +4447,11 @@ and start time beside it), so no caller can skip the checks.
   later end. The trade-off: a pattern that never matches the scheduler's
   message for a forgotten job settles nothing (the stop's refusal does not
   match it either); the guards refuse until the pattern is fixed, and
-  every message on that path names it. The MDB's Slurm pattern matches
-  `squeue`'s message (`slurm_load_jobs error: Invalid job id specified`),
-  not `scancel`'s (`Kill job error on job id N: Invalid job id
-  specified`): on Slurm a stop after a failed query settles only when
-  `scancel` takes it. No message states a scheduler answer cactup did not get:
+  every message on that path names it. Slurm's `scancel` of a job the
+  controller does not know (never existed, or aged out) exits 0 and prints
+  nothing (verified on Slurm 24.11.7), so on Slurm such a stop is taken and
+  the job settled; Torque's `qdel` refuses one ("Unknown Job Id", exit 153;
+  not verified on a real Torque), which `unknown-job-pattern` then matches. No message states a scheduler answer cactup did not get:
   "nothing to stop" names what was learned (the scheduler does not know
   the job, lists it as over, or, where nothing was asked, the record's
   end), and so does the reaper's note (where job ids are pids: the process

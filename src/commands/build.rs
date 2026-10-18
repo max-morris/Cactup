@@ -2665,8 +2665,9 @@ mod tests {
         let inst = Installation::new("et", tmp.path().join("inst"));
         let (state, stopped) = (tmp.path().join("state"), tmp.path().join("stopped"));
         // While it exists, the stop command fails, printing what it holds:
-        // `scancel` refusing a job the scheduler has forgotten, or failing
-        // to reach the controller.
+        // a stop refused as a job the scheduler does not know (as Torque's
+        // `qdel` refuses one; Slurm's `scancel` takes it silently), or one
+        // failing to reach the controller.
         let refuse = tmp.path().join("refuse");
         let forgotten = "scancel: error: Kill job error on job id 4242: Invalid job id specified";
         let transient = "scancel: error: Unable to contact slurm controller (connect failure)";

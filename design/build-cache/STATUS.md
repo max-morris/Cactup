@@ -3981,15 +3981,12 @@ the fixes in the commit after this record:
   nothing is settled on it.
 - The trade-off: a pattern that never matches the scheduler's message
   for a forgotten job settles nothing now; the commands refuse until the
-  user fixes the pattern, and every message on that path names it. And
-  since the stop's own refusal must match too, the MDB's Slurm pattern
-  (`slurm_load_jobs error: Invalid job id specified`, `squeue`'s words)
-  never matches `scancel`'s (`Kill job error on job id N: Invalid job id
-  specified`): on Slurm a stop after a failed query settles only when
-  `scancel` takes it; otherwise the user tries again once `squeue`
-  answers. Torque's `qdel` ("Unknown Job Id") matches its pattern. A
-  pattern of `Invalid job id specified` would cover both on Slurm (not
-  changed here: an MDB value, for the lead to decide).
+  user fixes the pattern, and every message on that path names it. (This
+  record first said `scancel` refuses a forgotten job with words the
+  MDB's Slurm pattern misses; wrong, see the correction below: a real
+  `scancel` takes such a stop silently, so on Slurm it settles the job.
+  Torque's `qdel` refuses one, "Unknown Job Id", which its pattern
+  matches.)
 - The guards word a listed job by its state (`listed_after_end`): queued
   or held, "queued again: `... stop` to stop it, or wait until it has
   run"; running, "leaving the queue, or starting again: wait until it
@@ -4018,6 +4015,30 @@ transiently (exit 111), an error, nothing recorded, after a failed query
 and after `R`; `qdel` of a forgotten job (153, "Unknown Job Id") after a
 failed query settled it. The generic machine as in round 8, the refusals
 in the new words. The earlier scenarios as before.
+
+Correction after round 9 (the lead, on a real Slurm: qbd, Slurm
+24.11.7): `scancel` of a job the controller does not know, one that
+never existed and one long finished and aged out, exits 0 and prints
+nothing. So a real Slurm takes the stop of a forgotten job: on Slurm the
+"a stop the scheduler takes settles the job" path applies, and the
+`scancel` wording mismatch round 9's record described does not arise; no
+MDB change (the Slurm machines keep `unknown-job-pattern =
+'slurm_load_jobs error: Invalid job id specified'`, which `squeue`
+prints, verified on qbd before). Rounds 8 and 9 were verified with a fake
+`scancel` that refused a forgotten job (exit 1, "Invalid job id
+specified"), which a real Slurm does not; the refusal handling stays (it
+serves Torque's `qdel`, "Unknown Job Id", exit 153, not verified on a
+real Torque, and any scheduler that refuses). The commit after this
+record corrects `meta-toml.md`, the spec and a test comment, and the
+fake `scancel` now exits 0 silently for an unknown job (its transient
+failures kept). Re-run with it, the scenarios with a forgotten job: an
+overlay whose `unknown-job-pattern` never matches, the job forgotten:
+`sim run`, `sim submit`, `test submit`, `build submit` refuse with the
+failed query; `sim stop`, `test stop`, `build stop` send the stop, which
+`scancel` takes: settled (`job-stopped`), and the next submission goes
+ahead, unchained; `sim submit -f` and `sim stop -f` the same in one step;
+with `squeue` down and the job forgotten, the same; transient `scancel`
+failures still errors, nothing recorded.
 
 ## Decisions
 
