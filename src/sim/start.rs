@@ -350,9 +350,11 @@ fn submit_impl(
             );
         }
         let chain = match r.meta.terminated {
+            // Not reaped: its job is listed, or the reaper's throttles kept
+            // it from asking; either way the run has not recorded its end.
             false => {
                 println!(
-                    "Restart {} is still live (job {}); chaining the new submission behind it",
+                    "Restart {} has not recorded its end (job {}); chaining the new submission behind it",
                     restart::dir_name(active),
                     r.meta.job_id
                 );

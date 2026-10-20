@@ -184,8 +184,14 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
             crate::scheduler::AfterEnd::Unanswered(failed) => (None, true, Some(failed)),
             crate::scheduler::AfterEnd::Over(_) => (None, false, None),
         },
-        false => (None, is_live(sched.get_status(job)?, false), None),
+        false => {
+            let status = sched.get_status(job)?;
+            (Some(status), is_live(status, false), None)
+        }
     };
+    // Before the outcome, listed in a state no pattern reads: suspended, or
+    // over before the attempt recorded it.
+    let unread = !ended && status == Some(JobStatus::Error);
     if live {
         // An older record's pid (§10): never stopped, `-f` neither.
         if sched.unverified(job) {
@@ -207,6 +213,7 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
         // After the attempt's outcome, a job the scheduler still lists in a
         // state its patterns read: leaving the queue, or starting again.
         if let Some(status) = status
+            && ended
             && !force
         {
             bail!(
@@ -214,6 +221,12 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
                  (or pass -f to stop it)",
                 job.id,
                 crate::scheduler::listed_after_end(status, &format!("cactup build stop {name}"))
+            );
+        }
+        if unread && !force {
+            bail!(
+                "config \"{name}\"'s build attempt: {}; `cactup build stop {name}` first, or pass -f to stop it",
+                crate::scheduler::unread_state(&format!("its job {}", job.id))
             );
         }
         if !force {
@@ -229,6 +242,21 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
                     Some(failed) => crate::scheduler::StopCase::Unanswered(failed),
                     None => crate::scheduler::StopCase::Listed,
                 })? {
+                    println!(
+                        "The scheduler does not know build job {} (its stop command said: {said}): taken as \
+                         ended",
+                        job.id
+                    );
+                }
+            }
+            // Listed in a state no pattern reads: a stop the scheduler
+            // refuses saying it does not know the job is taken as the job
+            // ended (nothing of the attempt holds its lock, above); any other
+            // failure of the stop command is an error.
+            false if unread => {
+                if let crate::scheduler::EndedStop::NotKnown(said) =
+                    sched.stop_judged(job, crate::scheduler::StopCase::Unread)?
+                {
                     println!(
                         "The scheduler does not know build job {} (its stop command said: {said}): taken as \
                          ended",
@@ -680,8 +708,10 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
         if last_job_check.elapsed() >= FOLLOW_JOB_CHECK_INTERVAL {
             last_job_check = std::time::Instant::now();
             // A query that failed is no sign the job died: keep waiting.
+            // Listed in any state, one no pattern reads too (suspended, or
+            // over before it could record its outcome): not gone yet.
             let live = match sched.get_status(fresh.meta.job()) {
-                Ok(status) => matches!(status, JobStatus::Running | JobStatus::Queued | JobStatus::Holding),
+                Ok(status) => crate::scheduler::is_live(status, false),
                 Err(_) => true,
             } || LinkLock::is_held_live(&fresh.running_lock_path()).unwrap_or(false);
             if !live {
@@ -726,6 +756,10 @@ enum BuildDisplayState {
     NeverBuilt,
     /// Its job's status query failed, and its lock does not say it runs.
     Unknown,
+    /// Its job is listed in a state no pattern reads (suspended, or over
+    /// before the attempt recorded its outcome), and its lock does not say
+    /// it runs.
+    Error,
 }
 
 /// What `list` and `show` print for an attempt, given the query of
@@ -759,6 +793,7 @@ fn build_state(
         Some(JobStatus::Running) => BuildDisplayState::Running,
         Some(JobStatus::Queued) => BuildDisplayState::Queued,
         Some(JobStatus::Holding) => BuildDisplayState::Holding,
+        Some(JobStatus::Error) if !lock_live => BuildDisplayState::Error,
         // Gone from the queue (or never a real scheduler id to begin with —
         // a foreground build's job_id is its pid), or nothing was queried:
         // the attempt's own liveness marker breaks the tie.
@@ -782,6 +817,7 @@ fn state_str(state: BuildDisplayState) -> colored::ColoredString {
         BuildDisplayState::Stale => "STALE".yellow(),
         BuildDisplayState::NeverBuilt => "NEVER BUILT".normal(),
         BuildDisplayState::Unknown => "UNKNOWN".yellow(),
+        BuildDisplayState::Error => "ERROR".red().bold(),
     }
 }
 
@@ -865,6 +901,12 @@ pub fn in_flight_build(config_dir: &Path, name: &str, machine: Option<&Machine>)
             BuildDisplayState::Running => "RUNNING",
             BuildDisplayState::Queued => "QUEUED",
             BuildDisplayState::Holding => "HOLDING",
+            BuildDisplayState::Error => {
+                return Some(format!(
+                    "a build of config \"{name}\" is listed by the scheduler in a state cactup does not read \
+                     (suspended, exiting, or ended; job {job_id}{submitted_suffix})"
+                ));
+            }
             _ => return None,
         };
         return Some(format!(
@@ -1255,12 +1297,13 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         // rather than ask a query that may keep failing. Any other failure
         // of the stop command is an error, nothing recorded.
         let settled = match answer {
-            Some((job, AfterEnd::Listed(_))) => match sched.stop_judged(job, StopCase::Listed)? {
+            Some((job, AfterEnd::Listed(status))) => match sched.stop_judged(job, StopCase::Listed)? {
                 EndedStop::Sent => {
                     println!(
                         "Asked the scheduler to stop build job {}, still listed after the attempt recorded \
-                         its outcome (queued again, or leaving the queue)",
-                        job.id.bold()
+                         its outcome ({})",
+                        job.id.bold(),
+                        crate::scheduler::listed_state_words(status)
                     );
                     false
                 }
@@ -1343,6 +1386,38 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
                 // `recorded_elsewhere` above: not reached.
                 Stopped::Elsewhere(host) => bail!("build job {} runs on host {host}: stop it there", job.id),
             },
+            // Listed in a state no pattern reads (suspended, or over before
+            // the attempt recorded its outcome): a stop that fails is an
+            // error, nothing recorded, unless the scheduler says it does
+            // not know the job (`stop_judged`); then it is over, unless
+            // something of the attempt still holds its lock.
+            JobStatus::Error => {
+                let what = crate::scheduler::unread_state(&format!("build job {}", job.id));
+                match sched.stop_judged(job.job(), crate::scheduler::StopCase::Unread)? {
+                    crate::scheduler::EndedStop::Sent => println!(
+                        "{}; asked the scheduler to stop it (if it had not ended already)",
+                        crate::scheduler::sentence(what)
+                    ),
+                    crate::scheduler::EndedStop::NotKnown(said)
+                        if LinkLock::is_held_live(&attempt.running_lock_path())? =>
+                    {
+                        println!(
+                            "{}, and the scheduler says it does not know it ({said}), but the attempt's \
+                             running.lock is held: nothing recorded. Once the build lets go of it (a lock \
+                             left by a build that ended expires within {} minutes), run `cactup build stop \
+                             {name}` again.",
+                            crate::scheduler::sentence(what),
+                            crate::lock::LOCK_STALE_SECS / 60
+                        );
+                        return Ok(());
+                    }
+                    crate::scheduler::EndedStop::NotKnown(said) => println!(
+                        "{}, and the scheduler says it does not know it ({said}); nothing of the attempt \
+                         holds its lock, so cactup takes it as ended",
+                        crate::scheduler::sentence(what)
+                    ),
+                }
+            }
             _ => println!(
                 "Build job {} is not in the queue; nothing to stop via the scheduler",
                 attempt.meta.job_id
@@ -1404,7 +1479,7 @@ fn attempt_is_live(attempt: &BuildAttempt, sched: &Scheduler) -> Res<bool> {
     let lock_live = LinkLock::is_held_live(&attempt.running_lock_path())?;
     Ok(matches!(
         build_state(None, status, lock_live),
-        BuildDisplayState::Running | BuildDisplayState::Queued | BuildDisplayState::Holding
+        BuildDisplayState::Running | BuildDisplayState::Queued | BuildDisplayState::Holding | BuildDisplayState::Error
     ))
 }
 
@@ -2533,7 +2608,7 @@ mod tests {
         assert_eq!(build_state(None, Some(JobStatus::Unknown), true), BuildDisplayState::Running);
         assert_eq!(build_state(None, Some(JobStatus::Unknown), false), BuildDisplayState::Stale);
         assert_eq!(build_state(None, Some(JobStatus::Error), true), BuildDisplayState::Running);
-        assert_eq!(build_state(None, Some(JobStatus::Error), false), BuildDisplayState::Stale);
+        assert_eq!(build_state(None, Some(JobStatus::Error), false), BuildDisplayState::Error);
         assert_eq!(build_state(None, None, true), BuildDisplayState::Running);
         assert_eq!(build_state(None, None, false), BuildDisplayState::Stale);
     }
@@ -2770,7 +2845,7 @@ mod tests {
         // the guard refuses still.
         fs::write(&refuse, transient).unwrap();
         let err = guard_no_live_attempt(&config_dir, "sim", &failing_sched, true).unwrap_err().to_string();
-        assert!(err.contains("may not have been reached") && err.contains("Unable to contact"), "{err}");
+        assert!(err.contains("failed too: ") && err.contains("Unable to contact"), "{err}");
         assert!(stop_impl(&failing, &inst, Some("sim"), false).is_err());
         assert!(!settled());
         assert!(guard_no_live_attempt(&config_dir, "sim", &failing_sched, false).is_err());
@@ -2797,6 +2872,30 @@ mod tests {
         assert_eq!(shown_state(&open.meta, Some(None), false), BuildDisplayState::Unknown);
         assert_eq!(shown_state(&open.meta, Some(None), true), BuildDisplayState::Running);
         assert!(attempt_is_live(&open, &failing_sched).unwrap(), "prune removed an attempt whose query failed");
+
+        // No outcome yet, the job listed in a state no pattern reads
+        // (Slurm's `S`, suspended): live. A new build is refused, saying
+        // so; `prune` keeps it; `list` shows ERROR.
+        fs::write(&state, "S").unwrap();
+        let refused = guard_no_live_attempt(&config_dir, "sim", &sched, false).unwrap_err().to_string();
+        assert!(refused.contains("in a state cactup does not read") && refused.contains("`cactup build stop sim`"), "{refused}");
+        assert!(attempt_is_live(&open, &sched).unwrap(), "prune removed an attempt whose job is suspended");
+        assert_eq!(shown_state(&open.meta, Some(Some(JobStatus::Error)), false), BuildDisplayState::Error);
+        // A stop that fails otherwise than as a job the scheduler does not
+        // know: an error for `-f` and `build stop`, no outcome recorded.
+        fs::write(&refuse, transient).unwrap();
+        let err = guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap_err().to_string();
+        assert!(err.contains("the stop command for job 4242 failed") && err.contains("Unable to contact"), "{err}");
+        assert!(stop_impl(&listing, &inst, Some("sim"), false).is_err());
+        assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_none(), "a failed stop recorded an outcome");
+        // Refused as a job the scheduler does not know: taken as ended.
+        fs::write(&refuse, forgotten).unwrap();
+        guard_no_live_attempt(&config_dir, "sim", &sched, true).unwrap();
+        fs::remove_file(&refuse).unwrap();
+        // Taken: `build stop` stops it and records the outcome.
+        stop_impl(&listing, &inst, Some("sim"), false).unwrap();
+        assert!(stopped.exists(), "build stop left a suspended job");
+        assert!(BuildAttempt::open(&config_dir, 0).unwrap().meta.outcome.is_some());
     }
 
     /// Where job ids are pids, a submitted attempt's job recorded on another

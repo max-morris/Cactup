@@ -4,8 +4,8 @@
 use crate::commands::Ctx;
 use crate::installation::{Installation, SimEntry};
 use crate::scheduler::{
-    display_state, is_live, AfterEnd, DisplayState, EndedStop, JobRecord, JobRef, JobStatus, Scheduler, Statuses, StopCase, Stopped,
-    UnverifiedPid,
+    display_state, is_live, sentence, AfterEnd, DisplayState, EndedStop, JobRecord, JobRef, JobStatus, Scheduler, Statuses,
+    StopCase, Stopped, UnverifiedPid,
 };
 use crate::mdb::meta::JobIds;
 use crate::sim::restart::{self, Restart, NO_JOB_ID};
@@ -41,10 +41,56 @@ fn run_is_live(sched: &Scheduler, r: &Restart) -> Res<bool> {
     crate::lock::LinkLock::is_held_live(&r.running_lock_path())
 }
 
+/// Whether the active restart `r`'s job, whose run has not recorded its
+/// end (read afresh), is one the scheduler here lists in a state no
+/// pattern reads.
+fn listed_unread(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<bool> {
+    let fresh = Restart::load(&sim.dir, r.id)?;
+    Ok(match fresh.meta.scheduler_job(sched) {
+        Some(job) if !fresh.meta.terminated && sched.recorded_elsewhere(job).is_none() => {
+            sched.get_status(job)? == JobStatus::Error
+        }
+        _ => false,
+    })
+}
+
+/// What a graceful `sim stop` says, and logs, of the active restart `r`
+/// whose job is listed in a state no pattern reads: left active, `-f`
+/// asking the scheduler to stop it.
+fn left_unread(sim: &Simulation, r: &Restart, name: &str) {
+    let dir = restart::dir_name(r.id);
+    println!(
+        "{}, so it is not acting on the trigger now. Leaving {dir} active — `cactup sim stop -f {name}` asks \
+         the scheduler to stop it.",
+        sentence(crate::scheduler::unread_state(&format!("job {}", r.meta.job_id)))
+    );
+    sim.log("stop", &format!("{dir} left active: its job is listed in a state cactup does not read"));
+}
+
+/// For `sim stop -f` of a job a batch scheduler answers for, that has not
+/// recorded its end: its state where that decides the stop, a state no
+/// pattern reads, or not known where the machine tells that from a failed
+/// query (`unknown-job-pattern`). `None` otherwise (live, a failed query,
+/// job ids that are pids): the stop is sent as it is.
+fn batch_status(sched: &Scheduler, job: JobRef<'_>) -> Res<Option<JobStatus>> {
+    if !sched.may_requeue() {
+        return Ok(None);
+    }
+    match sched.get_status(job) {
+        Ok(JobStatus::Error) => Ok(Some(JobStatus::Error)),
+        Ok(JobStatus::Unknown) if sched.tells_failed_queries() => Ok(Some(JobStatus::Unknown)),
+        _ if gix::interrupt::is_triggered() => bail!("interrupted"),
+        _ => Ok(None),
+    }
+}
+
 /// Poll for up to [`GRACEFUL_WAIT_SECS`] until the run behind `r` is gone;
-/// `true` means it really left. Interrupt-aware (§2.3): Ctrl-C fails the wait
-/// rather than reporting a run gone that is still there.
-fn await_run_exit(sched: &Scheduler, r: &Restart) -> Res<bool> {
+/// `true` means it really left. Each poll reads the restart afresh: a run
+/// that acts on the trigger records its end, and its job, listed then in a
+/// state no pattern reads (Slurm's `CD`, Torque's `C`), is the ended job.
+/// Interrupt-aware (§2.3): Ctrl-C fails the wait rather than reporting a
+/// run gone that is still there.
+fn await_run_exit(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<bool> {
     let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
     let waiting = progress.add_child(if r.meta.job_id == NO_JOB_ID {
         "waiting for the run to exit".to_owned()
@@ -55,7 +101,8 @@ fn await_run_exit(sched: &Scheduler, r: &Restart) -> Res<bool> {
 
     let started = std::time::Instant::now();
     let outcome = loop {
-        match run_is_live(sched, r) {
+        let fresh = Restart::load(&sim.dir, r.id)?;
+        match run_is_live(sched, &fresh) {
             Ok(false) => break Ok(true),
             Err(e) => break Err(e),
             Ok(true) => {}
@@ -122,11 +169,25 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
         );
         sim.log("stop", &format!("graceful termination of {} requested", restart::dir_name(active)));
 
+        // A job listed in a state no pattern reads (suspended, or over
+        // before its run recorded its end) is not acting on the trigger
+        // now: waiting for it tells nothing.
+        if listed_unread(sim, sched, &r)? {
+            left_unread(sim, &r, name);
+            return Ok(());
+        }
+
         // The trigger is a request, not a kill: report what actually happened
         // instead of finishing the restart on faith. While the run is still
         // there the restart stays active — deactivating it would hide the live
         // job from `stop -f` and from the live-job guard in `delete` (§8.7).
-        if !await_run_exit(sched, &r)? {
+        if !await_run_exit(sim, sched, &r)? {
+            // Listed in a state no pattern reads by now, its run not having
+            // recorded its end (it died, or the job was suspended).
+            if listed_unread(sim, sched, &r)? {
+                left_unread(sim, &r, name);
+                return Ok(());
+            }
             let what = if r.meta.scheduler_job(sched).is_none() {
                 format!("{} is still running", restart::dir_name(active))
             } else {
@@ -162,6 +223,43 @@ fn stop_sim(sim: &Simulation, sched: &Scheduler, name: &str, force: bool) -> Res
                 "{} ran in the foreground, and nothing of its run holds its lock: taken as ended",
                 restart::dir_name(active)
             );
+        } else if let Some(job) = r.meta.scheduler_job(sched)
+            && let Some(status) = batch_status(sched, job)?
+        {
+            match status {
+                // Listed in a state no pattern reads: a stop that fails is an
+                // error, nothing recorded, unless the scheduler says it does
+                // not know the job (`stop_judged`); then it is over, unless
+                // something of its run still holds the restart's lock.
+                JobStatus::Error => {
+                    let what = crate::scheduler::unread_state(&format!("job {}", r.meta.job_id));
+                    match sched.stop_judged(job, StopCase::Unread)? {
+                        EndedStop::Sent => println!(
+                            "{}; asked the scheduler to stop it (if it had not ended already)",
+                            sentence(what)
+                        ),
+                        EndedStop::NotKnown(said) if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? => {
+                            println!(
+                                "{}, and the scheduler says it does not know it ({said}), but the restart's \
+                                 running.lock is held: nothing recorded. Once the run lets go of it (a lock left \
+                                 by a run that ended expires within {} minutes), run `cactup sim stop -f {name}` \
+                                 again.",
+                                sentence(what),
+                                crate::lock::LOCK_STALE_SECS / 60
+                            );
+                            return Ok(());
+                        }
+                        EndedStop::NotKnown(said) => println!(
+                            "{}, and the scheduler says it does not know it ({said}); nothing of the run holds \
+                             its lock, so cactup takes it as ended",
+                            sentence(what)
+                        ),
+                    }
+                }
+                // Not known to a scheduler that tells a job it does not know
+                // from a failed query: nothing to stop.
+                _ => println!("The scheduler does not know job {}; nothing to stop", r.meta.job_id),
+            }
         } else if let Some(job) = r.meta.scheduler_job(sched) {
             match sched.stop(job)? {
                 Stopped::Sent => println!("Stopped job {} via the scheduler", r.meta.job_id.bold()),
@@ -246,10 +344,10 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
         }
     };
     let stopped = match &answer {
-        Some(AfterEnd::Listed(_)) => stop_it(&format!(
-            "Asked the scheduler to stop job {}, still listed after {dir} ended (queued again, or \
-             leaving the queue)",
-            job_id.bold()
+        Some(AfterEnd::Listed(status)) => stop_it(&format!(
+            "Asked the scheduler to stop job {}, still listed after {dir} ended ({})",
+            job_id.bold(),
+            crate::scheduler::listed_state_words(*status)
         ), StopCase::Listed)?,
         Some(AfterEnd::Unanswered(failed)) => stop_it(&format!(
             "Could not ask the scheduler about job {}, of {dir}, which has ended; asked it to stop the \
@@ -466,6 +564,32 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
                 sched.stop_judged(l.job.job(), StopCase::Listed)?;
                 continue;
             }
+            // Listed in a state no pattern reads before its end: a stop that
+            // fails is an error, nothing deleted, unless the scheduler says
+            // it does not know the job (`stop_judged`); then it is over,
+            // unless something of its run still holds the restart's lock.
+            if l.status == JobStatus::Error {
+                if let EndedStop::NotKnown(said) = sched.stop_judged(l.job.job(), StopCase::Unread)? {
+                    let r = Restart::load(&sim.dir, l.id)?;
+                    if crate::lock::LinkLock::is_held_live(&r.running_lock_path())? {
+                        bail!(
+                            "{}, says it does not know it ({said}), and restart {}'s running.lock is held: \
+                             delete the simulation once the run has let go of the lock (a lock left by a run \
+                             that ended expires within {} minutes)",
+                            crate::scheduler::unread_state(&format!("job {}", l.job.id)),
+                            restart::dir_name(l.id),
+                            crate::lock::LOCK_STALE_SECS / 60
+                        );
+                    }
+                    println!(
+                        "{}, and the scheduler says it does not know it ({said}); nothing of restart {}'s run \
+                         holds its lock, so cactup takes it as ended",
+                        sentence(crate::scheduler::unread_state(&format!("job {}", l.job.id))),
+                        restart::dir_name(l.id)
+                    );
+                }
+                continue;
+            }
             // A pid cactup cannot vouch for (§10) says itself that nothing ran.
             sched.stop(l.job.job()).map_err(|e| match e.downcast_ref::<UnverifiedPid>() {
                 Some(_) => e,
@@ -678,14 +802,16 @@ fn chained_after(sim: &Simulation, sched: &Scheduler, id: u32) -> Res<Vec<String
 struct LiveJob {
     id: u32,
     job: JobRecord,
-    /// Its run recorded its end: a job the scheduler still lists (queued
-    /// again, or leaving the queue).
+    /// Its run recorded its end: a job the scheduler still lists in a state
+    /// its patterns read (queued again, or leaving the queue). Before the
+    /// end, a job listed in any state, one no pattern reads too (`Error`:
+    /// suspended, or over before its run recorded it).
     ended: bool,
     /// The state the scheduler lists it in.
     status: JobStatus,
     /// An older record's pid with a process here (§10): never stopped.
     unverified: bool,
-    /// A pid that does not lead its own process group (§10): never stopped.
+    /// A pid whose process group is not its own (§10): never stopped.
     shared_group: bool,
 }
 
@@ -694,7 +820,10 @@ struct LiveJob {
 /// per-job queries) under a progress line. Of the restarts whose run
 /// recorded its end only the newest is asked about, within the requeue
 /// window ([`asks_after_end`]), and is live then while the scheduler lists
-/// it in any state (`is_live`: queued again, or leaving the queue). A job whose query failed is asked once more on its own:
+/// it in a state its patterns read (`is_live`: queued again, or leaving the
+/// queue); before its end a job is live listed in any state, one no pattern
+/// reads too (suspended, or over before its run recorded it). A job whose
+/// query failed is asked once more on its own:
 /// before its run's end that is an error, and `delete` refuses with it;
 /// after, it is taken as ended. Whatever `-f` says, `delete` is refused
 /// while a restart runs where this host can neither ask about nor stop it:
@@ -788,6 +917,11 @@ fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String
                 restart::dir_name(l.id),
                 l.job.id,
                 crate::scheduler::listed_state_words(l.status)
+            ),
+            false if l.status == JobStatus::Error => format!(
+                "{} = job {}, listed in a state cactup does not read (suspended, exiting, or ended)",
+                restart::dir_name(l.id),
+                l.job.id
             ),
             false => format!("{} = job {}", restart::dir_name(l.id), l.job.id),
         })
@@ -1543,6 +1677,15 @@ mod tests {
         assert!(err.contains("the status query for job 4242"), "{err}");
         let (state, _, _) = sim_state_now(&sim, &failing);
         assert_eq!(state, DisplayState::Unknown);
+        // Not ended, the job listed in a state no pattern reads (Slurm's
+        // `S`, suspended): live, and the refusal says the state is unread.
+        let suspended = fake("get-status = \"echo '@JOB_ID@ S '\"\nstatus-pattern = \"^@JOB_ID@ \"\nqueued-pattern = \" PD \"");
+        let suspended = Scheduler::new(&suspended);
+        let live = live_jobs(&sim, &suspended).unwrap();
+        assert_eq!(live.iter().map(|l| (l.id, l.status)).collect::<Vec<_>>(), [(0, JobStatus::Error)]);
+        let refused = live_jobs_refusal("requeued", &live, Some(0));
+        assert!(refused.contains("job 4242, listed in a state cactup does not read"), "{refused}");
+        assert_eq!(sim_state_now(&sim, &suspended).0, DisplayState::Error);
 
         // Ended, and the scheduler still lists the job in a state its
         // patterns read: leaving the queue (`CG`, `TO`) or starting again
@@ -2177,7 +2320,7 @@ mod tests {
             for force in [false, true] {
                 let err = stop_sim(&sim, &sched, name, force).unwrap_err().to_string();
                 assert!(err.contains("Socket timed out"), "{name} -f={force}: {err}");
-                assert!(err.contains(if name == "listed" { "the stop command for job 1003 failed" } else { "may not have been reached" }), "{err}");
+                assert!(err.contains(if name == "listed" { "the stop command for job 1003 failed" } else { "failed too: " }), "{err}");
             }
             // (`sim run -f` stops only a job the scheduler could not be asked
             // about; beside a listed one it refuses, `-f` too.)
@@ -2251,6 +2394,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let entry = fake_sim(root, "queued", "200", true, None, false);
+        let sim = Simulation::open("queued", &entry.dir).unwrap();
         let r = Restart::load(&entry.dir, 0).unwrap();
 
         // Still in the queue: the trigger has not been acted on.
@@ -2264,8 +2408,22 @@ mod tests {
         let gone = Scheduler::new(&gone_meta);
         assert!(!run_is_live(&gone, &r).unwrap());
         let waited = std::time::Instant::now();
-        assert!(await_run_exit(&gone, &r).unwrap());
+        assert!(await_run_exit(&sim, &gone, &r).unwrap());
         assert!(waited.elapsed() < std::time::Duration::from_secs(GRACEFUL_WAIT_SECS));
+
+        // The run acted on the trigger and recorded its end while the wait
+        // ran (the restart read before it says otherwise), its job listed
+        // as over (`CD`, a state no pattern reads): the ended job, gone.
+        let ended_meta = meta("echo '@JOB_ID@ CD'");
+        let ended = Scheduler::new(&ended_meta);
+        assert!(run_is_live(&ended, &r).unwrap(), "before its end, an unread state is live");
+        let path = restart::restart_dir(&sim.dir, 0).join(".cactup/restart.toml");
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{text}terminated = true\nfinished = \"{}\"\n", chrono::Utc::now().to_rfc3339())).unwrap();
+        let waited = std::time::Instant::now();
+        assert!(await_run_exit(&sim, &ended, &r).unwrap());
+        assert!(waited.elapsed() < std::time::Duration::from_secs(GRACEFUL_WAIT_SECS));
+        fs::write(&path, text).unwrap();
 
         // A foreground run has no job: its liveness marker decides instead.
         let fg = fake_sim(root, "foreground", NO_JOB_ID, true, None, false);

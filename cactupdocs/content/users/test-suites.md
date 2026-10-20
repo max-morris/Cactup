@@ -199,8 +199,9 @@ machine's `unknown-job-pattern`) does `--force` delete the run, unless
 its lock is held: it is running, or it ended without letting go of the
 lock, which then expires within 15 minutes. A job the
 scheduler lists in a state cactup does not know (suspended, exiting, or
-ended) is not deleted without `--force`; `test stop` asks the scheduler
-to stop it, and once it is over `test delete` goes ahead. One whose lock is held while the scheduler does not list its job
+ended) is not deleted without `--force`, and a new `test run` or `test
+submit` refuses beside it (`--force` cancels it first); `test stop` asks
+the scheduler to stop it, and once it is over `test delete` goes ahead. One whose lock is held while the scheduler does not list its job
 (it runs on another host, it ended without letting go of its lock, which
 expires within 15 minutes, or, on a machine that cannot tell, the scheduler
 could not be asked) is left as it is, `--force` too.
