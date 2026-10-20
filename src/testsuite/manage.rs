@@ -3,7 +3,9 @@
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::scheduler::{AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, StopCase, Stopped, UnverifiedPid};
+use crate::scheduler::{
+    sentence, AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, StopCase, Stopped, UnverifiedPid,
+};
 use crate::sim::cache;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
@@ -360,9 +362,12 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                     job_id.bold()
                 ),
                 EndedStop::Sent => println!(
-                    "Asked the scheduler to stop test job {}, still listed after the run ended (queued \
-                     again, or leaving the queue)",
-                    job_id.bold()
+                    "Asked the scheduler to stop test job {}, still listed after the run ended ({})",
+                    job_id.bold(),
+                    match &state {
+                        Job::Listed(status) => crate::scheduler::listed_state_words(*status),
+                        _ => "queued again, or leaving the queue",
+                    }
                 ),
                 // After a failed query, a stop the scheduler refuses as a job
                 // it does not know (by `unknown-job-pattern`) is taken as the
@@ -511,21 +516,9 @@ fn send_stop(sched: &Scheduler, job: JobRef<'_>) -> Res<Stopped> {
     })
 }
 
-/// `text` with its first letter capitalized, for a line of its own.
-fn sentence(text: String) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => text,
-    }
-}
-
 /// What `stop` and `delete` say of a [`Job::Unread`] job.
 fn unread(job_id: &str) -> String {
-    format!(
-        "the scheduler lists test job {job_id} in a state cactup does not read (suspended, exiting, or \
-         ended)"
-    )
+    crate::scheduler::unread_state(&format!("test job {job_id}"))
 }
 
 /// Refuse to delete `run` while it runs, unless `force` and it is a job the

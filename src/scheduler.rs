@@ -245,9 +245,10 @@ impl std::fmt::Display for UnverifiedPid {
 
 impl std::error::Error for UnverifiedPid {}
 
-/// [`Scheduler::stop`]'s refusal of a pid that does not lead its own
-/// process group: the machine's stop command (`pkill -g`, or `kill` of a
-/// process whose siblings carry on) would reach, or miss, other processes.
+/// [`Scheduler::stop`]'s refusal of a pid whose process group is not its
+/// own (it holds processes cactup cannot tell are the job's): the
+/// machine's stop command (`pkill -g`, or `kill` of a process whose
+/// siblings carry on) would reach, or miss, other processes.
 #[derive(Debug)]
 pub struct SharedGroup(pub String);
 
@@ -299,6 +300,12 @@ enum PidCheck {
     /// here that may be the job: asked about, never stopped.
     Unverified,
 }
+
+/// The end of a [`FailedQuery`]'s text where the query printed something:
+/// what to do if the scheduler's word for a job it does not know is there.
+const QUERY_HINT: &str = "If the scheduler's message for a job it does not know is among these lines, \
+                          unknown-job-pattern does not match it: fix the pattern in the machine's \
+                          [scheduler] table.";
 
 /// How long after a record's end its job is still asked about where a batch
 /// scheduler may requeue it ([`Scheduler::asks_after_end`]).
@@ -411,18 +418,40 @@ const OLD_RECORD_SLACK: std::time::Duration = std::time::Duration::from_secs(60)
 
 /// Whether a job with `status` is live, for a record whose run has
 /// (`ended`) or has not recorded its end: listed in a state the machine's
-/// patterns read (running, queued, held). After the end (asked only within
-/// the requeue window) such a job is "still listed": either leaving the
-/// queue (Slurm's `CG`, a timeout's `TO`, read as running) or starting
-/// again (queued, held, or `CF` and `R` before its run clears the record's
-/// end), which the patterns cannot tell apart, and each command takes the
-/// safe reading for what it does with it (§10). A state no pattern reads is
-/// not live, before the end (suspended, exiting: the scheduler's) as after
-/// it, where it is the ended job (Torque's completed `C`, Slurm's `CD`,
-/// `F`, `CA`, `OOM`, `NF`): a requeued job always passes through read
-/// states (Slurm `PD`, `CF`, `R`; Torque `Q`, `R`).
-pub fn is_live(status: JobStatus, _ended: bool) -> bool {
-    matches!(status, JobStatus::Queued | JobStatus::Holding | JobStatus::Running)
+/// patterns read (running, queued, held), or, before the end, listed in
+/// any state. After the end (asked only within the requeue window) a job
+/// in a read state is "still listed": either leaving the queue (Slurm's
+/// `CG`, a timeout's `TO`, read as running) or starting again (queued,
+/// held, or `CF` and `R` before its run clears the record's end), which
+/// the patterns cannot tell apart, and each command takes the safe reading
+/// for what it does with it (§10). A state no pattern reads (`Error`) is
+/// the ended job after the end (Torque's completed `C`, Slurm's `CD`, `F`,
+/// `CA`, `OOM`, `NF`: a requeued job always passes through read states,
+/// Slurm `PD`, `CF`, `R`, Torque `Q`, `R`); before it, the job may be
+/// suspended (Slurm's `S`), exiting, or over before its run could record
+/// its end, which cactup cannot tell apart: the job is live, stopped by
+/// [`Scheduler::stop_judged`] with [`StopCase::Unread`].
+pub fn is_live(status: JobStatus, ended: bool) -> bool {
+    match status {
+        JobStatus::Queued | JobStatus::Holding | JobStatus::Running => true,
+        JobStatus::Error => !ended,
+        JobStatus::Unknown => false,
+    }
+}
+
+/// `text` with its first letter capitalized, for a line of its own.
+pub fn sentence(text: String) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
+}
+
+/// What is said of a job listed in a state the machine's patterns do not
+/// read before its run recorded its end (`what`: "test job 42", "job 42").
+pub fn unread_state(what: &str) -> String {
+    format!("the scheduler lists {what} in a state cactup does not read (suspended, exiting, or ended)")
 }
 
 /// Live statuses from [`Scheduler::get_statuses`], looked up by the same
@@ -646,11 +675,7 @@ impl<'m> Scheduler<'m> {
             let unknown_pattern = sched.unknown_job_pattern.as_deref().unwrap_or_default();
             let said = match output.trim() {
                 "" => "It printed nothing.".to_owned(),
-                text => format!(
-                    "It printed:\n{text}\nIf the scheduler's message for a job it does not know is among \
-                     these lines, unknown-job-pattern does not match it: fix the pattern in the \
-                     machine's [scheduler] table."
-                ),
+                text => format!("It printed:\n{text}\n{QUERY_HINT}"),
             };
             return Err(FailedQuery(format!(
                 "the status query for job {job_id}, `{query}`, printed no line matching the machine's \
@@ -777,12 +802,21 @@ impl<'m> Scheduler<'m> {
              [scheduler] table."
         );
         match case {
+            // The query's hint and the stop's are one: said once, after both.
             StopCase::Unanswered(failed) => bail!(
-                "{failed}\nThe stop command for job {} failed too, and the scheduler may not have been \
-                 reached: {said}\n{hint}",
+                "{}\nThe stop command for job {} failed too: {said}\n{hint}",
+                failed.strip_suffix(QUERY_HINT).unwrap_or(failed).trim_end(),
                 job.id
             ),
-            _ => bail!("the stop command for job {} failed: {said}\n{hint}", job.id),
+            // Listed in a state no pattern reads: a scheduler may refuse to
+            // stop a job it lists as over (Torque's `qdel` of a `C` job)
+            // until it lets the job go.
+            _ => bail!(
+                "the stop command for job {} failed: {said}\nThe scheduler lists the job in a state the \
+                 machine's patterns do not read: if the job has ended (Torque lists a completed job as `C` \
+                 for a while), try again once the scheduler no longer lists it. {hint}",
+                job.id
+            ),
         }
     }
 
@@ -1041,7 +1075,7 @@ impl<'m> Scheduler<'m> {
     /// ([`Stopped::Gone`]) or is another host's ([`Stopped::Elsewhere`]); an
     /// older record's pid with a process here is refused ([`UnverifiedPid`]:
     /// that process may be another one), and so is the job's own process
-    /// where it does not lead its process group ([`SharedGroup`]: the stop
+    /// where its process group is not its own ([`SharedGroup`]: the stop
     /// command would reach its group's other processes).
     pub fn stop(&self, job: JobRef<'_>) -> Res<Stopped> {
         match self.pid_check(job) {
@@ -1743,7 +1777,7 @@ mod tests {
         };
         let unknown = with_stop("echo 'qdel: Unknown Job Id 4242.qb2' >&2; exit 153");
         let sched = Scheduler::new(&unknown);
-        let failed = "the status query for job 4242 failed. It printed:\nqstat: cannot connect to server qb2";
+        let failed = &format!("the status query for job 4242 failed. It printed:\nqstat: cannot connect to server qb2\n{QUERY_HINT}");
         for case in [StopCase::Unanswered(failed), StopCase::Unread] {
             match sched.stop_judged(JobRef::bare("4242"), case).unwrap() {
                 EndedStop::NotKnown(said) => assert_eq!(said, "qdel: Unknown Job Id 4242.qb2 (exit status: 153)"),
@@ -1762,12 +1796,13 @@ mod tests {
             let sched = Scheduler::new(&m);
             // After a failed query: both outputs shown, with the hint.
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unanswered(failed)).unwrap_err().to_string();
-            assert!(err.contains("may not have been reached") && err.contains(transient), "{err}");
+            assert!(err.contains("failed too: ") && err.contains(transient), "{err}");
             assert!(err.contains("qstat: cannot connect to server qb2"), "the failed query's output: {err}");
             assert!(err.contains("unknown-job-pattern ('Unknown Job Id') does not match it"), "{err}");
+            assert_eq!(err.matches("If the scheduler's message").count(), 1, "one hint: {err}");
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap_err().to_string();
             assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
-            assert!(err.contains("does not match it"), "{err}");
+            assert!(err.contains("does not match it") && err.contains("once the scheduler no longer lists it"), "{err}");
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
             assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
         }
@@ -1813,13 +1848,14 @@ mod tests {
     /// A job listed in a state the patterns read is live, before a record's
     /// end and after it (there "still listed": queued again, leaving the
     /// queue as `CG`, `TO`, or starting again as `CF`, `R`, which cactup
-    /// cannot tell apart); a state no pattern reads is not (after the end,
-    /// the ended job: Torque's `C`, Slurm's `CD`).
+    /// cannot tell apart). One in a state no pattern reads is live before
+    /// the end (suspended, as Slurm's `S`, or over before its run recorded
+    /// it) and not after it (the ended job: Torque's `C`, Slurm's `CD`).
     #[test]
-    fn after_the_end_a_job_listed_in_any_state_is_live() {
+    fn a_job_listed_is_live_but_after_the_end_only_in_a_read_state() {
         use JobStatus::*;
         for (status, before, after) in
-            [(Running, true, true), (Queued, true, true), (Holding, true, true), (Error, false, false), (Unknown, false, false)]
+            [(Running, true, true), (Queued, true, true), (Holding, true, true), (Error, true, false), (Unknown, false, false)]
         {
             assert_eq!((is_live(status, false), is_live(status, true)), (before, after), "{status:?}");
         }

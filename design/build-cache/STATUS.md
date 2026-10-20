@@ -4115,6 +4115,60 @@ failed, nothing recorded; once `qstat` no longer knew it, `test stop`
 said it is not in the queue and `test delete` went ahead. The earlier
 scenarios as before.
 
+### Liveness follow-ups (after PR #9)
+
+Branch `fix/liveness-followups` on master `02c2b8d` (PR #9 merged), for
+round 11's notes and the known cases A1, A3, A4:
+
+- **A1, a job listed in a state no pattern reads before its end** (Slurm
+  `S`, Torque `E`, or over before its run recorded it) is live for sims
+  and builds as it was for test runs (`is_live(Error, false)` is now
+  true): `sim delete` refuses it, naming the state, and `-f` stops it by
+  `stop_judged(StopCase::Unread)` (refused as not known: deleted unless
+  the restart's lock is held); a graceful `sim stop` writes `TERMINATE`
+  and returns at once, saying `-f` stops it; `build stop` stops it by the
+  same rule and records the outcome (master said "not in the queue"); a
+  new build refuses (`-f` stops it); `build list` shows ERROR (RUNNING
+  while the lock is held) and `build prune` keeps it. `test run`/`test
+  submit` beside such a job now refuse, `-f` stopping it by the same rule
+  (reviewer B's note: master replaced the job id, losing the job). `sim
+  submit` chains behind it, `sim run` refuses, the reaper keeps it, as
+  before.
+- **A3:** `sim submit` beside an active restart that has not recorded its
+  end says that ("has not recorded its end (job N); chaining"), not
+  "still live", which the reaper's throttles may not have asked.
+- **A4 and the hints:** `stop_judged`'s error after a failed query says
+  "the stop command failed too" (no "may not have been reached"), with
+  the `unknown-job-pattern` hint once, after both outputs (the query's
+  own hint, `QUERY_HINT`, is cut from its text there); for a job listed
+  in an unread state it adds to try again once the scheduler no longer
+  lists the job (Torque's `C`).
+- **Wording:** the stop messages after the end name the state read
+  (`listed_state_words`); "leads its own process group" corrected to "a
+  group of its own" in `GENERATIONS.md`, the generic machine's comment,
+  the spec and the doc comments; `live_jobs`' doc; `sentence` moved to
+  `scheduler.rs` beside `unread_state`, shared.
+- **Reviewer B's `setsid` note:** with `setsid` in the workstation
+  machines' `blocking-submit`, Ctrl-C during `build submit --block` ends
+  only the wait, never the job, as the user docs already said; the spec
+  (§7.9) now says so.
+
+Checked with real binaries, a fake Slurm 24.11 (the round 11 harness):
+a build job listed `S` before its outcome: `build list` ERROR, `build`
+and `build submit` refused naming the state, with `scancel` down `build
+-f` and `build stop` failed with the new hint and `build.toml`
+unchanged, with it up `build stop` canceled it (`CA`) and recorded the
+outcome. A sim's job `S`: `sim list` ERROR, `sim delete` refused naming
+the state, `sim run` refused, a graceful `sim stop` with `TERMINATE`
+present wrote it and returned, the restart left active; `sim delete -f`
+with `scancel` down failed, the sim kept; `sim submit` chained ("has not
+recorded its end"); `sim delete -f` with `scancel` up canceled and
+deleted. A test run's job `S`: `test submit` and `test run` refused,
+`-f` with `scancel` down failed (`test.toml` unchanged), with it up
+canceled the old job and submitted. A sim's job `PD` after its end:
+`sim stop` said "(queued again)"; with `squeue` and `scancel` down the
+error carried the hint once.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -4335,9 +4389,9 @@ The cache is on master with `cache doctor` and on by default (above).
 MDB generation 3 is on master (PR #7), and the docs tidy-up after it
 (PR #8). The test-run liveness work on `feature/test-run-liveness`, with
 decision 35's scheduler behavior (above), passed its gate in eleven
-rounds and is PR #9, rebased onto PR #8. Then round 11's non-blocking
-notes and the known cases (above), M4b (Cray), M5b (the whole-file
-cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
+rounds and was merged as PR #9. The follow-ups for round 11's notes and
+the known cases are on `fix/liveness-followups` (above), at the review
+gate. Then M4b (Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
 is shelved (Max, 2026-10-16).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.

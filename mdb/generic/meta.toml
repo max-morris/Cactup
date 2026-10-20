@@ -32,8 +32,9 @@ make = "make -j@MAKEJOBS@"
 # status/stop. @STDOUT_FILE@/@STDERR_FILE@ default to @RUNDIR@/@SIMULATION_NAME@.{out,err}
 # unless -o/-e are given (design §8.5).
 # `setsid` starts each job in a process group of its own, which `stop` kills
-# whole: cactup stops a job only where its process leads its own group (a
-# job sharing the submitting shell's group would take its siblings with it).
+# whole: cactup stops a job only where its group holds nothing but the job
+# and the processes it started (a job sharing the submitting shell's group
+# would take its siblings with it).
 submit          = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
 # The pid is printed before the wait, so the job id parses immediately.
 blocking-submit = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"

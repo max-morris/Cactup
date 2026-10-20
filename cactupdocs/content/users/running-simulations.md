@@ -404,6 +404,17 @@ with the scheduler's output instead of taking the job for ended, and `sim
 list` shows the simulation as `UNKNOWN`; try again once the scheduler
 answers.
 
+A job the scheduler lists in a state cactup does not read before its
+restart has finished (suspended, as Slurm's `S`; exiting; or ended before
+its run could record it, after a node failure, say) is shown `ERROR` and
+counts as live: `sim delete` refuses without `--force` (which cancels
+it), `sim submit` chains behind it, `sim run` refuses beside it, and `sim
+stop` writes `TERMINATE` but does not wait (the job reads it only if it
+runs again) and says that `sim stop --force` cancels it now. If `sim
+delete --force`'s cancel fails, it is an error and nothing is deleted,
+unless the scheduler says it does not know the job (by the machine's
+`unknown-job-pattern`).
+
 On a batch system, the job of a simulation's newest restart is looked at
 for 14 days after the restart finished (only on the machine the simulation
 was made for: two clusters sharing a home directory do not share job
