@@ -708,8 +708,10 @@ fn watch_build(machine: &Machine, config_dir: &Path, attempt_id: u32, mode: Watc
         if last_job_check.elapsed() >= FOLLOW_JOB_CHECK_INTERVAL {
             last_job_check = std::time::Instant::now();
             // A query that failed is no sign the job died: keep waiting.
+            // Listed in any state, one no pattern reads too (suspended, or
+            // over before it could record its outcome): not gone yet.
             let live = match sched.get_status(fresh.meta.job()) {
-                Ok(status) => matches!(status, JobStatus::Running | JobStatus::Queued | JobStatus::Holding),
+                Ok(status) => crate::scheduler::is_live(status, false),
                 Err(_) => true,
             } || LinkLock::is_held_live(&fresh.running_lock_path()).unwrap_or(false);
             if !live {
@@ -899,6 +901,12 @@ pub fn in_flight_build(config_dir: &Path, name: &str, machine: Option<&Machine>)
             BuildDisplayState::Running => "RUNNING",
             BuildDisplayState::Queued => "QUEUED",
             BuildDisplayState::Holding => "HOLDING",
+            BuildDisplayState::Error => {
+                return Some(format!(
+                    "a build of config \"{name}\" is listed by the scheduler in a state cactup does not read \
+                     (suspended, exiting, or ended; job {job_id}{submitted_suffix})"
+                ));
+            }
             _ => return None,
         };
         return Some(format!(

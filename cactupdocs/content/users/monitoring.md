@@ -309,11 +309,14 @@ finished). An unfinished build whose status query fails is shown
 `UNKNOWN`, `build stop` refuses with the scheduler's output, and `build
 prune` keeps it. One whose job the scheduler lists in a state cactup does
 not read (suspended, as Slurm's `S`, or ended before the build could
-record its result) is shown `ERROR` and counts as live: `build stop`
-cancels it and records the result, a new build of that config refuses
-(`-f` cancels it first), and `build prune` keeps it. If such a cancel
-fails, it is an error and nothing is recorded, unless the scheduler says
-it does not know the job (by the machine's `unknown-job-pattern`).
+record its result) counts as live: `build stop` cancels it and records
+the result, a new build of that config refuses (`-f` cancels it first),
+`build prune` keeps it, and `build list` shows it `ERROR` (`build list`
+asks Slurm for all your jobs at once, and that list leaves out jobs that
+have ended, so a build job that ended this way shows `STALE` there). If
+such a cancel fails, it is an error and nothing is recorded, unless the
+scheduler says it does not know the job (by the machine's
+`unknown-job-pattern`).
 
 Old build attempts accumulate under `.cactup-builds/` inside the config
 directory; prune them, keeping only the most recent N (never automatic —

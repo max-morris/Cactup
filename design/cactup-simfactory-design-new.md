@@ -4430,12 +4430,24 @@ and start time beside it), so no caller can skip the checks.
   stop it with `-f`; `test stop` and `build stop` stop it, recording the
   end; each such stop by the one rule below (`StopCase::Unread`), a job
   the scheduler then says it does not know taken as ended unless the
-  run's `running.lock` is held. `sim submit` chains behind it (the active
-  restart has not recorded its end), `sim run` refuses beside it, the
-  reaper never reaps it, and a graceful `sim stop` writes `TERMINATE`
-  without waiting (the job reads it only if it runs again), saying `sim
-  stop -f` stops it now. Displays show ERROR (a build attempt whose lock
-  says it runs, RUNNING), and `build prune` keeps the attempt. A failed
+  run's `running.lock` is held; `sim stop -f` too (and, for a job a
+  scheduler with `unknown-job-pattern` says it does not know, sends no
+  stop and finishes the restart). `sim submit` chains behind it (the
+  active restart has not recorded its end), `sim run` refuses beside it,
+  the reaper never reaps it, and a graceful `sim stop` writes `TERMINATE`
+  without waiting, at once or once the wait finds the job so (its
+  restart read afresh at each poll: a run that acts on the trigger
+  records its end, and its job, listed `CD` or `C` then, is the ended
+  job), saying `sim stop -f` asks the scheduler to stop it. `build
+  follow`/`--block` keep waiting, and `sim create` counts the build in
+  flight. Displays show ERROR (a build attempt whose lock says it runs,
+  RUNNING), and `build prune` keeps the attempt. The paths that ask
+  through the machine's `get-status-many` listing (`sim list`, `sim
+  delete`, `test list`, `build list`) see only what it lists: Slurm's
+  `squeue -u` lists suspended jobs but not ended ones, so a job over
+  before its run recorded its end reads there as gone (FINISHED or
+  ACTIVE, STALE; `sim delete` goes ahead), while the paths that ask
+  about the one job (`squeue -j`) see it listed. A failed
   query after the end is taken as ended only for what reads or removes
   records (the displays, which show the recorded end; `sim delete` and
   `test delete`, with a one-line note); a command takes the safe reading for what it

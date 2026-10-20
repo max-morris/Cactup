@@ -406,14 +406,18 @@ answers.
 
 A job the scheduler lists in a state cactup does not read before its
 restart has finished (suspended, as Slurm's `S`; exiting; or ended before
-its run could record it, after a node failure, say) is shown `ERROR` and
-counts as live: `sim delete` refuses without `--force` (which cancels
-it), `sim submit` chains behind it, `sim run` refuses beside it, and `sim
-stop` writes `TERMINATE` but does not wait (the job reads it only if it
-runs again) and says that `sim stop --force` cancels it now. If `sim
-delete --force`'s cancel fails, it is an error and nothing is deleted,
-unless the scheduler says it does not know the job (by the machine's
-`unknown-job-pattern`).
+its run could record it, after a node failure, say) counts as live: `sim
+submit` chains behind it, `sim run` refuses beside it, `sim stop` writes
+`TERMINATE` but does not wait for it (the job is not acting on it now)
+and says that `sim stop --force` asks the scheduler to cancel it, and
+`sim delete` refuses it without `--force` (which cancels it). `sim list`
+shows it `ERROR`. `sim list` and `sim delete` ask Slurm for all your jobs
+at once, and that list leaves out jobs that have ended, so there a job
+that ended this way reads as gone, while a suspended one is listed. A
+cancel that fails is an error and records or deletes nothing, unless the
+scheduler says it does not know the job (by the machine's
+`unknown-job-pattern`), which is then taken as ended; Torque refuses to
+cancel a job it lists as completed until it lets the job go.
 
 On a batch system, the job of a simulation's newest restart is looked at
 for 14 days after the restart finished (only on the machine the simulation

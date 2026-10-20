@@ -4169,6 +4169,41 @@ canceled the old job and submitted. A sim's job `PD` after its end:
 `sim stop` said "(queued again)"; with `squeue` and `scancel` down the
 error carried the hint once.
 
+Round 1 (`e557d7c`): both reviewers blocked on the same two findings.
+(1) A graceful `sim stop` whose run acts on the trigger within the wait
+reported "still in the queue" and left the restart active: the wait
+reused the restart read before it, so once the run recorded its end and
+the job was listed `CD` (Torque `E`, `C`), `is_live(Error, false)` kept
+it live. Fixed: each poll reads the restart afresh (`await_run_exit`),
+and a wait that ends with the job listed in an unread state says so
+(`listed_unread`, `left_unread`, which also logs it). (2) For a job
+Torque lists `C` before its run's end, the early return promised that
+`sim stop -f` stops it, and `-f` failed with a bare `qdel` error: `sim
+stop -f` now asks the scheduler first on a batch machine
+(`batch_status`) and stops an unread-state job by `stop_judged(Unread)`,
+with its hint and the lock check `sim delete -f` has; a job a scheduler
+with `unknown-job-pattern` says it does not know gets no stop ("does not
+know job N; nothing to stop", master sent one that Torque's `qdel`
+refused); the advice says `-f` "asks the scheduler to stop it". Torque's
+`C` before the end now holds a sim's stop and delete until Torque lets
+the job go, where master's graceful stop finished the restart: the cost
+round 10 accepted for test runs, now for sims and builds too (unverified
+on a real Torque). Non-blocking, done: the docs and spec said such a job
+shows ERROR and refuses `sim delete`, but the `get-status-many` paths
+(`sim list`, `sim delete`, `test list`, `build list`) see only what
+`squeue -u` lists, suspended jobs and not ended ones: said so; the hint
+names no pattern where the machine sets none, and says to try again once
+the scheduler answers; `build follow`/`--block` keep waiting on such a
+job and `sim create` counts the build in flight (`in_flight_build`); a
+test doc comment still said "lead". Checked with the reviewers' own
+scripts: the graceful stop ending the run 3 s in said "output-0000
+stopped" within a second; on the fake Torque, `C` before the end: `sim
+stop` left the restart active with the new advice, `sim stop -f` and
+`sim delete -f` failed with the hint, and once `qstat` no longer knew
+the job, `sim stop -f` said there is nothing to stop and `sim delete`
+went ahead; Slurm `S`: `sim stop -f` canceled it (`CA`) and finished the
+restart.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on

@@ -795,16 +795,19 @@ impl<'m> Scheduler<'m> {
         if self.unknown_job(&format!("{e:#}"), job.id)? == Some(true) {
             return Ok(EndedStop::NotKnown(said));
         }
-        let pattern = self.meta.scheduler.unknown_job_pattern.as_deref().unwrap_or_default();
-        let hint = format!(
-            "If the scheduler's message for a job it does not know is among these lines, \
-             unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the machine's \
-             [scheduler] table."
-        );
+        // Where no pattern is set, there is none to fix.
+        let hint = match self.meta.scheduler.unknown_job_pattern.as_deref() {
+            Some(pattern) => format!(
+                "\nIf the scheduler's message for a job it does not know is among these lines, \
+                 unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the machine's \
+                 [scheduler] table."
+            ),
+            None => String::new(),
+        };
         match case {
             // The query's hint and the stop's are one: said once, after both.
             StopCase::Unanswered(failed) => bail!(
-                "{}\nThe stop command for job {} failed too: {said}\n{hint}",
+                "{}\nThe stop command for job {} failed too: {said}{hint}",
                 failed.strip_suffix(QUERY_HINT).unwrap_or(failed).trim_end(),
                 job.id
             ),
@@ -813,8 +816,8 @@ impl<'m> Scheduler<'m> {
             // until it lets the job go.
             _ => bail!(
                 "the stop command for job {} failed: {said}\nThe scheduler lists the job in a state the \
-                 machine's patterns do not read: if the job has ended (Torque lists a completed job as `C` \
-                 for a while), try again once the scheduler no longer lists it. {hint}",
+                 machine's patterns do not read: try again once the scheduler answers, or, if the job has \
+                 ended (Torque lists a completed job as `C` for a while), once it no longer lists it.{hint}",
                 job.id
             ),
         }
@@ -1571,8 +1574,8 @@ mod tests {
         assert_eq!((marks(dir.path(), "asked"), marks(dir.path(), "stopped")), (2, 1));
     }
 
-    /// The job's own process that does not lead its own process group (a
-    /// submit without `setsid`, or a foreground run started from a script):
+    /// The job's own process whose process group is not its own (a submit
+    /// without `setsid`, or a foreground run started from a script):
     /// the stop command (`pkill -g`) would reach the group's other
     /// processes, so nothing is run and the refusal names the pid.
     #[test]
@@ -1802,12 +1805,22 @@ mod tests {
             assert_eq!(err.matches("If the scheduler's message").count(), 1, "one hint: {err}");
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap_err().to_string();
             assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
-            assert!(err.contains("does not match it") && err.contains("once the scheduler no longer lists it"), "{err}");
+            assert!(err.contains("does not match it") && err.contains("once it no longer lists it"), "{err}");
             let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
             assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
         }
         let taking = with_stop("true");
         assert_eq!(Scheduler::new(&taking).stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap(), EndedStop::Sent);
+        // A machine with no `unknown-job-pattern`: no pattern to fix is named.
+        let unpatterned = meta(
+            r#"
+            stop = "echo 'qdel: Invalid state for job - COMPLETE 4242.qb' >&2; exit 15"
+            status-pattern = "^@JOB_ID@ "
+            "#,
+        );
+        let err = Scheduler::new(&unpatterned).stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap_err().to_string();
+        assert!(err.contains("Invalid state") && err.contains("once it no longer lists it"), "{err}");
+        assert!(!err.contains("unknown-job-pattern"), "{err}");
     }
 
     /// A job an older cactup recorded (no host, no start time) on a
