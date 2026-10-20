@@ -3,7 +3,7 @@
 
 use crate::commands::Ctx;
 use crate::installation::Installation;
-use crate::scheduler::{AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, Stopped, UnverifiedPid};
+use crate::scheduler::{AfterEnd, EndedStop, JobRef, JobStatus, Scheduler, SharedGroup, StopCase, Stopped, UnverifiedPid};
 use crate::sim::cache;
 use crate::testsuite::{active_results_id, list_results_ids, results_name, TestRun};
 use crate::Res;
@@ -306,38 +306,30 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
     let job_id = job.id.as_str();
     match job_state(sched, run, job.job())? {
         Job::Unread => {
-            if let Err(e) = send_stop(sched, job.job()) {
-                // A stop command Ctrl-C ended is no refusal (§2.4), and
-                // neither is a pid cactup cannot vouch for (§10).
-                if gix::interrupt::is_triggered() {
-                    bail!("interrupted");
-                }
-                if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
-                    return Err(e);
-                }
-                let refused = refusal(&e);
+            // A failed stop is an error, nothing recorded, unless the
+            // scheduler says it does not know the job (`stop_judged`).
+            if let EndedStop::NotKnown(said) = sched.stop_judged(job.job(), StopCase::Unread)? {
                 if run.lock_live()? {
                     println!(
-                        "{}, and would not stop it ({refused}), but the run's running.lock is held: nothing \
-                         recorded. Once the run lets go of it (a lock left by a run that ended expires \
-                         within {} minutes), run `cactup test stop {name}` again.",
+                        "{}, and the scheduler says it does not know it ({said}), but the run's \
+                         running.lock is held: nothing recorded. Once the run lets go of it (a lock left by \
+                         a run that ended expires within {} minutes), run `cactup test stop {name}` again.",
                         sentence(unread(job_id)),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
                     return Ok(());
                 }
-                // Not stopped, and nothing of the run holds its lock:
-                // over (Torque's `qdel` refuses a completed job), so
-                // `delete` and a new run go ahead.
+                // Not stopped, and nothing of the run holds its lock: over,
+                // so `delete` and a new run go ahead.
                 println!(
-                    "{}, and would not stop it ({refused}); nothing of the run holds its lock, so cactup \
-                     takes it as ended",
+                    "{}, and the scheduler says it does not know it ({said}); nothing of the run holds its \
+                     lock, so cactup takes it as ended",
                     sentence(unread(job_id))
                 );
                 run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
                 run.meta.status = Some("U".to_owned());
                 run.store_meta()?;
-                run.log("test-stop", &format!("job {job_id}: the scheduler would not stop it, and nothing held the lock; taken as ended"));
+                run.log("test-stop", &format!("job {job_id}: the scheduler does not know it, and nothing held the lock; taken as ended"));
                 return Ok(());
             }
             // Taken: stopped, or over before (Slurm's `scancel` takes an
@@ -349,15 +341,20 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
         // Still listed after the run's end (queued again, or leaving the
         // queue): the scheduler is asked to stop it (harmless if it is
         // leaving), and the run's end stands.
-        state @ (Job::Listed | Job::Unanswered) => {
+        state @ (Job::Listed(_) | Job::Unanswered(_)) => {
             // A stop the scheduler took for a job it could not be asked
             // about, or refused saying it does not know the job, settles the
             // job: recorded (`job-stopped`), so the next command takes it as
             // ended rather than ask a query that may keep failing. Any other
             // failure of the stop command is an error, nothing recorded.
-            let mut settled = state == Job::Unanswered;
-            match sched.stop_after_end(job.job(), state == Job::Listed)? {
-                EndedStop::Sent if state == Job::Unanswered => println!(
+            let unanswered = matches!(state, Job::Unanswered(_));
+            let mut settled = unanswered;
+            let case = match &state {
+                Job::Unanswered(failed) => StopCase::Unanswered(failed),
+                _ => StopCase::Listed,
+            };
+            match sched.stop_judged(job.job(), case)? {
+                EndedStop::Sent if unanswered => println!(
                     "Could not ask the scheduler about test job {} (the run has ended); asked it to stop \
                      the job in case it was queued again",
                     job_id.bold()
@@ -428,7 +425,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
 }
 
 /// What the scheduler says of a submitted run's job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Job {
     /// Running, queued or held.
     Live,
@@ -437,8 +434,11 @@ enum Job {
     /// (Slurm's `S`), exiting (Torque's `E`), or over (Slurm and Torque list
     /// an ended job for a while: `CD`, `F`, `CA`, `C`). Which is not known:
     /// a stop the scheduler takes ends it either way (Slurm's `scancel`
-    /// takes an ended job too); one it refuses (Torque's `qdel` of a
-    /// completed job) is over where nothing of the run holds its lock.
+    /// takes an ended job too); one it refuses saying it does not know the
+    /// job (`Scheduler::stop_judged`, by `unknown-job-pattern`) is over
+    /// where nothing of the run holds its lock; any other failure of the
+    /// stop command (a timeout, Torque's `qdel` of a completed job) is an
+    /// error, nothing recorded.
     Unread,
     /// Listed in a state the patterns read after the run recorded its end
     /// (within the requeue window): queued again, or leaving the queue, which
@@ -446,15 +446,15 @@ enum Job {
     /// before its run clears the end, an ended one `CG`, `TO`). `stop` asks
     /// the scheduler to stop it, `delete` refuses it without `-f`, a new run
     /// refuses to start beside it.
-    Listed,
+    Listed(JobStatus),
     /// Listed in a state no pattern reads after the run recorded its end:
     /// the ended job (Torque's `C`, Slurm's `CD`, `F`, `CA`): a requeued job
     /// passes through read states. Nothing to stop; `delete` goes ahead.
     Ended,
-    /// The status query failed after the run recorded its end: no answer.
-    /// `stop` sends the stop (harmless if the job is gone), `delete` takes
-    /// it as ended, with a note.
-    Unanswered,
+    /// The status query failed after the run recorded its end: no answer
+    /// (the failed query's text). `stop` sends the stop, `delete` takes it
+    /// as ended, with a note.
+    Unanswered(String),
     /// Not listed (the scheduler does not know it; where the machine cannot
     /// tell, a query that failed reads so too; after the run's end, a query
     /// that failed is taken so).
@@ -476,10 +476,10 @@ fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
     }
     if run.meta.timestamps.finished.is_some() {
         return Ok(match sched.ask_after_end(job)? {
-            AfterEnd::Listed(_) => Job::Listed,
+            AfterEnd::Listed(status) => Job::Listed(status),
             AfterEnd::Over(JobStatus::Unknown) => Job::Absent,
             AfterEnd::Over(_) => Job::Ended,
-            AfterEnd::Unanswered(_) => Job::Unanswered,
+            AfterEnd::Unanswered(failed) => Job::Unanswered(failed),
         });
     }
     Ok(match sched.get_status(job)? {
@@ -509,15 +509,6 @@ fn send_stop(sched: &Scheduler, job: JobRef<'_>) -> Res<Stopped> {
         }
         e.context(format!("the scheduler's stop command failed for test job {}", job.id))
     })
-}
-
-/// A stop command's failure on one line, for inside a sentence.
-fn refusal(e: &anyhow::Error) -> String {
-    let lines: Vec<String> = format!("{e:#}").lines().map(str::trim).filter(|line| !line.is_empty()).map(|line| line.trim_end_matches(':').to_owned()).collect();
-    match lines.is_empty() {
-        true => "it said nothing".to_owned(),
-        false => lines.join("; "),
-    }
 }
 
 /// `text` with its first letter capitalized, for a line of its own.
@@ -551,7 +542,7 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         Job::OnHost if run.lock_live()? => bail!("{}; delete it once it has ended", on_host(job, name)),
         // Unanswered after the run's end: what only removes a record takes
         // it as ended (§10), with the note.
-        Job::Unanswered => {
+        Job::Unanswered(_) => {
             crate::scheduler::note_taken_as_ended(job_id);
             if run.lock_live()? {
                 bail!("{}", held_without_listed_job(run, sched, name));
@@ -561,16 +552,16 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
         Job::Ended | Job::Absent | Job::OnHost => {}
         // An older record's pid, or one sharing its process group (§10):
         // never stopped, `-f` neither.
-        Job::Live | Job::Listed if sched.unverified(job) => {
+        Job::Live | Job::Listed(_) if sched.unverified(job) => {
             bail!("{}; then delete the test run", UnverifiedPid::of(job_id))
         }
-        Job::Live | Job::Listed if sched.shares_group(job) => {
+        Job::Live | Job::Listed(_) if sched.shares_group(job) => {
             bail!("{}; then delete the test run", SharedGroup(job_id.to_owned()))
         }
-        Job::Listed if !force => bail!(
-            "test run \"{name}\" ended, but the scheduler still lists its job {job_id} (leaving the \
-             queue, or starting again): wait until it leaves, or `cactup test stop {name}` to stop it; \
-             or use -f to stop it and delete"
+        Job::Listed(status) if !force => bail!(
+            "test run \"{name}\" ended, but the scheduler still lists its job {job_id} {}; or use -f to \
+             stop it and delete",
+            crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
         ),
         Job::Live if !force => bail!(
             "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
@@ -583,30 +574,32 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
             "{}: `cactup test stop {name}` first, or use -f to stop it and delete",
             unread(job_id)
         ),
-        state @ (Job::Unread | Job::Listed) => {
-            let what = match state {
-                Job::Listed => format!("the scheduler still lists test job {job_id} after the run ended"),
-                _ => unread(job_id),
+        state @ (Job::Unread | Job::Listed(_)) => {
+            let (what, case) = match state {
+                Job::Listed(_) => (
+                    format!("the scheduler still lists test job {job_id} after the run ended"),
+                    StopCase::Listed,
+                ),
+                _ => (unread(job_id), StopCase::Unread),
             };
-            if let Err(e) = send_stop(sched, job) {
-                if gix::interrupt::is_triggered() {
-                    bail!("interrupted");
-                }
-                if e.downcast_ref::<UnverifiedPid>().is_some() || e.downcast_ref::<SharedGroup>().is_some() {
-                    return Err(e);
-                }
+            // A failed stop is an error, nothing deleted, unless the
+            // scheduler says it does not know the job (`stop_judged`).
+            if let EndedStop::NotKnown(said) = sched.stop_judged(job, case)? {
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
-                        "{}, would not stop it ({}), and the run's running.lock is held: delete it once \
-                         the run has let go of the lock (a lock left by a run that ended expires \
+                        "{}, says it does not know it ({said}), and the run's running.lock is held: delete \
+                         it once the run has let go of the lock (a lock left by a run that ended expires \
                          within {} minutes)",
                         what,
-                        refusal(&e),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
                 }
-                println!("{}, and would not stop it; nothing of the run holds its lock, so cactup takes it as ended: deleting it", sentence(what));
+                println!(
+                    "{}, and the scheduler says it does not know it ({said}); nothing of the run holds its \
+                     lock, so cactup takes it as ended: deleting it",
+                    sentence(what)
+                );
             }
         }
     }
@@ -942,30 +935,52 @@ mod tests {
         assert!(stopped.exists());
         assert!(TestRun::open(&ending.dir).unwrap().meta.timestamps.finished.is_some());
 
-        // Listed so, and the scheduler will not stop it (Torque's `qdel` of
-        // a completed `C` job): `delete -f` goes ahead without a lock held,
-        // and not with one; `stop` records nothing with the lock held, and
-        // takes the run as ended without it.
-        let refusing: Meta = toml::from_str(
-            r#"
-            [machine]
-            nickname = "fake"
-            [scheduler]
-            get-status = "echo '@JOB_ID@ C'"
-            status-pattern = "^@JOB_ID@ "
-            running-pattern = " R"
-            stop = "echo 'qdel: Invalid state for job - COMPLETE' >&2; exit 170"
-            [queues.local]
-            default = true
-            [submitscripts]
-            "default" = ["local"]
-            [runscripts]
-            "default" = ["local"]
-            "#,
-        )
-        .unwrap();
-        let refusing = Scheduler::new(&refusing);
+        // Listed so, and its stop command fails: by the one rule
+        // (`Scheduler::stop_judged`) a failure settles nothing unless its
+        // output matches `unknown-job-pattern` (the scheduler saying it does
+        // not know the job). Torque's `qdel` of a completed `C` job ("Invalid
+        // state"), or a timeout (Slurm's `scancel` reaching no controller):
+        // `stop` and `delete -f` fail with it, nothing recorded or deleted.
+        let machine_with = |stop: &str| -> Meta {
+            toml::from_str(&format!(
+                r#"
+                [machine]
+                nickname = "fake"
+                [scheduler]
+                get-status = "echo '@JOB_ID@ C'"
+                status-pattern = "^@JOB_ID@ "
+                running-pattern = " R"
+                unknown-job-pattern = 'Unknown Job Id'
+                stop = "{stop}"
+                [queues.local]
+                default = true
+                [submitscripts]
+                "default" = ["local"]
+                [runscripts]
+                "default" = ["local"]
+                "#
+            ))
+            .unwrap()
+        };
         let ended = open(true, false, "JOB-7");
+        for stop in [
+            "echo 'qdel: Invalid state for job - COMPLETE' >&2; exit 170",
+            "echo 'scancel: error: Kill job error on job id @JOB_ID@: Socket timed out on send/recv operation' >&2; exit 1",
+        ] {
+            let failing = machine_with(stop);
+            let failing = Scheduler::new(&failing);
+            let before = fs::read_to_string(TestRun::meta_path(&ended.dir)).unwrap();
+            let err = clear_to_delete(&ended, &failing, "t", true).unwrap_err().to_string();
+            assert!(err.contains("the stop command for job JOB-7 failed") && err.contains("does not match it"), "{err}");
+            let mut again = TestRun::open(&ended.dir).unwrap();
+            assert!(stop_run(&mut again, &failing, "t").is_err());
+            assert_eq!(fs::read_to_string(TestRun::meta_path(&ended.dir)).unwrap(), before, "recorded something");
+        }
+        // The scheduler says it does not know the job: `delete -f` goes
+        // ahead without a lock held, and not with one; `stop` records
+        // nothing with the lock held, and takes the run as ended without it.
+        let refusing = machine_with("echo 'qdel: Unknown Job Id JOB-7.qb2' >&2; exit 153");
+        let refusing = Scheduler::new(&refusing);
         assert!(clear_to_delete(&ended, &refusing, "t", false).unwrap_err().to_string().contains("use -f"));
         clear_to_delete(&ended, &refusing, "t", true).unwrap();
         let held_ended = crate::lock::LinkLock::acquire(&ended.running_lock_path()).unwrap();
@@ -1188,9 +1203,12 @@ mod tests {
         let before = fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap();
         for letter in ["CF", "R", "CG", "TO", "PD"] {
             fs::write(&state, letter).unwrap();
-            assert_eq!(job_state(&sched, &run, run.meta.job()).unwrap(), Job::Listed, "{letter}");
+            assert!(matches!(job_state(&sched, &run, run.meta.job()).unwrap(), Job::Listed(_)), "{letter}");
             let refused = clear_to_delete(&run, &sched, "t", false).unwrap_err().to_string();
             assert!(refused.contains("still lists its job 4242") && refused.contains("test stop t"), "{letter}: {refused}");
+            // Worded by state: queued again, or leaving the queue or starting again.
+            let words = if letter == "PD" { "as queued again" } else { "leaving the queue, or starting again" };
+            assert!(refused.contains(words), "{letter}: {refused}");
             stop_run(&mut run, &sched, "t").unwrap();
             assert_eq!(fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap(), before, "{letter}: recorded something");
         }
@@ -1223,7 +1241,7 @@ mod tests {
         // After the end, a failed query is no answer: `stop` sends the stop
         // (harmless if the job is gone), `delete` takes it as ended.
         let mut ended = submitted_run(&tmp.path().join("ended"), "4243", None, true);
-        assert_eq!(job_state(&failing, &ended, ended.meta.job()).unwrap(), Job::Unanswered);
+        assert!(matches!(job_state(&failing, &ended, ended.meta.job()).unwrap(), Job::Unanswered(_)));
         stop_run(&mut ended, &failing, "t").unwrap();
         // The stop settles the job: recorded, and not asked about again.
         let reread = TestRun::open(&ended.dir).unwrap();
@@ -1262,6 +1280,12 @@ mod tests {
             let before = fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap();
             let err = stop_run(&mut run, &transient, "t").unwrap_err().to_string();
             assert!(err.contains("Unable to contact slurm controller"), "{err}");
+            // `delete -f` of a job listed after the end (`PD`: queued
+            // again): the failed stop is an error, nothing deleted.
+            if get_status.contains("PD") {
+                let err = clear_to_delete(&run, &transient, "t", true).unwrap_err().to_string();
+                assert!(err.contains("the stop command for job 4246 failed"), "{err}");
+            }
             assert_eq!(fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap(), before, "recorded something");
         }
         clear_to_delete(&ended, &failing, "t", false).unwrap();

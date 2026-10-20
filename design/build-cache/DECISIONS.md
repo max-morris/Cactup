@@ -592,6 +592,11 @@ Asked as seven questions with options; the answers, in Max's numbering.
     him then, not decision 3 above): record the host and the process's start
     time and ask only there, and tell a scheduler's "no such job" from a
     query that failed. The two share one MDB generation bump.
+    Follow-up (2026-10-20, Max): no generation bump for a generation-3
+    overlay with `job-ids = "pids"` whose `submit` lacks `setsid`.
+    cactup refuses to stop a job whose process group is not its own,
+    and says how to stop it by hand; the fix is `setsid` in the overlay's
+    submit lines (Max's own plato overlay has it now).
 
 ## Still open
 

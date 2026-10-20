@@ -4425,20 +4425,25 @@ and start time beside it), so no caller can skip the checks.
   stop themselves and go ahead (`sim submit` then unchained). `sim submit`
   never chains behind such a job: a job the scheduler has forgotten fails
   the dependency (Slurm's `sbatch --dependency=afterany:<id>` says "Job
-  dependency problem"). What a stop after a record's end settles
-  (`Scheduler::stop_after_end`): after the scheduler listed the job
-  (`AfterEnd::Listed`), a stop command that fails is an error ("the stop
-  command for job N failed: …"), nothing recorded or deactivated, and
-  `delete -f` and the guards' `-f` refuse with it. After a failed query
-  (`AfterEnd::Unanswered`), a stop the scheduler takes settles the job,
-  and so does one it refuses with output matching `unknown-job-pattern`
-  (`EndedStop::NotKnown`: Torque's `qdel` of a forgotten job, "Unknown Job
-  Id", exit 153), said so ("the scheduler does not know job N (its stop
-  command said: …): taken as ended"), an ended active restart deactivated;
-  any other failure (Slurm's "Socket timed out on send/recv operation",
-  "Unable to contact slurm controller", exit 1) is an error that says the
-  scheduler may not have been reached, shows the output, and gives the
-  `unknown-job-pattern` hint. A machine without `unknown-job-pattern`
+  dependency problem"). One rule judges a stop command that fails, on
+  every path that might take the failure for the job being over (sims,
+  test runs, builds: `Scheduler::stop_judged`, by what cactup knows of
+  the job, `StopCase`). A job the scheduler lists in a state its patterns
+  read (`StopCase::Listed`: live, or listed after the end): any failure is
+  an error ("the stop command for job N failed: …"), nothing recorded,
+  deactivated or deleted, and `delete -f` and the guards' `-f` refuse
+  with it. A job listed in a state no pattern reads (`StopCase::Unread`),
+  or whose status query failed after the end (`StopCase::Unanswered`): a
+  stop the scheduler takes settles the job, and so does one it refuses
+  with output matching `unknown-job-pattern` (`EndedStop::NotKnown`:
+  Torque's `qdel` of a forgotten job, "Unknown Job Id", exit 153), said
+  so ("the scheduler does not know job N (its stop command said: …):
+  taken as ended"), an ended active restart deactivated; any other
+  failure (Slurm's "Socket timed out on send/recv operation", "Unable to
+  contact slurm controller", exit 1; Torque's `qdel` of a completed job,
+  "Invalid state") is an error that shows the stop's output, after a
+  failed query the query's output too (where the unknown-job message
+  would be), and gives the `unknown-job-pattern` hint. A machine without `unknown-job-pattern`
   never reaches `Unanswered` (no line for the job is a job gone), so
   nothing is settled there. Ctrl-C is "interrupted" still. A settled job's
   record gets `job-stopped` (its time; `restart.toml`, and `test.toml`'s
@@ -4913,16 +4918,25 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
     (Slurm and Torque list an ended job for a while: `CD`, `F`, `CA`, `C`):
     `stop` asks the scheduler to stop it, and records `finished` if it took
     the request (stopped, or ended before: Slurm's `scancel` takes an ended
-    job without a word, so `stop` says only that it asked); where it refuses
-    (Torque's `qdel` of a completed job), `stop` records `finished` too
-    unless the run's `running.lock` is held (nothing of the run holds the
-    lock, so it is taken as ended, though the scheduler still lists the
-    job). `delete` refuses it without `-f`, and with `-f` stops it, or,
-    where the scheduler refuses, goes ahead unless the run's `running.lock`
-    is held. Listed so after the run recorded its end, it is the ended job
-    (above).
+    job without a word, so `stop` says only that it asked). A stop command
+    that fails is judged by the one rule every stop path uses
+    (`Scheduler::stop_judged`, §10): it settles the job only where its
+    output matches `unknown-job-pattern` (the scheduler saying it does not
+    know the job), and then `stop` records `finished` unless the run's
+    `running.lock` is held (nothing of the run holds the lock, so it is
+    taken as ended); any other failure (a timeout, the controller not
+    reached, Torque's `qdel` of a completed job: "Invalid state") is an
+    error, nothing recorded, until the scheduler stops listing the job.
+    `delete` refuses it without `-f`, and with `-f` stops it, by the same
+    rule: a failed stop is an error and nothing is deleted, unless the
+    scheduler says it does not know the job and the run's `running.lock`
+    is not held. A job listed in a read state after the run's end
+    (`Job::Listed`): any failure of the stop command is an error, for
+    `stop` and `delete -f` alike. Listed so after the run recorded its end,
+    a state no pattern reads is the ended job (above).
   - **What `stop` records.** `finished`, once the scheduler took its stop,
-    or refused it with nothing of the run holding the lock; a status query
+    or refused it saying it does not know the job with nothing of the run
+    holding the lock; a status query
     that found no job records no end, though the status cache says `U`. A
     status query that failed (where the machine sets
     `unknown-job-pattern`) for a run that has not recorded `finished` is an

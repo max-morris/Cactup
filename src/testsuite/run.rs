@@ -398,7 +398,10 @@ fn start_impl(
                 // it does not know the job is taken as the job ended; any
                 // other failure of the stop command is an error.
                 true => {
-                    if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_after_end(job, failed.is_none())? {
+                    if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_judged(job, match failed.as_deref() {
+                        Some(failed) => crate::scheduler::StopCase::Unanswered(failed),
+                        None => crate::scheduler::StopCase::Listed,
+                    })? {
                         println!(
                             "The scheduler does not know test job {} (its stop command said: {said}): \
                              taken as ended",

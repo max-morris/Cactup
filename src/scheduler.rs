@@ -329,6 +329,17 @@ pub enum AfterEnd {
     Unanswered(String),
 }
 
+/// What a job the scheduler still lists after its record's end may be, by
+/// its state: queued or held, queued again; running (the patterns read
+/// `CF`, `R`, `CG`, `TO` alike), leaving the queue or starting again.
+pub fn listed_state_words(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Queued => "queued again",
+        JobStatus::Holding => "queued again, and held",
+        _ => "listed running: leaving the queue, or starting again",
+    }
+}
+
 /// How a job the scheduler still lists after its record's end reads, by
 /// its state, with what to do about it (`stop`: the cactup command that
 /// stops it): queued or held, queued again; running, leaving the queue or
@@ -369,7 +380,19 @@ pub fn end_to_ask(finished: Option<DateTime<Utc>>, job_stopped: Option<DateTime<
     finished.filter(|finished| job_stopped.is_none_or(|stopped| stopped < *finished))
 }
 
-/// What a stop sent after a record's end did ([`Scheduler::stop_after_end`]).
+/// What cactup knows of a job it stops ([`Scheduler::stop_judged`]).
+#[derive(Debug, Clone, Copy)]
+pub enum StopCase<'a> {
+    /// The scheduler lists it in a state its patterns read (queued, held,
+    /// running): any failure of the stop command is an error.
+    Listed,
+    /// Listed in a state no pattern reads (suspended, exiting, completed).
+    Unread,
+    /// Its status query failed: the [`FailedQuery`] text.
+    Unanswered(&'a str),
+}
+
+/// What a stop judged by [`Scheduler::stop_judged`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndedStop {
     /// The scheduler took it (or, where job ids are pids, there was
@@ -711,21 +734,25 @@ impl<'m> Scheduler<'m> {
         }
     }
 
-    /// Stop `job` after its record's end: `listed`, the scheduler has just
-    /// listed it ([`AfterEnd::Listed`]); else its status query failed
-    /// ([`AfterEnd::Unanswered`]). A stop command that fails is an error,
-    /// nothing settled, with one exception: after a failed query, a stop
-    /// whose output matches the machine's `unknown-job-pattern` is the
-    /// scheduler saying it does not know the job (Slurm's `scancel` and
-    /// Torque's `qdel` of a job they have forgotten), and the job is taken
-    /// as ended ([`EndedStop::NotKnown`]). A transient failure (the
-    /// controller not reached, a timeout) never settles anything: a job
-    /// the scheduler just listed, or may have queued again, stands. Where
-    /// the machine sets no `unknown-job-pattern`, no query fails (no line
-    /// for the job is a job gone), so `Unanswered` is never reached and
-    /// nothing is settled here. Ctrl-C is "interrupted" still; the pid
-    /// refusals ([`UnverifiedPid`], [`SharedGroup`]) are errors still.
-    pub fn stop_after_end(&self, job: JobRef<'_>, listed: bool) -> Res<EndedStop> {
+    /// Stop `job`, judging a stop command that fails by the one rule, for
+    /// every path that may take a failed stop for the job being over
+    /// (`case`: what cactup knows of the job). A job the scheduler lists in
+    /// a state its patterns read ([`StopCase::Listed`]): any failure is an
+    /// error. Otherwise (listed in a state no pattern reads, or its status
+    /// query failed) the failure is a refusal that settles the job only
+    /// where the stop command's output matches the machine's
+    /// `unknown-job-pattern`: the scheduler saying it does not know the job
+    /// ([`EndedStop::NotKnown`]; Torque's `qdel` of a forgotten job). Any
+    /// other failure (the controller not reached, a timeout) is an error
+    /// that shows the output, and the failed query's after a failed query,
+    /// with the pattern hint: nothing is settled, recorded or deleted on
+    /// it. Slurm's `scancel` takes the stop of a job it does not know
+    /// without a word, so there the stop is simply taken. Where the machine
+    /// sets no `unknown-job-pattern`, nothing fails as unanswered (no line
+    /// for the job is a job gone) and no failure settles anything. Ctrl-C
+    /// is "interrupted" still; the pid refusals ([`UnverifiedPid`],
+    /// [`SharedGroup`]) are errors still.
+    pub fn stop_judged(&self, job: JobRef<'_>, case: StopCase<'_>) -> Res<EndedStop> {
         let e = match self.stop(job) {
             Ok(_) => return Ok(EndedStop::Sent),
             Err(e) => e,
@@ -737,20 +764,26 @@ impl<'m> Scheduler<'m> {
             return Err(e);
         }
         let said = stop_said(&e);
-        if listed {
+        if matches!(case, StopCase::Listed) {
             bail!("the stop command for job {} failed: {said}", job.id);
         }
         if self.unknown_job(&format!("{e:#}"), job.id)? == Some(true) {
             return Ok(EndedStop::NotKnown(said));
         }
         let pattern = self.meta.scheduler.unknown_job_pattern.as_deref().unwrap_or_default();
-        bail!(
-            "the status query for job {} failed, and so did its stop command: the scheduler may not have \
-             been reached: {said}\nIf the scheduler's message for a job it does not know is among \
-             these lines, unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the \
-             machine's [scheduler] table.",
-            job.id
-        )
+        let hint = format!(
+            "If the scheduler's message for a job it does not know is among these lines, \
+             unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the machine's \
+             [scheduler] table."
+        );
+        match case {
+            StopCase::Unanswered(failed) => bail!(
+                "{failed}\nThe stop command for job {} failed too, and the scheduler may not have been \
+                 reached: {said}\n{hint}",
+                job.id
+            ),
+            _ => bail!("the stop command for job {} failed: {said}\n{hint}", job.id),
+        }
     }
 
     /// The machine's stop command for `job_id`, as the user may run it by
@@ -1710,12 +1743,15 @@ mod tests {
         };
         let unknown = with_stop("echo 'qdel: Unknown Job Id 4242.qb2' >&2; exit 153");
         let sched = Scheduler::new(&unknown);
-        match sched.stop_after_end(JobRef::bare("4242"), false).unwrap() {
-            EndedStop::NotKnown(said) => assert_eq!(said, "qdel: Unknown Job Id 4242.qb2 (exit status: 153)"),
-            other => panic!("{other:?}"),
+        let failed = "the status query for job 4242 failed. It printed:\nqstat: cannot connect to server qb2";
+        for case in [StopCase::Unanswered(failed), StopCase::Unread] {
+            match sched.stop_judged(JobRef::bare("4242"), case).unwrap() {
+                EndedStop::NotKnown(said) => assert_eq!(said, "qdel: Unknown Job Id 4242.qb2 (exit status: 153)"),
+                other => panic!("{case:?}: {other:?}"),
+            }
         }
         // Just listed: the same refusal is an error, nothing settled.
-        let err = sched.stop_after_end(JobRef::bare("4242"), true).unwrap_err().to_string();
+        let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
         assert!(err.contains("the stop command for job 4242 failed: qdel: Unknown Job Id"), "{err}");
         assert!(sched.stop(JobRef::bare("4242")).is_err(), "before the end it is an error still");
         for transient in [
@@ -1724,14 +1760,19 @@ mod tests {
         ] {
             let m = with_stop(&format!("echo '{transient}' >&2; exit 1"));
             let sched = Scheduler::new(&m);
-            let err = sched.stop_after_end(JobRef::bare("4242"), false).unwrap_err().to_string();
+            // After a failed query: both outputs shown, with the hint.
+            let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unanswered(failed)).unwrap_err().to_string();
             assert!(err.contains("may not have been reached") && err.contains(transient), "{err}");
+            assert!(err.contains("qstat: cannot connect to server qb2"), "the failed query's output: {err}");
             assert!(err.contains("unknown-job-pattern ('Unknown Job Id') does not match it"), "{err}");
-            let err = sched.stop_after_end(JobRef::bare("4242"), true).unwrap_err().to_string();
+            let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap_err().to_string();
+            assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
+            assert!(err.contains("does not match it"), "{err}");
+            let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
             assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
         }
         let taking = with_stop("true");
-        assert_eq!(Scheduler::new(&taking).stop_after_end(JobRef::bare("4242"), false).unwrap(), EndedStop::Sent);
+        assert_eq!(Scheduler::new(&taking).stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap(), EndedStop::Sent);
     }
 
     /// A job an older cactup recorded (no host, no start time) on a

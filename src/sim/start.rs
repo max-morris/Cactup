@@ -374,14 +374,14 @@ fn submit_impl(
                     if !args.force {
                         return Err(crate::sim::manage::unanswered_refusal(sim, &r, failed, "submit"));
                     }
-                    crate::sim::manage::stop_unanswered(sim, &sched, &r)?;
+                    crate::sim::manage::stop_unanswered(sim, &sched, &r, failed)?;
                 }
                 match answer {
-                    Some(AfterEnd::Listed(_)) => {
+                    Some(AfterEnd::Listed(status)) => {
                         println!(
                             "Restart {dir}'s job {job_id} is still listed by the scheduler after the \
-                             restart ended (queued again, or leaving the queue); chaining the new \
-                             submission behind it"
+                             restart ended ({}); chaining the new submission behind it",
+                            crate::scheduler::listed_state_words(status)
                         );
                         true
                     }
@@ -432,10 +432,11 @@ fn submit_impl(
         use crate::scheduler::AfterEnd;
         let (dir, job_id) = (restart::dir_name(ended.id), &ended.meta.job_id);
         match answer {
-            Some(AfterEnd::Listed(_)) => {
+            Some(AfterEnd::Listed(status)) => {
                 println!(
                     "Restart {dir}'s job {job_id} is still listed by the scheduler after the restart ended \
-                     (queued again, or leaving the queue); chaining the new submission behind it"
+                     ({}); chaining the new submission behind it",
+                    crate::scheduler::listed_state_words(status)
                 );
                 prev_job = Some(ended.meta.job_id.clone());
                 activate_first = false;
@@ -443,7 +444,7 @@ fn submit_impl(
             Some(AfterEnd::Unanswered(failed)) if !args.force => {
                 return Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "submit"));
             }
-            Some(AfterEnd::Unanswered(_)) => crate::sim::manage::stop_unanswered(sim, &sched, &ended)?,
+            Some(AfterEnd::Unanswered(failed)) => crate::sim::manage::stop_unanswered(sim, &sched, &ended, &failed)?,
             _ => {}
         }
     }
@@ -637,8 +638,8 @@ fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler, force: bool) -> Res
         Some(AfterEnd::Unanswered(failed)) if !force => {
             Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "run"))
         }
-        Some(AfterEnd::Unanswered(_)) => {
-            crate::sim::manage::stop_unanswered(sim, sched, &ended)?;
+        Some(AfterEnd::Unanswered(failed)) => {
+            crate::sim::manage::stop_unanswered(sim, sched, &ended, &failed)?;
             Ok(true)
         }
         _ => Ok(false),

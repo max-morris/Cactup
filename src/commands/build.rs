@@ -158,10 +158,12 @@ fn missing_to_submit_builds(machine: &Machine) -> Option<&'static str> {
 /// cactup is gone the pid can be any other process's — asking the
 /// scheduler about it (on the generic machine, `ps`) would find that
 /// process live, and `-f` would stop its process group. After the
-/// attempt's outcome only a job put back in the queue is live, and a query
-/// that fails is taken as the job ended (`Scheduler::get_status_of`), so a
-/// scheduler that cannot be asked never blocks a new build of a config
-/// whose last one finished.
+/// attempt's outcome a job the scheduler still lists, or could not be asked
+/// about (it may have been queued again), refuses a new attempt: the
+/// refusal prints the failed query and names `build stop`; `-f` stops the
+/// job first (`Scheduler::stop_judged`: a stop that fails is an error,
+/// unless the scheduler says it does not know the job). A job settled by
+/// an earlier stop (`job-stopped`) is not asked about again.
 fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force: bool) -> Res<()> {
     let Some(id) = BuildAttempt::latest_id(config_dir)? else { return Ok(()) };
     let attempt = BuildAttempt::open(config_dir, id)?;
@@ -223,7 +225,10 @@ fn guard_no_live_attempt(config_dir: &Path, name: &str, sched: &Scheduler, force
         }
         match ended {
             true => {
-                if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_after_end(job, failed.is_none())? {
+                if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_judged(job, match failed.as_deref() {
+                    Some(failed) => crate::scheduler::StopCase::Unanswered(failed),
+                    None => crate::scheduler::StopCase::Listed,
+                })? {
                     println!(
                         "The scheduler does not know build job {} (its stop command said: {said}): taken as \
                          ended",
@@ -1233,7 +1238,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         // not be asked: the stop is sent either way, harmless if the job is
         // leaving or gone; the outcome stands. Where it answered that the
         // job is gone or over, or nothing was asked, nothing is stopped.
-        use crate::scheduler::{AfterEnd, EndedStop};
+        use crate::scheduler::{AfterEnd, EndedStop, StopCase};
         let answer = match requeue_query(&attempt.meta, &sched) {
             Some(job) => Some((job, sched.ask_after_end(job)?)),
             None => None,
@@ -1250,7 +1255,7 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
         // rather than ask a query that may keep failing. Any other failure
         // of the stop command is an error, nothing recorded.
         let settled = match answer {
-            Some((job, AfterEnd::Listed(_))) => match sched.stop_after_end(job, true)? {
+            Some((job, AfterEnd::Listed(_))) => match sched.stop_judged(job, StopCase::Listed)? {
                 EndedStop::Sent => {
                     println!(
                         "Asked the scheduler to stop build job {}, still listed after the attempt recorded \
@@ -1264,8 +1269,8 @@ fn stop_impl(machine: &Machine, inst: &Installation, name: Option<&str>, force: 
                     true
                 }
             },
-            Some((job, AfterEnd::Unanswered(_))) => {
-                match sched.stop_after_end(job, false)? {
+            Some((job, AfterEnd::Unanswered(failed))) => {
+                match sched.stop_judged(job, StopCase::Unanswered(&failed))? {
                     EndedStop::Sent => println!(
                         "Could not ask the scheduler about build job {} (the attempt has recorded its \
                          outcome); asked it to stop the job in case it was queued again",

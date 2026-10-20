@@ -4,7 +4,7 @@
 use crate::commands::Ctx;
 use crate::installation::{Installation, SimEntry};
 use crate::scheduler::{
-    display_state, is_live, AfterEnd, DisplayState, EndedStop, JobRecord, JobRef, JobStatus, Scheduler, Statuses, Stopped,
+    display_state, is_live, AfterEnd, DisplayState, EndedStop, JobRecord, JobRef, JobStatus, Scheduler, Statuses, StopCase, Stopped,
     UnverifiedPid,
 };
 use crate::mdb::meta::JobIds;
@@ -221,8 +221,9 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
     // job it does not know (by `unknown-job-pattern`), settles the job:
     // recorded, so the next command takes it as ended. A stop command that
     // fails otherwise is an error: nothing recorded, nothing deactivated.
-    let stop_it = |why: &str, settles: bool| -> Res<bool> {
-        match sched.stop_after_end(r.meta.job(), !settles)? {
+    let stop_it = |why: &str, case: StopCase<'_>| -> Res<bool> {
+        let settles = !matches!(case, StopCase::Listed);
+        match sched.stop_judged(r.meta.job(), case)? {
             EndedStop::Sent => {
                 println!("{why}");
                 sim.log("stop", &format!("asked the scheduler to stop job {job_id} ({dir}), after its end"));
@@ -249,12 +250,12 @@ fn stop_ended(sim: &Simulation, sched: &Scheduler, name: &str) -> Res<()> {
             "Asked the scheduler to stop job {}, still listed after {dir} ended (queued again, or \
              leaving the queue)",
             job_id.bold()
-        ), false)?,
-        Some(AfterEnd::Unanswered(_)) => stop_it(&format!(
+        ), StopCase::Listed)?,
+        Some(AfterEnd::Unanswered(failed)) => stop_it(&format!(
             "Could not ask the scheduler about job {}, of {dir}, which has ended; asked it to stop the \
              job in case it was queued again",
             job_id.bold()
-        ), true)?,
+        ), StopCase::Unanswered(failed))?,
         Some(AfterEnd::Over(JobStatus::Unknown)) => {
             println!("The scheduler does not know job {job_id} ({dir} has ended); nothing to stop");
             false
@@ -462,7 +463,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool) -> Res<()> {
             // After its restart's end the scheduler listed it: a stop
             // command that fails is an error, and nothing is deleted.
             if l.ended {
-                sched.stop_after_end(l.job.job(), true)?;
+                sched.stop_judged(l.job.job(), StopCase::Listed)?;
                 continue;
             }
             // A pid cactup cannot vouch for (§10) says itself that nothing ran.
@@ -592,9 +593,9 @@ fn record_job_stopped(sim: &Simulation, id: u32) -> Res<()> {
 /// the scheduler does not know, and so taken as ended); the caller then
 /// goes ahead, unchained. Any other failure of the stop command is an
 /// error: nothing recorded, and the caller does not go ahead.
-pub(crate) fn stop_unanswered(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<()> {
+pub(crate) fn stop_unanswered(sim: &Simulation, sched: &Scheduler, r: &Restart, failed: &str) -> Res<()> {
     let (dir, job_id) = (restart::dir_name(r.id), &r.meta.job_id);
-    let stopped = sched.stop_after_end(r.meta.job(), false)?;
+    let stopped = sched.stop_judged(r.meta.job(), StopCase::Unanswered(failed))?;
     record_job_stopped(sim, r.id)?;
     match stopped {
         EndedStop::Sent => {
@@ -680,6 +681,8 @@ struct LiveJob {
     /// Its run recorded its end: a job the scheduler still lists (queued
     /// again, or leaving the queue).
     ended: bool,
+    /// The state the scheduler lists it in.
+    status: JobStatus,
     /// An older record's pid with a process here (§10): never stopped.
     unverified: bool,
     /// A pid that does not lead its own process group (§10): never stopped.
@@ -752,6 +755,7 @@ fn live_jobs(sim: &Simulation, sched: &Scheduler) -> Res<Vec<LiveJob>> {
                 id: r.id,
                 job: r.meta.job().to_record(),
                 ended,
+                status,
                 unverified: sched.unverified(r.meta.job()),
                 shared_group: sched.shares_group(r.meta.job()),
             });
@@ -780,10 +784,10 @@ fn live_jobs_refusal(name: &str, live: &[LiveJob], stops: Option<u32>) -> String
         .iter()
         .map(|l| match l.ended {
             true => format!(
-                "{} = job {}, still listed by the scheduler after the restart ended (leaving the \
-                 queue, or starting again)",
+                "{} = job {}, still listed by the scheduler after the restart ended ({})",
                 restart::dir_name(l.id),
-                l.job.id
+                l.job.id,
+                crate::scheduler::listed_state_words(l.status)
             ),
             false => format!("{} = job {}", restart::dir_name(l.id), l.job.id),
         })
@@ -1671,7 +1675,7 @@ mod tests {
         let live = live_jobs(&sim, &sched).unwrap();
         assert_eq!(live.iter().map(|l| (l.id, l.ended)).collect::<Vec<_>>(), [(0, true)]);
         let refusal = live_jobs_refusal("requeued", &live, Some(0));
-        assert!(refusal.contains("job 1003, still listed by the scheduler after the restart ended"), "{refusal}");
+        assert!(refusal.contains("job 1003, still listed by the scheduler after the restart ended (queued again)"), "{refusal}");
         assert!(refusal.ends_with("`cactup sim stop requeued` first, or use -f to stop it and delete"), "{refusal}");
         assert_eq!(shown(false, false, true, Some(Some(JobStatus::Queued))), DisplayState::Requeued);
         // `sim list` asks about it and says the same.
@@ -2181,7 +2185,7 @@ mod tests {
             assert!(err.contains(if name == "listed" { "as queued again" } else { "Socket timed out" }), "{name}: {err}");
             if name == "listed" {
                 assert!(live_jobs(&sim, &sched).unwrap().iter().any(|l| l.ended));
-                let ctx_err = live_jobs(&sim, &sched).unwrap().iter().map(|l| sched.stop_after_end(l.job.job(), true)).find_map(Result::err);
+                let ctx_err = live_jobs(&sim, &sched).unwrap().iter().map(|l| sched.stop_judged(l.job.job(), StopCase::Listed)).find_map(Result::err);
                 assert!(ctx_err.is_some(), "sim delete -f would go ahead");
             }
             assert_eq!(fs::read_to_string(&record).unwrap(), before, "{name}: recorded something");

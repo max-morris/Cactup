@@ -4040,6 +4040,75 @@ ahead, unchained; `sim submit -f` and `sim stop -f` the same in one step;
 with `squeue` down and the job forgotten, the same; transient `scancel`
 failures still errors, nothing recorded.
 
+Round 10 (on `fe99af5`): A signed off; BLOCKED by B (ran; a regression
+from master): two test-run paths still took any failure of the stop
+command for a refusal. (1) `clear_to_delete` (`test delete -f`) of a job
+listed `PD` after the run's end, `scancel` timing out: "would not stop
+it ... taken as ended: deleting it", and deleted the run while the job
+stayed queued (master failed with the error). (2) `stop_run` of a job
+listed in a state no pattern reads before the end (Slurm `S`), `scancel`
+timing out: `test stop` recorded `finished`, and a plain `test delete`
+then trashed the run of a suspended job. Not blocking, taken: (B)
+`guard_no_live_attempt`'s doc comment still said a failed query never
+blocks a new build; (B) the error after a failed query and a failed stop
+gave the pattern hint but not the query's output, where the unknown-job
+message would be; (A2) `test delete` and `sim delete`'s refusals still
+said "leaving the queue, or starting again" of a job listed `PD`. The
+fixes, in the commit after this record:
+- One rule for a stop command that fails, on every path that may take
+  the failure for the job being over: `Scheduler::stop_judged(job,
+  StopCase)`. `StopCase::Listed` (listed in a read state, live or after
+  the end): any failure is an error. `StopCase::Unread` (listed in a
+  state no pattern reads) and `StopCase::Unanswered(failed)` (its query
+  failed after the end): a stop the scheduler takes settles the job, and
+  so does a refusal matching `unknown-job-pattern` (`EndedStop::NotKnown`);
+  any other failure is an error with the stop's output (and, after a
+  failed query, the query's), and the pattern hint. Every caller goes
+  through it: `sim stop`, `sim delete -f` (ended jobs), the `-f` of `sim
+  submit`/`sim run`, `test stop`, `test delete -f`, a new test run's
+  `-f`, `build stop`, a new build's `-f`. The other stop calls (a live
+  job before its end) propagate any failure, as on master.
+- `Job::Unanswered` carries the failed query's text, `Job::Listed` the
+  listed state; the refusals of `test delete` and `sim delete`, and `sim
+  submit`'s chaining line, word a listed job by its state (`listed_state_words`, `listed_after_end`):
+  queued again (held), or listed running: leaving the queue, or starting
+  again.
+- A consequence on Torque (fake only, unverified on a real Torque): a test
+  run whose job is listed `C` before the run recorded its end has `qdel`
+  refuse it ("Invalid state for job - COMPLETE", exit 15), which no
+  pattern reads as "does not know the job": `test stop` and `test delete
+  -f` are errors until Torque stops listing it (keep_completed); then the
+  job is gone and both go ahead. Master took that refusal as the job
+  ended.
+- Docs and spec: §§10, 11.7, `test-suites.md`.
+Max's decision (2026-10-20, also in decision 35's follow-up): no MDB
+generation bump for a generation-3 overlay with `job-ids = "pids"` whose
+`submit` lacks `setsid`: cactup refuses to stop a job whose group is not
+its own and says how to stop it by hand; the fix is `setsid` in the
+submit lines (Max's plato overlay has it).
+Known and left for later (all as on master): (A1) a job listed in a
+state no pattern reads (Slurm `S`) before its record's end is not
+handled for builds and sims as test runs now handle it (`build stop`
+says "not in the queue" and records an outcome; `sim delete` trashes a
+simulation whose job is `S`); (A3) `sim submit` under the reaper's 60 s
+throttle says "still live (job N); chaining" of an un-ended restart
+without asking; (A4) on Torque, a `qdel` refusing a completed job
+("Invalid state for job - COMPLETE", exit 15) after a failed `qstat` is
+reported "may not have been reached" (hedged, but wrong for that case;
+unverified on a real Torque).
+Checked with real binaries: the fake Slurm (`scancel` of an unknown job
+exits 0 silently; transient failures exit 1): `test delete -f` of a job
+listed `PD` after the end with `scancel` timing out failed with the
+error and deleted nothing (with `scancel` answering, it deleted the run
+and the job was canceled); `test stop` of a job listed `S` before the
+end with `scancel` reaching no controller failed, `test.toml` unchanged,
+`test delete` refused, `test delete -f` failed; with `scancel` back,
+`test stop` stopped it. The fake Torque: a test run's job listed `C`
+before its end, `qdel` refusing it: `test stop` and `test delete -f`
+failed, nothing recorded; once `qstat` no longer knew it, `test stop`
+said it is not in the queue and `test delete` went ahead. The earlier
+scenarios as before.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
