@@ -4096,6 +4096,12 @@ without asking; (A4) on Torque, a `qdel` refusing a completed job
 ("Invalid state for job - COMPLETE", exit 15) after a failed `qstat` is
 reported "may not have been reached" (hedged, but wrong for that case;
 unverified on a real Torque).
+Round 11's non-blocking notes, for a commit after the merge: docs and
+comments that still say a job must lead its process group, where the
+code asks only for a group of its own (`mdb/GENERATIONS.md`, the
+generic machine's comment, the spec, `SharedGroup`'s doc); a stale
+`live_jobs` doc comment; the pattern hint printed twice in one error;
+stop messages worded by the job's state; the Torque `C` hint.
 Checked with real binaries: the fake Slurm (`scancel` of an unknown job
 exits 0 silently; transient failures exit 1): `test delete -f` of a job
 listed `PD` after the end with `scancel` timing out failed with the
@@ -4326,11 +4332,13 @@ gfortran, 0 wrong, with the fallback count reported.
 ## Next step
 
 The cache is on master with `cache doctor` and on by default (above).
-MDB generation 3 is on master (PR #7). The test-run liveness work on
-`feature/test-run-liveness`, rebased onto it and with decision 35's
-scheduler behavior (above), goes to the review gate. Then M4b
-(Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on
-`feature/doctor-every-flag` is shelved (Max, 2026-10-16).
+MDB generation 3 is on master (PR #7), and the docs tidy-up after it
+(PR #8). The test-run liveness work on `feature/test-run-liveness`, with
+decision 35's scheduler behavior (above), passed its gate in eleven
+rounds and is PR #9, rebased onto PR #8. Then round 11's non-blocking
+notes and the known cases (above), M4b (Cray), M5b (the whole-file
+cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
+is shelved (Max, 2026-10-16).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.
 Part 1 passed its gate at `ad236d2` (spec §18.12):
