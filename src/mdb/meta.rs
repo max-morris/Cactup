@@ -109,7 +109,8 @@ pub struct Meta {
     pub scheduler: Scheduler,
     #[serde(default)]
     pub queues: IndexMap<String, Queue>,
-    /// Script routes per kind (§4.4): which script file serves which queue.
+    /// Script routes per kind: which script file serves which queue.
+    // §4.4
     #[serde(default = "ScriptTable::submit", deserialize_with = "ScriptTable::de_submit")]
     pub submitscripts: ScriptTable,
     #[serde(default = "ScriptTable::run", deserialize_with = "ScriptTable::de_run")]
@@ -119,7 +120,8 @@ pub struct Meta {
     #[serde(default)]
     pub universes: IndexMap<String, Universe>,
     /// cactup-written metadata; today only the `machine create --from-existing`
-    /// provenance record (§4.7).
+    /// provenance record.
+    // §4.7
     #[serde(default)]
     pub cactup: CactupMeta,
 }
@@ -143,33 +145,38 @@ pub struct MachineInfo {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Paths {
-    /// Default install prefix; fallback `~/.cactup/cacti` (§4.2).
+    /// Default install prefix; fallback `~/.cactup/cacti`.
+    // §4.2
     pub install_home: Option<String>,
-    /// Simulation-output root; fallback `~/.cactup/simulations` (§4.2, §8.1).
+    /// Simulation-output root; fallback `~/.cactup/simulations`.
+    // §4.2, §8.1
     pub simulation_home: Option<String>,
-    /// Testsuite-output root; fallback `~/.cactup/tests` (§4.2, §11.5).
+    /// Testsuite-output root; fallback `~/.cactup/tests`.
+    // §4.2, §11.5
     pub test_home: Option<String>,
     /// Exposed to scripts as @SCRATCH_HOME@ (empty when unset); otherwise
     /// unused by cactup itself.
     pub scratch_home: Option<String>,
-    /// Where the build cache keeps its objects (§18.7); fallback
+    /// Where the build cache keeps its objects; fallback
     /// `<install-home>/.cactup-build-cache`, beside the installations whose builds
     /// fill it. For a site whose builds belong somewhere else.
+    // §18.7
     pub build_cache_home: Option<String>,
 }
 
-/// §4.2 carries only the hardware keys cactup actually feeds to submit/run
-/// scripts. These split along the **availability vs. request** axis (§8.5): the
-/// `max-` keys are *availability* facts (what a node/queue physically has),
-/// while the process-layout flags (`--tasks`, `--cpus`, …) are the *request*.
+// §4.2, §8.5 (the layout rules these keys feed).
+/// The hardware keys cactup feeds to submit and run scripts. They split along
+/// the **availability vs. request** axis: the `max-` keys are *availability*
+/// facts (what a node/queue physically has), while the process-layout flags
+/// (`--tasks`, `--cpus`, …) are the *request*.
 ///
 /// - `max-cpus-per-node` (simfactory's `ppn`; the CPUs/cores available per node
-///   — an availability fact, **not** MPI ranks; §8.5 topology +
+///   — an availability fact, **not** MPI ranks; it feeds the job layout and
 ///   @MAX_CPUS_PER_NODE@),
 /// - `default-cpus-per-task` (simfactory's `num-threads`; the request-side
-///   default for `CPUS_PER_TASK` when `--cpus` is omitted — §8.5),
-/// - `max-gpus-per-node` (the GPUs available per node; a **ceiling** §8.5
-///   refuses to exceed and a bound on a *derived* `TASKS_PER_NODE`, plus
+///   default for `CPUS_PER_TASK` when `--cpus` is omitted),
+/// - `max-gpus-per-node` (the GPUs available per node; a **ceiling** a layout
+///   may not exceed and a bound on a *derived* `TASKS_PER_NODE`, plus
 ///   @MAX_GPUS_PER_NODE@ — it never sets `GPUS_PER_TASK`, which defaults to 1)
 ///   and `default-gpus-per-task` (the machine's own per-task default, for the
 ///   rare partition that is not 1),
@@ -178,8 +185,8 @@ pub struct Paths {
 ///
 /// The two GPU keys are routinely absent: a CPU-only machine — or a CPU
 /// partition on a machine whose GPU partitions declare their own — has no GPUs
-/// to describe, and §8.5 falls back to one GPU per task rather than treating a
-/// missing value as an error.
+/// to describe, and cactup falls back to one GPU per task rather than treating
+/// a missing value as an error.
 ///
 /// Simfactory's other capacity keys (`min-ppn`, `spn`, `mpn`, `nodes`, `max-*`,
 /// `cpu-freq`, `flop-per-cycle`, …) were dropped — nothing consumed them.
@@ -190,18 +197,22 @@ pub struct Paths {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Hardware {
-    /// Fill missing core/memory values from the OS at load time (§4.6).
+    /// Fill missing core/memory values from the OS at load time.
+    // §4.6
     #[serde(default)]
     pub autodetect: bool,
+    // §8.5
     /// CPUs/cores available per node — the availability fact the fill-the-node
-    /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (§8.5; on a GPU
-    /// run a fully derived result — no `--tpn`/`--tasks` — is bounded by
+    /// rule divides by `CPUS_PER_TASK` to get `TASKS_PER_NODE` (on a GPU run a
+    /// fully derived result — no `--tpn`/`--tasks` — is bounded by
     /// `max-gpus-per-node`, so a machine may declare a `default-cpus-per-task`
     /// that deliberately leaves CPUs idle).
     pub max_cpus_per_node: Option<u32>,
-    /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted (§8.5).
+    /// Request-side default for `CPUS_PER_TASK` when `--cpus` is omitted.
+    // §8.5
     pub default_cpus_per_task: Option<u32>,
-    /// GPUs available per node. Never a target: §8.5 refuses a layout whose
+    // §8.5
+    /// GPUs available per node. Never a target: cactup refuses a layout whose
     /// `GPUS_PER_TASK × TASKS_PER_NODE` exceeds it, and bounds a *derived*
     /// `TASKS_PER_NODE` by it (a node cannot run more one-GPU ranks than it has
     /// devices), but never derives `GPUS_PER_TASK` from it — GPUs are not
@@ -210,8 +221,9 @@ pub struct Hardware {
     /// checked and nothing is bounded.
     pub max_gpus_per_node: Option<u32>,
     /// Request-side default for `GPUS_PER_TASK` when `--gpus-per-task` is
-    /// omitted (§8.5). Only worth setting on a partition that wants something
-    /// other than the global default of one GPU per rank.
+    /// omitted. Only worth setting on a partition that wants something other
+    /// than the global default of one GPU per rank.
+    // §8.5
     pub default_gpus_per_task: Option<u32>,
     pub threads_per_cpu: Option<u32>,
     /// MB per node.
@@ -234,7 +246,9 @@ pub struct Build {
     pub enabled_thorns: Vec<String>,
     #[serde(default)]
     pub disabled_thorns: Vec<String>,
-    /// Machine-level build-phase default universe (§4.8 precedence step 4).
+    /// Machine-level build-phase default universe (a flavor's own `universe`
+    /// wins over it).
+    // §4.8 precedence step 4
     pub universe: Option<String>,
     /// `build submit` groundwork (not yet wired to a command): whether an
     /// unqualified build should run in the foreground or go to the scheduler
@@ -378,19 +392,25 @@ impl Environment {
     }
 }
 
-/// §10 keeps simfactory's *consumed* scheduler keys verbatim. Its unconsumed
-/// ones were dropped outright — and, the table being closed, a machine that
-/// still carries one now fails to load rather than parsing it as a no-op.
-/// `interactive` went with §3.1, `stdout`/`stderr`/`stdout-follow` because
-/// output filenames are template-owned via @STDOUT_FILE@/@STDERR_FILE@ (§8.3.1)
-/// and `log` follows natively, and `max-queue-slots` because chain sizing is
-/// walltime-only (§8.8). simfactory's `allocation` is likewise absent: the
-/// account to charge is a per-user knob (§5), not a machine fact.
+// §10 keeps simfactory's *consumed* scheduler keys verbatim. Its unconsumed
+// ones were dropped outright — and, the table being closed, a machine that
+// still carries one now fails to load rather than parsing it as a no-op.
+// `interactive` went with §3.1, `stdout`/`stderr`/`stdout-follow` because
+// output filenames are template-owned via @STDOUT_FILE@/@STDERR_FILE@ (§8.3.1)
+// and `log` follows natively, and `max-queue-slots` because chain sizing is
+// walltime-only (§8.8). simfactory's `allocation` is likewise absent: the
+// account to charge is a per-user knob (§5), not a machine fact.
+/// The machine's batch system: the commands cactup runs to submit, query and
+/// stop jobs, and the patterns it reads their output with. Most keys are
+/// simfactory's, where cactup uses them; a few are cactup's own (said so
+/// below). Any other key fails to load. The account to charge is not here:
+/// it is the per-user `allocation` knob.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Scheduler {
     pub submit: Option<String>,
-    /// Optional blocking form of `submit` (§10, a cactup addition): the same
+    // §10
+    /// Optional blocking form of `submit` (a cactup addition): the same
     /// submission, expressed so the command does not return until the job has
     /// finished — `sbatch --wait`, `qsub -W block=true`. `cactup build submit
     /// --block` prefers it; machines that omit it get the emulated wait (the
@@ -400,7 +420,8 @@ pub struct Scheduler {
     /// still yields the id at submission time.
     pub blocking_submit: Option<String>,
     pub get_status: Option<String>,
-    /// Optional one-call form of `get-status` (§10, a cactup addition): lists
+    // §10
+    /// Optional one-call form of `get-status` (a cactup addition): lists
     /// every live job of `@USER@`, one per line, the job id as the first
     /// whitespace-separated field — e.g. `squeue -h -u @USER@ -o '%i %t (%r)'`.
     /// It lets `sim list` resolve a whole history with a single scheduler
@@ -417,32 +438,35 @@ pub struct Scheduler {
     pub holding_pattern: Option<String>,
     pub exec_host: Option<String>,
     pub exec_host_pattern: Option<String>,
-    /// Machine-level fallback ceiling for queues that omit `max-walltime` (§4.2).
+    /// Machine-level fallback ceiling for queues that omit `max-walltime`.
+    // §4.2
     pub max_walltime: Option<Walltime>,
-    /// Env var(s) the scheduler sets inside a job allocation — e.g.
-    /// `SLURM_JOB_ID` (both `salloc` and `sbatch` set it), `PBS_JOBID`. When
-    /// declared, `test run`'s foreground path (§11.6) refuses to launch unless
-    /// one is set: the flesh testsuite harness srun/mpirun's each test, which
-    /// needs an allocation, so running on a login node just produces no output.
-    /// Absent = no check (non-batch machines, or ones whose launcher
-    /// self-allocates from the head node). Accepts a string or a list.
+    // §11.6
+    /// Env var(s) the scheduler sets inside a job allocation (a cactup
+    /// addition) — e.g. `SLURM_JOB_ID` (both `salloc` and `sbatch` set it),
+    /// `PBS_JOBID`. When declared, `test run`'s foreground path refuses to
+    /// launch unless one is set: the flesh testsuite harness srun/mpirun's
+    /// each test, which needs an allocation, so running on a login node just
+    /// produces no output. Absent = no check (non-batch machines, or ones
+    /// whose launcher self-allocates from the head node). Accepts a string or
+    /// a list.
     #[serde(default, deserialize_with = "string_or_seq")]
     pub allocation_env: Vec<String>,
     // §10; the third of the questions decision 35 answers (design/
     // build-cache/DECISIONS.md, 35; not its decision 3): declared now,
     // read by the liveness work later.
-    /// What a job id is: `"scheduler"` (the default), an id the batch
-    /// system hands out, or `"pids"`, the pid of a process on the host the
-    /// job was submitted from, where the scheduler is that host's own
-    /// processes (`ps`, `kill`). Declares a fact; cactup does not yet act
-    /// on it.
+    /// What a job id is (a cactup addition): `"scheduler"` (the default), an
+    /// id the batch system hands out, or `"pids"`, the pid of a process on
+    /// the host the job was submitted from, where the scheduler is that
+    /// host's own processes (`ps`, `kill`). Declares a fact; cactup does not
+    /// yet act on it.
     #[serde(default)]
     pub job_ids: JobIds,
-    /// A regular expression matching a line of `get-status`'s output
-    /// (stdout or stderr) that says the scheduler does not know the job,
-    /// `@JOB_ID@` substituted as in the other patterns. Tells a job the
-    /// scheduler has forgotten from a status query that failed. Declares a
-    /// fact; cactup does not yet act on it.
+    /// A regular expression (a cactup addition) matching a line of
+    /// `get-status`'s output (stdout or stderr) that says the scheduler does
+    /// not know the job, `@JOB_ID@` substituted as in the other patterns.
+    /// Tells a job the scheduler has forgotten from a status query that
+    /// failed. Declares a fact; cactup does not yet act on it.
     pub unknown_job_pattern: Option<String>,
 }
 
@@ -489,19 +513,22 @@ pub struct Queue {
     /// cactup queue key — several cactup queues (e.g. cpu/gpu build flavors)
     /// may map onto one real partition. `@QUEUE@` resolves to this.
     pub name: Option<String>,
-    /// Build-universe compatibility list (§4.4): the queue only serves configs
+    // §4.4
+    /// Build-universe compatibility list: the queue only serves configs
     /// whose build universe is listed. `None` = compatible with ALL universes;
     /// an explicitly empty list is a validation error. Gates purely on the
     /// config's *build* universe, exactly like the same-named script-route
     /// key — hence the `build-` prefix.
     pub build_universes: Option<Vec<String>>,
-    /// Per-queue hardware overrides (§4.2): each falls back to the top-level
+    // §4.2
+    /// Per-queue hardware overrides: each falls back to the top-level
     /// `[hardware]` value when unset (`Meta::effective_hardware`).
     pub max_cpus_per_node: Option<u32>,
     pub default_cpus_per_task: Option<u32>,
     /// GPUs per node on this partition — the key that lets one machine carry
     /// GPU partitions of different widths (qbd's gpu2/gpu4), each with its own
-    /// §8.5 ceiling.
+    /// ceiling on a job's layout.
+    // §8.5
     pub max_gpus_per_node: Option<u32>,
     pub default_gpus_per_task: Option<u32>,
     pub threads_per_cpu: Option<u32>,
@@ -539,7 +566,8 @@ pub struct ScriptTable {
 pub struct Route {
     pub queues: Vec<String>,
     pub universe: Option<String>,
-    /// Build-universe compatibility list (§4.4): the script only serves configs
+    // §4.4
+    /// Build-universe compatibility list: the script only serves configs
     /// whose build universe is listed — for a run or submit script, configs
     /// whose binary it can run; for a buildsubmitscript, builds whose `make`
     /// runs in that universe. `None` = compatible with ALL universes;
@@ -662,10 +690,11 @@ pub struct Universe {
     pub environment: Environment,
 }
 
-/// A universe declaration (§4.8): at most one of the two wrapper forms.
-/// Neither wrapper = an identity universe (bare `sh -c` execution) — useful
-/// purely as a carrier for env-setup overrides (§4.8/§6.1), which are written
-/// inline in the universe table, alongside the wrapper keys.
+// §4.8, §6.1
+/// A universe declaration: at most one of the two wrapper forms. Neither
+/// wrapper = an identity universe (bare `sh -c` execution) — useful purely as
+/// a carrier for env-setup overrides, which are written inline in the universe
+/// table, alongside the wrapper keys.
 // The wire form of `Universe`, and the struct the schema reference is
 // generated from: `#[serde(flatten)]` on an `environment` field would read
 // exactly the same TOML, but serde cannot combine `flatten` with
@@ -832,7 +861,8 @@ pub struct CactupMeta {
     pub mdb_generation: Option<u32>,
 }
 
-/// `--from-existing` provenance (§4.7).
+/// `--from-existing` provenance.
+// §4.7
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Origin {

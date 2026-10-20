@@ -570,4 +570,25 @@ mod tests {
         assert_eq!(seen["job-ids"], "string: \"scheduler\" or \"pids\"");
         assert_eq!(seen["default-action"], "string: \"run\" or \"submit\"");
     }
+
+    /// The schema reference is read by users: no reference to the spec (a
+    /// section, a design decision `D<n>`, a "decision <n>") may reach it from
+    /// a doc comment (CLAUDE.md; put the reference in a plain `//` comment
+    /// beside the item instead).
+    #[test]
+    fn no_spec_reference_reaches_the_schema_reference() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let model = introspect(&repo).unwrap();
+        let rendered = serde_json::to_string(&model).unwrap();
+        let decision = |text: &str| {
+            let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).collect();
+            let number = |word: &str| word.chars().all(|c| c.is_ascii_digit());
+            words.iter().any(|word| word.len() > 1 && word.starts_with('D') && number(&word[1..]))
+                || words.windows(2).any(|pair| {
+                    (pair[0].eq_ignore_ascii_case("decision") || pair[0].eq_ignore_ascii_case("decisions")) && number(pair[1])
+                })
+        };
+        let found: Vec<&str> = rendered.split('"').filter(|text| text.contains('§') || decision(text)).collect();
+        assert!(found.is_empty(), "spec references in the schema reference:\n{}", found.join("\n"));
+    }
 }

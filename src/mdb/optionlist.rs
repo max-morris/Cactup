@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::path::Path;
 
-/// Where a flavor's *binary* may run (D12, §4.4): the queues it may be
-/// submitted to (empty = any) and whether it needs a GPU. Checked by sim and
-/// test jobs only — never by the build job that produces the binary (§7.9).
-/// Snapshotted into the config record at build time.
+// D12, §4.4, §7.9
+/// Where a flavor's *binary* may run: the queues it may be submitted to
+/// (empty = any) and whether it needs a GPU. Checked by sim and test jobs
+/// only — never by the build job that produces the binary. Snapshotted into
+/// the config record at build time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct RunsOn {
@@ -23,9 +24,10 @@ pub struct RunsOn {
     pub queues: Vec<String>,
     #[serde(default)]
     pub gpu: bool,
+    // §4.4, §8.5
     /// The queue a sim or test of this binary lands on when neither `-q`
-    /// nor the `queue` knob names one, ahead of the machine's default queue
-    /// (§4.4, §8.5). One of `queues` whenever that list is non-empty.
+    /// nor the `queue` knob names one, ahead of the machine's default queue.
+    /// One of `queues` whenever that list is non-empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_queue: Option<String>,
 }
@@ -47,30 +49,36 @@ impl RunsOn {
     }
 }
 
+// §7.8, D12, §4.4, §4.8
 /// The `[cactup]` header: cactup-only metadata, never emitted to the native
-/// file (§7.8, D12, §4.4, §4.8). Unknown keys are an error, as everywhere in
+/// file. Unknown keys are an error, as everywhere in
 /// the MDB: a misspelled or outdated key (a pre-generation-2 `gpu` or
 /// `compatible-queues` left at the top level) must fail loudly rather than
 /// silently drop the check it was meant to configure.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct OptionlistHeader {
-    /// Where the flavor's binary may run (D12): `[cactup.runs-on]`.
+    /// Where the flavor's binary may run: `[cactup.runs-on]`.
+    // D12
     #[serde(default)]
     pub runs_on: RunsOn,
-    /// Marks the implicit choice when a machine has several flavors (§4.4).
+    /// Marks the implicit choice when a machine has several flavors.
+    // §4.4
     #[serde(default)]
     pub default: bool,
     /// Free-form, informational description of this flavor. Purely
     /// documentary — never emitted to the native file.
     pub description: Option<String>,
-    /// Build this flavor inside this universe (§4.8 step 3).
+    /// Build this flavor inside this universe.
+    // §4.8 step 3
     pub universe: Option<String>,
-    /// Sims of this config default to running in `universe` too (§4.8 step 2);
-    /// false opts out of the build-universe coercion.
+    /// Sims of this config default to running in `universe` too; false opts
+    /// out of the build-universe coercion.
+    // §4.8 step 2
     #[serde(default = "default_true")]
     pub coerce_run_universe: bool,
-    /// Per-flavor thorn toggles (§7.5), applied ON TOP of the machine-level
+    // §7.5
+    /// Per-flavor thorn toggles, applied ON TOP of the machine-level
     /// `[build].enabled-thorns`/`disabled-thorns`. This is how one machine
     /// carries build flavors that differ in which thorns compile — e.g. a CUDA
     /// (nvcc) flavor disabling thorns the CPU flavor keeps. Merged with the
