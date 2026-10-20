@@ -73,6 +73,13 @@ pub struct RestartMeta {
     pub started: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<DateTime<Utc>>,
+    /// When a stop cactup sent after the record's end, its status query
+    /// having failed, settled the job: the scheduler took the stop, or
+    /// refused it saying (by `unknown-job-pattern`) it does not know the
+    /// job. The job is over from then on, and asked about again only after
+    /// a later end (a requeued run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_stopped: Option<DateTime<Utc>>,
     pub nodes: u32,
     pub tasks: u32,
     pub tpn: u32,
@@ -90,6 +97,22 @@ pub struct RestartMeta {
     pub checkpt_buffer: Walltime,
     /// `-1` = failed/unknown (§8.3).
     pub job_id: String,
+    // `job-ids = "pids"` (§10): where `job-id`'s process started.
+    /// On a machine whose job ids are pids: the host the job's process was
+    /// started on, recorded with its id. Absent on a batch scheduler's
+    /// machine, and in a record an older cactup made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_host: Option<String>,
+    /// With `job-host`: that process's start time, from `/proc/<pid>/stat`.
+    /// Absent with `job-host` set when the process had ended already when
+    /// cactup read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_start: Option<u64>,
+    /// A foreground `sim run`, whose `job-id` is the pid of the cactup that
+    /// runs it: no batch scheduler knows it. Absent (false) for a submitted
+    /// restart, as in records older cactups made.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub foreground: bool,
     /// The job id this restart's job depends on (pre-submitted chain, §8.3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chained_job_id: Option<String>,
@@ -111,6 +134,44 @@ pub struct RestartMeta {
     /// which never opens the global DB (D11).
     #[serde(default)]
     pub knobs: IndexMap<String, String>,
+}
+
+impl RestartMeta {
+    /// The end its job is asked about after (`Scheduler::asks_after_end`):
+    /// `finished`, unless a stop after it settled the job (`job-stopped`).
+    pub fn requeue_end(&self) -> Option<DateTime<Utc>> {
+        crate::scheduler::end_to_ask(self.finished, self.job_stopped)
+    }
+
+    /// The recorded job, as the scheduler is asked about it, with when the
+    /// record was made (its submission, else its creation).
+    pub fn job(&self) -> crate::scheduler::JobRef<'_> {
+        crate::scheduler::JobRef::new(
+            &self.job_id,
+            self.job_host.as_deref(),
+            self.job_start,
+            Some(self.created),
+        )
+    }
+
+    /// The job the scheduler is asked about and stops, if any: none for a
+    /// restart never submitted (`NO_JOB_ID`), nor for a foreground run on a
+    /// batch scheduler's machine, whose pid that scheduler knows nothing of
+    /// (its `running.lock` alone says whether it runs). On a `job-ids =
+    /// "pids"` machine a foreground run's pid is asked of `ps` like a
+    /// submitted job's (§10).
+    pub fn scheduler_job(&self, sched: &crate::scheduler::Scheduler) -> Option<crate::scheduler::JobRef<'_>> {
+        let batch_foreground = self.foreground && sched.job_ids() == crate::mdb::meta::JobIds::Scheduler;
+        (self.job_id != NO_JOB_ID && !batch_foreground).then(|| self.job())
+    }
+
+    /// Record `job` (a submitted one, or a foreground run's pid) as this
+    /// restart's job.
+    pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.job_id = job.id.clone();
+        self.job_host = job.host.clone();
+        self.job_start = job.start;
+    }
 }
 
 /// One restart on disk.
@@ -409,13 +470,50 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
 
     let restart = Restart::load(&sim.dir, active)?;
 
-    // (a) live job status must be U (gone from the queue).
-    let status = if restart.meta.job_id == NO_JOB_ID {
-        JobStatus::Unknown
-    } else {
-        sched.get_status(&restart.meta.job_id)?
+    // (a) live job status must be U (gone from the queue). A run that
+    // recorded its end is still asked about where a batch scheduler may
+    // have requeued its job; where job ids are pids it is done (§10).
+    // After the end a job the scheduler lists in a state its patterns
+    // read (queued, held, running) is still listed: leaving the queue, or
+    // starting again, never reaped; one in a state no pattern reads is the
+    // ended job (Torque's `C`, Slurm's `CD`), and a query that fails is
+    // taken as the job ended (§10, `is_live`, `Scheduler::get_status_of`).
+    // No job to ask about (none submitted, or a foreground run on a batch
+    // scheduler's machine: its lock says, below), or one past asking after
+    // its end (`Scheduler::asks_after_end`).
+    let ended = restart.meta.terminated;
+    let job_id = &restart.meta.job_id;
+    // What was learned, for the note below: never an answer not had.
+    let mut learned = None;
+    let status = match restart.meta.scheduler_job(sched) {
+        Some(job) if !ended || sched.asks_after_end(&sim.meta.machine, restart.meta.requeue_end()) => {
+            match sched.get_status(job) {
+                Err(e) if ended && e.downcast_ref::<crate::scheduler::FailedQuery>().is_some() => {
+                    crate::scheduler::note_taken_as_ended(job.id);
+                    JobStatus::Unknown
+                }
+                Err(e) => return Err(e),
+                Ok(status) => {
+                    // Where job ids are pids, the pid checks may have ruled
+                    // the job out without running anything: say so.
+                    let pids = sched.job_ids() == crate::mdb::meta::JobIds::Pids;
+                    learned = Some(match status {
+                        _ if sched.ruled_out(job).is_some() => sched.ruled_out(job).unwrap_or_default(),
+                        JobStatus::Unknown if pids => format!("process {job_id} is gone"),
+                        JobStatus::Unknown => format!("the scheduler no longer lists job {job_id}"),
+                        _ => format!("the scheduler lists job {job_id} as over"),
+                    });
+                    status
+                }
+            }
+        }
+        _ => JobStatus::Unknown,
     };
-    if !matches!(status, JobStatus::Unknown) {
+    let in_queue = match ended {
+        true => crate::scheduler::is_live(status, true),
+        false => !matches!(status, JobStatus::Unknown),
+    };
+    if in_queue {
         return Ok(false); // still in the queue → chaining, never reaping
     }
     // (b) the per-restart liveness marker must be unheld.
@@ -431,12 +529,11 @@ pub fn reap_stale(sim: &Simulation, sched: &Scheduler) -> Res<bool> {
         return Ok(false); // possibly a scheduler hiccup (transient U)
     }
 
-    eprintln!(
-        "{} reaping stale active restart {} (job {} gone)",
-        "note:".yellow(),
-        dir_name(active),
-        restart.meta.job_id
-    );
+    let learned = learned.unwrap_or_else(|| match ended {
+        true => "it had recorded its end".to_owned(),
+        false => "nothing of its run holds its lock".to_owned(),
+    });
+    eprintln!("{} reaping stale active restart {} ({learned})", "note:".yellow(), dir_name(active));
     crate::sim::manage::clean_active(sim)?;
     let _ = fs::write(&marker, b"");
     sim.log("reap", &format!("reaped stale active restart {}", dir_name(active)));

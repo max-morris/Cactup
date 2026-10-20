@@ -2,7 +2,7 @@
 //! one run of `make` for one config, recorded under
 //! `configs/<name>/.cactup-builds/%04d/` so a queued build can be monitored
 //! and a compute node can execute it without touching the global DB, the
-//! installation registry, the MDB, or knobs (D11). Modelled closely on
+//! installation registry, the MDB, or knobs (D11). Modeled closely on
 //! `testsuite::{TestMeta, TestRun}` and `sim::restart::{RestartMeta, Restart}`.
 //!
 //! Unlike a simulation restart's `output-%04d`, there is no nested `.cactup/`
@@ -40,6 +40,13 @@ pub struct Timestamps {
     pub submitted: Option<DateTime<Utc>>,
     pub started: Option<DateTime<Utc>>,
     pub finished: Option<DateTime<Utc>>,
+    /// When a stop cactup sent after the record's end, its status query
+    /// having failed, settled the job: the scheduler took the stop, or
+    /// refused it saying (by `unknown-job-pattern`) it does not know the
+    /// job. The job is over from then on, and asked about again only after
+    /// a later end (a requeued run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_stopped: Option<DateTime<Utc>>,
 }
 
 /// `[outcome]` in `build.toml`: recorded once the `make` invocation ends.
@@ -103,6 +110,17 @@ pub struct BuildMeta {
     /// The scheduler's job id, `restart::NO_JOB_ID` when submission failed,
     /// or the pid for a foreground build.
     pub job_id: String,
+    // `job-ids = "pids"` (§10): where `job-id`'s process started.
+    /// On a machine whose job ids are pids: the host the job's process was
+    /// started on, recorded with its id. Absent on a batch scheduler's
+    /// machine, and in a record an older cactup made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_host: Option<String>,
+    /// With `job-host`: that process's start time, from `/proc/<pid>/stat`.
+    /// Absent with `job-host` set when the process had ended already when
+    /// cactup read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_start: Option<u64>,
     /// Last observed live status letter (cached; the live query is the
     /// source of truth, mirroring `TestMeta::status`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +190,27 @@ pub struct BuildMeta {
     pub timestamps: Timestamps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<BuildOutcomeRecord>,
+}
+
+impl BuildMeta {
+    /// The recorded job, as the scheduler is asked about it, with when the
+    /// record was made (its submission, else its creation).
+    pub fn job(&self) -> crate::scheduler::JobRef<'_> {
+        crate::scheduler::JobRef::new(
+            &self.job_id,
+            self.job_host.as_deref(),
+            self.job_start,
+            self.timestamps.submitted.or(self.timestamps.created),
+        )
+    }
+
+    /// Record `job` (a submitted one, or a foreground run's pid) as this
+    /// attempt's job.
+    pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.job_id = job.id.clone();
+        self.job_host = job.host.clone();
+        self.job_start = job.start;
+    }
 }
 
 /// A located build attempt.
@@ -319,7 +358,13 @@ impl BuildAttempt {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(config_dir: &Path, id: u32) -> Res<BuildAttempt> {
         let dir = Self::attempt_dir(config_dir, id);
-        let path = Self::meta_path(&dir);
+        let meta = Self::read_meta(&dir)?;
+        Ok(BuildAttempt { id, dir, meta })
+    }
+
+    /// The `build.toml` in attempt directory `dir` (schema-guarded).
+    fn read_meta(dir: &Path) -> Res<BuildMeta> {
+        let path = Self::meta_path(dir);
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let mut table: toml::Table =
@@ -343,7 +388,37 @@ impl BuildAttempt {
                 meta.schema
             );
         }
-        Ok(BuildAttempt { id, dir, meta })
+        Ok(meta)
+    }
+
+    /// The lock of attempt directory `dir`'s record, waited for: the
+    /// submitter holds it while it submits and records the job, and the
+    /// compute side's writes take it ([`Self::store_meta_keeping_job`]), so
+    /// a job that starts at once never writes back a copy read before its
+    /// job id (and, where job ids are pids, its host and start time) was
+    /// recorded.
+    pub fn record_lock(dir: &Path) -> Res<crate::lock::LinkLock> {
+        crate::lock::LinkLock::acquire_wait(
+            &dir.join("record.lock"),
+            std::time::Duration::from_secs(crate::lock::HANDOFF_WAIT_SECS),
+        )
+    }
+
+    /// [`Self::store_meta`] under [`Self::record_lock`], keeping the job the
+    /// submitter recorded on disk (its id, host, start time, `submitted` and
+    /// when): what `execute` writes, which may run before the submitter has
+    /// recorded them.
+    pub fn store_meta_keeping_job(&mut self) -> Res<()> {
+        let _lock = Self::record_lock(&self.dir)?;
+        let disk = Self::read_meta(&self.dir)?;
+        if disk.submitted {
+            self.meta.submitted = true;
+            self.meta.job_id = disk.job_id;
+            self.meta.job_host = disk.job_host;
+            self.meta.job_start = disk.job_start;
+            self.meta.timestamps.submitted = disk.timestamps.submitted;
+        }
+        self.store_meta()
     }
 
     /// Create a fresh attempt directory and write its metadata.
@@ -405,6 +480,8 @@ mod tests {
             install_root: PathBuf::from("/home/user/et"),
             submitted: false,
             job_id: "12345".to_owned(),
+            job_host: None,
+            job_start: None,
             status: Some("R".to_owned()),
             reservation: Some(Reservation {
                 queue: "checkpt".to_owned(),
@@ -435,6 +512,7 @@ mod tests {
                 submitted: None,
                 started: None,
                 finished: None,
+                job_stopped: None,
             },
             outcome: None,
         }

@@ -99,7 +99,9 @@ fn file_mtime(file: &fs::File) -> std::io::Result<SystemTime> {
     file.metadata().and_then(|m| m.modified())
 }
 
-fn our_hostname() -> String {
+/// This host's name, as lock stamps and the origin of a job whose id is a
+/// pid (`scheduler::JobRef`) record it.
+pub(crate) fn our_hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 
@@ -127,6 +129,79 @@ pub(crate) fn proc_starttime(pid: u32) -> Option<u64> {
 /// stamp).
 pub(crate) fn proc_session(pid: u32) -> Option<u32> {
     proc_stat_field(pid, 6)
+}
+
+/// The process group of `pid`, from `/proc/<pid>/stat` field 5.
+pub(crate) fn proc_pgrp(pid: u32) -> Option<u32> {
+    proc_stat_field(pid, 5)
+}
+
+/// `pid`'s process group, read from every process's `/proc/<pid>/stat`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcGroup {
+    /// The group's id (the pid of its leader, which may be gone).
+    pub pgid: u32,
+    /// Every process in the group is `pid` or one of its descendants (by
+    /// the parent links): the group is the job's own, and stopping it
+    /// stops the job and nothing else.
+    pub own: bool,
+    /// `pid` and its live descendants, in any group.
+    pub tree: Vec<u32>,
+    /// Those of `tree` in another group (a descendant that made a group of
+    /// its own): stopping the group leaves them running.
+    pub outside: Vec<u32>,
+}
+
+/// [`ProcGroup`] of `pid`, `None` when it has no process. A descendant
+/// whose parent died has been handed to another parent and no longer
+/// counts as one: the group then holds a process cactup cannot tell is the
+/// job's, and is not its own (the safe reading).
+pub(crate) fn proc_group(pid: u32) -> Option<ProcGroup> {
+    let pgid = proc_pgrp(pid)?;
+    // (pid, ppid, pgrp) of every process.
+    let mut procs = Vec::new();
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let Some(p) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else { continue };
+        let Some((_, rest)) = stat.rsplit_once(')') else { continue };
+        let mut fields = rest.split_whitespace().skip(1);
+        let (Some(ppid), Some(pgrp)) = (fields.next().and_then(|f| f.parse::<u32>().ok()), fields.next().and_then(|f| f.parse::<u32>().ok())) else {
+            continue;
+        };
+        procs.push((p, ppid, pgrp));
+    }
+    let parent: std::collections::HashMap<u32, u32> = procs.iter().map(|&(p, ppid, _)| (p, ppid)).collect();
+    let descends = |mut p: u32| {
+        // Bounded: a parent link loop cannot happen, but a racing read could.
+        for _ in 0..4096 {
+            if p == pid {
+                return true;
+            }
+            match parent.get(&p) {
+                Some(&ppid) if ppid > 1 => p = ppid,
+                _ => return false,
+            }
+        }
+        false
+    };
+    let own = procs.iter().filter(|&&(_, _, pgrp)| pgrp == pgid).all(|&(p, _, _)| descends(p));
+    let mut tree: Vec<u32> = procs.iter().map(|&(p, _, _)| p).filter(|&p| descends(p)).collect();
+    tree.sort_unstable();
+    let outside = procs.iter().filter(|&&(p, _, pgrp)| pgrp != pgid && tree.contains(&p)).map(|&(p, _, _)| p).collect();
+    Some(ProcGroup { pgid, own, tree, outside })
+}
+
+/// When `pid`'s process started, on the wall clock: the boot time
+/// (`btime` in `/proc/stat`) plus its start time in clock ticks. Coarse
+/// (the boot time is whole seconds, and the clock may have been stepped
+/// since boot), so only good for telling apart times minutes apart.
+pub(crate) fn proc_start_wall(pid: u32) -> Option<SystemTime> {
+    let ticks = proc_starttime(pid)?;
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    let btime: u64 = stat.lines().find_map(|line| line.strip_prefix("btime "))?.trim().parse().ok()?;
+    let hz = rustix::param::clock_ticks_per_second().max(1);
+    let since_boot = Duration::from_millis(ticks.saturating_mul(1000) / hz);
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(btime) + since_boot)
 }
 
 /// Field `n` (1-based, as `proc(5)` numbers them) of `/proc/<pid>/stat`.

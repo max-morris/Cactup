@@ -12,7 +12,7 @@ use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
 use crate::mdb::meta::{Route, ScriptTable};
 use crate::mdb::{Machine, Phase, ScriptKind, Universe, HOST_UNIVERSE};
-use crate::scheduler::{JobStatus, Scheduler};
+use crate::scheduler::Scheduler;
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{
     generate_script, resolve_run_universe, resolve_submit_universe, script_command,
@@ -325,28 +325,94 @@ fn start_impl(
     }
 
     let identity = Identity::resolve(db, hostname_override);
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
     if let Ok(old) = TestRun::open(&run_dir) {
-        if old.meta.job_id != NO_JOB_ID
-            && !LinkLock::is_held_live(&old.running_lock_path())?
-            && matches!(
-                sched.get_status(&old.meta.job_id)?,
-                JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-            )
+        if old.lock_live()? {
+            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+        }
+        // After the old run's end, a job the scheduler still lists in a
+        // state its patterns read (leaving the queue, or starting again),
+        // or could not be asked about, may run beside a new run: refused,
+        // the safe reading for starting new work (§10).
+        use crate::scheduler::AfterEnd;
+        let finished = old.meta.timestamps.finished.is_some();
+        // `Some(answer)`: live; after the end, `answer` is the scheduler's
+        // (listed in a state, or the failed query's text where it could not
+        // be asked).
+        let live = |job| -> Res<Option<Option<AfterEnd>>> {
+            Ok(match finished {
+                true => match sched.ask_after_end(job)? {
+                    AfterEnd::Over(_) => None,
+                    answer => Some(Some(answer)),
+                },
+                false => crate::scheduler::is_live(sched.get_status(job)?, false).then_some(None),
+            })
+        };
+        if let Some(job) = old.pending_job(&sched)
+            && let Some(answer) = live(job)?
         {
+            let failed = match &answer {
+                Some(AfterEnd::Unanswered(failed)) => Some(failed.clone()),
+                _ => None,
+            };
+            // An older record's pid, or one sharing its process group (§10):
+            // never stopped, `-f` neither.
+            if sched.unverified(job) {
+                bail!("{}; then run the tests again", crate::scheduler::UnverifiedPid::of(job.id));
+            }
+            if sched.shares_group(job) {
+                bail!("{}; then run the tests again", crate::scheduler::SharedGroup(job.id.to_owned()));
+            }
+            if let Some(failed) = failed.as_deref()
+                && !args.force
+            {
+                bail!(
+                    "test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
+                     queued again: {failed}\n`cactup test stop {name}` asks the scheduler to stop the job (a job \
+                     it says it does not know is then taken as ended); or pass -f to stop it and run the tests",
+                    job.id
+                );
+            }
+            if let Some(AfterEnd::Listed(status)) = answer
+                && !args.force
+            {
+                bail!(
+                    "test run \"{name}\" ended, but the scheduler still lists its job {} {} (or pass -f to \
+                     stop it)",
+                    job.id,
+                    crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
+                );
+            }
             if !args.force {
                 bail!(
                     "test run \"{name}\" still has a live job ({}); \
                      `cactup test stop {name}` first, or pass -f to stop it",
-                    old.meta.job_id
+                    job.id
                 );
             }
-            sched.stop(&old.meta.job_id)?;
-        } else if LinkLock::is_held_live(&old.running_lock_path())? {
-            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+            match finished {
+                // After a failed query, a stop the scheduler refuses saying
+                // it does not know the job is taken as the job ended; any
+                // other failure of the stop command is an error.
+                true => {
+                    if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_judged(job, match failed.as_deref() {
+                        Some(failed) => crate::scheduler::StopCase::Unanswered(failed),
+                        None => crate::scheduler::StopCase::Listed,
+                    })? {
+                        println!(
+                            "The scheduler does not know test job {} (its stop command said: {said}): \
+                             taken as ended",
+                            job.id
+                        );
+                    }
+                }
+                false => {
+                    sched.stop(job)?;
+                }
+            }
         }
     }
 
@@ -374,6 +440,8 @@ fn start_impl(
             walltime: topo.total_wall,
             allocation: topo.allocation.clone(),
             job_id: NO_JOB_ID.to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             universe: run_uni_spec,
             results: None,
@@ -426,8 +494,9 @@ fn start_impl(
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
         run.store_meta()?;
 
-        let job_id = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
-        run.meta.job_id = job_id.clone();
+        let submitted = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
+        run.meta.set_job(&submitted);
+        let job_id = submitted.id;
         run.meta.timestamps.submitted = Some(Utc::now());
         run.store_meta()?;
         run.log("test-submit", &format!("submitted {} as job {job_id} (select: {select})", results_name(results_id)));
@@ -454,6 +523,16 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
     let mut run = TestRun::open(dir)?;
     {
         let _lock = run.lock_wait()?;
+        // Read again under the lock: a job the generic machine starts at
+        // once may get here before its submitter has recorded the job id
+        // (which it does holding the lock), and would write the record
+        // back without it.
+        run = TestRun::open(dir)?;
+        // Running, so not ended: a job the scheduler requeued after the
+        // run recorded its end (preemption, `scontrol requeue`, Torque's
+        // `qrerun`) is a job to ask the scheduler about again
+        // (`TestRun::pending_job`); `execute_testsuite` stores this.
+        run.meta.timestamps.finished = None;
         // The set was activated at submit time; re-assert defensively.
         fs::create_dir_all(results_dir(dir, results_id))?;
         activate_results(dir, results_id)?;
@@ -910,6 +989,8 @@ mod tests {
             install_root: cactus_root.clone(),
             submitted: true,
             job_id: "JOB-Q1".to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             reservation: None,
             decision: "test decision".to_owned(),

@@ -453,20 +453,32 @@ pub struct Scheduler {
     #[serde(default, deserialize_with = "string_or_seq")]
     pub allocation_env: Vec<String>,
     // §10; the third of the questions decision 35 answers (design/
-    // build-cache/DECISIONS.md, 35; not its decision 3): declared now,
-    // read by the liveness work later.
+    // build-cache/DECISIONS.md, 35; not its decision 3), read by
+    // `Scheduler::get_status`, `get_statuses` and `stop`.
     /// What a job id is (a cactup addition): `"scheduler"` (the default), an
     /// id the batch system hands out, or `"pids"`, the pid of a process on
     /// the host the job was submitted from, where the scheduler is that
-    /// host's own processes (`ps`, `kill`). Declares a fact; cactup does not
-    /// yet act on it.
+    /// host's own processes (`ps`, `kill`). With `"pids"`, cactup records the host and
+    /// the process's start time with each job id, and asks `get-status` or
+    /// `stop` about the job only on that host while the pid's process is
+    /// the one that started then; otherwise the job is gone (or, recorded on
+    /// another host, left to that host). `submit` must start each job in a
+    /// process group of its own (`setsid`): cactup stops only a job whose
+    /// group holds nothing but the job and the processes it started.
     #[serde(default)]
     pub job_ids: JobIds,
     /// A regular expression (a cactup addition) matching a line of
     /// `get-status`'s output (stdout or stderr) that says the scheduler does
     /// not know the job, `@JOB_ID@` substituted as in the other patterns.
-    /// Tells a job the scheduler has forgotten from a status query that
-    /// failed. Declares a fact; cactup does not yet act on it.
+    /// Where it is set, output with no line for the job is a job gone only
+    /// if a line matches it; otherwise the query failed: a command that
+    /// would act on the answer refuses. After the run recorded its end,
+    /// listings show that end and deletes note the failure and take the job
+    /// as ended, while the commands that act take the safe reading: a stop
+    /// is sent anyway (and the job is taken as ended only when the scheduler
+    /// took it, or the stop command's output matches this pattern too), and
+    /// new work refuses. Where it is not set, no line for the job is a job
+    /// gone.
     pub unknown_job_pattern: Option<String>,
 }
 

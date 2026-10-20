@@ -217,8 +217,8 @@ hostname = "mylab.local"
 autodetect = true
 
 [scheduler]
-submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
-blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+submit = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
 job-ids = "pids"
@@ -271,17 +271,64 @@ running-pattern = " R "
 `get-status-many` is optional: one call instead of one per job. It must list every
 live job of `@USER@`, one per line, with the job id as the first field; the rest of
 the line is classified by the same `status`/`queued`/`running`/`holding` patterns
-used for `get-status`. A job id absent from the listing is treated as not queued.
+used for `get-status`. A job id absent from the listing is treated as not queued
+(a listing says nothing of the jobs it leaves out, so `unknown-job-pattern`
+plays no part there). A listing command that exits non-zero has failed:
+cactup then asks job by job with `get-status`, so the listing must exit 0
+when it ran, also when it lists nothing. The listing serves `sim list`, `sim
+show`, `test list`, `test show`, `build list`, `build show` and `sim
+delete`; every other command asks job by job with `get-status`.
 
 `unknown-job-pattern` (optional) is a regular expression matching a line of
 `get-status`'s output, stdout or stderr, that says the scheduler does not
 know the job, `@JOB_ID@` substituted as in the other patterns. For Slurm's
 `squeue -j` that is `slurm_load_jobs error: Invalid job id specified`; for
 Torque's `qstat`, `Unknown Job Id`; for PBS Pro's, `Unknown Job Id|Job has
-finished` (the second for a finished job, when job history is on). It declares a fact for now:
-cactup will use it to tell a job the scheduler has forgotten from a status
-query that failed, with the test-run and simulation liveness work; today it
-changes nothing.
+finished` (the second for a finished job, when job history is on).
+
+With it set, cactup tells a job the scheduler has forgotten from a status
+query that failed: output with no line for the job (no line matching
+`status-pattern`) means the job is gone only if a line matches
+`unknown-job-pattern`. Otherwise the query failed (the controller timed out,
+say). For a run that has not recorded its end, a command that acts on the
+answer refuses, printing the query, both patterns and what it printed: `sim
+delete`, `sim stop`'s graceful wait (a forced `sim stop -f` asks nothing),
+`test stop`, `test delete`, `build stop`, and the checks before a new `sim
+submit`/`sim run`, `test run`/`test submit` and build; `sim list`, `test
+list`, `build list` and their `show`s print the state as `UNKNOWN`, and
+`build prune` keeps the attempt. For a run that has recorded its end (a
+finished simulation restart, test run or build), asking is the check for a
+job the scheduler put back in the queue, made for 14 days after the end and
+only on the machine the record was made for (later, or elsewhere, the job
+id may name an unrelated job, and the record is taken as ended without
+asking). A failed query then is taken as the job ended where cactup only
+shows records (`sim list`, `test list`, their `show`s: the recorded end) or
+removes them (`sim delete`, `test delete`: with a one-line note); the commands that act take the
+safe reading, since the job may have been queued again: `sim submit`, `sim
+run`, and a new test run or build refuse, printing the query, both patterns
+and what it printed, and naming the stop command (`-f` stops the job and
+goes ahead); `sim stop`, `test stop` and `build stop` ask the scheduler to
+stop the job anyway, saying they could not ask. Where the scheduler takes
+the stop, or refuses it with output this pattern matches (it does not
+know the job), cactup records the stop, and the job is taken as ended
+without asking from then on. Any other failure of the stop command (the
+controller not reached) is an error and records nothing. Slurm's
+`scancel` of a job the controller does not know exits 0 and prints
+nothing (Slurm 24.11.7), so there the stop is taken and the job settled;
+Torque's `qdel` refuses one (`Unknown Job Id`, exit 153), which the
+pattern then matches, as it is matched against the stop command's output
+too. So on a scheduler that refuses such a stop, a pattern that misses
+its message for a forgotten job settles nothing: the commands refuse,
+each showing the output to fix the pattern against. Without the key, no line for the
+job means the job is gone, as before: a query that failed reads as a job no
+longer in the queue. Check the pattern against what the command really
+prints for a job the scheduler no longer knows (an old job id will do): one
+that never matches makes every job the scheduler has forgotten look like a
+failed query wherever cactup asks job by job (`sim stop`'s wait, `test
+stop` and `delete`, `build stop`, the checks before a new run or build),
+which then refuse; where the listing answers instead (`sim list`, `sim show`, `test list`,
+`test show`, `build list`, `build show`, `sim delete`), such a job is just
+not listed, and so gone.
 
 `blocking-submit` is optional too: the same submission, but expressed so the
 command doesn't return until the job has finished, for `cactup build submit
@@ -318,8 +365,8 @@ running-pattern = " R "
 
 ```toml
 [scheduler]
-submit = "exec nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
-blocking-submit = "@SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
+submit = "exec setsid nohup @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & echo $!"
+blocking-submit = "setsid @SCRIPTFILE@ < /dev/null > @STDOUT_FILE@ 2> @STDERR_FILE@ & pid=$!; echo $pid; wait $pid"
 allocation-env = ""
 get-status = "ps @JOB_ID@"
 job-ids = "pids"
@@ -337,10 +384,31 @@ it parses immediately instead of only once the job is already done.
 Set `job-ids = "pids"` on such a machine (the default is `"scheduler"`): it
 declares that a job id is the pid of a process on the host the job was
 submitted from, so the scheduler is that host's own processes. A pid means
-nothing on another host and is reused once its process is gone; cactup will
-use the key to record the host and the process's start time with the id and
-ask only there, with the test-run and simulation liveness work. Today it
-changes nothing.
+nothing on another host and is reused once its process is gone, so cactup
+records with each job id the host it was submitted from and the start time
+of the process with that pid, read as soon as the id is known. Later it runs
+`get-status` or `stop` for the job only on that host, and only while the
+process with that pid is still the one that started then; otherwise the job
+is taken as gone, and nothing is run. A job recorded on another host is
+never taken as gone while its run's lock is held: `stop` says it runs on that
+host and to stop it there, and `delete` refuses; once the lock is let go (or
+goes stale) it is taken as ended. A job recorded by an older cactup,
+without its host and start time, is asked about only where a process with
+its pid runs on this host and started no later than the record was made,
+and cactup never stops it (it may be another process): stop it yourself if
+it is the job, as cactup says (`kill -- -<group>` where its process group
+holds only the job; else it names the processes to stop). A run that has recorded its end is not asked about again on
+such a machine, where nothing requeues a job.
+
+The `submit` (and `blocking-submit`) of such a machine must start each job
+in a process group of its own, with `setsid` as above: `stop` stops a whole
+group (`pkill -g`), so cactup runs it only for a job whose group holds
+nothing but the job and the processes it started, and refuses otherwise (a
+job sharing the submitting shell's group would take the shell and its other
+jobs with it), naming the pid to stop by hand with the processes it
+started. `setsid` keeps the backgrounded pid: it starts a new session in the
+same process when that process does not lead a group already, as a
+background job of `sh -c` does not.
 
 ## Environment variables
 

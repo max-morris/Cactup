@@ -2,16 +2,21 @@
 //!
 //! Everything is driven by the machine `meta.toml` scheduler keys: `submit`
 //! (job id parsed via `submit-pattern` group 1), its optional wait-for-the-job
-//! flavour `blocking-submit`, `get-status` classified by the `*-pattern`
+//! flavor `blocking-submit`, `get-status` classified by the `*-pattern`
 //! regexes into R/Q/H/U/E, and `stop`. Status is queried live, never stored
 //! (D4).
-
-// Consumed by the Phase-3 SIM/TEST streams; unused until then.
+//!
+//! A job is named by a [`JobRef`]: its id and, where job ids are pids
+//! (`job-ids = "pids"`), the host and process start time recorded with it
+//! at submit. Every query and stop goes through the checks those allow, so
+//! no caller hands a pid that means another process to `ps` or `pkill`.
 
 use crate::mdb::meta::{JobIds, Meta, Phase, Universe, WrappedCommand};
 use crate::template::{Syntax, VarSet};
 use crate::Res;
 use anyhow::{anyhow, bail, Context};
+use chrono::{DateTime, Utc};
+use colored::Colorize;
 use regex::Regex;
 use std::collections::HashMap;
 use std::process::Command;
@@ -60,6 +65,16 @@ pub enum DisplayState {
     Error,
     /// No active restart.
     Inactive,
+    /// The status query failed (where the machine can tell, §10) for a
+    /// restart whose run has not recorded its end: no state is known.
+    Unknown,
+    /// A restart whose run recorded its end, whose job the scheduler lists
+    /// queued (or held) again (§8.6): `sim stop` stops it.
+    Requeued,
+    /// A restart whose run recorded its end, whose job the scheduler still
+    /// lists running: leaving the queue, or starting again (§8.6). `sim
+    /// stop` stops it.
+    StillListed,
 }
 
 /// The §8.6 display-state derivation. `status` is `None` when the restart has
@@ -92,22 +107,381 @@ pub fn display_state(
     }
 }
 
+/// A recorded job, as the scheduler is asked about it: its id and, where
+/// the machine's job ids are pids (`job-ids = "pids"`, §10), the host the
+/// process was started on and its start time (`/proc/<pid>/stat`), read
+/// the moment the id was known ([`JobRecord`]). A record without them is
+/// one an older cactup made, or a batch scheduler's job. `since` is when
+/// the record was made (its submission, or its creation just before),
+/// which tells an older record's pid from a process that started later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JobRef<'a> {
+    pub id: &'a str,
+    /// The host the pid's process was started on.
+    pub host: Option<&'a str>,
+    /// Its start time; `None` with a host recorded: the process was gone
+    /// already when cactup read it.
+    pub start: Option<u64>,
+    /// When the record was made, where it says.
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl<'a> JobRef<'a> {
+    pub fn new(id: &'a str, host: Option<&'a str>, start: Option<u64>, since: Option<DateTime<Utc>>) -> JobRef<'a> {
+        JobRef { id, host, start, since }
+    }
+
+    /// A job id with nothing recorded beside it.
+    #[cfg(test)]
+    pub fn bare(id: &'a str) -> JobRef<'a> {
+        JobRef { id, host: None, start: None, since: None }
+    }
+
+    /// The same, owned.
+    pub fn to_record(self) -> JobRecord {
+        JobRecord { id: self.id.to_owned(), host: self.host.map(str::to_owned), start: self.start, since: self.since }
+    }
+
+    fn key(&self) -> JobKey {
+        (self.id.to_owned(), self.host.map(str::to_owned), self.start, self.since)
+    }
+}
+
+/// What tells two recorded jobs apart: all that is recorded of them.
+type JobKey = (String, Option<String>, Option<u64>, Option<DateTime<Utc>>);
+
+/// A job id with what is recorded beside it, owned: a job just submitted
+/// (or a foreground run's own pid, [`Scheduler::own_job`]), with, on a
+/// `job-ids = "pids"` machine, where its process started (recorded as
+/// `job-host` and `job-start`); or one read back from a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRecord {
+    pub id: String,
+    pub host: Option<String>,
+    pub start: Option<u64>,
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl JobRecord {
+    pub fn job(&self) -> JobRef<'_> {
+        JobRef::new(&self.id, self.host.as_deref(), self.start, self.since)
+    }
+}
+
+/// What [`Scheduler::stop`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// The machine's stop command ran and succeeded.
+    Sent,
+    /// The job's pid names no process of the job's any more (a process that
+    /// started at another time, or none): nothing was run.
+    Gone,
+    /// The job's pid is another host's, which this one cannot see or stop:
+    /// nothing was run. Whether it still runs there is for the run's
+    /// `running.lock` to say, never taken for gone here.
+    Elsewhere(String),
+}
+
+/// [`Scheduler::stop`]'s refusal of a pid recorded without its host and
+/// start time (by an older cactup): a live process with that pid here may
+/// be another one, so it is never stopped.
+#[derive(Debug)]
+pub struct UnverifiedPid {
+    pub id: String,
+    /// The pid's process group, read when the refusal was made.
+    group: Option<crate::lock::ProcGroup>,
+}
+
+impl UnverifiedPid {
+    pub fn of(id: &str) -> UnverifiedPid {
+        let group = id.parse::<u32>().ok().and_then(crate::lock::proc_group);
+        UnverifiedPid { id: id.to_owned(), group }
+    }
+}
+
+/// How to stop by hand the run whose top process is `pid`: the whole
+/// process group where it holds nothing else (`kill -- -<pgid>`, which
+/// stops the pid and the processes it started in that group, and nothing
+/// else; any it started in another group named too); else no single
+/// command does, and the processes are named.
+fn stop_by_hand(id: &str, group: Option<&crate::lock::ProcGroup>) -> String {
+    let pids = |list: &[u32]| list.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+    match group {
+        Some(group) if group.own && group.outside.is_empty() => {
+            format!("`kill -- -{}` stops it and every process it started", group.pgid)
+        }
+        Some(group) if group.own => format!(
+            "`kill -- -{}` stops it and the processes it started in its group, but not pids {}, which it \
+             started in groups of their own: stop those too",
+            group.pgid,
+            pids(&group.outside)
+        ),
+        Some(group) if group.tree.len() > 1 => format!(
+            "no single command stops it alone, as its process group holds processes cactup cannot tell \
+             are the job's: stop pid {id} and the processes it started (now pids {}; `pstree -p {id}` shows \
+             them), or interrupt the run where it runs (Ctrl-C)",
+            pids(&group.tree)
+        ),
+        _ => format!(
+            "no single command stops it alone, as its process group holds processes cactup cannot tell are \
+             the job's: stop pid {id} and any process it started (`pstree -p {id}` shows them), or interrupt \
+             the run where it runs (Ctrl-C)"
+        ),
+    }
+}
+
+impl std::fmt::Display for UnverifiedPid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let how = stop_by_hand(&self.id, self.group.as_ref());
+        write!(
+            f,
+            "job {0} was recorded by an older cactup, without the host and start time of its \
+             process, and a process with pid {0} runs here: it may be the job or another process, \
+             so cactup does not stop it (if it is the job, {how}; or try again once it has ended)",
+            self.id
+        )
+    }
+}
+
+impl std::error::Error for UnverifiedPid {}
+
+/// [`Scheduler::stop`]'s refusal of a pid that does not lead its own
+/// process group: the machine's stop command (`pkill -g`, or `kill` of a
+/// process whose siblings carry on) would reach, or miss, other processes.
+#[derive(Debug)]
+pub struct SharedGroup(pub String);
+
+impl std::fmt::Display for SharedGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let group = self.0.parse::<u32>().ok().and_then(crate::lock::proc_group);
+        let pgid = group.as_ref().map(|g| format!(" ({})", g.pgid)).unwrap_or_default();
+        write!(
+            f,
+            "job {0} shares its process group{pgid} with processes cactup cannot tell are the job's, so cactup does \
+             not stop it: the machine's stop command would stop them too, and no single command stops \
+             the job alone. Stop pid {0} and the processes it started by hand (`pstree -p {0}` shows \
+             them), or interrupt the run where it runs (Ctrl-C; a foreground `cactup sim run` started \
+             from a script or later in a pipeline is one); a submit command that starts each job with \
+             `setsid` gives it a group of its own",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SharedGroup {}
+
+/// [`Scheduler::get_status`]'s error for a status query whose output says
+/// neither how the job is nor that the scheduler does not know it (where
+/// the machine sets `unknown-job-pattern`).
+#[derive(Debug)]
+pub struct FailedQuery(pub String);
+
+impl std::fmt::Display for FailedQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FailedQuery {}
+
+/// What the pid checks (§10, `job-ids = "pids"`) make of a recorded job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidCheck {
+    /// Its process runs here, started when recorded: ask `ps`, stop it.
+    Here,
+    /// Not its process (a start time that differs, none at all, a process
+    /// that started after an older record was made): gone, nothing is run.
+    Gone,
+    /// Another host's pid: nothing is run here, and the run's lock says
+    /// whether it runs there.
+    Elsewhere,
+    /// An older record (no host, no start time) whose pid has a process
+    /// here that may be the job: asked about, never stopped.
+    Unverified,
+}
+
+/// How long after a record's end its job is still asked about where a batch
+/// scheduler may requeue it ([`Scheduler::asks_after_end`]).
+pub const REQUEUE_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(14);
+
+/// The note for a status query that failed after its record's end, taken
+/// as ended by what only reads or removes records (displays, deletes).
+pub fn note_taken_as_ended(job_id: &str) {
+    eprintln!(
+        "{} the status query for job {job_id} failed, and its run had recorded its end: taken as \
+         ended (if this repeats, check that unknown-job-pattern in the machine's [scheduler] table \
+         matches what get-status prints for a job the scheduler does not know)",
+        "note:".yellow()
+    );
+}
+
+/// What the scheduler said of a job asked about after its record's end
+/// ([`Scheduler::ask_after_end`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterEnd {
+    /// Listed in a state the patterns read: queued again, or leaving.
+    Listed(JobStatus),
+    /// Not known (`Unknown`), or listed in a state no pattern reads
+    /// (`Error`): the ended job.
+    Over(JobStatus),
+    /// The status query failed: no answer. The [`FailedQuery`] text (the
+    /// query, both patterns, its output, the `unknown-job-pattern` hint).
+    Unanswered(String),
+}
+
+/// What a job the scheduler still lists after its record's end may be, by
+/// its state: queued or held, queued again; running (the patterns read
+/// `CF`, `R`, `CG`, `TO` alike), leaving the queue or starting again.
+pub fn listed_state_words(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Queued => "queued again",
+        JobStatus::Holding => "queued again, and held",
+        _ => "listed running: leaving the queue, or starting again",
+    }
+}
+
+/// How a job the scheduler still lists after its record's end reads, by
+/// its state, with what to do about it (`stop`: the cactup command that
+/// stops it): queued or held, queued again; running, leaving the queue or
+/// starting again (the patterns cannot tell which).
+pub fn listed_after_end(status: JobStatus, stop: &str) -> String {
+    match status {
+        JobStatus::Queued => format!("as queued again: `{stop}` to stop it, or wait until it has run"),
+        JobStatus::Holding => format!("as queued again, and held: `{stop}` to stop it"),
+        _ => format!(
+            "as running (leaving the queue, or starting again): wait until it leaves the queue, or `{stop}` \
+             to stop it"
+        ),
+    }
+}
+
+/// What a failed stop command said, on one line: its output, then its exit
+/// status (`collect_output`'s "command exited unsuccessfully (<status>):"
+/// heading, turned around).
+pub fn stop_said(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    let (status, rest) = match text.strip_prefix("command exited unsuccessfully (").and_then(|t| t.split_once("):")) {
+        Some((status, rest)) => (Some(status), rest),
+        None => (None, text.as_str()),
+    };
+    let said: Vec<&str> = rest.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    match (said.is_empty(), status) {
+        (true, Some(status)) => status.to_owned(),
+        (true, None) => "nothing".to_owned(),
+        (false, Some(status)) => format!("{} ({status})", said.join(" ")),
+        (false, None) => said.join(" "),
+    }
+}
+
+/// The end a record's job is asked about after (`finished`), unless a stop
+/// sent after it settled the job (`job_stopped`, later than `finished`):
+/// then `None`, taken as ended without a query.
+pub fn end_to_ask(finished: Option<DateTime<Utc>>, job_stopped: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    finished.filter(|finished| job_stopped.is_none_or(|stopped| stopped < *finished))
+}
+
+/// What cactup knows of a job it stops ([`Scheduler::stop_judged`]).
+#[derive(Debug, Clone, Copy)]
+pub enum StopCase<'a> {
+    /// The scheduler lists it in a state its patterns read (queued, held,
+    /// running): any failure of the stop command is an error.
+    Listed,
+    /// Listed in a state no pattern reads (suspended, exiting, completed).
+    Unread,
+    /// Its status query failed: the [`FailedQuery`] text.
+    Unanswered(&'a str),
+}
+
+/// What a stop judged by [`Scheduler::stop_judged`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndedStop {
+    /// The scheduler took it (or, where job ids are pids, there was
+    /// nothing to stop).
+    Sent,
+    /// The stop command failed saying, by the machine's
+    /// `unknown-job-pattern`, that the scheduler does not know the job (one
+    /// it has forgotten), what it said attached: taken as the job ended.
+    NotKnown(String),
+}
+
+/// How much later than its record a process with an older record's pid may
+/// have started and still be the job: its submission takes moments, but the
+/// boot-time clock is coarse.
+const OLD_RECORD_SLACK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a job with `status` is live, for a record whose run has
+/// (`ended`) or has not recorded its end: listed in a state the machine's
+/// patterns read (running, queued, held). After the end (asked only within
+/// the requeue window) such a job is "still listed": either leaving the
+/// queue (Slurm's `CG`, a timeout's `TO`, read as running) or starting
+/// again (queued, held, or `CF` and `R` before its run clears the record's
+/// end), which the patterns cannot tell apart, and each command takes the
+/// safe reading for what it does with it (§10). A state no pattern reads is
+/// not live, before the end (suspended, exiting: the scheduler's) as after
+/// it, where it is the ended job (Torque's completed `C`, Slurm's `CD`,
+/// `F`, `CA`, `OOM`, `NF`): a requeued job always passes through read
+/// states (Slurm `PD`, `CF`, `R`; Torque `Q`, `R`).
+pub fn is_live(status: JobStatus, _ended: bool) -> bool {
+    matches!(status, JobStatus::Queued | JobStatus::Holding | JobStatus::Running)
+}
+
+/// Live statuses from [`Scheduler::get_statuses`], looked up by the same
+/// [`JobRef`] they were asked for: two records with one id (a pid used
+/// again) are two jobs. A job asked about with no status here: its query
+/// failed (or Ctrl-C cut it short).
+#[derive(Debug, Default)]
+pub struct Statuses(HashMap<JobKey, JobStatus>);
+
+impl Statuses {
+    pub fn get(&self, job: JobRef<'_>) -> Option<&JobStatus> {
+        self.0.get(&job.key())
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Scheduler driver for one machine.
 pub struct Scheduler<'m> {
     meta: &'m Meta,
+    /// The machine whose scheduler this is, where known: a record made for
+    /// another machine is not asked about after its end (two clusters
+    /// sharing a home).
+    machine: Option<&'m str>,
 }
 
 impl<'m> Scheduler<'m> {
+    /// A scheduler that does not know its machine's name (tests).
+    #[cfg(test)]
     pub fn new(meta: &'m Meta) -> Scheduler<'m> {
-        Scheduler { meta }
+        Scheduler { meta, machine: None }
+    }
+
+    /// The scheduler of `machine`, knowing its name.
+    pub fn for_machine(machine: &'m crate::mdb::Machine) -> Scheduler<'m> {
+        Scheduler { meta: &machine.meta, machine: Some(&machine.name) }
+    }
+
+    /// The same scheduler, taking itself for machine `name` (tests).
+    #[cfg(test)]
+    pub fn named(meta: &'m Meta, name: &'m str) -> Scheduler<'m> {
+        Scheduler { meta, machine: Some(name) }
     }
 
     /// Submit a job: run the machine `submit` command (already carrying
     /// `@SCRIPTFILE@` etc. — substituted here with `vars`), optionally inside
     /// a submit universe (§4.8) — `(name, universe)`, the name selecting the
     /// universe's env-setup overrides (§6.1) — and parse the job id via
-    /// `submit-pattern` group 1.
-    pub fn submit(&self, vars: &VarSet, universe: Option<(&str, &Universe)>) -> Res<String> {
+    /// `submit-pattern` group 1. On a `job-ids = "pids"` machine the pid's
+    /// host and start time come with it ([`JobRecord`]), read at once.
+    pub fn submit(&self, vars: &VarSet, universe: Option<(&str, &Universe)>) -> Res<JobRecord> {
         let submit = self.command_for(
             "submit",
             self.meta.scheduler.submit.as_deref(),
@@ -126,11 +500,32 @@ impl<'m> Scheduler<'m> {
             .ok_or_else(|| {
                 anyhow!("could not parse a job id from the submit output via {pattern:?}:\n{output}")
             })?;
-        Ok(job_id)
+        Ok(self.submitted(job_id))
+    }
+
+    /// `job_id`, just handed out, with what a `job-ids = "pids"` machine
+    /// records beside it: this host, and the start time of the process
+    /// with that pid, read now (`None` if it has ended already, or the id
+    /// is no pid). Nothing beside it elsewhere.
+    fn submitted(&self, job_id: String) -> JobRecord {
+        match self.job_ids() {
+            JobIds::Scheduler => JobRecord { id: job_id, host: None, start: None, since: None },
+            JobIds::Pids => {
+                let start = job_id.parse().ok().and_then(crate::lock::proc_starttime);
+                JobRecord { id: job_id, host: Some(crate::lock::our_hostname()), start, since: None }
+            }
+        }
+    }
+
+    /// The job id a foreground run records: this process's pid, and on a
+    /// `job-ids = "pids"` machine, where the scheduler's `ps` and `stop`
+    /// are asked about it, its host and start time as for a submitted job.
+    pub fn own_job(&self) -> JobRecord {
+        self.submitted(std::process::id().to_string())
     }
 
     /// Submit and wait (§10): run the machine's `blocking-submit` command —
-    /// the analogue of `submit` that returns only once the job has *finished*
+    /// the analog of `submit` that returns only once the job has *finished*
     /// (`sbatch --wait`, `qsub -W block=true`) — handing the job id to
     /// `on_job_id` the moment a line of output matches `submit-pattern`
     /// rather than at the end. Reporting the id from inside the wait is what
@@ -150,12 +545,15 @@ impl<'m> Scheduler<'m> {
     /// is whatever the cactup running on the compute node recorded, which the
     /// caller reads back from the attempt. A non-zero exit matters only when
     /// no job id ever appeared: then the submission itself is what failed.
+    ///
+    /// On a `job-ids = "pids"` machine the pid's host and start time are
+    /// read the moment its line arrives, while the command waits on it.
     pub fn submit_blocking(
         &self,
         vars: &VarSet,
         universe: Option<(&str, &Universe)>,
-        on_job_id: &mut dyn FnMut(&str) -> Res<()>,
-    ) -> Res<String> {
+        on_job_id: &mut dyn FnMut(&JobRecord) -> Res<()>,
+    ) -> Res<JobRecord> {
         let submit = self.command_for(
             "blocking-submit",
             self.meta.scheduler.blocking_submit.as_deref(),
@@ -167,7 +565,7 @@ impl<'m> Scheduler<'m> {
         let pattern = self.meta.scheduler.submit_pattern.as_deref().unwrap_or("(.*)");
         let regex = Regex::new(pattern).with_context(|| format!("invalid submit-pattern {pattern:?}"))?;
 
-        let mut job_id: Option<String> = None;
+        let mut job_id: Option<JobRecord> = None;
         let waited = stream_until_exit(command, &submit, &mut |line| {
             if job_id.is_some() {
                 return Ok(());
@@ -180,8 +578,9 @@ impl<'m> Scheduler<'m> {
             else {
                 return Ok(());
             };
-            on_job_id(&id)?;
-            job_id = Some(id);
+            let submitted = self.submitted(id);
+            on_job_id(&submitted)?;
+            job_id = Some(submitted);
             Ok(())
         })?;
 
@@ -211,33 +610,301 @@ impl<'m> Scheduler<'m> {
         vars
     }
 
-    /// Query live status for `job_id` (§10): run `get-status` and classify
+    /// Query live status for `job` (§10): run `get-status` and classify
     /// its output. A non-zero exit is NOT an error — e.g. `ps <pid>` exits 1
     /// when the process is gone, which is simply status U.
-    pub fn get_status(&self, job_id: &str) -> Res<JobStatus> {
+    ///
+    /// On a `job-ids = "pids"` machine, a pid that is not the job's process
+    /// ([`Self::pid_check`]) is U with nothing run. Where the machine sets
+    /// `unknown-job-pattern`, output with no line for the job is U only if
+    /// a line says the scheduler does not know it; otherwise the query
+    /// failed, and this is an error naming the command and its output.
+    pub fn get_status(&self, job: JobRef<'_>) -> Res<JobStatus> {
+        // Gone, or another host's pid, which `ps` here cannot see (callers
+        // ask `recorded_elsewhere` and the run's lock about that).
+        if matches!(self.pid_check(job), Some(PidCheck::Gone | PidCheck::Elsewhere)) {
+            return Ok(JobStatus::Unknown);
+        }
+        let job_id = job.id;
         let vars = Self::query_vars(job_id);
         let cmd = self.command_for("get-status", self.meta.scheduler.get_status.as_deref(), &vars, None)?;
 
         let output = self.spawn_sh(&cmd, true)?;
-        classify(&output, job_id, self.meta)
+        // Ctrl-C reaches the query too, which then prints nothing: that is
+        // no answer, not "not in the queue" (CLAUDE.md's interrupt
+        // contract), and a caller must not act on it.
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted");
+        }
+        if let Some(status) = classify_listed(&output, job_id, self.meta)? {
+            return Ok(status);
+        }
+        if self.unknown_job(&output, job_id)? == Some(false) {
+            let sched = &self.meta.scheduler;
+            let query = vars.substitute(sched.get_status.as_deref().unwrap_or_default(), Syntax::Shell).unwrap_or_default();
+            let status_pattern = sched.status_pattern.as_deref().unwrap_or("$^");
+            let unknown_pattern = sched.unknown_job_pattern.as_deref().unwrap_or_default();
+            let said = match output.trim() {
+                "" => "It printed nothing.".to_owned(),
+                text => format!(
+                    "It printed:\n{text}\nIf the scheduler's message for a job it does not know is among \
+                     these lines, unknown-job-pattern does not match it: fix the pattern in the \
+                     machine's [scheduler] table."
+                ),
+            };
+            return Err(FailedQuery(format!(
+                "the status query for job {job_id}, `{query}`, printed no line matching the machine's \
+                 status-pattern ('{status_pattern}') for the job, and none matching its \
+                 unknown-job-pattern ('{unknown_pattern}'), so cactup cannot tell whether the job \
+                 runs. {said}"
+            ))
+            .into());
+        }
+        Ok(JobStatus::Unknown)
+    }
+
+    /// [`Self::get_status`] for a recorded job whose run has (`ended`) or has
+    /// not recorded its end. After the end, a status query that failed
+    /// ([`FailedQuery`]) is taken as the job ended, saying so in one line:
+    /// asking is only the best-effort check for a requeued job, and must not
+    /// hold up a record that ended for good. Before the end it is the error.
+    pub fn get_status_of(&self, job: JobRef<'_>, ended: bool) -> Res<JobStatus> {
+        match self.get_status(job) {
+            Err(e) if ended && e.downcast_ref::<FailedQuery>().is_some() => {
+                note_taken_as_ended(job.id);
+                Ok(JobStatus::Unknown)
+            }
+            other => other,
+        }
+    }
+
+    /// The host a `job-ids = "pids"` job was recorded on, where that is not
+    /// this one: its pid means nothing here, so nothing here asks about or
+    /// stops it, and only the run's `running.lock` says whether it runs.
+    pub fn recorded_elsewhere<'j>(&self, job: JobRef<'j>) -> Option<&'j str> {
+        match self.pid_check(job) {
+            Some(PidCheck::Elsewhere) => job.host,
+            _ => None,
+        }
     }
 
     /// `[scheduler].job-ids` (§10): whether this machine's job ids are a
     /// batch system's or pids on the submitting host.
-    // Declared in generation 3 for the test-run and simulation liveness
-    // work (design/build-cache/DECISIONS.md, 35), which will read it; no
-    // status query does yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn job_ids(&self) -> JobIds {
         self.meta.scheduler.job_ids
+    }
+
+    /// Whether a job whose run recorded its end is still asked about: a
+    /// batch scheduler may run it again (preemption, `scontrol requeue`,
+    /// Torque's `qrerun`), and its queue says so. On a `job-ids = "pids"`
+    /// machine nothing does, and an older record's pid may be another
+    /// process's by now (§10), so such a job is done.
+    pub fn may_requeue(&self) -> bool {
+        self.job_ids() == JobIds::Scheduler
+    }
+
+    /// Whether a job of a record made for machine `record_machine`, whose
+    /// record ended at `ended_at`, is still asked about: where a batch
+    /// scheduler may requeue it ([`Self::may_requeue`]), only for a record of
+    /// this machine (another's, in a home two clusters share, names a job of
+    /// that cluster's), and only within [`REQUEUE_WINDOW`] of the end. Later
+    /// its id may by now name an unrelated job (ids wrap around, a cluster is
+    /// reinstalled), which would refuse a delete or be stopped by its `-f`;
+    /// and a record with no end time is taken as ended too.
+    pub fn asks_after_end(&self, record_machine: &str, ended_at: Option<DateTime<Utc>>) -> bool {
+        self.may_requeue()
+            && self.machine.is_none_or(|machine| machine == record_machine)
+            && ended_at.is_some_and(|ended| Utc::now() - ended < REQUEUE_WINDOW)
+    }
+
+    /// Ask about `job` after its record's end (within the requeue window):
+    /// still listed in a state the patterns read, said to be gone or over
+    /// (not known, absent from a listing, a state no pattern reads), or not
+    /// answered (a failed query). What each command does with it is its own
+    /// safe reading (§10): stops are sent unless the scheduler answered that
+    /// the job is gone; new work is not started beside an unanswered job.
+    pub fn ask_after_end(&self, job: JobRef<'_>) -> Res<AfterEnd> {
+        match self.get_status(job) {
+            Ok(status) if is_live(status, true) => Ok(AfterEnd::Listed(status)),
+            Ok(status) => Ok(AfterEnd::Over(status)),
+            Err(e) => match e.downcast::<FailedQuery>() {
+                Ok(failed) => Ok(AfterEnd::Unanswered(failed.0)),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// Stop `job`, judging a stop command that fails by the one rule, for
+    /// every path that may take a failed stop for the job being over
+    /// (`case`: what cactup knows of the job). A job the scheduler lists in
+    /// a state its patterns read ([`StopCase::Listed`]): any failure is an
+    /// error. Otherwise (listed in a state no pattern reads, or its status
+    /// query failed) the failure is a refusal that settles the job only
+    /// where the stop command's output matches the machine's
+    /// `unknown-job-pattern`: the scheduler saying it does not know the job
+    /// ([`EndedStop::NotKnown`]; Torque's `qdel` of a forgotten job). Any
+    /// other failure (the controller not reached, a timeout) is an error
+    /// that shows the output, and the failed query's after a failed query,
+    /// with the pattern hint: nothing is settled, recorded or deleted on
+    /// it. Slurm's `scancel` takes the stop of a job it does not know
+    /// without a word, so there the stop is simply taken. Where the machine
+    /// sets no `unknown-job-pattern`, nothing fails as unanswered (no line
+    /// for the job is a job gone) and no failure settles anything. Ctrl-C
+    /// is "interrupted" still; the pid refusals ([`UnverifiedPid`],
+    /// [`SharedGroup`]) are errors still.
+    pub fn stop_judged(&self, job: JobRef<'_>, case: StopCase<'_>) -> Res<EndedStop> {
+        let e = match self.stop(job) {
+            Ok(_) => return Ok(EndedStop::Sent),
+            Err(e) => e,
+        };
+        if gix::interrupt::is_triggered()
+            || e.downcast_ref::<UnverifiedPid>().is_some()
+            || e.downcast_ref::<SharedGroup>().is_some()
+        {
+            return Err(e);
+        }
+        let said = stop_said(&e);
+        if matches!(case, StopCase::Listed) {
+            bail!("the stop command for job {} failed: {said}", job.id);
+        }
+        if self.unknown_job(&format!("{e:#}"), job.id)? == Some(true) {
+            return Ok(EndedStop::NotKnown(said));
+        }
+        let pattern = self.meta.scheduler.unknown_job_pattern.as_deref().unwrap_or_default();
+        let hint = format!(
+            "If the scheduler's message for a job it does not know is among these lines, \
+             unknown-job-pattern ('{pattern}') does not match it: fix the pattern in the machine's \
+             [scheduler] table."
+        );
+        match case {
+            StopCase::Unanswered(failed) => bail!(
+                "{failed}\nThe stop command for job {} failed too, and the scheduler may not have been \
+                 reached: {said}\n{hint}",
+                job.id
+            ),
+            _ => bail!("the stop command for job {} failed: {said}\n{hint}", job.id),
+        }
+    }
+
+    /// The machine's stop command for `job_id`, as the user may run it by
+    /// hand (without the environment setup cactup prepends).
+    pub fn stop_command(&self, job_id: &str) -> Option<String> {
+        let template = self.meta.scheduler.stop.as_deref()?;
+        Self::query_vars(job_id).substitute(template, Syntax::Shell).ok()
+    }
+
+    /// Whether `job` is the job's own process here but its process group
+    /// is not the job's own (it holds processes cactup cannot tell are the
+    /// job's), so
+    /// [`Self::stop`] refuses it ([`SharedGroup`]).
+    pub fn shares_group(&self, job: JobRef<'_>) -> bool {
+        self.pid_check(job) == Some(PidCheck::Here) && !Self::own_group(job.id)
+    }
+
+    /// Whether pid `id`'s process group is its own: every process in it is
+    /// the pid or one it started (`lock::proc_group`). Whether the pid
+    /// leads it does not matter: a job started without `setsid` from an
+    /// interactive shell is in the group of the cactup that submitted it,
+    /// which has exited, and holds nothing else.
+    fn own_group(id: &str) -> bool {
+        id.parse::<u32>().ok().and_then(crate::lock::proc_group).is_some_and(|group| group.own)
+    }
+
+    /// What can be said of `job` where the pid checks rule it out without
+    /// running anything (job ids that are pids): its process is gone or is
+    /// another process now, or it is another host's. `None` where the
+    /// checks leave the asking to `get-status` (a batch scheduler, a pid
+    /// whose process is the job's).
+    pub fn ruled_out(&self, job: JobRef<'_>) -> Option<String> {
+        match self.pid_check(job)? {
+            PidCheck::Gone => Some(format!("process {} is gone, or is another process now", job.id)),
+            PidCheck::Elsewhere => Some(format!(
+                "it ran on host {}, and nothing of its run holds its lock",
+                job.host.unwrap_or_default()
+            )),
+            PidCheck::Here | PidCheck::Unverified => None,
+        }
+    }
+
+    /// Whether `job` is verified as the job's own process here, in a group
+    /// of its own, so the machine's stop command stops exactly it: a pid
+    /// with its host and start time ([`PidCheck::Here`]) whose group is its
+    /// own. Never true on a batch scheduler, where the scheduler answers.
+    pub fn stoppable_pid(&self, job: JobRef<'_>) -> bool {
+        self.pid_check(job) == Some(PidCheck::Here) && Self::own_group(job.id)
+    }
+
+    /// Whether `job` is a pid an older cactup recorded (no host, no start
+    /// time) whose process here may be the job: asked about, never stopped
+    /// ([`UnverifiedPid`]).
+    pub fn unverified(&self, job: JobRef<'_>) -> bool {
+        self.pid_check(job) == Some(PidCheck::Unverified)
+    }
+
+    /// [`Self::get_statuses`] for a display path (`sim list`/`show`, `test
+    /// list`/`show`, `build list`/`show`) or `sim delete`: under a progress
+    /// line (the per-job fallback after a failed listing can take a while),
+    /// failing with "interrupted" on Ctrl-C rather than handing back the
+    /// statuses it did not get.
+    pub fn get_statuses_shown(&self, jobs: &[JobRef<'_>]) -> Res<Statuses> {
+        let (progress, renderer) = crate::manifest::setup_prodash_if_tty();
+        let asking = progress.add_child("ask the scheduler");
+        asking.init(Some(jobs.len()), Some(prodash::unit::label("jobs")));
+        let asking = std::sync::Mutex::new(asking);
+        let statuses = self.get_statuses_counted(jobs, &|n| asking.lock().expect("progress poisoned").inc_by(n));
+        drop(asking);
+        if let Some(renderer) = renderer {
+            renderer.shutdown_and_wait();
+        }
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted");
+        }
+        Ok(statuses)
+    }
+
+    /// Whether this machine's status query tells a job it does not know
+    /// from a query that failed: it sets `unknown-job-pattern` (§10).
+    pub fn tells_failed_queries(&self) -> bool {
+        self.meta.scheduler.unknown_job_pattern.is_some()
+    }
+
+    /// The `job-ids = "pids"` checks (§10), `None` on a batch scheduler's
+    /// machine. A recorded host must be this one (another host's pid is
+    /// [`PidCheck::Elsewhere`]) and the recorded start time that of the
+    /// process with the pid now: a pid is used again once its process has
+    /// gone. A job recorded without either (by an older cactup) is asked
+    /// about only where its pid has a process here that started no later
+    /// than the record was made, and never stopped.
+    fn pid_check(&self, job: JobRef<'_>) -> Option<PidCheck> {
+        if self.job_ids() != JobIds::Pids {
+            return None;
+        }
+        let Ok(pid) = job.id.parse::<u32>() else { return Some(PidCheck::Gone) };
+        Some(match job.host {
+            None => match crate::lock::proc_starttime(pid) {
+                None => PidCheck::Gone,
+                // Started well after the record was made: not the job.
+                Some(_) if job
+                    .since
+                    .zip(crate::lock::proc_start_wall(pid))
+                    .is_some_and(|(since, started)| started > std::time::SystemTime::from(since) + OLD_RECORD_SLACK) =>
+                {
+                    PidCheck::Gone
+                }
+                Some(_) => PidCheck::Unverified,
+            },
+            Some(host) if host != crate::lock::our_hostname() => PidCheck::Elsewhere,
+            Some(_) => match job.start {
+                Some(start) if crate::lock::proc_starttime(pid) == Some(start) => PidCheck::Here,
+                _ => PidCheck::Gone,
+            },
+        })
     }
 
     /// Whether `output`, what `get-status` printed for `job_id` (stdout and
     /// stderr, as [`Self::get_status`] reads it), has a line matching
     /// `[scheduler].unknown-job-pattern` (§10): the scheduler saying it does
     /// not know the job. `None` when the machine declares no such pattern.
-    // As `job_ids`: for the liveness work; nothing classifies with it yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn unknown_job(&self, output: &str, job_id: &str) -> Res<Option<bool>> {
         let Some(pattern) = self.meta.scheduler.unknown_job_pattern.as_deref() else { return Ok(None) };
         let pattern = pattern.replace("@JOB_ID@", &regex::escape(job_id));
@@ -245,68 +912,111 @@ impl<'m> Scheduler<'m> {
         Ok(Some(output.lines().any(|line| regex.is_match(line))))
     }
 
-    /// Live status for many jobs at once (§10): dedupes the ids and runs the
+    /// Live status for many jobs at once (§10): dedupes the jobs and runs the
     /// per-job `get-status` query on a bounded worker pool, because each query is
     /// its own scheduler round-trip and a long simulation history makes those the
-    /// dominant cost of `sim list`. Ids whose query failed are simply absent from
-    /// the map — the same tolerance the display paths already get from
-    /// `get_status(..).ok()`.
-    pub fn get_statuses(&self, job_ids: &[&str]) -> HashMap<String, JobStatus> {
-        let mut seen = std::collections::HashSet::new();
-        let ids: Vec<&str> = job_ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    /// dominant cost of `sim list`. Jobs whose query failed are simply absent from
+    /// the result — the same tolerance the display paths already get from
+    /// `get_status(..).ok()`. A pid the `job-ids = "pids"` checks take for
+    /// gone is U with nothing run, as in [`Self::get_status`].
+    // Every command asks through `get_statuses_shown`; tests ask directly.
+    #[cfg(test)]
+    pub fn get_statuses(&self, jobs: &[JobRef<'_>]) -> Statuses {
+        self.get_statuses_counted(jobs, &|_| {})
+    }
 
+    /// [`Self::get_statuses`], calling `done(n)` as each `n` distinct jobs
+    /// are answered (or failed), for a caller's progress line.
+    pub fn get_statuses_counted(&self, jobs: &[JobRef<'_>], done: &(dyn Fn(usize) + Sync)) -> Statuses {
+        let mut seen = std::collections::HashSet::new();
         let mut results = HashMap::new();
-        if ids.is_empty() {
-            return results;
+        let mut asked: Vec<JobRef<'_>> = Vec::new();
+        for job in jobs {
+            if !seen.insert(job.key()) {
+                continue;
+            }
+            if matches!(self.pid_check(*job), Some(PidCheck::Gone | PidCheck::Elsewhere)) {
+                results.insert(job.key(), JobStatus::Unknown);
+                done(1);
+            } else {
+                asked.push(*job);
+            }
         }
-        // One listing answers for every id when the machine offers one; a
+        if asked.is_empty() {
+            return Statuses(results);
+        }
+        // One listing answers for every job when the machine offers one; a
         // machine that doesn't, or a listing that failed, falls back to the
         // per-job pool below.
         if let Some(many) = self.meta.scheduler.get_status_many.as_deref()
-            && let Ok(statuses) = self.status_listing(many, &ids)
+            && let Ok(statuses) = self.status_listing(many, &asked)
         {
-            return statuses;
+            done(asked.len());
+            results.extend(statuses);
+            return Statuses(results);
         }
-        if ids.len() == 1 {
-            if let Ok(status) = self.get_status(ids[0]) {
-                results.insert(ids[0].to_owned(), status);
+        if asked.len() == 1 {
+            if let Ok(status) = self.get_status(asked[0]) {
+                results.insert(asked[0].key(), status);
             }
-            return results;
+            done(1);
+            return Statuses(results);
         }
 
-        let workers = STATUS_WORKERS.min(ids.len());
-        let queue: std::sync::Mutex<std::collections::VecDeque<&str>> =
-            std::sync::Mutex::new(ids.into_iter().collect());
+        let workers = STATUS_WORKERS.min(asked.len());
+        let queue: std::sync::Mutex<std::collections::VecDeque<JobRef<'_>>> =
+            std::sync::Mutex::new(asked.into_iter().collect());
         let results = std::sync::Mutex::new(results);
 
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| loop {
-                    let id = match queue.lock().expect("status queue poisoned").pop_front() {
-                        Some(id) => id,
+                    // Ctrl-C: no query more (each would fail "interrupted"
+                    // anyway, once it had run).
+                    if gix::interrupt::is_triggered() {
+                        return;
+                    }
+                    let job = match queue.lock().expect("status queue poisoned").pop_front() {
+                        Some(job) => job,
                         None => return,
                     };
-                    if let Ok(status) = self.get_status(id) {
+                    if let Ok(status) = self.get_status(job) {
                         let mut results = results.lock().expect("status results poisoned");
-                        results.insert(id.to_owned(), status);
+                        results.insert(job.key(), status);
                     }
+                    done(1);
                 });
             }
         });
 
-        results.into_inner().expect("status results poisoned")
+        Statuses(results.into_inner().expect("status results poisoned"))
     }
 
-    /// Classify every id in `ids` from ONE run of the machine's
+    /// Classify every job in `jobs` from ONE run of the machine's
     /// `get-status-many` listing (§10). A job is looked up by exact match on
     /// the line's first field — never by regex against the whole listing, which
     /// would let one job's line answer for another job's id — and the line is
-    /// then classified exactly as a single-job query would be. An id the
-    /// listing does not mention is U: not in the queue.
-    fn status_listing(&self, template: &str, ids: &[&str]) -> Res<HashMap<String, JobStatus>> {
+    /// then classified exactly as a single-job query would be. A job the
+    /// listing does not mention is U: not in the queue (a listing says nothing
+    /// of the jobs it leaves out, so `unknown-job-pattern` has no part here).
+    /// A listing that exits non-zero failed (Slurm's `squeue` exits 1 on a
+    /// timeout, printing nothing on stdout): that is an error, and
+    /// [`Self::get_statuses`] falls back to the per-job queries, whose own
+    /// failures their callers handle. An empty listing exits 0: no job
+    /// listed.
+    fn status_listing(
+        &self,
+        template: &str,
+        jobs: &[JobRef<'_>],
+    ) -> Res<HashMap<JobKey, JobStatus>> {
         let vars = Self::query_vars("");
         let cmd = self.command_for("get-status-many", Some(template), &vars, None)?;
-        let output = self.spawn_sh(&cmd, true)?;
+        let output = self.spawn_sh(&cmd, false)?;
+        // As in `get_status`: a listing Ctrl-C cut short lists nothing,
+        // which says nothing of the jobs.
+        if gix::interrupt::is_triggered() {
+            bail!("interrupted");
+        }
 
         let mut lines: HashMap<&str, &str> = HashMap::new();
         for line in output.lines() {
@@ -315,23 +1025,38 @@ impl<'m> Scheduler<'m> {
             }
         }
 
-        let mut statuses = HashMap::with_capacity(ids.len());
-        for id in ids {
-            let status = match lines.get(id) {
-                Some(line) => classify(line, id, self.meta)?,
+        let mut statuses = HashMap::with_capacity(jobs.len());
+        for job in jobs {
+            let status = match lines.get(job.id) {
+                Some(line) => classify(line, job.id, self.meta)?,
                 None => JobStatus::Unknown,
             };
-            statuses.insert((*id).to_owned(), status);
+            statuses.insert(job.key(), status);
         }
         Ok(statuses)
     }
 
-    /// Stop `job_id` via the machine `stop` command.
-    pub fn stop(&self, job_id: &str) -> Res<()> {
-        let vars = Self::query_vars(job_id);
+    /// Stop `job` via the machine `stop` command. On a `job-ids = "pids"`
+    /// machine, nothing is run for a pid that is not the job's process
+    /// ([`Stopped::Gone`]) or is another host's ([`Stopped::Elsewhere`]); an
+    /// older record's pid with a process here is refused ([`UnverifiedPid`]:
+    /// that process may be another one), and so is the job's own process
+    /// where it does not lead its process group ([`SharedGroup`]: the stop
+    /// command would reach its group's other processes).
+    pub fn stop(&self, job: JobRef<'_>) -> Res<Stopped> {
+        match self.pid_check(job) {
+            Some(PidCheck::Gone) => return Ok(Stopped::Gone),
+            Some(PidCheck::Elsewhere) => return Ok(Stopped::Elsewhere(job.host.unwrap_or_default().to_owned())),
+            Some(PidCheck::Unverified) => return Err(UnverifiedPid::of(job.id).into()),
+            Some(PidCheck::Here) if !Self::own_group(job.id) => return Err(SharedGroup(job.id.to_owned()).into()),
+            Some(PidCheck::Here) => {}
+            None => {}
+        }
+        let vars = Self::query_vars(job.id);
         let cmd = self.command_for("stop", self.meta.scheduler.stop.as_deref(), &vars, None)?;
-        self.spawn_sh(&cmd, false)?;
-        Ok(())
+        // A stop command Ctrl-C ended is no failure of the scheduler's.
+        self.spawn_sh(&cmd, false).map_err(|e| if gix::interrupt::is_triggered() { anyhow!("interrupted") } else { e })?;
+        Ok(Stopped::Sent)
     }
 
     /// The execution host of `job_id`, via `exec-host` + `exec-host-pattern`
@@ -527,6 +1252,13 @@ fn collect_output(output: std::process::Output, tolerate_failure: bool) -> Res<S
 /// test holding → H, queued → Q, running → R; an in-queue line matching none
 /// of them is E.
 fn classify(output: &str, job_id: &str, meta: &Meta) -> Res<JobStatus> {
+    Ok(classify_listed(output, job_id, meta)?.unwrap_or(JobStatus::Unknown))
+}
+
+/// [`classify`], `None` where no line matches `status-pattern`: the output
+/// does not list the job ([`Scheduler::get_status`] then reads
+/// `unknown-job-pattern`).
+fn classify_listed(output: &str, job_id: &str, meta: &Meta) -> Res<Option<JobStatus>> {
     let sched = &meta.scheduler;
     let compile = |what: &str, pattern: Option<&str>| -> Res<Regex> {
         // `$^` (match nothing) is the conventional never-pattern default.
@@ -539,9 +1271,9 @@ fn classify(output: &str, job_id: &str, meta: &Meta) -> Res<JobStatus> {
     let running = compile("running-pattern", sched.running_pattern.as_deref())?;
 
     let Some(line) = output.lines().find(|line| status.is_match(line)) else {
-        return Ok(JobStatus::Unknown);
+        return Ok(None);
     };
-    Ok(if holding.is_match(line) {
+    Ok(Some(if holding.is_match(line) {
         JobStatus::Holding
     } else if queued.is_match(line) {
         JobStatus::Queued
@@ -549,12 +1281,16 @@ fn classify(output: &str, job_id: &str, meta: &Meta) -> Res<JobStatus> {
         JobStatus::Running
     } else {
         JobStatus::Error
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bare<'a>(ids: &[&'a str]) -> Vec<JobRef<'a>> {
+        ids.iter().map(|id| JobRef::bare(id)).collect()
+    }
 
     fn meta(scheduler_toml: &str) -> Meta {
         toml::from_str(&format!(
@@ -585,7 +1321,7 @@ mod tests {
         m.environment.env_setup = Some("CACTUP_TEST_MARKER=77".to_owned());
         let mut vars = VarSet::new();
         vars.set("SCRIPTFILE", "run.sh");
-        assert_eq!(Scheduler::new(&m).submit(&vars, None).unwrap(), "77-run.sh");
+        assert_eq!(Scheduler::new(&m).submit(&vars, None).unwrap().id, "77-run.sh");
     }
 
     #[test]
@@ -595,7 +1331,7 @@ mod tests {
         let mut vars = VarSet::new();
         vars.set("SCRIPTFILE", "s.sh");
         // submit-pattern defaults to (.*) over the trimmed output.
-        assert_eq!(Scheduler::new(&m).submit(&vars, Some(("sif", &universe))).unwrap(), "id=s.sh");
+        assert_eq!(Scheduler::new(&m).submit(&vars, Some(("sif", &universe))).unwrap().id, "id=s.sh");
     }
 
     #[test]
@@ -609,9 +1345,9 @@ mod tests {
         let mut vars = VarSet::new();
         vars.set("SCRIPTFILE", "s.sh");
         let sched = Scheduler::new(&m);
-        assert_eq!(sched.submit(&vars, None).unwrap(), "id=s.sh-base");
+        assert_eq!(sched.submit(&vars, None).unwrap().id, "id=s.sh-base");
         assert_eq!(
-            sched.submit(&vars, Some(("u", &m.universes["u"]))).unwrap(),
+            sched.submit(&vars, Some(("u", &m.universes["u"]))).unwrap().id,
             "id=s.sh-uni"
         );
     }
@@ -642,8 +1378,533 @@ mod tests {
         assert_eq!(sched.unknown_job(&output, "12.x").unwrap(), Some(true), "{output}");
         assert_eq!(sched.unknown_job("JOBID\n12.x gone\n", "12.x").unwrap(), Some(true));
         assert_eq!(sched.unknown_job("JOBID\n12y gone\n", "12.x").unwrap(), Some(false));
-        // What status the query gives is unchanged by the keys.
-        assert_eq!(sched.get_status("12.x").unwrap(), JobStatus::Unknown);
+        // The scheduler says it does not know the job: gone. (On this
+        // `pids` machine the id is no pid, so nothing is even asked.)
+        assert_eq!(sched.get_status(JobRef::bare("12.x")).unwrap(), JobStatus::Unknown);
+    }
+
+    /// A live child process of the test's own, killed and reaped on drop.
+    struct Sleeper(std::process::Child);
+
+    impl Sleeper {
+        /// Leading a process group of its own, as a job `setsid` starts.
+        fn start() -> Sleeper {
+            use std::os::unix::process::CommandExt;
+            Sleeper(std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap())
+        }
+
+        /// In the test's own process group, as a job a submit command
+        /// backgrounds without `setsid`.
+        fn start_in_our_group() -> Sleeper {
+            Sleeper(std::process::Command::new("sleep").arg("30").spawn().unwrap())
+        }
+
+        fn pid(&self) -> String {
+            self.0.id().to_string()
+        }
+
+        fn start_time(&self) -> u64 {
+            crate::lock::proc_starttime(self.0.id()).unwrap()
+        }
+    }
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A `job-ids = "pids"` machine whose `get-status` and `stop` leave a
+    /// mark when they run: what the generic machine's `ps` and `pkill` would
+    /// be asked, without asking them.
+    fn pids_machine(dir: &std::path::Path) -> Meta {
+        meta(&format!(
+            r#"
+            job-ids = "pids"
+            submit = "sleep 30 > /dev/null 2>&1 & echo $!"
+            get-status = "echo asked >> {asked}; echo '  @JOB_ID@ ?  0:00 sleep'"
+            stop = "echo @JOB_ID@ >> {stopped}"
+            status-pattern = "^ *@JOB_ID@ "
+            running-pattern = "^"
+            "#,
+            asked = dir.join("asked").display(),
+            stopped = dir.join("stopped").display()
+        ))
+    }
+
+    fn marks(dir: &std::path::Path, what: &str) -> usize {
+        std::fs::read_to_string(dir.join(what)).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    /// `job-ids = "pids"` (§10): `submit` records this host and the
+    /// backgrounded process's start time, read at once; a process gone
+    /// before cactup reads it is recorded as such (a host, no start). A
+    /// batch scheduler's job id gets neither.
+    #[test]
+    fn a_pid_is_recorded_with_its_host_and_start_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = pids_machine(dir.path());
+        let job = Scheduler::new(&m).submit(&VarSet::new(), None).unwrap();
+        let pid: u32 = job.id.parse().unwrap();
+        // Kill what the submit started, whatever the assertions say.
+        let _reap = kill_on_drop(pid);
+        assert_eq!(job.host.as_deref(), Some(crate::lock::our_hostname().as_str()));
+        assert_eq!(job.start, crate::lock::proc_starttime(pid));
+        assert!(job.start.is_some());
+
+        let gone = meta(r#"job-ids = "pids"
+            submit = "sh -c 'exit 0' & p=$!; wait $p; echo $p""#);
+        let job = Scheduler::new(&gone).submit(&VarSet::new(), None).unwrap();
+        assert_eq!(job.host.as_deref(), Some(crate::lock::our_hostname().as_str()));
+        assert_eq!(job.start, None, "a process gone at once is recorded gone");
+
+        let batch = meta(r#"submit = "echo 'Submitted batch job 77'"
+            submit-pattern = "job ([0-9]+)""#);
+        let job = Scheduler::new(&batch).submit(&VarSet::new(), None).unwrap();
+        assert_eq!(job, JobRecord { id: "77".to_owned(), host: None, start: None, since: None });
+    }
+
+    /// As `submit`, a `blocking-submit` on a `job-ids = "pids"` machine:
+    /// the start time is read as the id's line arrives, while the command
+    /// still waits on the process.
+    #[test]
+    fn a_blocking_submits_pid_is_recorded_while_it_runs() {
+        let m = meta(r#"job-ids = "pids"
+            blocking-submit = "sleep 1 & p=$!; echo $p; wait $p""#);
+        let mut seen = None;
+        let job = Scheduler::new(&m)
+            .submit_blocking(&VarSet::new(), None, &mut |job| {
+                seen = Some((job.clone(), crate::lock::proc_starttime(job.id.parse().unwrap())));
+                Ok(())
+            })
+            .unwrap();
+        let (reported, start_then) = seen.expect("the job id was never reported");
+        assert_eq!(reported, job);
+        assert!(job.start.is_some());
+        assert_eq!(job.start, start_then);
+        assert_eq!(job.host.as_deref(), Some(crate::lock::our_hostname().as_str()));
+    }
+
+    /// Kills `pid` (a process this test started through a shell, so not
+    /// its child) when dropped.
+    fn kill_on_drop(pid: u32) -> impl Drop {
+        struct Kill(u32);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("kill").arg(self.0.to_string()).status();
+            }
+        }
+        Kill(pid)
+    }
+
+    /// The pid checks (§10): the job's own process, on the recorded host
+    /// with the recorded start time, is asked about and stopped; a pid
+    /// used again (a live process that started at another time) and a
+    /// process recorded gone are taken as gone; another host's pid is
+    /// neither asked about nor stopped here, and never taken for gone
+    /// (`Stopped::Elsewhere`): neither `get-status` nor `stop` runs for any
+    /// of them.
+    #[test]
+    fn a_pid_is_asked_about_only_while_it_is_the_jobs_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = pids_machine(dir.path());
+        let sched = Scheduler::new(&m);
+        let sleeper = Sleeper::start();
+        let pid = sleeper.pid();
+        let here = crate::lock::our_hostname();
+
+        let reused = JobRef::new(&pid, Some(&here), Some(sleeper.start_time() + 1), None);
+        assert_eq!(sched.get_status(reused).unwrap(), JobStatus::Unknown);
+        assert_eq!(sched.stop(reused).unwrap(), Stopped::Gone);
+        let elsewhere = JobRef::new(&pid, Some("some-other-host"), Some(sleeper.start_time()), None);
+        assert_eq!(sched.recorded_elsewhere(elsewhere), Some("some-other-host"));
+        assert_eq!(sched.get_status(elsewhere).unwrap(), JobStatus::Unknown);
+        assert_eq!(sched.stop(elsewhere).unwrap(), Stopped::Elsewhere("some-other-host".to_owned()));
+        let gone_at_submit = JobRef::new(&pid, Some(&here), None, None);
+        assert_eq!(sched.get_status(gone_at_submit).unwrap(), JobStatus::Unknown);
+        assert_eq!(sched.stop(gone_at_submit).unwrap(), Stopped::Gone);
+        assert_eq!(sched.recorded_elsewhere(gone_at_submit), None);
+        let statuses = sched.get_statuses(&[reused, elsewhere, gone_at_submit]);
+        assert_eq!(statuses.len(), 3, "the same id with other records is another job");
+        assert!([reused, elsewhere, gone_at_submit].iter().all(|job| statuses.get(*job) == Some(&JobStatus::Unknown)));
+        assert_eq!((marks(dir.path(), "asked"), marks(dir.path(), "stopped")), (0, 0), "a pid not the job's was asked about");
+
+        let own = JobRef::new(&pid, Some(&here), Some(sleeper.start_time()), None);
+        assert_eq!(sched.get_status(own).unwrap(), JobStatus::Running);
+        assert_eq!(sched.get_statuses(&[own, reused]).get(own), Some(&JobStatus::Running));
+        assert_eq!(sched.stop(own).unwrap(), Stopped::Sent);
+        assert_eq!((marks(dir.path(), "asked"), marks(dir.path(), "stopped")), (2, 1));
+    }
+
+    /// The job's own process that does not lead its own process group (a
+    /// submit without `setsid`, or a foreground run started from a script):
+    /// the stop command (`pkill -g`) would reach the group's other
+    /// processes, so nothing is run and the refusal names the pid.
+    #[test]
+    fn a_pid_sharing_its_process_group_is_never_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = pids_machine(dir.path());
+        let sched = Scheduler::new(&m);
+        let sleeper = Sleeper::start_in_our_group();
+        let pid = sleeper.pid();
+        let here = crate::lock::our_hostname();
+        let own = JobRef::new(&pid, Some(&here), Some(sleeper.start_time()), None);
+        assert_eq!(sched.get_status(own).unwrap(), JobStatus::Running);
+        let err = sched.stop(own).unwrap_err();
+        assert!(err.downcast_ref::<SharedGroup>().is_some(), "{err:#}");
+        let text = format!("{err:#}");
+        assert!(text.contains("shares its process group") && text.contains(&format!("pstree -p {pid}")), "{text}");
+        assert!(!text.contains("kill"), "no single command stops it alone: {text}");
+        assert_eq!(marks(dir.path(), "stopped"), 0);
+    }
+
+    /// A run the way a job started without `setsid` from an interactive
+    /// shell is: the group's leader (the cactup that submitted it) gone,
+    /// the group holding only the job's processes, a run-script (`top`)
+    /// and the process it started (`child`).
+    struct OrphanRun {
+        top: u32,
+        child: u32,
+        pgid: u32,
+    }
+
+    impl OrphanRun {
+        fn start() -> OrphanRun {
+            OrphanRun::start_with("sleep 300")
+        }
+
+        /// The run-script runs `child` (in the background) and waits.
+        fn start_with(child: &str) -> OrphanRun {
+            use std::os::unix::process::CommandExt;
+            let out = std::process::Command::new("sh")
+                .args(["-c", &format!("sh -c '{child} & wait' > /dev/null 2>&1 < /dev/null & echo $!")])
+                .process_group(0)
+                .output()
+                .unwrap();
+            let top: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            let pgid = crate::lock::proc_pgrp(top).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let group = crate::lock::proc_group(top).unwrap();
+                if let Some(&child) = group.tree.iter().find(|&&p| p != top) {
+                    return OrphanRun { top, child, pgid };
+                }
+                assert!(std::time::Instant::now() < deadline, "the run's child never started");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        fn gone(&self) -> bool {
+            // A killed process lingers as a zombie until its parent (init,
+            // or the run-script) reaps it: gone either way.
+            [self.top, self.child].iter().all(|p| {
+                std::fs::read_to_string(format!("/proc/{p}/stat"))
+                    .map(|stat| stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')))
+                    .unwrap_or(true)
+            })
+        }
+
+        fn await_gone(&self) -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !self.gone() {
+                if std::time::Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            true
+        }
+    }
+
+    impl Drop for OrphanRun {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("kill").args(["-9", &self.top.to_string(), &self.child.to_string()]).status();
+        }
+    }
+
+    /// A job whose leader is gone but whose process group holds only the
+    /// job's processes (submitted without `setsid` from an interactive
+    /// shell, as master's MDB did) is the job's own group: the machine's
+    /// stop command is run (the generic machine's real one stops the whole
+    /// run and nothing else), and the advice for an older record of it,
+    /// `kill -- -<pgid>`, stops the whole run too.
+    #[test]
+    fn a_group_holding_only_the_jobs_processes_is_its_own() {
+        let run = OrphanRun::start();
+        assert_ne!(run.pgid, run.top, "the run's top process does not lead its group");
+        let group = crate::lock::proc_group(run.top).unwrap();
+        assert!(group.own, "{group:?}");
+        assert_eq!((group.pgid, group.tree.clone()), (run.pgid, vec![run.top.min(run.child), run.top.max(run.child)]));
+        // Our own group holds the test runner, which no sleeper started.
+        let ours = Sleeper::start_in_our_group();
+        assert!(!crate::lock::proc_group(ours.0.id()).unwrap().own);
+
+        let dir = tempfile::tempdir().unwrap();
+        let marking = pids_machine(dir.path());
+        let sched = Scheduler::new(&marking);
+        let (top, here) = (run.top.to_string(), crate::lock::our_hostname());
+        let start = crate::lock::proc_starttime(run.top);
+        let job = JobRef::new(&top, Some(&here), start, None);
+        assert!(!sched.shares_group(job) && sched.stoppable_pid(job));
+        assert_eq!(sched.stop(job).unwrap(), Stopped::Sent);
+        assert_eq!(marks(dir.path(), "stopped"), 1);
+
+        // The generic machine's own stop command, for real.
+        let generic = meta(
+            r#"
+            job-ids = "pids"
+            get-status = "ps @JOB_ID@"
+            stop = "pkill -g $(ps -o pgid= -p @JOB_ID@)"
+            status-pattern = "^ *@JOB_ID@ "
+            running-pattern = "^"
+            "#,
+        );
+        assert_eq!(Scheduler::new(&generic).stop(job).unwrap(), Stopped::Sent);
+        assert!(run.await_gone(), "the stop command left part of the run");
+        assert!(crate::lock::proc_starttime(ours.0.id()).is_some(), "the stop command reached another group");
+
+        // An older record of such a run: never stopped, and the advice
+        // stops the whole run when followed.
+        let run = OrphanRun::start();
+        let text = UnverifiedPid::of(&run.top.to_string()).to_string();
+        let advice = format!("kill -- -{}", run.pgid);
+        assert!(text.contains(&format!("`{advice}`")), "{text}");
+        assert!(std::process::Command::new("sh").args(["-c", &advice]).status().unwrap().success());
+        assert!(run.await_gone(), "{advice} left part of the run");
+        assert!(crate::lock::proc_starttime(ours.0.id()).is_some(), "{advice} reached another group");
+    }
+
+    /// A run whose group is its own but one of whose processes made a group
+    /// of its own (`setsid`): `kill -- -<pgid>` would leave that one, so the
+    /// advice names it rather than claim the whole run.
+    #[test]
+    fn the_advice_names_a_process_of_the_run_outside_its_group() {
+        let run = OrphanRun::start_with("setsid sleep 300");
+        // The child is forked before it makes its own group: wait for that.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let group = loop {
+            let group = crate::lock::proc_group(run.top).unwrap();
+            if !group.outside.is_empty() || std::time::Instant::now() > deadline {
+                break group;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(group.own, "{group:?}");
+        assert_eq!(group.outside, vec![run.child], "{group:?}");
+        let text = UnverifiedPid::of(&run.top.to_string()).to_string();
+        assert!(text.contains(&format!("`kill -- -{}`", run.pgid)) && text.contains(&format!("but not pids {}", run.child)), "{text}");
+        assert!(!text.contains("every process it started"), "{text}");
+    }
+
+    /// A run-script in a group that holds processes it did not start (the
+    /// test runner's): no single command stops it alone. An older record
+    /// of it names the processes to stop; a verified one is refused.
+    #[test]
+    fn a_run_sharing_its_group_with_others_names_its_processes() {
+        let mut shell = std::process::Command::new("sh").args(["-c", "sleep 300 & wait"]).spawn().unwrap();
+        let top = shell.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let group = loop {
+            let group = crate::lock::proc_group(top).unwrap();
+            if group.tree.len() == 2 {
+                break group;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run's child never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(!group.own);
+        let text = UnverifiedPid::of(&top.to_string()).to_string();
+        let tree: Vec<String> = group.tree.iter().map(u32::to_string).collect();
+        assert!(text.contains(&format!("now pids {}", tree.join(", "))) && text.contains(&format!("pstree -p {top}")), "{text}");
+        assert!(!text.contains("kill"), "{text}");
+        let _ = std::process::Command::new("kill").args(["-9", &tree[0], &tree[1]]).status();
+        let _ = shell.wait();
+    }
+
+    /// After a record's end, a stop command that fails settles nothing,
+    /// but for one exception: after a failed status query, a refusal whose
+    /// output matches `unknown-job-pattern` (the scheduler saying it does
+    /// not know the job: Torque's `qdel` of a forgotten job, exit 153) is
+    /// taken as the job ended, what it said kept. A transient failure (the
+    /// controller not reached) is an error after a failed query, saying so
+    /// with the pattern hint; and any failure is an error after the
+    /// scheduler just listed the job.
+    #[test]
+    fn a_stop_that_fails_after_the_end_settles_only_a_job_the_scheduler_does_not_know() {
+        let with_stop = |stop: &str| {
+            meta(&format!(
+                r#"
+                stop = "{stop}"
+                unknown-job-pattern = 'Unknown Job Id'
+                status-pattern = "^@JOB_ID@ "
+                "#
+            ))
+        };
+        let unknown = with_stop("echo 'qdel: Unknown Job Id 4242.qb2' >&2; exit 153");
+        let sched = Scheduler::new(&unknown);
+        let failed = "the status query for job 4242 failed. It printed:\nqstat: cannot connect to server qb2";
+        for case in [StopCase::Unanswered(failed), StopCase::Unread] {
+            match sched.stop_judged(JobRef::bare("4242"), case).unwrap() {
+                EndedStop::NotKnown(said) => assert_eq!(said, "qdel: Unknown Job Id 4242.qb2 (exit status: 153)"),
+                other => panic!("{case:?}: {other:?}"),
+            }
+        }
+        // Just listed: the same refusal is an error, nothing settled.
+        let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
+        assert!(err.contains("the stop command for job 4242 failed: qdel: Unknown Job Id"), "{err}");
+        assert!(sched.stop(JobRef::bare("4242")).is_err(), "before the end it is an error still");
+        for transient in [
+            "scancel: error: Kill job error on job id 4242: Socket timed out on send/recv operation",
+            "scancel: error: Unable to contact slurm controller (connect failure)",
+        ] {
+            let m = with_stop(&format!("echo '{transient}' >&2; exit 1"));
+            let sched = Scheduler::new(&m);
+            // After a failed query: both outputs shown, with the hint.
+            let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unanswered(failed)).unwrap_err().to_string();
+            assert!(err.contains("may not have been reached") && err.contains(transient), "{err}");
+            assert!(err.contains("qstat: cannot connect to server qb2"), "the failed query's output: {err}");
+            assert!(err.contains("unknown-job-pattern ('Unknown Job Id') does not match it"), "{err}");
+            let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap_err().to_string();
+            assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
+            assert!(err.contains("does not match it"), "{err}");
+            let err = sched.stop_judged(JobRef::bare("4242"), StopCase::Listed).unwrap_err().to_string();
+            assert!(err.contains("the stop command for job 4242 failed") && err.contains(transient), "{err}");
+        }
+        let taking = with_stop("true");
+        assert_eq!(Scheduler::new(&taking).stop_judged(JobRef::bare("4242"), StopCase::Unread).unwrap(), EndedStop::Sent);
+    }
+
+    /// A job an older cactup recorded (no host, no start time) on a
+    /// `job-ids = "pids"` machine: asked about only where its pid has a
+    /// process here that started no later than the record was made (give
+    /// or take the slack), and never stopped, since that process may be
+    /// another. One that started well after the record is not the job.
+    #[test]
+    fn an_older_records_pid_is_asked_about_where_it_runs_and_never_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = pids_machine(dir.path());
+        let sched = Scheduler::new(&m);
+        let sleeper = Sleeper::start();
+        let pid = sleeper.pid();
+
+        for since in [None, Some(Utc::now())] {
+            let old = JobRef::new(&pid, None, None, since);
+            assert_eq!(sched.get_status(old).unwrap(), JobStatus::Running);
+            let err = sched.stop(old).unwrap_err();
+            assert!(err.downcast_ref::<UnverifiedPid>().is_some(), "{err:#}");
+            assert!(format!("{err:#}").contains(&format!("pid {pid}")), "{err:#}");
+        }
+        assert_eq!((marks(dir.path(), "asked"), marks(dir.path(), "stopped")), (2, 0));
+
+        // The record is an hour older than the process with its pid.
+        let long_ago = Utc::now() - chrono::Duration::hours(1);
+        let reused = JobRef::new(&pid, None, None, Some(long_ago));
+        assert_eq!(sched.get_status(reused).unwrap(), JobStatus::Unknown);
+        assert_eq!(sched.stop(reused).unwrap(), Stopped::Gone);
+
+        let dead = 999_999_999u32.to_string();
+        let old_dead = JobRef::new(&dead, None, None, None);
+        assert_eq!(sched.get_status(old_dead).unwrap(), JobStatus::Unknown);
+        assert_eq!(sched.stop(old_dead).unwrap(), Stopped::Gone);
+        assert_eq!((marks(dir.path(), "asked"), marks(dir.path(), "stopped")), (2, 0));
+    }
+
+    /// A job listed in a state the patterns read is live, before a record's
+    /// end and after it (there "still listed": queued again, leaving the
+    /// queue as `CG`, `TO`, or starting again as `CF`, `R`, which cactup
+    /// cannot tell apart); a state no pattern reads is not (after the end,
+    /// the ended job: Torque's `C`, Slurm's `CD`).
+    #[test]
+    fn after_the_end_a_job_listed_in_any_state_is_live() {
+        use JobStatus::*;
+        for (status, before, after) in
+            [(Running, true, true), (Queued, true, true), (Holding, true, true), (Error, false, false), (Unknown, false, false)]
+        {
+            assert_eq!((is_live(status, false), is_live(status, true)), (before, after), "{status:?}");
+        }
+    }
+
+    /// `unknown-job-pattern` (§10): no line for the job is a job gone only
+    /// where the scheduler says it does not know it (Slurm 24.11's `squeue
+    /// -j`: the message on stderr, nothing on stdout, exit 1); otherwise
+    /// the query failed, an error naming the command and its output. A
+    /// machine without the key reads both as gone, as before; the batch
+    /// listing reads a job it leaves out as gone either way.
+    #[test]
+    fn a_failed_status_query_is_an_error_where_the_machine_can_tell() {
+        let squeue = |stderr: &str, extra: &str| {
+            meta(&format!(
+                r#"
+                get-status = "echo '{stderr}' >&2; exit 1"
+                status-pattern = "^ *@JOB_ID@ "
+                running-pattern = " R "
+                {extra}
+                "#
+            ))
+        };
+        let pattern = "unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'";
+        let unknown = squeue("slurm_load_jobs error: Invalid job id specified", pattern);
+        assert_eq!(Scheduler::new(&unknown).get_status(JobRef::bare("4242")).unwrap(), JobStatus::Unknown);
+
+        let failed = squeue("slurm_load_jobs error: Socket timed out on send/recv operation", pattern);
+        let sched = Scheduler::new(&failed);
+        let err = sched.get_status(JobRef::bare("4242")).unwrap_err();
+        assert!(err.downcast_ref::<FailedQuery>().is_some());
+        let err = format!("{err:#}");
+        assert!(err.contains("the status query for job 4242, `echo 'slurm_load_jobs error: Socket timed out"), "names the command: {err}");
+        assert!(err.contains("status-pattern ('^ *@JOB_ID@ ')"), "names the status pattern: {err}");
+        assert!(err.contains("unknown-job-pattern ('slurm_load_jobs error: Invalid job id specified')"), "{err}");
+        assert!(err.contains("It printed:\nslurm_load_jobs error: Socket timed out on send/recv operation\n"), "{err}");
+        assert!(err.contains("unknown-job-pattern does not match it: fix the pattern"), "{err}");
+        assert!(!err.contains("could not ask"), "{err}");
+        // Display paths take it as no status at all.
+        assert!(sched.get_statuses(&[JobRef::bare("4242")]).is_empty());
+        // After the record's end it is taken as the job ended; before, the error.
+        assert_eq!(sched.get_status_of(JobRef::bare("4242"), true).unwrap(), JobStatus::Unknown);
+        assert!(sched.get_status_of(JobRef::bare("4242"), false).is_err());
+
+        let silent = squeue("", pattern);
+        let err = format!("{:#}", Scheduler::new(&silent).get_status(JobRef::bare("4242")).unwrap_err());
+        assert!(err.ends_with("It printed nothing."), "{err}");
+
+        let without = squeue("slurm_load_jobs error: Socket timed out on send/recv operation", "");
+        assert_eq!(Scheduler::new(&without).get_status(JobRef::bare("4242")).unwrap(), JobStatus::Unknown);
+
+        let listing = meta(&format!(
+            r#"
+            get-status-many = "printf '1 R\n'"
+            status-pattern = "^ *@JOB_ID@ "
+            running-pattern = " R"
+            {pattern}
+            "#
+        ));
+        let statuses = Scheduler::new(&listing).get_statuses(&bare(&["1", "2"]));
+        assert_eq!(statuses.get(JobRef::bare("2")), Some(&JobStatus::Unknown));
+    }
+
+    /// After a record's end its job is asked about only on a batch
+    /// scheduler and only within the requeue window (14 days): a job id
+    /// that old may name an unrelated job; a record with no end time is
+    /// taken as ended.
+    #[test]
+    fn a_job_is_asked_about_after_its_end_only_within_the_requeue_window() {
+        let batch = meta("");
+        let batch = Scheduler::new(&batch);
+        let pids = meta(r#"job-ids = "pids""#);
+        let pids = Scheduler::new(&pids);
+        let days = |n: i64| Some(Utc::now() - chrono::Duration::days(n));
+        assert!(batch.asks_after_end("m", days(0)));
+        assert!(batch.asks_after_end("m", days(13)));
+        assert!(!batch.asks_after_end("m", days(15)));
+        assert!(!batch.asks_after_end("m", None));
+        assert!(!pids.asks_after_end("m", days(0)));
+        // A record made for another machine (a home two clusters share):
+        // never asked after its end.
+        let m = meta("");
+        let here = Scheduler::named(&m, "qb");
+        assert!(here.asks_after_end("qb", days(0)));
+        assert!(!here.asks_after_end("mike", days(0)));
     }
 
     /// The point of the streaming parse (§10): the job id has to reach the
@@ -665,10 +1926,11 @@ mod tests {
         let mut seen_while_running = None;
         let job_id = Scheduler::new(&m)
             .submit_blocking(&VarSet::new(), None, &mut |id| {
-                seen_while_running = Some((id.to_owned(), done.exists()));
+                seen_while_running = Some((id.id.clone(), done.exists()));
                 Ok(())
             })
-            .unwrap();
+            .unwrap()
+            .id;
 
         assert_eq!(job_id, "4242");
         let (reported, finished_already) = seen_while_running.expect("the job id was never reported");
@@ -690,7 +1952,7 @@ mod tests {
             "#,
         );
         assert_eq!(
-            Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap(),
+            Scheduler::new(&m).submit_blocking(&VarSet::new(), None, &mut |_| Ok(())).unwrap().id,
             "JOB-7"
         );
     }
@@ -745,7 +2007,7 @@ mod tests {
     }
 
     /// Substitution and the submit-phase env-setup apply exactly as they do to
-    /// `submit` — the two keys are the same command in two flavours.
+    /// `submit` — the two keys are the same command in two flavors.
     #[test]
     fn blocking_submit_substitutes_and_prepends_env_like_submit() {
         let mut m = meta(
@@ -758,7 +2020,7 @@ mod tests {
         let mut vars = VarSet::new();
         vars.set("SCRIPTFILE", "build.sh");
         assert_eq!(
-            Scheduler::new(&m).submit_blocking(&vars, None, &mut |_| Ok(())).unwrap(),
+            Scheduler::new(&m).submit_blocking(&vars, None, &mut |_| Ok(())).unwrap().id,
             "77-build.sh"
         );
     }
@@ -808,7 +2070,7 @@ mod tests {
             status-pattern = "^ *@JOB_ID@ "
             "#,
         );
-        assert_eq!(Scheduler::new(&m).get_status("31337").unwrap(), JobStatus::Unknown);
+        assert_eq!(Scheduler::new(&m).get_status(JobRef::bare("31337")).unwrap(), JobStatus::Unknown);
     }
 
     #[test]
@@ -829,7 +2091,7 @@ mod tests {
         // "5" appears twice: a duplicate id must still be queried once and
         // land as a single entry.
         let ids = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "5"];
-        let statuses = sched.get_statuses(&ids);
+        let statuses = sched.get_statuses(&bare(&ids));
 
         assert_eq!(statuses.len(), 12);
         let want = [
@@ -847,7 +2109,7 @@ mod tests {
             ("12", JobStatus::Running),
         ];
         for (id, status) in want {
-            assert_eq!(statuses.get(id).copied(), Some(status), "job {id}");
+            assert_eq!(statuses.get(JobRef::bare(id)).copied(), Some(status), "job {id}");
         }
     }
 
@@ -862,19 +2124,19 @@ mod tests {
         );
         let sched = Scheduler::new(&m);
         assert!(sched.get_statuses(&[]).is_empty());
-        let statuses = sched.get_statuses(&["7"]);
-        assert_eq!(statuses.get("7").copied(), Some(JobStatus::Running));
+        let statuses = sched.get_statuses(&bare(&["7"]));
+        assert_eq!(statuses.get(JobRef::bare("7")).copied(), Some(JobStatus::Running));
     }
 
     #[test]
     fn stop_propagates_failure() {
         let ok = meta(r#"stop = "true""#);
-        Scheduler::new(&ok).stop("1").unwrap();
+        Scheduler::new(&ok).stop(JobRef::bare("1")).unwrap();
         let bad = meta(r#"stop = "echo no permission >&2; false""#);
-        let err = format!("{:#}", Scheduler::new(&bad).stop("1").unwrap_err());
+        let err = format!("{:#}", Scheduler::new(&bad).stop(JobRef::bare("1")).unwrap_err());
         assert!(err.contains("no permission"), "{err}");
         let missing = meta("");
-        assert!(Scheduler::new(&missing).stop("1").is_err());
+        assert!(Scheduler::new(&missing).stop(JobRef::bare("1")).is_err());
     }
 
     #[test]
@@ -891,13 +2153,53 @@ mod tests {
         );
         let sched = Scheduler::new(&m);
         let ids = ["3774765", "3774766", "3774767", "9999999"];
-        let statuses = sched.get_statuses(&ids);
+        let statuses = sched.get_statuses(&bare(&ids));
 
-        assert_eq!(statuses.get("3774765").copied(), Some(JobStatus::Running));
-        assert_eq!(statuses.get("3774766").copied(), Some(JobStatus::Queued));
-        assert_eq!(statuses.get("3774767").copied(), Some(JobStatus::Holding));
+        assert_eq!(statuses.get(JobRef::bare("3774765")).copied(), Some(JobStatus::Running));
+        assert_eq!(statuses.get(JobRef::bare("3774766")).copied(), Some(JobStatus::Queued));
+        assert_eq!(statuses.get(JobRef::bare("3774767")).copied(), Some(JobStatus::Holding));
         // Not in the listing at all ⇒ U, not absent.
-        assert_eq!(statuses.get("9999999").copied(), Some(JobStatus::Unknown));
+        assert_eq!(statuses.get(JobRef::bare("9999999")).copied(), Some(JobStatus::Unknown));
+    }
+
+    /// A `get-status-many` listing that exits non-zero failed (Slurm 24.11's
+    /// `squeue -h -u` on a timeout: the message on stderr, nothing on
+    /// stdout, exit 1): it says nothing of any job, so the per-job queries
+    /// answer instead, and their own failure is what callers get (an error
+    /// before a record's end, taken as ended after it). An empty listing
+    /// exits 0: every job asked about is gone.
+    #[test]
+    fn a_failing_listing_falls_back_to_the_per_job_queries() {
+        let timeout = "echo 'slurm_load_jobs error: Socket timed out on send/recv operation' >&2; exit 1";
+        let machine = |many: &str, single: &str| {
+            meta(&format!(
+                r#"
+                get-status-many = "{many}"
+                get-status = "{single}"
+                unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
+                status-pattern = "^@JOB_ID@ "
+                running-pattern = " R"
+                "#
+            ))
+        };
+        let jobs = bare(&["1", "2"]);
+
+        let per_job_answers = machine(timeout, "echo '@JOB_ID@ R'");
+        let statuses = Scheduler::new(&per_job_answers).get_statuses(&jobs);
+        assert_eq!(statuses.get(JobRef::bare("1")), Some(&JobStatus::Running));
+        assert_eq!(statuses.get(JobRef::bare("2")), Some(&JobStatus::Running));
+
+        let both_fail = machine(timeout, timeout);
+        let sched = Scheduler::new(&both_fail);
+        assert!(sched.get_statuses(&jobs).is_empty(), "a failed listing marked jobs gone");
+        let err = sched.get_status_of(JobRef::bare("1"), false).unwrap_err();
+        assert!(err.downcast_ref::<FailedQuery>().is_some(), "{err:#}");
+        assert_eq!(sched.get_status_of(JobRef::bare("1"), true).unwrap(), JobStatus::Unknown);
+
+        let empty = machine("true", "echo '@JOB_ID@ R'");
+        let statuses = Scheduler::new(&empty).get_statuses(&jobs);
+        assert_eq!(statuses.get(JobRef::bare("1")), Some(&JobStatus::Unknown));
+        assert_eq!(statuses.get(JobRef::bare("2")), Some(&JobStatus::Unknown));
     }
 
     #[test]
@@ -918,7 +2220,7 @@ mod tests {
         // 10 distinct ids: the listing must still answer for all of them
         // from a single round-trip, regardless of how many are requested.
         let ids = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
-        let _ = sched.get_statuses(&ids);
+        let _ = sched.get_statuses(&bare(&ids));
 
         let calls = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(calls.lines().count(), 1, "expected exactly one scheduler round-trip:\n{calls}");
@@ -940,9 +2242,9 @@ mod tests {
             "#,
         );
         let sched = Scheduler::new(&m);
-        let statuses = sched.get_statuses(&["3774765", "774765"]);
-        assert_eq!(statuses.get("3774765").copied(), Some(JobStatus::Running));
-        assert_eq!(statuses.get("774765").copied(), Some(JobStatus::Unknown));
+        let statuses = sched.get_statuses(&bare(&["3774765", "774765"]));
+        assert_eq!(statuses.get(JobRef::bare("3774765")).copied(), Some(JobStatus::Running));
+        assert_eq!(statuses.get(JobRef::bare("774765")).copied(), Some(JobStatus::Unknown));
     }
 
     #[test]
@@ -962,9 +2264,9 @@ mod tests {
             "#,
         );
         let sched = Scheduler::new(&m);
-        let statuses = sched.get_statuses(&["1", "2"]);
-        assert_eq!(statuses.get("1").copied(), Some(JobStatus::Running));
-        assert_eq!(statuses.get("2").copied(), Some(JobStatus::Queued));
+        let statuses = sched.get_statuses(&bare(&["1", "2"]));
+        assert_eq!(statuses.get(JobRef::bare("1")).copied(), Some(JobStatus::Running));
+        assert_eq!(statuses.get(JobRef::bare("2")).copied(), Some(JobStatus::Queued));
     }
 
     #[test]

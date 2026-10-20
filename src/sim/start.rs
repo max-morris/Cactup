@@ -309,7 +309,7 @@ fn submit_impl(
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
     let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     // Per-simulation mutual exclusion for everything below (§2.3 item 3).
     let _lock = sim.lock()?;
@@ -320,6 +320,27 @@ fn submit_impl(
     let mut activate_first = true;
     if let Some(active) = restart::active_id(&sim.dir)? {
         let r = Restart::load(&sim.dir, active)?;
+        // A foreground run's pid is no job a batch scheduler could chain
+        // behind (§8.6): wait for it, or interrupt it.
+        if r.meta.foreground && r.meta.scheduler_job(&sched).is_none() {
+            match LinkLock::is_held_live(&r.running_lock_path())? {
+                true => bail!(
+                    "restart {} of simulation \"{}\" runs in the foreground (pid {}), which the scheduler \
+                     knows nothing of and cannot chain a job behind: wait for it to end, or interrupt it \
+                     where it runs (Ctrl-C), then submit",
+                    restart::dir_name(active),
+                    sim.name,
+                    r.meta.job_id
+                ),
+                false => bail!(
+                    "restart {} of simulation \"{}\" ran in the foreground and is still active, though \
+                     nothing of it holds its lock: `cactup sim clean {}`, then submit",
+                    restart::dir_name(active),
+                    sim.name,
+                    sim.name
+                ),
+            }
+        }
         if r.meta.job_id == NO_JOB_ID {
             bail!(
                 "restart {} is active but has no job and is not reapable yet; \
@@ -328,13 +349,104 @@ fn submit_impl(
                 sim.name
             );
         }
-        println!(
-            "Restart {} is still live (job {}); chaining the new submission behind it",
-            restart::dir_name(active),
-            r.meta.job_id
-        );
-        prev_job = Some(r.meta.job_id.clone());
-        activate_first = false;
+        let chain = match r.meta.terminated {
+            false => {
+                println!(
+                    "Restart {} is still live (job {}); chaining the new submission behind it",
+                    restart::dir_name(active),
+                    r.meta.job_id
+                );
+                true
+            }
+            // An ended restart still active: the reaper left it, because the
+            // scheduler still lists its job (§8.6), or under its throttles,
+            // without asking. Asked here, so what is said is known; the safe
+            // reading for new work: chained behind a job still listed;
+            // refused beside one the scheduler could not be asked about
+            // (chaining behind a job it has forgotten fails), unless `-f`
+            // stops it first.
+            true => {
+                use crate::scheduler::AfterEnd;
+                let dir = restart::dir_name(active);
+                let job_id = &r.meta.job_id;
+                let answer = crate::sim::manage::ask_ended(sim, &sched, &r)?;
+                if let Some(AfterEnd::Unanswered(failed)) = &answer {
+                    if !args.force {
+                        return Err(crate::sim::manage::unanswered_refusal(sim, &r, failed, "submit"));
+                    }
+                    crate::sim::manage::stop_unanswered(sim, &sched, &r, failed)?;
+                }
+                match answer {
+                    Some(AfterEnd::Listed(status)) => {
+                        println!(
+                            "Restart {dir}'s job {job_id} is still listed by the scheduler after the \
+                             restart ended ({}); chaining the new submission behind it",
+                            crate::scheduler::listed_state_words(status)
+                        );
+                        true
+                    }
+                    // Stopped by `-f`, but its run still ending: no chaining
+                    // behind a job the scheduler may have forgotten.
+                    Some(AfterEnd::Unanswered(_)) if LinkLock::is_held_live(&r.running_lock_path())? => bail!(
+                        "restart {dir} of simulation \"{}\" has recorded its end, but its run still holds \
+                         its lock (it is ending): wait for it, then submit",
+                        sim.name
+                    ),
+                    _ if LinkLock::is_held_live(&r.running_lock_path())? => {
+                        println!(
+                            "Restart {dir} has recorded its end, but its run still holds its lock (it is \
+                             ending); chaining the new submission behind its job {job_id}"
+                        );
+                        true
+                    }
+                    answer => {
+                        // What the reaper does, but for its throttles.
+                        crate::sim::manage::clean_active(sim)?;
+                        match answer {
+                            Some(AfterEnd::Over(crate::scheduler::JobStatus::Unknown)) => println!(
+                                "Restart {dir} had ended and the scheduler does not know its job {job_id}: \
+                                 cleaned it"
+                            ),
+                            Some(AfterEnd::Over(_)) => println!(
+                                "Restart {dir} had ended and the scheduler lists its job {job_id} as over: \
+                                 cleaned it"
+                            ),
+                            _ => println!("Restart {dir} had recorded its end: cleaned it"),
+                        }
+                        false
+                    }
+                }
+            }
+        };
+        if chain {
+            prev_job = Some(r.meta.job_id.clone());
+            activate_first = false;
+        }
+    } else if let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, &sched)? {
+        // The newest ended restart (deactivated: `sim clean`, a stop): its
+        // job still listed (queued again, or leaving the queue), the new
+        // job is chained behind it, which waits for it either way (behind a
+        // job that is just leaving, a moment). One the scheduler could not
+        // be asked about refuses the submission (chaining behind a job it
+        // has forgotten fails), unless `-f` stops it first.
+        use crate::scheduler::AfterEnd;
+        let (dir, job_id) = (restart::dir_name(ended.id), &ended.meta.job_id);
+        match answer {
+            Some(AfterEnd::Listed(status)) => {
+                println!(
+                    "Restart {dir}'s job {job_id} is still listed by the scheduler after the restart ended \
+                     ({}); chaining the new submission behind it",
+                    crate::scheduler::listed_state_words(status)
+                );
+                prev_job = Some(ended.meta.job_id.clone());
+                activate_first = false;
+            }
+            Some(AfterEnd::Unanswered(failed)) if !args.force => {
+                return Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "submit"));
+            }
+            Some(AfterEnd::Unanswered(failed)) => crate::sim::manage::stop_unanswered(sim, &sched, &ended, &failed)?,
+            _ => {}
+        }
     }
 
     // Scripts for the chosen queue (§4.4) and universes (§4.8);
@@ -433,6 +545,7 @@ fn submit_impl(
                 created: Utc::now(),
                 started: None,
                 finished: None,
+                job_stopped: None,
                 nodes: topo.nodes,
                 tasks: topo.tasks,
                 tpn: topo.tpn,
@@ -443,6 +556,9 @@ fn submit_impl(
                 walltime: job_wall,
                 checkpt_buffer: buffer,
                 job_id: NO_JOB_ID.to_owned(),
+                job_host: None,
+                job_start: None,
+                foreground: false,
                 chained_job_id: chained,
                 status: None,
                 terminated: false,
@@ -459,10 +575,11 @@ fn submit_impl(
             restart::make_active(&sim.dir, id)?;
         }
 
-        let job_id = sched
+        let submitted = sched
             .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
             .with_context(|| format!("submitting restart {}", restart::dir_name(id)))?;
-        r.meta.job_id = job_id.clone();
+        r.meta.set_job(&submitted);
+        let job_id = submitted.id;
         r.meta.status = None;
         r.store()?;
 
@@ -495,6 +612,38 @@ fn submit_impl(
         prev_job = Some(job_id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn refuse_beside_listed_for_tests(sim: &Simulation, sched: &Scheduler, force: bool) -> Res<bool> {
+    refuse_beside_listed(sim, sched, force)
+}
+
+/// Refuse to start a foreground run beside the newest ended restart's job,
+/// which the scheduler still lists after the restart ended (§8.6: leaving
+/// the queue, or starting again), or could not be asked about: both might
+/// run. Called once no running active restart refuses first (whose own
+/// message stands), so `sim stop` acts on this job, as the advice says.
+/// With `force`, a job the scheduler could not be asked about is stopped
+/// instead (taken, or refused and taken as ended), and `true` returned.
+fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler, force: bool) -> Res<bool> {
+    use crate::scheduler::AfterEnd;
+    let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, sched)? else { return Ok(false) };
+    let (dir, job_id, name) = (restart::dir_name(ended.id), &ended.meta.job_id, &sim.name);
+    match answer {
+        Some(AfterEnd::Listed(status)) => bail!(
+            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
+            crate::scheduler::listed_after_end(status, &format!("cactup sim stop {name}"))
+        ),
+        Some(AfterEnd::Unanswered(failed)) if !force => {
+            Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "run"))
+        }
+        Some(AfterEnd::Unanswered(failed)) => {
+            crate::sim::manage::stop_unanswered(sim, sched, &ended, &failed)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// `sim run` (§8.4): dispatches to the compute-node path (`--sim-dir`,
@@ -547,11 +696,22 @@ fn run_interactive(
     let fit = vars::BinaryFit::for_config(machine, &cfg)?;
     let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     let lock = sim.lock()?;
     restart::reap_stale(sim, &sched)?;
-    if let Some(active) = restart::active_id(&sim.dir)? {
+    // A running active restart refuses first, with its own message (`sim
+    // stop` acts on it before anything else); then a job still listed after
+    // its restart's end (or unanswered), which `sim stop` then acts on.
+    let mut active = restart::active_id(&sim.dir)?;
+    let running = active.is_some_and(|id| Restart::load(&sim.dir, id).is_ok_and(|r| !r.meta.terminated));
+    // `-f` stopped the ended restart's job: an active restart that ended is
+    // finished with it (what the reaper does).
+    if !running && refuse_beside_listed(sim, &sched, args.start.force)? && active.is_some() {
+        crate::sim::manage::clean_active(sim)?;
+        active = None;
+    }
+    if let Some(active) = active {
         bail!(
             "simulation \"{}\" already has an active restart ({}); wait for it, or \
              `cactup sim stop {}` first",
@@ -624,6 +784,7 @@ fn run_interactive(
             created: Utc::now(),
             started: None,
             finished: None,
+            job_stopped: None,
             nodes: topo.nodes,
             tasks: topo.tasks,
             tpn: topo.tpn,
@@ -633,9 +794,11 @@ fn run_interactive(
             allocation: topo.allocation.clone(),
             walltime: job_wall,
             checkpt_buffer: buffer,
-            // The interactive run IS the job; our pid is what `ps`-style
-            // get-status commands can see (matches the generic machine).
-            job_id: std::process::id().to_string(),
+            // Set from `own_job` below.
+            job_id: NO_JOB_ID.to_owned(),
+            job_host: None,
+            job_start: None,
+            foreground: true,
             chained_job_id: None,
             status: None,
             terminated: false,
@@ -644,6 +807,10 @@ fn run_interactive(
             knobs: restart::freeze_knobs(&vset),
         },
     };
+    // The interactive run IS the job; our pid is what `ps`-style
+    // get-status commands can see (matches the generic machine), recorded
+    // with its host and start time where the machine's job ids are pids.
+    r.meta.set_job(&sched.own_job());
     r.store()?;
     restart::make_active(&sim.dir, id)?;
     // A fresh heartbeat before the sim lock drops: between here and
@@ -664,14 +831,17 @@ fn run_interactive(
 /// global DB, the registry, the MDB, or knobs (D11).
 fn run_compute(args: &SimRunArgs, sim_dir: &Path, id: u32) -> Res<()> {
     let sim = Simulation::open(&args.start.sim, sim_dir)?;
-    let mut r = Restart::load(&sim.dir, id)?;
 
     // Chain handoff (§8.3.2), under the per-simulation lock — waiting for the
-    // submitter to let go of it if the job started that quickly.
-    {
+    // submitter to let go of it if the job started that quickly. The restart
+    // is read under it too: the submitter records the job id (and on a
+    // `job-ids = "pids"` machine its host and start time) holding the lock,
+    // and a copy read before that would be written back without them.
+    let mut r = {
         let _lock = sim.lock_wait()?;
         restart::handoff_active(&sim.dir, id)?;
-    }
+        Restart::load(&sim.dir, id)?
+    };
 
     // No recovery step here: the parfile points Cactus at its recovery dir and
     // Cactus loads the newest checkpoint itself (§8.8).
@@ -783,6 +953,11 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     r.touch_heartbeat();
     r.meta.started = Some(Utc::now());
     r.meta.status = Some("R".to_owned());
+    // Running, so not ended: a job the scheduler requeued after its run
+    // recorded its end (preemption, `scontrol requeue`) runs again here,
+    // and records its end again when it is over (§8.6).
+    r.meta.terminated = false;
+    r.meta.finished = None;
     r.store()?;
 
     let tee_files = tee.then(|| {
@@ -1245,6 +1420,8 @@ mod tests {
                 install_root: cactus_root.clone(),
                 submitted: false,
                 job_id: "999".to_owned(),
+                job_host: None,
+                job_start: None,
                 status: None,
                 reservation: None,
                 decision: "test decision".to_owned(),

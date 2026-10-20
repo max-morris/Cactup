@@ -476,6 +476,8 @@ mod tests {
             install_root: cactus_root.to_owned(),
             submitted: true,
             job_id: job_id.to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             reservation: None,
             decision: "test decision".to_owned(),

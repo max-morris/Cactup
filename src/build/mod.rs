@@ -2261,6 +2261,8 @@ fn prepare_with_cache(
         install_root: installation.root.clone(),
         submitted: false,
         job_id: NO_JOB_ID.to_owned(),
+        job_host: None,
+        job_start: None,
         status: None,
         reservation: submit.map(|s| s.reservation.clone()),
         decision: decision_reason(&decision).to_owned(),
@@ -2273,7 +2275,7 @@ fn prepare_with_cache(
         config_meta,
         vars: freeze_vars(&vars),
         knobs: freeze_knobs(&vars),
-        timestamps: Timestamps { created: Some(Utc::now()), submitted: None, started: None, finished: None },
+        timestamps: Timestamps { created: Some(Utc::now()), submitted: None, started: None, finished: None, job_stopped: None },
         outcome: None,
     };
     // Creates the attempt directory and writes build.toml; from here on the
@@ -2470,7 +2472,12 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
 
     attempt.meta.timestamps.started = Some(Utc::now());
     attempt.meta.status = Some("R".to_owned());
-    attempt.store_meta()?;
+    // Running, so not over: a job the scheduler requeued after this
+    // attempt recorded its outcome (preemption, `scontrol requeue`) runs
+    // again here, and records a new one when it is done (§7.9).
+    attempt.meta.outcome = None;
+    attempt.meta.timestamps.finished = None;
+    attempt.store_meta_keeping_job()?;
 
     // §7.4/D11 re-probe (see this function's doc comment for why it must
     // happen here, not just at `prepare` time), unless `prepare`'s own
@@ -2557,7 +2564,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             "Escalating config {name} to a from-scratch rebuild: the Cactus flesh moved while \
              this build was queued, so the make system and config-data must be regenerated."
         );
-        attempt.store_meta()?;
+        attempt.store_meta_keeping_job()?;
     }
 
     // Two incidents this exists for, both leaving a same-named build/<Thorn>/
@@ -2683,7 +2690,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         && !st.success()
     {
         attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: st.code(), complete: false });
-        attempt.store_meta()?;
+        attempt.store_meta_keeping_job()?;
         eprintln!(
             "\n{} the build failed ({st})\n{} {} and {}",
             "✗".red().bold(),
@@ -2733,7 +2740,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         };
         attempt.meta.outcome =
             Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: false });
-        attempt.store_meta()?;
+        attempt.store_meta_keeping_job()?;
         bail!(
             "the build command finished but {} is missing — the config is incomplete{log_hint}",
             missing.display(),
@@ -2770,7 +2777,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
 
     attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: true });
     attempt.meta.config_meta = meta.clone();
-    attempt.store_meta()?;
+    attempt.store_meta_keeping_job()?;
 
     Ok(meta)
 }
@@ -4178,6 +4185,40 @@ mod tests {
         let err = fs::read_to_string(attempt.err_path()).unwrap();
         let ours: Vec<&str> = err.lines().filter(|l| l.starts_with("cactup:")).collect();
         assert_eq!(ours, ["cactup: build cache off for this build: a reason"], "{err}");
+    }
+
+    /// A job the scheduler requeued after its attempt recorded an outcome
+    /// runs `execute` again: the old outcome is cleared as it starts (it is
+    /// running, not over), and a new one recorded at its end.
+    #[test]
+    fn a_requeued_attempt_clears_its_outcome_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cactus = root.join("inst/Cactus");
+        let seen = root.join("seen");
+        let (_mdb, machine, inst, opts) = fake_tree(
+            root,
+            &format!(
+                "sim-config) cd {c}/configs/sim/config-data && touch cctk_Config.h ;;\n\
+                 sim) cat {c}/configs/sim/.cactup-builds/*/build.toml > {seen}; mkdir -p {c}/exe && touch {c}/exe/cactus_sim ;;",
+                c = cactus.display(),
+                seen = seen.display()
+            ),
+        );
+        let mut attempt = match prepare(&inst, &machine, "sim", &opts, None).unwrap() {
+            Prepared::Ready(a, _) => a,
+            Prepared::UpToDate(_) => panic!("a never-built config must need a build"),
+        };
+        // As its first run left it.
+        attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: Some(0), complete: true });
+        attempt.meta.timestamps.finished = Some(Utc::now());
+        attempt.store_meta().unwrap();
+
+        execute(&mut attempt, true, None).unwrap();
+        let during = fs::read_to_string(&seen).unwrap();
+        assert!(!during.contains("[outcome]") && !during.contains("finished ="), "{during}");
+        let after = BuildAttempt::open(&cactus.join("configs/sim"), attempt.id).unwrap();
+        assert!(after.meta.outcome.is_some_and(|o| o.complete) && after.meta.timestamps.finished.is_some());
     }
 
     /// Stage a fake Cactus tree whose machine `make` is `make_body` (a `case

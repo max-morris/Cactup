@@ -373,6 +373,89 @@ cactup sim stop mysim              # Graceful stop (sends TERMINATE signal)
 cactup sim stop mysim --force      # Kill the job (scheduler `stop` command)
 ```
 
+On a machine without a batch system (the generic machine, where a job is a
+background process), cactup records with each job the host it was started on
+and when its process started. It asks about the job, and stops it, only on
+that host and only while that process is still running; a job that has ended
+is taken as gone even if its process number now belongs to another process,
+which is never stopped. Run from another host, `sim stop --force` says the
+job runs on the host that submitted it and to stop it there, and changes
+nothing, and `sim delete` refuses, while the simulation's run still holds
+its lock; once the run has let go of it (a lock left behind by a lost host
+expires within 15 minutes) the job is taken as ended. cactup stops only a
+job whose process group holds nothing but the job and the processes it
+started (the machine's `submit` starts it with `setsid`; a job submitted
+without it from an interactive shell is in such a group too), and otherwise
+says so and leaves it: no single command stops the job alone then, so stop
+it and the processes it started yourself (`pstree -p <pid>` shows them), or
+interrupt the run where it runs (Ctrl-C). A `cactup sim run` typed alone at
+a shell prompt has a group of its own, so `sim stop --force` from another
+terminal stops it; one started from a script, or with other commands in a
+pipeline, does not, and is left alone. A simulation submitted by an older
+cactup, without that record, is not stopped for you if a process with its
+number is running: check that it is the job and stop it yourself, as cactup
+says (`kill -- -<group>` where its process group holds only the job, which
+stops the whole run; else it names the processes to stop).
+
+On a batch system whose machine definition says how the scheduler reports a
+job it does not know, a status query that fails (the scheduler not
+answering, say) stops `sim delete` (and the wait of a graceful `sim stop`)
+with the scheduler's output instead of taking the job for ended, and `sim
+list` shows the simulation as `UNKNOWN`; try again once the scheduler
+answers.
+
+On a batch system, the job of a simulation's newest restart is looked at
+for 14 days after the restart finished (only on the machine the simulation
+was made for: two clusters sharing a home directory do not share job
+numbers): if the scheduler still lists it, it is either put back in the
+queue (preemption, `scontrol requeue`) or just leaving it (Slurm lists an
+ended job as completing for a moment, or timed out for a few minutes), and
+cactup cannot tell which (a job listed as completed, Slurm's `CD` or
+Torque's `C`, has simply ended). `sim list` and `sim show` then show that
+restart as `QUEUED AGAIN` (queued or held) or `STILL LISTED` (listed running: `sim
+show` adds that it is leaving the queue or starting again), `sim stop` cancels the job (with or without
+`--force`), `sim delete` refuses until it has left or is stopped (or with
+`--force`, which cancels it), `sim submit` chains the new submission behind
+it, and `sim run` refuses to start beside it (`sim stop` it, or wait). `sim list`, `sim show` and
+`sim delete` ask Slurm for all your jobs at once, and `squeue` leaves a job
+that timed out (`TO`) out of that list, so for those minutes they show the
+restart as finished (or the simulation as inactive) and `sim delete` goes
+ahead, while `sim stop`, `sim submit` and `sim run`, which ask about the one
+job, still see it listed.
+
+If the scheduler cannot be asked about such a job (it does not answer, or
+the machine's `unknown-job-pattern` misses its message for a job it has
+forgotten), `sim list` and `sim show` show the restart as it recorded its
+end, and `sim delete` notes it and goes ahead. The commands that act take
+the safe reading instead, since the job may have been queued again: `sim
+submit` and `sim run` refuse, printing the failed query, and `sim stop`
+asks the scheduler to cancel the job anyway and says it could not ask.
+Where the scheduler takes the cancel, or refuses it saying it does not
+know the job (by the machine's `unknown-job-pattern`: Torque's `qdel`
+says "Unknown Job Id"), that settles it: cactup records the stop, and from
+then on takes the job as ended (unless it really was queued again and
+runs). `--force` on `sim submit` or `sim run` does the same and goes ahead
+(the new submission not chained: Slurm refuses a dependency on a job it
+has forgotten). If the cancel fails otherwise (the controller not
+reached), or fails for a job the scheduler has just listed, it is an
+error and nothing is recorded: try again once the scheduler answers. If
+the scheduler's message for a forgotten job is among what it printed,
+the machine's `unknown-job-pattern` does not match it, and every message
+on this path says so: fix the pattern. When `sim stop`
+has nothing to cancel, it says what it knows: that the scheduler does not
+know the job, or lists it as over, or (where it did not ask) that the
+restart has recorded its end. Either way, it names the later restarts
+submitted chained behind a job (`sim submit` again while one was queued)
+that are still waiting, and the scheduler command that stops each: they
+run after the job they are chained behind, and cactup does not stop them
+for you. One that has been canceled, or has run, is not named.
+
+`sim stop` stops a simulation's running restart first: only when none is
+running does it turn to the newest restart's job. `sim submit` also refuses while the simulation runs
+in the foreground on a batch system: wait for that run, or interrupt it. A simulation run in the foreground (`cactup sim run`) on a batch
+system has no job the scheduler knows: `sim stop --force` tells you to
+interrupt it where it runs, and `sim delete` refuses while it runs.
+
 Clean up aborted restart data:
 
 ```sh
