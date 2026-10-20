@@ -4204,6 +4204,25 @@ the job, `sim stop -f` said there is nothing to stop and `sim delete`
 went ahead; Slurm `S`: `sim stop -f` canceled it (`CA`) and finished the
 restart.
 
+Round 2 (`717c111`): both reviewers signed off. Both round 1 findings
+fixed (ran: Slurm `CD`, Torque `C` and `E` after the run's end; Torque
+`C` before it); `sim stop -f`'s query checked for `R`, `S`, `CD` before
+the end, a forgotten job, `squeue` down, no `unknown-job-pattern`,
+Ctrl-C during the query, a run dying or suspended mid-wait. Non-blocking
+notes, for a later commit: the "nothing to stop" branch of `sim stop -f`
+has no `running.lock` check, which the branch above it has (both; it
+matters for a home shared by two clusters, where `sim delete` is
+unguarded already); its log line says "stopped job N" (as master's for a
+pid gone); the spec's list of `get-status-many` paths leaves out `sim
+show`, `test show`, `build show`; `stop_sim` stores the restart read
+before a successful graceful wait, overwriting the run's own `finished`
+and `status` (as on master); after 30 s with the run's end recorded and
+the job still listed `CG`, the message's "Cactus acts on the trigger at
+its next termination check" is false (as on master), and a run that
+records its end between the last poll and the final read gets that
+message too; on crux (`Unknown Job Id|Job has finished`) a finished job
+is said not to be known.
+
 ## Decisions
 
 All of them, answered, are in `DECISIONS.md`. **Answered by Max on
@@ -4425,8 +4444,9 @@ MDB generation 3 is on master (PR #7), and the docs tidy-up after it
 (PR #8). The test-run liveness work on `feature/test-run-liveness`, with
 decision 35's scheduler behavior (above), passed its gate in eleven
 rounds and was merged as PR #9. The follow-ups for round 11's notes and
-the known cases are on `fix/liveness-followups` (above), at the review
-gate. Then M4b (Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
+the known cases passed their gate in two rounds on
+`fix/liveness-followups` (above); round 2's notes are left for a later
+commit. Then M4b (Cray), M5b (the whole-file cases), M6 (HIP). The every-flag search on `feature/doctor-every-flag`
 is shelved (Max, 2026-10-16).
 
 M5 (`cactup cache doctor`) in two parts, each through the review gate.
