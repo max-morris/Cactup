@@ -1272,7 +1272,15 @@ fetched on each request (`https://max-morris.github.io/Cactup/`, the
 project's docs: `https://DOMAIN/` is their front page, and their own links,
 to `/Cactup/...`, pass through as they are); with `SITE_PROXY` empty it
 redirects to the hub. The proxy needs the machine to reach that site during
-the workshop (HTTPS out to `max-morris.github.io`).
+the workshop (HTTPS out to `max-morris.github.io`), and Caddy to look its
+name up. Docker gives a container the host's nameservers when it starts it:
+one started at boot before the machine had its DHCP lease has none for
+good, and `https://DOMAIN/` answers 502 (Caddy's log: `lookup
+max-morris.github.io ... server misbehaving`) while the hub works. Docker
+waits for the network only as long as the boot does: on Debian with
+ifupdown, the interface wants `auto eth0`, not `allow-hotplug eth0`, in
+`/etc/network/interfaces`. Already hit: `docker compose restart caddy-plain`
+(or `caddy`).
 
 One setting moves the hub: JupyterHub's `base_url` and Caddy's routes both
 follow `HUB_PATH`, and `just token` shows the address with it. The routes are
