@@ -62,6 +62,7 @@ status-pattern   = '@JOB_ID@ '
 queued-pattern   = ' PD '
 running-pattern  = ' (CF|CG|R|TO) '
 holding-pattern  = '\(JobHeldUser\)'
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 exec-host        = "hostname -s"
 exec-host-pattern = '(\S+)'
 
@@ -94,19 +95,16 @@ max-walltime          = "04:00:00"
 max-gpus-per-node     = 1
 default-cpus-per-task = 4
 
-[variants.submitscript]
-"default" = { queues = ["debug", "short", "batch", "gpu"], default = true }
+[submitscripts]
+"default" = ["debug", "short", "batch", "gpu"]
 "test"    = { queues = ["debug", "short", "batch", "gpu"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["debug", "short", "batch", "gpu"], default = true }
+[runscripts]
+"default" = ["debug", "short", "batch", "gpu"]
 "test"    = { queues = ["debug", "short", "batch", "gpu"], test = true }   # used by `cactup test run`
 
-[variants.optionlist]
-variants = ["default", "gpu"]
-
 # A universe wraps the commands cactup runs for a config: its build and, by
-# default, its simulations (an optionlist can opt out with
+# default, its simulations (a flavor's optionlist can opt out with
 # coerce-run-universe = false). `cactup build NAME --universe
 # pinned` builds and runs under taskset, restricted to this container's CPUs.
 # The CPU numbers differ from container to container, so they come from the

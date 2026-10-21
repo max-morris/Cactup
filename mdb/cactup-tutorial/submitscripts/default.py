@@ -1,6 +1,6 @@
-# cactup-tutorial submitscript (variant "default").
+# cactup-tutorial submitscript (script "default").
 #
-# A .py variant: cactup runs it with every template variable as a global
+# A .py script: cactup runs it with every template variable as a global
 # (strings; `typed` has them as ints and bools), and what it prints is the job
 # script. Python is needed here because some #SBATCH lines are conditional,
 # which @NAME@ substitution cannot express:
@@ -49,7 +49,7 @@ lines.append("#SBATCH --error={0}".format(STDERR_FILE))
 # rather than truncate, so the log keeps the interrupted attempt too.
 lines.append("#SBATCH --open-mode=append")
 
-# env-setup is not auto-prepended for .py variants; it goes after the
+# env-setup is not auto-prepended for .py scripts; it goes after the
 # directives (this machine declares none, so it is usually empty).
 if ENV_SETUP.strip():
     lines.append(ENV_SETUP.rstrip("\n"))

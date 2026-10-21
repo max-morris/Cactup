@@ -28,6 +28,126 @@ fn parse_knob_override(s: &str) -> Result<KnobOverride, String> {
     Ok(KnobOverride { name: name.to_owned(), value })
 }
 
+/// A flag cactup once accepted and has since renamed. Retired flags are never
+/// declared to clap, so no help text, completion, or "did you mean" can
+/// mention them; `retired_flag_notice` catches them on the raw arguments
+/// before clap parses anything, so the user gets the rename notice whatever
+/// else is wrong with the line. Keep these indefinitely — at least one user
+/// still types `--variant` from habit.
+struct RetiredFlag {
+    /// The exact subcommand path the flag was accepted under. `build` alone
+    /// is the bare `cactup build [<name>]`; `build run`/`build submit` are
+    /// listed separately, so `build log --variant` stays an ordinary error.
+    path: &'static [&'static str],
+    flag: &'static str,
+    retirement: Retirement,
+}
+
+enum Retirement {
+    /// Renamed: the notice rewrites the flag to its new spelling.
+    Renamed(&'static str),
+    /// Removed with nothing in its place: the notice says why and drops the
+    /// flag (and its value) from the suggested command.
+    Removed(&'static str),
+}
+
+const RETIRED_FLAGS: &[RetiredFlag] = &[
+    RetiredFlag { path: &["build"], flag: "--variant", retirement: Retirement::Renamed("--flavor") },
+    RetiredFlag { path: &["build", "run"], flag: "--variant", retirement: Retirement::Renamed("--flavor") },
+    RetiredFlag { path: &["build", "submit"], flag: "--variant", retirement: Retirement::Renamed("--flavor") },
+    RetiredFlag { path: &["test", "run"], flag: "--variant", retirement: Retirement::Removed(TEST_SCRIPTS_BY_QUEUE) },
+    RetiredFlag { path: &["test", "submit"], flag: "--variant", retirement: Retirement::Removed(TEST_SCRIPTS_BY_QUEUE) },
+    RetiredFlag { path: &["machine", "show"], flag: "--variants", retirement: Retirement::Renamed("--flavors") },
+];
+
+const TEST_SCRIPTS_BY_QUEUE: &str =
+    "the queue now picks the test scripts — choose a different queue with -q to use different ones";
+
+/// The rename notice for a retired flag on this command line, if any: the
+/// command line rewritten with the replacement, for the user to re-run.
+/// `args` includes the program name, as `std::env::args_os` yields it.
+pub(crate) fn retired_flag_notice(args: &[OsString]) -> Option<String> {
+    use clap::CommandFactory;
+    let args: Vec<String> = args.iter().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let before_passthrough = &args[..end];
+
+    // The subcommand path, found the way clap finds it: walk the command
+    // tree, skipping flags (and the value of each that takes one, by the
+    // definitions of the command reached so far — global flags included, as
+    // they may sit at any level) and descending while a word names a
+    // subcommand. The first word that does not is a positional, so the path
+    // ends there.
+    let root = Args::command();
+    let takes_value = |cmd: &clap::Command, token: &str| {
+        cmd.get_arguments().chain(root.get_arguments()).any(|a| {
+            a.get_action().takes_values()
+                && (a.get_long().is_some_and(|l| token == format!("--{l}"))
+                    || a.get_short().is_some_and(|c| token == format!("-{c}")))
+        })
+    };
+    let mut path: Vec<&str> = Vec::new();
+    let mut cmd = &root;
+    let mut i = 0;
+    while i < before_passthrough.len() {
+        let token = before_passthrough[i].as_str();
+        if token.starts_with('-') {
+            i += if takes_value(cmd, token) { 2 } else { 1 };
+            continue;
+        }
+        match cmd.find_subcommand(token) {
+            Some(sub) => {
+                path.push(sub.get_name());
+                cmd = sub;
+                i += 1;
+            }
+            None => break,
+        }
+    }
+
+    let retired = RETIRED_FLAGS.iter().find(|r| {
+        r.path == path.as_slice()
+            && before_passthrough.iter().any(|a| a == r.flag || a.starts_with(&format!("{}=", r.flag)))
+    })?;
+
+    let mut rewritten = vec!["cactup".to_owned()];
+    let mut k = 0;
+    while k < args.len() {
+        let a = &args[k];
+        let spelled = k < end && a == retired.flag;
+        let joined = k < end && a.starts_with(&format!("{}=", retired.flag));
+        match &retired.retirement {
+            Retirement::Renamed(new) if spelled => rewritten.push(new.to_string()),
+            Retirement::Renamed(new) if joined => {
+                rewritten.push(shell_quote(&format!("{new}{}", &a[retired.flag.len()..])))
+            }
+            // A removed flag goes, and so does its value when it was given
+            // as the next word.
+            Retirement::Removed(_) if spelled => {
+                if args.get(k + 1).is_some_and(|v| k + 1 < end && !v.starts_with('-')) {
+                    k += 1;
+                }
+            }
+            Retirement::Removed(_) if joined => {}
+            _ => rewritten.push(shell_quote(a)),
+        }
+        k += 1;
+    }
+    let what = match &retired.retirement {
+        Retirement::Renamed(new) => format!("{} has been renamed {new}", retired.flag),
+        Retirement::Removed(why) => format!("{} has been removed: {why}", retired.flag),
+    };
+    Some(format!("{what}. Run instead:\n  {}", rewritten.join(" ")))
+}
+
+/// Single-quote `s` for a shell when it holds anything but plain word
+/// characters, so a rewritten command line can be pasted back as-is.
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_=./:,@+%".contains(c));
+    if plain { s.to_owned() } else { format!("'{}'", s.replace('\'', r"'\''")) }
+}
+
 /// Fold the two-token spelling of a knob override — `-K NAME VALUE`,
 /// `-KNAME VALUE`, `--knob NAME VALUE` — into the one-token `-K NAME=VALUE`
 /// clap parses. A `NAME` that already carries `=` is left alone, as is
@@ -214,9 +334,41 @@ pub(crate) enum Commands {
     /// Manage Cactus configurations in the active installation
     #[clap(subcommand)]
     Config(ConfigCommand),
-    /// Build (or rebuild) a config in the active installation, and manage
-    /// build attempts
+    /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
+    ///
+    /// Five machine-global knobs control the build cache, which reuses the
+    /// objects earlier builds compiled:
+    ///
+    ///   build-cache          serve (the default): compile only what no
+    ///                        build compiled before, and keep what is
+    ///                        compiled; off: build without the cache;
+    ///                        audit: serve, but compile anyway and check
+    ///                        that every served object is the same;
+    ///                        record: only measure, changing nothing.
+    ///   build-cache-home     where cached objects are kept, as an absolute
+    ///                        path (default: .cactup-build-cache beside
+    ///                        your installations, in the install-home).
+    ///   build-cache-relocate yes (the default): objects record their
+    ///                        sources as /cactup-root/arrangements/...,
+    ///                        so every installation can share them; no:
+    ///                        they keep this installation's paths.
+    ///   build-cache-size     a size (200G): a build says when the cache
+    ///                        has grown past it. Nothing is removed but by
+    ///                        `cactup cache gc`.
+    ///   build-cache-preserve-exact-warnings
+    ///                        false (the default): a served object's
+    ///                        warnings are the ones its compile printed,
+    ///                        which in rare cases name a line or a macro
+    ///                        of another configuration's headers; true:
+    ///                        exactly this build's, at the cost of fewer
+    ///                        objects shared between configurations.
+    ///
+    /// Set them with `cactup knob`, or for one build with -K:
+    ///
+    ///   cactup knob build-cache off
+    ///   cactup -K build-cache=audit build
     #[command(args_conflicts_with_subcommands = true)]
+    #[clap(verbatim_doc_comment)]
     Build {
         #[clap(flatten)]
         start: Box<BuildStartArgs>,
@@ -278,6 +430,10 @@ pub(crate) enum Commands {
     ///   cactup knob wisdom-kind relevant
     #[clap(verbatim_doc_comment)]
     Wisdom,
+    // §18.5
+    /// Inspect and look after the build cache
+    #[clap(subcommand)]
+    Cache(CacheCommand),
     // §17, §5
     /// Update cactup and its machine database (--help for how to configure)
     ///
@@ -433,7 +589,7 @@ pub(crate) struct TopologyFlags {
     /// Node count (default: 1).
     #[clap(short, long, value_name = "N")]
     pub nodes: Option<u32>,
-    /// Total tasks (MPI ranks; default: the script variant's `tasks` setting,
+    /// Total tasks (MPI ranks; default: the run/submit script's `tasks` setting,
     /// else nodes * tasks-per-node — but 2 for `test run`/`test submit`).
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,
@@ -474,7 +630,8 @@ pub(crate) struct TopologyFlags {
 /// Build flags for `cactup build`.
 #[derive(clap::Args, Debug)]
 pub(crate) struct BuildOpts {
-    /// Rebuild even if the config is already built (implies --ignore-machine).
+    /// Rebuild from scratch (`make <config>-realclean` first), even if the
+    /// config is up to date (implies --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
     // §7.4
@@ -486,14 +643,15 @@ pub(crate) struct BuildOpts {
     #[clap(long, value_name = "PATH")]
     pub thornlist: Option<PathBuf>,
     // §4.4
-    /// Optionlist variant (required iff the machine has more than one).
-    #[clap(long, value_name = "VARIANT")]
-    pub variant: Option<String>,
+    /// Optionlist flavor to build (required iff the machine has more than one
+    /// and none is marked default).
+    #[clap(long, value_name = "FLAVOR")]
+    pub flavor: Option<String>,
     // §4.4, §7.8
     /// Build from this optionlist file instead of the machine's: an MDB-style
     /// .toml (with its [cactup] header), an [options]-only .toml, or a native
     /// Cactus .cfg.
-    #[clap(long, value_name = "PATH", conflicts_with = "variant")]
+    #[clap(long, value_name = "PATH", conflicts_with = "flavor")]
     pub optionlist: Option<PathBuf>,
     #[clap(flatten)]
     pub universe: UniverseFlags,
@@ -509,7 +667,9 @@ pub(crate) struct BuildOpts {
     /// Profiling build.
     #[clap(long)]
     pub profile: bool,
-    /// Force reconfiguration before building.
+    // §7.8
+    /// Reconfigure and rebuild even if the config is up to date: incremental
+    /// unless a change needs a from-scratch rebuild (-f always does one).
     #[clap(long)]
     pub reconfig: bool,
     /// Clean the config before building.
@@ -534,7 +694,7 @@ impl BuildOpts {
             force: false,
             ignore_machine: false,
             thornlist: None,
-            variant: None,
+            flavor: None,
             optionlist: None,
             universe: UniverseFlags { universe: None, no_universe: false },
             debug: false,
@@ -637,6 +797,119 @@ pub(crate) enum BuildCommand {
         #[clap(long, value_name = "N", help = "Number of most-recent attempts to keep.")]
         keep: Option<u32>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CacheCommand {
+    /// Summarize what a build recorded about its compiles, and compare it with another build
+    ///
+    /// A build made with the build-cache knob set to record logs, for every
+    /// compile of a Cactus source file, the key it would be cached under.
+    /// This prints how many compiles got a key, why the others did not, and
+    /// what working out the keys cost.
+    ///
+    /// With --against, --against-installation or --against-attempt it also
+    /// says how many of this build's compiles the other build's cache
+    /// entries would have served, and for the rest, which part of the key
+    /// differs. Nothing is read from or written to a cache: both builds
+    /// only recorded.
+    ///
+    ///   cactup cache report sim --against sim-debug
+    ///   cactup cache report sim --against-installation other-install
+    ///   cactup cache report sim --against-attempt 3
+    #[clap(verbatim_doc_comment)]
+    Report {
+        /// Config whose build to report on (default: the active config).
+        name: Option<String>,
+        /// Build attempt to report on (default: the newest that recorded its compiles).
+        #[clap(long, value_name = "N")]
+        attempt: Option<u32>,
+        /// Compare with a build of this config (default: the same config).
+        #[clap(long, value_name = "CONFIG")]
+        against: Option<String>,
+        /// Compare with a build in this installation (default: the same installation).
+        #[clap(long, value_name = "ALIAS")]
+        against_installation: Option<String>,
+        /// Compare with this build attempt (default: the newest other one that recorded its compiles).
+        #[clap(long, value_name = "N")]
+        against_attempt: Option<u32>,
+        /// Also list every compile the other build would not have served, with the reason.
+        #[clap(long)]
+        long: bool,
+    },
+    /// Say what keeps a config's compiles from the build cache, and why a build's were not served
+    ///
+    /// First it checks the config's build environment, as its newest build
+    /// set it up: the environment, the compilers and the flags, with the
+    /// cache's own rules, in that environment (it runs the compilers on
+    /// small probe sources, and builds nothing), and what each thorn's own
+    /// make files add for its compiles (read with make, as a build reads
+    /// them, so their $(shell ...) commands run). Each finding says where it
+    /// comes from (your shell, the machine's environment setup, the variable
+    /// of the config's make.config.defn that gives the flag, a thorn's file)
+    /// and what to change. A config's compilers and flags are checked where
+    /// what is configured now is its newest build's own configure;
+    /// otherwise the doctor says why not, and they are checked once a build
+    /// has configured it.
+    ///
+    /// Then it reads what a build that went through the cache logged of its
+    /// compiles (the newest build of the config that did, or --attempt) and
+    /// says: how many objects the cache gave; the compiles it kept out, by
+    /// reason, with what would let them in where that is known; the
+    /// objects the cache had from other sources, by the file that differed,
+    /// with whether the cache compared that file whole and why; the objects
+    /// it had built otherwise, by what differed (compiler, flags,
+    /// environment, host platform, cactup version); and the compiles of
+    /// which it compared every file whole, by reason. The cache itself is
+    /// not read.
+    ///
+    ///   cactup cache doctor sim
+    #[clap(verbatim_doc_comment)]
+    Doctor {
+        /// Config whose build to look at (default: the active config).
+        name: Option<String>,
+        /// Build attempt to look at (default: the newest that went through the cache).
+        #[clap(long, value_name = "N")]
+        attempt: Option<u32>,
+    },
+    /// Say what the build cache holds: objects, sizes, and how recently they were used
+    ///
+    /// Walks the cache directory (the build-cache-home knob; by default
+    /// .cactup-build-cache beside your installations) and reports, for each machine, how
+    /// many objects it keeps and their size, how many of them builds used
+    /// lately, and anything left over from an interrupted build.
+    #[clap(verbatim_doc_comment)]
+    Stats,
+    /// Remove from the build cache what no build has used for a while
+    ///
+    /// Nothing is ever removed from the cache on its own: an old object is
+    /// what makes going back to an older version of a thorn cheap. This
+    /// removes the objects no build has used or stored for the given time,
+    /// and with --to-size, further ones, least recently used first, until
+    /// the cache is no larger than the given size. Either may be given
+    /// alone.
+    ///
+    ///   cactup cache gc --unused-for 60d
+    ///   cactup cache gc --to-size 200G
+    ///   cactup cache gc --unused-for 30d --to-size 200G --dry-run
+    #[clap(verbatim_doc_comment)]
+    Gc {
+        /// Remove what no build has used for this long: a number with h, d, w, m (30 days) or y.
+        #[clap(long, value_name = "AGE")]
+        unused_for: Option<String>,
+        /// Then remove the least recently used until the cache is no larger than this (200G, 500M).
+        #[clap(long, value_name = "SIZE")]
+        to_size: Option<String>,
+        /// Say what would be removed, and remove nothing.
+        #[clap(long)]
+        dry_run: bool,
+    },
+    /// Read every object in the build cache and remove the damaged ones
+    ///
+    /// A build already checks each object it takes from the cache and
+    /// removes a damaged one; this does the same for all of them at once.
+    #[clap(verbatim_doc_comment)]
+    Verify,
 }
 
 #[derive(Subcommand, Debug)]
@@ -860,10 +1133,6 @@ pub(crate) struct TestStartArgs {
     /// Config whose testsuite to run (default: the active config).
     #[clap(long, value_name = "CONFIG")]
     pub config: Option<String>,
-    // §11.2
-    /// Runscript variant override.
-    #[clap(long, value_name = "VARIANT")]
-    pub variant: Option<String>,
     /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
@@ -888,8 +1157,9 @@ pub(crate) struct TestStartArgs {
     #[clap(flatten)]
     pub topology: TopologyFlags,
     // §11.3
-    /// Test selection: test names, thorns (arrangement/Thorn), or
-    /// arrangements. Empty selects all tests.
+    /// Test selection: test names, thorns (Thorn or arrangement/Thorn),
+    /// Thorn/test pairs, or arrangements. A name that is both an arrangement
+    /// and a thorn selects the arrangement. Empty selects all tests.
     pub tests: Vec<String>,
     // §11.6
     /// Compute-node path: the absolute test-run directory, so the
@@ -909,11 +1179,11 @@ pub(crate) enum MachineCommand {
     /// Show the machine this host resolves to, or a named one
     Show {
         name: Option<String>,
-        /// List the machine's optionlist variants with their details
-        /// (description, compatible queues, universe, …) instead of the
-        /// usual machine summary.
+        /// List the machine's optionlist flavors with their details
+        /// (description, the queues their binaries run on, universe, …)
+        /// instead of the usual machine summary.
         #[clap(long)]
-        variants: bool,
+        flavors: bool,
     },
     // §4.7
     /// Persist a tuned local machine into the user MDB
@@ -978,10 +1248,10 @@ mod tests {
             // thing to break here: "sim" must land as the config positional,
             // not be mistaken for (or reported as) an unknown subcommand. See
             // `build_bare_positional_is_not_mistaken_for_a_subcommand` below.
-            vec!["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"],
+            vec!["cactup", "build", "sim", "--flavor", "cuda", "--unsafe", "-j", "8"],
             vec!["cactup", "build", "sim", "--optionlist", "/tmp/my.cfg"],
             vec!["cactup", "build", "sim", "--ignore-machine"],
-            vec!["cactup", "build", "run", "sim", "--variant", "cuda", "--universe", "et-sif"],
+            vec!["cactup", "build", "run", "sim", "--flavor", "cuda", "--universe", "et-sif"],
             vec![
                 "cactup", "build", "run", "--config-dir", "/inst/configs/sim", "--attempt-id", "2",
             ],
@@ -1144,6 +1414,73 @@ mod tests {
         assert!(Args::try_parse_from(["cactup", "build", "sim", "-j", "nope"]).is_err());
     }
 
+    fn notice(line: &[&str]) -> Option<String> {
+        let argv: Vec<OsString> = std::iter::once("cactup").chain(line.iter().copied()).map(OsString::from).collect();
+        retired_flag_notice(&argv)
+    }
+
+    /// Every place `--variant` (or `--variants`) used to be accepted stops
+    /// with the rename notice and the corrected command line — in either
+    /// spelling, bare or with a value, after global flags, and whatever else
+    /// on the line clap would have rejected.
+    #[test]
+    fn retired_flags_short_circuit_with_the_rewritten_command() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["build", "sim", "--variant", "cuda", "-j", "8"], "cactup build sim --flavor cuda -j 8"),
+            (&["build", "run", "--variant=cpu"], "cactup build run --flavor=cpu"),
+            (&["build", "submit", "sim", "--variant", "cpu", "-q", "single"], "cactup build submit sim --flavor cpu -q single"),
+            (&["--machine", "qbd", "build", "--variant"], "cactup --machine qbd build --flavor"),
+            (&["build", "--variant", "x", "--optionlist", "y.cfg", "--bogus"], "cactup build --flavor x --optionlist y.cfg --bogus"),
+            (&["test", "run", "--variant", "test", "foo"], "cactup test run foo"),
+            (&["test", "submit", "--variant=t", "-q", "gpu"], "cactup test submit -q gpu"),
+            (&["machine", "show", "qbd", "--variants"], "cactup machine show qbd --flavors"),
+            (&["test", "--machine", "qbd", "run", "--variant", "t"], "cactup test --machine qbd run"),
+            (&["build", "--thornlist", "my list.th", "--variant", "a"], "cactup build --thornlist 'my list.th' --flavor a"),
+        ];
+        for (line, rewritten) in cases {
+            let notice = notice(line).unwrap_or_else(|| panic!("no notice for {line:?}"));
+            assert!(notice.ends_with(&format!("\n  {rewritten}")), "{line:?}: {notice}");
+        }
+        assert!(notice(&["build", "--variant", "x"]).unwrap().starts_with("--variant has been renamed --flavor"));
+        assert!(notice(&["test", "run", "--variant", "x"]).unwrap().starts_with("--variant has been removed: the queue now picks"));
+    }
+
+    /// Only where the flag was really accepted: elsewhere it stays an
+    /// ordinary clap error, and nothing after `--` is ever inspected.
+    #[test]
+    fn retired_flags_are_left_alone_elsewhere() {
+        for line in [
+            &["sim", "submit", "s", "--variant", "x"][..],
+            &["test", "list", "--variant", "x"],
+            &["machine", "show", "--variant"],
+            &["build", "--flavor", "x"],
+            &["sim", "run", "s", "--", "--variant"],
+            &["--machine", "build", "sim", "submit", "--variant", "x"],
+            &["build", "log", "sim", "--variant", "x"],
+            &["build", "list", "--variant", "x"],
+        ] {
+            assert_eq!(notice(line), None, "{line:?}");
+        }
+    }
+
+    /// The retired spellings appear in no help text anywhere: they are never
+    /// declared to clap, and nothing else in the help may say "variant".
+    #[test]
+    fn no_help_text_mentions_variant() {
+        use clap::CommandFactory;
+        fn walk(cmd: &mut clap::Command, path: &str) {
+            let help = cmd.render_long_help().to_string();
+            assert!(!help.to_lowercase().contains("variant"), "`{path}` help mentions variant:\n{help}");
+            for sub in cmd.get_subcommands_mut() {
+                let name = format!("{path} {}", sub.get_name());
+                walk(sub, &name);
+            }
+        }
+        let mut root = Args::command();
+        root.build();
+        walk(&mut root, "cactup");
+    }
+
     /// `Commands::Build`'s optional subcommand sits beside a positional
     /// (`<config>`) — the likeliest spot for clap to mistake one for the
     /// other. "sim" here must land as the config, not be treated as an
@@ -1151,12 +1488,12 @@ mod tests {
     #[test]
     fn build_bare_positional_is_not_mistaken_for_a_subcommand() {
         let args =
-            Args::try_parse_from(["cactup", "build", "sim", "--variant", "cuda", "--unsafe", "-j", "8"])
+            Args::try_parse_from(["cactup", "build", "sim", "--flavor", "cuda", "--unsafe", "-j", "8"])
                 .unwrap_or_else(|e| panic!("failed to parse: {e}"));
         match args.command {
             Commands::Build { start, command: None } => {
                 assert_eq!(start.name.as_deref(), Some("sim"));
-                assert_eq!(start.opts.variant.as_deref(), Some("cuda"));
+                assert_eq!(start.opts.flavor.as_deref(), Some("cuda"));
                 assert!(start.opts.unsafe_build);
                 assert_eq!(start.opts.make_jobs, Some(MakeJobs::Count(8)));
             }
@@ -1195,18 +1532,18 @@ mod tests {
         );
         // --dry-run and --silent are mutually exclusive (§ RefetchArgs).
         assert!(Args::try_parse_from(["cactup", "inst", "refetch", "-n", "-s"]).is_err());
-        // --optionlist displaces the machine's variant selection entirely, so
-        // pairing it with --variant is a contradiction, not a refinement.
+        // --optionlist displaces the machine's flavor selection entirely, so
+        // pairing it with --flavor is a contradiction, not a refinement.
         assert!(
             Args::try_parse_from([
-                "cactup", "build", "sim", "--optionlist", "x.cfg", "--variant", "cuda"
+                "cactup", "build", "sim", "--optionlist", "x.cfg", "--flavor", "cuda"
             ])
             .is_err()
         );
     }
 
     /// `--optionlist` names a user-supplied file in place of the machine's
-    /// own variants; it must land on `BuildOpts` untouched so `build/mod.rs`
+    /// own flavors; it must land on `BuildOpts` untouched so `build/mod.rs`
     /// can load it (§4.4, §7.8).
     #[test]
     fn optionlist_flag_parses_into_build_opts() {

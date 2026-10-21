@@ -79,7 +79,7 @@ pub fn dispatch(ctx: &Ctx, name: Option<String>, value: Option<String>, custom: 
                 Some(stored) => {
                     println!("{}{}", knob_display_form(&name, &stored), override_marker(&name))
                 }
-                None => println!("{}", "(unset)".dimmed()),
+                None => println!("{}", unset_note(&name).dimmed()),
             }
         }
         Some(value) => {
@@ -112,7 +112,7 @@ fn print_all(ctx: &Ctx) -> Res<()> {
             (None, Some(derived)) => {
                 println!("  {knob} = {} {}", (spec.render)(&derived), "(derived)".dimmed())
             }
-            (None, None) => println!("  {knob} {}", "(unset)".dimmed()),
+            (None, None) => println!("  {knob} {}", unset_note(knob).dimmed()),
         }
     }
     println!("Custom knobs:");
@@ -125,6 +125,11 @@ fn print_all(ctx: &Ctx) -> Res<()> {
         println!("  {}", "(none — create one with `cactup knob -c NAME VALUE`)".dimmed());
     }
     Ok(())
+}
+
+/// "(unset)", and for a path knob what it comes to then (§4.2).
+fn unset_note(name: &str) -> String {
+    format!("({})", crate::mdb::meta::path_knob_unset(name).unwrap_or_else(|| "unset".to_owned()))
 }
 
 /// The error for a non-standard name nothing has created yet.

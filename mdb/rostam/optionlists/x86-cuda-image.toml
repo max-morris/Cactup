@@ -1,0 +1,298 @@
+# rostam flavor "x86-cuda-image" (the default; x86 CUDA partitions), from
+# Steve Brandt's rostam1 overlay, which converted
+# /opt/cactus-deps/cactus-cuda-mpich.cfg inside his
+# docker://stevenrbrandt/cactus-cuda image (MPICH variant). Built and run
+# inside the cactus-cuda universe (Apptainer). The long comments under
+# [options] are the image file's own. VERSION is required by cactup and was
+# not in the image file; bump it if the image optionlist changes.
+
+[cactup]
+universe          = "cactus-cuda"
+# The runscript does its own `srun --mpi=pmi2 … apptainer exec` launch;
+# wrapping the whole run in the universe would hide SLURM's PMI.
+coerce-run-universe = false
+default           = true
+description       = "x86 + CUDA (sm_70, sm_80): Steve Brandt's cactus-cuda image, MPICH"
+
+[cactup.runs-on]
+queues = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"]
+gpu    = true
+
+[options]
+# cactup requires VERSION (emitted first; a change forces a full rebuild).
+VERSION = "cactus-cuda-mpich"
+
+# Cactus optionlist for the x86+CUDA image's prebuilt ExternalLibraries,
+# MPICH variant. See cactus-cuda-openmpi.cfg for the OpenMPI counterpart,
+# and ../x86-cpu/cactus-mpich.cfg for the non-CUDA original this is derived
+# from (all the non-CUDA reasoning below -- C23, Cray-pointer,
+# fixed-line-length, LD_OPENMP_FLAGS, etc. -- is unchanged and not
+# re-explained here). Use pmi-test-openmpi / pmi-test-mpich (under
+# /opt/cactus-deps) to check which MPI/PMI variant actually works on a
+# given site before committing to it.
+#
+# This points Cactus's ExternalLibraries `detect.sh`/`configure.sh` scripts
+# at dependencies already built into the image (see Dockerfile), so a
+# `sim build` / `gmake <config>-config options=cactus-cuda-mpich.cfg ...`
+# run at singularity-build time does NOT re-download or rebuild AMReX,
+# ADIOS2 or openPMD-api -- only Cactus itself gets built there (plus NSIMD,
+# which stays deferred so it can match the target CPU's SIMD ISA).
+#
+# Scope: same as x86-cpu's optionlists (everything the official
+# einsteintoolkit.th ExternalLibraries enable except NSIMD/LORENE/SGRID).
+# AMReX IS prebuilt in this image, as a CUDA fat binary covering sm_70
+# (Volta/V100) and sm_80 (Ampere/A100) -- see AMREX_DIR below. To target a
+# GPU outside that pair, either rebuild the image with a different
+# AMREX_CUDA_ARCHS, or set `AMREX_DIR = BUILD` here so Cactus builds AMReX
+# at singularity time for that specific architecture (in which case
+# AMREX_CMAKE_CUDA_ARCHITECTURES below becomes live rather than
+# informational).
+#
+# All *_DIR / *_INC_DIRS / *_LIB_DIRS / *_LIBS below are set explicitly
+# rather than left for each thorn's own auto-detection, on purpose: Debian
+# manages multiple parallel MPI/HDF5 installs (openmpi vs mpich) through
+# `update-alternatives`, whose generic names (`mpicc`, `mpirun`, `hdf5.pc`,
+# ...) can silently point at a different implementation than the one these
+# libraries were actually built against if alternatives are ever
+# reconfigured. Pinning explicit, implementation-specific paths here makes
+# this optionlist correct regardless of that state (see cactus-build-ref.md
+# §14's Intel-MPI row for the same reasoning applied to a different site).
+#
+# What is and isn't proven here, stated plainly:
+#   PROVEN at image build time -- the CUCC/CUCCFLAGS/LD/LIBS below actually
+#   compile an AMReX device-lambda kernel against this image's prebuilt
+#   libamrex, device-link it, and produce an executable carrying both
+#   sm_70 and sm_80 code. /opt/cactus-deps/amrex-cuda-smoke.sh does exactly
+#   that during the build, using the values from this file.
+#   NOT PROVEN -- running any of it on a real GPU (the build environment has
+#   none), and compiling real CarpetX thorns through Cactus's own build
+#   system, which needs a full ET checkout. CPPFLAGS/DISABLE_INT16/
+#   DISABLE_REAL16 in particular come from cactus-build-ref.md §5 rather
+#   than from a build that exercised them. Verify those on first real use.
+
+# ---------------------------------------------------------------------------
+# Compilers -- plain gcc/g++, NOT nvcc, for CC/CXX/LD. Cactus's own AMReX
+# thorn detect.sh auto-injects a per-thorn override
+# (`ifneq ($(THORN),AMReX) CXX = $(CUCC) ... endif`) for every thorn that
+# actually uses AMReX headers, driven by AMREX_ENABLE_CUDA=yes below -- so
+# CXX only needs to point at nvcc for those thorns, not globally, and
+# Cactus's own detect.sh handles that switch automatically. AMReX itself,
+# and any thorn that doesn't touch AMReX, still compiles with plain g++.
+# ---------------------------------------------------------------------------
+CC = "gcc"
+CXX = "g++"
+F90 = "gfortran"
+F77 = "gfortran"
+# LD stays nvcc even though per-thorn compilation mostly doesn't: CUDA's
+# relocatable-device-code final link (combining device code from every
+# AMReX-consuming thorn's .o files into the executable) needs to go
+# through nvcc, per the common CarpetX-CUDA pattern in cactus-build-ref.md
+# §5 ("LD = nvcc --forward-unknown-to-host-compiler ..."). -ccbin points it
+# at the same g++ used for host-side compilation above.
+LD = "nvcc --forward-unknown-to-host-compiler -ccbin=g++"
+
+CXXFLAGS = "-O2 -g -std=c++17"
+CFLAGS = "-O2 -g"
+F90FLAGS = "-O2 -g -fallow-argument-mismatch -fallow-invalid-boz -ffixed-line-length-none -fcray-pointer"
+F77FLAGS = "-O2 -g -fallow-argument-mismatch -fallow-invalid-boz -ffixed-line-length-none -fcray-pointer"
+
+LDFLAGS = "-rdynamic"
+# AMReX's AMReX_Random.cpp calls cuRAND directly, and nothing pulls it in
+# automatically -- without this the final link dies on
+# "undefined reference to curandCreateGenerator" and friends. Exactly the
+# CUDA counterpart of the hiprand/rocrand row in cactus-build-ref.md §14.
+# nvcc-as-LD already passes -L for that directory itself (it adds
+# .../targets/x86_64-linux/lib, which is what /usr/local/cuda/lib64
+# resolves to), so the -L is not what the LIBDIRS line below buys.
+# gfortran: the final link goes through LD (nvcc -> g++), not gfortran, so
+# nothing puts libgfortran on the link line -- but Cactus links Fortran
+# thorns into the same executable. Without it the link dies on
+# "undefined reference to symbol '_gfortran_string_scan@@GFORTRAN_8'
+# ... libgfortran.so.5: DSO missing from command line" (seen from
+# EHFinder). This is the cactus-build-ref.md §14 libgfortran row; unlike
+# the HIP case described there, gfortran needs no LIBDIRS entry of its
+# own, because -lgfortran resolves via gcc's private dir
+# (/usr/lib/gcc/x86_64-linux-gnu/12/libgfortran.so) which g++ searches,
+# and libgfortran.so.5 is in the normal runtime search path.
+LIBS = "curand gfortran"
+
+# Cactus turns LIBDIRS into BOTH -L and -Wl,-rpath (see GENERAL_LIBRARIES in
+# the generated make.config.defn), and the rpath is the reason this line is
+# here. nvcc supplies the -L at link time, but nothing records where
+# libcurand.so.10 lives in the executable itself, so the binary depends on
+# LD_LIBRARY_PATH still being right when it runs. Under Singularity that is
+# exactly the assumption that breaks -- a job launched with --cleanenv, or
+# on a host whose driver stack sits elsewhere, starts with a stripped
+# environment. Baking the rpath in makes the executable self-locating.
+#
+# /usr/local/cuda is the alternatives symlink to /usr/local/cuda-12.9, so
+# this keeps working if the toolkit is ever repointed.
+LIBDIRS = "/usr/local/cuda/lib64"
+PTHREADS_DIR = "NO_BUILD"
+
+ac_cv_prog_cc_c23 = "no"
+
+# See x86-cpu/cactus-mpich.cfg's comment for why this is needed whenever
+# LD is set explicitly (it always is here, since LD must point at nvcc).
+LD_OPENMP_FLAGS = "-fopenmp"
+
+OPENMP = "yes"
+
+DEBUG = "no"
+OPTIMISE = "yes"
+PROFILE = "no"
+
+# ---------------------------------------------------------------------------
+# CUDA / AMReX. CUCC/CUCCFLAGS are what Cactus's AMReX detect.sh actually
+# substitutes into AMReX-consuming thorns' CXX/CXXFLAGS (see the compilers
+# comment above) -- not a generic Cactus optionlist key, specific to this
+# mechanism.
+#
+# The -gencode pair must stay in sync with the architectures the prebuilt
+# libamrex was compiled for (AMREX_CUDA_ARCHS in the Dockerfile, currently
+# 70;80): these flags compile the *thorns* that consume AMReX, so they have
+# to emit device code for the same GPUs the library itself covers.
+# Two warnings are suppressed, both expected rather than actionable:
+#   -Wno-deprecated-gpu-targets  CUDA 12.9's warning that sm_70 is
+#                                deprecated. Supporting sm_70 at all is why
+#                                this image pins 12.9 rather than 13.x.
+#   -diag-suppress=20012         "__host__ annotation is ignored on a
+#                                function("IndexTypeND") that is explicitly
+#                                defaulted on its first declaration",
+#                                emitted from AMReX's own headers (12 copies
+#                                per translation unit that includes
+#                                AMReX_MultiFab.H). Nothing in Cactus can
+#                                fix it -- it is upstream AMReX -- and it
+#                                buries real diagnostics.
+#
+# CPPFLAGS/DISABLE_INT16/DISABLE_REAL16 match cactus-build-ref.md §5's
+# documented CUDA-stack requirements.
+# ---------------------------------------------------------------------------
+CUCC = "nvcc"
+CUCCFLAGS = "-x cu -ccbin=g++ -std=c++17 -O2 -g -gencode=arch=compute_70,code=sm_70 -gencode=arch=compute_80,code=sm_80 -Wno-deprecated-gpu-targets -diag-suppress=20012 -Xcompiler -fopenmp --expt-relaxed-constexpr --extended-lambda --relocatable-device-code=true"
+#
+# The four flags after the two suppressions are not cosmetic -- each
+# was added because compiling against this image's own prebuilt libamrex
+# fails without it (verified during the image build, and re-checked by the
+# smoke test the Dockerfile runs):
+#   -Xcompiler -fopenmp          libamrex is built with OpenMP, and
+#                                AMReX_Config_3D.H hard-errors on a consumer
+#                                that isn't: "libamrex was built with
+#                                OpenMP, so the downstream project must
+#                                activate it, too". This has to live in
+#                                CUCCFLAGS specifically, because AMReX's
+#                                detect.sh injects `CXXFLAGS = $(CUCCFLAGS)`
+#                                -- a wholesale replacement -- for every
+#                                AMReX-consuming thorn, discarding whatever
+#                                OpenMP flag Cactus would otherwise have
+#                                appended to CXXFLAGS.
+#   --extended-lambda            required for the AMREX_GPU_DEVICE lambdas
+#                                that all AMReX/CarpetX kernel code uses:
+#                                "__host__ or __device__ annotation on
+#                                lambda requires --extended-lambda".
+#   --expt-relaxed-constexpr     AMReX_Math.H calls constexpr __host__
+#                                functions from __host__ __device__ ones.
+#   --relocatable-device-code    libamrex is built with AMREX_USE_GPU_RDC,
+#                                so consumers must compile RDC too and let
+#                                LD (nvcc, above) do the device link.
+
+CPPFLAGS = "-DSIMD_DISABLE"
+
+DISABLE_INT16 = "yes"
+DISABLE_REAL16 = "yes"
+
+AMREX_ENABLE_CUDA = "yes"
+# Informational while AMREX_DIR points at the prebuilt library below
+# (detect.sh finds it and never calls build.sh, per cactus-build-ref.md
+# §18.2) -- but load-bearing if AMREX_DIR is switched to BUILD.
+AMREX_CMAKE_CUDA_ARCHITECTURES = "70;80"
+
+# ---------------------------------------------------------------------------
+# MPI: MPICH explicitly. The prebuilt C++ stack below (ADIOS2/openPMD-api)
+# is linked against this same MPICH -- OpenMPI and MPICH are not
+# ABI-compatible, so Cactus's own MPI thorn must resolve to whichever
+# implementation those libraries were actually built against, or the final
+# link/runtime breaks. Set manually rather than via the mpicc/mpicxx
+# wrapper so this stays correct regardless of whatever
+# `update-alternatives --config mpi` currently points at -- see
+# cactus-build-ref.md §14.
+#
+# MPICH splits its runtime across separate per-language libraries (unlike
+# OpenMPI's single libmpi.so) -- mpicc.mpich/mpicxx.mpich/mpif90.mpich -show
+# name libmpich, libmpichcxx, and libmpichfort respectively; all three are
+# listed here since Cactus links C, C++, and Fortran thorns into one
+# executable.
+# ---------------------------------------------------------------------------
+MPI_DIR = "/opt/mpi/mpich"
+# MPI_HOME is what CMake's FindMPI honors as a search hint. Cactus's
+# optionlist parser (setup_configuration.pl's ParseOptionsFile) loads every
+# KEY = value line straight into the environment the build runs in, so this
+# reaches any ExternalLibrary built at singularity time via CMake --
+# notably AMReX's bundled build.sh, which passes CMake no MPI hints of its
+# own. Without it, FindMPI resolves /usr/bin/mpicc through
+# update-alternatives and silently picks OpenMPI no matter which optionlist
+# is in use. Verified: MPI_HOME=/opt/mpi/mpich -> libmpich.so,
+# MPI_HOME=/opt/mpi/openmpi -> openmpi's libmpi.so.
+MPI_HOME = "/opt/mpi/mpich"
+MPI_INC_DIRS = "/opt/mpi/mpich/include"
+MPI_LIB_DIRS = "/opt/mpi/mpich/lib"
+MPI_LIBS = "mpichcxx mpichfort mpich"
+
+# ---------------------------------------------------------------------------
+# Apt-provided ExternalLibraries (Debian bookworm ships all of these; no
+# reason to build from source). HDF5 is the one MPI-flavor-specific
+# exception -- Debian ships separate openmpi/mpich builds of it.
+# ---------------------------------------------------------------------------
+HDF5_DIR = "/usr"
+HDF5_INC_DIRS = "/usr/include/hdf5/mpich"
+HDF5_LIB_DIRS = "/usr/lib/x86_64-linux-gnu/hdf5/mpich"
+HDF5_LIBS = "hdf5hl_fortran hdf5_fortran hdf5_hl hdf5"
+HDF5_ENABLE_FORTRAN = "yes"
+HDF5_ENABLE_CXX = "no"
+
+ZLIB_DIR = "/usr"
+GSL_DIR = "/usr"
+FFTW3_DIR = "/usr"
+BOOST_DIR = "/usr"
+HWLOC_DIR = "/usr"
+LIBJPEG_DIR = "/usr"
+OPENSSL_DIR = "/usr"
+YAML_CPP_DIR = "/usr"
+SILO_DIR = "/usr"
+
+# BLAS/LAPACK's own configure.sh searches a fixed list of directories
+# (/usr/lib, /usr/lib64, ...) that does NOT include Debian's multiarch
+# path -- point at it explicitly rather than relying on that search.
+BLAS_DIR = "/usr/lib/x86_64-linux-gnu"
+LAPACK_DIR = "/usr/lib/x86_64-linux-gnu"
+
+# ---------------------------------------------------------------------------
+# Source-built ExternalLibraries (prebuilt in the image, linked against
+# MPICH -- see above).
+# ---------------------------------------------------------------------------
+# Prebuilt CUDA fat binary covering sm_70 and sm_80 (see Dockerfile).
+AMREX_DIR = "/opt/cactus-deps/amrex-mpich"
+
+ADIOS2_DIR = "/opt/cactus-deps/adios2-mpich"
+ADIOS2_INC_DIRS = "/opt/cactus-deps/adios2-mpich/include"
+ADIOS2_LIB_DIRS = "/opt/cactus-deps/adios2-mpich/lib"
+# Explicit, rather than left to detect.sh's own find_lib: ADIOS2 >=2.9
+# renamed libadios2_cxx11 -> libadios2_cxx, which the ET_2026_05 thorn's
+# detect.sh (written for the older name) doesn't know to look for.
+ADIOS2_LIBS = "adios2_cxx_mpi adios2_c_mpi adios2_core_mpi adios2_cxx adios2_c adios2_core"
+ADIOS2_ENABLE_SST = "no"
+
+OPENPMD_DIR = "/opt/cactus-deps/openpmd-mpich"
+
+# ---------------------------------------------------------------------------
+# NSIMD -- intentionally omitted, same reasoning as AMReX above. Leave
+# unset so Cactus builds it at singularity-build time against the real
+# target CPU:
+#
+# NSIMD_DIR = BUILD
+
+# ---------------------------------------------------------------------------
+# Not built into this image -- set by hand if needed:
+#
+# LORENE_DIR = ...
+# SGRID_DIR  = ...

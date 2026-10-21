@@ -1,7 +1,7 @@
-# golub runscript (variant "default"), ported from simfactory2
+# golub runscript (script "default"), ported from simfactory2
 # mdb/runscripts/golub.run.
 #
-# This is a .py variant (design §6.1): the old script used computed float
+# This is a .py script (design §6.1): the old script used computed float
 # templates that the literal-only @NAME@ engine (D7) cannot express —
 #   @(1.0*(@NODE_PROCS@*@NUM_THREADS@)/@MAX_CPUS_PER_NODE@)@   (OpenMP threads per core)
 #   @(@NODE_PROCS@*@NUM_THREADS@)@               (OpenMP threads per node)
@@ -11,7 +11,7 @@
 # CPUS_PER_TASK. (The original had `env | sort > SIMFACTORY/ENVIRONMENT`
 # commented out; kept commented, with the .cactup/ dir rename, §9.3.)
 #
-# env-setup is NOT auto-prepended for .py variants (design §6.1); it is
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); it is
 # emitted right after the shebang, where cactup would have placed it for a
 # .sh runscript.
 

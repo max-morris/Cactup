@@ -1,4 +1,4 @@
-# omnia optionlist (variant "default"), ported from simfactory2
+# omnia optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/omnia-hip.cfg — building CarpetX/AMReX on "omnia" using the
 # attached AMD Instinct MI210 (gfx90a) GPU via ROCm/HIP.
 #
@@ -23,9 +23,9 @@
 # optionlist before `make <config>-config` (design §7.8); every value is kept
 # as a TOML string so the render is faithful to the original.
 
-[cactup]
-gpu               = true
-compatible-queues = ["local"]
+[cactup.runs-on]
+queues = ["local"]
+gpu    = true
 
 [options]
 

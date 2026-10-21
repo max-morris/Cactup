@@ -1,5 +1,5 @@
-# cactup-tutorial optionlist (variant "gpu"): a CUDA build with the same
-# toolchain and Debian libraries as the "default" variant (see
+# cactup-tutorial optionlist (flavor "gpu"): a CUDA build with the same
+# toolchain and Debian libraries as the "default" flavor (see
 # optionlists/default.toml for where each library comes from); only the
 # compilers, the link and the AMReX GPU settings differ.
 #
@@ -20,12 +20,15 @@
 # sm_75), put 75 in CUCCFLAGS, LD and AMREX_CMAKE_CUDA_ARCHITECTURES alike.
 # Each extra architecture multiplies device compile time and object size.
 
-# gpu = true: these executables need a GPU, so cactup submits them only to
-# GPU queues, and compatible-queues narrows that to the gpu partition.
+# gpu = true: these executables need a GPU, so cactup runs them only on GPU
+# queues, and queues narrows that to the gpu partition.
 [cactup]
-gpu               = true
-description       = "CUDA build (nvcc with gcc 14 as host compiler) for the gpu queue"
-compatible-queues = ["gpu"]
+description = "CUDA build (nvcc with gcc 14 as host compiler) for the gpu queue"
+
+[cactup.runs-on]
+queues        = ["gpu"]
+default-queue = "gpu"
+gpu           = true
 
 [options]
 # Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.
@@ -38,7 +41,7 @@ CXX = "/usr/bin/g++"
 F90 = "/usr/bin/gfortran"
 
 FPPFLAGS = "-traditional"
-# -O2 in the base flags, as in the default variant (see there).
+# -O2 in the base flags, as in the default flavor (see there).
 CFLAGS   = "-g -O2 -std=gnu11"
 CXXFLAGS = "-g -O2 -std=c++17"
 F90FLAGS = "-g -O2 -fcray-pointer -ffixed-line-length-none"
@@ -103,7 +106,7 @@ PTHREADS_DIR = "NO_BUILD"
 CMAKE_DIR = "/usr"
 BOOST_DIR = "/usr"
 
-# The libraries, exactly as in the default variant.
+# The libraries, exactly as in the default flavor.
 MPI_DIR      = "/usr/lib/x86_64-linux-gnu/openmpi"
 MPI_INC_DIRS = "/usr/lib/x86_64-linux-gnu/openmpi/include /usr/lib/x86_64-linux-gnu/openmpi/include/openmpi"
 MPI_LIB_DIRS = "/usr/lib/x86_64-linux-gnu/openmpi/lib"

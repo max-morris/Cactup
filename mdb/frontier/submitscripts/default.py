@@ -1,7 +1,7 @@
-# Frontier submitscript (variant "default"), ported from simfactory2
+# Frontier submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/frontier.sub.
 #
-# .py variant (design §6.1): the old script used the chained-job ternary
+# .py script (design §6.1): the old script used the chained-job ternary
 # @("@CHAINED_JOB_ID@" != "" ? "--dependency=afterany:@CHAINED_JOB_ID@" : "")@
 # — cactup's @NAME@ engine is literal-only (D7), so the conditional moves
 # into Python.
@@ -36,7 +36,7 @@ if CHAINED_JOB_ID:
     lines.append("#SBATCH --dependency=afterany:{0}".format(CHAINED_JOB_ID))
 lines.append("#SBATCH --export=ALL")
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header.
 lines.append(ENV_SETUP)
 

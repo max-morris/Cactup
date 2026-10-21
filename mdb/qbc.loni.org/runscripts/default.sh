@@ -1,5 +1,5 @@
 #! /bin/bash
-# qbc.loni.org runscript (variant "default"), ported from simfactory2
+# qbc.loni.org runscript (script "default"), ported from simfactory2
 # mdb/runscripts/mike.run.
 #
 # Variable renames vs. simfactory (design §6.3):

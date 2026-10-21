@@ -65,13 +65,10 @@ exec-host-pattern = '^(\S+)'
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["sciama2.q"], default = true }
+[submitscripts]
+"default" = { queues = ["sciama2.q"] }
 "test"    = { queues = ["sciama2.q"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["sciama2.q"], default = true }
+[runscripts]
+"default" = { queues = ["sciama2.q"] }
 "test"    = { queues = ["sciama2.q"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

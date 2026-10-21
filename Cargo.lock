@@ -21,12 +21,14 @@ dependencies = [
  "ratatui",
  "regex",
  "reqwest",
+ "rustix",
  "serde",
  "serde_derive",
  "serde_json",
  "signal-hook 0.4.4",
  "tempfile",
  "toml",
+ "zlib-rs",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 #!/bin/bash
-# cactup-tutorial TEST runscript (variant "test"): drives `make
+# cactup-tutorial TEST runscript (script "test"): drives `make
 # <config>-testsuite` and lets the Cactus flesh harness launch each test. It
 # runs inside the allocation `cactup test submit` requested; a foreground
 # `cactup test run` outside one is refused (the machine sets allocation-env).

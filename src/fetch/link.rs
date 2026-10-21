@@ -64,12 +64,58 @@ struct LinkPlan {
     desired: PathBuf,
 }
 
-fn plan_link(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkPlan> {
-    // Canonicalized so the relative-path math and the physically-resolved
-    // target dir below live in one namespace even when `install_root` itself
-    // contains symlinks.
-    let repos_dir = std::fs::canonicalize(install_root.join(root).join("repos"))
-        .unwrap_or_else(|_| lexical_normalize(&install_root.join(root).join("repos")));
+/// What every link of one pass over a thornlist shares, resolved once rather
+/// than per thorn: on a network filesystem each `canonicalize` is a chain of
+/// lstat/readlink round trips, and an installation has ~400 thorns. Two
+/// paths are cached — the canonical `repos/` and the installation root's own
+/// resolved prefix — and both are stable for the pass: it is made after the
+/// fetches, and linking never creates either. Anything under the root
+/// (arrangement directories, links created earlier in the same pass) is
+/// still resolved live for every thorn.
+pub struct LinkPass {
+    /// `<install_root>/<root>/repos`, canonicalized. "Resolves under here" is
+    /// the test that separates a cactup-managed link from a hand-made one.
+    repos_dir: PathBuf,
+    /// `install_root` resolved the way [`physical_resolve`] resolves a path's
+    /// leading components, so resolving the rest from here gives the same
+    /// answer as resolving the whole path.
+    physical_root: PathBuf,
+}
+
+impl LinkPass {
+    pub fn new(install_root: &Path, root: &str) -> LinkPass {
+        // Canonicalized so the relative-path math and the physically-resolved
+        // target dir live in one namespace even when `install_root` itself
+        // contains symlinks.
+        let repos_dir = std::fs::canonicalize(install_root.join(root).join("repos"))
+            .unwrap_or_else(|_| lexical_normalize(&install_root.join(root).join("repos")));
+        LinkPass { repos_dir, physical_root: physical_resolve(install_root) }
+    }
+
+    /// [`link_component`] within this pass.
+    pub fn link(&self, component: &Component) -> crate::Res<LinkOutcome> {
+        link_planned(plan_link(self, component)?)
+    }
+
+    /// [`inspect_link`] within this pass.
+    pub fn inspect(&self, component: &Component) -> crate::Res<LinkState> {
+        inspect_planned(plan_link(self, component)?)
+    }
+
+    /// `physical_resolve(install_root.join(rel))`, without re-resolving the
+    /// installation's own prefix. The same answer: `physical_resolve` works
+    /// component by component, so after the prefix its state is exactly
+    /// `physical_root`. An absolute `rel` replaces the root, as `join` does.
+    fn resolve_under_root(&self, rel: &Path) -> PathBuf {
+        if rel.is_absolute() {
+            return physical_resolve(rel);
+        }
+        physical_resolve_from(self.physical_root.clone(), rel)
+    }
+}
+
+fn plan_link(pass: &LinkPass, component: &Component) -> crate::Res<LinkPlan> {
+    let repos_dir = pass.repos_dir.clone();
     let repo_base = repos_dir.join(&component.repo);
 
     // GetComponents lines 1549-1557: `($checkout_dir, $checkout_item) =
@@ -79,10 +125,10 @@ fn plan_link(install_root: &Path, root: &str, component: &Component) -> crate::R
     // checkout must not leave a trailing `/.` for mkdir, and a target that
     // routes through an existing arrangement symlink must land where the
     // symlink points, not where the text lexically collapses to.
-    let target_dir = physical_resolve(&if checkout_dir.is_empty() {
-        install_root.join(&component.target)
+    let target_dir = pass.resolve_under_root(&if checkout_dir.is_empty() {
+        PathBuf::from(&component.target)
     } else {
-        install_root.join(&component.target).join(&checkout_dir)
+        Path::new(&component.target).join(&checkout_dir)
     });
 
     // The three cases, lines 1568-1615 (see the module doc for the ln -nsf
@@ -132,8 +178,13 @@ fn plan_link(install_root: &Path, root: &str, component: &Component) -> crate::R
 /// given the thornlist's `!DEFINE ROOT` value (`Thornlist::root()`). Creates
 /// parent directories as needed; never touches a pre-existing non-symlink
 /// path or a symlink that doesn't already point into `<root>/repos/`.
+// One-off form (tests); passes over a whole list use `LinkPass`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn link_component(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkOutcome> {
-    let plan = plan_link(install_root, root, component)?;
+    LinkPass::new(install_root, root).link(component)
+}
+
+fn link_planned(plan: LinkPlan) -> crate::Res<LinkOutcome> {
     std::fs::create_dir_all(&plan.target_dir)
         .with_context(|| format!("Failed to create {}", plan.target_dir.display()))?;
 
@@ -206,8 +257,13 @@ impl LinkState {
 /// no `create_dir_all`, no repointing. Resolves the same path
 /// [`link_component`] would act on, by construction (both go through
 /// [`plan_link`]).
+// One-off form (tests); passes over a whole list use `LinkPass`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn inspect_link(install_root: &Path, root: &str, component: &Component) -> crate::Res<LinkState> {
-    let plan = plan_link(install_root, root, component)?;
+    LinkPass::new(install_root, root).inspect(component)
+}
+
+fn inspect_planned(plan: LinkPlan) -> crate::Res<LinkState> {
     let Ok(meta) = std::fs::symlink_metadata(&plan.link_path) else {
         return Ok(LinkState::Missing);
     };
@@ -321,7 +377,11 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// `repos/KadathThorn` the way GetComponents' `realpath` did), then append
 /// the not-yet-existing remainder and collapse it lexically.
 fn physical_resolve(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
+    physical_resolve_from(PathBuf::new(), path)
+}
+
+/// [`physical_resolve`]'s loop, continued from an already-resolved `out`.
+fn physical_resolve_from(mut out: PathBuf, path: &Path) -> PathBuf {
     for comp in path.components() {
         match comp {
             PathComponent::CurDir => {}
@@ -462,6 +522,54 @@ mod tests {
 
     fn make_repo(install_root: &Path, repo: &str) {
         std::fs::create_dir_all(install_root.join("Cactus/repos").join(repo)).unwrap();
+    }
+
+    /// A pass resolves exactly what a from-scratch `physical_resolve` of the
+    /// whole path would — through a symlinked install root, with `..`, for an
+    /// absolute target — and it sees links created earlier in the same pass.
+    #[test]
+    fn a_pass_resolves_like_a_full_physical_resolve() {
+        let f = fixture();
+        // The install root is reached through a symlink, as on clusters
+        // where $HOME links into the real storage mount.
+        let real = f.install_root.join("real");
+        std::fs::create_dir_all(real.join("Cactus/repos")).unwrap();
+        let via_link = f.install_root.join("home");
+        std::os::unix::fs::symlink(&real, &via_link).unwrap();
+        make_repo(&via_link, "Kadath");
+        let thorn = real.join("Cactus/repos/Kadath/Kadath/Fuka/KadathThorn");
+        std::fs::create_dir_all(&thorn).unwrap();
+
+        let pass = LinkPass::new(&via_link, "Cactus");
+        // A link the "crazy path" target below routes through, created by
+        // an earlier component of the same pass.
+        let kadath = git_component("Fuka/KadathThorn", "Kadath");
+        let kadath = Component { repo_path: Some("Kadath".to_owned()), ..kadath };
+        assert_eq!(pass.link(&kadath).unwrap(), LinkOutcome::Created);
+        let link = real.join("Cactus/arrangements/Fuka/KadathThorn");
+        assert_eq!(std::fs::canonicalize(&link).unwrap(), std::fs::canonicalize(&thorn).unwrap());
+        // `..` through the live link lands where the link points, not
+        // where the text collapses to: the physical path is really taken.
+        let through = pass.resolve_under_root(Path::new("Cactus/arrangements/Fuka/KadathThorn/.."));
+        assert_eq!(through, std::fs::canonicalize(thorn.parent().unwrap()).unwrap());
+        let repos = std::fs::canonicalize(real.join("Cactus/repos")).unwrap();
+        let up_two = pass.resolve_under_root(Path::new("Cactus/arrangements/Fuka/KadathThorn/../.."));
+        assert!(up_two.starts_with(&repos), "{} should be under repos/", up_two.display());
+
+        for rel in [
+            "Cactus/arrangements",
+            "Cactus/arrangements/Fuka/KadathThorn/../..",
+            "Cactus/arrangements/Fuka/KadathThorn/../Fuka",
+            "./Cactus/../Cactus/arrangements/New",
+            "nonexistent/deeper",
+            "",
+            "../outside",
+        ] {
+            let full = physical_resolve(&via_link.join(rel));
+            assert_eq!(pass.resolve_under_root(Path::new(rel)), full, "{rel}");
+        }
+        let absolute = real.join("Cactus/arrangements");
+        assert_eq!(pass.resolve_under_root(&absolute), physical_resolve(&absolute));
     }
 
     #[test]

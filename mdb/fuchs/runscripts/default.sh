@@ -1,5 +1,5 @@
 #! /bin/bash
-# fuchs runscript (variant "default"), ported from simfactory2
+# fuchs runscript (script "default"), ported from simfactory2
 # mdb/runscripts/fuchs.run.
 #
 # Variable renames vs. simfactory (design §6.3):

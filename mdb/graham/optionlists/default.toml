@@ -1,9 +1,9 @@
-# Graham optionlist (variant "default" = the CPU/g++ flavor), ported from
+# Graham optionlist (flavor "default" = the CPU/g++ flavor), ported from
 # simfactory2 mdb/optionlists/graham.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["cpu"]
+[cactup.runs-on]
+queues = ["cpu"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

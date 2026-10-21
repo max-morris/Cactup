@@ -1,11 +1,11 @@
-# tianhe1a submitscript (variant "default"), ported from simfactory2
+# tianhe1a submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/tianhe1a.sub (SLURM-style directives).
 #
 # NOTE: the old ini's submit/getstatus/stop commands were EMPTY, so this
 # script was never actually submitted by simfactory; ported for reference
 # (see the header comment in meta.toml).
 #
-# .py variant (design §6.1): the old script used the chained-job ternary
+# .py script (design §6.1): the old script used the chained-job ternary
 # @("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@ — cactup's
 # @NAME@ engine is literal-only (D7), so the conditional moves into Python.
 #
@@ -30,7 +30,7 @@ lines.append("#SBATCH --mail-type=ALL")
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header (empty for this machine — no [environment]).
 lines.append(ENV_SETUP)
 

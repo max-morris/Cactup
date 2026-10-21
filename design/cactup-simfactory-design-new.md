@@ -23,18 +23,19 @@ These were settled during design review and are treated as fixed below.
 |---|----------|----------|
 | D1 | Remote execution / source sync / `login` | **Dropped.** cactup is a local, per-machine tool. No `rsync` sync, no `--remote` SSH dispatch, no `login`, no trampoline/iomachine tunneling. You run cactup on the machine where the work happens. |
 | D2 | Archive subsystem (petashare/uberftp) | **Dropped entirely.** No archive command, no drivers. |
-| D3 | Cactus test-suite support | **Kept, as a first-class `cactup test run`/`test submit` command tree** separate from `sim` (§11). A testsuite runs against any built config — default the active config, or `--config C` — with **no separate test-config kind**. Test output lives under a dedicated, configurable **test-home** (`tests/`), *not* inside `simulations/`. Test run/submitscripts are marked `test = true` in the MDB and resolved by the §11.2 rules (this is the only test-marking; optionlists just use the §4.4 `default = true` picker). simfactory's overloading of `sim` (empty-parfile sentinel, monster `output-NNNN/exe/` copytree) is *not* ported. |
+| D3 | Cactus test-suite support | **Kept, as a first-class `cactup test run`/`test submit` command tree** separate from `sim` (§11). A testsuite runs against any built config — default the active config, or `--config C` — with **no separate test-config kind**. Test output lives under a dedicated, configurable **test-home** (`tests/`), *not* inside `simulations/`. Test run/submitscripts are marked `test = true` in the MDB and resolved by the §11.2 rules (this is the only test-marking; optionlists just use the §4.4 `default = true` flavor marker). simfactory's overloading of `sim` (empty-parfile sentinel, monster `output-NNNN/exe/` copytree) is *not* ported. |
 | D4 | Restart / chaining & on-disk metadata | **On-disk simulation output preserved** (numbered `output-%04d` restarts, the `output-NNNN-active` symlink, `CACHE/`, `TRASH/`). simfactory's `SIMFACTORY/` metadata dir and `properties.ini` are an **implementation detail and are NOT preserved** — cactup uses its own TOML metadata. Per-simulation state lives in the simulation's own folder; the global cactup database holds only global cactup state and the installation registry. Checkpoint recovery is **out of scope**: the parfile and Cactus own it end to end (§8.8). |
 | D5 | Where simulations live | `<sim-home>/<config>/<SimName>/...`, where the per-alias `<sim-home>` = `<machine simulation-home>/<alias>` (falling back to `~/.cactup/simulations/<alias>` when the machine omits `simulation-home`). The chosen sim-home is fixed at install time and recorded per-installation; a single simulation's directory may be overridden at create time with `--sim-dir` (see §8.1). There is no `--basedir` flag. |
 | D6 | Config-level metadata storage | Per-installation **on-disk TOML**, not the global DB (see §7.4). |
-| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. Comments (as the target file kind spells them) are copied through untouched. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` variant escape hatch (see §6). |
+| D7 | `@VAR@` substitution engine fidelity | **Literal `@NAME@` replacement plus two computed token families, `@ENV(…)@` and `@KNOB(…)@`**, each in a required form (unset or empty = hard error) and two `-OPTIONAL` forms (empty, or a quoted/bare default) — see §6.1. Comments (as the target file kind spells them) are copied through untouched. `ENV` reads the named environment variable at substitution time; `KNOB` reads the knob snapshot frozen with the variable set (§5). Everywhere (TOML and shell templates, parfiles). simfactory's `@(expr)@` Python-eval and ternary/word-operator sugar are **not** ported. Scripts and parfiles needing further logic use the Python `.py` escape hatch (see §6). |
 | D8 | Machine-level thorn enable/disable toggles | **Kept** (see §7.5). |
 | D9 | Optionlist on-disk format | **TOML + render step.** Optionlists are authored as TOML; cactup renders them to the native Cactus `NAME = value` optionlist before `make`. Render rules, the `VERSION` semantics, and ordering are specified in §7.8. |
 | D10 | Pre-existing simfactory simulation dirs | **Greenfield / ignore.** cactup manages only simulations it created. A directory is recognized as a cactup simulation **iff** it contains `.cactup/simulation.toml`. cactup neither reads nor migrates legacy `SIMFACTORY/` simulations. |
 | D11 | Global-DB locking | **Brief lock around DB access only.** The exclusive lock is held only while reading/mutating/persisting the database — never across a compile or a simulation run. Per-simulation coordination uses the simulation's own on-disk state, not the global lock (see §2.3). |
-| D12 | OptionList-variant ↔ queue compatibility | **The optionlist variant declares its compatible queues** (and therefore which run/submit variants it can pair with). `sim submit`/`sim run` enforce it (see §4.4, §7.4). |
-| D13 | Linking & system libraries | **Fully static MUSL binary.** cactup deploys to clusters as a single copyable binary: the release artifact targets `x86_64-unknown-linux-musl` and must stay fully statically linked (`ldd`: "statically linked"). No crate that binds a system shared library (no openssl/native-tls — reqwest uses rustls; no libgit2 — git is pure-Rust gix; no pkg-config'd C deps); C code a dependency compiles in statically at cargo-build time is fine. Our own code never uses the `libc` crate directly — OS facts come from `/proc` or std (e.g. §2.3's pid probing). |
+| D12 | Optionlist flavor ↔ queue compatibility | **The optionlist flavor declares where its binary may run** (`[cactup.runs-on]`: `queues` and `gpu`). `sim submit`/`sim run` and `test run`/`test submit` enforce it; a `build submit` job's queue is never checked against it, since that job runs `make`, not the binary (see §4.4, §7.4, §7.9). |
+| D13 | Linking & system libraries | **Fully static MUSL binary.** cactup deploys to clusters as a single copyable binary: the release artifact targets `x86_64-unknown-linux-musl` and must stay fully statically linked (`ldd`: "statically linked"). No crate that binds a system shared library (no openssl/native-tls — reqwest uses rustls; no libgit2 — git is pure-Rust gix; no pkg-config'd C deps); C code a dependency compiles in statically at cargo-build time is fine. Our own code never uses the `libc` crate directly — OS facts come from `/proc` or std (e.g. §2.3's pid probing). What neither offers, the build cache's compiler wrapper (§18.4) gets from `rustix`: sending a signal to another process and waiting on it by pid (`kill(2)`, `waitpid(2)`). `rustix` makes Linux system calls itself, without libc, so the binary stays static: the point is not to depend on the system's C library, not to avoid system calls std happens not to wrap. |
 | D14 | Distribution, self-update & MDB generations | **CI builds, publishes and deploys; installed binaries keep themselves current.** Every passing `master` push builds static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (reused unchanged when no build input changed), publishes `mdb/` as the `mdb` git branch, and deploys docs + binaries + `cactup-init.sh` + `latest.json` to GitHub Pages. A binary is a **dist** build iff CI stamped it (`CACTUP_DIST=1`, build id, date); any local cargo build is a **dev** build (repo `mdb/`, no sync, no self-update). Dist builds clone the MDB into `~/.cactup/mdb`, sync the newest commit of their own **MDB generation** (warning loudly when a newer generation exists), and update themselves per the `autoupdate` knob (`auto`/`notify`/`off`). Each build lives at `~/.cactup/bin/cactup-<build>` behind a `bin/cactup` symlink and substitutes that path for `@CACTUP@`, so a job runs the exact build it was submitted with. The published MDB is the one on-disk artifact with a compatibility promise, and the generation is its only mechanism (§17). |
+| D15 | Shared build cache | **A compiler wrapper inside cactup, over an instance-wide store.** Objects one installation or configuration of an instance built are reused by the others whenever, and only when, compiling afresh would produce the same bytes. No existing compiler cache fits (none handles Fortran module files, and none shares a directory between hosts over NFS without POSIX locks), so cactup is its own: it stands in front of Cactus's object compiles, injected by a makefile fragment that leaves the optionlist and `config-data` untouched. The cache may only ever cost a miss: anything it does not fully understand compiles as if it were not there. Objects will be keyed by the cactup machine and by the host that compiles them, so that one filesystem spanning several architectures never mixes them, and nothing will be evicted automatically. On by default (knob `build-cache`, `serve`; decision 34); §18 says what it caches and how. |
 
 Everything marked **ASSUMPTION** in this document is a smaller decision made to
 keep the spec complete; flag any you want changed.
@@ -202,8 +203,8 @@ multi-writer story.
 
 Required model (D11):
 
-1. The global DB lock is acquired, the DB is read (and possibly mutated +
-   persisted), and the lock is **released before** any long-running work begins.
+1. A mutation acquires the global DB lock, re-reads the DB, mutates and
+   persists it, and **releases the lock before** any long-running work begins.
    A command that needs to write a result at the end **re-acquires the lock,
    re-reads the on-disk DB, and applies a field-scoped write** (mutating only the
    specific keys it owns — e.g. one `installations` entry or one `knobs` entry —
@@ -213,6 +214,30 @@ Required model (D11):
    the reason the persist path must re-read first: the whole-file
    `serde_json::to_string_pretty(self)` in `src/database.rs` is replaced by
    read-modify-write under the held lock.
+
+   **Reads take no lock.** A plain read (`Db::read`, a snapshot nothing will
+   persist) opens `database.json` directly. That is safe because the only
+   writer is the locked read-modify-write above, which renames a complete,
+   fsynced temp file into place: the path always names one whole version, so
+   a reader sees either it or its successor, never a torn mix, and the lock
+   would only have serialized readers against writers that rename already
+   keeps apart. Locking each read cost every command several synchronous
+   round trips on NFS (create, link, fstat, unlink, read back, remove) and
+   made a read that raced an update fail outright. Fallbacks keep the worst
+   case at the locked behavior: a missing file goes straight to the locked
+   read (before the first write ever, every read takes it — the old cost); a
+   stale NFS file handle (`ESTALE`, the file renamed over mid-read) or an
+   unparsable file is retried a few times first; the schema guard's verdict
+   is final. Freshness: a read returns a complete version, normally the
+   current one — NFSv4 opens by name, and on a default (close-to-open)
+   NFSv3 mount a renamed-over file's handle goes stale and the kernel looks
+   the name up again. It can be a *previous* version only on a `nocto` mount
+   (cached attributes and pages, up to `acregmax`), or on NFSv3 when a
+   process on the writing host still had the old file open during the rename
+   (that client keeps the old inode alive by silly-renaming it), until the reader's
+   cached lookup revalidates (about `acdirmax`). That is harmless here,
+   since a snapshot is never persisted and every mutation re-reads under the
+   lock.
 2. **`cactup sim run --restart-id N` (the compute-node path) does not depend on
    the global DB at all.** Everything it needs — the Cactus root, the
    executable, the config, the parfile, topology — is read from
@@ -427,7 +452,7 @@ cactup inst …                      (short form of `installation`, a duplicate
 cactup list [--all]                (top-level equivalent of `installation list`)
 cactup use <alias>                 (top-level equivalent of `installation use`)
 
-cactup build [<name>] [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [BUILD FLAGS] [BUILD TOPOLOGY]
+cactup build [<name>] [-f] [--thornlist P] [--flavor F] [--universe U | --no-universe] [BUILD FLAGS] [BUILD TOPOLOGY]
                                     (auto-selects foreground vs. queued per the
                                     machine's MDB entry — §7.9)
 cactup build run    [<name>] …    [--config-dir P --attempt-id N]
@@ -464,8 +489,8 @@ cactup sim show [<sim>] [--long] [--all]           (--all: across every installa
 cactup sim output-dir <sim> [--restart-id N]      (prints active/Nth restart dir)
 cactup sim log <sim>                              (tail stdout/err / formaline)
 
-cactup test run    [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]   (§11)
-cactup test submit [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test run    [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]   (§11)
+cactup test submit [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
 cactup test list       [--long] [--all]
 cactup test show       <name>
 cactup test stop       <name> [-f]
@@ -480,7 +505,7 @@ cactup update [--check] [--prune]                 (D14, §17.3: install the newe
                                                    builds retired > 30 days, §17.2;
                                                    dev builds refuse)
 
-cactup machine show [<name>]                      (replaces print-mdb / list-machines)
+cactup machine show [<name>] [--flavors]         (replaces print-mdb / list-machines)
 cactup machine whoami                             (which machine am I on)
 cactup machine create [<name>] [--from-existing [B]] [--silent] [--no-discover]   (§4.7)
 cactup machine delete <name>                      (§4.7; user-MDB machines only)
@@ -490,6 +515,18 @@ cactup machine forget                             (clear the cached detected mac
 Most simulation/config commands operate on the **active installation** and its
 **active config** unless overridden. `config`/`sim` commands fail fast if no
 installation is active.
+
+**Retired flags.** A flag that has been renamed stays *reserved* where it was
+once accepted: it is never declared to clap — so no help text, completion, or
+user doc ever shows it — and it is caught on the raw command line before clap
+parses anything, stopping the command with a rename notice and the corrected
+command line, whatever else is on it. A flag removed with nothing in its
+place gets a notice saying why, and the suggested command simply drops it.
+Retired so far: `--variant` on `build` (and `build run`/`build submit`), now
+`--flavor`; `--variant` on `test run`/`test submit`, removed — the queue picks
+test scripts, as it picks every script (§11.2); `--variants` on `machine
+show`, now `--flavors`. They are kept indefinitely (`args::RETIRED_FLAGS`). This
+paragraph is the one place they are documented: user docs never mention them.
 
 ### 3.1 Command mapping from simfactory
 
@@ -671,9 +708,12 @@ network. They differ in the **baseline** they compare against:
   says so rather than rendering every repo as diverged; local modifications
   are still reported.
 - **`config delta [<name>]`** — against **the last build of that config**
-  (`sources` in its metadata, §7.4): *what would rebuilding pick up*. This is
-  exactly the input the rebuild decision acts on (§7.8 rule 5), so the two can
-  never disagree.
+  (`sources`, `thorn-providers`, `thorn-shapes` and `thorn-stamps` in its
+  metadata, §7.4): *what would rebuilding pick up*. These are exactly the
+  source-derived inputs the rebuild decision acts on (§7.8 rules 4 and 5), so
+  the two can never disagree. A changed thorn is named once, under the
+  strongest of its changes: a new provider, then a new shape (both cost the
+  thorn its build state), then edited files.
 
 **`installation delta` reports two independent things, because the tree can
 diverge in two independent ways.**
@@ -722,11 +762,14 @@ mdb/
     hostname.regexp                 # one Rust regex claiming this machine's hosts (optional)
     discover.py                     # def is_machine(hostname: str) -> bool (optional)
     optionlists/
-      <variant>.toml                # build option lists (TOML + @templating@)
+      <flavor>.toml                 # build option lists (TOML + @templating@);
+                                    # each file IS one flavor (§4.4)
     runscripts/
-      <variant>.sh                  # or <variant>.py
+      <script>.sh                   # or <script>.py
     submitscripts/
-      <variant>.sh                  # or <variant>.py
+      <script>.sh                   # or <script>.py
+    buildsubmitscripts/             # optional (§7.9)
+      <script>.sh                   # or <script>.py
 ```
 
 **No top-level index (D1).** There is no `mdb/meta.toml`; the authoritative data
@@ -769,32 +812,67 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   `hostname.regexp` / `discover.py` matcher files (§4.3).
 - `submitscript` / `runscript` / `optionlist` single-filename keys are
   **replaced** by the per-machine `optionlists/`, `runscripts/`,
-  `submitscripts/` directories and the **variant→queue mapping** described in
-  §4.4. (This is the headline MDB change.)
+  `submitscripts/` directories: optionlist **flavors** discovered from the
+  directory, and the **queue→script routes** of `[submitscripts]` /
+  `[runscripts]` described in §4.4. (This is the headline MDB change.)
 - `env-setup` (shell setup, usually module loads) is kept verbatim. Unlike
   simfactory (where it fed only submit/run scripts), cactup applies `env-setup`
   to **all three** execution phases by default — **build**, **submit**, and
   **run** — because a Cactus build usually needs the same module environment as
   the eventual run (compilers, MPI, etc.), and requiring the user to duplicate it
   was a common footgun. For phase-specific additions there are three optional
-  companion keys — **`env-build-setup`**, **`env-submit-setup`**, and
-  **`env-run-setup`** — each *appended* to `env-setup` for that phase only. The
+  companion keys — **`build-env-setup`**, **`submit-env-setup`**, and
+  **`run-env-setup`** — each *appended* to `env-setup` for that phase only. The
   effective environment for a phase is `env-setup` followed by the matching
-  `env-<phase>-setup` (empty when unset). This is opt-in granularity: a machine
+  `<phase>-env-setup` (empty when unset). This is opt-in granularity: a machine
   that needs no per-phase difference sets only `env-setup`; a machine that (say)
-  loads a debugger module only when building sets `env-build-setup`. §6.1
+  loads a debugger module only when building sets `build-env-setup`. §6.1
   specifies how each block is injected for `.sh` vs `.py` templates and for the
-  build's `make` invocation.
+  build's `make` invocation. (Generations 1 and 2 spelled the companions
+  `env-build-setup` / `env-submit-setup` / `env-run-setup`; generation 3
+  renamed them, with no reader for the old names — §17.5.)
+- **Provisioning keys (generation 3).** Beside each setup, a provisioning
+  step of its own: **`provision`** runs wherever `env-setup` does (every
+  phase), and **`build-provision`**, **`submit-provision`** and
+  **`run-provision`** in their phase only. A setup *describes* the
+  environment (exports, module loads) and must run through anywhere; a
+  provisioning step *makes or fetches* what the phase needs (a conda
+  environment, a stub file under `$HOME`), which only works on the machine
+  itself. Within a phase the order is: the effective setup (a provisioning
+  step may need it, e.g. a module that provides `curl`), then `provision`,
+  then the phase's own `<phase>-provision`. Each runs in a subshell of its
+  own, under `set -e`, so nothing it exports or changes in its shell reaches
+  the phase, and a failure stops the script it is in (the build, the submit
+  script, the run script) with its status, whether or not that script runs
+  `set -e` itself. They are frozen and injected exactly where the setups are
+  (§6.1), never before the scheduler's own commands (`submit`,
+  `blocking-submit`, `get-status`, `get-status-many`, `stop`, `exec-host`:
+  run on the login node, the queries over and over), never
+  run by `cactup cache doctor` or the MDB's setup check (§18.12), and not
+  part of the build cache's key (§18.5: they cannot change the environment a
+  compile sees).
 - **Universe-level env-setup overrides.** A `[universes.<name>]` table (§4.8)
-  may itself carry `env-setup` / `env-build-setup` / `env-submit-setup` /
-  `env-run-setup`, alongside its wrapper keys (or with no wrapper at all — an
+  may itself carry `env-setup` / `build-env-setup` / `submit-env-setup` /
+  `run-env-setup` and `provision` / `build-provision` / `submit-provision` /
+  `run-provision`, alongside its wrapper keys (or with no wrapper at all — an
   identity universe, §4.8). Where set, a key in the universe table **replaces**
   the machine `[environment]` key of the same name, **key-by-key**, for any
   phase executed in that universe; a key the universe table omits still falls
   back to the machine's `[environment]` value. The concatenation that produces
-  the effective per-phase block (`env-setup` then `env-<phase>-setup`, §6.1) is
+  the effective per-phase block (`env-setup` then `<phase>-env-setup`, §6.1) is
   otherwise unchanged — it is simply evaluated against whichever of the two
-  (universe or machine) key is in force. See §4.8 for the full resolution
+  (universe or machine) key is in force. The provisioning keys follow the
+  same rule, so a universe that sets none inherits the machine's and runs
+  them: inside its wrapper (a container) in a build or run script, which
+  cactup starts through the universe, and wherever the scheduler starts it
+  in a submit script, whose universe only picks the setup and the
+  `submit` command's wrapping; a universe sets
+  an empty value (`provision = ""`, `build-provision = ""`, …) to turn the
+  machine's step off there. (Generation-2 overlays need care here: a
+  universe that set its own `env-setup` used to replace the machine's whole
+  setup, creation lines included, so moving those lines into the machine's
+  `provision` makes that universe run them unless it sets `provision = ""`;
+  `GENERATIONS.md` says so.) See §4.8 for the full resolution
   story (including which universe is "in effect" for a given phase).
 - Scheduler keys carried over (semantics unchanged; names kebab-normalized —
   see the key-naming note below): `submit`, `interactive-cmd`, `get-status`,
@@ -874,6 +952,32 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   (with `@USER@` substituted) for run scripts that stage to fast scratch; it is
   otherwise unused by cactup itself. A machine that does not set it leaves
   `@SCRATCH_HOME@` empty.
+- **`build-cache-home`** (optional) is where the build cache keeps its
+  objects (§18.7); omitted → `<install-home>/.cactup-build-cache`, beside the
+  installations (the `install-home` fallback applies, so
+  `~/.cactup/cacti/.cactup-build-cache`). A serving build writes a cold
+  Einstein Toolkit's worth of objects (about half a gigabyte in some three
+  thousand files) there, from compute nodes too; next to the installations is
+  where builds already do their I/O, and storage a site gave them is purged
+  less than scratch. No machine in the MDB sets it: the default follows
+  `install-home`. It is for a site whose builds belong somewhere else.
+  `@USER@` and `@ENV(NAME)@` work as in `simulation-home`; a per-user
+  directory, since anyone who can write in a store can put objects into
+  every build that reads it. Unlike the other paths it is resolved leniently
+  (`objcache::store_root`): a value that cannot be resolved (an `@ENV(…)@`
+  unset) is passed over for the next place with one line, never failing a
+  build, a simulation or an install. A purge of the store's storage costs
+  misses later, never a wrong object.
+- **Every `[paths]` key has a knob of the same name** (§5): `install-home`,
+  `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`, an
+  absolute path that wins over the machine's value for the user who sets it
+  (`Meta::path_for`/`Meta::paths_for`; a machine value a knob overrides is
+  not resolved at all). They are read where the machine's are, on the login
+  node: `simulation-home` and `test-home` when an installation's homes are
+  fixed (install time, or `cactup use` backfilling them), `install-home` for
+  the install-prefix default and the build cache's place, `scratch-home`
+  when a restart's, a test's or a build's variables are assembled — so a
+  compute-node run sees the value frozen into its metadata (D11).
 - Thorn-toggle keys kept (D8, §7.5): `enabled-thorns`, `disabled-thorns`, and
   their `-default`/`-local` variants collapse to plain `enabled-thorns` /
   `disabled-thorns` arrays in TOML (the `-default`/`-local` split existed only
@@ -890,15 +994,14 @@ TOML port of simfactory's `mdb/machines/<name>.ini` (`simfactory-docs.txt` §8).
   already tunes `make-jobs` for its node size gets a matching job shape for
   free), and **`gpus-per-task`**. None of the six affect a foreground build.
   Alongside them, a machine that can submit builds declares a
-  **`buildsubmitscript`** script kind — a fourth sibling of `optionlist` /
-  `submitscript` / `runscript`, with its own `buildsubmitscripts/<variant>.{sh,py}`
-  directory and `[variants.buildsubmitscript]` table (identical shape to
-  `[variants.submitscript]`: queues, an optional `universe`/`build-universes`,
-  a `default` marker — §4.4). It is the **only** optional script kind — a
-  machine that never hands a build to the scheduler declares no
-  `buildsubmitscript` variants at all, and MDB load validation skips the usual
-  queue-coverage check for a kind with none (§7.9 states the precise rule for
-  when submitting is even possible).
+  **build-submit script** kind — a third sibling of the submit and run
+  scripts, with its own `buildsubmitscripts/<script>.{sh,py}` directory and
+  `[buildsubmitscripts]` table (identical route shape to `[submitscripts]`:
+  queues, an optional `universe`/`build-universes`, a `default` marker —
+  §4.4). It is the **only** optional script kind — a machine that never hands
+  a build to the scheduler declares no `[buildsubmitscripts]` routes at all,
+  and MDB load validation skips the usual queue-coverage check for a kind with
+  none (§7.9 states the precise rule for when submitting is even possible).
 
 **Key-naming convention (kebab-case everywhere).** Every user- and disk-facing
 identifier is **kebab-case**: TOML keys (`meta.toml`, optionlists, and cactup's
@@ -915,7 +1018,7 @@ spellings are normalized on port (`getstatus` → `get-status`, `submitpattern` 
 `max-walltime`, `scratchbasedir` → `scratch-home`, …), and cactup's own keys
 use hyphens too
 (`config-id`, `build-id`, `job-id`, `chained-job-id`,
-`simulation-id`, `compatible-queues`). The **only** identifiers that keep
+`simulation-id`, `runs-on`). The **only** identifiers that keep
 underscores are **template substitution variables**, which stay `UPPER_SNAKE`
 inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME@`,
 `@TASKS_PER_NODE@`).
@@ -923,19 +1026,21 @@ inside `@…@` (a deliberately separate namespace — `@JOB_ID@`, `@SCRATCH_HOME
 **meta.toml table structure.** Scalar keys are grouped into tables for clarity
 (TOML requires top-level keys before any table, so grouping avoids ordering
 pitfalls). The tables are: `[machine]` (descriptive + access), `[paths]`
-(`install-home`, `simulation-home`, `test-home`, `scratch-home`), `[hardware]` (`max-cpus-per-node`,
+(`install-home`, `simulation-home`, `test-home`, `scratch-home`, `build-cache-home`), `[hardware]` (`max-cpus-per-node`,
 `default-cpus-per-task`, `threads-per-cpu`, `memory` — machine-wide defaults, each overridable per-queue; see below), `[build]` (`make`, `make-jobs`,
 `enabled-thorns`, `disabled-thorns`, and the queued-build keys `default-action`,
 `queue`, `walltime`, `nodes`, `tasks`, `cpus-per-task`, `gpus-per-task` — §7.9),
 `[environment]` (`env-setup` and the
-phase-specific `env-build-setup` / `env-submit-setup` / `env-run-setup` — §6.1;
+phase-specific `build-env-setup` / `submit-env-setup` / `run-env-setup`, and the
+provisioning keys `provision` / `build-provision` / `submit-provision` /
+`run-provision` — §6.1;
 grouped here rather than under `[scheduler]` because `env-setup` now spans build
 as well as submit/run), `[scheduler]` (`submit`, `get-status`, `stop`, the
-`*-pattern`s, `exec-host`, `max-walltime`), then `[queues.*]`, `[variants.*]`
-(`optionlist`, `submitscript`, `runscript`, and — only on a machine that
-submits builds — `buildsubmitscript`, §7.9),
+`*-pattern`s, `exec-host`, `max-walltime`, `job-ids` — §10), then `[queues.*]`, the script
+route tables `[submitscripts]`, `[runscripts]` and — only on a machine that
+submits builds — `[buildsubmitscripts]` (§4.4, §7.9),
 and (optional) `[universes.*]` (§4.8 — a wrapper spec and/or per-universe
-`env-*-setup` overrides; the always-available `"host"` universe needs no table
+environment-key overrides; the always-available `"host"` universe needs no table
 at all unless it is being customized).
 
 **The schema is closed.** Every table above rejects keys it does not model: an
@@ -968,10 +1073,10 @@ make = "make -j@MAKEJOBS@"
 make-jobs = 16
 # default-action = "submit"    # optional (§7.9): force `cactup build` to
                                 # submit even where running is also possible;
-                                # requires [variants.buildsubmitscript] below
+                                # requires [buildsubmitscripts] below
                                 # AND [scheduler].submit — the queued-build job
                                 # shape a submitted build uses:
-# queue         = "checkpt"    # optional; else -q, else the default queue
+# queue         = "checkpt"    # optional; -q, then the `build-queue` knob, then this, then the default queue
 # walltime      = "4:00:00"    # optional; else -w, else the queue's ceiling
 # nodes         = 1            # optional; else -n, else 1
 # tasks         = 1            # optional; else -T
@@ -987,8 +1092,9 @@ get-status = "squeue -j @JOB_ID@"
 env-setup = """
 module load gcc/11 openmpi/4
 """                            # applied to build, submit, AND run (§6.1)
-env-build-setup = "module load cmake/3.27"   # appended only for `cactup build`
-# env-submit-setup / env-run-setup: appended only for submit / run (optional)
+build-env-setup = "module load cmake/3.27"   # appended only for `cactup build`
+# submit-env-setup / run-env-setup: appended only for submit / run (optional)
+# provision / build-provision / …: steps that make what a phase needs (optional)
 
 [queues.checkpt]               # one table per queue
 gpu = false
@@ -1004,54 +1110,57 @@ threads-per-cpu = 2            # partitions); any key not set here inherits
 # name = "gpu_part"            # optional: the scheduler's REAL queue/partition
                                # name when it differs from the table key. @QUEUE@
                                # resolves to it (default: the key itself). Lets
-                               # several cactup queues — e.g. cpu/gpu build
-                               # flavors with different D12 gpu flags — map onto
-                               # one real queue without hardcoding it in scripts.
+                               # several cactup queues — e.g. queues with
+                               # different D12 gpu flags or build-universes —
+                               # map onto one real queue without hardcoding it
+                               # in scripts.
 
-# Variant → queue association (§4.4). Every key names a variant; there are no
-# reserved keys. A variant is either the array shorthand (queues only) or the
-# inline-table form `{ queues = [...], universe = "…", build-universes = […],
-# test = …, default = …, tasks = … }` when it carries a universe to run *in*
-# (§4.8 step 3), a build-universe COMPATIBILITY list for selection (below),
-# a test marker (§11.2), the default flag, or a default task count (`tasks =
-# N`: the TASKS used when no -n/-T/-t flag is given, instead of filling the
-# node — §8.5). `universe` and `build-universes` are independent and may both be
-# set: `universe` is what THIS variant's own execution is wrapped in;
-# `build-universes` is which configs' BUILD universes this variant is compatible
-# with (omitted = all — the common case).
-# `default = true` marks the fallback variant within its partition (see below).
-[variants.submitscript]
-"slurm-cpu" = { queues = ["checkpt", "single"], default = true }   # normal default: serves these queues + any queue with no explicit mapping
+# Queue → script routes (§4.4). Every key names a script file
+# (submitscripts/<key>.{sh,py}); there are no reserved keys. A route is either
+# the array shorthand (queues only) or the inline-table form `{ queues = [...],
+# universe = "…", build-universes = […], test = …, tasks = … }`
+# when it carries a universe to run *in* (§4.8 step 3), a build-universe
+# COMPATIBILITY list for routing (below), a test marker (§11.2), or a default
+# task count (`tasks = N`: the TASKS used when no -n/-T/-t
+# flag is given, instead of filling the node — §8.5). `universe` and
+# `build-universes` are independent and may both be set: `universe` is what
+# THIS script's own execution is wrapped in; `build-universes` is which configs'
+# BUILD universes this script serves (omitted = all — the common case).
+# A script serves exactly the queues it lists; there is no fallback script.
+# Scripts are never chosen by the user; the queue routes them (§4.4, §11.2).
+[submitscripts]
+"slurm-cpu" = ["checkpt", "single"]
 "slurm-gpu" = ["gpu"]
-"slurm-test" = { queues = ["checkpt", "single"], test = true, default = true }   # testsuite submit + test-partition default (§11.2)
+"slurm-test" = { queues = ["checkpt", "single"], test = true }   # testsuite submit (§11.2); no testsuite runs on gpu
 
-[variants.runscript]
-"cpu" = { queues = ["checkpt", "single"], default = true }
+[runscripts]
+"cpu" = ["checkpt", "single"]
 "gpu-sing" = { queues = ["gpu"], universe = "et-sif" }   # runs inside a universe (§4.8)
 "sing" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
                                # selected only for configs whose BUILD universe
                                # (§7.4) is "et-sing" or "et-sing-cpu" (§4.4,
                                # §4.8); replaces the old trick of minting a
-                               # synthetic queue per build flavor purely to
+                               # synthetic queue per build universe purely to
                                # route script selection (see the db1 MDB port)
-"test-cpu" = { queues = ["checkpt", "single"], test = true, default = true }   # drives make <config>-testsuite (§11.6)
-# default-universe = "et-sif"          # optional: universe for runscript variants that omit one
+"test-cpu" = { queues = ["checkpt", "single"], test = true }   # drives make <config>-testsuite (§11.6)
+                               # no machine-wide universe fallback: a route that
+                               # runs inside a universe names it itself
 
 # OPTIONAL — only on a machine that hands builds to the scheduler (§7.9): same
-# shape as [variants.submitscript], one buildsubmitscripts/<variant>.{sh,py}
-# per key. Omitted entirely (no table at all) ⇒ this machine can never submit a
-# build; `cactup build`/`build submit` always run in the foreground.
-[variants.buildsubmitscript]
-"slurm-cpu" = { queues = ["checkpt", "single"], default = true }
+# route shape as [submitscripts], one buildsubmitscripts/<key>.{sh,py} per key.
+# Routed by the BUILD JOB's queue; `build-universes = ["X"]` here means "serves
+# builds of configs whose build universe is X". Omitted entirely (no table at
+# all) ⇒ this machine can never submit a build; `cactup build`/`build submit`
+# always run in the foreground.
+[buildsubmitscripts]
+"slurm-cpu" = { queues = ["checkpt", "single"] }
 
-# Each variant just names the optionlist file under optionlists/<variant>.toml;
-# that file declares its own gpu flag, compatible queues, and an optional
-# `default = true` marker in its [cactup] header (D12, §7.8, §4.4). With one
-# variant that variant is implicit; with several, the default-marked one is the
-# implicit pick and the rest need --variant.
-[variants.optionlist]
-variants = ["cpu", "gpu", "cpu-debug"]   # selected at build time via --variant;
-                                         # cpu.toml carries [cactup].default = true (§4.4)
+# No table for optionlists: the machine's flavors are the *.toml files under
+# optionlists/ (here cpu.toml, gpu.toml, cpu-debug.toml). Each declares where
+# its binary may run ([cactup.runs-on]: queues, gpu) and an optional
+# `default = true` marker in its own [cactup] header (D12, §7.8, §4.4). With
+# one flavor it is implicit; with several, the default-marked one is the
+# implicit pick and the rest need --flavor.
 ```
 
 **Hardware keys.** `[hardware]` carries **only** the keys cactup actually
@@ -1084,64 +1193,77 @@ entirely per-queue — and a queue with no overrides simply inherits everything.
 Topology derivation (§8.5) and the machine-derived script variables (§6.3) use
 the **queue-effective** values for the queue the job targets.
 
-The default variant. Instead of a reserved `default = "<name>"` pointer key
-(which would collide with a variant literally named `default` and force the
-token `default` to serve as both a variant name and a directive), the fallback
-variant is marked in place with `default = true` inside its own inline table —
-exactly parallel to `test = true`. `default = true` designates the fallback
-**within its partition**: an un-marked variant is the *normal-partition* default;
-a variant carrying both `test = true` and `default = true` is the *test-partition*
-default (the old `test-default`). **At most one** variant per partition may carry
-`default = true`; a partition with exactly one variant makes that variant the
-implicit default, so the flag is optional there (it may still be stated for
-clarity, as mel5 does). Because every key names a variant, a variant may now be
-named `default` with no special meaning.
+**No fallback script.** **DEVIATION (from the original design note, which
+gave submit and run scripts a default for queues no script names).** A script
+serves exactly the queues its route lists.
+Generation 1 had a fallback — a `default = true` route, or a partition's
+sole route, served every queue no route listed — and generation 2 removed it:
+every in-repo flag was redundant (each machine listed every queue anyway),
+and the one fallback actually exercised was the implicit sole-script one,
+which handed qbd's and saturn's GPU-only test scripts the CPU queues. A queue
+must be named to be served.
 
-Queue/variant consistency requirement: every queue listed in `[queues.*]` must
-be served by some `submitscript` variant and some `runscript` variant (an
-explicit mapping or the `default = true` variant). cactup validates this at MDB
-load and errors on a queue with no resolvable script variant, rather than failing
-cryptically at submit time. When a machine defines any **test-marked** variants
-of a kind (`test = true`), the same coverage check is applied **within the test
-partition** (against the test-partition default); a kind with no test variants is
-fine — tests borrow the normal partition (§11.2).
+**No reserved keys.** Every key of `[submitscripts]`, `[runscripts]` and
+`[buildsubmitscripts]` names a script file, so a script may be named `default`
+(or anything else) with no special meaning. The former table-level
+`default-universe` key — a universe for every route that named none — is
+**removed**: a route that runs inside a universe says so with its own
+`universe = "…"`, so the table holds nothing but routes (§4.8).
+
+Queue/script consistency requirement: every queue listed in `[queues.*]` must
+be listed by some normal (not test-marked) `[submitscripts]` route and some
+normal `[runscripts]` route. cactup validates this at MDB load and errors on a
+queue with no script, rather than failing cryptically at submit time. Test
+scripts and buildsubmitscripts owe no such coverage: a machine may offer
+testsuites, or queued builds, on some partitions only, and choosing a queue
+none of them lists is a **selection-time** error naming the queues that are
+served ("no build-submit script serves queue \"bigmem\" (served: single,
+gpu2); pick one of those with -q"; a test command narrows the list to the
+queues the config's binary may run on, §11.2). Each key must name an existing `<kind>/<key>.sh` or `.py`,
+and every queue a route lists must be a declared `[queues.*]` table.
 
 **Build-universe compatibility list (`build-universes`).** The inline-table
-variant form may carry `build-universes = ["name", …]` — the set of build
-universes this variant is compatible with (§4.8). Omitted (the default) means
+route form may carry `build-universes = ["name", …]` — the set of build
+universes this script serves (§4.8). Omitted (the default) means
 compatible with every universe. An explicitly empty list (`build-universes =
 []`) is a validation error (omit the key instead). Every name listed must be a
 declared `[universes.<name>]` or the literal `"host"` (§4.8's always-available
 implicit universe). Selection filters on the **config's build universe** —
 `"host"` when the config records none — never on the run/submit universe
 context; this is the parity `build-universes` enforces: a config built in
-universe X gets X-compatible run/submit scripts (§4.4). The `build-` prefix on
+universe X gets X-compatible run/submit scripts (§4.4) — e.g. a binary built
+inside apptainer image A must run in A, or in an image B designed to run
+A-built binaries. On a `[buildsubmitscripts]` route the same key filters on the
+build universe of the config being built, i.e. the universe the build job's
+own `make` runs in (§7.9). The `build-` prefix on
 the key name records exactly this: the gate is on the universe a config was
 *built* in, not the one it is run or submitted in.
 
 **Queues carry the same key.** A `[queues.<name>]` table may likewise declare
 `build-universes = ["name", …]` (same semantics, same validation), so a machine
 that unifies several upstream clusters behind one set of scheduler queues can
-restrict a queue to the build flavors it serves. When `-q` is omitted, the
-default-queue pick is restricted to the queues compatible with the config's
-build universe; naming an incompatible queue explicitly (via `-q`, the `queue`
-knob, or a config's compatible-queues) is a **hard error** naming the universe
-— there is no `--force-queue` escape, since the gate is structural (like
-variant compatibility) rather than advisory (like the GPU / compatible-queues
+restrict a queue to the configs whose build universes it serves. When `-q` is
+omitted, the default-queue pick is restricted to the queues compatible with the
+config's build universe; naming an incompatible queue explicitly (via `-q`, the
+`queue` knob, or a config's `runs-on` queues) is a **hard error** naming the
+universe — there is no `--force-queue` escape, since the gate is structural
+(like script routing) rather than advisory (like the GPU / `runs-on` queue
 guards). A queue with no `build-universes` list serves every build universe.
+The gate applies to `sim` and `test` only: a `build submit` job's queue is
+never checked against it (§7.9).
 
 Validation adds an **ambiguity check per universe context**: for each *u* in
 {`"host"`} ∪ the machine's declared universes, and separately within each
 partition (normal/test, §11.2), no queue *compatible with u* may be served by
-more than one *u*-compatible variant (a variant with no `build-universes` list
+more than one *u*-compatible route (a route with no `build-universes` list
 is compatible with every *u*, and so counts toward every *u*'s check; a queue
 gated away from *u* is skipped in that context). Queue **coverage** (every
 queue served-or-default, above) is enforced at MDB load time only for *u* =
 `"host"`, exactly as before, and only for the queues compatible with host; for
 any other declared universe, a queue left unserved by that universe's compatible
-variants is instead a **selection-time** error — "no `<kind>` variant
-compatible with universe \"X\" serves queue \"Y\" and none is a compatible
-default" — since exhaustively checking every declared universe against every
+routes is instead a **selection-time** error — "no script compatible with
+universe \"X\" serves queue \"Y\" and none is a compatible default" ("no
+test script …" in the test partition) — since exhaustively checking every declared universe against every
 queue at load time would reject machines that intentionally scope a universe
 to a subset of queues. A machine with no `build-universes` lists anywhere
 validates and selects **byte-identically to today**.
@@ -1231,10 +1353,10 @@ A does not claim B's host, and discovers B. `cactup machine forget` clears the
 record.
 
 **ASSUMPTION (Python runtime):** cactup shells out to a `python3` on `PATH` to
-evaluate `discover.py` and `.py` script variants (cactup is Rust; embedding
+evaluate `discover.py` and `.py` scripts (cactup is Rust; embedding
 CPython is heavier than needed).
 
-**Security & cost note.** `discover.py` (and `.py` script variants) are arbitrary
+**Security & cost note.** `discover.py` (and `.py` scripts) are arbitrary
 code from the MDB git repo, executed on the user's machine. The MDB repo is
 therefore a **trust boundary**: cactup runs only the MDB it cloned from the
 configured `manifest`/MDB URL, and the spec assumes that repo is trusted. Cost:
@@ -1249,35 +1371,46 @@ only on a stamp miss (step 3 above), never on the steady-state command. The
 `.py` calling convention (§6.1) likewise batches all variable injection into a
 single `python3` invocation per script.
 
-### 4.4 Variants (the headline new feature)
+### 4.4 Flavors and scripts (the headline new feature)
 
 From `cactup-simfactory-design.txt`. simfactory faked variants with separate
 machine definitions (e.g. `db-sing-cpu.run` / `db-sing-nv.run`); cactup makes
-them first-class within one machine.
+them first-class within one machine, as two distinct concepts that the user
+meets in different ways: **flavors** (optionlists, which the user picks) and
+**scripts** (submit/run/build-submit scripts, which the queue routes and the
+user never picks). (Both were once called "variants" and shared one CLI flag;
+that is how `build submit --variant` came to pick a build-submit script. The
+word is retired for both.)
 
-- **OptionList variants** select compile configuration. If a machine has exactly
-  one optionlist variant, it is used implicitly. If it has more than one, the
-  user **must** pick one at `cactup build` time via `--variant`; there is no
-  default. The chosen variant is recorded in the config metadata (§7.4) and is
+- **Flavors** select compile configuration. A flavor is an optionlist file,
+  `optionlists/<flavor>.toml`; the machine's flavors are exactly the `*.toml`
+  files in that directory — there is no table in `meta.toml` listing them. If a
+  machine has exactly one flavor, it is used implicitly. If it has more than
+  one, the one whose `[cactup]` header says `default = true` is the implicit
+  pick, and the user picks any other at `cactup build` time via `--flavor`;
+  with several flavors and none marked default, `--flavor` is required. The
+  chosen flavor is recorded in the config metadata (§7.4) and is
   **sticky**: later rebuilds of that config reuse it without the flag, and
-  `--variant` is repeated only to switch flavors, or to move a config back off a
-  `--optionlist` file (§7.8). A recorded variant the machine has since dropped is
+  `--flavor` is repeated only to switch flavors, or to move a config back off a
+  `--optionlist` file (§7.8). A recorded flavor the machine has since dropped is
   a hard error naming it, never a silent fallback.
   `cactup build --optionlist PATH` displaces this selection entirely, building
   from a file outside the MDB — an MDB-shaped `.toml`, an `[options]`-only
-  `.toml`, or a native Cactus `.cfg`. It is mutually exclusive with `--variant`,
+  `.toml`, or a native Cactus `.cfg`. It is mutually exclusive with `--flavor`,
   and a file that carries a `[cactup]` header is validated by it exactly as an
-  MDB variant would be; §7.8 has the forms, the detection rule, and what gets
-  recorded.
-- **OptionList variant ↔ queue compatibility (D12).** Each optionlist TOML
-  declares, in its `[cactup]` header (§7.8), a `compatible-queues` list and a
-  `gpu` flag. At `sim submit`/`sim run`, cactup checks the chosen queue against
-  the built config's `compatible-queues`; a mismatch is a **hard error**
+  MDB flavor would be; §7.8 has the forms, the detection rule, and what gets
+  recorded. `--flavor` never selects a script, for any command.
+- **Runs-on: where a flavor's binary may run (D12).** Each optionlist TOML
+  declares, in its `[cactup.runs-on]` table (§7.8), a `queues` list and a
+  `gpu` flag, snapshotted into the config record's `[runs-on]` (§7.4). At
+  `sim submit`/`sim run` and `test run`/`test submit`, cactup checks the chosen
+  queue against the built config's `runs-on.queues` (empty = any queue); a
+  mismatch is a **hard error**
   (overridable with `--force-queue`/`-f` for experts). This is what prevents
   submitting a GPU binary to a CPU queue. The **gpu/binary cross-check is
   one-directional**: refuse (absent `--force-queue`/`-f`) only when the
-  config's `gpu` flag is set and the effective context (`-g/--gpu`, or else the
-  chosen queue's `gpu` flag) is **not** — a GPU-built config on a non-GPU queue
+  config's `runs-on.gpu` flag is set and the effective context (`-g/--gpu`, or
+  else the chosen queue's `gpu` flag) is **not** — a GPU-built config on a non-GPU queue
   is refused, but a non-GPU config on a GPU queue is **allowed**: nothing about
   running a CPU-only binary on GPU hardware is wrong, and some machines' only
   real partition is GPU-flagged (a cluster like this makes GPU flags on
@@ -1286,39 +1419,66 @@ them first-class within one machine.
   an advisory note in that (allowed) case only when the machine has at least
   one non-GPU queue the user could have used instead; a machine with no
   non-GPU queue at all never sees it. `-g/--gpu` itself still defaults from
-  the chosen queue's `gpu` flag when not passed explicitly.
-- **SubmitScript and RunScript variants** are each associated with one or more
-  **queues** (the `[variants.*]` tables in §4.2) and, optionally, a
+  the chosen queue's `gpu` flag when not passed explicitly. An optional
+  `runs-on.default-queue` names where a sim or test of the binary goes when
+  neither `-q` nor a usable `queue` knob names a queue, ahead of the
+  machine's default queue (§8.5) — which matters exactly when the machine
+  default is a queue this binary may not use (a CPU flavor on a machine whose
+  default partition is GPU-flagged). It must be one of `runs-on.queues` when
+  that list is non-empty (checked when the optionlist is parsed) and a queue
+  of the machine (checked at build). Unlike the rest of `runs-on`, it is read
+  from the flavor's **current** header when the job is submitted, for a
+  config built from one of the machine's flavors: `queues` and `gpu` describe
+  the compiled binary, but which allowed queue a job lands on is a routing
+  preference, so an MDB edit reaches existing configs without a rebuild. A
+  config built from an `--optionlist` file, or from a flavor the machine has
+  since dropped, uses the recorded one.
+
+  **The queue chain for a sim or test** is `-q` → the `queue` knob → the
+  flavor's `default-queue` → the machine default. The knob is only ever set
+  by the user (`cactup knob set`, or `-K` for one command), so it outranks the
+  MDB's suggestion — but a knob naming a queue this binary may not run on (by
+  the checks below) is passed over, with a one-line note, rather than failing
+  every submit of a flavor it cannot serve; `--force-queue` keeps it. Build
+  jobs never read the `queue` knob; they have their own, `build-queue`
+  (§7.9).
+
+  `runs-on` describes the binary only: a `build submit` job's queue (where
+  `make` runs) is never checked against it, nor defaulted from it (§7.9).
+- **Submit, run and build-submit scripts** are each associated with one or more
+  **queues** by a **route** (the `[submitscripts]` / `[runscripts]` /
+  `[buildsubmitscripts]` tables in §4.2) and, optionally, a
   **build-universe compatibility list** (`build-universes = […]`, §4.8) — a
   second, orthogonal routing dimension alongside queue: queue narrows *which
-  partition* a variant serves; `build-universes` narrows *which build
+  partition* a script serves; `build-universes` narrows *which build
   universe's* configs it serves. At submit/run time cactup first filters the
-  queue's candidate variants to those compatible with the config's **build
+  routes to those compatible with the config's **build
   universe** (§4.8 — `"host"` when the config records none), then picks among the
-  survivors exactly as before: the variant mapped to the chosen `-q/--queue`,
-  or (absent an explicit mapping) the variant marked `default = true`.
-  Omitting `build-universes` (the common case, and the only case before this
-  mechanism existed) means "compatible with every universe," so a machine with
-  no universe-routing need is unaffected. An explicit `--variant` naming a
-  variant incompatible with the build universe is a **hard error** naming the
-  universe. The **queues** themselves (`[queues.*]`, §4.2) accept the same
-  `build-universes` key with identical semantics, gating which build flavors may
-  target a queue at all. (A machine with a single variant makes it the implicit
-  default, so the `default` flag is optional there.) The submit-script and
-  run-script variant maps are independent of each other but must each cover
-  every queue, for every universe context in play — validated at MDB **load**
-  time for `"host"`; for any other declared universe, an uncovered queue is
-  instead a **selection-time** error (§4.2). A variant entry is written either
-  as the **array shorthand** (`"<v>" = ["q1", "q2"]` — queues only) or, when it
+  survivors: the script whose route lists the chosen `-q/--queue`. There is
+  no fallback script; a queue no surviving route lists is an error. `test`
+  commands route among test-marked scripts only, and never borrow a normal
+  one (§11.2). Scripts are never chosen by the user, by name or otherwise:
+  the queue alone routes them, so choosing a different script means choosing
+  a different queue. Omitting `build-universes` (the common case, and the
+  only case before this mechanism existed) means "compatible with every
+  universe," so a machine with no universe-routing need is unaffected. The
+  **queues** themselves (`[queues.*]`, §4.2) accept the same
+  `build-universes` key with identical semantics, gating which configs' binaries may
+  target a queue at all (for `sim`/`test`; never for a build job). The
+  normal submit-script and run-script routes are independent of each other
+  but must each cover every queue, for every universe context in play —
+  validated at MDB **load** time for `"host"`; for any other declared
+  universe, an uncovered queue is instead a **selection-time** error (§4.2). A route is written either
+  as the **array shorthand** (`"<script>" = ["q1", "q2"]` — queues only) or, when it
   must carry a field beyond its queues, the **inline-table form**
-  `"<v>" = { queues = ["q1", …], universe = "<name>", build-universes = ["…"], test = true, default = true }`
-  where `universe` (the universe this variant's *own* execution runs inside,
+  `"<script>" = { queues = ["q1", …], universe = "<name>", build-universes = ["…"], test = true, tasks = N }`
+  where `universe` (the universe this script's *own* execution runs inside,
   §4.8), `build-universes` (the build-universe compatibility list, above), `test`
-  (§11.2), and `default` are each optional and independent of one another; a
+  (§11.2), and `tasks` (§8.5) are each optional and independent of one another; a
   table entry with only `queues` is equivalent to the shorthand. Every key names
-  a variant — there are no reserved keys — so a variant may be named `default`
-  with no special meaning; defaultness is carried solely by `default = true`.
-- Script variants may be `.sh` (literal `@NAME@` templating) or `.py` (emits a
+  a script file — there are no reserved keys (`default-universe` is gone; §4.8) — so a script may be named `default`
+  with no special meaning.
+- Scripts may be `.sh` (literal `@NAME@` templating) or `.py` (emits a
   shell script to stdout; variables are injected per the §6.1 calling
   convention).
 
@@ -1334,11 +1494,11 @@ end-to-end test target (you can actually build and run locally). The port:
 mdb/
   mel5/
     meta.toml                    # grouped tables (§4.2); single "local" queue;
-                                 #   normal + test-marked script/optionlist variants (§11.2);
+                                 #   normal + test-marked script routes (§11.2);
                                  #   test-home under [paths] (§11.5)
     hostname.regexp              # ^melete05(\.cct\.lsu\.edu)?$
-    optionlists/default.toml     # ported from mel5.cfg; [cactup] gpu=false + [options]
-    optionlists/debug.toml       # DEBUG optionlist; reached with cactup build --variant debug (§4.4)
+    optionlists/default.toml     # ported from mel5.cfg; [cactup.runs-on] gpu=false + [options]
+    optionlists/debug.toml       # DEBUG optionlist; reached with cactup build --flavor debug (§4.4)
     runscripts/default.sh        # @NUM_PROCS@→@TASKS@, @NUM_THREADS@→@CPUS_PER_TASK@
     runscripts/test.sh           # test=true; drives make <config>-testsuite → test-home (§11.6)
     submitscripts/default.sh     # @SIMFACTORY@→@CACTUP@, +--installation, PID-wait chaining
@@ -1346,14 +1506,14 @@ mdb/
 ```
 
 It exercises every load-bearing new mechanism: discovery matcher, grouped
-`meta.toml`, single-queue/single-variant resolution, the optionlist
+`meta.toml`, single-queue/single-script resolution, the optionlist
 TOML→native render (§7.8), the renamed topology variables (§6.3), the
 compute-node re-invocation locator (§8.3.1), and — via the `test`-marked
-variants — the whole `cactup test` subsystem (§11): the `test = true` marking and
+scripts — the whole `cactup test` subsystem (§11): the `test = true` marking and
 its respective-defaults resolution (§11.2), the testsuite-only variables (§11.9),
 and the results-into-test-home redirect (§11.6). Because mel5 has no scheduler,
 its `submit` backgrounds the script and echoes a PID; chaining is emulated by
-waiting on that PID in plain bash (no `.py` variant needed), and the testsuite
+waiting on that PID in plain bash (no `.py` script needed), and the testsuite
 `submit` re-invokes `cactup test run` directly (a testsuite is one-shot — no
 chaining, §11.6).
 
@@ -1363,10 +1523,12 @@ chaining, §11.6).
 simfactory's `generic.ini`/`.cfg`/`.run`/`.sub` (`simfactory-docs.txt` §9, §20).
 It describes a single-node workstation with **no batch system**:
 
-- `submit` = `exec nohup @SCRIPTFILE@ … & echo $!` (background, echo PID as job
-  id), `get-status` = `ps @JOB_ID@`, `stop` = `pkill` the process group.
-- A single `local` queue (`gpu = false`, `default = true`) and single `default`
-  variant of each script.
+- `submit` = `exec setsid nohup @SCRIPTFILE@ … & echo $!` (background, in a
+  session and process group of its own, echo PID as job id), `get-status` =
+  `ps @JOB_ID@`, `stop` = `pkill` the process group (§10: cactup stops only
+  a job that leads its own group).
+- A single `local` queue (`gpu = false`, `default = true`) and a single
+  `default` script of each kind, plus a single `default` flavor.
 - It ships no matcher file — `generic` is never auto-matched; it is the
   explicit zero-match fallback (§4.3) and is always selectable via
   `--machine generic`.
@@ -1485,7 +1647,7 @@ the seams where *cactup itself* spawns a process:
 
 The mechanism is phase-agnostic by construction — nothing below is
 phase-specific except which seam consults the resolved universe. Discovery and
-`.py` variant evaluation (cactup's own plumbing) are never wrapped.
+`.py` script evaluation (cactup's own plumbing) are never wrapped.
 
 **Registry (`meta.toml`, machine-level).** Universes are declared per machine
 (images/contexts are machine-specific) and are user-MDB-overridable like anything
@@ -1506,7 +1668,7 @@ wrapper-argv = ["apptainer", "exec", "--bind", "@SOURCEDIR@", "/work/@USER@/et.s
 # shape a machine uses to customize the implicit "host" universe (below)
 # without introducing any wrapping:
 # [universes.host]
-# env-build-setup = """
+# build-env-setup = """
 # module purge
 # module load gcc/9.3.0 cuda/12.4.0
 # """
@@ -1555,8 +1717,8 @@ falling back to `scontrol show job <id>`) rather than the shim's exit code. The
 **The implicit `host` universe.** `"host"` always exists as a universe name —
 even on a machine whose `meta.toml` has no `[universes.host]` table at all —
 as cactup's name for "the invoking context, unwrapped." Any reference to a
-universe name (`[build].universe`, a variant's `universe`, `default-universe`,
-or a variant's `build-universes` compatibility list, §4.4) may say `"host"` and it is
+universe name (`[build].universe`, a flavor's or script route's `universe`,
+or a route's `build-universes` compatibility list, §4.4) may say `"host"` and it is
 never an unknown-universe error, declared or not. A machine may *optionally*
 declare `[universes.host]` to **customize** host — almost always to attach the
 env-setup overrides below, since host is by definition the identity case and
@@ -1570,24 +1732,27 @@ declare it (see step 5).
 **`env-setup` runs *inside* the universe.** The `<inner>` snippet cactup wraps is
 the phase's effective env-setup followed by the phase command — build:
 `<ENV_SETUP>\n<make …>`; run: the substituted runscript (with its `ENV_SETUP`
-already prepended for a `.sh` variant, §6.1); submit: the `submit` command — so
-the phase's `env-<phase>-setup` module loads resolve against the universe's
+already prepended for a `.sh` script, §6.1); submit: the `submit` command — so
+the phase's `<phase>-env-setup` module loads resolve against the universe's
 environment (e.g. the container's modules), which is almost always what a
 containerized phase wants. Authors needing host-then-universe ordering use a
 `.py`-emitted script as usual.
 
 **Universe-level env-setup overrides (§4.2).** A `[universes.<name>]` table
-may itself carry `env-setup` / `env-build-setup` / `env-submit-setup` /
-`env-run-setup`, on top of any wrapper keys — or, per the identity case above,
+may itself carry `env-setup` / `build-env-setup` / `submit-env-setup` /
+`run-env-setup` and the provisioning keys, on top of any wrapper keys — or, per the identity case above,
 with no wrapper at all. Where set, a universe's key **replaces** the machine
 `[environment]` key of the same name, **key-by-key**, for any phase executed
 in that universe; a key the universe table omits still falls back to the
 machine's `[environment]` value. The §6.1 concatenation that produces the
-effective per-phase block (`env-setup` then `env-<phase>-setup`) is otherwise
+effective per-phase block (`env-setup` then `<phase>-env-setup`) is otherwise
 unchanged — it simply reads whichever of the two (universe- or
 machine-scoped) key is in force for each half. Concretely, the effective
 env-setup for phase P in universe U is `(U.env-setup ?? machine.env-setup)`
-followed by `(U.env-<P>-setup ?? machine.env-<P>-setup)`. The env block used
+followed by `(U.<P>-env-setup ?? machine.<P>-env-setup)`, and its
+provisioning steps `(U.provision ?? machine.provision)` then
+`(U.<P>-provision ?? machine.<P>-provision)`, an empty value turning a step
+off. The env block used
 for a given phase always resolves against **the universe in effect for that
 phase** — the same universe the resolution chain below picks — so a
 build-phase env override, for instance, only ever applies while building.
@@ -1595,7 +1760,7 @@ This is what lets a machine give its native build the modules it needs
 without a stray `module purge` in the machine-wide `env-setup` clobbering a
 *different* universe's own loads (a real problem for a machine whose
 container universes rely on the container's own module state): scope the
-purge-and-load sequence to `[universes.host].env-build-setup` instead of
+purge-and-load sequence to `[universes.host].build-env-setup` instead of
 `[environment].env-setup`, and leave the machine-wide block minimal. See the
 MDB porting guide's db1 write-up for the full worked example.
 
@@ -1616,18 +1781,18 @@ step below — **even when the machine declares `[universes.host]`**.
    re-expands its wrapper with the **run** variable set, so run-specific binds
    (e.g. `@RUNDIR@`) are correct — it does not reuse the build-time expanded
    wrapper. It is deliberately stronger than the per-script/machine defaults below
-   (only an explicit CLI flag or the optionlist opt-out escapes it). If a runscript
-   variant *also* names a universe that differs from the coerced one, cactup uses
+   (only an explicit CLI flag or the optionlist opt-out escapes it). If the routed
+   runscript *also* names a universe that differs from the coerced one, cactup uses
    the coerced (build) universe and notes the override under `-v`.
-3. **Per-script association.** For **build**, the optionlist variant's
-   `[cactup].universe` (§7.8). For **run** / **submit**, the selected script
-   variant's `universe` field in `[variants.runscript]` / `[variants.submitscript]`
-   (§4.4) — the inline-table variant form `"<v>" = { queues = [...], universe = "…" }`.
+3. **Per-script association.** For **build**, the flavor's
+   `[cactup].universe` (§7.8). For **run** / **submit**, the routed script's
+   `universe` field in `[runscripts]` / `[submitscripts]`
+   (§4.4) — the inline-table route form `"<script>" = { queues = [...], universe = "…" }`.
    This is where "an optionlist/script that only works in a given image names that
    image" lives.
-4. **Machine phase default.** build: `[build].universe`; run/submit: the
-   `default-universe` key of `[variants.runscript]` / `[variants.submitscript]`.
-   Applies to any variant that does not name its own.
+4. **Machine phase default.** build: `[build].universe`; run/submit: none.
+   (The former table-level `default-universe` key is gone: the script tables
+   hold only routes, so a route that needs a universe names it in step 3.)
 5. **The machine's declared `[universes.host]`, if present.** The final
    fallback of every chain is now the machine's own customization of `host`
    (above) — but only *materially* when the machine actually declares
@@ -1650,23 +1815,23 @@ universe no longer exists on this machine; the error names it and points at
 
 **Universe-compatibility routing is a separate mechanism from resolution.**
 Everything above answers "which universe does this phase run *in*." A
-different question — "which run/submit **script variant** does a config get
+different question — "which run/submit **script** does a config get
 routed to, given the universe it was *built* in" — is answered by each
-variant's optional `build-universes` compatibility list (§4.4), not by this
-precedence chain: `sim run`/`sim submit` filter the candidate script variants
+route's optional `build-universes` compatibility list (§4.4), not by this
+precedence chain: `sim run`/`sim submit` filter the candidate routes
 for the chosen queue down to those whose `build-universes` list (if set) includes
 the config's build universe (default `"host"`), before applying the usual
-queue → variant / `default = true` selection (§4.2). This is what lets one
+queue → script selection (§4.2). This is what lets one
 machine ship, say, a native run/submit script and a Singularity run/submit
 script over the **same** queue, distinguished purely by the build universe of
 the config being run/submitted — replacing the older trick of minting a
-synthetic queue per build flavor purely to multiplex script selection (the MDB
+synthetic queue per build universe purely to multiplex script selection (the MDB
 porting guide's db1 write-up documents exactly this collapse). `build-universes` is
-orthogonal to the `universe` / `default-universe` keys used by this
-resolution chain: a variant's `build-universes` list says what build universes it is
+orthogonal to the `universe` key used by this
+resolution chain: a route's `build-universes` list says what build universes it is
 *compatible with* (a selection filter); its own `universe` key (if any, step
 3) says what universe *its execution runs inside* (a wrapper choice) — a
-variant may set either, both, or neither.
+route may set either, both, or neither.
 
 **Where the resolved universe is recorded, and when it is applied.**
 
@@ -1685,7 +1850,7 @@ variant may set either, both, or neither.
   compute node. Note that "resolved" here includes the build-universe coercion
   (step 2): a config built in a universe gets that universe frozen into every
   restart's `restart.toml` by default, so its simulations run in the build image
-  even with no `--universe` flag and no runscript-variant universe.
+  even with no `--universe` flag and no runscript-route universe.
 - **submit:** resolved at `sim submit` time and applied around the `submit`
   command on the spot; nothing about it needs persisting (it affects only the
   one-shot `sbatch`-equivalent invocation).
@@ -1762,6 +1927,22 @@ since what it serves is installed unasked; trailing `/` stripped; default
 `snapshot = false`: they configure the cactup installation, not a job, so
 `knob_snapshot()` never freezes them into restart/build/test metadata.
 
+The path knobs, one per `[paths]` key (`install-home`, `simulation-home`,
+`test-home`, `scratch-home`, `build-cache-home`; §4.2), are maintenance knobs
+too: an absolute path each (validated; read leniently, so a value that is not
+one is no value), winning over the machine's value of that key for the user
+who sets it. Where a job needs one, it is frozen like the machine's would be.
+
+And maintenance knobs for the build cache (D15, §18): `build-cache`
+(`serve`, the default since decision 34, `off`, `record` or `audit`; read
+leniently — garbage, or a database that cannot be read, means `off`), `build-cache-relocate` (`yes`, the default, or `no`: §18.8),
+`build-cache-preserve-exact-warnings` (`false`, the default, or `true`:
+§18.5, decision 31) and `build-cache-size` (§18.9); the store's root is the path knob
+`build-cache-home` (below, §18.7). They are not in the snapshot either, but a build does
+depend on them, on a compute node included: `prepare` resolves them and
+freezes the result into the build attempt (§18.2). `KnobSpec::maintenance` is for exactly that kind of knob: one
+that configures cactup rather than a value a job's templates read.
+
 **Storage:** knobs live in the **global database** (`~/.cactup/database.json`)
 as a single flat map — a `~/.cactup` lives on exactly one machine, so there is
 nothing to key them by. This is consistent with D4 (the global DB holds global
@@ -1810,7 +1991,8 @@ simfactory's two-file config DB and its merge/layering engine
 (`simfactory-docs.txt` §10) are **removed**. Their responsibilities are
 redistributed:
 
-- `user` / `email` / `allocation` / `queue` defaults → **knobs** (§5).
+- `user` / `email` / `allocation` / `queue` defaults → **knobs** (§5);
+  build jobs take theirs from a separate `build-queue` knob (§7.9).
 - `sync-sources` / `sync-parfiles` → gone (no sync, D1).
 - `default-configuration-name` → cactup's **active config** per installation
   (§7).
@@ -1856,7 +2038,7 @@ not at MDB load, so entries for other machines still load and validate
 everywhere. There is no expression evaluation and no ternary sugar. Any MDB
 script that needs conditional logic (e.g. simfactory's
 `@("@CHAINED_JOB_ID@" != "" ? "-d afterany:@CHAINED_JOB_ID@" : "")@`) is
-rewritten as a Python `.py` variant.
+rewritten as a Python `.py` script.
 
 **Submit-time check (`VarSet::check`).** `sim submit`/`sim run` dry-run a
 `.par` parfile against the assembled variable set *before* creating the
@@ -1914,9 +2096,9 @@ environment can judge. `.py` parfiles are not checked.
    substitution errors name the **line**, not a byte offset. The bundled
    MDB comments that had doubled their `@` to survive the old rule were
    un-doubled when this landed.
-2. **`.py` script variants**: the escape hatch for conditional/computed logic.
+2. **`.py` scripts**: the escape hatch for conditional/computed logic.
    **Calling convention (interface contract for MDB authors):** cactup invokes
-   `python3 <variant>.py` once, passing the entire variable set as a single JSON
+   `python3 <script>.py` once, passing the entire variable set as a single JSON
    object on **stdin**. cactup prepends a small fixed preamble that reads stdin
    and binds every variable as a module global, so the author's code sees plain
    globals (`NODES`, `QUEUE`, `CHAINED_JOB_ID`, …). The script writes the final
@@ -1932,40 +2114,86 @@ environment can judge. `.py` parfiles are not checked.
    The JSON-on-stdin choice keeps values out of the process table and argv
    length limits.
 
-   **Refusing the run.** A `.py` variant may `raise CactupError("…")` (the class
+   **Refusing the run.** A `.py` script may `raise CactupError("…")` (the class
    is provided by the preamble) to reject the request outright: cactup prints the
    message as its own error and stops, so nothing is submitted and no restart
    directory is left behind. This is for a request the machine genuinely cannot
    serve — a scheduler rule the topology violates, a combination of variables the
    site rejects — which cactup cannot check itself because the rule lives in the
    script's own arithmetic. Any **other** exception is treated as a bug in the
-   variant and reported with its full Python traceback, so a typo stays
+   script and reported with its full Python traceback, so a typo stays
    debuggable instead of masquerading as a site policy. Multi-line messages are
    preserved; say what to change, not just what is wrong.
 
 **`env-setup` handling — the effective block and where it is injected.** For any
 given phase (build/submit/run), the **effective env-setup** is the concatenation
-of the machine's `env-setup` and that phase's optional `env-<phase>-setup`
-(`env-build-setup` / `env-submit-setup` / `env-run-setup`, §4.2), in that order,
-joined by a newline (an unset companion contributes nothing). The `ENV_SETUP`
-variable (§6.3) always holds the **already-combined** effective block for the
-current phase, so scripts and `.py` authors never see the split. Injection then
+of the machine's `env-setup` and that phase's optional `<phase>-env-setup`
+(`build-env-setup` / `submit-env-setup` / `run-env-setup`, §4.2), in that order,
+joined by a newline (an unset companion contributes nothing). The phase's
+**provisioning steps** (§4.2) follow it: `provision`, then `<phase>-provision`,
+each unset one contributing nothing, each written as
+
+```sh
+# build-provision, in a subshell: what it sets stays there; a failure stops this script
+(
+set -e
+<the key's text>
+:
+)
+case $? in 0) ;; *) exit $? ;; esac
+```
+
+so what it exports is lost when it ends, it runs under `set -e` wherever it is
+(not `( … ) || exit`, which would turn that off inside), and its failure ends
+the script with its status (under the build script's own `set -e` the
+subshell's failure already does). The `:` after the text makes the step's
+status exactly what `set -e` makes of it: a command that fails stops the step
+(and the script), `exit N` gives `N`, and a false `a && b` as the text's last
+line, which `set -e` passes over, is no failure (without the `:` the step's
+status would be that last command's, stricter than the same lines in a
+setup). A setup may name what provisioning creates (`PATH` and other
+exports of directories it makes) but must not source or run it: the setup
+runs first, and on a host where the thing does not exist yet `. file` of a
+missing file is fatal in `sh`, so the script would die before provisioning
+could make it. Write the exports instead (rostam's `arm-conda` does). For a
+queued job, `provision` runs twice, as `env-setup` does: in the submit
+script (the job's script, where the scheduler starts it) and again in the
+run or build script that job runs. The `ENV_SETUP` variable (§6.3) always holds
+the **already-combined** block for the current phase, the effective setup and
+then the provisioning steps, so scripts and `.py` authors never see the split
+and a `.py` that emits `ENV_SETUP` provisions with no change. Injection then
 depends on the artifact:
 
 - **Build (`cactup build`, §7.2):** the build has no submit/run *script* — cactup
   drives `make` directly. cactup sources the effective build env-setup
-  (`env-setup` + `env-build-setup`) in the shell it spawns for the `make
+  (`env-setup` + `build-env-setup`) in the shell it spawns for the `make
   <config>-config` / `make <config>` / `make <config>-utils` invocations, so the
   compiler/MPI modules are loaded exactly as they will be at run time. (This is
-  new relative to simfactory, which never applied `env-setup` to builds.)
+  new relative to simfactory, which never applied `env-setup` to builds.) The
+  build script is `set -e`, `cd` to the Cactus root, the setup, the
+  provisioning steps (`provision`, `build-provision`), then the `make` steps.
+  The attempt freezes the two apart (`BuildMeta::build_env`,
+  `BuildMeta::build_provisioning`, D11): the setup alone is what the build
+  cache digests (§18.5) and `cache doctor` runs (§18.12), and the realclean
+  step `execute` adds when the flesh has moved since `prepare` runs the setup
+  alone.
+- **The scheduler's own commands** (`submit`, `blocking-submit`, `get-status`,
+  `get-status-many`, `stop`, `exec-host`, §10) get the effective submit
+  env-setup prepended, the setup alone: `submit` and `blocking-submit` the
+  submit universe's (its keys over the machine's), the others the machine's
+  own `[environment]` (`env-setup` + `submit-env-setup`). They run on the
+  login node, the queries over and over (`sim list`), where provisioning
+  would cost every time and is never what they need.
 - **`.sh` run templates:** cactup **auto-prepends** the effective run env-setup
-  (`env-setup` + `env-run-setup`) to the generated script **right after the
+  (`env-setup` + `run-env-setup`, then `provision` and `run-provision`) to the
+  generated script **right after the
   shebang line**, exactly as simfactory did for the base `env-setup`
   (`simfactory-docs.txt` §6.4, §18 `ExecuteCommand`) — a runscript carries no
   scheduler directive block, so there is nothing ahead of the shebang that
   insertion could disturb.
 - **`.sh` submit templates:** cactup **auto-prepends** the effective submit
-  env-setup (`env-setup` + `env-submit-setup`), but **not** necessarily right
+  env-setup (`env-setup` + `submit-env-setup`, then `provision` and
+  `submit-provision`), but **not** necessarily right
   after the shebang. The insertion point is **after the leading run of
   `#`-comment and/or blank/whitespace-only lines** — i.e. immediately before
   the first substantive (non-comment, non-blank) line — rather than
@@ -1982,21 +2210,21 @@ depends on the artifact:
   env-setup block appended at the end instead. A scheduler-less submitscript
   (no directive lines at all — `generic`, mel5) reduces to "right after the
   shebang," identical to the runscript rule above.
-- **`.py` submit/run variants:** cactup does **not** auto-prepend — the `.py`
+- **`.py` submit/run scripts:** cactup does **not** auto-prepend — the `.py`
   author has full control over the emitted script and is responsible for placing
   env-setup where they want it. cactup makes the combined value available as the
   global **`ENV_SETUP`** (string) — and, like every variable, as a literal
   `@ENV_SETUP@` token — so the author typically emits `print(ENV_SETUP)` near the
   top of the generated script. (This is the deliberate consequence of the `.py`
-  variant being the "cactup gets out of the way" escape hatch.)
+  form being the "cactup gets out of the way" escape hatch.)
 
 ### 6.2 Substituted artifacts
 
-- Optionlist (selected variant) → substituted and written into the config's
+- Optionlist (selected flavor) → substituted and written into the config's
   build inputs (§7).
-- SubmitScript (queue-selected variant) → substituted at submit time, written
+- SubmitScript (queue-routed script) → substituted at submit time, written
   into the restart metadata, and handed to the scheduler.
-- RunScript (queue-selected variant) → substituted at run time.
+- RunScript (queue-routed script) → substituted at run time.
 - Parfile → resolved at **run** time (when the topology and restart are known),
   in one of the two template kinds above — exactly like submit/run scripts, and
   chosen by the parfile's extension (§8.2):
@@ -2018,7 +2246,7 @@ depends on the artifact:
     is written as `<basename>.par` and used **as-is**: cactup does **not**
     post-substitute it (the author already has every variable as a global —
     including the typed companions — and interpolates in Python). Unlike
-    submit/run `.py` variants there is no `env-setup` to place; `ENV_SETUP` is a
+    submit/run `.py` scripts there is no `env-setup` to place; `ENV_SETUP` is a
     submit/run-script concern only.
 
 ### 6.3 The canonical variable set
@@ -2095,12 +2323,14 @@ fact, **not** MPI ranks; from `max-cpus-per-node`),
 rather than one),
 `MEMORY` (per-node MB), `THREADS_PER_CPU` (from `threads-per-cpu`, default 1;
 §8.5 assumption), `ENV_SETUP` (the **effective** env-setup
-block for the current phase — `env-setup` plus the phase's `env-<phase>-setup`,
-already combined; auto-prepended for `.sh`, author-emitted for `.py` — §6.1).
+block for the current phase — `env-setup` plus the phase's `<phase>-env-setup`,
+already combined, followed by the phase's provisioning steps, each in its
+subshell (generation 3); auto-prepended for `.sh`, author-emitted for `.py` —
+§6.1).
 
 **Build-time only** (optionlists/build): `MAKEJOBS`, `DEBUGGER`, `RUNDEBUG`.
 
-**Build-submit-only** (§7.9; present only for `buildsubmitscript` variants and
+**Build-submit-only** (§7.9; present only for build-submit scripts and
 the frozen var set a build attempt carries — never leaked into normal
 sim/config substitution): `CONFIG_DIR` (the config's absolute on-disk
 directory, `<Cactus root>/configs/<name>` — passed to the compute-node
@@ -2120,7 +2350,13 @@ gets the same job-shape and identity variables, just no `CHAINED_JOB_ID`
 `SIMULATION_NAME`/`SIMULATION_ID`/`SIMULATION_DIR`/`RUNDIR`/`RESTART_ID`/
 `PARFILE`/`SIM_HOME`, and none of the testsuite-only group below either. This
 mirrors the no-leak rule §11.9 states for test runs: each phase's variable set
-is exactly what that phase's scripts can legitimately consume.
+is exactly what that phase's scripts can legitimately consume. A
+build-submit script's `ENV_SETUP` is the submit phase's block (§6.1) in the
+**submit** universe (the route's `universe`, else the declared `host`), the
+very block a `.sh` build-submit script gets prepended, so `.sh` and `.py`
+agree; never the build universe's, which is where `make` runs, not the batch
+script. (Until generation 3 a `.py` build-submit script got the build
+universe's setup there.)
 
 **Testsuite-only** (present only for `cactup test run`/`test submit` scripts and
 test runs — never leaked into normal sim/config substitution;
@@ -2130,7 +2366,7 @@ existing §6.3 variables a test runscript uses for `make @CONFIGURATION@-testsui
 and `CCTK_TESTSUITE_RUN_PROCESSORS`.)
 
 Dropped (no longer produced): the simfactory proc-layout names above, the bare
-`SUBMITSCRIPT` machine key (variants replace it), and every remote/archive
+`SUBMITSCRIPT` machine key (queue-routed scripts replace it), and every remote/archive
 variable.
 
 ---
@@ -2143,7 +2379,7 @@ Local to the active installation. Replaces `sim-build` (`simfactory-docs.txt`
 ### 7.1 Commands
 
 ```
-cactup build <name> [-f] [--thornlist P] [--variant V] [--universe U | --no-universe] [flags…]
+cactup build <name> [-f] [--thornlist P] [--flavor F] [--universe U | --no-universe] [flags…]
                                     # foreground or queued, auto-selected — §7.9
 cactup config show [<name>]
 cactup config use <name>
@@ -2159,8 +2395,8 @@ cactup config delta [<name>]       # divergence from the last build (§3.3)
   subcommand. `--thornlist` defaults to the thornlist the config was last
   built from (§7.5), falling back to
   `<Cactus root>/thornlists/installation-default.th` for a fresh config.
-  `--variant` selects the optionlist variant (required iff the machine has >1
-  optionlist variant — §4.4).
+  `--flavor` selects the optionlist flavor (required iff the machine has >1
+  flavor and none is marked default — §4.4).
   `--universe <U>` runs the build inside a declared universe (e.g. an Apptainer
   image), `--no-universe` forces the host context; both override the
   optionlist/machine defaults (§4.8).
@@ -2170,8 +2406,8 @@ cactup config delta [<name>]       # divergence from the last build (§3.3)
   CLI > stored config metadata > default.
 - `show` (no arg): list configs with `[built <date>]` / `[incomplete]` status
   (port of `list-configurations`).
-- `show <name>`: print stored metadata (variant, thornlist, flags, build/config
-  IDs, optionlist).
+- `show <name>`: print stored metadata (flavor, where the binary runs,
+  thornlist, flags, build/config IDs, optionlist).
 - `use <name>`: set the installation's active config.
 - `delete <name>`: remove the config build and its metadata, and GC any now-orphaned
   `CACHE/exe/<build-id>` (§8.1). If `<name>` is the active config, the installation
@@ -2207,7 +2443,7 @@ scratch/`, `config-data/cctk_Config.h` (presence ⇒ complete), and the
 options=<OptionList>`, then `make <config>`, `make <config>-utils`; a `VERSION:`
 line change in the optionlist forces a full rebuild). Each `make` runs in a shell
 that has first sourced the effective **build** env-setup (`env-setup` +
-`env-build-setup`, §4.2/§6.1), so the build sees the same compiler/MPI modules
+`build-env-setup`, §4.2/§6.1), so the build sees the same compiler/MPI modules
 the run will. When a **universe** is resolved for the build (§4.8), that whole
 env-setup-plus-`make` shell snippet is what cactup wraps — i.e. the build runs
 inside the universe (container, chroot, …), with env-setup applied inside it.
@@ -2223,11 +2459,11 @@ locate the right attempt automatically; there is nothing to `tail` by hand.
 
 - **Submit/Run scripts are no longer baked into the config** at build time.
   simfactory copied a `SubmitScript`/`RunScript` into `configs/<name>/`; cactup
-  resolves the correct *variant* at submit/run time based on the chosen queue
-  (§4.4). The config only owns the **optionlist variant** (which genuinely
+  routes the correct *script* at submit/run time based on the chosen queue
+  (§4.4). The config only owns the **optionlist flavor** (which genuinely
   affects the binary). This removes `remove-submitscript` and the
   `--no-submitscript` dance.
-- The OptionList variant is chosen via `--variant` and recorded in metadata.
+- The optionlist flavor is chosen via `--flavor` and recorded in metadata.
 
 ### 7.4 Config metadata (per-installation on-disk TOML — D6)
 
@@ -2238,18 +2474,16 @@ Stored next to the build, **not** in the global DB:
 ```
 
 ```toml
-schema = 1
+schema = 2
 name = "sim-gpu"
-variant = "gpu"                 # which optionlist this config is built from: EXACTLY ONE of
-# optionlist = "/home/me/my.cfg"  # `variant` (an MDB variant) or `optionlist` (the file a
-                                 # --optionlist build came from), never both and never
-                                 # neither, and the one a bare rebuild uses (§7.8)
-gpu = true                      # copied from the optionlist [cactup].gpu at build (D12)
-compatible-queues = ["gpu"]     # copied from the optionlist [cactup].compatible-queues (D12)
+flavor = "gpu"                  # which optionlist this config is built from: EXACTLY ONE of
+# optionlist = "/home/me/my.cfg"  # `flavor` (one of the machine's flavors) or `optionlist`
+                                 # (the file a --optionlist build came from), never both and
+                                 # never neither, and the one a bare rebuild uses (§7.8)
 thornlist = "thornlists/installation-default.th"
 universe = "et-sif"             # resolved build universe; omitted when built bare/in host —
                                  # treated as "host" wherever a build universe is consulted
-                                 # (script-variant `build-universes` filtering, §4.4; run coercion, §4.8)
+                                 # (script `build-universes` filtering, §4.4; run coercion, §4.8)
 coerce-run-universe = true      # snapshotted from optionlist [cactup]; default true (§4.8, §7.8)
 config-id = "…"                 # replaces CONFIG-ID
 build-id = "…"                  # replaces BUILD-ID
@@ -2258,11 +2492,39 @@ debug = false
 optimize = true
 unsafe = false
 profile = false
+[runs-on]                       # where the binary may run, copied from the flavor's header (D12)
+queues = ["gpu"]
+gpu = true
+# default-queue = "gpu"         # present only when the flavor names one (§4.4)
 ```
 
-`gpu` and `compatible-queues` are snapshotted from the chosen optionlist
-variant's `[cactup]` header at build time (§7.8) so that `sim submit` can
-enforce queue compatibility (§4.4) without re-reading the MDB. The machine the
+`[runs-on]` is snapshotted from the chosen flavor's `[cactup.runs-on]` at build
+time (§7.8) so that `sim submit` can enforce queue compatibility (§4.4) without
+re-reading the MDB. It constrains the config's simulations and test runs only,
+never the queue a build of it is submitted to (§7.9).
+
+**Schema 2, and the first read-side upgrade.** Schema 2 renamed `variant` to
+`flavor` and grouped the flat `gpu`/`compatible-queues` keys as `[runs-on]`
+(`queues`/`gpu`). A schema-1 record — or one predating the `schema` key — is
+upgraded **in memory on every read**, in one place (`ConfigMeta::from_table`),
+and that covers both copies on disk: `cactup-config.toml` and the record
+embedded in each build attempt's `build.toml` (whose own top-level `variant`
+key is renamed the same way when the attempt is opened). A read never rewrites
+the file — rewriting on read could race a concurrent build storing a newer
+record — so a file reaches schema 2 the next time it is stored. The upgrade is
+kept indefinitely: a build queued by an older cactup runs that older binary on
+the compute node (`@CACTUP@`, §17.2) and writes a schema-1 record when it
+finishes. An older binary cannot read a schema-2 record, and one path reaches
+that without anyone running mixed versions on purpose: a build queued by an
+older cactup reads the config's record when its compute-node `execute`
+starts, so if the newer cactup stored that record in the meantime, the queued
+build fails to parse it. The newer binary stores a record only when it builds
+the config — which `build` refuses while an attempt of it is queued or
+running, unless forced with `-f` — or in the one-time legacy thornlist
+retarget, so the window is narrow and accepted. This is the
+"migration story designed when a breaking bump happens" that §2.1 defers to,
+and the pattern for the next one: a read-side upgrade in one place, the
+record's own `schema` bumped, never a rewrite on read. The machine the
 config was built on is recorded too (`machine = "<name>"`; a build is not
 portable across machines) and **enforced**: `build` of an existing config,
 `sim create`/`submit`/`run` and `test run`/`submit` refuse a config whose
@@ -2284,11 +2546,21 @@ run-time wrapper is re-resolved and re-expanded from the current MDB (§4.8).
 **source optionlist TOML** verbatim to `configs/<name>/cactup-optionlist.toml`,
 and the chosen **source thornlist** verbatim to
 `configs/<name>/cactup-thornlist.src.th` (§7.5).
-The rebuild decision (§7.8 rule 5) diffs the freshly-selected source TOML against
-this stored copy; *any* difference triggers a full realclean + reconfigure +
-rebuild. This is the source-of-truth for "did the optionlist change?" — the
-rendered native file is never diffed (it exists only for the Cactus build system
-to consume, §7.8). The recorded **`universe`** is compared the same way (its value
+The rebuild decision (§7.8 rule 5) compares the freshly-selected optionlist
+against this stored copy **as what reaches the build**: both are reduced to
+their rendered native options, with the `[cactup]` header dropped, and any
+difference triggers a full realclean + reconfigure + rebuild. A comment,
+layout or header edit therefore rebuilds nothing — the header's universe and
+thorn toggles have their own checks (below, §7.5), and the rest of it
+(`runs-on`, `coerce-run-universe`, `default`, `description`) describes the
+binary or the flavor, not the compile. (An earlier revision diffed the
+verbatim text; the generation-2 migration, which rewrote every shipped
+optionlist's header, would have cost every existing config a from-scratch
+rebuild.) A stored copy that no longer parses counts as changed. Because a
+header edit no longer reaches the record through a rebuild, every `cactup
+build` — an up-to-date one included — refreshes the record's header snapshot
+(`runs-on`, `coerce-run-universe`), the optionlist it is on record as built
+from, and this stored copy. The recorded **`universe`** is compared the same way (its value
 can come from CLI/machine default, not just the optionlist TOML, so it is checked
 separately): a resolved universe that differs from the stored one also forces a
 full realclean + rebuild, since a host build and an in-container build are not
@@ -2353,6 +2625,13 @@ landed:
   own `.d` dependency tracking already gets body-code edits right, and
   hashing bodies would discard a thorn's whole build directory on every such
   edit — the opposite of what this tracking is for.
+- **`thorn-stamps`** — thorn name → a hash of the path, mtime and size of
+  every file `thorn-shapes` lists, mtime-based like the `make` that consumes
+  them. It is what sees a body edit to a thorn git does not track — one
+  generated into a checkout without being committed, or one in no repo at
+  all — which `sources` cannot: its worktree summary counts tracked files
+  only. A config rebuilt off regenerated kernels in such a thorn otherwise
+  read as up to date and never recompiled them.
 
 **`.cactupignore`.** Editor droppings under `src/` (JupyterLab's
 `.ipynb_checkpoints/`, vim's `.*.swp`) would otherwise each read as a file
@@ -2361,7 +2640,7 @@ dotfiles was rejected as too blunt. A `.cactupignore` has exactly `.gitignore`
 syntax and semantics (`!` negation, trailing `/` for directories, anchoring by
 a leading or middle `/`, `**`, comments, escaping; a bad pattern is skipped as
 git skips it) and exempts what it matches from the `thorn-shapes` file list
-only — never from the `sources` map above (HEAD plus tracked-file edits) or
+(and so from `thorn-stamps`) only — never from the `sources` map above (HEAD plus tracked-file edits) or
 anything else. Locations mirror git:
 
 - per directory, from the thorn's repo root (`repos/<repo>`, what the URL
@@ -2414,7 +2693,7 @@ thorn (an uncommented thorn line — a line the list already carries as
 `#DISABLED` is not a conflict) that a `disabled-thorns` array then switches
 back off, `build prepare` prints a loud yellow warning naming each such thorn,
 the `disabled-thorns` entry that matched it, and which layer that entry came
-from: the machine (§7.5) or the selected optionlist variant (§7.8). Without it
+from: the machine (§7.5) or the selected optionlist flavor (§7.8). Without it
 the drop is completely silent — the user asked for the thorn, the processed
 list quietly omits it, and the absence only surfaces much later as a missing
 thorn at runtime. The warning is informational; it never fails the build.
@@ -2486,17 +2765,25 @@ first line a `VERSION` date), consumed directly by
 `make <config>-config options=<file>`. cactup authors optionlists as **TOML**
 and **renders** them to that native format before invoking make.
 
-**TOML schema** (`mdb/<m>/optionlists/<variant>.toml`):
+**TOML schema** (`mdb/<m>/optionlists/<flavor>.toml`). The machine's flavors
+are exactly the `*.toml` files in `optionlists/`, named by file stem; nothing
+in `meta.toml` lists them (the former `[variants.optionlist]` table is gone).
 
 ```toml
 [cactup]                         # cactup-only metadata; NOT emitted to the native file
-gpu = true                       # binary capability (D12)
-compatible-queues = ["gpu"]      # which queues this build may be submitted to (D12)
+description = "CUDA build"       # optional: shown by `machine show --flavors`
 default = false                  # optional, default false: marks the implicit choice when the
-                                 # machine lists several optionlist variants (§4.4)
-universe = "et-sif"              # optional: build this variant inside this universe (§4.8)
+                                 # machine has several flavors (§4.4)
+universe = "et-sif"              # optional: build this flavor inside this universe (§4.8)
 coerce-run-universe = true       # optional, default true: sims of this config run in `universe` too (§4.8);
                                  # set false to opt out (run resolves normally, no build-universe inheritance)
+# enabled-thorns / disabled-thorns = [...]   # optional per-flavor thorn toggles (§7.5)
+
+[cactup.runs-on]                 # optional: where the BUILT BINARY may run (D12)
+queues = ["gpu"]                 # which queues; empty/omitted = any queue
+gpu = true                       # binary needs a GPU context; default false
+default-queue = "gpu"            # optional: a sim/test's queue when neither -q nor the
+                                 # `queue` knob names one; one of `queues` (§4.4, §8.5)
 
 [options]                        # rendered to native NAME = value lines
 VERSION = "2024-06-01"           # first emitted line; a change forces full rebuild
@@ -2506,11 +2793,19 @@ CFLAGS = "-O2 -g @SOME_TEMPLATED_VALUE@"
 # … one key per native option …
 ```
 
-**Render rules (deterministic; the rendered native file is fed to Cactus only —
-it is never diffed for the rebuild decision):**
+**The header is closed.** `[cactup]` and `[cactup.runs-on]` reject keys they
+do not model, exactly like `meta.toml` (§4.2): a typo'd or leftover key (a flat
+`gpu` or `compatible-queues` from before `runs-on` existed, say) is a load-time
+error naming it, never a silently skipped check. `runs-on` describes the
+binary, so it is consulted by `sim submit`/`sim run` and `test run`/`test
+submit` only (escapable with `--force-queue`, §4.4) — never by `build submit`,
+whose job queue is only where `make` runs (§7.9).
 
-1. Only the `[options]` table is rendered. `[cactup]` is stripped (`gpu`,
-   `compatible-queues`, and `coerce-run-universe` snapshotted verbatim into the
+**Render rules (deterministic; the rendered options are what Cactus is fed,
+and also what the rebuild decision compares, §7.4):**
+
+1. Only the `[options]` table is rendered. `[cactup]` is stripped
+   (`[cactup.runs-on]` and `coerce-run-universe` snapshotted verbatim into the
    config metadata, §7.4; `[cactup].universe` feeds universe resolution —
    precedence in §4.8 — and the *resolved* value is what lands in the metadata).
 2. Emit `VERSION` first, then the remaining keys in **TOML document order**
@@ -2540,21 +2835,21 @@ it is never diffed for the rebuild decision):**
 **User-supplied optionlists (`cactup build --optionlist PATH`).** A build may be
 made from a file outside the MDB entirely. The porting loop (edit a `.cfg`,
 rebuild, read the error, repeat) and the one-off experiment both want an
-optionlist that does not yet deserve to be a machine variant, and requiring one
+optionlist that does not yet deserve to be a machine flavor, and requiring one
 to be installed into `mdb/<m>/optionlists/` first turns a two-minute iteration
-into an MDB edit. `--optionlist` displaces variant selection completely and is
-therefore mutually exclusive with `--variant`. Three spellings are accepted,
+into an MDB edit. `--optionlist` displaces flavor selection completely and is
+therefore mutually exclusive with `--flavor`. Three spellings are accepted,
 auto-detected, and never intermixed within one file:
 
 1. **The MDB shape above** — a `[cactup]` table plus an `[options]` table. The
-   `[cactup]` keys are honored exactly as if the file sat in the MDB: `gpu` and
-   `compatible-queues` feed the D12 queue cross-check (§4.4), `universe` feeds
+   `[cactup]` keys are honored exactly as if the file sat in the MDB:
+   `[cactup.runs-on]` feeds the D12 queue cross-check (§4.4), `universe` feeds
    §4.8 resolution, and `enabled-thorns`/`disabled-thorns` apply on top of the
    machine's. (`default` is meaningless here — the file was named explicitly —
    and is ignored.)
 2. **The `[options]` table alone**, with or without its header line. There is no
-   `[cactup]` table, so the header defaults apply: no `gpu` claim, and an empty
-   `compatible-queues`, i.e. no queue restriction at all.
+   `[cactup]` table, so the header defaults apply: no `gpu` claim, and empty
+   `runs-on` queues, i.e. no queue restriction at all.
 3. **A native Cactus `.cfg`** — `NAME = value` lines with `#` comments, the
    format simfactory consumed directly and the format every existing optionlist
    in the wild is already written in. Header defaults as in (2). Every value is
@@ -2577,46 +2872,48 @@ silently build the wrong binary. A `[cactup]` table decides form 1; an
 is an error, as is a file that declares no options at all.
 
 The config metadata (§7.4) records **which optionlist, of one kind or the
-other** — a `variant = "cuda"` naming an MDB variant, or an `optionlist =
+other** — a `flavor = "cuda"` naming an MDB flavor, or an `optionlist =
 "/abs/path"` naming a user file, never both and never neither. The two are
 alternatives, not a fallback chain, because the flags that set them are mutually
 exclusive; the metadata is modeled as a sum so a config that is somehow both
 cannot be written down. The recorded path is canonicalized, so `config show`
 names the file the build came from wherever a later rebuild runs. The rebuild
 trigger's first input — the source snapshot — is the user's file text verbatim,
-exactly as it is for an MDB variant, so editing that file forces the same full
-rebuild an MDB optionlist edit does.
+exactly as it is for an MDB flavor, so editing that file's options forces the
+same full rebuild an MDB optionlist edit does.
 
 **Stickiness.** A later bare `cactup build` rebuilds from whichever the config
 records — the flag does not have to be repeated, exactly as `--thornlist` does
-not (§7.5). This is true of `--variant` too: **all three** of the flags that say
+not (§7.5). This is true of `--flavor` too: **all three** of the flags that say
 what a config is made of are remembered, so there is no rule to learn about
 which ones are. The resolution order is:
 
 1. `--optionlist PATH` — explicit; a hard error if unreadable.
-2. `--variant NAME` — explicit; how a config is deliberately moved onto, or
-   between, the machine's own variants.
+2. `--flavor NAME` — explicit; how a config is deliberately moved onto, or
+   between, the machine's own flavors.
 3. whichever of the two the config already records, since it records exactly
    one:
-   - a **variant**, when the machine still lists it. When the machine has since
-     renamed or dropped it, this is a **hard error** naming the missing variant
-     and listing what the machine now offers — there is nothing to fall back on,
-     because a snapshot records the text one build used, not a standing
-     definition of a variant.
+   - a **flavor**, when the machine still has it. When the machine has since
+     renamed or dropped it, this is a **hard error** naming the missing flavor
+     and listing what the machine now offers ("config \"c\" was built with
+     optionlist flavor \"X\", which machine \"m\" no longer has (it now offers:
+     …) — pass --flavor to pick one of those, or --optionlist to build from a
+     file") — there is nothing to fall back on, because a snapshot records the
+     text one build used, not a standing definition of a flavor.
    - the **`--optionlist` path**, falling back to that config's verbatim
      snapshot when the path has since moved or been deleted, so the config stays
      rebuildable and the file going away cannot quietly change what gets built.
      Preferring the live file is deliberate: editing an optionlist in place and
      rebuilding is the whole point of naming one.
-4. the machine's own variant selection (§4.4).
+4. the machine's own flavor selection (§4.4).
 
 Steps 1 and 2 are alternatives, and so are the two halves of step 3. Supplying
-either flag **displaces** what the config was on record as being — `--variant`
+either flag **displaces** what the config was on record as being — `--flavor`
 on a config built from a file moves it onto the MDB, `--optionlist` on a config
-built from a variant moves it off. Whichever flag was passed most recently is
+built from a flavor moves it off. Whichever flag was passed most recently is
 what sticks, in both directions; neither ever falls back to the other.
 
-This replaces an earlier guard that refused a bare rebuild whenever the variant
+This replaces an earlier guard that refused a bare rebuild whenever the flavor
 a config recorded differed from what the machine would now resolve to. The guard
 was there to stop a bare rebuild silently building a different flavor; step 3
 stops that by construction instead, by rebuilding what the config actually
@@ -2630,8 +2927,8 @@ config was last built with:
 2. the resolved build **universe** against the recorded one (§7.4);
 3. the **processed thornlist** against the stored
    `configs/<name>/cactup-thornlist.th` (§7.5);
-4. each thorn's recorded **provider** and **shape** (§7.4) against the stored
-   `thorn-providers`/`thorn-shapes` maps — independent of the thornlist-text
+4. each thorn's recorded **provider**, **shape** and **stamp** (§7.4) against
+   the stored `thorn-providers`/`thorn-shapes`/`thorn-stamps` maps — independent of the thornlist-text
    diff above, since a thornlist can be byte-for-byte unchanged while what a
    name resolves to underneath it, or what that thorn contains, is not;
 5. the live **source-tree state** against the stored `sources` map (§7.4) — a
@@ -2657,7 +2954,7 @@ the reconfigure step copies into place. Adding a thorn is routine, so charging a
 from-scratch rebuild for it would be a poor trade; `-f` still forces one.
 Diffing the *processed* text (not the source) makes this one comparison cover a
 source-thornlist edit, a switch to a different thornlist file, and a change to
-the machine's or variant's `enabled-thorns`/`disabled-thorns` — none of which the
+the machine's or flavor's `enabled-thorns`/`disabled-thorns` — none of which the
 optionlist diff can see.
 
 A thorn whose provider or shape differs also triggers a reconfigure + `make`
@@ -2675,6 +2972,13 @@ thorn's existing source-file bodies do **not** appear in either map and so
 never trigger this: `make` recompiles what such an edit affects on its own,
 the same trust extended to an edited flesh above.
 
+A thorn whose **stamp** alone differs — files rewritten, nothing added or
+removed — triggers a reconfigure + `make` and deletes nothing, the same
+response as an edited worktree below. It is the weakest of the source-derived
+reasons and only ever replaces "up to date": for a thorn in a tracked repo the
+worktree summary sees the same edit first. A thorn missing from the fresh
+stamps is not a stamp change; its shape entry already reports it.
+
 A **source-tree** difference is graded by what moved. A repo on a different
 commit, or one that can no longer be read at all, triggers a reconfigure +
 `make`; the same for the **flesh** triggers a full realclean + rebuild, since
@@ -2689,6 +2993,31 @@ Only when all five inputs match does a complete config short-circuit as up to
 date. The baseline for all five is recorded on **every** build, including under
 `-f`: a config that always rebuilds with `-f` could otherwise never acquire one
 to diff a later plain rebuild against.
+
+The processed thornlist may be a CRL list or a plain Cactus `ThornList`. A
+plain list is resolved through the tree: each `arrangements/<A>/<T>` that links
+into `repos/<repo>/…` counts as that repo, and the flesh is whatever repo the
+root `Makefile` links into. A thorn that is no such link keeps its provider and
+shape entries but has no source state. Its stamp still sees its files edited,
+but nothing sees the flesh's (when the `Makefile` is not a link) nor a thorn's
+without a stamp, so neither the up-to-date line nor `config delta` may then
+claim "same sources" without naming them. Resolving reads the tree rather than the
+installation's CRL list, because the links are what the build compiles from.
+
+A source tree cactup cannot read at all yields no reading. That happens when the
+processed thornlist is neither kind of list, a CRL list names no git repo, no
+thorn of a plain list is a link into `repos/`, none of the repos is on disk, or
+none of them opens. No reading means no baseline and no source diff: the
+config behaves as it did before source tracking. That is never silent. Every
+build of such a config says why there is no reading, the up-to-date line does
+not claim "same sources", and `config delta` names the cause rather than
+advising a rebuild that cannot record a baseline either.
+
+Two flags override the short-circuit. `-f` forces `Full` (realclean +
+reconfigure + build). `--reconfig` forces `Incremental` (reconfigure + `make`,
+no realclean), but only in place of `UpToDate`: any decision the diffs reached
+on their own stands. `--reconfig` is the only incremental rebuild available
+for a config whose sources cactup cannot track.
 
 ---
 
@@ -2760,7 +3089,7 @@ native route has no polling.
 `--block` is an error when the submit path is not taken at all: on `cactup
 build run`; and on a bare `cactup build` that resolves to the foreground
 because `[build].default-action = "run"`, because the machine cannot submit
-builds (no `[variants.buildsubmitscript]` variant and/or no
+builds (no `[buildsubmitscripts]` route and/or no
 `[scheduler].submit`), or because `--virtual-executable` was given (which is
 never queued regardless of what the machine would otherwise pick). The error
 names *which* of those decided it, since the fix differs in each case — drop
@@ -2777,7 +3106,7 @@ worse than one that simply never combines. `--follow` already waits for the
 build; `--block` is what you use when you want the wait without the output.
 
 **Auto-selection.** Submitting a build is *possible* on a machine iff it
-declares at least one `[variants.buildsubmitscript]` entry **and**
+declares at least one `[buildsubmitscripts]` route **and**
 `[scheduler].submit` (§4.2) — both are required, since a buildsubmitscript with
 nothing to hand it to is as useless as a submit command with nothing to run.
 `[build].default-action` then decides what an unqualified `cactup build` does:
@@ -2796,12 +3125,34 @@ a hard error for the same reason, rather than a silent fallback to the
 foreground — a user who explicitly asked to submit should not be surprised by
 a login-node compile.
 
+**The build job's queue is not the binary's.** A build job runs `make`, not
+the binary it produces, so nothing that describes where a *binary* may run
+constrains it: the flavor's `[cactup.runs-on]` `queues` and `gpu` (D12), and a
+queue's `build-universes` list (§4.4), are checked by `sim` and `test` jobs
+only. A CPU-only optionlist may be compiled on a GPU partition and a CUDA one
+on a CPU partition; the build queue is `-q`, else the `build-queue` knob,
+else `[build].queue`, else the machine's default queue, checked against the
+machine alone. `build-queue` is the build-job counterpart of the `queue` knob
+(which build jobs never read) and follows the same rule: the user's standing
+choice outranks the MDB's `[build].queue`, but a knob naming a queue this
+machine cannot queue a build on — no such queue, or no build-submit script
+serves it — is passed over with a one-line note. (That check cannot see the
+scripts' `build-universes` lists: the config's build universe is resolved
+later, in `prepare`. A knob naming a queue served only by another universe's
+build-submit script is therefore kept, and stops at routing with the usual
+"no build-submit script serves queue" error rather than being passed over.) The
+buildsubmitscript is then routed by that queue exactly as a submitscript is —
+filtered by its `build-universes` list against the config's build universe,
+which here is the universe the job's own `make` runs in — and by nothing
+else: `--flavor` names the optionlist being built, never the script that
+queues it.
+
 **The prepare/execute split, and what is frozen at submit time.** A build's
 work splits into two phases with different privileges (D11):
 
 - **`prepare`** — everything that needs the MDB, the installation's git repos,
-  or the knobs: resolving the optionlist variant and universe, resolving the
-  thornlist and its machine/variant thorn toggles, making the rebuild decision
+  or the knobs: resolving the optionlist flavor and universe, resolving the
+  thornlist and its machine/flavor thorn toggles, making the rebuild decision
   (§7.8), and staging the rendered optionlist, processed thornlist, and
   assembled `make` step list. This runs **only on the login node**, whether the
   build that follows is a foreground `build run` or a queued `build submit`.
@@ -2899,6 +3250,50 @@ wanted: submitting refuses (unless `-f`) whenever an attempt is already live,
 using the same liveness protocol §8.3 uses to decide whether a restart is
 really dead — the per-config lock (below) held, or the attempt's
 `running.lock`/heartbeat still fresh, or its scheduler status still live.
+The scheduler is asked only about a submitted attempt: a foreground
+attempt's `job-id` is the pid of the cactup that ran it, which `running.lock`
+alone vouches for; once that cactup is gone the pid can be any other
+process's, and `-f` would stop it. `build list`, `show` and `prune` ask only
+about one that has recorded no outcome (a finished history costs no
+scheduler round-trip). The guard before a new attempt and `build stop` also
+ask, on a batch scheduler, about the latest attempt's job after its outcome
+was recorded, within the requeue window (14 days after its `finished`,
+§10): a scheduler that requeues it (preemption, `scontrol requeue`)
+lists it, and it is then a live attempt, though `list` and `show` show its
+recorded outcome until it runs. After the outcome a job listed in a state
+the machine's patterns read (queued, held, running) is "still listed"
+(§10; one in a state no pattern reads, as Torque's completed `C` or
+Slurm's `CD`, is the ended job): queued again, or leaving the queue, which cactup
+cannot tell apart; the guard refuses a new attempt beside it without `-f`
+(wait until it leaves, or `build stop` it; `-f` stops it), and `build stop`
+asks the scheduler to stop it, saying it is still listed (queued again, or
+leaving the queue), the outcome standing. Only an attempt made for the
+machine cactup runs on is asked about after its outcome (§10). A status
+query that fails after the outcome takes the safe reading for what each
+does: the guard refuses a new attempt without `-f`, printing the failed
+query (the job may have been queued again) and naming `build stop`; `-f`
+stops it and builds. `build stop` asks the scheduler to stop it, saying it
+could not ask; where the scheduler takes the stop, or refuses it saying
+(by `unknown-job-pattern`) that it does not know the job, the job is
+settled: `job-stopped` is recorded in the attempt's `[timestamps]` (under
+its `record.lock`), and it is not asked about again (§10). Any other
+failure of the stop command (the controller not reached) is an error,
+for `build stop` and `-f` alike, and nothing is recorded; so is any
+failure to stop a job the scheduler has just listed. Where the scheduler answers
+that the job is gone or over, `build stop` says which, and nothing to
+stop. A requeued attempt that runs
+again clears its outcome and `finished` as `execute` starts and records new
+ones at its end. Where job ids are pids (§10), a recorded outcome is the
+end, and a submitted attempt's job is asked about and stopped only on its
+recorded host with its process start time; one recorded on another host is
+left while the attempt's `running.lock` is live (`build stop` says to stop
+it there and records nothing), and taken as ended once it is not. `build
+list` and `show` print `UNKNOWN` for an attempt with no outcome whose status
+query failed (unless its lock says it runs), and `build prune` keeps such an
+attempt. The submitter holds the attempt's `record.lock` while it submits
+and records the job; `execute`'s writes take it and keep the job fields the
+submitter recorded, so a job that starts at once never writes back a copy
+without them.
 
 **Locking across submit → queue → execute.** `LinkLock::acquire` (§2.3) fails
 fast and never blocks, so it cannot span a queue wait — a build's lock
@@ -2944,7 +3339,7 @@ the attempt (`@CONFIG_DIR@/.cactup-builds/<ATTEMPT_ID>`) with no registry
 lookup, exactly as `--sim-dir`/`--restart-id` locate a restart. `--installation`
 and `--machine` supply the alias and machine name without touching the global
 DB. `cactup build run --config-dir --attempt-id` reads everything else —
-variant, universe, the resolved `make` invocation, the full frozen variable
+flavor, universe, the resolved `make` invocation, the full frozen variable
 set — from that attempt's on-disk `build.toml` (§7.9), satisfying the same D11
 rule §8.3.1 states for a compute-node `sim run`: the path a generated script
 takes never touches the global DB, the installation registry, the MDB, or
@@ -3051,7 +3446,7 @@ Port of `create()` (`simfactory-docs.txt` §14.1):
    have been built for the resolved machine (§7.4); `--ignore-machine`/`-f`
    overrides.
 2. **Validate `<parfile>`'s name (collision guard).** The parfile must end
-   in `.par` (literal `@NAME@` substitution) or `.py` (Python variant —
+   in `.par` (literal `@NAME@` substitution) or `.py` (Python form —
    §6.1/§6.2). cactup strips that one extension to derive the working-directory
    name (so intra-name dots are fine — `q1.5.par` → working dir `q1.5/`,
    `q1.5.py` → `q1.5/`). Create is rejected only if the extension-stripped
@@ -3093,8 +3488,8 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   `create-submit` fusion). If `<sim>` **does** exist and a parfile is *also*
   given, that is an **error** unless `--overwrite`/`-f` is passed — cactup
   will not silently ignore a parfile that contradicts an existing sim.
-- Validate the built config's `compatible-queues` against the chosen queue
-  (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`. Before that,
+- Validate the built config's `runs-on` queues and `gpu` flag against the
+  chosen queue (§4.4 / D12); error on mismatch unless `--force-queue`/`-f`. Before that,
   the config and the simulation must both have been built for the resolved
   machine (§7.4); error on mismatch unless `--ignore-machine`/`-f`.
 - **Reap a stale active restart (port of simfactory `initRestart`).** Before
@@ -3111,12 +3506,12 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   never reaping. Without reaping, the lingering `-active` symlink would make
   `makeActive` refuse (§9.2).
 - Allocate the next restart id, create `output-NNNN/` + its `.cactup/` dir.
-- Compute the topology variable set (§8.5), select the submit/run script
-  variants for the chosen queue (§4.4), substitute, and write the substituted
+- Compute the topology variable set (§8.5), route the submit/run scripts
+  for the chosen queue (§4.4), substitute, and write the substituted
   SubmitScript into the restart metadata.
 - **Resolve universes (§4.8).** Resolve the **run** universe (following the §4.8
   precedence: `--universe` → the config's coerced build universe unless the
-  optionlist opted out → runscript variant / `default-universe` → none) and record
+  optionlist opted out → routed runscript's `universe` → none) and record
   it in `restart.toml` so the compute-node `sim run` applies it (§8.3.1); resolve the
   **submit** universe and, if any, wrap the `submit` command below in it. The
   run-universe resolution happens here, on the login node, because the compute
@@ -3131,7 +3526,7 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   effective walltime ceiling (§4.2), cactup transparently pre-submits
   `ceil(walltime / ceiling)` chained restarts, each scheduler-dependent on the
   prior job id. There is no user-facing chaining command; the dependency flag is
-  emitted by the submit-script variant (a `.py` variant, since this is
+  emitted by the submit script (a `.py` script, since this is
   conditional — §6). Each segment continues from the prior one only insofar as
   its **parfile** recovers the newest checkpoint — cactup does not arrange that
   and takes no position on it (§8.8).
@@ -3217,11 +3612,11 @@ resolved **run** universe, if any. In the compute-node path the universe is read
 from `restart.toml` (frozen at submit time, §8.3.1); in the interactive path
 (`--restart-id` absent) it is resolved on the spot per the §4.8 precedence:
 `--universe` → the config's coerced build universe (unless the optionlist opted
-out) → runscript variant / `default-universe` → none. `--no-universe` forces the
+out) → routed runscript's `universe` → none. `--no-universe` forces the
 host context. The whole runscript — mpirun/`srun` line included — runs inside the
 universe (the per-rank-container boundary of §4.8 applies).
 
-Computed parfiles use the **`.py` variant** (§6.2), replacing simfactory's
+Computed parfiles use the **`.py` form** (§6.2), replacing simfactory's
 executable `.rpar`: the `.py` parfile's master copy (§8.2) is invoked per the
 §6.1 calling convention (the full §6.3 variable set as JSON on stdin, bound as
 globals), and its stdout is written into the restart as the ready-to-run
@@ -3237,7 +3632,7 @@ proc-distribution math. Flags (those passed through to submit scripts marked *):
 | Flag | Meaning | Default |
 |------|---------|---------|
 | `-a/--allocation` * | account | knob |
-| `-q/--queue` * | scheduler queue | knob → machine default queue |
+| `-q/--queue` * | scheduler queue | `queue` knob (passed over when the binary may not run there) → the flavor's `runs-on.default-queue` → machine default queue (§4.4). A build job: `build-queue` knob → `[build].queue` → machine default (§7.9) |
 | `-m/--mail` * | notify address | knob |
 | `-M/--mail-type` * | notify type | knob (`all`) |
 | `-n/--nodes` * | node count | 1 |
@@ -3305,14 +3700,14 @@ facts fill any topology the user left unset.
   (`--tasks=1` is 1 rank on 1 node, not `TASKS = 1, TASKS_PER_NODE = 2`); an
   explicit `--tpn` is authoritative and never capped. This is a no-op in the
   default case, where `TASKS == NODES * TASKS_PER_NODE` already.
-- **Script-variant default tasks (§4.2).** When *no* process-layout flag
-  (`-n`/`-T`/`-t`) was given, the selected script variant's optional `tasks = N`
+- **Script-route default tasks (§4.2).** When *no* process-layout flag
+  (`-n`/`-T`/`-t`) was given, the routed script's optional `tasks = N`
   setting replaces the fill-the-node `TASKS` (capping `TASKS_PER_NODE` to keep
   the layout self-consistent); for a submit the submitscript entry is consulted
   first, then the runscript entry. Testsuite runs additionally fall back to
-  `TASKS = 2` when no variant sets it (§11.6).
+  `TASKS = 2` when no route sets it (§11.6).
 - `GPU` = `1` if `--gpu` or the chosen queue's `gpu = true`, else `0` — checked
-  **one-directionally** against the built binary's `gpu` flag (§4.4 / D12):
+  **one-directionally** against the built binary's `runs-on.gpu` flag (§4.4 / D12):
   refused (absent `--force-queue`/`-f`) only when the binary's `gpu` flag is
   set and this computed `GPU` is `0`; a non-GPU binary with `GPU = 1` is
   allowed (advisory note only when a non-GPU queue exists on the machine).
@@ -3381,6 +3776,25 @@ Ports of `simfactory-docs.txt` §14.8 / §14.5:
     `delete` (§8.7). Corollary, enforced in `sim/start.rs`: cactup must never
     create `TERMINATE` itself — its existence is the *evidence* that the run is
     watching it, which a file we minted would destroy.
+  - **The job, as §10 has it.** Where job ids are pids (`job-ids = "pids"`)
+    the forced stop runs `stop` only for the recorded host and process
+    start time, and only for a process that leads its own process group; a
+    pid whose process is not the job's any more is reported as ended, with
+    nothing run; a job recorded on another host is said to run there, to be
+    stopped there, with nothing recorded, while the restart's `running.lock`
+    is live (another host's lock goes stale by its mtime, §2.3), and taken
+    as ended once it is not; a restart recorded by an older cactup (no
+    `job-host`) whose pid has a process here, or whose process does not lead
+    its group, is refused, not stopped. A foreground `cactup sim run` typed
+    at an interactive shell's prompt leads its own process group (the shell
+    gives each job one), so `sim stop -f` from another terminal stops it,
+    as before; one started from a script (no job control), or not the first
+    command of a pipeline, shares another process's group and is refused. The graceful path's queue polling fails, and `stop` with
+    it, on a status query that failed (where the machine sets
+    `unknown-job-pattern`) for a restart that has not recorded its end,
+    rather than reading it as a run that left; it watches the lock instead
+    of the queue for a job recorded on another host. The forced stop of a
+    batch job asks the scheduler nothing.
 - `cactup sim clean <sim>`: deactivate the active restart (remove the
   `-active` symlink), tighten `TERMINATE` perms, and run the Formaline tarball
   **hard-link dedup** across prior restarts. Dedup semantics are preserved verbatim from simfactory
@@ -3405,7 +3819,37 @@ against the machine `*-pattern` regexes → `R`/`Q`/`H`/`U`/`E`
 (`simfactory-docs.txt` §14.7). cactup may *cache* the last observed status in the
 restart metadata for display, but the symlink + live query remain the source of
 truth (per D4's "state inferred, not stored" principle — `simfactory-docs.txt`
-§24).
+§24). The simulation's newest ended restart (the newest whose run
+recorded its end; restarts chained behind its job have not run), if its run recorded its end
+(`terminated`), is still asked about on a batch scheduler, which may
+requeue its job, for 14 days after its `finished` (the requeue window,
+§10); an older terminated restart, one past the window, or one with no
+`finished`, is taken as ended without a query, since its job id may by now
+name an unrelated job (ids wrap around, a cluster is reinstalled) that
+would refuse a `delete` or be stopped by its `-f`, and so is a simulation
+made for another machine (its `machine`; two clusters that share a home do
+not share job ids) (a requeued job that
+runs again clears `terminated` and `finished` as it starts, and records
+them again when it is over); after the end a job listed in a state the
+patterns read (queued, held, running) is still listed (§10: queued again,
+or leaving the queue), and one listed in a state no pattern reads (the
+ended job: Torque's `C`, Slurm's `CD`) is taken as ended, as is, for
+`sim list`/`show` and `delete`, one whose status query failed (the other
+commands take the safe reading below);
+where job ids are pids, it is not asked about again (§10): `sim
+list`/`show`, the reaper (§8.3) and `delete` (§8.7) take it as gone. A
+restart that has not recorded its end and whose status query failed is
+shown `UNKNOWN` (never a state the query did not give). A foreground `sim
+run` records its own pid as `job-id` and `foreground = true` in
+`restart.toml` (absent: a submitted restart, as older records are): on a
+batch scheduler's machine that pid is never asked about or stopped
+(`RestartMeta::scheduler_job`), its `running.lock` alone saying whether it
+runs: `sim stop -f` says to interrupt it where it runs and records
+nothing while the lock is live, `delete` refuses, `-f` too, and `sim
+list`/`show` ask nothing for it. On a `job-ids = "pids"` machine its pid
+is asked of `ps` like a submitted job's (§10). `sim show` asks one batch
+for the header and every row (one job, one state); `sim list` and `sim
+show` ask under a progress line and fail with "interrupted" on Ctrl-C.
 
 Display-state derivation for `cactup sim show`:
 - **PRESUBMITTED** = a restart that has a `job-id` and a `chained-job-id` (it was
@@ -3415,7 +3859,84 @@ Display-state derivation for `cactup sim show`:
   dependency-gated member of a chain.
 - RUNNING/QUEUED/HOLDING follow `R`/`Q`/`H` of the *active* restart; FINISHED =
   active restart whose job is `U` and that has reached termination; ERROR = `E`;
-  INACTIVE = no active restart.
+  INACTIVE = no active restart; UNKNOWN = a restart that has not reached
+  termination whose status query failed (§10); QUEUED AGAIN and STILL
+  LISTED (`sim list`, `sim show`) = a restart, active or not, that has
+  reached termination and whose job the scheduler still lists (asked about
+  only for the newest ended restart within the requeue window): queued or held
+  (QUEUED AGAIN), or running (STILL LISTED: leaving the queue, or starting
+  again; `sim show`'s row adds "listed running after the restart ended",
+the patterns' reading, since the scheduler's own word for the state is
+not kept: Slurm's `CG`, `TO` and `R` all read as running).
+
+After a restart's end its job, still listed in a state the patterns read,
+is either leaving the queue or starting again (a requeued Slurm job goes
+`PD`, `CF` while a node boots, `R`, before its cactup clears the end; an
+ended one lingers as `CG`, `TO`), and each command takes the safe reading
+for what it does, the same reading where the status query failed (the job
+may have been queued again). `sim stop` (with or without `-f`) acts on the active
+restart first while it has not recorded its end (gracefully or forced, as
+below: at a chain's handover the restart before it has ended, its job
+still listed while it leaves, and the active one is the run). Only when
+there is no active restart, or the active one has recorded its end, does
+it look at the newest ended restart: if, within the requeue window, its
+job is still listed, or the scheduler could not be asked about it, `sim
+stop` asks the scheduler to stop that job directly (stopping a job that is
+leaving, or gone, is harmless), says which ("still listed after the
+restart ended, queued again, or leaving the queue"; "could not ask the
+scheduler about job N ... asked it to stop the job in case it was queued
+again"), and records nothing else on the restart (its end stands) but,
+for a job it could not ask about, `job-stopped` where the scheduler took
+the stop or refused it saying (by `unknown-job-pattern`) that it does not
+know the job, which is said and taken as ended (§10: settled, not asked
+about again). Any other failure of the stop command is an error, with
+nothing recorded and nothing deactivated: a job the scheduler just
+listed, or may have queued again, stands. There is no graceful path for it: a restart that has recorded its end has no
+Cactus reading its `TERMINATE` (a requeued job's own run recreates the
+file and runs in full). Where the scheduler answered that the job is
+gone or over, or nothing was asked (job ids that are pids, past the
+requeue window, another machine's simulation, a foreground run on a batch
+scheduler's machine), `sim stop` runs no stop command (Torque's `qdel`
+refuses a completed job) and says only what it knows: the scheduler does
+not know job N, or lists it as over, or the restart has recorded its end;
+nothing to stop. An active restart that has recorded its end is then
+deactivated, as a stop finishes it (not where the scheduler took a stop
+of a job it listed: a requeued job's run hands it over). Whatever it
+did, `sim stop` names the restarts after the one it acted on that were
+submitted chained (pre-submitted, §8.3.2) and have not run, but only
+where the job is verified to be waiting: on a batch scheduler, one the
+scheduler lists queued or held (a failed query: said to be that, and no
+"runs after it"); where job ids are pids, one whose pid passes the pid
+checks in a group of its own (§10). Each is named with the job it is
+chained behind (it runs after that job) and the scheduler's command that
+stops it exactly (`Scheduler::stop_command`); one canceled, killed, over
+or another process now is passed over; cactup never stops them unasked.
+`sim submit` chains the new submission behind a still-listed job
+(`CHAINED_JOB_ID`: behind a job that is just leaving, a moment's wait),
+active restart or not, saying so, and the reaper (§8.3) never reaps a
+restart whose job is still listed. Beside a job the scheduler could not
+be asked about it refuses (chaining behind a job the scheduler has
+forgotten fails: Slurm's "Job dependency problem"), printing the failed
+query and naming `sim stop`; `-f` stops the job and submits unchained.
+Where the reaper left an ended active restart under its throttles, `sim
+submit` asks the scheduler before saying so: still listed, chained;
+unanswered, as above; its run still holding its lock, chained; else it
+cleans the restart, as the reaper would, saying what it learned (the
+scheduler does not know the job, or lists it as over, or, where nothing
+was asked, that the restart had recorded its end), and the new
+submission runs on its own. `sim run` refuses to start beside an active
+restart that has not recorded its end (its own refusal, first: `sim stop`
+acts on that one), then beside a still-listed job (wait until it leaves,
+or `sim stop` it, which then acts on that job) or one the scheduler could
+not be asked about (the failed query printed; `sim stop` resolves it,
+`-f` stops it and runs). `sim run` does not look at a later restart
+chained behind a job and queued (as master did not). `sim submit` also
+refuses while the active restart is a foreground run on a batch scheduler's
+machine (whose pid no scheduler could chain a job behind): wait for it, or
+interrupt it. What this costs where the job is only leaving: a new `sim
+run`, test run or build waits until the scheduler lets it go (seconds for
+Slurm's `CG`, minutes for `TO`), and `delete` refuses until then or until
+it is stopped.
 
 `--long` additionally prints the build provenance snapshotted into
 `.cactup/cfg/` at create time (§8.2) — the paths of the simulation's optionlist
@@ -3430,8 +3951,31 @@ Port of `purge`/`trash()` (`simfactory-docs.txt` §14.10): **fatal if any restar
 has a queued/holding/running job, unless `-f`** — as the "bypass all nagging"
 umbrella (§3), `-f` overrides the live-job guard (cactup first `stop`s the
 running/queued jobs, §8.6, then deletes), the trash/purge default, *and* the
-`--purge` prompt. Without `-f` on a live simulation, cactup refuses and tells
-the user to `sim stop` first. Deletion otherwise does a `shutil.move`-equivalent
+`--purge` prompt. Without `-f` on a live simulation, cactup refuses with
+advice that works: `sim stop` stops one job, the one it acts on (§8.6):
+the active restart's while it has not recorded its end, else the newest
+ended restart's still-listed job (named so: leaving the queue, or
+starting again; waiting until it leaves works too); `-f` stops the rest (a
+pre-submitted chain's, an ended restart's behind a running one). A pid that
+does not lead its own process group, like an older record's, is never
+stopped: the refusal says to stop it by hand (§10). Which restarts' jobs are asked about, and how,
+is §8.6's and §10's: on a batch scheduler every restart with a job that has
+not recorded its end, and the newest ended restart within the requeue window
+after its end (live then while listed in a state the patterns read), where job
+ids are pids
+only those that have not recorded their end, each only on its recorded host
+with its process start time. They are asked in one batch (the machine's
+`get-status-many` listing, else the bounded pool of per-job queries) under a
+progress line, Ctrl-C stopping it. A status query that failed (where the
+machine sets `unknown-job-pattern`) refuses the delete for a restart that
+has not recorded its end, and is taken as the job ended for one that has; a
+job recorded on another host (pids) refuses it, `-f` too, while its
+restart's `running.lock` is live, and so does a foreground run on a batch
+scheduler's machine (§8.6); a restart recorded by an older cactup whose pid
+has a process here refuses it, `-f` too, saying to stop that pid by hand
+if it is the job (cactup cannot tell it from another process); `-f`
+refuses a restart whose process does not lead its own group rather than
+stop it. Deletion otherwise does a `shutil.move`-equivalent
 of the whole simulation dir into `<sim-home>/TRASH/<simulation-id>/`, removes the
 simulation's entry from the per-installation registry (§8.1), and then **runs
 executable-cache GC** — if this was the last live-or-trashed sim referencing its
@@ -3684,7 +4228,7 @@ output-%04d/.cactup/               restart-level metadata              [cactup-o
   submit-script  run-script        substituted scripts for this restart
                                    (cactup-owned `.cactup/` files → kebab-case per §4.2;
                                     the CamelCase `SubmitScript`/`RunScript` elsewhere in
-                                    this doc name the MDB *variant* artifacts, not these)
+                                    this doc name the MDB *script* artifacts, not these)
   running.lock                     per-restart liveness marker held by a live run
   heartbeat                        mtime touched periodically by a live run
 ```
@@ -3724,8 +4268,13 @@ a simulation is never a testsuite — testsuite state lives in the `cactup test`
 subsystem's own `test.toml` under test-home, §11.8 — D3.) `restart.toml` carries
 `schema` plus the submit/run keys
 (`nodes`, `tasks`, `tpn`, `cpus`, `queue`, `allocation`, `walltime`,
-`checkpt-buffer`, `job-id`, `chained-job-id`,
-the last observed `status`, the resolved **run** `universe` (name + expanded
+`checkpt-buffer`, `job-id`, `foreground` (a foreground `sim run`'s own
+pid, §8.6; absent for a submitted restart), `chained-job-id`, and where job
+ids are pids
+the `job-host` and `job-start` recorded with `job-id` (§10; `build.toml` and
+`test.toml` carry them too), `job-stopped` (when a stop after the
+restart's end settled its job, §10; `build.toml`'s and `test.toml`'s
+`[timestamps]` carry it too), the last observed `status`, the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
 without re-reading the MDB), the frozen `[vars]` table (the §6.3 variable set)
 and `[knobs]` table (the effective knob snapshot, §5.1 — both so the compute
@@ -3771,13 +4320,256 @@ machine `meta.toml` carries `submit`, `get-status`, `stop`, `submit-pattern`,
   `--block`: it submits normally via `submit` and polls the attempt for an
   outcome instead of blocking natively.
 - Queries status via `get-status` (with `@JOB_ID@`) and classifies via the
-  pattern regexes into `R`/`Q`/`H`/`U`/`E`.
+  pattern regexes into `R`/`Q`/`H`/`U`/`E`. The query's output is read with
+  stdout and stderr together (stdout first), and its exit status is not
+  consulted (`ps <pid>` exits 1 for a process that is gone, which is `U`).
 - Stops via `stop` (with `@JOB_ID@`).
 - The generic "machine" describes a workstation with no batch system (`submit` =
-  local `nohup`/exec, `get-status` = `ps`, `stop` = `pkill`) — preserved.
+  local `setsid nohup`/exec, `get-status` = `ps`, `stop` = `pkill`) — preserved.
+
+**Two keys for job liveness (generation 3; build cache decision 35).**
+`Scheduler` reads both: every status query and stop goes through it, with
+the job as recorded (`JobRef`: the id, and where job ids are pids, the host
+and start time beside it), so no caller can skip the checks.
+
+- **`job-ids = "scheduler" | "pids"`** (default `"scheduler"`). `"pids"`
+  declares that a job id is the pid of a process on the host the job was
+  submitted from: the scheduler is that host's own processes (`ps`,
+  `kill`/`pkill`), as on `generic`. Every in-repository machine whose
+  `get-status` is `ps @JOB_ID@` sets it (athena, et-juphub, generic, hal1,
+  hal2, hedges, hopper, mel5, omnia, saturn, spine). A pid means nothing on
+  another host and is used again once its process is gone, so on such a
+  machine:
+  - **Recorded at submit.** `submit` and `blocking-submit` (sim submit,
+    test submit, build submit, `--block` included) hand back the job id
+    with the submitting host (the host name lock stamps carry, §2.3) and
+    the start time of the process with that pid (`/proc/<pid>/stat` field
+    22), read the moment the id is parsed: after `submit` returns, or as
+    the id's line arrives from a `blocking-submit` still waiting on it. A
+    foreground `sim run` records its own pid the same way (it is asked of
+    `ps` like a submitted job). They are stored beside the id as
+    `job-host` and `job-start` (`restart.toml`, `test.toml`,
+    `build.toml`); both are optional, so older records read as before. A
+    process already gone when cactup reads it (the job ended at once) is
+    recorded as `job-host` without `job-start`.
+  - **Asked only there.** `get-status`, the per-job queries behind a
+    batched status, and `stop` run for the job only on the recorded host
+    and only while `/proc/<pid>` has the recorded start time. A reused pid
+    (a live process with another start time), or a process recorded gone,
+    is a job gone: status `U` and nothing stopped, with neither `ps` nor
+    `pkill` run (`Stopped::Gone`).
+  - **Another host's pid** is never asked about or stopped here, and never
+    taken for gone on that account (`Scheduler::recorded_elsewhere`,
+    `Stopped::Elsewhere`): the run's `running.lock` says whether it runs.
+    While the lock is live, `sim stop -f`, `test stop` and `build stop`
+    say the job runs on that host (named) and to stop it there, recording
+    nothing, and `sim delete`/`test delete` refuse, `-f` too; the graceful
+    `sim stop` watches the lock. Once the lock is not live (its holder
+    gone; another host's lock goes stale by its mtime, `LOCK_STALE_SECS`,
+    §2.3) the job is taken as ended.
+  - **Only a job whose process group is its own is stopped.** The stop
+    commands kill a process group (`pkill -g`); killing the pid alone
+    (`kill`) would leave the run-script's exe and Cactus running orphaned
+    (a foreground `sim run`'s interrupt path stops only its direct child),
+    and a group that holds other processes takes them with it. A group is
+    the job's own when every process in it (by `/proc/*/stat`'s process
+    group) is the pid or one of its descendants (by the parent links,
+    `lock::proc_group`), whether or not the pid leads it: a job submitted
+    without `setsid` from an interactive shell is in the group of the
+    cactup that submitted it, which has exited, and the group holds the
+    job alone (master's MDB, whose `stop` stopped such a job whole). `stop`
+    runs the machine's stop command only there, and otherwise refuses
+    (`SharedGroup`): no single command stops the job alone, so the refusal
+    names the pid, says to stop it and the processes it started (`pstree -p
+    <pid>`), or to interrupt the run where it runs. A foreground `sim run`
+    typed at an interactive prompt, alone, has a group of its own and is
+    stopped; one started from a script, or with other commands in its
+    pipeline, shares its group and is refused. Every in-repository
+    `pids` machine's `submit` and `blocking-submit` start the job with
+    `setsid` (which keeps the pid: the backgrounded process does not lead
+    a group, so `setsid` makes its session in place), and a `pids`
+    machine's submit must.
+  - **Records made by an older cactup** (no `job-host`): asked about only
+    where a process with that pid runs on this host and started no later
+    than the record was made (a test run's or build attempt's
+    `timestamps.submitted`, else the record's creation, as a restart's
+    `created`, which comes a moment before the submit runs; give or
+    take a minute, the wall-clock start being the boot time from
+    `/proc/stat`'s `btime` plus the start time in clock ticks): else `U`,
+    nothing run, so a long-lived unrelated process that took the pid later
+    never holds a record up. Never stopped: `stop` refuses
+    (`UnverifiedPid`), saying how to stop it by hand if it is the job:
+    `kill -- -<pgid>` where its process group is its own (which stops the
+    pid and every process it started, and nothing else), else naming the
+    pid and its descendants to stop, or the run to interrupt; so `sim stop`, `test stop`, `delete
+    -f` and the `-f` of a new run or build refuse rather than stop what may
+    be another process. The user stops it by hand if it is the job. This
+    is the safe reading of a record that cannot tell its own process from
+    a later one.
+  - **A run that recorded its end is done.** Nothing on such a machine
+    requeues a job, so a test run with `finished`, a restart with
+    `terminated` and a build attempt with an outcome are not asked about
+    again (`Scheduler::may_requeue` is false; §8.6, §8.7, §11.7, §7.9).
+    The pid checks above would make asking safe for new records; the gate
+    stays because it costs nothing there and keeps an older record's pid,
+    which no start time vouches for, from being read as a live run.
+
+  On a `"scheduler"` machine a job id is the batch system's, asked about
+  whatever the run recorded (a batch scheduler may requeue a job after its
+  run recorded its end: preemption, `scontrol requeue`, Torque's `qrerun`),
+  except where a section says otherwise, for 14 days after the record's
+  end (the requeue window, `Scheduler::asks_after_end`: a restart's
+  `finished`, a test run's `finished`, a build attempt's `finished`, which
+  its outcome is recorded with); later, or with no end time recorded, the
+  job is taken as ended without a query, since its id may by now name an
+  unrelated job (ids wrap around, a cluster is reinstalled). Only a record
+  made for the machine cactup runs on is asked about after its end (its
+  `machine` against `Scheduler::for_machine`'s name): two clusters that
+  share a home do not share job ids, and another machine's record is
+  taken as ended. After a record's end (a restart's
+  `terminated`, a test run's `finished`, a build attempt's outcome) a job
+  the scheduler lists in a state the machine's patterns read (queued,
+  held, running) is "still listed" (`is_live`): the scheduler has not let
+  it go, and it is either leaving the queue (Slurm's `CG`, `TO`, both in
+  the MDB's running patterns) or starting again (`PD`, then `CF` while a
+  node boots and `R` before its cactup clears the record's end: preemption
+  with requeue reaches exactly this, the run recording its end on
+  SIGTERM), which the patterns cannot tell apart. A job listed in a state
+  no pattern reads after the end is the ended job (Torque's completed `C`
+  within keep_completed, whose `qdel` refuses it; Slurm's `CD`, `F`,
+  `CA`, `OOM`, `NF`): a requeued job always passes through read states
+  (Slurm `PD`, `CF`, `R`; Torque `Q`, `R`). The listing paths and the
+  single queries agree on a requeued job, but not on every one leaving:
+  Slurm's `squeue -u` without `-t` lists only pending, running,
+  suspended, completing and configuring jobs, so a job lingering as `TO`
+  is absent from the listing (ended, for the displays and `sim delete`)
+  while `squeue -j` still lists it (still listed, for the stop commands
+  and the guards). Each command takes the safe reading for what it does: those
+  that would start new work beside it (`sim run`, `test run`/`test
+  submit`, a new build) refuse, saying it is still listed and to wait or
+  stop it, and `sim submit` chains behind it; `sim stop`, `test stop` and
+  `build stop` ask the scheduler to stop it (harmless for a job that is
+  leaving), with no graceful path and nothing else recorded; `sim delete`
+  and `test delete` refuse without `-f` and stop it with `-f`; displays
+  show QUEUED AGAIN (queued or held) or STILL LISTED (running). Not listed
+  (the unknown-job line, or absent from a listing that ran), listed in a
+  state no pattern reads, or past the requeue window: ended. A failed
+  query after the end is taken as ended only for what reads or removes
+  records (the displays, which show the recorded end; `sim delete` and
+  `test delete`, with a one-line note); a command takes the safe reading for what it
+  does: `sim stop`, `test stop` and `build stop` ask the scheduler to stop
+  the job in case it was queued again, saying the scheduler could not be
+  asked; the guards before new work (`sim run`, `sim submit`, a new test
+  run or build) refuse, printing the failed query as `FailedQuery` has it
+  (the query, both patterns, its output, the `unknown-job-pattern` hint)
+  and naming `sim stop`/`test stop`/`build stop`; with `-f` they send the
+  stop themselves and go ahead (`sim submit` then unchained). `sim submit`
+  never chains behind such a job: a job the scheduler has forgotten fails
+  the dependency (Slurm's `sbatch --dependency=afterany:<id>` says "Job
+  dependency problem"). One rule judges a stop command that fails, on
+  every path that might take the failure for the job being over (sims,
+  test runs, builds: `Scheduler::stop_judged`, by what cactup knows of
+  the job, `StopCase`). A job the scheduler lists in a state its patterns
+  read (`StopCase::Listed`: live, or listed after the end): any failure is
+  an error ("the stop command for job N failed: …"), nothing recorded,
+  deactivated or deleted, and `delete -f` and the guards' `-f` refuse
+  with it. A job listed in a state no pattern reads (`StopCase::Unread`),
+  or whose status query failed after the end (`StopCase::Unanswered`): a
+  stop the scheduler takes settles the job, and so does one it refuses
+  with output matching `unknown-job-pattern` (`EndedStop::NotKnown`:
+  Torque's `qdel` of a forgotten job, "Unknown Job Id", exit 153), said
+  so ("the scheduler does not know job N (its stop command said: …):
+  taken as ended"), an ended active restart deactivated; any other
+  failure (Slurm's "Socket timed out on send/recv operation", "Unable to
+  contact slurm controller", exit 1; Torque's `qdel` of a completed job,
+  "Invalid state") is an error that shows the stop's output, after a
+  failed query the query's output too (where the unknown-job message
+  would be), and gives the `unknown-job-pattern` hint. A machine without `unknown-job-pattern`
+  never reaches `Unanswered` (no line for the job is a job gone), so
+  nothing is settled there. Ctrl-C is "interrupted" still. A settled job's
+  record gets `job-stopped` (its time; `restart.toml`, and `test.toml`'s
+  and `build.toml`'s `[timestamps]`), and from then on the job is taken as
+  ended without a query (`end_to_ask`), unless a requeued run records a
+  later end. The trade-off: a pattern that never matches the scheduler's
+  message for a forgotten job settles nothing (the stop's refusal does not
+  match it either); the guards refuse until the pattern is fixed, and
+  every message on that path names it. Slurm's `scancel` of a job the
+  controller does not know (never existed, or aged out) exits 0 and prints
+  nothing (verified on Slurm 24.11.7), so on Slurm such a stop is taken and
+  the job settled; Torque's `qdel` refuses one ("Unknown Job Id", exit 153;
+  not verified on a real Torque), which `unknown-job-pattern` then matches. No message states a scheduler answer cactup did not get:
+  "nothing to stop" names what was learned (the scheduler does not know
+  the job, lists it as over, or, where nothing was asked, the record's
+  end), and so does the reaper's note (where job ids are pids: the process
+  is gone or is another process now, or it ran on another host and
+  nothing of its run holds its lock). A requeued job that starts clears the record's end itself
+  (`execute_restart`, `build::execute`, the test run's compute side), and is
+  live by the ordinary rule from then on.
+- **`unknown-job-pattern = '<regex>'`** (optional; `@JOB_ID@` substituted as
+  in the other patterns, regex-escaped): a line of `get-status`'s output,
+  stdout or stderr, that says the scheduler does not know the job. Where it
+  is set, output with no line matching `status-pattern` is `U` only if a
+  line matches it; otherwise the query failed (the controller unreachable,
+  a timeout: Slurm's `slurm_load_jobs error: Socket timed out on send/recv
+  operation`), and `Scheduler::get_status` returns an error
+  (`FailedQuery`) that prints the query, says its output had neither a line
+  matching the machine's `status-pattern` for the job nor one matching its
+  `unknown-job-pattern` (both shown), prints the output, and says that if
+  the scheduler's message for an unknown job is among those lines, the
+  pattern does not match it and is to be fixed in the machine's
+  `[scheduler]`. For a record that has not recorded its end, commands that
+  act on the answer refuse with it (`sim stop`'s graceful wait, `sim
+  delete`, the reaper before `sim submit` and `sim run`, `test stop`, `test
+  delete`, the guard before a new test run, `build stop`, the guard before a
+  new build; `sim stop -f` asks nothing); `build prune` keeps the attempt;
+  display paths (`sim list`/`show`, `test list`/`show`, `build list`/`show`)
+  print the state as `UNKNOWN`. After a record's end, asking is the check
+  for a requeued job: the display paths show the record's end, and the
+  paths that only remove records take a failed query as the job ended
+  (`Scheduler::get_status_of`), saying so in one line, so a scheduler that cannot be asked never holds
+  up a finished record for good; the commands that act on the answer take
+  the safe reading above (`Scheduler::ask_after_end`'s `Unanswered`).
+  Where it is not
+  set, no line for the job is `U`, as before: a query that failed reads as
+  a job no longer in the queue. Stderr needs no change to be seen: the
+  output already carries it, and `status-pattern` and the state patterns
+  match what they matched before. The batch `get-status-many` listing is
+  unchanged: a job it does not list is `U`, since a listing says nothing
+  of the jobs it leaves out. A listing that fails (it exits non-zero, as
+  Slurm's `squeue -h -u` does on a timeout, printing nothing on stdout),
+  or that Ctrl-C cuts short, says nothing of any job: cactup falls back to
+  the per-job queries, whose failures are handled as above (a refusal for
+  a record with no end, a note after it, `UNKNOWN` on display). An empty
+  listing exits 0, and lists no job. Which paths ask through the batch
+  (`Scheduler::get_statuses_shown`: the listing where the machine has one,
+  else the per-job pool; under a progress line, failing with "interrupted"
+  on Ctrl-C): `sim list`/`show`, `test list`/`show`, `build list`/`show`
+  and `sim delete`. Every other path asks one job with `get-status`: `sim
+  stop`'s graceful wait, the reaper, `test stop`/`delete`, the guards before
+  a new test run or build, `build stop`, `build prune`, `--follow`/`--block`.
+  So a never-matching `unknown-job-pattern` (one that misses the
+  scheduler's real unknown-job message) shows only on the per-job paths,
+  where every job the scheduler has forgotten reads as a failed query;
+  where a working listing answers, such a job is simply not listed, so
+  gone (`sim list`, `sim delete` take it so, and `sim show` with them, its
+  header and rows from one answer). The MDB sets the
+  key where the real tool's message is known: Slurm's `squeue -j`
+  (`slurm_load_jobs error: Invalid job id specified`, on stderr with
+  nothing on stdout and exit 1, once the job has aged out of the
+  controller), Torque's `qstat` (`Unknown Job Id`; qb, smic, thornyflat)
+  and PBS Pro's (crux: `Unknown Job Id`, or `Job has finished` with job
+  history on). Not set: golub (Slurm's `qstat` compatibility wrapper, whose
+  message is not established), sciama (an `squeue -u | awk` filter, which
+  says nothing of a job it does not list), the `ps` machines (`ps` says
+  nothing; `job-ids = "pids"` covers them) and tianhe1a (no `get-status`).
+
+Both are validated at load: `job-ids` takes only the two values, and
+`unknown-job-pattern` must compile as a regular expression with a job id
+put in.
 
 `cactup sim show` maps statuses to ACTIVE / RUNNING / QUEUED / PRESUBMITTED /
-FINISHED / ERROR / INACTIVE as simfactory's `list-simulations` did.
+FINISHED / ERROR / INACTIVE as simfactory's `list-simulations` did, and
+UNKNOWN where the status query failed (§8.6).
 
 ---
 
@@ -3821,7 +4613,7 @@ test-config kind** and **no separate active pointer** — only two concepts:
 
   A config built with a DEBUG optionlist (to surface assertion/bounds errors the
   testsuite is meant to catch) is just a config built with `cactup build
-  --variant <debug>` — see §4.4 optionlist selection; the old test-optionlist
+  --flavor <debug>` — see §4.4 optionlist selection; the old test-optionlist
   partition is gone.
 - **test run** (a.k.a. **test-sim**) — one execution of a config's testsuite
   against a chosen topology and test selection. It is the analog of a
@@ -3836,59 +4628,62 @@ A machine typically needs **different** runscripts and submitscripts for
 testsuites than for production (a test runscript drives `make <config>-testsuite`
 and exports `CCTK_TESTSUITE_RUN_*`, §11.6, rather than `mpirun`-ing a parfile).
 cactup lets one machine ship both, keyed by a single `test = true` marker on the
-script variant, and resolves the right one by the rules the requirements specify.
-(Optionlists are **not** part of this: they are chosen purely by §4.4 — a config
-under test uses whatever optionlist its `cactup build` selected.)
+script's route, and resolves the right one by the rules the requirements specify.
+(Flavors are **not** part of this: they are chosen purely by §4.4 — a config
+under test uses whatever flavor its `cactup build` selected.)
 
 **Where the marker lives.** Run/submitscripts have no header of their own, so
-the marker goes on the `meta.toml` variant entry, using the inline-table form
-(§4.2):
+the marker goes on the script's route in `[runscripts]` / `[submitscripts]`,
+using the inline-table form (§4.2):
 
 ```toml
-[variants.runscript]
-"cpu"      = { queues = ["checkpt", "single"], default = true }              # normal default
-"test-cpu" = { queues = ["checkpt", "single"], test = true, default = true } # test-partition default (see resolution below)
+[runscripts]
+"cpu"      = ["checkpt", "single"]                            # normal: sim run/submit
+"test-cpu" = { queues = ["checkpt", "single"], test = true }  # testsuite: test run/submit
 ```
-(`test = true` and `default = true` compose with each other and with
-`universe = "…"` / `build-universes = […]` in the same inline table.)
+(`test = true` composes with `universe = "…"` / `build-universes = […]` /
+`tasks = N` in the same inline table.)
 
 **Partitioning.** For each script kind (runscript / submitscript) cactup splits
-the machine's variants into a **normal** set (no marker) and a **test** set
+the machine's routes into a **normal** set (no marker) and a **test** set
 (`test = true`). Normal commands (`sim run`, `sim submit`) consider **only the
-normal set** — a test variant is *never* used for a normal run. Test commands
-(`test run`, `test submit`) prefer the **test set** but **fall back to the normal
-set when the test set is empty**. This is the asymmetry the requirements call
-out: *"if there is no testsuite script but there is a regular one, use that for
-tests, but not vice versa."*
+normal set** — a test script is *never* used for a normal run — and test
+commands (`test run`, `test submit`) consider **only the test set**: a normal
+script is never used for a testsuite either. (An earlier revision let tests
+fall back to the normal set when the test set was empty. That never worked:
+a testsuite needs a script written for it — a test runscript `cd`s into the
+source tree and runs `make <config>-testsuite` with `CCTK_TESTSUITE_RUN_*`
+set, while a normal one `mpirun`s a parfile in a run directory — and a test
+run deliberately defines none of `RUNDIR`, `PARFILE` or `SIMULATION_NAME`
+(§11.9), so a borrowed normal script failed at substitution anyway.)
 
-**Resolution within the chosen set** (selected at `test run`/`test submit` time,
-per the chosen queue **and** the config's build universe): the chosen set (test,
-or normal on fallback) is first filtered to variants compatible with the
-config's build universe — `"host"` when the config records none — using the
-same `build-universes` compatibility list and filtering rule that governs `sim
-run`/`sim submit` (§4.4, §4.8); then cactup picks, among the survivors, the
-variant whose `queues` include the chosen queue, or (absent a mapping) the
-test-partition default (the `test = true`, `default = true` variant, or the
-sole test variant). If the test set is empty, resolve against the normal set
-exactly as a sim does (§4.4: filter by universe, then queue → variant, else
-the `default = true` variant). `--variant V` on `test run`/`test submit` is
-the escape hatch that forces the entry named `V` in each map (it must be a
-test-marked variant when the test set is non-empty, and compatible with the
-build universe, or `V`'s resolution errors naming the universe); the
-runscript and submitscript maps are resolved independently, and `V` names the
-entry in each.
+**Resolution within the test set** (at `test run`/`test submit` time, per the
+chosen queue **and** the config's build universe): the test set is first
+filtered to routes compatible with the config's build universe — `"host"`
+when the config records none — using the same `build-universes` compatibility
+list and filtering rule that governs `sim run`/`sim submit` (§4.4, §4.8); then
+cactup picks the survivor whose route's `queues` include the chosen queue. A
+queue no test script lists is an error naming the queues where this config
+*can* run its testsuite — the test scripts' queues narrowed to its
+`runs-on.queues`, since suggesting any other would only lead into the runs-on
+refusal ("no test run script serves queue \"bigmem\"; config \"sim\" can run
+its testsuite on gpu2, gpu4; pick one of those with -q"), or, when that list
+is empty, that the machine cannot run this config's testsuite at all.
 
-**Validation at MDB load** extends §4.2's "every queue is served" check
-**per-partition** — and, within each partition, per the same **per-universe-context**
-rules §4.2 defines for `build-universes` lists: if a machine defines *any* test
-runscript (or submitscript) variant, then every queue in `[queues.*]` must be
-served, for universe context `"host"`, by some test variant of that kind or by
-the test-partition default; a machine that defines **no** test variants of a
-kind is fine (tests borrow the normal partition, already validated). As with
-the normal partition, coverage for a declared non-host universe is *not*
-checked at load time — a gap there instead surfaces as the same
-selection-time error (§4.2) the first time a `test run`/`test submit` actually
-needs it.
+There is no way to pick a test script by name. Validation allows at most one
+test script per queue in each universe context, so a name could only ever
+repeat what routing chose, or force a script onto a queue it does not serve
+— the GPU-test-script-on-a-CPU-partition mistake the routing rules exist to
+prevent. (An earlier revision had a `--script` escape hatch; it was dropped
+for that reason, and `test --variant`, the spelling before it, is retired
+with a notice saying the queue picks the scripts.) `cactup build`'s
+`--flavor` names an optionlist and never reaches script routing.
+
+**Validation at MDB load** checks test routes the way it checks normal ones
+— known queues and universes, and no queue served twice within a universe
+context — but owes **no coverage**: a machine may offer testsuites on some
+partitions only (qbd and saturn run them on their GPU partitions alone), and
+the queues it skips surface as the selection-time error above.
 
 ### 11.3 CLI surface
 
@@ -3896,8 +4691,8 @@ Added to §3 (all operate on the **active installation**; the run/submit topolog
 flags are the §8.5 set):
 
 ```
-cactup test run    [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
-cactup test submit [--config C] [--variant V] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test run    [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
+cactup test submit [--config C] [-f] [--overwrite] [--force-queue] [--universe U | --no-universe] <TOPOLOGY…> [<test>…]
 
 cactup test list       [--long] [--all]           # list test runs (--all: across installations)
 cactup test show       <name>                      # show one test run in detail
@@ -3909,8 +4704,14 @@ cactup test delete     <name> [-f] [--purge]      # move a test run to test-home
 Notes:
 - `[<test>…]` is the optional test selection (`test run` / `test submit`). Omitted
   ⇒ run **all** tests (the successor to simfactory's `--select-tests all`
-  default). A selector is a test name, a thorn (`arrangement/Thorn`), or an
-  arrangement; cactup passes the resolved selection to the flesh harness (§11.6).
+  default). A selector is a test name, a thorn (`Thorn` or `arrangement/Thorn`),
+  a `Thorn/test` pair, or an arrangement; a bare name that is both an
+  arrangement and a thorn means the arrangement (`arrangement/Thorn` spells the
+  thorn). cactup resolves the selection against the config's `ThornList` at
+  submit time into the flesh's `CCTK_TESTSUITE_RUN_TESTS` format, which knows
+  only `Thorn` and `Thorn/test`, and freezes that into `@TESTSUITE_SELECT@`
+  (§11.6, D11). A selector naming nothing with tests is an error before any
+  job is queued.
 - `--config C` defaults to the **active config** (§7.4); both `test run` and
   `test submit` fail fast in the null-config state with guidance to
   `cactup build`. The config must be a complete build.
@@ -3930,10 +4731,10 @@ layout (§7.2), the make flow, the optionlist render (§7.8), and the metadata
 
 If you want the testsuite to run against a DEBUG binary (assertions / bounds
 checking, to surface errors the tests exist to catch), build the config with a
-DEBUG optionlist variant: `cactup build <name> --variant <debug>` (§4.4).
+DEBUG optionlist flavor: `cactup build <name> --flavor <debug>` (§4.4).
 mel5, for example, ships `default` (OPTIMISE, the implicit pick) and `debug`
-(DEBUG + OPTIMISE); the latter is just a normal variant reached with
-`--variant debug`.
+(DEBUG + OPTIMISE); the latter is just a normal flavor reached with
+`--flavor debug`.
 
 Deleting a config that test runs reference: `config delete` (§7.1) warns and
 refuses without `-f` when registered test runs point at it — unlike simulations
@@ -4008,11 +4809,11 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
 1. Resolve config = `--config` or the active config (fatal in null-config).
    Locate its built binary in `<Cactus root>/configs/<config>/` (fatal if the
    config is incomplete — no `config-data/cctk_Config.h`, §7.2).
-2. Enforce the built config's `compatible-queues` against the chosen queue (§4.4 /
+2. Enforce the built config's `runs-on` queues and `gpu` flag against the chosen queue (§4.4 /
    D12) exactly as a sim does; `--force-queue`/`-f` overrides. The config
    must have been built for the resolved machine (§7.4);
    `--ignore-machine`/`-f` overrides.
-3. Resolve the **test** submit/run script variants for the chosen queue (§11.2)
+3. Route the **test** submit/run scripts for the chosen queue (§11.2)
    and the **run universe** (§4.8, same precedence as §8.3), recording the run
    universe in the test-run metadata so a queued run applies it on the compute
    node without touching the MDB (D11).
@@ -4025,7 +4826,7 @@ compute-node re-invocation), but the body is the **simplified, one-shot** path:
    PROMPT=no`, with the effective **run** env-setup applied (auto-prepended for
    `.sh`, author-emitted via `@ENV_SETUP@` for `.py` — §6.1). Because thorn
    tests are written for 1–2 MPI ranks, a testsuite run does NOT fill the node:
-   with no `-n`/`-T`/`-t` flag, `TASKS` is the selected script variant's
+   with no `-n`/`-T`/`-t` flag, `TASKS` is the routed script's
    `tasks` setting (§4.2, mode-relevant script first), else **2**. cactup
    exposes the values the script needs: `@TASKS@` (→
    `CCTK_TESTSUITE_RUN_PROCESSORS`), the
@@ -4079,7 +4880,112 @@ the `make …-testsuite` shell exactly as they wrap a normal runscript.
   installation's with `--all` (the §8.1 cross-install discipline). Per-run display
   state is coarser than a sim's (no restart chain): `RUNNING`/`QUEUED`/`HOLDING`
   from the active result set's live job status, `DONE (passed/failed)` once the
-  job is `U` and a summary was recorded, `ERROR` on `E`.
+  job is `U` and a summary was recorded, `ERROR` on `E` (after the run
+  recorded `finished`, a job the scheduler still lists is `QUEUED AGAIN`
+  when queued or held, `STILL LISTED` when running: leaving the queue, or
+  starting again; listed in a state no pattern reads, it is the ended job),
+  and `UNKNOWN` where the status query failed for a
+  run that has not recorded `finished` and whose lock does not say it runs. The rules below are shared
+  by `list`, `show`, `stop`, `delete` and the guard before a new run
+  (`TestRun::pending_job`).
+  - **Which job is asked about.** Only a submitted run has a job to ask the
+    scheduler about: an interactive run's `job-id` is the pid of the cactup
+    that ran it, and once that cactup is gone the pid can be any other
+    process's (on the generic machine, `ps` would find it, and `stop` would
+    stop its process group). A run that recorded `finished` (its end
+    records it, and so does `test stop`) is still asked about on a batch
+    scheduler (`job-ids = "scheduler"`, §10), which may requeue its job
+    after its run recorded its end (preemption, `scontrol requeue`,
+    Torque's `qrerun`), within the requeue window (14 days after
+    `finished`, §10), and a requeued job that runs clears `finished` as it
+    starts (the compute side, under the test lock). After `finished` a job
+    listed in a state the patterns read is still listed (`Job::Listed`:
+    queued again, or leaving the queue, §10; one in a state no pattern
+    reads is the ended job, `Job::Ended`: nothing to stop, `delete` goes
+    ahead): `list` shows it `QUEUED AGAIN` or `STILL
+    LISTED`, `stop` asks the scheduler to stop it (recording nothing else;
+    one the scheduler will not stop leaves the run's end standing),
+    `delete` refuses it without `-f` (wait until it leaves, or `test stop`
+    it) and stops it with `-f`, and a new `test run` or `test submit`
+    refuses beside it (`-f` stops it). A status query that fails after
+    `finished` (`Job::Unanswered`) takes the safe reading for each (§10):
+    `list` shows the recorded end, `delete` notes it and goes ahead, `stop`
+    asks the scheduler to stop the job in case it was queued again, saying
+    it could not ask, and records `job-stopped` in `[timestamps]` (settled,
+    not asked about again, §10), and a new `test run` or `test submit`
+    refuses without `-f`, printing the failed query and naming `test stop`
+    (`-f` stops it). After a failed query, a stop the scheduler refuses
+    saying (by `unknown-job-pattern`) it does not know the job is said so
+    and taken as the job ended (settled); any other failure of the stop
+    command, and any after the scheduler listed the job, is an error with
+    nothing recorded. Only a run made for this machine (its `machine`)
+    is asked about after `finished`. Where
+    job ids are pids (`job-ids = "pids"`: the generic machine and those
+    `machine create` makes from it; in the MDB athena, et-juphub, hal1,
+    hal2, hedges, hopper, mel5, omnia, saturn and spine; its `submit`
+    backgrounds the script), nothing requeues a job and a run with
+    `finished` is not asked about again; a submitted run's job is asked
+    about and stopped only on the host recorded at submit while its pid's
+    process has the start time recorded then (§10). One that ended without
+    recording it (killed, the host rebooted) and whose pid is now another
+    process's is gone: never asked, never stopped. One recorded on another
+    host is never asked about or stopped here either, and never taken for
+    gone while the run's `running.lock` is live: `stop` says it runs on that
+    host (named) and to stop it there, recording nothing, and `delete`
+    refuses, `-f` too; with the lock let go (or stale) it is taken as ended.
+    A job whose process does not lead its own process group is never
+    stopped (§10). A run recorded by an older cactup (no `job-host`) is
+    asked about only where its pid has a process here that started no later
+    than the run was submitted, and never stopped: `stop`, `delete -f` and
+    the `-f` of a new `test run` or `test submit` refuse.
+  - **A run held without a job the scheduler lists.** An interactive run is
+    `RUNNING` while its `running.lock` is held; its pid never goes to the
+    scheduler (a batch scheduler knows no pid, and the lock may be another
+    host's): `stop` says to interrupt it where it runs (Ctrl-C), as `build
+    stop` does, or that it ended without letting go of the lock (on another
+    host, which a lost host or a hangup leaves until it expires), and
+    `delete` refuses, `-f` too; so for a submitted run that recorded its end
+    (its job dealt with by `stop`, or over) whose lock lingers and whose job
+    the scheduler does not list live (it is ending, or ended without letting
+    go). A submitted run that has not recorded its end, whose `running.lock`
+    is held though the scheduler here does not list its job, runs where that
+    scheduler cannot see it (another host), or it ended without letting go
+    of the lock (which expires, §2.3), or, on a batch scheduler that cannot
+    tell a failed query from a job it does not know (no
+    `unknown-job-pattern`, §10), the query failed: `stop` and `delete` say
+    which it may be and leave it, `-f` too.
+  - **A job listed in a state no pattern reads,** before the run recorded
+    its end, may be suspended (Slurm's `S`), exiting (Torque's `E`) or over
+    (Slurm and Torque list an ended job for a while: `CD`, `F`, `CA`, `C`):
+    `stop` asks the scheduler to stop it, and records `finished` if it took
+    the request (stopped, or ended before: Slurm's `scancel` takes an ended
+    job without a word, so `stop` says only that it asked). A stop command
+    that fails is judged by the one rule every stop path uses
+    (`Scheduler::stop_judged`, §10): it settles the job only where its
+    output matches `unknown-job-pattern` (the scheduler saying it does not
+    know the job), and then `stop` records `finished` unless the run's
+    `running.lock` is held (nothing of the run holds the lock, so it is
+    taken as ended); any other failure (a timeout, the controller not
+    reached, Torque's `qdel` of a completed job: "Invalid state") is an
+    error, nothing recorded, until the scheduler stops listing the job.
+    `delete` refuses it without `-f`, and with `-f` stops it, by the same
+    rule: a failed stop is an error and nothing is deleted, unless the
+    scheduler says it does not know the job and the run's `running.lock`
+    is not held. A job listed in a read state after the run's end
+    (`Job::Listed`): any failure of the stop command is an error, for
+    `stop` and `delete -f` alike. Listed so after the run recorded its end,
+    a state no pattern reads is the ended job (above).
+  - **What `stop` records.** `finished`, once the scheduler took its stop,
+    or refused it saying it does not know the job with nothing of the run
+    holding the lock; a status query
+    that found no job records no end, though the status cache says `U`. A
+    status query that failed (where the machine sets
+    `unknown-job-pattern`) for a run that has not recorded `finished` is an
+    error: `stop` and `delete` refuse with it, as does the guard before a
+    new run; after `finished`, see above (`Job::Unanswered`). A
+    status query or a stop command
+    Ctrl-C ends is no answer and no refusal: the command stops,
+    "interrupted", and nothing is deleted or recorded.
 - **`cactup test show <name>`** — one test run in detail.
 - **`cactup test stop <name> [-f]`** — the §8.6 `stop` semantics for the
   active result set's job (there is no `clean`: no checkpoints/Formaline tarballs
@@ -4129,6 +5035,8 @@ reads), the test subsystem adds:
   walltime = "1:00:00"
   allocation = "…"
   job-id = "…"
+  job-host = "…"                    # job-ids = "pids" only: where the pid ran (§10)
+  job-start = 123456                # …and its process start time (§10)
   status = "U"                      # last observed live status (cached; §8.6)
   universe = { name = "et-sif", wrapper = "…" }   # resolved run universe, or absent
   [vars]                            # frozen §6.3 variable set (D11)
@@ -4143,6 +5051,7 @@ reads), the test subsystem adds:
   created = "…"
   submitted = "…"
   finished = "…"
+  job-stopped = "…"                 # a stop after the end settled the job (§10)
   ```
   Plus the liveness files under the same `.cactup/`: `running.lock` and
   `heartbeat` (§9.3 semantics; consulted by `test stop`/`show`, not by any
@@ -4152,7 +5061,7 @@ reads), the test subsystem adds:
 ### 11.9 Variables added
 
 The §6.3 canonical variable set gains a small **test-only** group, available to
-test runscripts/submitscripts (and their `.py` variants) — never leaked into
+test runscripts/submitscripts (and their `.py` forms) — never leaked into
 normal sim/config substitution:
 
 - `TEST_HOME` — the per-alias test output root (§11.5), the test analog of
@@ -4212,11 +5121,11 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Machine def | `mdb/machines/<m>.ini` | `mdb/<m>/meta.toml` (TOML) |
 | Machine discovery | `aliaspattern` regex | `mdb/<m>/hostname.regexp` (Rust regex), then `mdb/<m>/discover.py` |
 | Config DB / defs | `etc/defs.ini` + `etc/defs.local.ini` | **removed**; → knobs + machine meta |
-| OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<variant>.toml` (rendered to native `.cfg` before make — §7.8) |
-| SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<variant>.{sh,py}` |
-| RunScript | `mdb/runscripts/<m>.run` | `mdb/<m>/runscripts/<variant>.{sh,py}` |
-| BuildSubmitScript | n/a (`cactup build` always ran on the login node) | `mdb/<m>/buildsubmitscripts/<variant>.{sh,py}` — optional; only on machines that hand builds to the scheduler (§7.9) |
-| Parfile | user-supplied `.par` / executable `.rpar` | user-supplied `.par` (literal `@NAME@`) / `.py` variant (JSON-on-stdin, emits `.par` to stdout — §6.1/§6.2) |
+| OptionList | `mdb/optionlists/<m>.cfg` | `mdb/<m>/optionlists/<flavor>.toml` (rendered to native `.cfg` before make — §7.8) |
+| SubmitScript | `mdb/submitscripts/<m>.sub` | `mdb/<m>/submitscripts/<script>.{sh,py}`, routed by `[submitscripts]` |
+| RunScript | `mdb/runscripts/<m>.run` | `mdb/<m>/runscripts/<script>.{sh,py}`, routed by `[runscripts]` |
+| BuildSubmitScript | n/a (`cactup build` always ran on the login node) | `mdb/<m>/buildsubmitscripts/<script>.{sh,py}`, routed by `[buildsubmitscripts]` — optional; only on machines that hand builds to the scheduler (§7.9) |
+| Parfile | user-supplied `.par` / executable `.rpar` | user-supplied `.par` (literal `@NAME@`) / `.py` form (JSON-on-stdin, emits `.par` to stdout — §6.1/§6.2) |
 | Config metadata | `configs/<name>/properties.ini` | `configs/<name>/cactup-config.toml` |
 | Build attempt | n/a (build output went to `cactup-build.log` in the config dir) | `configs/<name>/.cactup-builds/%04d/build.toml` + frozen `build-script` (and `submit-script` when queued) + `build.out`/`build.err` — one per build, foreground or queued (§7.9) |
 | Sim metadata | `SIMFACTORY/properties.ini` | `.cactup/simulation.toml`, `.cactup/restart.toml` (schema-versioned) |
@@ -4232,11 +5141,11 @@ Port of `simfactory-docs.txt` §22, adapted to Rust (`anyhow`, existing style):
 | Test output root | inside a simulation dir (`output-NNNN/exe/…`) | machine `test-home` (optional; falls back to `~/.cactup/tests`) — §11.5 |
 | Config under test | n/a (a `testsuite` property on a sim) | any built config; `--config C` defaults to the active config (no separate test-config kind) — §11.1 |
 | Test run metadata | sim `properties.ini` + `output-NNNN/exe/` copytree | `<test-home>/…/<name>/.cactup/test.toml` + `tests.toml` registry (§11.8); no copytree (§11.10) |
-| Test-script marking | separate faked machine defs | `test = true` on the meta.toml run/submitscript variant entry (§11.2) |
+| Test-script marking | separate faked machine defs | `test = true` on the script's route in `[runscripts]`/`[submitscripts]` (§11.2) |
 | Install root key | machine `sourcebasedir` (source base; also sync/disambiguation) | machine `install-home` (optional default install prefix; falls back to `~/.cactup/cacti`; `--install-prefix` overrides) — §4.2 |
 | Locking | none (per-tree) | `link()`-based (NFS-safe) global-DB lock + per-sim lock + per-config build lock + per-installation lock + per-installation fetch lock (heartbeat) (D11, §2.3) |
 | Execution universe | faked via separate machine defs (e.g. `db-sing-*`) | `[universes.*]` command-wrapper in `meta.toml`; wired for `cactup build`, `sim run`, and `sim submit` (§4.8) |
-| Queue-submitted build | faked via a `[universes.*]` wrapper around `make` (the qbd hack this design retires — §7.9) | first-class: `[build].default-action`/`queue`/`walltime`/… + `[variants.buildsubmitscript]` (§4.2); `build submit` goes through the same `Scheduler` abstraction as `sim submit` (§10) |
+| Queue-submitted build | faked via a `[universes.*]` wrapper around `make` (the qbd hack this design retires — §7.9) | first-class: `[build].default-action`/`queue`/`walltime`/… + `[buildsubmitscripts]` (§4.2); `build submit` goes through the same `Scheduler` abstraction as `sim submit` (§10) |
 
 ---
 
@@ -4249,7 +5158,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
    sync the `mdb` branch into `~/.cactup/mdb/{repo,<sha>,gen-<N>}`; dev builds
    read the repo's `mdb/`.
 2. Python runtime: shell out to `python3` for `discover.py` (one process for
-   all of them) and `.py` script variants rather than embedding CPython (§4.3).
+   all of them) and `.py` scripts rather than embedding CPython (§4.3).
 3. `interactive` command dropped for v1 (§3.1).
 4. `--virtual` prebuilt-executable build kept (§7.7).
 5. `sim delete` moves to `TRASH/` by default; permanent removal behind an
@@ -4258,7 +5167,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
 7. SMT not exposed as a topology flag in v1 (§8.5).
 8. `user`/`email` auto-derived (like simfactory `setup`) and overridable as
    knobs (§5).
-9. `.py` variant calling convention is JSON-on-stdin with a fixed preamble
+9. `.py` script calling convention is JSON-on-stdin with a fixed preamble
    binding globals (§6.1) — flag if you'd prefer env vars or a generated
    assignment preamble instead.
 10. Checkpoint buffer defaults to `max(reserved-walltime/24, 10 min)`, overridable
@@ -4270,7 +5179,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
     (default the active config), with no separate test-config kind (D3, §11).
     Softer choices inside §11 to confirm:
     (a) a testsuite runs the config's normal binary; a DEBUG run is just `config
-        build --variant <debug>` (§4.4, §11.4);
+        build --flavor <debug>` (§4.4, §11.4);
     (b) a test run uses the config's **live** built binary rather than freezing a
         private copy, since it is one-shot (§11.5);
     (c) results are redirected into test-home via the flesh testsuite target's
@@ -4308,7 +5217,7 @@ Each is marked **ASSUMPTION** inline above; collected here:
 | 9 machine detection | `hostname.regexp` / `discover.py` (§4.3) |
 | 10 defs layering | removed; → knobs/meta (§5.2) |
 | 11 `@VAR@` engine | literal `@NAME@` + `.py` escape hatch (§6) |
-| 12 optionlists/run/submit | variants (§4.4, §6.2); test-marked variants (§11.2) |
+| 12 optionlists/run/submit | flavors and queue-routed scripts (§4.4, §6.2); test-marked scripts (§11.2) |
 | 13 on-disk layout | **preserved** (§9) |
 | 13.7 testsuite layout / `copyTestsuiteData` | `cactup test` subsystem: test-home output root + `test.toml`; monster `output-NNNN/exe/` copytree **not** ported (§11) |
 | 14 lifecycle | §8 |
@@ -4392,7 +5301,7 @@ latest.json                          # the version manifest below
 for `<target>` ∈ {`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`}.
 
 ```json
-{ "build": "a1b2c3d", "date": "2026-09-24T12:00:00-05:00", "mdb_generation": 1,
+{ "build": "a1b2c3d", "date": "2026-09-24T12:00:00-05:00", "mdb_generation": 2,
   "targets": { "x86_64-unknown-linux-musl":
                { "path": "x86_64-unknown-linux-musl/cactup-a1b2c3d",
                  "sha256": "…", "size": 11534336 }, … } }
@@ -4406,8 +5315,8 @@ Cargo.toml Cargo.lock resources mdb/GENERATION mdb/generic`), abbreviated to
 7 hex; `date` is that commit's committer date (`%cI`). A docs- or MDB-only
 push therefore has the same id, and CI republishes the live binaries (fetched
 from the current site and verified against `latest.json`) instead of
-rebuilding. `--version` prints `0.1.0 (a1b2c3d 2026-09-24, mdb generation 1)`,
-or `0.1.0 (dev build, mdb generation 1)` for an unstamped build.
+rebuilding. `--version` prints `0.1.0 (a1b2c3d 2026-09-24, mdb generation 2)`,
+or `0.1.0 (dev build, mdb generation 2)` for an unstamped build.
 
 **Ordering and caching.** `publish-mdb` (push `git subtree split --prefix=mdb`
 to `refs/heads/mdb`) runs before `deploy`, so a binary of a new generation is
@@ -4504,10 +5413,36 @@ fail to load or behave differently in the oldest binary of the current
 generation, or (b) an overlay written for the current generation would fail
 or behave differently in the new binary. Adding optional `meta.toml` keys
 counts (the schema is closed). The `mdb-compat` CI job loads every machine in
-both directions against the commit that last touched `mdb/GENERATION`; the
-rest (template variables, `.py` protocol, ignored optionlist header keys)
-needs review. A unit test requires a `GENERATIONS.md` entry for every
+both directions against the last commit that raised `mdb/GENERATION` to the
+current number (a bump reverted later does not move it); the rest (template
+variables, `.py` protocol) needs review. (Optionlist header keys needed
+review too while a generation-1 binary silently ignored unknown ones; since
+Generation 2 `[cactup]` and `[cactup.runs-on]` are closed, so loading
+catches them.) A unit test requires a `GENERATIONS.md` entry for every
 generation up to N.
+
+**Generations so far.** *Generation 1* is the first published format.
+*Generation 2* is the flavor/script split (§4.2, §4.4, §7.8): the
+`[variants.submitscript]`/`[variants.runscript]`/`[variants.buildsubmitscript]`
+tables are renamed `[submitscripts]`/`[runscripts]`/`[buildsubmitscripts]`
+(same route shape); `[variants.optionlist]` is deleted (flavors are discovered
+from `optionlists/*.toml`); the table-level `default-universe` key is removed
+(each route that relied on it gets its own `universe`); script routes lose
+`default = true` (a script serves exactly the queues it lists, and tests never
+borrow normal scripts); each optionlist
+header's flat `gpu`/`compatible-queues` move into `[cactup.runs-on]` as
+`gpu`/`queues` (alongside a new optional `default-queue`), and the header
+rejects unknown keys; overlays set
+`[cactup] mdb-generation = 2`. *Generation 3* renames the phase setups
+`env-build-setup`/`env-submit-setup`/`env-run-setup` to
+`build-env-setup`/`submit-env-setup`/`run-env-setup` (no reader for the old
+names: an overlay that keeps them fails to load), adds the provisioning keys
+`provision`/`build-provision`/`submit-provision`/`run-provision` (§4.2, §6.1;
+rostam's `arm-conda` micromamba block and `x86-modules` Perl stub moved into
+`build-provision`), and adds `[scheduler]`'s `job-ids` and
+`unknown-job-pattern` (§10); `ENV_SETUP` now carries the provisioning steps
+too. Overlays set `[cactup] mdb-generation = 3`. `mdb/GENERATIONS.md` carries
+the step-by-step overlay recipe for each.
 
 **Overlays** (`~/.cactup/machines/<name>/meta.toml`) carry
 `[cactup] mdb-generation = N` (written by `machine create`). On load of a
@@ -4517,3 +5452,1807 @@ N"); older → `OverlayGenerationError` naming `GENERATIONS.md`; newer →
 refused overlay annotated instead of failing. A `--mdb-path` directory whose
 `GENERATION` differs from the binary's is a hard error (a missing file is
 accepted, for fixtures).
+
+---
+
+## 18. Build cache (D15)
+
+One cache per cactup instance, shared by every installation and
+configuration in it. The goal is that a new installation, or a configuration
+rebuilt from scratch after an optionlist edit, compiles only what no build
+of this instance has compiled before.
+
+**Status.** Built in stages; the plan and the state of each stage are in
+`design/build-cache/`. What exists now is the interposition (§18.2–§18.4)
+and the keys (§18.5): with `build-cache = record`, cactup stands in front of
+every object compile, works out the key it would be cached under, and logs
+it; `cactup cache report` (§18.6) reads the logs. With `build-cache =
+serve` it also serves objects from the store (§18.7) and publishes the ones
+it compiles (§18.8); `audit` checks every hit by compiling anyway. `cactup
+cache stats`, `gc` and `verify` look after the store (§18.9). Fortran is
+cached for gfortran (§18.10), and CUDA for `nvcc` (§18.11).
+
+### 18.1 Rules
+
+These hold for every stage, and code in `src/objcache/` is reviewed against
+them.
+
+1. **Never a stale object.** A hit must be byte for byte what the compile
+   would produce here and now. A false miss is acceptable; a false hit is
+   not. Anything the cache does not fully understand is not cached.
+2. **Fail open.** The cache must never fail a build, and never change what
+   gets compiled, with one exception: a serving cache adds the path map's
+   flags to a compile it runs (§18.8), which changes the paths an object
+   records and nothing else. The cache sits strictly below `make`: `make` and cactup
+   (§7.8) still decide *whether* to compile and *with what*; the cache only
+   answers *what the compile would produce*. Every failure inside the
+   wrapper or the probe ends in the compile running as `make` asked.
+3. **Nothing outside Cactus's object compiles.** No compiler variable and
+   no recipe's environment may change, and no build other than Cactus's
+   object compiles may behave differently: not an ExternalLibraries build,
+   not a configure run, not dependency generation; `config-data` stays as
+   configured. That rules out a `make CC=…` override and an optionlist
+   rewrite; §18.3 is what is left. (The makes *above* the object sub-makes
+   do read the fragment, and it does nothing there: see §18.3.)
+4. **Quiet.** A wrapped compile's stdout and stderr are the compiler's own;
+   the wrapper adds nothing. (A serving cache passes them on as they come,
+   and a hit writes the stored ones, §18.8.) (With `SILENT=no` Cactus echoes its recipes,
+   and the echoed compile line then shows the wrapper in front of the
+   compiler — that is make's output, and the truth.) The build output says
+   in one line that the cache stayed out of a build, or how many compiles
+   went through it.
+5. **Signals and exit statuses pass through.** The wrapper stands between
+   `make` and a compiler: a stop signal must reach the compiler, an ignored
+   one must stay ignored, and the wrapper must end the way the compiler
+   ended.
+6. **Hermetic on the compute node (D11).** The wrapper and the probe read
+   the attempt's frozen settings, the configuration directory named in
+   them (and `/proc/self/status`), and the store whose root is named in
+   them (§18.7). Never the global DB, the registry, the MDB, or knobs:
+   `prepare` resolves the store's root from its knob and freezes it.
+7. **No eviction without being asked.** Old entries are what make reverting
+   a thorn cheap.
+
+### 18.2 What `prepare` freezes
+
+With `build-cache` off, a build attempt and its build script are exactly
+what they are without this section. Otherwise `prepare` writes
+`<attempt>/cc/config.toml` (`objcache::BuildConf`): the mode, the versioned
+cactup binary (`freeze::frozen_cactup`, as for `@CACTUP@`), the configuration
+directory and the Cactus root, what keys objects to their platform
+(§18.5): the machine, the build universe, and a SHA-256 of the build-phase
+environment setup (the setup alone: the provisioning steps, §4.2, run in
+subshells and cannot change the environment a compile sees, so they are not
+keyed, and what they put on disk that a compile reads, a compiler included,
+is keyed where it is read); the store's root (§18.7); and
+whether keys use the path map (§18.8, knob `build-cache-relocate`); and
+whether warnings are kept exact (§18.5, knob
+`build-cache-preserve-exact-warnings`). If that
+cannot be written, the build goes on without the cache and says so.
+
+The build script gains one step and changes one (`objcache::Staged`):
+
+```sh
+echo yes | make … <name>-config …          # unchanged: real compilers
+make … <name>-clean                        # unchanged (only with --clean)
+<probe step>                               # may only turn the cache off
+<build step>                               # make <name>, reading inject.mk if allowed;
+                                           #   then one line: how many compiles it recorded
+make … <name>-utils                        # unchanged
+```
+
+### 18.3 The probe and the injected fragment
+
+`cactup __cc-probe <attempt>/cc/config.toml` runs inside the build script,
+after the configure and clean steps — so where the compiles will run
+(compute node, container universe) and after
+`config-data/make.config.rules` exists. It declines (exit 3, one line on
+stderr, the build goes on uncached, nothing written) when it cannot do its
+job there; a container that cannot see the binary at all makes the shell
+report 126/127, which the script turns into the same kind of line.
+
+Otherwise it writes `<attempt>/cc/inject.mk`, which `make` reads through the
+`MAKEFILES` environment variable for the `make <name>` step alone, and
+creates the configuration's `build/` directory if a `realclean` removed it
+(the self-test runs there; make would create it moments later). A `build/`
+that is a link is named by where it leads, since that is the working
+directory make reports. The probe also clears what an earlier run left in
+`<attempt>/cc/` (self-test results, the event log). The
+fragment redefines Cactus's compile recipes — `COMPILE_C`, `COMPILE_CXX`,
+`COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90` — each copied from
+the configuration's own `make.config.rules` with its one compiler reference
+replaced:
+
+```make
+<attempt>/cc/inject.mk: ;
+ifdef CCTK_TARGET
+ifneq ($(findstring |<config>/build/,|$(CURDIR)/),)
+MAKEFILES := $(filter-out <attempt>/cc/inject.mk,$(MAKEFILES))
+ifeq ($(shell <grep -Eq for the stand-down pattern in /dev/null and whichever of $(SRCDIR)/make.code.defn and make.code.deps exist>; echo $$?),1)
+define cactup_cc_run
+'<cactup>' __cc '<config.toml>' '$(subst ','\'',$1)' '$(subst ','\'',$(SHELL))'
+endef
+override define COMPILE_C
+current_wd=`$(GET_WD)` ; cd $(SCRATCH_BUILD) ; $(call cactup_cc_run,$(CC)) $(CPPFLAGS) $(CFLAGS) …
+endef
+…
+endif
+endif
+endif
+MAKEFILE_LIST := $(filter-out $(lastword $(MAKEFILE_LIST)),$(MAKEFILE_LIST))
+```
+
+Why this shape (rule 3):
+
+- **Recipes, not compiler variables.** `$(CC)` is still expanded where it
+  always was, per target, so a thorn that sets its own compiler — globally,
+  per target, by pattern — gets it, and no recipe's environment changes: an
+  ExternalLibraries `build.sh`, which hangs off the objects that need its
+  library and reads `$CC`, gets what it always got. Setting `CC` per object
+  target instead (a pattern-specific `private` variable) fails on both
+  counts: before GNU make 4.4 the target-specific value of an exported
+  variable is exported into the recipes of the target's prerequisites,
+  `private` or not; and a more specific pattern silently beats a thorn's
+  less specific one.
+- **Only in Cactus's object sub-makes.** `MAKEFILES` is inherited by every
+  make below `make <name>`. The fragment acts only where `CCTK_TARGET` is
+  set (`make.thornlib` passes it to the `make.subdir` sub-make) *and* the
+  working directory is under this configuration's `build/`. A third-party
+  build started below one inherits `CCTK_TARGET` through `MAKEFLAGS` but
+  runs in its own tree; and the object sub-make takes the fragment out of
+  the `MAKEFILES` it hands on (a user's own entries stay).
+- **Inert elsewhere.** Every other make that reads it — Cactus's makes
+  above the object sub-makes, and anything they start — gets an empty rule
+  for the fragment itself and nothing more. (make tries to remake each
+  makefile it reads; without that rule a forwarding makefile's
+  match-anything rule would be run for the fragment.) And in every make the
+  fragment takes its own name back out of `MAKEFILE_LIST`, so a makefile
+  that locates itself with `$(firstword $(MAKEFILE_LIST))` still finds
+  itself.
+- **A thorn's own recipe wins — as far as the fragment can see it.**
+  `override` would silently beat a thorn that redefines `COMPILE_C` in its
+  `make.code.deps` (the one place a plain redefinition takes effect, since
+  it is read after the rules). The fragment stands down for a source
+  directory whose `make.code.defn` or `make.code.deps` mentions the compile
+  recipes at all (`COMPILE_` anywhere), or could define one where the
+  fragment cannot see it: an `include` directive (`include`, `-include`,
+  `sinclude` at the start of a line), a `define` directive (also behind
+  `override`, `export`, `private` or `unexport`), a `load` directive (a
+  make plugin can define anything), or `$(eval` or `$(guile` (with braces
+  too). It matches directives, not words: `INCLUDE_DIRS` or a comment
+  saying "include" does not count. make joins a line ending in `\` to the
+  next with a space before it reads a directive or a function, so a `\`
+  counts as the space after the keyword (`include\` then the file name on
+  the next line is an `include`). A line that only continues the one
+  before and begins with `include` is matched too (that costs the thorn
+  the cache, never a wrong recipe). `grep -E` does the reading, once per
+  object sub-make, with its messages discarded (the shell picks the files
+  that exist; make's `$(wildcard …)` crashes GNU make 4.2.1 built against a
+  current C library), and the fragment wraps only on its "no match" (exit
+  1): an unreadable file or no `grep` at all leaves the thorn to plain
+  make, and the self-test's wrapped run, which needs the "no match", turns
+  the cache off for a build where `grep` cannot run. None of the 348
+  thorns of the Einstein Toolkit has any of these (counted 2026-10-02), so
+  this costs nothing there. What is left: a thorn that redefines a compile
+  recipe under a computed name (`$(RECIPE_NAME) = …`, with `COMPILE_`
+  nowhere in its text) is not seen. That needs a makefile written to hide
+  the name; it is listed in the contract with the Cactus build work.
+- **`config-data` stays pristine**: a `make <name>` run by hand later builds
+  with the real compilers, with no cactup involved.
+
+The probe wraps a recipe only if `make.config.rules` defines it exactly
+once, plainly (a line `define NAME` with nothing after the name, then
+`endef`; no other assignment to it) and outside any conditional — otherwise
+the body it reads might not be the one make ends up with — and declines
+altogether if the rules file includes other makefiles, which it does not
+follow. The body must have exactly one reference to its compiler variable,
+as a word of its own in command position: at the start of a recipe line
+(not one continuing the line above), or right after `;`, `&&` or `||`, and
+outside quotes. (A line ending in `\` goes on in the next: the compiler
+may stand at the start of a continuation line if a separator ends the line
+before it.) A recipe that runs the compiler behind something else, or only
+mentions it, is not a shape cactup stands in front of. The probe
+refuses (declines) paths with characters that mean something to make or the
+shell — anything but letters, digits and `/ . _ - + @ ~` — rather than
+escape them for every context they appear in.
+
+The script then runs the goal `all` of two throwaway makefiles under the
+fragment, with the build's own `make` command (`<attempt>/cc/selftest/`,
+output in `<attempt>/cc/selftest.log`), three times in all. One run is the
+way an object sub-make runs: each wrapped recipe must win over a later
+plain definition and, run for real with the compiler `cactup:selftest`,
+must reach a cactup that can read its configuration and
+`/proc/self/status`. Two runs are the way other makes run — in `build/`
+without `CCTK_TARGET`, and with it somewhere else, so that each half of the
+fragment's guard is tried on its own — and each must find nothing of the
+fragment's defined, itself first in `MAKEFILE_LIST`, and its match-anything
+rule not run for the fragment (that rule leaves a file behind if it is).
+Every check of a recipe is one `&&` chain ending in a marker file, and a
+run writes its `.passed` file only when its checks have all run; the script
+takes those three files, not make's exit status alone, as the pass. So a
+make that exits 0 having run nothing, or one told to carry on past errors
+(`-i`, `-k`), proves nothing. A `make` that fails any of it builds
+uncached. A unit test feeds the self-test the fragment broken in each of
+the ways it exists to catch. This holds on GNU make 4.2.1, 4.3 and
+4.4.1 (tested; real Cactus trees on 4.3 and 4.4.1); for anything else the
+self-test is the judge.
+
+### 18.4 The wrapper
+
+`cactup __cc <config.toml> <compiler> <shell> <args…>`. It is dispatched as
+the first statement of `main`, before the interrupt handler, clap, the DB
+and the update check: it runs once per compile with `make` waiting.
+
+`<compiler>` is what the recipe's compiler variable expanded to, and
+`<shell>` is make's `$(SHELL)`, each passed as one quoted argument, so that
+the recipe's shell does not interpret the compiler text before the wrapper
+has looked at it.
+
+**The recipe's shell is the reference.** Without cactup, that shell decides
+what the compiler text means and how to start it. Whatever the wrapper
+cannot start itself goes to a shell of the same kind:
+`<shell> -c '<compiler> "$@"' <shell> <args…>`.
+
+- **A plain command** is what the cache works with: words the shell would
+  pass on unchanged, the first naming a program the shell would take from
+  `PATH` or by its path (`gcc`, `nvcc --compiler-bindir /usr/bin/g++`). The
+  wrapper starts it directly — where the cache has identified the compiler
+  (§18.5), the very file it identified, under the name the recipe gave
+  (for `nvcc`, the steps of its dry run, each the file identified,
+  §18.11). If
+  that fails — a script without a `#!` line,
+  a name only the shell's lookup finds — the shell runs it, and its message
+  and exit status are the shell's own if it cannot either.
+- **A name the shell resolves itself** goes to the shell even when a
+  program of that name exists: a reserved word or builtin (`time gcc`,
+  `command gcc`, `exec gcc`), a function exported to the shell under that
+  name (bash's `export -f`), and a bare name when `PATH` has an entry
+  beginning with `~` ahead of the directory the program is in (bash expands
+  such an entry as it searches; other shells and the wrapper do not).
+- **Anything else** (`LANG=C gcc`, quotes, any shell syntax) means what it
+  means only to a shell, and goes to one without being looked at further.
+- **A compiler already behind another wrapper** (ccache, sccache, distcc,
+  …) is started as it is and left alone: cactup does not stack.
+
+**The shell is asked what the compiler's name means.** Whatever the shell
+sets up for itself at startup that changes how it looks a name up — a
+function or alias, or a `hash -p` — cannot be seen from outside it. Cactus
+runs its recipes with `SHELL = /bin/bash`, and bash reads the file
+`BASH_ENV` names before every recipe line (module systems set it); bash and
+zsh even run a function named by a path (`function /usr/bin/gcc { … }`)
+for the command `/usr/bin/gcc`. So before a compile the wrapper runs
+`<shell> -c 'printf "\ncactup-lookup:"; type "$1"' cactup <name>` in the
+recipe's environment and working directory (messages in English, as for
+the compiler), and starts the compiler itself only when the answer after
+the marker is `<name> is <path>` (or bash's `<name> is hashed (<path>)`)
+for the very file a `PATH` search finds, or the name names (both resolved
+to their physical paths). Any other answer — a function, an alias, a
+builtin, another path, nothing, a failure — leaves the compile to the
+shell, with the answer in the log. (`type`, not `command -v`: for a
+function named by a path, `command -v` prints the path.) The shell's
+output goes to a file, and only the shell is waited for: a startup file
+that leaves something running in the background with the shell's output
+open does not hold up the compile, as it does not hold up the recipe. The
+answer is remembered per build attempt (`<attempt>/cc/compilers/`), for
+that shell and name, as long as these are what they were: the file a
+`PATH` search finds, the shell's file (size, change time, inode), `PATH`,
+`BASH_ENV`, `ENV`, `ZDOTDIR`, `HOME`, the files `BASH_ENV` and `ENV` name
+and, for zsh, its `.zshenv` files, and the working directory when `PATH`
+has a relative entry.
+
+Differences from the recipe's own shell remain, and they are stated
+limits. It is a *new* shell, run with `-c`: a compiler text that uses the
+recipe's shell variables (`$$current_wd`) does not find them, and flags a
+makefile gives its shell in `.SHELLFLAGS` (`-O expand_aliases`, `-l`) are
+not given to it. And the answer is remembered: a startup file that answers
+differently by the working directory or by a variable not listed above, a
+file it reads in turn that is edited during the build attempt, or a
+`BASH_ENV` value the shell expands (`$HOME/.env`, watched as the literal
+name) can make a later compile of the attempt run differently in the
+recipe than in the wrapper. A startup file that defines a function named
+`type` or `printf` can make the answer say anything. No makefile or site
+setup cactup knows of does any of that.
+
+A started compiler's environment is the recipe's, with one adjustment: a
+shell that sets `_` for each command it starts (bash) set it to cactup, and
+the compiler is given its own path there instead, as that shell would have.
+A `SIGPIPE` the recipe was started ignoring reaches the compiler at its
+default (the Rust runtime and `std::process` both touch it); only a build
+script run by hand from such a parent can show that.
+- **Unreadable configuration, mode `off`, any internal error, a panic:** the
+  process becomes the compile, by `exec`: same stdin, signal dispositions
+  and jobserver descriptors, nothing of cactup in between.
+- **`record`:** the compiler runs as a child with inherited stdio. `SIGHUP`,
+  `SIGINT`, `SIGQUIT` and `SIGTERM` are passed on to it (`make` signals the
+  recipe, not the recipe's children) — except those the wrapper was started
+  ignoring, which stay ignored for the compiler too (a build under `nohup`
+  survives the hangup). A terminal's own signal thus reaches the compiler
+  twice, once from the terminal and once passed on. The wrapper then ends
+  as the compiler ended: same exit code, or killed by the same
+  `SIGHUP`/`SIGINT`/`SIGTERM`; any other fatal signal becomes the shell's
+  `128 + signal`. One JSON line per compile goes to
+  `<attempt>/cc/events.jsonl`, best-effort (`objcache::event::Event`): the
+  compiler, the object's name below `build/`, the key and its parts or the
+  reason there is none (§18.5), the exit status, and the time keying, the
+  compile and the check afterward took. A compile left to the shell (also
+  one the wrapper tried to start and could not), or to another wrapper,
+  gets a line with the reason and nothing else — the wrapper becomes that
+  compile and does not see how it ends. A thorn the fragment stood down for
+  is not in the log at all.
+
+Passing a signal on needs `kill(2)`, which std does not offer; the wrapper
+uses `rustix` (D13).
+
+### 18.5 Keys
+
+A key is a digest that two compiles share only when they would produce the
+same object (rule 1). `objcache::key` builds it from six parts, each a
+SHA-256 over length-framed input (`objcache::hash`), kept apart in the log
+so that two builds can be compared part by part. The six digests are
+combined under a label (`key::KEY_LABEL`, now `key-7`), and **any change
+that can make one key stand for another object changes the label**:
+something the key now covers that it did not, anything cactup adds to or
+changes in a compile it runs, a change in how a part is digested. Several
+cactup builds share one store at once (a queued job runs the build it was
+submitted with, for months), and the label is what keeps them from
+serving each other objects made differently. A unit test pins the key of
+fixed parts, so that the key does not change by accident:
+
+- **Preprocessed text.** The output of the same compiler with the same
+  arguments and `-E` in place of `-c -o <object>`. It shows what the include
+  paths and macro definitions made of the source: which files were found,
+  which branches were taken. No header is tracked or guessed at. With `-g3`
+  macro definitions are kept (`-dD`), since the object's debug information
+  then has them.
+- **Files read.** The bytes of every file the preprocessor names in its
+  line markers: the source and every header (everything but the compilers'
+  own names for what is not a file, `<built-in>` and its like, matched
+  exactly). The text alone forgets what
+  the compiler does not. Spacing and comments move the columns that debug
+  information, `__builtin_COLUMN` and `std::source_location` record; Clang's
+  debug information carries a checksum of each file. So an edit to a
+  comment, or to text inside `#if 0`, changes the key. One kind of line is
+  left out (decisions 26, 29, 30): with GCC (and `nvcc`'s GCC passes),
+  without `-g3`, except in the files the preprocessor run's diagnostics
+  name (a stray quote in a definition, `/*` in a comment, a name redefined
+  are warnings about the very lines left out; a `#warning` in the source
+  names the source, which is whole anyway; a diagnostic that names no file
+  keeps every file whole), the
+  preprocessor is asked which macros the text expands or tests (`-dU`,
+  whose definitions then stand in the text), and in each file the text has
+  no code of (a header of definitions alone; not the unit's own source) a
+  line that defines or undefines any other macro is left out, line breaks
+  and all, unless the macro is defined more than once in the unit, is
+  given on a command line (the compile's, or one of `nvcc`'s passes'), or
+  has a reserved name. A line counts as a definition only where it begins
+  in code, not inside a block comment or a raw string. A file with code is
+  keyed whole: what the compiler checks line by line reads its raw lines,
+  definitions too (`-Wmisleading-indentation` looks at the lines between an
+  `if`'s body and what follows). Such a definition changes nothing in the
+  object, and Cactus's headers that list every thorn of a configuration
+  (`cctk_DefineThorn.h`, `CParameterStructNames.h`) are nothing else: two
+  configurations a few thorns apart share their objects. Where what is
+  compiled stands is in the text (`-E` keeps its lines where they were,
+  and its markers say where each `#include` stands); a definition left out,
+  or where a definition stands, can show only in messages that speak of
+  macros or suggest a name ("in definition of macro", "did you mean"). An
+  entry keeps the digest of its files whole; one whose messages speak so is
+  stored under its key with its files whole (`store::whole_key`), so that
+  each set of files gets its own, and a hit with such messages must match
+  them (`Miss::SaidElsewhere`). Clang, whose debug information checksums
+  each file, and `-g3`, whose debug information has every macro, and
+  builds with `build-cache-preserve-exact-warnings = true` (decision 31:
+  by default a served object's warnings are best effort, and in rare cases
+  name a line or a macro of another configuration's headers),
+  keep whole files; with that knob the locale is keyed too (decision 5
+  leaves it out where the object does not depend on it, but the messages'
+  language and quotes do). The names are read
+  as the compilers write them, as C strings (Clang writes a tab or a byte
+  outside ASCII in octal); a marker whose name cannot be read leaves the
+  compile without a key. So does a file the preprocessor *entered* (marker
+  flag `1`) that cannot be read afterward, and the source itself. Only a
+  name that no marker enters — one a `#line` in the source gave, as
+  generated code names its origin — may be of no file, and is then keyed
+  as absent: the bytes compiled are those of the file the directive stands
+  in, which was entered.
+- **What the compile read** (decision 28). A compile run to store its
+  result says what it read: GCC and Clang are given `-MD -MF
+  <file>` (a short name of the wrapper's own beside the object; or, where
+  the compile writes a full dependency file of its own, that one is read;
+  with `-MMD`, which leaves out system headers, the compile is not cached),
+  and `nvcc`'s preprocessing steps and last step likewise. The key's
+  preprocessor runs say what they read the same way, worded by the same
+  compiler (Clang lists what `__has_include` found; GCC does not). After the
+  compile, the lists must name the same files (for `nvcc`'s last step, no
+  file but the passes' and what its identity's trial saw): a compile that could
+  not see a file for a moment (a node whose file system stalled: seen on
+  qbd) takes another branch of a `__has_include`, makes another object,
+  and is not stored, though the key's runs before and after saw the file.
+- **What decides a warning or a failure besides the files.** Whether each
+  include directory (`-I`, `-isystem`, `-iquote`, `-idirafter`) is there,
+  and is a directory (gfortran warns of one that is not there, GCC and
+  Clang with `-Wmissing-include-dirs`, GCC always of one that is a file;
+  with `-Werror` the compile fails); a unit that reads a `#pragma GCC
+  dependency` written as one is not cached (its warning compares
+  modification times). And what the key's preprocessor run says of the
+  text (its diagnostics; for gfortran its `Warning:` and `Error:` lines),
+  mapped as stored messages are, is in the text part: a warning can turn on
+  what neither the text nor the files show (`__has_include`'s answer
+  deciding a `#warning`, a `#pragma GCC dependency` behind `_Pragma` or a
+  macro, a definition the narrowed key leaves out that `#pragma GCC poison`
+  names), and the run prints it as the compile does. For gfortran a run that
+  printed anything is checked after the compile by running it again. What
+  was said is read without the terminal's escape sequences
+  (`-fdiagnostics-color=always`), and with the locale's curly quotes as
+  plain ones. GCC's C front end acts on some pragmas as it reads on, where
+  `-E` ignores them or follows them only in part: `#pragma GCC optimize`
+  (and `target` before GCC 14, with `push_options` and the like) redefines
+  `__OPTIMIZE__`, `__FAST_MATH__`, `__AVX2__` and their kind for the rest
+  of the unit, so
+  `-dU` misses a macro the compile uses; `#pragma GCC diagnostic` turns a
+  warning on, or into an error, for the compile alone (`-E` ignores it
+  before GCC 13, and for an option it does not know, `-Wall`, after). So a C
+  unit whose text has a `#pragma GCC` that reaches a file the key may
+  narrow is not narrowed: any but those the preprocessor alone handles or
+  that change nothing later lines read (`system_header`, `poison`,
+  `warning`, `error`, `dependency`, `ivdep`, `unroll`, `novector`,
+  `visibility`), except a `diagnostic ignored` between a `push` and its
+  `pop` in one file with no other file entered in between. The file such a
+  line is in has code (the line) and is keyed whole, and the region reaches
+  no other; glibc's `stdlib-bsearch.h`, which every C unit with
+  `<stdlib.h>` reads, is so (`objcache::key::FrontEnd`). A `warning` or
+  `error` in a region is no such exception: it turns the option on for the
+  whole unit, and the `pop` does not undo that. (For C++ the compile and `-E`
+  agree on every macro and preprocessor warning after any of them, tried on
+  GCC 8.5 to 14.2, and libstdc++'s headers are full of them.) With `build-cache-preserve-exact-warnings = true` the key
+  also has how the compiler (for CUDA, its host compiler) words a warning
+  in the compile's environment, from a small run of its own: the language
+  and quotes follow the locale as the host resolves it.
+- **Arguments.** Every argument but `-c`, `-o <object>`, the source file,
+  and `-I`/`-D`/`-U` (whose whole effect is in the text and the files), in
+  order, plus the language by the source's suffix, and with debug
+  information the working directory (and `PWD`, which compilers prefer when
+  it names the same place). `objcache::compile` reads GCC and Clang command
+  lines from a list of what it knows. A flag that is not on it makes the
+  whole command line "not cached"; so does one that names another input
+  (plugins, profiles, precompiled headers, LTO, sanitizer lists), another
+  output (split DWARF, coverage), another program (`-B`, `-Wa,`),
+  whose meaning depends on where it stands (`-x`), or that reads a file the
+  preprocessor's output does not name (`-imacros`). Optimization and debug
+  levels are listed one by one, since `-g…` also begins flags that record
+  the command line or embed the source. One second output is understood: a
+  dependency file written while compiling, in the form `-MD` or `-MMD`,
+  `-MP`, `-MF <file>` (required: without it the file's place follows from
+  `-o`), `-MT`/`-MQ <target>` — the form a Cactus recipe gives when
+  dependencies come from the compile itself. These flags change neither
+  the object nor the text, so they are not in the key, and they are kept
+  from the preprocessor runs that make the key, which would write the file
+  too. (A serving cache has to have the file written on a hit; its own
+  preprocessor run, given the flags, does that.) Two families are admitted by
+  prefix, because their members are too many to list and none of them names
+  a file: `-W…` (diagnostics) and `-m…` (machine options; `-mllvm` and
+  Clang's `-module…` excepted).
+- **Compiler.** `objcache::identity`: the bytes of the file that would run
+  (found as `execvp` finds it), the name it is run by (`clang` and `clang++` are one file), for GCC the
+  bytes of `cc1`, `cc1plus` and the assembler it names, and of every shared
+  library each program loads (as the dynamic loader resolves them), plus
+  what the driver says of itself (`--version` without the installation
+  directory, and for GCC its built-in specs and target). Not its path and
+  not its modification time. The identity is worked out once for a build
+  attempt and remembered with what it was computed from: the files (opened,
+  where they can be, so that a network filesystem's attribute cache does
+  not answer for them; by the names they were found by and by where those
+  lead now, physical paths:
+  a link on the way turned to another tree of the same files, hard links,
+  leaves every file as it was but has a program take its `$ORIGIN`, and
+  the driver its prefix, from that tree; tried), and the places searched
+  and passed over before each was found, which must go on holding nothing
+  (or what they held) for a compile to reuse it. For GCC's programs, the
+  places it says it looks (`-print-search-dirs`; none for an assembler it
+  was built to run, `--with-as`), then `PATH`'s for a program it leaves to
+  `PATH` (the assembler), and the places it looks for a `specs` file (its
+  library prefixes, `LIBRARY_PATH`'s entries among them, and its machine's
+  directory, which it does not list, both above the directory it is
+  installed in and under the library directory it was configured with
+  (`--libdir`, else `lib` under `--exec-prefix` or `--prefix`, else
+  `/usr/local/lib`, as configure reads its line), which a relocated GCC
+  still reads: one that appears there is read; tried); along `PATH`, as `execvp` does, a file the system
+  refuses to run (no permission, `noexec`; tried by starting it) is passed
+  over, and one that fails to start otherwise rules the compiler out. For
+  libraries, the places the loader says it tried (glibc's `LD_DEBUG=libs`,
+  read whatever `LD_DEBUG_OUTPUT` says), each entry of its search paths
+  that is not there or is no directory (it is not tried again for the next
+  library), its cache file, the system's preload list
+  (`/etc/ld.so.preload`), and a library preloaded by its path that is not
+  there (through a token the loader expands, `$LIB`, `$PLATFORM`,
+  `$ORIGIN`, where the program's own loader says it leads:
+  `--list-diagnostics`; a loader that does not say rules the compiler
+  out). A program whose loader is not glibc's (which says nothing of its
+  search) rules the compiler out, and so does a library found by a
+  relative name or named by its program with a `/` but not from the root.
+  A program the driver runs must say what it is in its own bytes, as the
+  driver must (GNU's assembler, C, C++ or Fortran compiler proper): a
+  script or a wrapper runs something nothing here follows (tried, both).
+  Once the places are looked at, the driver is asked again where its
+  programs are and the libraries are listed again; a different answer
+  rules the compiler out (something appeared between the search and the
+  look). The identity is worked out again at the end of the key (whose
+  preprocessor runs use the compiler's programs too, and on whose reading
+  a hit is served), right before the compile and after it, before what it
+  made is stored, and must hold each time (checked from what the compile
+  that identified it keeps, not read again). Across the key, and across
+  the compile, the directories that hold the files it watches must look
+  the same (compiles do not write there, so one that changed means
+  something came or went meanwhile, even if it is gone again; tried, an
+  assembler that deletes itself), and so must every entry on the way to
+  each watched place, links by their change time and target (`trail`, as
+  for the files a key reads: a link turned to another tree and back leaves
+  every directory looking the same through it, tried; a directory renamed
+  away and the same one renamed back is decision 9's limit here too). A
+  place passed over that is not there is looked at by its own name only,
+  before and after: its nearest existing ancestor may be a directory
+  people and compiles write in all the time (the home directory for a
+  missing `~/bin`, the temporary one), so what appears there and is gone
+  again within one compile is decision 20's limit. Each compile looks at
+  all of this, a hit twice and a miss four times: some 30 files opened and
+  a few hundred lookups with dozens of `PATH` and `LD_LIBRARY_PATH`
+  entries, about 1–2 ms a hit with a short `PATH` and 4–6 ms with a long
+  one on a local disk; on a network filesystem each open is a round trip,
+  and so is each lookup of a place that is not there where negative
+  lookups are not cached (`lookupcache=positive`). A search for a program the
+  driver runs, for a library or for a `specs` file that passes through the
+  working directory (an empty or relative entry of `PATH`,
+  `LD_LIBRARY_PATH` or `LIBRARY_PATH`, as `export X=/a:$X` leaves when `X`
+  was unset, and as `nvcc` itself appends to `LD_LIBRARY_PATH`) is watched
+  there by name, from each compile's own directory, before and after, as
+  any place that is not there (decision 22): a program, library or `specs`
+  file left there has the identity worked out again; one that appears and
+  is gone within one compile is decision 20's limit (the compile writes
+  that directory, so its change time cannot tell). A program or library
+  actually found by a relative name rules the compiler out. What leads the driver elsewhere from one directory to
+  the next keeps the compile out of the cache: an entry of
+  `COMPILER_PATH` or `GCC_EXEC_PREFIX` that is not an absolute path (an
+  empty one is the working directory), a name in one of the search
+  variables that is not UTF-8 (the identity could not be remembered), a library
+  preloaded by a relative path, `LD_AUDIT`, a flag that selects another of
+  a GCC's sets of programs and libraries (`-print-multi-lib`: `-m32`,
+  `-mx32`; the driver looks for its programs elsewhere then, tried), a
+  compile that converts character sets (its converters and locale data,
+  `GCONV_PATH`, `LOCPATH` and the system's modules, are not followed;
+  tried, two converters and two locales, each two objects; Cactus asks for
+  none); and for Fortran, whose
+  dependency run runs in a directory of its own (§18.10), also a compiler
+  named by a relative path, and, for one named without a `/`
+  (which finds its own prefix along `PATH` from that directory too), such
+  an entry of `PATH` before the compiler. The loader's tunables
+  (`GLIBC_TUNABLES`) are among the variables a change of which has the
+  identity worked out again. All of this guards against accidents
+  (upgrades, reinstalls, module loads, links turned to new versions,
+  shared stores, leftovers), not against someone with write access to the
+  toolchain or the search paths who means to plant a wrong object: a
+  program built to change what it emits while saying it is GNU's, timed to
+  a compile, is out of reach (decision 19). Left: a flag that selects a multilib under
+  another name than `-print-multi-lib` gives (GCC targets with aliases,
+  such as some Arm and RISC-V builds); a file passed over on a `noexec`
+  filesystem that is remounted to allow it; a wrapper that says in its own
+  bytes what the program it runs is. The driver's own bytes must say it is GCC or
+  Clang: a wrapper (`mpicc`, a Cray `cc`, a script) passes `--version` on
+  to a compiler and is not one, and is not cached. Neither is a compiler
+  that takes flags from a file of its own — a GCC with a `specs` file on
+  disk, a Clang that says it reads a configuration file: what such a file
+  adds never passes the reader of the command line, so nothing that reader
+  declines would be declined. **One kind of specs file is accepted**: one
+  that changes only how GCC links. Site-built GCCs have such a file to add
+  an `-rpath` to their own libraries (seen on qbd: `*link_libgcc:` gains
+  `%(link_libgcc_rpath)`, a new section with the `-rpath`), and a `-c`
+  compile never links. The file is read against the driver's built-in
+  specs (`-dumpspecs`, which ignores the file) and accepted only if it
+  defines every built-in section (a GCC that finds a specs file does not
+  set up its built-in sections first: one the file leaves out, such as the
+  target's `cc1_cpu`, is gone, and an empty file leaves GCC compiling
+  nothing), and every section it defines is a built-in one with the same
+  text, a built-in one only the link command uses (`link_command`, `linker`, `link`, `lib`,
+  `libgcc`, `link_libgcc`, `link_gcc_c_sequence`, `link_ssp`, `link_gomp`,
+  `startfile`, `endfile`, `post_link`, `linker_plugin_file`,
+  `lto_wrapper`, `lto_gcc`), or a new one that no section outside that
+  list refers to (`%(name)`, `%[name]`) except other new ones; and if it
+  has nothing else: no `%include`, `%include_noerr` or `%rename`, no
+  compiler for a suffix (`.ext:`, `@language:`), no section twice, nothing
+  unparsed, no empty section followed by a single blank line (GCC
+  skips blank lines after a section's name, so it would read the next
+  section's name as this one's text; `-dumpspecs` writes two), and no `#`
+  or line-final `\` anywhere (GCC takes a comment, and a backslash with
+  its line end, out of the text; `-dumpspecs` prints the text as it is). GCC's own compile steps, which `-dumpspecs` does not show,
+  refer to built-in sections only, and to none on that list. The file's
+  bytes join the compiler's identity. Which file a driver reads depends on the
+  compile (Clang picks a configuration file by target, so `-m32` can bring
+  one in), so **every compile is asked**: the preprocessor run is given
+  `-v`, and the driver says on stderr whether it read a configuration file
+  (Clang) or its built-in specs (GCC); a GCC whose specs file was accepted
+  must say it read that file (`Reading specs from`, the same file by its
+  physical path) and no other. Each must say a line it always says
+  (`InstalledDir:`, `Using built-in specs.` or the accepted file's line): an answer without it is no
+  answer, and no key (Clang names a configuration file between
+  `InstalledDir:` and the command line of the compiler proper, so it has
+  to have printed both). That run is given English messages
+  (`LC_MESSAGES=C`, no `LANGUAGE`, and a non-empty `LC_ALL` taken apart
+  into `LC_CTYPE`, `LC_COLLATE`, `LC_NUMERIC`, `LC_TIME` and
+  `LC_MONETARY`, which thus stay what they were: a compiler may read its
+  source by `LC_CTYPE`).
+  The compiler as a whole is asked too, once, to spare the compiles the
+  asking; and whatever a driver is asked for its identity (`--version`,
+  its specs), it is asked in English the same way, so that the identity
+  does not depend on the language of the session that asked. gfortran is a
+  family of its own (§18.10): its back end is `f951`, and its relocation
+  and locale trials compile Fortran. The answer — also "not one the cache
+  works with" — is remembered per build attempt (`<attempt>/cc/compilers/`)
+  and reused while every file it came from still has the same size, change
+  time and inode. The wrapper starts the file that was identified, under
+  the name the recipe gave.
+- **Platform** (D15). `objcache::platform`: what `prepare` froze — the
+  cactup machine, the build universe, the digest of the build-phase
+  environment setup — and what the wrapper finds on the host that compiles:
+  the architecture, each kind of processor (from `/proc/cpuinfo`: vendor,
+  family, model, stepping, feature flags, cache size; and its caches as
+  `/sys/devices/system/cpu` describes them; not speed or microcode), and
+  `/etc/os-release`. The host half is there because the machine name can be
+  wrong or too coarse (detection keeps the last machine when no machine
+  claims a host; `generic` covers every unclaimed one; login and compute
+  nodes may differ), and it is always in the key, so `-march=native` and
+  compilers that tune for the build host unasked need no flag to say so. A
+  change of machine keys differently and invalidates nothing; so does a
+  change of hardware or of the operating system under one machine.
+  Remembered per attempt, host and boot (`<attempt>/cc/hosts/`).
+- **Environment.** `objcache::environment`: the variables compilers are
+  known to read — locale, `SOURCE_DATE_EPOCH`, the loader's and the
+  compiler's search paths, the loaded-modules lists, and the families MPI
+  wrappers and vendor toolchains use. A variable that makes a compiler
+  write another file (`DEPENDENCIES_OUTPUT`, …), or that rewrites its flags
+  behind the command line (`CCC_OVERRIDE_OPTIONS`, `GCC_COMPARE_DEBUG`),
+  makes the compile not cached. The whole environment cannot be keyed: Cactus's makefiles export
+  well over a hundred variables into every recipe, many of them the
+  configuration's own paths.
+
+**Compiles with no one object.** Some compiles the cache declines because
+nothing it could key would say what comes out:
+
+- A source whose text makes the assembler read a file (`.incbin`,
+  `.include`): the object holds bytes no part of the key covers.
+- A precompiled header that would be used unasked. GCC takes
+  `<header>.gch` beside a header in place of the header; its `-E` is asked
+  to say so (`-fpch-preprocess`), and such a compile is not cached. Clang
+  looks for one only beside a file given with `-include`, and its `-E`
+  does not say; a Clang compile with `-include` is not cached.
+- `-march=native` (or `-mtune=`, `-mcpu=`, with or without extensions
+  after `native`) on a host whose processors are not all of one kind (performance and efficiency cores): the compiler
+  targets the core it happens to run on. Seen on a hybrid Intel
+  workstation: one compile, run twice, gave two objects (GCC resolved three
+  different cache sizes across its sixteen cores).
+
+**Paths.** Cactus compiles with absolute paths, and an object records them:
+`__FILE__` in every `CCTK_WARN`, file names and the compile directory in
+debug information. As it stands an object belongs to one configuration of
+one installation. Where it is known to hold, the key is computed as if the
+compile ran with the Cactus root mapped to `/cactup-root/` and the
+configuration directory to `/cactup-root/configs/@config/`
+(`key::PathMap`), which is how a serving cache runs it (§18.8). The names
+are absolute (decision 8 in `design/build-cache/DECISIONS.md`): debug
+information then names every file by an absolute path, which gdb's
+`set substitute-path` turns into the real one (a rule for
+`/cactup-root/configs/@config` first, then one for `/cactup-root`), where a
+relative name would be taken as relative to the recorded compile
+directory.
+
+- The compiler is given `-ffile-prefix-map=<root>/=/cactup-root/` and then
+  `-ffile-prefix-map=<config>/=/cactup-root/configs/@config/` for the preprocessor
+  run, and maps `__FILE__` where the text uses it. The option and the two
+  names (not the directories) are in the arguments part of the key, so a
+  cactup that maps another way keys apart. Each directory is given
+  with its trailing `/`, in the spelling cactup has for it and in its
+  physical one.
+- The key maps what the compiler does not map in `-E` output — the file
+  names in line markers — and the working directory, by the compiler's own
+  rule: a plain string prefix at the start of a name, the most specific
+  directory first. `<root>-libs/include` is not under `<root>/`, for the
+  compiler and for the key alike.
+- Of the keyed arguments, only the values of `-isystem`, `-iquote`,
+  `-idirafter` and `-include` are mapped: the compiler uses them to find
+  files and keeps them nowhere but in the names of what it finds. Every
+  other argument is keyed as written. GCC records its command line in debug
+  information, unmapped, so a path of the tree in `-frandom-seed=<path>` is
+  part of the object, and two installations do not share such a key.
+- Each file's bytes are keyed under its mapped name. Cactus begins a build
+  copy with `#line 1 "<absolute path of the original>"` when the option
+  list asks for line directives; in a file's *first line* such a name is
+  keyed as mapped (the compiler takes a name from that line and nothing
+  else). Further down, what looks like a directive may be the inside of a
+  comment or a string, and is keyed as the bytes it is.
+- **Whether the map holds is tried, per compiler** (`identity::relocates`,
+  once per build attempt): a Cactus compile in miniature — a build copy
+  with a line directive, a header from the tree, one from the
+  configuration, `__FILE__` in each, debug information on — is compiled in
+  two trees at different paths with configurations of different names, with
+  the flags above, and the two objects must be the same bytes. A compiler
+  without the option, one that applies the first matching map and not the
+  last (compilers have differed, between versions and between `__FILE__`
+  and debug information), or one whose debug information carries the
+  unmapped path some other way, fails the trial and keeps the
+  installation's paths in its keys.
+- Clang with `-fopenmp` keeps them too: its OpenMP source-location strings
+  hold the unmapped path.
+
+A key made without the map is sound and of use to later builds of the same
+configuration only. The log says for each key whether it is free of the
+installation's paths. **Nothing is added to the real compile while the
+cache only records**: the objects of a recording build are byte for byte
+those of a build without the cache.
+
+**Record mode** does around each compile what a serving cache does around
+one it has to run: key it, run it, and compute the text and file digests
+again to see whether the key still describes what was compiled (a header
+edited during the compile would otherwise leave an object of the new text
+under the key of the old). Only the compile has any effect. The two
+preprocessor runs and the reading of the files are the cost a build pays
+for the cache on a miss, and the log has what each took. For gfortran the
+check runs no compiler where it can: it reads the files again and looks
+where the compile looks (§18.10, decision 14 and 16 in
+`design/build-cache/DECISIONS.md`); the log says how many lookups that took
+(`lookups`), or why the dependency run ran again (`checked_by_compiler`). A stop signal that
+arrives during the check afterward ends the wrapper on the spot, by that
+signal (`make` then discards the object, as it would have with the compiler
+still running); the compile is not logged.
+
+**What the key rests on, and where it could be wrong.** Stated so that
+nobody has to find out:
+
+- *What the compiler reads that the preprocessor does not name.* The key
+  covers the files in `-E`'s line markers. A file read some other way that
+  this section does not list is not in it. Known and handled: precompiled
+  headers, `#embed` (its bytes are in the text). Known and excluded by the
+  flag list: plugins, profiles, sanitizer lists, module maps, `-imacros`.
+- *Assembler includes are found by their spelling.* `.incbin` or
+  `.include` followed by a quote, in the preprocessed text. A source that
+  assembles the directive from pieces (`".inc" "bin \"blob\""`) is not
+  noticed, and the file it pulls in is not in the key. Nobody writes that
+  by accident.
+- *A file changed and changed back* between the key and the check after the
+  compile, with the compile reading the changed bytes in between, has its
+  keyed bytes again. The check also compares, for each file (not part of
+  the key): every entry its name resolves through, directories and
+  symlinks (followed as the kernel follows them), by device, inode and
+  birth time (where the filesystem keeps one; it tells a new entry from an
+  old one when ext4 hands the new one the old inode number at once, and
+  does not move when files are created inside a directory), a symlink also
+  by its change time and its target; and the file itself as the opened file is
+  (device, inode, size, modification and change time; taken after the
+  open, which on NFS revalidates what the client knows of it). User space
+  cannot set a change time back, and a symlink swapped and swapped back is
+  a new symlink, so a file rewritten or reached another way in between
+  fails the check. Left: a filesystem whose change times are coarser than
+  the edits (a change and a change back within one tick, to a file of the
+  same size); and the very same directory renamed away and renamed back
+  while the compile reads through it (decision 9 in
+  `design/build-cache/DECISIONS.md`: a directory's change time, the only
+  trace, also moves whenever anything is created in it, and watching it
+  would stop honest compiles from being published); and, on a filesystem
+  that keeps no birth times (NFS, typically), a directory removed and
+  another made in its place that gets the same inode number. Audit mode
+  would catch an object any of these produced.
+- *The flag families.* A `-W…` or `-m…` flag that names a file or records
+  something outside the key would be admitted. None is known besides the
+  two excepted.
+- *Flags from behind the command line.* The reader sees the command line.
+  Known other sources are ruled out: a response file, a GCC `specs` file
+  that does more than change the link, and a Clang configuration file (by
+  what the driver says of each compile), the override variables. The
+  link-only judgment rests on the list of link sections above being
+  right for every GCC: a GCC whose compile steps refer to one of them
+  would be keyed without what that section adds. Flags a distribution
+  built into its compiler are part of the compiler, and of its identity;
+  one that built in a flag the reader would decline is not noticed.
+- *The compiler's identity.* Files a compiler reads by rules of its own
+  that are named nowhere above — a plugin directory, lists in Clang's
+  resource directory, whatever a later version adds — are not hashed. The
+  remembered identity watches where programs and libraries are searched
+  for (above), the places a GCC looks for a `specs` file among them; a
+  Clang configuration file added while a build attempt runs is reported
+  by each compile's preprocessor run, and seen there.
+- *The path map.* The trial shows the map holds for the trial's compile. A
+  flag on the list that makes the compiler put an unmapped path *it worked
+  out itself* into the object, where the trial does not look, would give
+  two installations one key for two objects (differing in a recorded path,
+  not in code). Known and excluded: sanitizers, Clang's OpenMP. (A path
+  written in a flag is not such a case: it is keyed as written.) Audit mode (the serving milestone's gate) is
+  what tries it on real compiles.
+- *The environment.* A variable on no list that changes some compiler's
+  output. The environment-setup digest in the platform part and the
+  loaded-modules variables narrow that; it is not closed.
+- *The host.* Two hosts alike in everything the platform part reads and
+  different in something a compiler targets.
+
+**What the key costs in hits.** Keying files by their bytes means that an
+edit which changes no token still misses: every source that includes a
+header misses when that header's bytes change. Cactus generates headers
+that nearly every thorn source includes and that list the configuration's
+thorns (`cctk_DefineThorn.h`, `CParameterStructNames.h`), so adding a thorn
+to a configuration costs more than the new thorn's compiles (measured:
+§18.6's report on a 25-thorn configuration against the same with three
+thorns added dropped from 90% served, with the text alone, to 55%).
+Narrowing that is a design question for the serving milestone, not a
+soundness one.
+
+### 18.6 `cactup cache report`
+
+```
+cactup cache report [<config>] [--attempt N]
+                    [--against <config>] [--against-installation <alias>] [--against-attempt N] [--long]
+```
+
+Reads the event log of a recording build (the newest attempt of the config
+that has one, or `--attempt`) and prints how many compiles were keyed, per
+language and with the share of compile time; how many of the keys are free
+of the installation's paths; why the other compiles were not keyed; how
+many keys no longer held after the compile; and what keying and checking
+again cost against the compiles themselves.
+
+The log's format is not kept between versions of cactup (§2.4: no backward
+compatibility). Lines the reader cannot parse are counted and the count is
+printed; a log with nothing else is an error that says to build again.
+
+With any of the `--against` flags it compares with another recording build
+— another config, another installation, or an earlier attempt of the same
+one (never the same attempt: naming it is an error) — and says what a cache filled by that build
+would have served: a compile is served if the other build has a compile
+with the same key that succeeded and whose key still held, under whatever
+name. For the rest it finds the same object (by its name below `build/`) in
+the other build and names the parts of the key that differ; `--long` lists
+them one by one. Both builds are found before anything is printed.
+Nothing is read from or written to a cache: both builds only recorded, and
+"would be served" stands on §18.5's path mapping, which the per-compiler
+trial supports and audit mode has yet to try on real compiles.
+
+### 18.7 The store
+
+One directory tree per instance, shared by every installation,
+configuration and host of it, and written by builds running at the same
+time on several hosts over NFS or Lustre, where `flock` cannot be trusted
+(§2.3). So: no lock, no file written by two processes. Every
+write is a new file under a name of its own, and the one shared step is
+`link(2)`, atomic on all three (`objcache::store`). (The one index, of
+the entries each object has, is made of such files too: below.)
+
+**Where.** `<root>/v2/<machine>/<first two hex digits of the key>/<key>`.
+The root is the user's knob `build-cache-home` (an absolute path), else the
+machine's `[paths] build-cache-home` (§4.2), else `.cactup-build-cache` in the
+install home (the `install-home` knob, else the machine's, else
+`~/.cactup/cacti`): beside the installations, whose builds already do their
+I/O there. A machine's place that cannot be resolved here is passed over for
+the next with a warning (`objcache::store_root`). It is resolved by `prepare`
+and frozen into
+`<attempt>/cc/config.toml` (§18.2): the wrapper on a compute node reads it
+from there (§18.1 rule 6). `v2` is the entry format. A cactup with another
+format writes beside it and never reads it — no backward compatibility
+(§2.4); the old tree is left as it is (`cache stats` names it, and says to
+remove it by hand once no older cactup builds with the store). `<machine>` is the cactup
+machine the build was prepared for, which the key also covers: the
+directory keeps machines apart for `cache stats` and `cache gc`, not for
+soundness. A machine name that is not a plain file name keeps the build out
+of the store.
+
+**An entry** is one file, written whole once and never changed:
+
+```
+cactup build cache entry\n                       magic line
+<header> <object> <stdout> <stderr> [<module>…]\n their lengths, decimal
+<header, TOML>
+<the object>
+<what the compiler wrote to stdout>
+<what the compiler wrote to stderr>
+<each module file the compile wrote, §18.10>
+<SHA-256 of every byte above, 64 hex digits>\n
+```
+
+The header has the format (`2`), the label the key was made under, the
+key and its six parts (§18.5), the names of the module files in the order
+they follow the messages (at most 1000; none but for Fortran); and,
+for people only, the object's name below `build/`, the compiler as the
+recipe named it, whether the key is relocatable, the cactup version and
+the host that compiled it. An entry is *whole* when the magic line is
+there, the lengths add up to the file's size, and the checksum is right;
+it is *valid* when it is whole, its header parses (unknown fields are an
+error), its key is the file's name and the digest of its parts, and it
+names as many module files as it holds, each a plain module file name
+(`<name>.mod` or `<name>.smod`), none twice. A
+dependency file is not stored (§18.5: a hit has the key's own preprocessor
+run write it).
+
+**Several cactup builds share the store** (a queued job runs the build it
+was submitted with), so the lengths are outside the header and the header
+is read last: a whole entry whose header this cactup cannot read, or whose
+key was made under another label, was written by another cactup, and is
+left alone, a miss. Any change to what
+an entry holds or how it is read changes the format, which puts the new
+entries in a directory of their own; any change to what a key stands for
+changes the key's label (§18.5).
+
+**Publishing** an object (what a serving cache does after a compile that
+succeeded and whose key still held, §18.5):
+
+1. If `<key>` exists as a file, nothing is written: an entry is the object
+   of its key, whoever compiled it first. (Something else there, such as
+   a directory, fails the publish.)
+2. The two directories above it are created if missing.
+3. A temporary file is created beside it, `.tmp-<key>-<random>`, and the
+   entry is written into it, the object read once from the compile's
+   output and the checksum computed over exactly the bytes written. An
+   object whose size or modification time changed while it was copied is
+   not published. The file is synced to disk (`sync_all`) and then made
+   read-only (`0444`), in that order, so that a server that checks
+   permissions when the data reaches it has nothing left to refuse.
+4. It is hard-linked to `<key>`. The entry is published if the link
+   succeeds, or if it fails and the temporary file's link count is 2 (NFS
+   can lose the reply to a link that happened; `lock::LinkLock` does the
+   same). If `<key>` exists by now, another build published it first: the
+   same object, so nothing is lost. Any other failure (no space, no
+   permission, no hard links on that filesystem) leaves the object
+   unpublished; the build goes on.
+5. The temporary file is removed.
+
+What an interruption at each step leaves: before step 4, a `.tmp-` file no
+restore ever opens; between 4 and 5, the same beside a whole entry. `cache
+gc` removes `.tmp-` files a day old (by the fileserver's clock). The data
+is synced before the link, so a name that exists names a whole entry, also
+after a crash. A stop signal during publishing ends the wrapper on the spot,
+as during the check after the compile (§18.5), and leaves such a `.tmp-`
+file.
+
+**Restoring** an object:
+
+1. `<key>` is looked at, then opened. Not there: a miss. Not a regular
+   file: invalid (a FIFO there must not block the open).
+2. The magic line and the lengths are read and checked against the file's
+   size.
+3. A temporary file is created beside the object the compile would write
+   (`.<object name>.cactup-<random>`), created as a compiler creates its
+   output (`0666`, less the umask, plus what a default ACL of the
+   directory adds), and the object's bytes are copied into it while the
+   whole entry is digested; the compiler's output is read into memory; each
+   module file (§18.10) is copied into a temporary file in the directory it
+   goes into (`.module.cactup-<random>`, created as the object's is); the
+   checksum is compared. Then the header is read.
+4. If the entry is valid, the module files go first: each temporary file
+   is renamed onto its module file's name, unless the file there already
+   has the same bytes, when it is left alone (with its modification time,
+   as gfortran leaves it) and the temporary file removed. Then the object's
+   temporary file is renamed onto the object's name: `make` sees the old
+   object or none, or the whole new one, never part of one, and an object
+   in place stands for its module files in place too. Its modification time
+   is the restore's.
+5. If it is not whole, or whole and for another key, the temporary file is
+   removed, the entry is invalidated, and it is a miss. If it is whole and
+   its header is another cactup's, or reading it fails in a way that says
+   nothing about its content (an I/O error, a stale NFS handle), it is a
+   miss that leaves the entry alone: a passing fault or another build must
+   not cost a good entry.
+
+An entry is never linked to the object: the object is the build's, and a
+later compile writes into it in place. A restore stopped half way leaves
+its `.<object name>.cactup-` file in the configuration's `build/`
+directory, where `make` never looks; `cache gc` does not reach it, and a
+`realclean` removes it.
+
+**Invalidating** an entry removes it, so that the next compile of its key
+can publish a good one. It is removed by name only if that name still
+leads to the file that was read (same device and inode): another build may
+have removed it already and published anew. The check and the removal are
+two steps; a good entry that slips in between is removed, which costs one
+miss.
+
+**Two builds at once.** Two publishers of one key: one link wins, the
+other finds the name taken, and both entries were the same object. A
+reader and a publisher: the reader finds no entry or a whole one. A reader
+and an invalidator: the reader keeps reading the file it opened, and
+checks it anyway. On NFS the data is on the server before the link, and a
+reader on another host revalidates at open (close-to-open consistency); a
+host that has not seen a new entry yet misses.
+
+**Trust.** The checksum shows that an entry is what its writer wrote, not
+that its writer was honest: whoever can write in the store can put any
+object under any key. The store is as trustworthy as its directories'
+permissions. Entries are read-only for everyone, directories are created
+under the user's umask, and the default root is inside `$CACTUP_HOME`. A
+root shared with a group trusts every member with every build that reads
+it.
+
+**Last use** is not recorded yet; it comes with `cache gc`. Whatever form it
+takes, an entry is never changed after its link.
+
+### 18.8 Serving
+
+With `build-cache = serve`, the wrapper keys every compile it can, as in
+record mode, and then either serves it from the store (§18.7) or compiles
+it and publishes the result. `build-cache = audit` serves too, but checks
+every hit by compiling anyway. `record` stays what it is: a measurement
+that changes nothing.
+
+**A hit**: the key's preprocessor run (§18.5) has the store's entry for the
+key restored onto the object's name, the compiler's stored messages written
+to the wrapper's stdout and stderr, and the wrapper exits 0. No compiler
+runs. If the recipe asked for a dependency file (§18.5's `-MD` form), that
+same preprocessor run writes it: it is given the compile's dependency flags
+with the last `-MF` (the one the compiler writes) pointing at a temporary
+file beside the real one, created as the compiler creates its output (`0666`
+less the umask, plus a directory's default ACL: make skips a `.d` file it
+cannot read, and says nothing), and `-MQ <object>` when the compile names
+no target (which is the target GCC
+and Clang give a compile with `-o` and no `-MT`/`-MQ`; tried with both,
+spaces, `$` and `#` in the name included). On a hit the file is renamed
+onto the real name, on a miss it is removed: the compile writes its own.
+Tried: the file is byte for byte the compile's, with and without the path
+map.
+
+**A miss**: the compile runs, given the path map's flags when the key was
+made with the map (§18.5): the stored object must be the object the key
+describes. **This is where the cache changes a real compile**, and where a
+build with the cache serving stops being byte for byte one without it: the
+objects name their sources `/cactup-root/arrangements/…` and the
+configuration's files `/cactup-root/configs/@config/…` (in debug
+information and in `__FILE__`, so a `CCTK_WARN` shows them too). A
+debugger is pointed at them with two gdb rules, the configuration's first
+(`set substitute-path /cactup-root/configs/@config
+/path/to/Cactus/configs/<name>`, then `set substitute-path /cactup-root
+/path/to/Cactus`; gdb uses the first rule that matches, and without line
+directives Cactus compiles the copies in the configuration's `build`), or
+the knob below turns the map off for a build meant for debugging. (Not
+tried with a debugger: the host this was written on has none.) The compiler's stdout and stderr go through the wrapper: one thread
+per stream reads it and keeps a copy (up to 4 MiB of each; beyond that the
+result is not published), another passes it on as it comes. When the
+compiler has ended, the reading waits up to two seconds for the streams to
+close (a process the compiler started may keep one open; then the result
+is not published either), and the passing on is waited for to the end,
+however slow the terminal is, as the compiler's own writes would have
+been. If the compile succeeded and the key still holds afterward (§18.5),
+the object and the messages are published (§18.7); then the wrapper ends
+as the compiler ended.
+
+**Messages are stored as the map would have them.** A compiler's
+diagnostics name files by the paths the compile used, which the path map
+does not change. In a relocatable entry, the configuration directory and
+the Cactus root (each spelling, with its `/`) are stored as
+`@CACTUP_CONFIG@/` and `@CACTUP_ROOT@/` wherever a path begins with them
+(at the start of the text, after a character that cannot be part of a
+path, or after a terminal color sequence), and a hit writes them back as
+this build's directories: a warning served from another installation
+points into this one. (A path glued to something that can be part of a
+path, such as `-I/path/...`, is stored as it is.) The messages are those of the build that
+compiled the object — in its language, when the locale is not keyed (below)
+— and in the order each stream had, not interleaved as they were.
+
+**The path map can be turned off**: `build-cache-relocate = no` (default
+`yes`, frozen with the rest) keys every compile without the map, so the
+compiles keep the installation's absolute paths and are shared only with
+builds of the same configuration in the same installation.
+
+**The locale leaves the key behind a trial** (decision 5 in
+`design/build-cache/DECISIONS.md`). Once per build attempt and compiler,
+with the compiler's identity, a source with non-ASCII bytes in a comment, a
+string and a wide string (not an identifier: GCC before 10 rejects those)
+is compiled with debug information
+twice: in the session's locale, and in the C locale (`LC_ALL=C`, `LANG`,
+`LANGUAGE` and the other `LC_*` removed). A compiler that makes one object
+of both is keyed without `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE` and
+`LC_MESSAGES`; one that does not keeps them. A compile that converts
+character sets (`-finput-charset=`, `-fexec-charset=`) is not cached at
+all: a conversion follows the locale (GCC's `ASCII//TRANSLIT` gives `cafe`
+in a UTF-8 locale and `caf?` in C, from the same text), its data and the
+converters loaded, none of which the key follows (§18.5). Each session is compared with
+the same reference, so two sessions whose compilers pass are interchangeable
+for that source. The remembered identity depends on those variables, so a
+session in another locale tries again.
+
+**Audit mode** checks a hit instead of trusting it. The entry is restored
+to a temporary file beside the object, the dependency file the hit would
+have written is kept aside too, and the compile runs anyway, exactly as on
+a miss. Only a compile whose inputs held still (the check after it passed,
+§18.5) says anything about the entry; otherwise the verdict is that the
+inputs changed. If the two objects are the same bytes and so are the two
+dependency files, the hit was right; the same object with another
+dependency file is a wrong dependency file. If the objects differ, the
+fresh object is moved aside and the compile runs a second time, its
+messages not shown again: if its object equals the first and the inputs
+still held, the stored entry is wrong (**a wrong hit**: the key failed to
+describe the compile), and it is removed and the fresh object published in
+its place; if not, the compiler is not deterministic for this compile. A
+stop signal that reaches the wrapper during the second compile ends it by
+that signal, as it would the compile, with no verdict; a second compile
+that ends any other way (killed by the kernel, crashed, failed) leaves the
+first compile's object the build's, and the verdict that the second
+compile failed. A hit whose compile now fails is
+counted as well. Either way the build keeps the fresh object, the event log
+records the verdict (`event::Audit`), and the build's closing line counts
+it.
+Audit mode is the acceptance gate for serving: a full build in two
+installations with no wrong hit.
+
+**What a build says.** The build step ends with one line, written by
+`cactup __cc-summary` from the event log (§18.12): in a serving build, how
+many objects the cache gave of how many, and why the others were compiled;
+in audit mode, `A checked against the cache (W wrong, F failing to
+compile, D not deterministic, C with inputs that changed), P published`.
+
+**Signals.** A hit runs no compiler: a stop signal during it ends the
+wrapper by that signal, which leaves at most the temporary files the store
+leaves when a restore is cut short (§18.7), and the key's temporary
+dependency file (`.<name>.cactup-…` beside the real one). A signal after
+an audited compile can leave the temporary copies audit mode keeps beside
+the object, under the same kind of name; for Fortran, a restore cut short
+can leave `.module.cactup-…` beside the module files, and a copy cut short
+`.copy-…` in `.cactup/`. The Fortran keying's own directory in the
+attempt's `cc` (`.fortran-…`) is left too. `make` reads none of them. A miss forwards signals to the
+compiler as record mode does; a signal during the check and the publishing
+after it ends the wrapper on the spot (§18.5, §18.7).
+
+### 18.9 Living with the store
+
+Nothing is ever removed from the store on its own (§18.1 rule 7): an old
+entry is what makes going back to an older version of a thorn cheap. The
+store is looked after by three commands, a size notice, and a record of
+when each entry was last used.
+
+**Last use.** An entry is never changed after its link (§18.7), so when it
+was last used is kept beside it, not in it. After the build step of a
+serving or auditing build, `execute` writes one new file into the store,
+`<root>/v<N>/<machine>/used/<random>.keys`, listing the keys of the entries
+that build found there (for a hit under the key with the files whole,
+decision 30, that key), one per line, through a temporary file renamed into place. Its
+modification time, set by the write, is the fileserver's clock at the end
+of that build (§2.3), and is when every key in it was last used. No two
+builds write the same file, and none changes one: nothing is shared but
+the directory. The logs, like entries, are readable by everyone who can
+read the store (`0666` less the umask): `gc` must be able to read every
+log, and a log it cannot read stops it (below). A build that finds nothing
+writes nothing; one that cannot write says so in one line and is otherwise
+unaffected. An entry's own
+modification time is when it was published. `cache gc` folds the logs it
+reads into one, `<random>.times`, with a time on each line (`<key>
+<seconds>`), and removes the logs it folded, so the information outlives
+them and the directory stays small.
+
+**`cactup cache stats`** walks the store under the root a build on this
+machine would use (and says which setting named it) and says, per machine: how many entries and how
+many bytes, the oldest and the newest publish, how many were used in the
+last 7 and 30 days, temporary files; and which directories hold another
+entry format (another version of cactup's: not walked, and to be removed
+by hand once no older cactup builds with the store). It works on a store
+it can only read (ages then by this host's clock, which days do not
+mind).
+
+**`cactup cache gc [--unused-for <age>] [--to-size <size>] [--dry-run]`**
+(at least one of the two) removes the entries of this cactup's format that
+no build has used or published for `<age>` (`30d`, `12w`, `6m` …),
+measured in the fileserver's clock; with `--to-size`, further entries,
+least recently used first, until the store is no larger than `<size>`
+(`200G`). Every directory and every use log of the store must be read
+whole, or `gc` stops before removing anything, naming the log: a log it
+could not look at or read would leave the entries it records as in use
+looking unused. (`stats` says so and goes on; `verify` does not read
+logs.) It also removes the
+temporary files of publishes cut short (`.tmp-…`) older than a day,
+folds the use logs, and removes the unit records (§18.12) of entries that
+are gone. Only one `gc` runs at a time per store: it holds
+`<root>/gc.lock`, a heartbeat `lock::LinkLock` (§2.3). It never touches
+another format's directory. `--dry-run` says what it would remove, and
+removes nothing. An entry is removed by name after checking that the name
+still leads to the file looked at: the same device, inode, size and
+modification time (an entry republished meanwhile can have the old inode
+number on ext4, never the old modification time). What `gc`
+cannot know and need not: a use being logged while it runs (that entry may
+go, which costs one miss), a restore of an entry it removes (the reader
+keeps the file it opened).
+
+**`cactup cache verify`** reads every entry as a restore does (§18.7): it
+removes the invalid ones, as a restore would, leaves another cactup's
+alone, and says how many of each it found (interrupted, how many it had
+removed).
+
+All three walk thousands of files on a network filesystem: they fan out
+over the entry directories (`par::parallel_map`), show progress, and stop
+on the first Ctrl-C with an "interrupted" error, having removed what they
+say they removed.
+
+**The size notice.** The knob `build-cache-size` (a size, `200G`; not set
+by default) is frozen with the rest (§18.2). At the end of a serving or
+auditing build, if it is set and the store is larger, the build says so in
+one line and names `cactup cache gc`. A build never walks the store: the
+size of the whole store (every machine's entries of this format) is kept
+in `<root>/v2/size`, measured by `cache stats` and `cache gc`, and each
+serving build adds the bytes it published and keeps the sum. Builds that
+add at the same moment can lose each other's additions, so between
+measurements it is an estimate, low if anything. Before the first
+measurement the size is not known, and the build says that instead, naming
+`cache stats`. Nothing is removed.
+
+### 18.10 Fortran
+
+gfortran is cached (`objcache::fortran`); other Fortran compilers are not
+identified, and so not cached. Cactus hands gfortran a build copy it has
+preprocessed itself (`.f`, `.f90`), compiled from the configuration's
+`scratch`, which is where gfortran writes the module files of the modules a
+source defines and where, first, it looks for the ones a source uses. A
+source gfortran would preprocess itself (`.F`, `.F90`, `-cpp`), a module
+directory of the compile's own (`-J`), more module search directories
+(`-fintrinsic-modules-path`), a file read before the source
+(`-fpre-include`) and a dependency file from the compile are not cached.
+
+**What a compile reads.** Besides the source: module files (`use`, the
+intrinsic ones included), included files (`include`), and the header the
+driver pre-includes. No preprocessor output shows them, so gfortran is
+asked: run on the source with the compile's arguments and `-cpp -undef -M
+-fsyntax-only` (the *dependency run*), it prints a rule naming every file
+it read, each by the name it was found under, and the module files it
+writes as targets. `-fsyntax-only` runs the front end alone, which reads
+every file the compile reads, and tells the driver nothing will be linked
+(it would read `libgfortran.spec` for a link). A name the rule had to
+escape is not read, and the compile is not cached.
+
+That run needs the C preprocessor, which the compile does not run. `-D` and
+`-U` do nothing to the compile (the compile gets them, as the recipe gave
+them); the runs that preprocess do not. Even so, in
+traditional mode with every macro it can drop dropped (`-undef`), the
+preprocessor still acts on more than a Fortran source should give it: a
+`/*` (which swallows lines up to the next `*/`), a line ending in `\`
+(blanks after it too), a lone carriage return, the names it still defines
+(`__FILE__`, `_OPENMP` and `_REENTRANT` under `-fopenmp`), trigraphs under
+`-trigraphs`. Rather than list them, the preprocessor is run once more with
+the same arguments and `-E`, and its output must be the source: every line
+but its line markers, in order (lines blank on both sides aside, since it
+may stand a marker for a run of them). Otherwise the compile is not
+cached. All 594 of the Einstein Toolkit's Fortran build copies come back
+from it byte for byte. (A source with CRLF line ends does not, since the
+preprocessor drops the carriage returns: it is not cached.) A line beginning with `#` that is not a line marker
+is a directive, which leaves no line to compare, and keeps the compile out
+too.
+
+The dependency run writes module files, and reads back the ones it wrote
+as the compile does, so it runs in an empty directory of its own (where it
+writes them, and where it finds them first) with the compile's working
+directory first among its `-I` directories. Its search order is still not
+the compile's: gfortran looks in the directory of the file it reads before
+any `-I` directory, for module files as for included files, so the
+compile searches its working directory, then the source's directory, then
+its `-I` directories, and the dependency run the source's directory before
+the working directory; and the dependency run searches the working
+directory for included files, which the compile does not. So each module
+file it read must be the first of its name in the compile's order (none of
+that name in a directory the compile searches before it), and no included
+file may be found under the working directory; otherwise the compile is
+not cached. A file named like a module file (`.mod`, `.smod`) is checked
+as one whatever its bytes, since gfortran reads module files through
+zlib, which takes an uncompressed file as it is; only one that is
+gzip-compressed, as gfortran writes them, is surely not an included file,
+and any other is checked as an included file too. The rule for included files is the plain
+one, not a check of the compile's order: it also turns away a Fortran
+`include` of a file an external library installed below `scratch`
+(`scratch/external/...`), a lost hit and never a wrong one, since which
+name an included file was written by cannot be told from where it was
+found. A module file it names in its own directory is its own output,
+not an input. Both checks are made again after the compile.
+
+The key's text part (§18.5) is the digest of the text compiled and of the
+names of the module files it writes; its files part, of every file the
+dependency run read, under its mapped name. Since module files are found
+by names relative to the working directory, the working directory is
+keyed for every Fortran compile, and so are the `-I` directories (mapped).
+After the compile, what each file looked like must not have changed (§18.5),
+and nothing may have appeared where the compile looks before the place it
+found a file: gfortran looks for an included file, also one included from
+an included file, in the directory of the file it compiles, then in its
+`-I` directories, then in the intrinsic modules' directory (tried; not in
+the including file's directory or the working directory), and treats
+anything there as found (a directory there hangs it, tried); no module file
+may appear named like a module gfortran has built in (`iso_c_binding`,
+`iso_fortran_env`: a `use` that does not say `intrinsic` takes a file of
+that name if it finds one, tried) where the compile looks for modules. An
+included file named by an absolute path is opened by that name first, and
+only where nothing is there searched for under each directory as
+`<dir>//<name>` (the dependency run prints the double `/`, tried): found so,
+the name itself is a place before it.
+So are the places the compile looks for each module file it reads before
+the one it reads it from (tried: one put in an earlier `-I` directory right
+before the compile, gone after it, was read). These places are looked at
+right before the compile (one already taken
+fails the check: what appeared there since the key's dependency run may be
+gone again before a second one could see it, tried) and again after it. Module files
+keep their order check, when the key is made and after the compile, along
+the `-I` directories as the compile names them, resolved when looked at (a
+directory behind a symlink turned elsewhere leads elsewhere). And the
+driver's own searches are repeated after the compile by the driver alone
+(`-###`, which runs no compiler): it must read the same `specs` file or
+none, and name the same compiler proper, pre-included header
+(`-fpre-include=`) and intrinsic modules' directory as when it was asked
+right before the compile (so a hit does not pay for it), in the compile's
+working directory; and what the key's dependency run's own driver gave its
+compiler proper (its `-v` says) must be the same, by absolute names; else
+the dependency run reads other files than the compile would, and the check
+fails. A hit compares none of this; what could lead the driver elsewhere
+from another directory keeps the compile out of the cache when the key is
+made (§18.5, Compiler; tried here, a `specs` file and a pre-included header found
+through an empty `LIBRARY_PATH` entry). The file compiled is also watched by the name the
+compile reads it by (through a symlink, maybe): the way that name leads is
+the same when the key is made as before the source is read, and a copy
+must hold the text keyed. No compiler runs for any of this.
+Where an included file cannot be placed so (one named by an absolute
+path and found there), the dependency run runs again after the compile
+instead, and what it lists must be the same; but not where the compile
+reads a copy (decision 13): the dependency run reads the source and is
+blind to the copy's directory, so the check then fails and nothing is
+stored. Left, as for a second dependency run: a file that appears and is
+gone again between the key's dependency run and the check.
+
+**What a compile writes.** The object and its module files. An entry keeps
+all of them (§18.7). A hit puts back each module file whose bytes differ
+from the one in the working directory, and leaves alone one that would not
+change, as gfortran itself does (it keeps its modification time); audit
+mode (§18.8) puts the stored
+ones aside and compares them with the compile's, and a wrong module file
+is a wrong hit. gfortran's module files are deterministic (gzip without a
+time; the source named by its file name alone), so they are the same
+across installations.
+
+**Paths** (decision 13). gfortran writes a source's name into the object
+for its runtime messages, and no `-f*-prefix-map` reaches it: the name it
+was given ("In file '...', around line 7", from runtime checks), and the
+name in a line marker, or else the one it was given ("At line 7 of file
+..."). So under the path map a compile names its source by its path from
+the working directory, `../build/<Thorn>/x.f90`, the same in every tree and
+every configuration. A source whose line markers name files (Cactus writes
+them with `F_LINE_DIRECTIVES = yes`, naming the original by its absolute
+path) is compiled as a copy whose markers name their files by mapped names
+(`/cactup-root/...`, as C's `__FILE__` under decision 8): under the
+source's own file name (a module file records the name gfortran was
+given), in `.cactup/` beside the source, named from the working directory
+too (`../build/<Thorn>/.cactup/x.f90`, which is then what "In file"
+messages name), with the source's own directory first among the `-I`
+directories, right after the copy's own, where Fortran `include` would
+have looked first (an included file of a name the copy's directory has
+too, a copy of another source or one whose build copy is gone, keeps the
+compile out; so does one named with `..`, which from the copy's directory
+leads elsewhere than from the source's: the dependency run prints each
+included file as it was named, after the directory it was found in). `.cactup/` is cactup's alone, and safe to delete: it is
+written again by the next compile that needs it. Only the compile for the store reads the copy, so only a
+serving or auditing build writes it, whole (a temporary file renamed into
+place); it stays there like the build copy itself, and another compile of
+the same source writes the same bytes. Its bytes are the key's text, and
+after the compile it is looked at again with the files read: one changed
+meanwhile keeps the object out of the store. Objects and module files from
+two trees are byte-identical; the debug information names the source
+relative to the compile directory, which the path map maps. The
+compiler's messages name the source as it was given and the mapped names;
+as they pass through, line by line, those are given back their real names
+(`key::Rewrite`), so what the user reads, and what an entry keeps (§18.8),
+is what the compile without the cache would have said (where the messages
+cannot be passed through the wrapper, the recipe's own compile runs).
+`relocates`' trial for gfortran compiles a module this way in two trees,
+with and without a line marker, with runtime checks on, and compares both
+objects and both module files. In record mode, and under
+`build-cache-relocate = no`, the compile reads the source as the recipe
+gave it.
+
+### 18.11 CUDA
+
+`nvcc` is cached (`objcache::cuda`, decisions 24 and 25; how it was found
+out: `design/build-cache/M4-CUDA.md`), with GCC or Clang as its host
+compiler; HIP and Cray's compilers are later milestones. `nvcc` is a driver
+of its own: for one `-c` it runs the host compiler's preprocessor twice (the
+host pass, and the device pass with `__CUDA_ARCH__`), `cudafe++`, `cicc`,
+`ptxas`, `fatbinary`, and the host compiler on the code `cudafe++`
+generates, in an environment its `nvcc.profile` sets. `nvcc -dryrun` says
+all of it without running any of it: the assignments it makes and the
+commands it would hand to `sh -c`, one per line.
+
+**What is read.** `compile::parse_cuda` reads the command line as the GCC
+reader does: what is not on its lists is not cached. Host compiler flags,
+given with `-Xcompiler` or forwarded with
+`--forward-unknown-to-host-compiler`, are held to the GCC reader's list and
+say what they would say there (`-fopenmp`, `-march=native`, character
+sets). `-Xcudafe` may only keep diagnostics quiet, `-Xptxas` only ask for
+`-v`. A compile without `--objdir-as-tempdir` is not cached: `nvcc` names
+its intermediate files differently each time otherwise, and the names go
+into the object. A GPU architecture of `native` is not cached (the key does
+not know the GPU), nor is a compile while `NVCC_PREPEND_FLAGS` or
+`NVCC_APPEND_FLAGS` add flags no reader sees, nor one with device line
+information (`-G`, `-lineinfo`): it records the time each source was last
+changed, and Cactus copies each source anew before it compiles it
+(tried).
+
+**The identity** (§18.5's Compiler item) is `nvcc`'s file, its
+`nvcc.profile`, the programs a dry run of a plain compile says it runs
+(each found along the `PATH` the dry run gives, the places passed over
+watched, each an ELF file that names itself), its `libdevice` directory,
+and what the trial below finds its last step reads. The host compiler is
+identified per compile as any compiler is: the one `--compiler-bindir`
+names, or the one `nvcc` finds along its `PATH` (the places passed over
+watched); its identity goes into the key beside `nvcc`'s.
+
+**The key.** The text part is what the two preprocessor passes print, run
+by cactup as the dry run says `nvcc` would run them (in the environment it
+gives, printing instead of writing, with `-v` and the path map's flags),
+and the files part every file either reads, as for C and C++. The
+arguments part has the compile's flags, its working directory and object
+name (a CUDA object records where it was compiled, and names made from its
+own name, with or without debug information), and every step of the dry
+run of the compile as it will run, with the environment it is given but
+for `PATH` and `LD_LIBRARY_PATH` (whose programs and libraries the
+identities follow), each directory the path map knows mapped. Flags `nvcc`
+takes from the environment through its profile (`PTXAS_FLAGS`,
+`CUDAFE_FLAGS`) are in those steps; the variables its programs read are in
+the environment part (`EDG_…`, `NVVM…`, `OCG_FLAGS` and others).
+
+The last step finds CUDA's headers that only it reads by searching: the
+directory of the generated files, then the compile's own `-iquote`, `-I`,
+`-isystem` and `-idirafter` directories, before CUDA's. No pass makes
+those lookups, so each place searched ahead of the header, under every
+name the header has below a directory searched (the CUDA root given with
+`-I` names it by a longer one), and a `.gch` beside each, must hold
+nothing, at key time and to the end of the compile (`Plan::ahead`): a
+thorn's own `math_constants.h` is not served around (tried).
+
+**The compile the cache runs** (decision 25). `cudafe++` names a unit's
+module ID, which names its registration, its fat binary and every entity of
+internal linkage. Where the unit defines no routine or variable of external
+linkage that serves, it makes the ID of the working directory, the time the
+source was last changed (as local time) and its process ID: every
+configuration, and every copy of a source, would make another object. Not
+told to make one (`--gen_module_id_file`), it reads the ID from its file.
+So a compile the cache runs, to store its result or to audit one, is not
+`nvcc` but `nvcc`'s steps (`cuda::Plan`): the dry run of the compile with
+the path map's flags (the host compiler's prefix maps through
+`-Xcompiler`, shortest directory first, and the source's mapped name
+through `-Xcudafe --orig_src_path_name`), run one step after another in the
+environment it gives, each program the file its identities found (run by
+the name `nvcc` gives it), without `--gen_module_id_file`, with an ID made
+of the key in the shape `cudafe++` gives its own
+(`_<hash>_<length>_<name>_<hash>`, `cuda::module_id`). The key differs
+wherever the compile does (it names the source and the object, mapped), so
+two units of one link never share an ID. Apart from the ID, the object is
+the one `nvcc` makes (tried: every section the same, but the order of the
+strings in `.debug_str`). The last host compile is also given `-MD` to say
+what it read; a compile whose last step read a file the key does not cover
+(neither pass's, nor one its identity's trial saw) is not stored.
+
+What `nvcc` itself does around the steps, the plan does as it does: it
+says `nvcc`'s own warnings first, stops at the first step that fails and
+ends with its exit status, removes the intermediate files `nvcc` removes,
+and for a step killed by a signal it did not pass on, says what `nvcc`
+says (`nvcc error   : '<program>' died due to signal <n> …`) and exits
+with the signal's number. A stop signal is the one exception: it reaches
+the step running, no further step starts, and the compile ends as that
+step ended (by the signal, or with a status of its own: GCC's `cc1plus`
+exits 4 on `SIGINT`), as any compile through the wrapper does (`nvcc`
+itself, sent `SIGINT` with its whole process group, reports the step's
+death and exits 2; sent `SIGTERM`, says `nvcc: Terminated` and exits 255:
+seen). A dry run with more shell than `cuda::shell_words`
+follows (a command substitution, an operator, a pattern), or that does not
+run `cudafe++` making one ID in a file, or that runs a program neither
+identity knows, is not cached. Record mode, which adds nothing to a
+compile, runs `nvcc` as the recipe asks.
+
+**The trial.** An `nvcc` is cached only if, given one ID, it compiles a
+unit without an external routine to the same object in two trees laid out
+as Cactus lays them out (the configuration inside the root, names of other
+lengths), with the ID in both objects (`Compiler::takes_module_id`,
+`relocates`). The trial uses `nvcc`'s default host compiler. What its last
+step read outside the trial's own files (CUDA's `crt/host_runtime.h`,
+`fatbinary_section.h` and the like, which no preprocessor pass reads) is
+part of `nvcc`'s identity and watched (`Compiler::host_reads`).
+
+**The path map** is not used for an OpenMP compile whose host compiler is
+Clang, as for Clang itself.
+
+### 18.12 Why compiles miss: the build's line and `cactup cache doctor`
+
+Max (decision 27, 2026-10-13): "any build where cache is enabled should
+print at the end a brief line indicating how many objects were reused from
+the cache and some brief info about the kinds of misses (first time an
+object was built, source code differed, or a problem `cache doctor` or
+`cache report` can diagnose)"; "don't print any miss kind with 0 count";
+and the cases where whole files are still keyed are to be identified by
+`cache doctor`.
+
+**The line.** A serving build ends its build step with
+
+```
+cactup: build cache: 350 of 389 objects reused; 39 compiled: 22 new, 9 with other sources, 5 built otherwise, 3 kept out (see cactup cache doctor)
+```
+
+Each compile the build ran through the cache is one of:
+
+- *reused*: served from the store;
+- *new*: the store has no record of an entry for this object (by its name
+  below `build/`) at all;
+- *with other sources*: it has a record of one made with the same compiler,
+  flags, environment and platform, from other preprocessed text or other
+  files
+  (a thorn's source edited, or a header of the configuration that differs);
+- *built otherwise*: it has records of entries, none with the same
+  compiler, flags, environment and platform;
+- *kept out*: it has no key (not cached, §18.5), the store has an entry
+  under its key that it could not use (damaged, unreadable, another
+  cactup's), or its object could not be stored (the check after the
+  compile, a publish that failed);
+- *failed*: the compile failed.
+
+A kind with a count of 0 is left out, and so is the part after `;` when
+every object was reused. (In audit mode a hit counts as reused, though it
+is compiled anyway to compare; audit mode's own line says what the
+comparisons found, §18.8.) "See `cactup cache doctor`" follows only when
+something was kept out. A compile another build stored first, while this
+one compiled, counts by what the store held when this one looked. The
+line is the wrapper's events counted by `cactup __cc-summary
+<attempt>/cc`, which reads that directory alone (rule 6); if it cannot,
+the build says how many compiles went through the cache, as before.
+
+**The unit records.** Whether the store has another entry for an object is
+an index beside the entries: for each entry published, one file
+`<root>/v<N>/<machine>/units/<ab>/<unit digest>.<key>`, where the unit
+digest is a SHA-256 of the object's name below `build/` and `<ab>` its
+first two digits (one directory per two digits, not one per object),
+written as an entry is (temporary file, `link(2)`, never changed), but not
+synced: a record cut short by a crash reads back as none and is passed
+over. It holds
+what made the key, as JSON: the label the key was made under, the six parts
+(§18.5), and each file the key read, by its mapped name, with the first 16
+hex digits of its digest as the key took it, whether the key narrowed it and
+whether it left a definition out of it (a record is a report, never a key:
+what a 64-bit prefix might hide is one line of it). Where one key left
+definitions out of a file and the other took it whole, the two digests are
+of other bytes: the file is said to be taken so, not to differ. A record of another
+label makes a miss *built otherwise* ("the cactup that keyed it"). Two
+thorns of one name in two arrangements share an object name, and so their
+records. What it says is a function of its key (but for whether a file
+was narrowed, which the key does not show), so two builds publishing one key
+write records alike, and the second link finds the first. On a miss the wrapper reads the
+unit's records (the newest 32, by modification time), and with them the
+kind of miss; for the record closest to its own (the fewest parts, then
+the fewest files, that differ) it notes in its event which parts or which
+files differ (at most 64, with a count of the rest, which `cache doctor`
+says), and how its key took each such file (below). Only a miss
+pays for this: one listing of its `<ab>` directory, a look at each of its
+object's records, and the newest 32 read. Records are compressed (zlib, by
+the pure-Rust `zlib-rs` already in the tree) and keep 16 hex digits of each
+file's digest: some kilobytes for a C unit, 3% of the entries' bytes on
+`smoke`. They are counted in the store's size as `cache stats` and `cache
+gc` measure it (`--to-size` counts an entry with its record; between
+measurements the size notice's estimate adds objects only). `cache gc` removes the records whose
+entry is gone, each only if its entry is still not there when it comes to
+it (one published since the walk keeps its record), and `cache stats`
+counts them. A
+record missing (a publish cut short between the entry and its record, a
+record removed by hand) makes a miss look new, and a record outlives an
+entry removed otherwise than by `gc` (`verify`, audit mode) until the next
+`gc`: the line is a report, not a key.
+
+**How a key takes each file (decision 27).** Decision 26 leaves out of the
+files part the definitions a unit never uses, in the files the text has no
+code of; every other file is keyed whole, and with it every definition in
+it. The event of a compile says, when no file was narrowed, why (Clang;
+`-g3`; `build-cache-preserve-exact-warnings`; Fortran; a preprocessor
+diagnostic naming no file; a C unit with a `#pragma GCC` its front end
+acts on); and a miss with other sources says, for each file that differs,
+whether it was keyed whole and why (the unit's source; the text has code
+of it; a diagnostic names it; nothing in it was left out) or narrowed, and
+either way which definitions the unit does not use it kept all the same
+(defined twice in the unit, given on the command line, a reserved name).
+
+**`cactup cache doctor [<config>] [--attempt N]`** reads the event log of
+a build that went through the cache (the newest attempt of the config that
+has one, or `--attempt`) and says, in this order: the line above; the
+compiles kept out, by reason, each with how many and the first few
+objects, and what would let them in where cactup knows (a flag, a
+setting, a knob); the misses with other sources, by file, the files that
+cost the most misses first, with how the key took each (the cases where
+whole files stay keyed, which M5b is to take on); the misses built
+otherwise, by the part of the key that differed; and the compiles of which
+no file was narrowed, by reason. That part reads the log and nothing else:
+no store, no compiler.
+
+**The build environment.** Before that, `cache doctor` applies the cache's
+rules to the configuration's build environment as its newest build
+attempt froze it (its environment setup and option list; a configuration
+never built has none to check), without a build (`objcache::doctor`):
+
+- It runs the setup four times (once for the checks, three times for the
+  path variables): a slow module system's setup takes that much longer.
+- It writes a script as the build script is written (the setup at its top
+  level, after `set -e`), which `/bin/sh` reads a command at a time, so
+  an alias the setup defines works in the lines after, as in the build;
+  it runs it from the Cactus root, stdin `/dev/null`, what the setup
+  prints sent to stderr. Once the setup is through, the script marks that
+  in a file and starts `cactup __cc-doctor`, with what to check in
+  another. The checks run in that process, in the
+  build's own environment, with the functions a compile through the wrapper
+  runs; the answer comes back as JSON in a third file. Files, not the
+  shell's stdin, stdout or stderr: the setup may read, redirect or close
+  those (one that closes its stderr runs through). A setup that does not run
+  to its end is said so ("not checked"), and the all-clear is given only
+  where everything was checked. Ctrl-C stops it. A configuration built in
+  a container universe is not checked (said so).
+- The compilers and flags are those `make` gives the configuration's
+  compile recipes (`CC` with `CPPFLAGS` and `CFLAGS`, `CXX`, `F90`, `F77`,
+  `CUCC` with theirs), read through `config-data/make.config.defn` with its
+  conditionals (the optimizing flags where optimizing) by `$(info)`. Where
+  there is no such configure to ask (the configuration is not configured,
+  `make` cannot read it, the newest attempt configures it again from
+  another option list than the one installed with the configuration when
+  an attempt succeeded, or its last configure failed, `CONFIG-STATUS` in
+  Cactus's `config-info`), no compiler or flag is checked, said so: the
+  doctor does not emulate configure (decision 33). Flags are split as the
+  recipe's shell splits them.
+- The checks: the variables that keep every compile out
+  (`CCC_OVERRIDE_OPTIONS` and the like); for each language, what the
+  wrapper makes of the compiler's text before any key (a command only a
+  shell can run, another wrapper such as `ccache` in front, a name the
+  recipe's shell gives a meaning of its own), the driver's
+  own searches (`COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LD_PRELOAD`,
+  `LD_AUDIT`, a Fortran driver's `PATH`), the compiler's identity, the
+  compile's words read whole, as the recipe has them (the compiler's own
+  after its name, then each variable of flags), and the reader's first
+  reason given to each variable that has the word it is about (one about
+  the compile as a whole, as nvcc's reader has some, to the language's
+  flags; one about a single occurrence, a second input or a second `-o`,
+  to the variable at its position): where it is a second input, with the word the reader takes for
+  it (asked of the reader, without the probe's source and its `-o`, of
+  each longer start of the flags: the first that has an input ends at it,
+  so a value the reader takes apart from its flag, `-I /dir`, is never
+  named); where it is a second `-o`, with the word the reader reads one
+  out of (`-openmp`), each variable with that word; the fix names a
+  flag's value too where the reader knows it takes one (`-mllvm x`). The
+  place a flag is traced to is asked of make (decision 33): the variables
+  of `make.config.defn` with the word in their text whose emptying, on
+  make's command line, takes a copy of it out of the variable the compile
+  gets (`C_OPTIMISE_FLAGS`, not `C_DEBUG_FLAGS` where debugging is off;
+  `F77_OPTIMISE_FLAGS` as configure wrote it), and the variable itself
+  where none does, or where copies are left with all those emptied; for
+  a word read as a second input, which is one copy, the variable whose
+  value, given back to make between two marker words, has that copy's
+  place between them (`source_of_copy`); each is said as configure wrote
+  it, with whether the option list has it the same. A `make` that cannot
+  be started is the setup's (its `PATH`). The compilers and flags are
+  checked only where what is configured is provably the newest attempt
+  that builds' (not a `--virtual-executable` one) own configure: it wrote
+  its `configured` stamp (each build script writes it once its configure
+  step succeeds) and `config-data/make.config.defn`, which only a
+  configure writes, is not newer than the stamp; or, for an attempt of a
+  cactup from before the stamp, it succeeded, its option list is the one
+  installed with the configuration, and `make.config.defn` is not newer
+  than that. Otherwise "not checked", said by what the record shows: no
+  record that the attempt configured it as it is now (it has recorded
+  no end, and no configure; it ended without recording that its configure succeeded; its script,
+  an older cactup's, records none; its script is not there), or
+  configured again since (no guess at whether an attempt that recorded
+  no end is queued, running or dead); nothing
+  of who configured last, or from what, is reconstructed.
+  The stamp step never stops a build (`|| true`). Nothing of Cactus's
+  switches or of which variable feeds which is written into the doctor.
+  Only the first (decision 32): that what
+  comes after it is not checked is said once, to be seen by running the
+  doctor again once it is changed; where the configuration's check
+  stopped at a reason, a thorn's reason about a word the configuration's
+  own compile has too is the configuration's. A variable with
+  shell syntax the recipe's shell expands first is "not checked". Where
+  the reader has no reason, a whole key of a small probe compile with
+  every flag (its preprocessor and the identity's trial compiles run; no
+  object of the build is compiled), which also says whether keys are
+  relocatable and whether files are narrowed; and what each thorn's compiles get
+  beyond the configuration's: for each directory a thorn compiles (its
+  `src` and its `SUBDIRS`, as make reads them, links and all, and its
+  bindings, `bindings/build/<thorn>`), Cactus's own
+  `make.subdir` is run as the build's sub-make there runs it (the
+  variables the build passes it and exports to it, `USESTHORNS` and
+  `SRCDIR` as `make.thornlib` writes them, its goal), with
+  `make -n`, in a directory of its own, and with the compile recipes
+  (`COMPILE_C` and the rest, as the fragment redefines them) redefined to
+  print each object's compiler and flags: so each object gets what its
+  compile would (the thorn's bindings and the capabilities they include,
+  the directory's `make.code.defn` and `make.code.deps`,
+  `make.configuration.defn`; `SRCS` as the configuration makes it; what is
+  set for the goal, for `$(OBJS)`, for one object or a pattern, `$*` its
+  stem, `private` too). Nothing is built: Cactus's rules for dependency
+  files are canceled, and every line `make -n` would run all the same (a
+  `+` line, one with `$(MAKE)`, remaking a file it includes) goes to a
+  shell that runs none of them; it runs make's `$(shell …)`, whose output
+  make reads through a pipe (a recipe's goes to a file), in the
+  configuration's own `SHELL` (bash, where `/bin/sh` may be dash), as a
+  build would (a `$(shell …)` inside a recipe of a target the build would
+  make runs too). On Ctrl-C, `cache doctor` asks the setup's process group
+  to stop (a TERM: the checks, which look for it between languages and
+  between their compiles, stop what they run and give no answer), makes
+  it 0.5 s later, and removes the checks' temporary directory, which is
+  its own (the checks' `TMPDIR`, the compilers' files too), however they
+  ended. The `TMPDIR` the setup exports is the build's: the checks read it
+  before they take `cache doctor`'s directory for theirs, and make a file
+  there, as the wrapper makes its files for a compile (a relative one in
+  the directory the compiles run in, `configs/<name>/scratch`: a quoted
+  `~/tmp` is no home directory; a
+  `TMPDIR` where none can be made keeps every compile out, though the
+  compilers fall back on `/tmp`); `cache doctor`'s own files go in `/tmp`
+  where the user's `TMPDIR` has no room for them.
+  Where an object's compiler or flags differ from the configuration's
+  (AMReX's capability can make `CXX` `nvcc`), its language is checked
+  again as above, probe key and all, once for each set of values, and
+  what that finds beyond the configuration's check is the thorn's: one
+  finding for the objects that get it (the directory's, or those named),
+  and for the thorns (one capability's flag is the finding of every thorn
+  that requires it), traced to the file that has the flag (in a line that
+  is no comment),
+  with a fix for where that file comes from (the thorn's own, or written
+  from its configuration or a capability's). A directory whose
+  `make.code.defn` or `make.code.deps` the fragment would stand down for
+  (`probe::STAND_DOWN`, or a file there, as `[ -e ]` has it, that `grep`
+  cannot read: the fragment wraps only on its "no match") keeps the cache out of its
+  compiles, said so with the line. A directory whose make files `make`
+  cannot read through is "not checked"; one it cannot read at all compiles
+  nothing, in a build too, and is passed over (but a thorn's
+  `src/make.code.defn` there and unreadable, at which a build stops). A thorn with a `Makefile`
+  of its own (built by it, not by Cactus's) is "not checked" (its bindings
+  too). The flesh's own compiles are not checked (its make files set no
+  flags of their own); so are the
+  capabilities' flags while the configuration's bindings are not written,
+  and every thorn's while the configuration is not configured. The thorns and their files are read as they are
+  now, not as the attempt froze them (the doctor speaks of the next
+  build). On the Einstein Toolkit (334 directories) this costs under two
+  seconds; entries of the path variables that are
+  not absolute; and the setup itself, run with each path variable but
+  `PATH` unset, empty and set, for one it gives an entry that is not
+  absolute (`export X=/dir:$X` with `X` unset). It runs as the build script
+  runs it: a script file `/bin/sh` reads, the setup at its top level after
+  `set -e`, no arguments, in the Cactus tree and
+  the user's environment, `PATH` included, but for the other path
+  variables (a setup that makes what it needs on its own machine, the
+  first time, finds it made: rostam's `arm-conda`), with the module
+  system the build gets (where `/bin/sh` is bash, an exported `module`
+  function) and a sourced file that is not there as fatal as in the
+  build; an entry of `PATH` that the user's own `PATH` has is not the
+  setup's. A setup that stops
+  before its end (an `exit`, a command that fails) is checked as far as it
+  ran (a trap on the shell's exit writes the values to a file of the
+  doctor's, named in its environment and taken out of it before the setup
+  runs; once the setup is through, a trap of its own on exit runs, as in
+  the build), and each way it stopped is said; one that ends the shell its
+  own way (a trap of its own, an `exec`), or that the shell cannot read
+  (checked first with `-n`), is said not known.
+- Each finding says how much it matters (keeps the cache out; costs
+  objects shared or time; worth knowing), what, where it comes from, and
+  what to change. An environment variable is the user's shell's when it
+  had the value before the setup ran and the setup left it so (or kept the
+  entries found from a value of the shell's), else the setup's (the
+  machine's `[environment]`, or its universe's); a flag is the variable
+  of `make.config.defn` make says gives it (above), said with whether the
+  option list has that variable the same, or the thorn whose file adds it
+  (only that thorn's compiles get it); a compiler likewise.
+- The checks are named sets returning findings (`doctor::CheckSet`), so
+  that a general `cactup doctor` can run them with others.
+
+**The MDB's setups.** A unit test runs every in-repository machine's
+build environment setup, in every universe, as above but in bash without
+`set -e` (a sourced file that is not there passed over), in an environment
+of nothing but `HOME` (not there), `PATH` (`/usr/bin:/bin`) and the path
+variables (the same on every host),
+and fails on one that gives a path variable an entry that is not an
+absolute path, whose stop is not known, or that stops before its end at
+all: CI runs it on every change to the MDB. A setup only describes the
+environment, so it runs through anywhere; what makes or fetches what the
+build needs on its own machine is provisioning (`build-provision`, §4.2),
+which neither this test nor `cache doctor` runs (generation 3 moved
+rostam's two such blocks there; until then the test kept a list of setups
+allowed to stop). A setup that sources a module system's init file this
+host has (a path naming `lmod` or `modules`, such as rostam's `x86-modules`
+sourcing Lmod's) would run the real module system here, where the test's
+`module` otherwise does nothing, and make the result depend on the host: the
+test prints that the setup is not checked on this host and goes on; CI,
+which has no such file, checks it, and where the environment variable `CI`
+is set (to anything but empty, `0` or `false`, case and surrounding blanks
+ignored) such a skip fails the test, so a runner image that gains Lmod or
+Environment Modules cannot hide setups from the check. Other sourced files (`/etc/profile`, an
+MPI's `vars.sh`) are run as before.
+

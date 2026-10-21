@@ -1,4 +1,4 @@
-# cactup-tutorial TEST submitscript (variant "test"), used by `cactup test
+# cactup-tutorial TEST submitscript (script "test"), used by `cactup test
 # submit`. The same #SBATCH header as submitscripts/default.py, without
 # chaining (a testsuite run is a single job). The job re-invokes `cactup test
 # run` inside the allocation, where SLURM_JOB_ID (the machine's
@@ -28,7 +28,7 @@ if MAIL:
 lines.append("#SBATCH --output={0}".format(STDOUT_FILE))
 lines.append("#SBATCH --error={0}".format(STDERR_FILE))
 
-# env-setup is not auto-prepended for .py variants.
+# env-setup is not auto-prepended for .py scripts.
 if ENV_SETUP.strip():
     lines.append(ENV_SETUP.rstrip("\n"))
 

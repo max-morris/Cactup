@@ -35,7 +35,7 @@ description = "Debugger launch command"
 description = "Notification email address"
 
 [ENV_SETUP]
-description = "Resolved environment-setup shell block for the phase"
+description = "Resolved environment-setup shell block for the phase, followed by its provisioning steps"
 
 [EXECHOST]
 description = "Execution host"

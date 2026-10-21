@@ -1,5 +1,5 @@
 #! /bin/bash
-# db1.hpc.lsu.edu TEST runscript (variant "test") — marked test = true in
+# db1.hpc.lsu.edu TEST runscript (script "test") — marked test = true in
 # meta.toml (design §11.2). Instead of launching a parfile like
 # runscripts/default.sh, it drives `make <config>-testsuite` and lets the
 # Cactus flesh harness launch each test (design §11.6). The launcher mirrors
@@ -7,7 +7,7 @@
 #
 # Testsuite-only variables (design §11.9): TESTSUITE_RESULTS_DIR (where the
 # harness output must land, under test-home) and TESTSUITE_SELECT (which tests
-# to run; empty = all). env-setup is auto-prepended by cactup for .sh variants
+# to run; empty = all). env-setup is auto-prepended by cactup for .sh scripts
 # (design §6.1).
 
 echo "Preparing testsuite:"
@@ -31,8 +31,7 @@ export OMP_PLACES=cores
 
 # The flesh testsuite harness substitutes the literal placeholders
 # $nprocs/$exe/$parfile into this command (design §11.6); single quotes keep
-# them out of the shell's hands. The launcher mirrors runscripts/default.sh
-# (its GRES branch depends on $QUEUE, which is unset here, so it is omitted).
+# them out of the shell's hands. The launcher mirrors runscripts/default.sh.
 export CCTK_TESTSUITE_RUN_PROCESSORS=@TASKS@
 export CCTK_TESTSUITE_RUN_COMMAND='srun --overlap -n $nprocs --cpus-per-task=@CPUS_PER_TASK@ --gpus-per-task=@GPUS_PER_TASK@ $exe $parfile'
 

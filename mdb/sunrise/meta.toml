@@ -39,13 +39,13 @@ module unload openmpi3
 module unload intel/mpi/2021.2.0
 module unload gnu8/8.3.0;
 export PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/bin:/cfs/home/pedi5492/OpenMPI/openmpi-4.1.5/bin:/cfs/home/pedi5492/HDF5/hdf5-1.14.2/bin:${PATH}
-export LD_LIBRARY_PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/lib64:/cfs/home/pedi5492/GNU/gmp-6.3.0/lib:/cfs/home/pedi5492/GNU/mpfr-4.2.1/lib:/cfs/home/pedi5492/GNU/mpc-1.3.1/lib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=/cfs/home/pedi5492/GNU/gcc-13.2.0/lib64:/cfs/home/pedi5492/GNU/gmp-6.3.0/lib:/cfs/home/pedi5492/GNU/mpfr-4.2.1/lib:/cfs/home/pedi5492/GNU/mpc-1.3.1/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 #module load intel/2021.2
 #module load intel/compiler/2021.2.0
 #module unload intel/mpi/2021.2.0
 #module load openmpi3/3.1.4
-#export LIBRARY_PATH="${LIBRARY_PATH+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
-#export CPATH="${CPATH+$CPATH:}/usr/local/include:/usr/include:/include"
+#export LIBRARY_PATH="${LIBRARY_PATH:+$LIBRARY_PATH:}/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib"
+#export CPATH="${CPATH:+$CPATH:}/usr/local/include:/usr/include:/include"
 """
 
 [scheduler]
@@ -54,6 +54,8 @@ blocking-submit = "sbatch --wait @SCRIPTFILE@"
 # set inside a SLURM allocation; gates `test run` (design §11.6)
 allocation-env  = "SLURM_JOB_ID"
 get-status      = "squeue -j @JOB_ID@"
+# What squeue says (on stderr) of a job Slurm no longer knows.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
@@ -73,13 +75,10 @@ exec-host-pattern = '^(\S+)'
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["rossw"], default = true }
+[submitscripts]
+"default" = { queues = ["rossw"] }
 "test"    = { queues = ["rossw"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["rossw"], default = true }
+[runscripts]
+"default" = { queues = ["rossw"] }
 "test"    = { queues = ["rossw"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

@@ -1,9 +1,9 @@
-# anvil optionlist (variant "default"), ported from simfactory2
+# anvil optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/anvil.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["wholenode"]
+[cactup.runs-on]
+queues = ["wholenode"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

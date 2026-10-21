@@ -1,11 +1,11 @@
 #! /bin/bash
-# Sciama submitscript (variant "default"), ported from simfactory2
+# Sciama submitscript (script "default"), ported from simfactory2
 # mdb/submitscripts/sciama.sub. The old script had NO restart-chaining
 # directive; kept that way.
 #
-# A .sh variant works here since the header is fully static: cactup inserts
+# A .sh script works here since the header is fully static: cactup inserts
 # env-setup after the leading directive/comment block (design §6.1), so the
-# #SBATCH lines stay on top. (This was a .py variant back when env-setup was
+# #SBATCH lines stay on top. (This was a .py script back when env-setup was
 # inserted right after the shebang.)
 #
 # Changes vs. simfactory (design §6.3, §8.3.1):

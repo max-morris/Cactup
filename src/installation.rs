@@ -236,6 +236,7 @@ impl Installation {
     /// The installation a command targets: `--installation <alias>` or the
     /// active installation; fail fast otherwise (§3).
     pub fn resolve(ctx: &Ctx) -> Res<Installation> {
+        let _span = crate::timing::span("installation resolve");
         let db = ctx.db.read()?;
         let alias = match &ctx.globals.installation {
             Some(alias) => alias.clone(),
@@ -430,13 +431,18 @@ impl Installation {
     }
 
     /// First-time setup (install-time, §8.1) and `cactup use` backfill:
-    /// resolve sim-home/test-home from the machine's `[paths]` (resolved
-    /// here at use time — @USER@/@ENV()@, §4.2; an unset env var is a hard
-    /// error), record the thornlist's `!DEFINE ROOT` directory (`root_dir`,
+    /// resolve sim-home/test-home from the user's knobs of those names, else
+    /// the machine's `[paths]` (resolved here at use time — @USER@/@ENV()@,
+    /// §4.2; an unset env var is a hard error), record the thornlist's `!DEFINE ROOT` directory (`root_dir`,
     /// if supplied), and write installation.toml. A field that is already
     /// recorded is never changed (homes and the root dir are fixed at
     /// install time); only missing ones are filled.
-    pub fn ensure_meta(&self, machine: &Machine, root_dir: Option<&str>) -> Res<InstallationMeta> {
+    pub fn ensure_meta(
+        &self,
+        machine: &Machine,
+        db: &crate::database::Database,
+        root_dir: Option<&str>,
+    ) -> Res<InstallationMeta> {
         let locked = self.locked()?;
         let mut meta = locked.meta()?;
         if meta.sim_home.is_some() && meta.test_home.is_some() && (root_dir.is_none() || meta.root_dir.is_some())
@@ -444,18 +450,18 @@ impl Installation {
             return Ok(meta);
         }
         if meta.sim_home.is_none() || meta.test_home.is_none() {
-            let paths = machine.meta.resolved_paths()?;
+            let paths = machine.meta.paths_for(db)?;
             if meta.sim_home.is_none() {
                 meta.sim_home = Some(resolve_home(
                     paths.simulation_home.as_deref(),
-                    "simulations",
+                    "simulation-home",
                     &self.alias,
                 ));
             }
             if meta.test_home.is_none() {
                 meta.test_home = Some(resolve_home(
                     paths.test_home.as_deref(),
-                    "tests",
+                    "test-home",
                     &self.alias,
                 ));
             }
@@ -474,12 +480,13 @@ impl Installation {
     }
 }
 
-/// `<machine home>/<alias>`, or the `~/.cactup/<fallback>/<alias>` fallback
-/// when the machine omits the key (§8.1, §4.2).
-fn resolve_home(machine_home: Option<&str>, fallback: &str, alias: &str) -> PathBuf {
+/// `<machine home>/<alias>`, or the fallback of the `[paths]` key `key`
+/// (`~/.cactup/<dir>/<alias>`) when neither a knob nor the machine sets it
+/// (§8.1, §4.2).
+fn resolve_home(machine_home: Option<&str>, key: &str, alias: &str) -> PathBuf {
     match machine_home {
         Some(home) => PathBuf::from(home).join(alias),
-        None => crate::CACTUP_ROOT.join(fallback).join(alias),
+        None => crate::mdb::meta::fallback_home(key).expect("a home key has a fallback").join(alias),
     }
 }
 
@@ -559,6 +566,7 @@ pub(crate) fn write_toml<T: Serialize>(path: &Path, value: &T) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::Database;
 
     fn inst() -> (tempfile::TempDir, Installation) {
         let dir = tempfile::tempdir().unwrap();
@@ -577,7 +585,7 @@ mod tests {
         std::fs::write(
             cfg.join("cactup-config.toml"),
             format!(
-                "name = \"sim\"\nvariant = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
+                "name = \"sim\"\nflavor = \"default\"\nthornlist = \"{}\"\nmachine = \"fake\"\n\
                  config-id = \"c1\"\nbuild-id = \"b1\"\n",
                 inst.legacy_live_thornlist().display()
             ),
@@ -752,7 +760,7 @@ mod tests {
         );
         let mel5 = mdb.load("mel5").unwrap();
 
-        let meta = inst.ensure_meta(&mel5, None).unwrap();
+        let meta = inst.ensure_meta(&mel5, &Database::new(), None).unwrap();
         // mel5 sets simulation-home/test-home; per-alias subdirs (§8.1, §11.5).
         assert!(meta.sim_home().unwrap().ends_with("simulations/et-dev"));
         assert!(meta.test_home().unwrap().ends_with("tests/et-dev"));
@@ -760,8 +768,16 @@ mod tests {
         // Fixed at install time: a second ensure with a different machine
         // changes nothing.
         let generic = mdb.load("generic").unwrap();
-        let again = inst.ensure_meta(&generic, None).unwrap();
+        let again = inst.ensure_meta(&generic, &Database::new(), None).unwrap();
         assert_eq!(again.sim_home().unwrap(), meta.sim_home().unwrap());
+
+        // The user's knobs of those names win over the machine's.
+        let (_other_dir, other) = self::inst();
+        let mut db = Database::new();
+        db.set_knob("simulation-home", "/fast/sims".to_owned());
+        let meta = other.ensure_meta(&mel5, &db, None).unwrap();
+        assert_eq!(meta.sim_home().unwrap(), PathBuf::from("/fast/sims/et-dev"));
+        assert!(meta.test_home().unwrap().ends_with("tests/et-dev"));
     }
 
     #[test]
@@ -890,13 +906,13 @@ mod tests {
 
         // First call resolves homes (as `install` or an earlier `use` would
         // have), but records no root-dir — the pre-root-tracking state.
-        inst.ensure_meta(&mel5, None).unwrap();
+        inst.ensure_meta(&mel5, &Database::new(), None).unwrap();
         assert!(inst.meta().unwrap().root_dir.is_none());
 
         // A later `cactup use` backfill: homes are already set, and it still
         // passes None.
         let generic = mdb.load("generic").unwrap();
-        let meta = inst.ensure_meta(&generic, None).unwrap();
+        let meta = inst.ensure_meta(&generic, &Database::new(), None).unwrap();
         assert!(meta.root_dir.is_none());
         assert_eq!(inst.cactus_root(), inst.root.join(DEFAULT_ROOT_DIR));
     }
@@ -928,13 +944,13 @@ mod tests {
         );
         let mel5 = mdb.load("mel5").unwrap();
 
-        let meta = inst.ensure_meta(&mel5, Some("Foo")).unwrap();
+        let meta = inst.ensure_meta(&mel5, &Database::new(), Some("Foo")).unwrap();
         assert_eq!(meta.root_dir.as_deref(), Some("Foo"));
         assert_eq!(inst.cactus_root(), inst.root.join("Foo"));
 
         // Fixed at install time: a later ensure with a different root dir
         // changes nothing.
-        let again = inst.ensure_meta(&mel5, Some("Bar")).unwrap();
+        let again = inst.ensure_meta(&mel5, &Database::new(), Some("Bar")).unwrap();
         assert_eq!(again.root_dir.as_deref(), Some("Foo"));
     }
 }

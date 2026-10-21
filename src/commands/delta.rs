@@ -103,10 +103,11 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let checking = progress.add_child("probe thorn links");
     checking.init(Some(linked.len()), Some(prodash::unit::label("thorns")));
     let checking = std::sync::Mutex::new(checking);
+    let pass = fetch::link::LinkPass::new(&inst.root, &root);
     let states: Res<Vec<Res<LinkState>>> = crate::par::parallel_map(&linked, |c| {
         let current =
             checking.lock().expect("delta progress poisoned").add_child(c.checkout.clone());
-        let state = fetch::link::inspect_link(&inst.root, &root, c);
+        let state = pass.inspect(c);
         drop(current);
         checking.lock().expect("delta progress poisoned").inc();
         state
@@ -293,18 +294,80 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     let processed = cactus_root.join("configs").join(&name).join(build::THORNLIST_PROCESSED);
     let text = std::fs::read_to_string(&processed)
         .with_context(|| format!("Failed to read {}", processed.display()))?;
-    let live = crate::thornlist::parse(&text)
-        .ok()
-        .and_then(|list| fetch::source_heads_with_progress(&inst.root, &list).ok().flatten());
+    // The same three readings `cactup build` decides on (§7.4): the repos'
+    // state, and each thorn's provider, shape and stamp. Leaving the thorn
+    // half out let this say "matches" about a tree the next build rebuilds.
+    let list = crate::thornlist::parse_config_list(&text, &inst.root, &cactus_root)?;
+    let live = match &list {
+        Ok(list) => fetch::source_heads_with_progress(&inst.root, list)?,
+        Err(why) => Err(fetch::NoSources::Unparseable(why.clone())),
+    };
+    let list = list.ok();
+    // The global `.cactupignore` as the next build will read it.
+    let global_ignore = build::read_global_shape_ignore();
+    let scan = list
+        .as_ref()
+        .map(|l| build::thorn_shapes_with_progress(&cactus_root, l, global_ignore.as_deref()))
+        .transpose()?;
+    let thorns = ThornChanges::new(
+        meta.thorn_providers.as_ref(),
+        meta.thorn_shapes.as_ref(),
+        meta.thorn_stamps.as_ref(),
+        list.as_ref().map(|l| l.thorn_providers()).as_ref(),
+        scan.as_ref(),
+    );
+    // Whether thorn stamps are compared at all: both the record and the tree
+    // must have some, exactly as `cactup build` requires. A record without
+    // any predates them (or an older cactup rewrote it), and compares nothing.
+    let recorded_stamps = meta.thorn_stamps.as_ref().filter(|s| !s.is_empty());
+    let fresh_stamps = scan.as_ref().map(|s| &s.stamps).filter(|s| !s.is_empty());
+    let stamps_compared = recorded_stamps.is_some() && fresh_stamps.is_some();
+    let stamps_unrecorded = recorded_stamps.is_none() && fresh_stamps.is_some();
+    // A plain-list thorn with no repo behind it has no source state, but its
+    // stamp still sees its files edited once a build has recorded one; only
+    // what has neither (the flesh, a thorn without a stamp) goes unnoticed.
+    let stamped =
+        |thorn: &str| build::has_stamp(recorded_stamps, thorn) && build::has_stamp(fresh_stamps, thorn);
+    let untracked: Vec<String> =
+        list.iter().flat_map(|l| l.untracked()).filter(|t| !stamped(t)).cloned().collect();
 
-    let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref());
+    let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref().ok());
     if delta == SourceDelta::Unknown {
-        println!(
-            "{} no source baseline recorded for this config{}. Run `cactup build {name}` to \
-             establish one; after that, every later change is reported here.",
-            "note:".yellow().bold(),
-            if meta.sources.is_none() { " (built before source tracking)" } else { "" }
-        );
+        // Three different situations, and only one of them is fixed by
+        // running `cactup build`: telling a user whose sources cactup cannot
+        // read to build "to establish a baseline" sends them in a circle.
+        match (&live, &meta.sources) {
+            (Err(why), None) if stamps_compared => println!(
+                "{} cactup cannot track this config's repos: {why}. Only its thorns' files \
+                 are compared; after changing the flesh, `cactup build {name} --reconfig` \
+                 rebuilds incrementally, and after a refetch, `cactup build {name} -f` rebuilds \
+                 from scratch.",
+                "note:".yellow().bold()
+            ),
+            (Err(why), None) => println!(
+                "{} cactup cannot track this config's sources: {why}. It records no source \
+                 baseline, so there is nothing to compare; after changing the sources, \
+                 `cactup build {name} --reconfig` rebuilds incrementally.",
+                "note:".yellow().bold()
+            ),
+            (Err(why), Some(_)) => println!(
+                "{} cactup can no longer read this config's sources: {why}.",
+                "note:".yellow().bold()
+            ),
+            (Ok(_), _) => println!(
+                "{} no source baseline recorded for this config yet. The next `cactup build \
+                 {name}` records the sources as they are then (it does not compare them with \
+                 the last build), and every change after that is reported here. If they \
+                 changed since the last build, `cactup build {name} --reconfig` rebuilds them.",
+                "note:".yellow().bold()
+            ),
+        }
+        if thorns.print(verbose) {
+            println!(
+                "\n  {} `cactup build {name}` reconfigures and rebuilds what this affects.",
+                "→".bold()
+            );
+        }
         return Ok(());
     }
 
@@ -361,7 +424,33 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         println!("    {}", dir.display().to_string().dimmed());
     }
 
+    let thorns_changed = thorns.print(verbose);
+
+    // What nothing above can speak for — and "matches" must not either.
+    if !untracked.is_empty() {
+        println!(
+            "  {} — {}",
+            build::summarize(&untracked).bold(),
+            "not a link into the installation's repos/, so not tracked: edits to it go unnoticed".yellow()
+        );
+    }
+
     match delta {
+        // A thorn change rebuilds incrementally, whatever the repos say.
+        SourceDelta::Unchanged if thorns_changed => println!(
+            "\n  {} `cactup build {name}` reconfigures and rebuilds what this affects.",
+            "→".bold()
+        ),
+        // Built before stamps: nothing can say whether thorn files changed.
+        SourceDelta::Unchanged if stamps_unrecorded => println!(
+            "  {} thorn files have no baseline yet (this config was built before cactup \
+             recorded one); the next `cactup build {name}` records it. If files git does not \
+             track were regenerated since, `cactup build {name} --reconfig` rebuilds them.",
+            "note:".yellow().bold()
+        ),
+        SourceDelta::Unchanged if !untracked.is_empty() => {
+            println!("  {}", "everything else matches what this config was built from.".green());
+        }
         SourceDelta::Unchanged => {
             println!("  {}", "the source tree matches what this config was built from.".green());
         }
@@ -386,20 +475,25 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
 /// build` — and a run whose sources have moved is often exactly what was
 /// intended (the executable is already built and frozen per simulation).
 /// Suppressed by `-s/--silent`, and any inspection failure is swallowed:
-/// nothing here may stand between the user and their job.
-pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: bool) {
+/// nothing here may stand between the user and their job. The one error is
+/// an interrupt during the probe (§2.4): the user asked cactup to stop, so
+/// the submit or run must not go ahead.
+///
+/// It compares the repos only, not the per-thorn records `config delta`
+/// also reads (§7.4): a thorn git does not track that was edited after the
+/// build goes unmentioned here. Stamping means walking every thorn, a cost
+/// not yet judged worth paying on every submit.
+pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: bool) -> Res<()> {
     if silent || meta.sources.is_none() {
-        return;
+        return Ok(());
     }
     let processed =
         inst.cactus_root().join("configs").join(&meta.name).join(build::THORNLIST_PROCESSED);
-    let Ok(text) = std::fs::read_to_string(&processed) else { return };
-    let live = crate::thornlist::parse(&text)
-        .ok()
-        .and_then(|list| fetch::source_heads_with_progress(&inst.root, &list).ok().flatten());
-    let (delta, change) = build::source_delta(meta.sources.as_ref(), live.as_ref());
+    let Ok(text) = std::fs::read_to_string(&processed) else { return Ok(()) };
+    let Ok(live) = fetch::probe_sources(&inst.root, &inst.cactus_root(), &text)? else { return Ok(()) };
+    let (delta, change) = build::source_delta(meta.sources.as_ref(), Some(&live));
     if matches!(delta, SourceDelta::Unknown | SourceDelta::Unchanged) {
-        return;
+        return Ok(());
     }
     let mut what = Vec::new();
     if !change.moved.is_empty() {
@@ -424,6 +518,7 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         meta.name,
         meta.name
     );
+    Ok(())
 }
 
 /// A build is not portable across machines (§7.4): refuse to use `what` (a
@@ -450,6 +545,61 @@ pub fn check_machine(current: &Machine, recorded: &str, what: &str, ignore: bool
         current.name.bold()
     );
     Ok(())
+}
+
+/// The thorns whose recorded provider, shape or stamp (§7.4) no longer
+/// matches the tree, each named under the strongest of the three only, as
+/// `cactup build` acts on it: a new provider or shape loses the thorn's build
+/// state, a new stamp alone is an incremental rebuild.
+struct ThornChanges {
+    providers: Vec<String>,
+    shapes: Vec<String>,
+    stamps: Vec<String>,
+}
+
+type ThornMap = std::collections::BTreeMap<String, String>;
+
+impl ThornChanges {
+    /// The `recorded_*` maps are the config's record; `providers` and `scan`
+    /// the tree now.
+    fn new(
+        recorded_providers: Option<&ThornMap>,
+        recorded_shapes: Option<&ThornMap>,
+        recorded_stamps: Option<&ThornMap>,
+        providers: Option<&ThornMap>,
+        scan: Option<&build::ThornScan>,
+    ) -> Self {
+        let providers = build::provider_delta(recorded_providers, providers);
+        let shapes: Vec<String> = build::shape_delta(recorded_shapes, scan.map(|s| &s.shapes))
+            .into_iter()
+            .filter(|t| !providers.contains(t))
+            .collect();
+        let stamps = build::stamp_delta(recorded_stamps, scan.map(|s| &s.stamps))
+            .into_iter()
+            .filter(|t| !providers.contains(t) && !shapes.contains(t))
+            .collect();
+        ThornChanges { providers, shapes, stamps }
+    }
+
+    /// Print a line per kind of change; whether there was any.
+    fn print(&self, verbose: bool) -> bool {
+        let names =
+            |thorns: &[String]| if verbose { thorns.join(", ") } else { build::summarize(thorns) };
+        let kinds = [
+            (
+                &self.providers,
+                "provided by a different directory, or gone from the thornlist since the build",
+            ),
+            (&self.shapes, "files added or removed, or a .ccl or make.* file edited, since the build"),
+            (&self.stamps, "files edited since the build"),
+        ];
+        for (thorns, what) in kinds {
+            if !thorns.is_empty() {
+                println!("  {} — {}", names(thorns).bold(), what.yellow());
+            }
+        }
+        kinds.iter().any(|(thorns, _)| !thorns.is_empty())
+    }
 }
 
 /// Shared "what changed in the worktree" block.
@@ -487,4 +637,37 @@ fn read_live_thornlist(inst: &Installation) -> Res<crate::thornlist::Thornlist> 
         .with_context(|| format!("Failed to read thornlist {}", path.display()))?;
     crate::thornlist::parse(&text)
         .with_context(|| format!("Failed to parse thornlist {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, &str)]) -> ThornMap {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// Each changed thorn is named once, under the strongest change `cactup
+    /// build` acts on, and a tree with no stamps recorded yet reports none.
+    #[test]
+    fn thorn_changes_name_each_thorn_under_its_strongest_change() {
+        let providers = map(&[("A", "arr/A"), ("B", "arr/B"), ("C", "arr/C"), ("D", "arr/D")]);
+        let shapes = map(&[("A", "s"), ("B", "s"), ("C", "s"), ("D", "s")]);
+        let stamps = map(&[("A", "t"), ("B", "t"), ("C", "t"), ("D", "t")]);
+        let now = build::ThornScan {
+            shapes: map(&[("A", "s2"), ("B", "s2"), ("C", "s"), ("D", "s")]),
+            stamps: map(&[("A", "t2"), ("B", "t2"), ("C", "t2"), ("D", "t")]),
+        };
+        let moved = map(&[("A", "other/A"), ("B", "arr/B"), ("C", "arr/C"), ("D", "arr/D")]);
+        let got =
+            ThornChanges::new(Some(&providers), Some(&shapes), Some(&stamps), Some(&moved), Some(&now));
+        assert_eq!(got.providers, ["A"]);
+        assert_eq!(got.shapes, ["B"]);
+        assert_eq!(got.stamps, ["C"]);
+
+        let unstamped =
+            ThornChanges::new(Some(&providers), Some(&shapes), None, Some(&providers), Some(&now));
+        assert_eq!(unstamped.shapes, ["A", "B"]);
+        assert!(unstamped.stamps.is_empty(), "no recorded stamps is no information");
+    }
 }

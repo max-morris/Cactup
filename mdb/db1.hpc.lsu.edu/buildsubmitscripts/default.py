@@ -1,8 +1,12 @@
-# qbd BUILD submitscript (variant "cpu"): compile a CPU-only config on one of
-# the CPU partitions (`cactup build submit <cfg> -q single`). QB4 makes you
-# compile on a compute node; on these partitions no GPU reservation is needed,
-# so this is the GPU script without the --gres derivation. Batch header plus
-# the compute-node re-invocation, nothing else.
+# db1.hpc.lsu.edu BUILD submitscript (script "default"), chosen by the gpu
+# queue for every flavor.
+#
+# Builds on a compute node rather than the shared login node: a whole node's
+# 48 cores instead of a polite -j8. A Singularity flavor's build universe
+# wraps make in its own srun, which runs as a step of this job. Mirrors qbd's
+# buildsubmitscripts/gpu-partition.py, minus its --gres derivation: the gpu
+# partition bills only GPUs and caps nothing per GPU, so a build reserves
+# none.
 
 lines = ["#! /bin/bash"]
 lines.append("#SBATCH -A {0}".format(ALLOCATION))
@@ -17,10 +21,10 @@ if EMAIL:
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1); place it
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); place it
 # after the directive header. The build itself re-applies the build-phase
-# env-setup from its own frozen script, so this only has to be enough to
-# reach the cactup binary.
+# env-setup (its build universe's) from its own frozen script, so this only has
+# to be enough to reach the cactup binary.
 lines.append(ENV_SETUP)
 
 lines.append("cd {0}".format(SOURCEDIR))

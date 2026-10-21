@@ -1,4 +1,4 @@
-# mel5 optionlist (variant "default"), ported from simfactory2 mdb/optionlists/mel5.cfg.
+# mel5 optionlist (flavor "default"), ported from simfactory2 mdb/optionlists/mel5.cfg.
 #
 # The [options] table is rendered back to the native Cactus "NAME = value"
 # optionlist before `make <config>-config` (design §7.8). Every value is kept as
@@ -7,9 +7,11 @@
 # render.
 
 [cactup]
-gpu               = false
-compatible-queues = ["local"]
-default           = true          # the implicit choice among mel5's variants (§4.4)
+default           = true          # the implicit choice among mel5's flavors (§4.4)
+
+[cactup.runs-on]
+queues = ["local"]
+gpu    = false
 
 [options]
 # Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.

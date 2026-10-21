@@ -1,4 +1,4 @@
-# cactup-tutorial optionlist (variant "default"): a CPU build with Debian
+# cactup-tutorial optionlist (flavor "default"): a CPU build with Debian
 # trixie's toolchain, gcc/g++/gfortran 14 and OpenMPI 5.0.
 #
 # It uses Debian's packaged libraries wherever they exist: OpenMPI, HDF5 1.14
@@ -17,13 +17,15 @@
 # NSIMD at SSE2.
 
 # The [cactup] header is for cactup only and never reaches Cactus: this
-# variant is the implicit choice (default), and its executables are CPU-only
-# (gpu = false), so cactup submits them only to the CPU partitions.
+# flavor is the implicit choice (default), and its executables are CPU-only
+# (gpu = false), so cactup runs them only on the CPU partitions.
 [cactup]
-gpu               = false
-default           = true
-description       = "CPU build with Debian's gcc 14, OpenMPI 5 and packaged libraries"
-compatible-queues = ["debug", "short", "batch"]
+default     = true
+description = "CPU build with Debian's gcc 14, OpenMPI 5 and packaged libraries"
+
+[cactup.runs-on]
+queues = ["debug", "short", "batch"]
+gpu    = false
 
 [options]
 # Whenever VERSION changes, the config is reconfigured and rebuilt from scratch.
@@ -79,8 +81,8 @@ CXX_OPENMP_FLAGS = "-fopenmp"
 F90_OPENMP_FLAGS = "-fopenmp"
 LD_OPENMP_FLAGS  = "-fopenmp"
 
-# No 16-byte integer or real types (CCTK_INT16, CCTK_REAL16): the gpu variant
-# cannot have them under nvcc, and the two variants should offer the same
+# No 16-byte integer or real types (CCTK_INT16, CCTK_REAL16): the gpu flavor
+# cannot have them under nvcc, and the two flavors should offer the same
 # types. The 2- and 4-byte reals that CarpetX's TestReal2/TestReal4 use stay.
 DISABLE_INT16  = "yes"
 DISABLE_REAL16 = "yes"

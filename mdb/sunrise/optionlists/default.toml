@@ -1,9 +1,9 @@
-# Sunrise optionlist (variant "default"), ported from simfactory2
+# Sunrise optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/sunrise-gnu.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["rossw"]
+[cactup.runs-on]
+queues = ["rossw"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

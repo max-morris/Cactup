@@ -82,6 +82,8 @@ pub struct MdbModel {
     pub meta_tables: Vec<MdbTable>,
     /// The optionlist `[cactup]` header table.
     pub optionlist_header: MdbTable,
+    /// Its `[cactup.runs-on]` sub-table: where the flavor's binary may run.
+    pub optionlist_runs_on: MdbTable,
     /// The `@VAR@` template tokens available to submit/run/optionlist templates.
     pub template_vars: Vec<TemplateVar>,
 }

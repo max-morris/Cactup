@@ -1,5 +1,5 @@
 #! /bin/bash
-# perlmutter-p1 runscript (variant "default"), ported from simfactory2
+# perlmutter-p1 runscript (script "default"), ported from simfactory2
 # mdb/runscripts/perlmutter-p1.run.
 #
 # Variable renames vs. simfactory (design §6.3):

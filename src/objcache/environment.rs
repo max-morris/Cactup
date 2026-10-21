@@ -1,0 +1,168 @@
+//! The environment a compile runs in, as far as it can change the object:
+//! the part of a cache key for what the compiler reads from its
+//! surroundings rather than from its command line.
+//!
+//! The whole environment cannot be it. Cactus's makefiles export well over
+//! a hundred variables into every recipe, many of them paths of the
+//! configuration, and a login session adds its own; a key over all of them
+//! would never match anything. So this is a list of what compilers are
+//! known to read ([`KEYED`], [`KEYED_PREFIXES`]) — which leaves a variable
+//! that is on no list and still changes some compiler's output as the way
+//! this part could be wrong. The platform digest's environment-setup part
+//! and the loaded-modules variables here are what narrows that.
+
+use super::hash::Hasher;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
+
+/// The locale: diagnostics, and character handling in the source. Keyed
+/// only for a compiler whose objects its trial showed to depend on it
+/// (`identity`, §18.8).
+pub const LOCALE: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES"];
+
+/// Variables that change what a compiler does or writes.
+const KEYED: &[&str] = &[
+    // Reproducible-build inputs to `__DATE__` and friends.
+    "SOURCE_DATE_EPOCH", "TZ",
+    // What the dynamic loader gives the compiler itself.
+    "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
+    // Search paths the compiler adds to the ones on its command line.
+    "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX",
+    "SDKROOT",
+    // Behavior switches, and how GCC words its diagnostics (its fix-it
+    // lines, links, the width it wraps to), which are stored with the object.
+    "GCC_COLORS", "CLANG_NO_DEFAULT_CONFIG", "GCC_EXTRA_DIAGNOSTIC_OUTPUT", "GCC_URLS", "TERM_URLS", "COLUMNS",
+    // The modules a machine's environment setup loaded.
+    "LOADEDMODULES", "_LMFILES_",
+    // What `nvcc` and the programs it runs read (seen, M4): flags its
+    // profile passes on, and settings of its front end and back ends.
+    "PTXAS_FLAGS", "CUDAFE_FLAGS", "OCG_FLAGS", "NVASM_FLAGS", "LLVMC_FLAGS", "LLVM_OVERRIDE_PRODUCER", "DUMP_KNOBS_TO_FILE",
+    "USR_INCLUDE", "GCC_ROOT", "BINUTILS_ROOT", "LPATH",
+];
+
+/// Families of variables that wrapper compilers and vendor toolchains read.
+const KEYED_PREFIXES: &[&str] =
+    &["OMPI_", "MPICH_", "I_MPI_", "CRAY", "PE_", "NVCC_", "NVVM", "EDG_", "NVHPC", "NVCOMPILER_", "PGI", "HIP", "ROCM_", "SPACK_", "NIX_", "__INTEL_"];
+
+/// Variables that make a compiler write a file besides its object: a hit
+/// would skip writing it.
+const MORE_OUTPUT: &[&str] =
+    &["DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "CC_PRINT_OPTIONS", "CC_PRINT_HEADERS", "CC_LOG_DIAGNOSTICS"];
+
+/// Variables that add to a compiler's flags or rewrite them. Such flags
+/// never pass the reader of the command line (`compile`), so nothing it
+/// would decline is declined: keying the variable's value is not enough.
+const MORE_FLAGS: &[&str] = &["CCC_OVERRIDE_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS", "GCC_COMPARE_DEBUG"];
+
+/// Every variable that keeps the cache out of a compile when set.
+pub const REFUSED: [&str; 8] = [
+    "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "CC_PRINT_OPTIONS", "CC_PRINT_HEADERS", "CC_LOG_DIAGNOSTICS",
+    "CCC_OVERRIDE_OPTIONS", "QA_OVERRIDE_GCC3_OPTIONS", "GCC_COMPARE_DEBUG",
+];
+
+/// Why each variable of `vars` that keeps the cache out does (`cache
+/// doctor`: every one, where a compile stops at the first).
+pub fn refusals(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<String> {
+    let mut found: Vec<String> = vars
+        .filter_map(|(name, _)| {
+            let name = name.to_str()?;
+            match () {
+                _ if MORE_OUTPUT.contains(&name) => Some(format!("{name} is set, which makes the compiler write another file")),
+                _ if MORE_FLAGS.contains(&name) => Some(format!("{name} is set, which changes the compiler's flags behind its command line")),
+                _ => None,
+            }
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The digest of the keyed part of `vars`, or the variable that rules
+/// caching out.
+fn digest_of(vars: impl Iterator<Item = (OsString, OsString)>, locale: bool) -> Result<String, String> {
+    let mut keyed = Vec::new();
+    for (name, value) in vars {
+        let Some(name) = name.to_str() else { continue };
+        if MORE_OUTPUT.contains(&name) {
+            return Err(format!("{name} is set, which makes the compiler write another file"));
+        }
+        if MORE_FLAGS.contains(&name) {
+            return Err(format!("{name} is set, which changes the compiler's flags behind its command line"));
+        }
+        if KEYED.contains(&name) || (locale && LOCALE.contains(&name)) || KEYED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+            keyed.push((name.to_owned(), value));
+        }
+    }
+    // The environment has no order.
+    keyed.sort();
+    let mut hasher = Hasher::new("environment");
+    for (name, value) in keyed {
+        hasher.feed(name.as_bytes());
+        hasher.feed(value.as_bytes());
+    }
+    Ok(hasher.hex())
+}
+
+/// The environment digest of this process, which is the compiler's; with
+/// the locale, or without it.
+pub fn digest(locale: bool) -> Result<String, String> {
+    digest_of(std::env::vars_os(), locale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variable that keeps the cache out is in the list `cache
+    /// doctor` reports from.
+    #[test]
+    fn refused_lists_every_variable_that_keeps_the_cache_out() {
+        let mut both: Vec<&str> = MORE_OUTPUT.iter().chain(MORE_FLAGS).copied().collect();
+        let mut refused = REFUSED.to_vec();
+        both.sort();
+        refused.sort();
+        assert_eq!(both, refused);
+        assert_eq!(refusals(REFUSED.iter().map(|name| (OsString::from(name), OsString::from("x")))).len(), REFUSED.len());
+    }
+
+    fn of(vars: &[(&str, &str)]) -> Result<String, String> {
+        digest_of(vars.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))), true)
+    }
+
+    #[test]
+    fn only_what_compilers_read_is_keyed() {
+        let base = of(&[("LANG", "C"), ("CPATH", "/opt/include")]).unwrap();
+        // Order, and what no compiler reads, change nothing.
+        assert_eq!(base, of(&[("CPATH", "/opt/include"), ("LANG", "C")]).unwrap());
+        assert_eq!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("CCTK_HOME", "/x"), ("SSH_TTY", "/dev/pts/3")]).unwrap());
+        // A keyed variable's value, or presence, does.
+        assert_ne!(base, of(&[("LANG", "de_DE.UTF-8"), ("CPATH", "/opt/include")]).unwrap());
+        assert_ne!(base, of(&[("LANG", "C")]).unwrap());
+        assert_ne!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("LOADEDMODULES", "gcc/13")]).unwrap());
+        assert_ne!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("OMPI_CC", "icx")]).unwrap());
+        assert_ne!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("PE_ENV", "GNU")]).unwrap());
+        // Empty is not unset.
+        assert_ne!(base, of(&[("LANG", "C"), ("CPATH", "/opt/include"), ("TZ", "")]).unwrap());
+    }
+
+    /// For a compiler whose trial showed the locale does not matter, it is
+    /// not keyed; anything else still is.
+    #[test]
+    fn the_locale_is_keyed_only_where_asked() {
+        let without = |vars: &[(&str, &str)]| {
+            digest_of(vars.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))), false).unwrap()
+        };
+        let base = without(&[("CPATH", "/opt/include")]);
+        assert_eq!(base, without(&[("CPATH", "/opt/include"), ("LANG", "de_DE.UTF-8"), ("LC_ALL", "C"), ("LANGUAGE", "de")]));
+        assert_ne!(base, without(&[("CPATH", "/opt/include"), ("TZ", "UTC")]));
+        assert_ne!(of(&[("LANG", "C")]).unwrap(), of(&[]).unwrap());
+    }
+
+    #[test]
+    fn a_variable_that_adds_an_output_or_flags_rules_caching_out() {
+        let err = of(&[("LANG", "C"), ("DEPENDENCIES_OUTPUT", "deps.d")]).unwrap_err();
+        assert!(err.starts_with("DEPENDENCIES_OUTPUT is set"), "{err}");
+        let err = of(&[("LANG", "C"), ("CCC_OVERRIDE_OPTIONS", "# +-grecord-command-line")]).unwrap_err();
+        assert_eq!(err, "CCC_OVERRIDE_OPTIONS is set, which changes the compiler's flags behind its command line");
+    }
+}

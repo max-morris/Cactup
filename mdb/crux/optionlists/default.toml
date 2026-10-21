@@ -1,9 +1,9 @@
-# Crux optionlist (variant "default"), ported from simfactory2
+# Crux optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/crux.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["workq"]
+[cactup.runs-on]
+queues = ["workq"]
+gpu    = false
 
 [options]
 VERSION = "crux-2025-02-21"

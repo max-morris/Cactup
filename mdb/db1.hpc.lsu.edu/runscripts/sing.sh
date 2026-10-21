@@ -1,5 +1,5 @@
 #! /bin/bash
-# db1.hpc.lsu.edu runscript (variant "sing"), ported from simfactory2
+# db1.hpc.lsu.edu runscript (script "sing"), ported from simfactory2
 # mdb/runscripts/db-sing-nv.run. Serves the Singularity build flavors (the
 # et-sing and et-sing-cpu build universes; upstream db-sing-cpu reused
 # db-sing-nv's runscript, so the launcher keeps --nv either way). It does its

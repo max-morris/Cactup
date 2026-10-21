@@ -1,9 +1,9 @@
-# MARCONIA1 optionlist (variant "default"), ported from simfactory2
+# MARCONIA1 optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/marconiA3.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["skl_usr_prod"]
+[cactup.runs-on]
+queues = ["skl_usr_prod"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

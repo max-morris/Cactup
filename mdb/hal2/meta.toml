@@ -40,10 +40,12 @@ disabled-thorns = [
 # submit discarded stdout/stderr to /dev/null (kept verbatim — the runscript's
 # output was never captured on this machine); stop kills only the top process
 # (also verbatim).
-submit          = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
+submit          = "setsid sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & echo $!"
 # The pid is printed before the wait, so the job id parses immediately.
-blocking-submit = "sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & pid=$!; echo $pid; wait $pid"
+blocking-submit = "setsid sh @SCRIPTFILE@ < /dev/null > /dev/null 2> /dev/null & pid=$!; echo $pid; wait $pid"
 get-status      = "ps @JOB_ID@"
+# The job id is the pid of the backgrounded script, on this host.
+job-ids = "pids"
 stop            = "kill @JOB_ID@"
 submit-pattern   = "(.*)"
 status-pattern   = "^ *@JOB_ID@ "
@@ -57,13 +59,10 @@ exec-host-pattern = "(.*)"
 gpu     = false
 default = true
 
-[variants.submitscript]
-"default" = { queues = ["local"], default = true }
+[submitscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test submit`
 
-[variants.runscript]
-"default" = { queues = ["local"], default = true }
+[runscripts]
+"default" = { queues = ["local"] }
 "test"    = { queues = ["local"], test = true }   # used by `cactup test run`
-
-[variants.optionlist]
-variants = ["default"]

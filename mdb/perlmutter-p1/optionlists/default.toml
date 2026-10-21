@@ -1,9 +1,9 @@
-# Perlmutter Phase 1 optionlist (variant "default"), ported from simfactory2
+# Perlmutter Phase 1 optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/perlmutter-p1.cfg.
 
-[cactup]
-gpu               = true
-compatible-queues = ["regular"]
+[cactup.runs-on]
+queues = ["regular"]
+gpu    = true
 
 [options]
 # Whenever this version string changes, the application is configured

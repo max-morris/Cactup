@@ -1,9 +1,9 @@
-# Sciama optionlist (variant "default"), ported from simfactory2
+# Sciama optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/sciama.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["sciama2.q"]
+[cactup.runs-on]
+queues = ["sciama2.q"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

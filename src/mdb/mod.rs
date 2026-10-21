@@ -1,7 +1,7 @@
 //! The machine database (MDB) — spec §4 (layout, meta.toml model, two-layer
 //! system/user resolution with name-shadowing, `hostname.regexp` /
 //! `discover.py` discovery,
-//! variants/queues/universes and their validation), §7.8 (optionlist TOML +
+//! scripts/queues/universes and their validation), §7.8 (optionlist TOML +
 //! render), §11.2 (test-partition marking & resolution).
 
 pub mod autodetect;
@@ -11,7 +11,7 @@ pub mod optionlist;
 pub mod sync;
 
 // Convenience re-exports for the consuming subsystems.
-pub use meta::{BuildAction, Hardware, Meta, Phase, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
+pub use meta::{BuildAction, Hardware, Meta, Phase, Queue, ScriptKind, Universe, WrappedCommand, HOST_UNIVERSE};
 pub use optionlist::Optionlist;
 
 use crate::Res;
@@ -19,6 +19,7 @@ use anyhow::{anyhow, bail, Context};
 use colored::Colorize;
 use include_dir::{include_dir, Dir};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -117,6 +118,7 @@ impl Mdb {
     // `test run --test-dir` (testsuite/run.rs `start`) all return into their
     // compute paths before anything calls `Mdb::open`.
     pub fn open(mdb_path_override: Option<&Path>, db: &crate::database::Db) -> Res<Mdb> {
+        let _span = crate::timing::span("Mdb::open");
         let system_root = match mdb_path_override {
             Some(path) => {
                 check_root_generation(path)?;
@@ -487,47 +489,45 @@ impl Machine {
         Ok(machine)
     }
 
-    /// §4.2's layout obligations: every declared variant must have its file.
+    /// §4.2's layout obligations: every routed script must have its file, and
+    /// there must be at least one flavor to build.
     fn validate_files(&self) -> Res<()> {
         for kind in [ScriptKind::Submit, ScriptKind::Run, ScriptKind::BuildSubmit] {
-            for variant in self.meta.script_variants(kind).variants.keys() {
-                self.script_path(kind, variant)?;
+            for script in self.meta.scripts(kind).routes.keys() {
+                self.script_path(kind, script)?;
             }
         }
-        for variant in &self.meta.variants.optionlist.variants {
-            let path = self.optionlist_path(variant);
-            if !path.is_file() {
-                bail!(
-                    "machine \"{}\" lists optionlist variant \"{variant}\" but {} does not exist",
-                    self.name,
-                    path.display()
-                );
-            }
+        if self.flavors()?.is_empty() {
+            bail!(
+                "machine \"{}\" has no flavors: {} holds no .toml optionlist",
+                self.name,
+                self.dir.join("optionlists").display()
+            );
         }
         Ok(())
     }
 
-    pub fn optionlist_path(&self, variant: &str) -> PathBuf {
-        self.dir.join("optionlists").join(format!("{variant}.toml"))
+    pub fn optionlist_path(&self, flavor: &str) -> PathBuf {
+        self.dir.join("optionlists").join(format!("{flavor}.toml"))
     }
 
-    /// The script file for a variant: `<kind>/<variant>.sh` or `.py` (§4.4).
+    /// The script file for a route: `<kind>/<name>.sh` or `.py` (§4.4).
     /// Exactly one of the two must exist.
-    pub fn script_path(&self, kind: ScriptKind, variant: &str) -> Res<ScriptFile> {
+    pub fn script_path(&self, kind: ScriptKind, script: &str) -> Res<ScriptFile> {
         let dir = self.dir.join(kind.dir_name());
-        let sh = dir.join(format!("{variant}.sh"));
-        let py = dir.join(format!("{variant}.py"));
+        let sh = dir.join(format!("{script}.sh"));
+        let py = dir.join(format!("{script}.py"));
         match (sh.is_file(), py.is_file()) {
             (true, false) => Ok(ScriptFile { path: sh, python: false }),
             (false, true) => Ok(ScriptFile { path: py, python: true }),
             (true, true) => bail!(
-                "machine \"{}\" has both {} and {} — a variant may be .sh or .py, not both",
+                "machine \"{}\" has both {} and {} — a script may be .sh or .py, not both",
                 self.name,
                 sh.display(),
                 py.display()
             ),
             (false, false) => bail!(
-                "machine \"{}\" declares {} variant \"{variant}\" but neither {} nor {} exists",
+                "machine \"{}\" routes {} script \"{script}\" but neither {} nor {} exists",
                 self.name,
                 kind.dir_name(),
                 sh.display(),
@@ -536,41 +536,64 @@ impl Machine {
         }
     }
 
-    /// Select the optionlist variant for a build (§4.4): explicit `--variant`
-    /// if given; else the sole listed variant; else the sole `default = true`
-    /// variant.
+    /// The machine's optionlist flavors (§4.4): the stems of the `.toml`
+    /// files in its `optionlists/` directory, sorted. There is no list of
+    /// them to keep in sync — the directory is the list.
+    pub fn flavors(&self) -> Res<Vec<String>> {
+        let dir = self.dir.join("optionlists");
+        let entries = match fs::read_dir(&dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            other => other.with_context(|| format!("Failed to read {}", dir.display()))?,
+        };
+        let mut flavors = Vec::new();
+        for entry in entries {
+            let path = entry.with_context(|| format!("Failed to read {}", dir.display()))?.path();
+            if path.extension().is_some_and(|e| e == "toml")
+                && path.is_file()
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && !stem.starts_with('.')
+            {
+                flavors.push(stem.to_owned());
+            }
+        }
+        flavors.sort();
+        Ok(flavors)
+    }
+
+    /// Select the optionlist flavor for a build (§4.4): explicit `--flavor`
+    /// if given; else the sole flavor; else the sole `default = true` one.
     pub fn select_optionlist(&self, explicit: Option<&str>) -> Res<String> {
-        let listed = &self.meta.variants.optionlist.variants;
+        let listed = self.flavors()?;
 
         if let Some(name) = explicit {
             return listed
                 .iter()
                 .find(|n| *n == name)
                 .cloned()
-                .ok_or_else(|| anyhow!("no optionlist variant named \"{name}\" (known: {})", listed.join(", ")));
+                .ok_or_else(|| anyhow!("no optionlist flavor named \"{name}\" (known: {})", listed.join(", ")));
         }
 
         if let [single] = listed.as_slice() {
             return Ok(single.clone());
         }
         let mut defaults = Vec::new();
-        for variant in listed {
-            if optionlist::load_header(&self.optionlist_path(variant))?.default {
-                defaults.push(variant);
+        for flavor in &listed {
+            if optionlist::load_header(&self.optionlist_path(flavor))?.default {
+                defaults.push(flavor);
             }
         }
         match defaults.as_slice() {
             [single] => Ok((*single).clone()),
-            [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist variant", self.name),
+            [] if listed.is_empty() => bail!("machine \"{}\" has no optionlist flavor", self.name),
             [] => bail!(
-                "machine \"{}\" has several optionlist variants ({}) and none is marked \
-                 default = true; pick one with --variant", // §4.4
+                "machine \"{}\" has several optionlist flavors ({}) and none is marked \
+                 default = true; pick one with --flavor", // §4.4
                 self.name,
                 listed.join(", ")
             ),
             several => bail!(
-                "machine \"{}\" marks several optionlist variants default = true ({}); \
-                 pick one with --variant", // §4.4
+                "machine \"{}\" marks several optionlist flavors default = true ({}); \
+                 pick one with --flavor", // §4.4
                 self.name,
                 several.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             ),
@@ -578,11 +601,11 @@ impl Machine {
     }
 }
 
-/// A resolved script variant file.
+/// A resolved script file.
 #[derive(Debug, Clone)]
 pub struct ScriptFile {
     pub path: PathBuf,
-    /// `.py` variants emit the script on stdout per the §6.1 convention.
+    /// `.py` scripts emit the script on stdout per the §6.1 convention.
     pub python: bool,
 }
 
@@ -614,9 +637,9 @@ mod tests {
     }
 
     /// Sweep the whole dev MDB (the simfactory2 port): every machine must
-    /// load+validate (meta.toml schema, queue coverage, per-variant files),
-    /// every optionlist variant must parse under the §7.8 rules, and every
-    /// declared script variant must resolve to exactly one .sh/.py file.
+    /// load+validate (meta.toml schema, queue coverage, per-script files),
+    /// every flavor must parse under the §7.8 rules, and every
+    /// declared script must resolve to exactly one .sh/.py file.
     #[test]
     fn loads_and_validates_every_dev_machine() {
         let mdb = dev_mdb();
@@ -624,9 +647,44 @@ mod tests {
             let machine = mdb
                 .load(&name)
                 .unwrap_or_else(|e| panic!("machine {name} failed to load: {e:#}"));
-            for variant in &machine.meta.variants.optionlist.variants {
-                optionlist::Optionlist::load(&machine.optionlist_path(variant))
-                    .unwrap_or_else(|e| panic!("machine {name} optionlist {variant} failed: {e:#}"));
+            for flavor in machine.flavors().unwrap() {
+                let ol = optionlist::Optionlist::load(&machine.optionlist_path(&flavor))
+                    .unwrap_or_else(|e| panic!("machine {name} optionlist {flavor} failed: {e:#}"));
+                // Checked at build time in production; every shipped flavor
+                // must already pass it.
+                if let Some(queue) = &ol.header.runs_on.default_queue {
+                    assert!(
+                        machine.meta.queues.contains_key(queue),
+                        "machine {name} flavor {flavor}: default-queue {queue} is not a queue"
+                    );
+                }
+                // A test never borrows a normal script, so the queue a
+                // flavor's tests land on by default must have test scripts
+                // of both kinds — or `cactup test run` of that flavor would
+                // fail on a clean machine.
+                let universe = ol.header.universe.as_deref().unwrap_or(HOST_UNIVERSE);
+                let queue = ol
+                    .header
+                    .runs_on
+                    .default_queue
+                    .clone()
+                    .or_else(|| machine.meta.default_queue(Some(universe)).map(str::to_owned));
+                if let Some(queue) = queue {
+                    // A flavor whose default queue it may not run on would
+                    // refuse every submit that omits -q.
+                    let allowed = &ol.header.runs_on.queues;
+                    assert!(
+                        allowed.is_empty() || allowed.contains(&queue),
+                        "machine {name} flavor {flavor}: its default queue {queue} is not one of its \
+                         runs-on queues ({}); set [cactup.runs-on] default-queue",
+                        allowed.join(", ")
+                    );
+                    for kind in [ScriptKind::Submit, ScriptKind::Run] {
+                        machine.meta.scripts(kind).route(&queue, universe, true).unwrap_or_else(|e| {
+                            panic!("machine {name} flavor {flavor}: default queue {queue} has no test script: {e:#}")
+                        });
+                    }
+                }
             }
         }
     }
@@ -636,7 +694,7 @@ mod tests {
         let mdb = dev_mdb();
 
         let mel5 = mdb.load("mel5").unwrap();
-        assert_eq!(mel5.meta.default_queue(HOST_UNIVERSE), Some("local"));
+        assert_eq!(mel5.meta.default_queue(Some(HOST_UNIVERSE)), Some("local"));
         // [paths] keep their tokens at load (resolution is a use-time
         // concern — §4.2)…
         assert_eq!(mel5.meta.paths.simulation_home.as_deref(), Some("/home/@USER@/simulations"));
@@ -649,24 +707,24 @@ mod tests {
         assert!(mel5.meta.scheduler.submit.as_deref().unwrap().contains("@SCRIPTFILE@"));
         // env-setup lives in [environment] and spans all three phases.
         assert!(mel5.meta.environment.effective(Phase::Build).contains("MPI_DIR"));
-        // Optionlist selection (§4.4): with two variants, the default-marked
-        // one wins implicitly and the other stays reachable via --variant.
+        // Optionlist selection (§4.4): with two flavors, the default-marked
+        // one wins implicitly and the other stays reachable via --flavor.
         assert_eq!(mel5.select_optionlist(None).unwrap(), "default");
         assert_eq!(mel5.select_optionlist(Some("debug")).unwrap(), "debug");
         // Script selection honors the test partition.
-        let rs = mel5.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("local", "host", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("local", "host", true, None).unwrap().0, "test");
+        let rs = mel5.meta.scripts(ScriptKind::Run);
+        assert_eq!(rs.route("local", "host", false).unwrap().0, "default");
+        assert_eq!(rs.route("local", "host", true).unwrap().0, "test");
         assert!(!mel5.script_path(ScriptKind::Submit, "test").unwrap().python);
 
         // db1.hpc.lsu.edu is ONE machine for the whole Deep Bayou cluster: the
         // upstream fragmentation into db1 (native) + db-sing-nv + db-sing-cpu +
-        // etworkshop-db is unified here via ONE real queue plus per-variant
+        // etworkshop-db is unified here via ONE real queue plus per-script
         // `build-universes` compatibility lists routing each build flavor's
         // configs to its scripts (§4.4; self-named "db").
         let db1 = mdb.load("db1.hpc.lsu.edu").unwrap();
         assert_eq!(db1.meta.machine.name.as_deref(), Some("db"));
-        assert_eq!(db1.meta.default_queue(HOST_UNIVERSE), Some("gpu"));
+        assert_eq!(db1.meta.default_queue(Some(HOST_UNIVERSE)), Some("gpu"));
         // The cluster's single real partition, GPU-flagged.
         assert_eq!(db1.meta.queues.len(), 1);
         assert!(db1.meta.queues["gpu"].gpu);
@@ -678,24 +736,24 @@ mod tests {
         assert_eq!(hw.max_cpus_per_node, Some(48));
         assert_eq!(hw.default_cpus_per_task, Some(24));
         // Three optionlists, none default-marked: a build must pick one with
-        // --variant (§4.4).
+        // --flavor (§4.4).
         assert!(db1.select_optionlist(None).is_err());
         for v in ["native", "sing-nv", "sing-cpu"] {
             assert_eq!(db1.select_optionlist(Some(v)).unwrap(), v);
         }
         // The native flavor builds in the DECLARED host universe — an identity
-        // universe (§4.8) carrying only a module-loading env-build-setup
+        // universe (§4.8) carrying only a module-loading build-env-setup
         // override (§6.1) — reached via the declared-host fallback, so
         // [build].universe is unset; the Singularity flavors name their own
         // build universe in the optionlist header, --nv vs not.
         assert!(db1.meta.build.universe.is_none());
         let host = db1.meta.universe("host").unwrap();
         assert!(host.wrapper.is_none() && host.wrapper_argv.is_none());
-        assert!(host.environment.env_build_setup.as_deref().unwrap().contains("module load gcc/9.3.0"));
+        assert!(host.environment.build_env_setup.as_deref().unwrap().contains("module load gcc/9.3.0"));
         assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-nv")).unwrap().universe.as_deref(), Some("et-sing"));
         assert_eq!(optionlist::load_header(&db1.optionlist_path("sing-cpu")).unwrap().universe.as_deref(), Some("et-sing-cpu"));
         for v in ["sing-nv", "sing-cpu"] {
-            assert_eq!(optionlist::load_header(&db1.optionlist_path(v)).unwrap().compatible_queues, ["gpu"]);
+            assert_eq!(optionlist::load_header(&db1.optionlist_path(v)).unwrap().runs_on.queues, ["gpu"]);
         }
         let argv = |u: &str| db1.meta.universe(u).unwrap().wrapper_argv.clone().unwrap();
         assert!(argv("et-sing").iter().any(|a| a == "--nv"));
@@ -703,10 +761,15 @@ mod tests {
         // Native builds run with the "default" scripts; the Singularity
         // flavors share the "sing" scripts — same queue, routed by the
         // config's build universe (§4.4).
-        let rs = db1.meta.script_variants(ScriptKind::Run);
-        assert_eq!(rs.select("gpu", "host", false, None).unwrap().0, "default");
-        assert_eq!(rs.select("gpu", "et-sing", false, None).unwrap().0, "sing");
-        assert_eq!(rs.select("gpu", "et-sing-cpu", true, None).unwrap().0, "sing-test");
+        let rs = db1.meta.scripts(ScriptKind::Run);
+        assert_eq!(rs.route("gpu", "host", false).unwrap().0, "default");
+        assert_eq!(rs.route("gpu", "et-sing", false).unwrap().0, "sing");
+        assert_eq!(rs.route("gpu", "et-sing-cpu", true).unwrap().0, "sing-test");
+        // Every flavor's build is queued through the one build-submit script.
+        let bs = db1.meta.scripts(ScriptKind::BuildSubmit);
+        for u in ["host", "et-sing", "et-sing-cpu"] {
+            assert_eq!(bs.route("gpu", u, false).unwrap().0, "default");
+        }
 
         // qbd (LSU/LONI Queen Bee 4) runs SLURM, though upstream's 2026-07-07
         // regeneration flipped it to PBS with a blank queue: the port keeps
@@ -714,7 +777,7 @@ mod tests {
         // placeholder queue with QB4's two real GPU partitions.
         let qbd = mdb.load("qbd").unwrap();
         assert!(qbd.meta.scheduler.submit.as_deref().unwrap().starts_with("sbatch"));
-        assert_eq!(qbd.meta.default_queue(HOST_UNIVERSE), Some("gpu2"));
+        assert_eq!(qbd.meta.default_queue(Some(HOST_UNIVERSE)), Some("gpu2"));
         assert!(qbd.meta.queues["gpu2"].gpu && qbd.meta.queues["gpu4"].gpu);
         // No per-queue `name` override any more: @QUEUE@ is the key itself, so
         // the submitscripts' `-p` directive and their `QUEUE == "gpu4"` gres
@@ -737,16 +800,88 @@ mod tests {
             (Some(64), Some(16), Some(4))
         );
         // QB4 makes you compile on the compute nodes: pin that the migration
-        // actually wired up `build submit` (a [variants.buildsubmitscript]
-        // variant, a [scheduler].submit command) and defaults to it, rather
+        // actually wired up `build submit` (a [buildsubmitscripts]
+        // route, a [scheduler].submit command) and defaults to it, rather
         // than merely parsing.
         assert!(qbd.meta.can_submit_builds());
         assert_eq!(qbd.meta.build.default_action, Some(BuildAction::Submit));
 
+        // rostam (LSU CCT) mixes x86, Arm and RISC-V partitions, so its
+        // flavors are named <ISA>-<accelerator>-<how built>, and each queue's
+        // build-universes keeps a binary off the nodes it cannot run on.
+        let rostam = mdb.load("rostam").unwrap();
+        assert_eq!(rostam.select_optionlist(None).unwrap(), "x86-cuda-image");
+        assert_eq!(
+            rostam.flavors().unwrap(),
+            ["arm-cuda-native", "x86-cpu-image", "x86-cuda-image", "x86-cuda-native"]
+        );
+        let header = |flavor: &str| optionlist::load_header(&rostam.optionlist_path(flavor)).unwrap();
+        for (flavor, universe) in [
+            ("x86-cuda-image", "cactus-cuda"),
+            ("x86-cuda-native", "x86-modules"),
+            ("arm-cuda-native", "arm-conda"),
+            ("x86-cpu-image", "cactus-cpu"),
+        ] {
+            assert_eq!(header(flavor).universe.as_deref(), Some(universe), "{flavor}");
+        }
+        // The default queue is the default flavor's; the spark universe has
+        // one queue, which is therefore its default; the CPU flavor names
+        // its own, Rostam's default partition.
+        assert_eq!(rostam.meta.default_queue(Some("cactus-cuda")), Some("cuda-A100"));
+        assert_eq!(rostam.meta.default_queue(Some("arm-conda")), Some("spark"));
+        assert_eq!(header("x86-cpu-image").runs_on.default_queue.as_deref(), Some("medusa"));
+        assert!(!header("x86-cpu-image").runs_on.gpu);
+        // The x86 CUDA flavors compile for sm_70 and sm_80, so they serve
+        // every NVIDIA x86 partition, V100 and A100 alike, and nothing else.
+        let x86_gpu = ["cuda-A100", "cuda-A100-amd", "cuda-A100-intel", "cuda", "cuda-V100", "DGX-A100", "sc15"];
+        for flavor in ["x86-cuda-image", "x86-cuda-native"] {
+            assert_eq!(header(flavor).runs_on.queues, x86_gpu, "{flavor}");
+        }
+        for queue in x86_gpu {
+            let q = &rostam.meta.queues[queue];
+            assert!(q.gpu && q.compatible_with("cactus-cuda") && q.compatible_with("x86-modules"), "{queue}");
+            assert!(!q.compatible_with("arm-conda") && !q.compatible_with("cactus-cpu"), "{queue}");
+        }
+        assert!(!rostam.meta.queues["spark"].compatible_with("cactus-cuda"));
+        for queue in ["medusa", "buran"] {
+            let q = &rostam.meta.queues[queue];
+            assert!(!q.gpu && q.compatible_with("cactus-cpu") && !q.compatible_with("cactus-cuda"), "{queue}");
+        }
+        // Partitions deliberately left out (meta.toml says why).
+        for queue in ["marvin", "mi100", "risc5", "jenkins-compute", "jenkins-cuda", "jenkins-A100", "jenkins-amdgpu"] {
+            assert!(!rostam.meta.queues.contains_key(queue), "{queue}");
+        }
+        // Per-queue hardware: a mixed partition carries the intersection of
+        // its nodes (cuda: bahram's), and the fill-the-node default gives one
+        // rank per GPU.
+        let hw = rostam.meta.effective_hardware("cuda").unwrap();
+        assert_eq!((hw.max_cpus_per_node, hw.max_gpus_per_node, hw.memory), (Some(20), Some(2), Some(124200)));
+        let hw = rostam.meta.effective_hardware("DGX-A100").unwrap();
+        assert_eq!(
+            (hw.max_cpus_per_node, hw.default_cpus_per_task, hw.max_gpus_per_node, hw.threads_per_cpu()),
+            (Some(256), Some(32), Some(8), 2)
+        );
+        assert_eq!(rostam.meta.effective_max_walltime("cuda").unwrap().total_seconds(), 86400);
+        // One submit script serves every queue; the run script follows the
+        // config's build universe, each flavor launching its own way.
+        let rs = rostam.meta.scripts(ScriptKind::Run);
+        assert_eq!(rs.route("cuda-V100", "cactus-cuda", false).unwrap().0, "x86-cuda-image");
+        assert_eq!(rs.route("cuda-V100", "x86-modules", false).unwrap().0, "x86-cuda-native");
+        assert_eq!(rs.route("spark", "arm-conda", true).unwrap().0, "test-arm-cuda-native");
+        assert_eq!(rs.route("buran", "cactus-cpu", false).unwrap().0, "x86-cpu-image");
+        assert!(rs.route("medusa", "cactus-cuda", false).is_err());
+        let ss = rostam.meta.scripts(ScriptKind::Submit);
+        assert_eq!(ss.route("medusa", "cactus-cpu", false).unwrap().0, "default");
+        assert!(rostam.script_path(ScriptKind::Submit, "default").unwrap().python);
+        // The spark build's conda environment is each user's own.
+        let arm = optionlist::Optionlist::load(&rostam.optionlist_path("arm-cuda-native")).unwrap();
+        assert!(arm.render().contains("MPI_DIR = /work/@USER@/spark-deps/env"));
+        assert!(!arm.source.contains("mmorris"));
+
         // graham unifies one Compute Canada cluster's CPU (g++) and CUDA (nvcc)
-        // build flavors into two optionlist variants. The CUDA variant carries
-        // per-variant disabled-thorns (§7.8) — thorns nvcc can't compile — that
-        // the CPU variant keeps; this is what lets the two flavors coexist on
+        // build flavors into two flavors. The CUDA flavor carries
+        // per-flavor disabled-thorns (§7.8) — thorns nvcc can't compile — that
+        // the CPU flavor keeps; this is what lets the two flavors coexist on
         // one machine.
         let graham = mdb.load("graham").unwrap();
         assert!(!graham.meta.queues["cpu"].gpu && graham.meta.queues["gpu"].gpu);
@@ -779,7 +914,7 @@ mod tests {
         assert!(generic.meta.hardware.memory.unwrap() > 0);
         // generic has no paths: consumers use the ~/.cactup fallbacks.
         assert!(generic.meta.paths.simulation_home.is_none());
-        assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole variant
+        assert_eq!(generic.select_optionlist(None).unwrap(), "default"); // sole flavor
     }
 
     #[test]
@@ -791,12 +926,10 @@ mod tests {
             nickname = "m"
             [queues.local]
             default = true
-            [variants.submitscript]
+            [submitscripts]
             "default" = ["local"]
-            [variants.runscript]
+            [runscripts]
             "default" = ["local"]
-            [variants.optionlist]
-            variants = ["default"]
         "#;
         for (root, tag) in [(system.path(), "system"), (user.path(), "user")] {
             let dir = root.join("box");
@@ -828,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn load_reports_missing_variant_files() {
+    fn load_reports_missing_script_files() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("broken");
         fs::create_dir_all(&dir).unwrap();
@@ -839,12 +972,10 @@ mod tests {
                 nickname = "broken"
                 [queues.local]
                 default = true
-                [variants.submitscript]
+                [submitscripts]
                 "default" = ["local"]
-                [variants.runscript]
+                [runscripts]
                 "default" = ["local"]
-                [variants.optionlist]
-                variants = ["default"]
             "#,
         )
         .unwrap();
@@ -921,14 +1052,45 @@ mod tests {
         }
         let meta = format!(
             "[machine]\nnickname = \"{name}\"\n[queues.local]\ndefault = true\n\
-             [variants.submitscript]\n\"default\" = [\"local\"]\n\
-             [variants.runscript]\n\"default\" = [\"local\"]\n\
-             [variants.optionlist]\nvariants = [\"default\"]\n{extra}"
+             [submitscripts]\n\"default\" = [\"local\"]\n\
+             [runscripts]\n\"default\" = [\"local\"]\n\
+             {extra}"
         );
         fs::write(dir.join("meta.toml"), meta).unwrap();
         fs::write(dir.join("optionlists/default.toml"), "[options]\nVERSION = \"1\"\n").unwrap();
         fs::write(dir.join("runscripts/default.sh"), "#!/bin/sh\n").unwrap();
         fs::write(dir.join("submitscripts/default.sh"), "#!/bin/sh\n").unwrap();
+    }
+
+    /// A machine's flavors are its `optionlists/*.toml` files, sorted — no
+    /// list in meta.toml to keep in sync. Anything else in the directory
+    /// (another extension, a hidden file, a subdirectory) is not a flavor.
+    #[test]
+    fn flavors_are_the_optionlist_files() {
+        let root = tempfile::tempdir().unwrap();
+        write_minimal_machine(root.path(), "box", "");
+        let ol = root.path().join("box/optionlists");
+        fs::write(ol.join("cuda.toml"), "[options]\nVERSION = \"1\"\n").unwrap();
+        fs::write(ol.join("notes.md"), "not a flavor").unwrap();
+        fs::write(ol.join(".scratch.toml"), "[options]\n").unwrap();
+        fs::create_dir_all(ol.join("old.toml")).unwrap();
+        let mdb = Mdb::with_roots(root.path().to_owned(), root.path().join("no-user-layer"));
+        let machine = mdb.load("box").unwrap();
+        assert_eq!(machine.flavors().unwrap(), ["cuda", "default"]);
+        let err = format!("{:#}", machine.select_optionlist(None).unwrap_err());
+        assert!(err.contains("several optionlist flavors (cuda, default)"), "{err}");
+        assert_eq!(machine.select_optionlist(Some("cuda")).unwrap(), "cuda");
+    }
+
+    /// With no optionlist at all there is nothing to build: refused at load.
+    #[test]
+    fn a_machine_without_flavors_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        write_minimal_machine(root.path(), "box", "");
+        fs::remove_file(root.path().join("box/optionlists/default.toml")).unwrap();
+        let mdb = Mdb::with_roots(root.path().to_owned(), root.path().join("no-user-layer"));
+        let err = format!("{:#}", mdb.load("box").unwrap_err());
+        assert!(err.contains("has no flavors"), "{err}");
     }
 
     fn overlay_error(e: &anyhow::Error) -> &OverlayGenerationError {

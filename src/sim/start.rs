@@ -79,15 +79,14 @@ fn obtain_sim(
 }
 
 /// Resolve the RUN universe per the §4.8 precedence:
-/// CLI → coerced build universe → runscript variant / default-universe →
+/// CLI → coerced build universe → the runscript's own `universe` →
 /// declared host → none (a machine without `[universes.host]` keeps
 /// resolving to none: implicit host ≡ identity ≡ bare execution).
 pub fn resolve_run_universe<'m>(
     machine: &'m Machine,
     cfg: &ConfigMeta,
     cli: &UniverseFlags,
-    variant_universe: Option<&str>,
-    default_universe: Option<&str>,
+    script_universe: Option<&str>,
     verbose: bool,
 ) -> Res<Option<(String, &'m Universe)>> {
     if cli.no_universe {
@@ -105,31 +104,29 @@ pub fn resolve_run_universe<'m>(
                 cfg.name
             )
         })?;
-        if verbose && let Some(v) = variant_universe && v != build_uni {
+        if verbose && let Some(v) = script_universe && v != build_uni {
             // §4.8
             eprintln!(
-                "{} runscript variant names universe \"{v}\" but the config's build \
+                "{} runscript names universe \"{v}\" but the config's build \
                  universe \"{build_uni}\" takes precedence",
                 "note:".yellow()
             );
         }
         return Ok(Some((build_uni.clone(), u)));
     }
-    let name = variant_universe.or(default_universe);
-    match name {
+    match script_universe {
         Some(n) => Ok(Some((n.to_owned(), machine.meta.universe(n)?))),
         None => Ok(machine.meta.declared_host().map(|u| (HOST_UNIVERSE.to_owned(), u))),
     }
 }
 
-/// Resolve the SUBMIT universe: submitscript variant → `default-universe` →
+/// Resolve the SUBMIT universe: the submitscript's own `universe` →
 /// declared host → none (the CLI flag targets the run universe — §8.3).
 pub(crate) fn resolve_submit_universe<'m>(
     machine: &'m Machine,
-    variant_universe: Option<&str>,
-    default_universe: Option<&str>,
+    script_universe: Option<&str>,
 ) -> Res<Option<(String, &'m Universe)>> {
-    match variant_universe.or(default_universe) {
+    match script_universe {
         Some(n) => Ok(Some((n.to_owned(), machine.meta.universe(n)?))),
         None => Ok(machine.meta.declared_host().map(|u| (HOST_UNIVERSE.to_owned(), u))),
     }
@@ -190,19 +187,19 @@ fn prepend_env(script: &str, env: &str, kind: ScriptKind) -> String {
 }
 
 /// Generate one script artifact for a restart or test run (§6.1/§6.2): `.sh`
-/// variants are `@NAME@`-substituted with the phase env — under the phase's
+/// scripts are `@NAME@`-substituted with the phase env — under the phase's
 /// resolved `universe`, whose env keys override the machine's (§6.1) —
-/// auto-prepended; `.py` variants run per the calling convention and own
+/// auto-prepended; `.py` scripts run per the calling convention and own
 /// their env placement.
 pub(crate) fn generate_script(
     machine: &Machine,
     kind: ScriptKind,
-    variant: &str,
+    script_name: &str,
     vars: &VarSet,
     phase: Phase,
     universe: Option<&str>,
 ) -> Res<String> {
-    let script = machine.script_path(kind, variant)?;
+    let script = machine.script_path(kind, script_name)?;
     if script.python {
         vars.run_py_script(&script.path)
     } else {
@@ -211,7 +208,7 @@ pub(crate) fn generate_script(
         let substituted = vars
             .substitute(&template, Syntax::Shell)
             .with_context(|| format!("substituting {}", script.path.display()))?;
-        Ok(prepend_env(&substituted, &machine.meta.effective_env(universe, phase), kind))
+        Ok(prepend_env(&substituted, &machine.meta.phase_env(universe, phase), kind))
     }
 }
 
@@ -307,12 +304,12 @@ fn submit_impl(
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     check_sim_machine(machine, sim, &cfg, args.ignore_machine || args.force)?;
-    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
     let force_queue = args.force_queue || args.force;
-    let fit = vars::QueueFit::from_config(&cfg);
-    let mut topo = vars::resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
+    let fit = vars::BinaryFit::for_config(machine, &cfg)?;
+    let mut topo = vars::resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     // Per-simulation mutual exclusion for everything below (§2.3 item 3).
     let _lock = sim.lock()?;
@@ -323,6 +320,27 @@ fn submit_impl(
     let mut activate_first = true;
     if let Some(active) = restart::active_id(&sim.dir)? {
         let r = Restart::load(&sim.dir, active)?;
+        // A foreground run's pid is no job a batch scheduler could chain
+        // behind (§8.6): wait for it, or interrupt it.
+        if r.meta.foreground && r.meta.scheduler_job(&sched).is_none() {
+            match LinkLock::is_held_live(&r.running_lock_path())? {
+                true => bail!(
+                    "restart {} of simulation \"{}\" runs in the foreground (pid {}), which the scheduler \
+                     knows nothing of and cannot chain a job behind: wait for it to end, or interrupt it \
+                     where it runs (Ctrl-C), then submit",
+                    restart::dir_name(active),
+                    sim.name,
+                    r.meta.job_id
+                ),
+                false => bail!(
+                    "restart {} of simulation \"{}\" ran in the foreground and is still active, though \
+                     nothing of it holds its lock: `cactup sim clean {}`, then submit",
+                    restart::dir_name(active),
+                    sim.name,
+                    sim.name
+                ),
+            }
+        }
         if r.meta.job_id == NO_JOB_ID {
             bail!(
                 "restart {} is active but has no job and is not reapable yet; \
@@ -331,35 +349,124 @@ fn submit_impl(
                 sim.name
             );
         }
-        println!(
-            "Restart {} is still live (job {}); chaining the new submission behind it",
-            restart::dir_name(active),
-            r.meta.job_id
-        );
-        prev_job = Some(r.meta.job_id.clone());
-        activate_first = false;
+        let chain = match r.meta.terminated {
+            false => {
+                println!(
+                    "Restart {} is still live (job {}); chaining the new submission behind it",
+                    restart::dir_name(active),
+                    r.meta.job_id
+                );
+                true
+            }
+            // An ended restart still active: the reaper left it, because the
+            // scheduler still lists its job (§8.6), or under its throttles,
+            // without asking. Asked here, so what is said is known; the safe
+            // reading for new work: chained behind a job still listed;
+            // refused beside one the scheduler could not be asked about
+            // (chaining behind a job it has forgotten fails), unless `-f`
+            // stops it first.
+            true => {
+                use crate::scheduler::AfterEnd;
+                let dir = restart::dir_name(active);
+                let job_id = &r.meta.job_id;
+                let answer = crate::sim::manage::ask_ended(sim, &sched, &r)?;
+                if let Some(AfterEnd::Unanswered(failed)) = &answer {
+                    if !args.force {
+                        return Err(crate::sim::manage::unanswered_refusal(sim, &r, failed, "submit"));
+                    }
+                    crate::sim::manage::stop_unanswered(sim, &sched, &r, failed)?;
+                }
+                match answer {
+                    Some(AfterEnd::Listed(status)) => {
+                        println!(
+                            "Restart {dir}'s job {job_id} is still listed by the scheduler after the \
+                             restart ended ({}); chaining the new submission behind it",
+                            crate::scheduler::listed_state_words(status)
+                        );
+                        true
+                    }
+                    // Stopped by `-f`, but its run still ending: no chaining
+                    // behind a job the scheduler may have forgotten.
+                    Some(AfterEnd::Unanswered(_)) if LinkLock::is_held_live(&r.running_lock_path())? => bail!(
+                        "restart {dir} of simulation \"{}\" has recorded its end, but its run still holds \
+                         its lock (it is ending): wait for it, then submit",
+                        sim.name
+                    ),
+                    _ if LinkLock::is_held_live(&r.running_lock_path())? => {
+                        println!(
+                            "Restart {dir} has recorded its end, but its run still holds its lock (it is \
+                             ending); chaining the new submission behind its job {job_id}"
+                        );
+                        true
+                    }
+                    answer => {
+                        // What the reaper does, but for its throttles.
+                        crate::sim::manage::clean_active(sim)?;
+                        match answer {
+                            Some(AfterEnd::Over(crate::scheduler::JobStatus::Unknown)) => println!(
+                                "Restart {dir} had ended and the scheduler does not know its job {job_id}: \
+                                 cleaned it"
+                            ),
+                            Some(AfterEnd::Over(_)) => println!(
+                                "Restart {dir} had ended and the scheduler lists its job {job_id} as over: \
+                                 cleaned it"
+                            ),
+                            _ => println!("Restart {dir} had recorded its end: cleaned it"),
+                        }
+                        false
+                    }
+                }
+            }
+        };
+        if chain {
+            prev_job = Some(r.meta.job_id.clone());
+            activate_first = false;
+        }
+    } else if let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, &sched)? {
+        // The newest ended restart (deactivated: `sim clean`, a stop): its
+        // job still listed (queued again, or leaving the queue), the new
+        // job is chained behind it, which waits for it either way (behind a
+        // job that is just leaving, a moment). One the scheduler could not
+        // be asked about refuses the submission (chaining behind a job it
+        // has forgotten fails), unless `-f` stops it first.
+        use crate::scheduler::AfterEnd;
+        let (dir, job_id) = (restart::dir_name(ended.id), &ended.meta.job_id);
+        match answer {
+            Some(AfterEnd::Listed(status)) => {
+                println!(
+                    "Restart {dir}'s job {job_id} is still listed by the scheduler after the restart ended \
+                     ({}); chaining the new submission behind it",
+                    crate::scheduler::listed_state_words(status)
+                );
+                prev_job = Some(ended.meta.job_id.clone());
+                activate_first = false;
+            }
+            Some(AfterEnd::Unanswered(failed)) if !args.force => {
+                return Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "submit"));
+            }
+            Some(AfterEnd::Unanswered(failed)) => crate::sim::manage::stop_unanswered(sim, &sched, &ended, &failed)?,
+            _ => {}
+        }
     }
 
-    // Script variants for the chosen queue (§4.4) and universes (§4.8);
+    // Scripts for the chosen queue (§4.4) and universes (§4.8);
     // selection is driven by the config's BUILD universe (§4.4).
-    let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
-    let run_scripts = machine.meta.script_variants(ScriptKind::Run);
+    let submit_scripts = machine.meta.scripts(ScriptKind::Submit);
+    let run_scripts = machine.meta.scripts(ScriptKind::Run);
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, cfg_universe, false, None)?;
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, false, None)?;
-    // Script-variant default tasks (§4.2): submitscript first for a submit.
+    let (sub_script_name, sub_entry) = submit_scripts.route(&topo.queue, cfg_universe, false)?;
+    let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
+    // Script default tasks (§4.2): submitscript first for a submit.
     vars::apply_tasks_default(&mut topo, &args.topology, sub_entry.tasks.or(run_entry.tasks), None);
     let submit_uni = resolve_submit_universe(
         machine,
         sub_entry.universe.as_deref(),
-        submit_scripts.default_universe.as_deref(),
     )?;
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
         &args.universe,
         run_entry.universe.as_deref(),
-        run_scripts.default_universe.as_deref(),
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
@@ -382,7 +489,8 @@ fn submit_impl(
     }
 
     let identity = Identity::resolve(db, hostname_override);
-    let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
+    let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
+    let (sub_script_name, run_script_name) = (sub_script_name.to_owned(), run_script_name.to_owned());
 
     for seg in 0..segments {
         // Every restart gets a fresh id: the reaper (above) cleared the stale
@@ -405,6 +513,7 @@ fn submit_impl(
             email: &identity.email,
             run_universe: run_uni_name,
             debug: false,
+            scratch_home: &scratch_home,
         })?;
         // The effective knobs, `-K` overlay included, frozen with the vars so the
         // compute node resolves @KNOB(…)@ without the DB (§5, D11).
@@ -419,13 +528,13 @@ fn submit_impl(
         // Submit-phase artifact: same vars, submit-phase ENV_SETUP under the
         // submit universe (§6.1).
         let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
-        let submit_script = generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit, submit_uni_name)?;
+        submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
+        let submit_script = generate_script(machine, ScriptKind::Submit, &sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&rdir.join(".cactup").join("submit-script"), &submit_script)?;
 
         // Run-phase artifact, frozen now so the compute node never touches
         // the MDB (§8.3.1).
-        let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run, run_uni_name)?;
+        let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
         write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
         let mut r = Restart {
@@ -436,6 +545,7 @@ fn submit_impl(
                 created: Utc::now(),
                 started: None,
                 finished: None,
+                job_stopped: None,
                 nodes: topo.nodes,
                 tasks: topo.tasks,
                 tpn: topo.tpn,
@@ -446,6 +556,9 @@ fn submit_impl(
                 walltime: job_wall,
                 checkpt_buffer: buffer,
                 job_id: NO_JOB_ID.to_owned(),
+                job_host: None,
+                job_start: None,
+                foreground: false,
                 chained_job_id: chained,
                 status: None,
                 terminated: false,
@@ -462,10 +575,11 @@ fn submit_impl(
             restart::make_active(&sim.dir, id)?;
         }
 
-        let job_id = sched
+        let submitted = sched
             .submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))
             .with_context(|| format!("submitting restart {}", restart::dir_name(id)))?;
-        r.meta.job_id = job_id.clone();
+        r.meta.set_job(&submitted);
+        let job_id = submitted.id;
         r.meta.status = None;
         r.store()?;
 
@@ -498,6 +612,38 @@ fn submit_impl(
         prev_job = Some(job_id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn refuse_beside_listed_for_tests(sim: &Simulation, sched: &Scheduler, force: bool) -> Res<bool> {
+    refuse_beside_listed(sim, sched, force)
+}
+
+/// Refuse to start a foreground run beside the newest ended restart's job,
+/// which the scheduler still lists after the restart ended (§8.6: leaving
+/// the queue, or starting again), or could not be asked about: both might
+/// run. Called once no running active restart refuses first (whose own
+/// message stands), so `sim stop` acts on this job, as the advice says.
+/// With `force`, a job the scheduler could not be asked about is stopped
+/// instead (taken, or refused and taken as ended), and `true` returned.
+fn refuse_beside_listed(sim: &Simulation, sched: &Scheduler, force: bool) -> Res<bool> {
+    use crate::scheduler::AfterEnd;
+    let Some((ended, answer)) = crate::sim::manage::ended_newest(sim, sched)? else { return Ok(false) };
+    let (dir, job_id, name) = (restart::dir_name(ended.id), &ended.meta.job_id, &sim.name);
+    match answer {
+        Some(AfterEnd::Listed(status)) => bail!(
+            "restart {dir} of simulation \"{name}\" ended, but the scheduler still lists its job {job_id} {}",
+            crate::scheduler::listed_after_end(status, &format!("cactup sim stop {name}"))
+        ),
+        Some(AfterEnd::Unanswered(failed)) if !force => {
+            Err(crate::sim::manage::unanswered_refusal(sim, &ended, &failed, "run"))
+        }
+        Some(AfterEnd::Unanswered(failed)) => {
+            crate::sim::manage::stop_unanswered(sim, sched, &ended, &failed)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// `sim run` (§8.4): dispatches to the compute-node path (`--sim-dir`,
@@ -545,16 +691,27 @@ fn run_interactive(
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
     check_sim_machine(machine, sim, &cfg, args.start.ignore_machine || args.start.force)?;
-    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent);
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.start.silent)?;
     let force_queue = args.start.force_queue || args.start.force;
-    let fit = vars::QueueFit::from_config(&cfg);
-    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, &fit, force_queue)?;
+    let fit = vars::BinaryFit::for_config(machine, &cfg)?;
+    let mut topo = vars::resolve_topology(&args.start.topology, machine, db, Some(&fit), force_queue)?;
     let sim_home = inst.meta()?.sim_home()?.to_owned();
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     let lock = sim.lock()?;
     restart::reap_stale(sim, &sched)?;
-    if let Some(active) = restart::active_id(&sim.dir)? {
+    // A running active restart refuses first, with its own message (`sim
+    // stop` acts on it before anything else); then a job still listed after
+    // its restart's end (or unanswered), which `sim stop` then acts on.
+    let mut active = restart::active_id(&sim.dir)?;
+    let running = active.is_some_and(|id| Restart::load(&sim.dir, id).is_ok_and(|r| !r.meta.terminated));
+    // `-f` stopped the ended restart's job: an active restart that ended is
+    // finished with it (what the reaper does).
+    if !running && refuse_beside_listed(sim, &sched, args.start.force)? && active.is_some() {
+        crate::sim::manage::clean_active(sim)?;
+        active = None;
+    }
+    if let Some(active) = active {
         bail!(
             "simulation \"{}\" already has an active restart ({}); wait for it, or \
              `cactup sim stop {}` first",
@@ -564,18 +721,17 @@ fn run_interactive(
         );
     }
 
-    let run_scripts = machine.meta.script_variants(ScriptKind::Run);
+    let run_scripts = machine.meta.scripts(ScriptKind::Run);
     // Selection is driven by the config's BUILD universe (§4.4).
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, false, None)?;
-    // Script-variant default tasks (§4.2).
+    let (run_script_name, run_entry) = run_scripts.route(&topo.queue, cfg_universe, false)?;
+    // Script default tasks (§4.2).
     vars::apply_tasks_default(&mut topo, &args.start.topology, run_entry.tasks, None);
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
         &args.start.universe,
         run_entry.universe.as_deref(),
-        run_scripts.default_universe.as_deref(),
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
@@ -588,6 +744,7 @@ fn run_interactive(
         .unwrap_or_else(|| vars::default_checkpt_buffer(job_wall));
 
     let identity = Identity::resolve(db, hostname_override);
+    let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
     // A fresh interactive run always gets a new id; reaping (above) cleared any
     // stale active restart.
     let id = restart::next_id(&sim.dir)?;
@@ -607,6 +764,7 @@ fn run_interactive(
         email: &identity.email,
         run_universe: run_uni_name,
         debug: args.debug,
+        scratch_home: &scratch_home,
     })?;
     vset.set_knobs(db.knob_snapshot());
     // As in submit: a parfile that cannot substitute fails before any
@@ -615,7 +773,7 @@ fn run_interactive(
     fs::create_dir_all(rdir.join(".cactup"))
         .with_context(|| format!("Failed to create {}", rdir.display()))?;
 
-    let run_script = generate_script(machine, ScriptKind::Run, run_variant, &vset, Phase::Run, run_uni_name)?;
+    let run_script = generate_script(machine, ScriptKind::Run, run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&rdir.join(".cactup").join("run-script"), &run_script)?;
 
     let mut r = Restart {
@@ -626,6 +784,7 @@ fn run_interactive(
             created: Utc::now(),
             started: None,
             finished: None,
+            job_stopped: None,
             nodes: topo.nodes,
             tasks: topo.tasks,
             tpn: topo.tpn,
@@ -635,9 +794,11 @@ fn run_interactive(
             allocation: topo.allocation.clone(),
             walltime: job_wall,
             checkpt_buffer: buffer,
-            // The interactive run IS the job; our pid is what `ps`-style
-            // get-status commands can see (matches the generic machine).
-            job_id: std::process::id().to_string(),
+            // Set from `own_job` below.
+            job_id: NO_JOB_ID.to_owned(),
+            job_host: None,
+            job_start: None,
+            foreground: true,
             chained_job_id: None,
             status: None,
             terminated: false,
@@ -646,6 +807,10 @@ fn run_interactive(
             knobs: restart::freeze_knobs(&vset),
         },
     };
+    // The interactive run IS the job; our pid is what `ps`-style
+    // get-status commands can see (matches the generic machine), recorded
+    // with its host and start time where the machine's job ids are pids.
+    r.meta.set_job(&sched.own_job());
     r.store()?;
     restart::make_active(&sim.dir, id)?;
     // A fresh heartbeat before the sim lock drops: between here and
@@ -666,14 +831,17 @@ fn run_interactive(
 /// global DB, the registry, the MDB, or knobs (D11).
 fn run_compute(args: &SimRunArgs, sim_dir: &Path, id: u32) -> Res<()> {
     let sim = Simulation::open(&args.start.sim, sim_dir)?;
-    let mut r = Restart::load(&sim.dir, id)?;
 
     // Chain handoff (§8.3.2), under the per-simulation lock — waiting for the
-    // submitter to let go of it if the job started that quickly.
-    {
+    // submitter to let go of it if the job started that quickly. The restart
+    // is read under it too: the submitter records the job id (and on a
+    // `job-ids = "pids"` machine its host and start time) holding the lock,
+    // and a copy read before that would be written back without them.
+    let mut r = {
         let _lock = sim.lock_wait()?;
         restart::handoff_active(&sim.dir, id)?;
-    }
+        Restart::load(&sim.dir, id)?
+    };
 
     // No recovery step here: the parfile points Cactus at its recovery dir and
     // Cactus loads the newest checkpoint itself (§8.8).
@@ -686,21 +854,30 @@ pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build the command that executes a stored script (with shebang → exec the
-/// file; without → via `/bin/sh`), optionally wrapped in a universe (§4.8),
-/// with `cwd` as the working directory.
+/// Build the command that executes a stored script, optionally wrapped in a
+/// universe (§4.8), with `cwd` as the working directory.
+///
+/// The script is run by its interpreter, as the kernel would run it, never
+/// exec'd itself ([`interpreter_command`]): cactup writes a script and runs
+/// it moments later, and a thread of this process that forks in between
+/// hands its child an open write handle on the file, until that child execs.
+/// The kernel refuses to exec a file open for writing ("Text file busy");
+/// an interpreter only reads it.
 pub(crate) fn script_command(
     script: &Path,
     universe: Option<&Universe>,
     vars: &VarSet,
     cwd: &Path,
 ) -> Res<Command> {
-    let script_text = fs::read_to_string(script).unwrap_or_default();
-    let inner = if script_text.starts_with("#!") {
-        shell_quote(&script.display().to_string())
-    } else {
-        format!("/bin/sh {}", shell_quote(&script.display().to_string()))
-    };
+    // The first line is all that is read (a bounded piece of it; the
+    // kernel reads less), as bytes: the rest of a script need not be text.
+    let mut head = Vec::new();
+    if let Ok(file) = fs::File::open(script) {
+        use std::io::BufRead;
+        let _ = std::io::BufReader::new(std::io::Read::take(file, 4096)).read_until(b'\n', &mut head);
+    }
+    let first = head.split(|b| *b == b'\n').next().unwrap_or_default();
+    let inner = interpreter_command(&String::from_utf8_lossy(first), &shell_quote(&script.display().to_string()));
     let mut cmd = match universe {
         None => {
             let mut c = Command::new("/bin/sh");
@@ -722,6 +899,30 @@ pub(crate) fn script_command(
     };
     cmd.current_dir(cwd);
     Ok(cmd)
+}
+
+/// The shell text that runs the script `quoted` (already quoted) whose text
+/// is `text`: its `#!` line's interpreter, and the one argument the kernel
+/// would give it (whatever follows the interpreter on that line, as one
+/// word), before the script; `/bin/sh` for a script without one.
+fn interpreter_command(text: &str, quoted: &str) -> String {
+    // The kernel's reading: spaces and tabs around the line, and between the
+    // interpreter and its one argument, are dropped; nothing else is (a
+    // carriage return stays, and fails as it always did). A relative
+    // interpreter is found from the working directory, not by `PATH`.
+    let blank = [' ', '\t'];
+    let line = text.strip_prefix("#!").map(|rest| rest.split('\n').next().unwrap_or_default().trim_matches(blank));
+    let interpreter = |name: &str| match name.contains('/') {
+        true => shell_quote(name),
+        false => shell_quote(&format!("./{name}")),
+    };
+    match line.filter(|line| !line.is_empty()) {
+        Some(line) => match line.split_once(blank) {
+            Some((name, arg)) => format!("{} {} {quoted}", interpreter(name), shell_quote(arg.trim_matches(blank))),
+            None => format!("{} {quoted}", interpreter(line)),
+        },
+        None => format!("/bin/sh {quoted}"),
+    }
 }
 
 /// Execute a prepared restart: resolve the parfile, create the working dir
@@ -752,6 +953,11 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     r.touch_heartbeat();
     r.meta.started = Some(Utc::now());
     r.meta.status = Some("R".to_owned());
+    // Running, so not ended: a job the scheduler requeued after its run
+    // recorded its end (preemption, `scontrol requeue`) runs again here,
+    // and records its end again when it is over (§8.6).
+    r.meta.terminated = false;
+    r.meta.finished = None;
     r.store()?;
 
     let tee_files = tee.then(|| {
@@ -924,14 +1130,12 @@ mod tests {
             default = true
             max-walltime = "24:00:00"
 
-            [variants.submitscript]
-            "default" = { queues = ["batch"], default = true }
+            [submitscripts]
+            "default" = { queues = ["batch"] }
 
-            [variants.runscript]
-            "default" = { queues = ["batch"], default = true }
+            [runscripts]
+            "default" = { queues = ["batch"] }
 
-            [variants.optionlist]
-            variants = []
             "#,
         )
         .unwrap();
@@ -957,7 +1161,7 @@ mod tests {
             cfg_dir.join("cactup-config.toml"),
             r#"
             name = "sim"
-            variant = "default"
+            flavor = "default"
             thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-sim-1"
@@ -1208,7 +1412,7 @@ mod tests {
                 schema: crate::database::SCHEMA,
                 attempt_id: 0,
                 config: "sim".to_owned(),
-                optionlist_source: OptionlistSource::Variant("default".to_owned()),
+                optionlist_source: OptionlistSource::Flavor("default".to_owned()),
                 machine: "fake".to_owned(),
                 alias: "et".to_owned(),
                 config_dir: config_dir.clone(),
@@ -1216,12 +1420,15 @@ mod tests {
                 install_root: cactus_root.clone(),
                 submitted: false,
                 job_id: "999".to_owned(),
+                job_host: None,
+                job_start: None,
                 status: None,
                 reservation: None,
                 decision: "test decision".to_owned(),
                 full_rebuild: false,
                 make: None,
                 build_env: String::new(),
+                build_provisioning: String::new(),
                 virtual_executable: None,
                 universe: None,
                 global_shape_ignore: None,
@@ -1229,7 +1436,7 @@ mod tests {
                     r#"
                     schema = 1
                     name = "sim"
-                    variant = "default"
+                    flavor = "default"
                     thornlist = "sim.th"
                     machine = "fake"
                     config-id = "cfg-sim"
@@ -1390,12 +1597,10 @@ mod tests {
             wrapper-argv = ["apptainer", "exec", "img.sif"]
             [universes.other]
             wrapper-argv = ["env"]
-            [variants.submitscript]
-            "default" = { queues = ["batch"], default = true }
-            [variants.runscript]
-            "default" = { queues = ["batch"], default = true }
-            [variants.optionlist]
-            variants = []
+            [submitscripts]
+            "default" = { queues = ["batch"] }
+            [runscripts]
+            "default" = { queues = ["batch"] }
             "#,
         )
         .unwrap();
@@ -1404,7 +1609,7 @@ mod tests {
         let cfg_plain: ConfigMeta = toml::from_str(
             r#"
             name = "sim"
-            variant = "default"
+            flavor = "default"
             thornlist = "t"
             machine = "fake"
             config-id = "c"
@@ -1419,39 +1624,39 @@ mod tests {
 
         // 1. CLI wins.
         let cli = UniverseFlags { universe: Some("other".to_owned()), no_universe: false };
-        let got = resolve_run_universe(&machine, &cfg_coerced, &cli, None, None, false).unwrap();
+        let got = resolve_run_universe(&machine, &cfg_coerced, &cli, None, false).unwrap();
         assert_eq!(got.unwrap().0, "other");
         // --no-universe forces the host context.
         let no_uni = UniverseFlags { universe: None, no_universe: true };
-        assert!(resolve_run_universe(&machine, &cfg_coerced, &no_uni, None, None, false).unwrap().is_none());
-        // 2. Build-universe coercion beats the variant's own universe.
-        let got = resolve_run_universe(&machine, &cfg_coerced, &no_flags, Some("other"), None, false).unwrap();
+        assert!(resolve_run_universe(&machine, &cfg_coerced, &no_uni, None, false).unwrap().is_none());
+        // 2. Build-universe coercion beats the script's own universe.
+        let got = resolve_run_universe(&machine, &cfg_coerced, &no_flags, Some("other"), false).unwrap();
         assert_eq!(got.unwrap().0, "sif");
-        // Opt-out (§7.8) falls through to the variant.
+        // Opt-out (§7.8) falls through to the script.
         let mut cfg_optout = cfg_coerced.clone();
         cfg_optout.coerce_run_universe = false;
-        let got = resolve_run_universe(&machine, &cfg_optout, &no_flags, Some("other"), None, false).unwrap();
+        let got = resolve_run_universe(&machine, &cfg_optout, &no_flags, Some("other"), false).unwrap();
         assert_eq!(got.unwrap().0, "other");
-        // 3/4. Variant → default-universe → 5. none (no declared host here).
-        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, Some("sif"), false).unwrap();
+        // 3. The runscript's own universe → 5. none (no declared host here).
+        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, Some("sif"), false).unwrap();
         assert_eq!(got.unwrap().0, "sif");
-        assert!(resolve_run_universe(&machine, &cfg_plain, &no_flags, None, None, false).unwrap().is_none());
+        assert!(resolve_run_universe(&machine, &cfg_plain, &no_flags, None, false).unwrap().is_none());
         // Unknown names are hard errors listing the known set (§4.8).
         let bad = UniverseFlags { universe: Some("ghost".to_owned()), no_universe: false };
-        let err = resolve_run_universe(&machine, &cfg_plain, &bad, None, None, false).unwrap_err();
+        let err = resolve_run_universe(&machine, &cfg_plain, &bad, None, false).unwrap_err();
         assert!(format!("{err:#}").contains("sif"), "{err:#}");
 
         // 5'. A DECLARED host becomes the final fallback of both chains
         // (§4.8); --no-universe still bypasses it.
-        let host: Universe = toml::from_str("env-run-setup = \"module load x\"").unwrap();
+        let host: Universe = toml::from_str("run-env-setup = \"module load x\"").unwrap();
         machine.meta.universes.insert("host".to_owned(), host);
-        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, None, false).unwrap();
+        let got = resolve_run_universe(&machine, &cfg_plain, &no_flags, None, false).unwrap();
         assert_eq!(got.unwrap().0, "host");
-        assert!(resolve_run_universe(&machine, &cfg_plain, &no_uni, None, None, false).unwrap().is_none());
-        let got = resolve_submit_universe(&machine, None, None).unwrap();
+        assert!(resolve_run_universe(&machine, &cfg_plain, &no_uni, None, false).unwrap().is_none());
+        let got = resolve_submit_universe(&machine, None).unwrap();
         assert_eq!(got.unwrap().0, "host");
-        // With a variant/default-universe, host stays out of the way.
-        let got = resolve_submit_universe(&machine, Some("sif"), None).unwrap();
+        // With a script universe, host stays out of the way.
+        let got = resolve_submit_universe(&machine, Some("sif")).unwrap();
         assert_eq!(got.unwrap().0, "sif");
     }
 
@@ -1485,5 +1690,34 @@ mod tests {
     fn shell_quoting() {
         assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn a_script_runs_by_the_interpreter_its_first_line_names() {
+        let q = "'/w/run-script'";
+        assert_eq!(interpreter_command("#!/bin/bash\necho\n", q), "'/bin/bash' '/w/run-script'");
+        assert_eq!(interpreter_command("#! /bin/sh -e \n", q), "'/bin/sh' '-e' '/w/run-script'");
+        // The rest of the line is one argument, as the kernel gives it.
+        assert_eq!(interpreter_command("#!/usr/bin/env bash -x\n", q), "'/usr/bin/env' 'bash -x' '/w/run-script'");
+        assert_eq!(interpreter_command("echo\n", q), "/bin/sh '/w/run-script'");
+        assert_eq!(interpreter_command("#!\n", q), "/bin/sh '/w/run-script'");
+        // As the kernel has it: a carriage return is part of the name, and a
+        // relative interpreter is a path from here.
+        assert_eq!(interpreter_command("#!/bin/sh\r\n", q), "'/bin/sh\r' '/w/run-script'");
+        assert_eq!(interpreter_command("#!bash\n", q), "'./bash' '/w/run-script'");
+    }
+
+    /// A script this process still holds open for writing — as a child that
+    /// another thread forked a moment ago may — runs all the same: it is
+    /// read by its interpreter, not exec'd ("Text file busy").
+    #[test]
+    fn a_script_open_for_writing_still_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("run-script");
+        write_executable(&script, "#!/bin/sh\necho ran \"$0\"\n").unwrap();
+        let _held = fs::OpenOptions::new().append(true).open(&script).unwrap();
+        let out = script_command(&script, None, &VarSet::default(), tmp.path()).unwrap().output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("ran {}\n", script.display()));
     }
 }

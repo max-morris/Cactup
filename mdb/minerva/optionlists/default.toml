@@ -1,9 +1,9 @@
-# Minerva optionlist (variant "default"), ported from simfactory2
+# Minerva optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/minerva.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["devel1"]
+[cactup.runs-on]
+queues = ["devel1"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

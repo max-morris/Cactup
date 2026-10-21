@@ -184,7 +184,7 @@ env-setup = """
 module load gcc
 module load openmpi
 export PATH="/opt/bin:$PATH"
-export LD_LIBRARY_PATH="/opt/lib:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/opt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 """
 ```
 
@@ -214,22 +214,23 @@ Get queue info:
 sinfo -o "%P %l %D" | head -5
 ```
 
-### Variants section
+### Script routes
 
-Declare available variants:
+Tell cactup which submit and run script serves each queue. Each key names a
+script file (`submitscripts/default.sh`, `runscripts/test.sh`, ...):
 
 ```toml
-[variants.optionlist]
-variants = ["default", "cuda"]
-
-[variants.submitscript]
-"default" = { queues = ["default", "gpu"], default = true }
+[submitscripts]
+"default" = { queues = ["default", "gpu"] }
 "test" = { queues = ["default"], test = true }
 
-[variants.runscript]
-"default" = { queues = ["default", "gpu"], default = true }
+[runscripts]
+"default" = { queues = ["default", "gpu"] }
 "test" = { queues = ["default"], test = true }
 ```
+
+Optionlists need no table here: every `*.toml` file you put in `optionlists/`
+(next step) is one of the machine's flavors.
 
 ## Step 3: Create optionlists
 
@@ -243,9 +244,11 @@ Edit `optionlists/default.toml` with your cluster's compilers and flags:
 
 ```toml
 [cactup]
-compatible-queues = ["default", "long"]
 default = true
 description = "Default build on myclu"
+
+[cactup.runs-on]
+queues = ["default", "long"]     # where the binary may run; omit for any queue
 
 [options]
 VERSION = "2024-06-01"
@@ -269,14 +272,16 @@ OPENMP = "yes"
 MPI    = "MPICH"
 ```
 
-If your cluster has CUDA, create `optionlists/cuda.toml` and mark it `gpu = true`
-so it is only offered on GPU queues:
+If your cluster has CUDA, create `optionlists/cuda.toml` and mark its binary
+`gpu = true` so its simulations only run on GPU queues:
 
 ```toml
 [cactup]
-gpu = true
-compatible-queues = ["gpu"]
 description = "CUDA GPU build on myclu"
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu = true
 
 [options]
 VERSION = "2024-06-01"
@@ -310,9 +315,6 @@ Edit `submitscripts/default.sh`. Here's a complete SLURM example:
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
 
-# Source environment
-@ENV_SETUP@
-
 # Set up checkpoint walltime
 export CHECKPOINT_WALLTIME=@CHECKPOINT_WALLTIME@
 
@@ -320,6 +322,12 @@ cd @RUNDIR@-active
 
 srun @EXECUTABLE@ @PARFILE@
 ```
+
+The script does not write the environment setup: cactup puts the machine's
+setup (and any provisioning steps) into every `.sh` submit and run script
+itself, after the directives, so writing `@ENV_SETUP@` as well would run it
+twice. Only a `.py` script prints `ENV_SETUP` itself (see
+[Scripts & Variables](scripts-and-variables.html#environment-setup-env_setup)).
 
 If your cluster uses modules or special configurations, adjust accordingly.
 
@@ -343,8 +351,6 @@ Create `submitscripts/test.sh` for test submissions (smaller, faster):
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
 
-@ENV_SETUP@
-
 cd @RUNDIR@-active
 
 srun @EXECUTABLE@ @PARFILE@
@@ -364,13 +370,18 @@ alongside the three above:
     default.sh
 ```
 
-It's declared in meta.toml exactly like `submitscript`/`runscript`, as its
-own variant table:
+It's routed in meta.toml exactly like `[submitscripts]`/`[runscripts]`, in
+its own table:
 
 ```toml
-[variants.buildsubmitscript]
-"default" = { queues = ["default", "gpu"], default = true }
+[buildsubmitscripts]
+"default" = { queues = ["default", "gpu"] }
 ```
+
+The queue a build job lands on only decides where `make` runs, so any queue
+may build any flavor: the CUDA flavor can compile on `default`, and the CPU
+flavor on `gpu`. Neither the flavor's `[cactup.runs-on]` nor a queue's
+`build-universes` is checked for a build job.
 
 And in `[build]`, tell cactup an unqualified `cactup build` should go to the
 queue rather than trying (and failing) to compile on the login node:
@@ -386,7 +397,7 @@ cpus-per-task  = 32
 ```
 
 The script itself is structurally identical to `submitscripts/default.sh` —
-same `#SBATCH` directives, same `@ENV_SETUP@` — except the final line
+same `#SBATCH` directives — except the final line
 re-invokes cactup to build instead of to run:
 
 ```bash
@@ -400,8 +411,6 @@ re-invokes cactup to build instead of to run:
 #SBATCH --output=@STDOUT_FILE@
 #SBATCH --error=@STDERR_FILE@
 #SBATCH --partition=@QUEUE@
-
-@ENV_SETUP@
 
 cd @SOURCEDIR@
 
@@ -420,7 +429,7 @@ cactup itself when it generates the script, not from anything you configure.
 If your cluster needs the same GPU-reservation logic your run submitscript
 has (see the qbd example in [Scripts & Variables](scripts-and-variables.html)),
 write `buildsubmitscripts/default.py` instead of `.sh` — the calling
-convention is identical to a `submitscript` `.py` variant.
+convention is identical to a `.py` submit script.
 
 ## Step 5: Update run scripts
 
@@ -430,8 +439,6 @@ Edit `runscripts/default.sh`:
 #!/bin/bash
 
 set -e
-
-@ENV_SETUP@
 
 cd @RUNDIR@-active
 
@@ -448,8 +455,6 @@ Edit `runscripts/test.sh` for interactive test runs:
 #!/bin/bash
 
 set -e
-
-@ENV_SETUP@
 
 cd @RUNDIR@-active
 
@@ -518,7 +523,7 @@ cactup install ET_2025_05 --silent
 Build a test config:
 
 ```sh
-cactup build testconfig --variant default
+cactup build testconfig --flavor default
 ```
 
 Run the test suite:
@@ -574,7 +579,7 @@ Test the key workflows:
 # Build with different options
 cactup build config1 --optimize
 cactup build config2 --debug
-cactup build config3 --variant cuda
+cactup build config3 --flavor cuda
 
 # Run simulations
 cactup sim submit mysim mysim.par -n 4 -w 2:00:00 -q default

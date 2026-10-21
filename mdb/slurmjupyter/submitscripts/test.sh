@@ -1,14 +1,14 @@
 #! /bin/bash
-# slurmjupyter TEST submitscript (variant "test") — marked test = true in
+# slurmjupyter TEST submitscript (script "test") — marked test = true in
 # meta.toml (design §11.2). Same #SBATCH header as submitscripts/default.py
 # but WITHOUT restart chaining (a testsuite is one-shot — no recovery, no
 # chain, design §11.6); the payload re-invokes `cactup test run` on the
 # compute node with the §11.6 locator flags (--test-dir + --results-id)
 # instead of `sim run`.
 #
-# A .sh variant works here since the header is fully static: cactup inserts
+# A .sh script works here since the header is fully static: cactup inserts
 # env-setup after the leading directive/comment block (design §6.1), so the
-# #SBATCH lines stay on top. (This was a .py variant back when env-setup was
+# #SBATCH lines stay on top. (This was a .py script back when env-setup was
 # inserted right after the shebang.)
 #SBATCH -t @WALLTIME@
 #SBATCH -N @NODES@ -n @TASKS@

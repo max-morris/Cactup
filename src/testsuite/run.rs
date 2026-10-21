@@ -1,6 +1,6 @@
 //! `test run` / `test submit` (§11.6): the simplified one-shot path — no
 //! chaining, no recovery, no restart bookkeeping. Drives the flesh testsuite
-//! (`make <config>-testsuite`) through the machine's TEST runscript variant
+//! (`make <config>-testsuite`) through the machine's TEST runscript
 //! and records the pass/fail summary.
 
 use crate::args::TestStartArgs;
@@ -10,8 +10,9 @@ use crate::commands::{machine, Ctx};
 use crate::database::{Database, SCHEMA};
 use crate::installation::{Installation, TestEntry};
 use crate::lock::LinkLock;
+use crate::mdb::meta::{Route, ScriptTable};
 use crate::mdb::{Machine, Phase, ScriptKind, Universe, HOST_UNIVERSE};
-use crate::scheduler::{JobStatus, Scheduler};
+use crate::scheduler::Scheduler;
 use crate::sim::restart::{freeze_knobs, freeze_vars, thaw_vars, UniverseSpec, NO_JOB_ID};
 use crate::sim::start::{
     generate_script, resolve_run_universe, resolve_submit_universe, script_command,
@@ -19,7 +20,7 @@ use crate::sim::start::{
 };
 use crate::sim::vars::{
     apply_tasks_default, default_checkpt_buffer, resolve_topology, set_machine_vars,
-    set_topology_vars, set_walltime_vars, QueueFit, Topology,
+    set_topology_vars, set_walltime_vars, BinaryFit, Topology,
 };
 use crate::template::VarSet;
 use crate::testsuite::{
@@ -35,7 +36,7 @@ use std::fs;
 use std::path::Path;
 
 /// Default task count for testsuite runs when neither the command line nor
-/// the script variant's `tasks` setting says otherwise (§11.6): thorn tests
+/// the script's `tasks` setting says otherwise (§11.6): thorn tests
 /// are written for 1–2 MPI ranks, so filling the node (§8.5) breaks them.
 const TESTSUITE_DEFAULT_TASKS: u32 = 2;
 
@@ -74,10 +75,11 @@ fn assemble_test_vars(
     cactus_root: &Path,
     machine: &Machine,
     topo: &Topology,
-    select: &str,
+    flesh_select: &str,
     identity: &Identity,
     alias: &str,
     run_universe: Option<&str>,
+    scratch_home: &str,
 ) -> Res<VarSet> {
     let mut v = VarSet::new();
     set_topology_vars(&mut v, topo, name);
@@ -94,10 +96,10 @@ fn assemble_test_vars(
     v.set("TEST_NAME", name);
     v.set("RESULTS_ID", results_id as u64);
     v.set("TESTSUITE_RESULTS_DIR", results_dir(run_dir, results_id).display().to_string());
-    // @TESTSUITE_SELECT@ carries the flesh's CCTK_TESTSUITE_RUN_TESTS format:
-    // empty = run everything, else space-separated Thorn / Thorn/test entries
-    // (metadata and logs keep the human-facing "all").
-    v.set("TESTSUITE_SELECT", if select == "all" { "" } else { select });
+    // @TESTSUITE_SELECT@ carries the flesh's CCTK_TESTSUITE_RUN_TESTS format
+    // (`select::resolve`): empty = run everything, else space-separated
+    // Thorn / Thorn/test entries (metadata and logs keep what the user typed).
+    v.set("TESTSUITE_SELECT", flesh_select);
 
     // Shared §6.3 names a test script uses (§11.9): the LIVE built binary —
     // a test run freezes no private copy (§11.5).
@@ -105,9 +107,10 @@ fn assemble_test_vars(
     v.set("EXECUTABLE", build::executable_path(cactus_root, &cfg.name).display().to_string());
     v.set("CONFIGURATION", cfg.name.as_str());
     v.set("SCRIPTFILE", run_dir.join("submit-script").display().to_string());
-    // Resolve @USER@/@ENV()@ (§4.2); the raw template would leak `@USER@`
-    // literally (single-pass substitution). Matches the sim path.
-    v.set("SCRATCH_HOME", machine.meta.resolved_paths()?.scratch_home.unwrap_or_default());
+    // Resolved by the caller (§4.2: the `scratch-home` knob over the
+    // machine's, `@USER@`/`@ENV()@` substituted); the raw template would leak
+    // `@USER@` literally (single-pass substitution). Matches the sim path.
+    v.set("SCRATCH_HOME", scratch_home);
     v.set("ALIAS", alias);
     v.set("CACTUP", crate::freeze::frozen_cactup());
 
@@ -137,6 +140,44 @@ fn link_arrangements(run_dir: &Path, cactus_root: &Path) -> Res<()> {
     }
     std::os::unix::fs::symlink(cactus_root.join("arrangements"), &link)
         .with_context(|| format!("Failed to link {}", link.display()))
+}
+
+/// Route a test script for `queue` (§11.2), with an error that only offers
+/// queues this config can actually test on: a test script's queue must also
+/// be one the binary may run on (`runs-on`, §4.4), so suggesting any other
+/// would send the user straight into the runs-on refusal.
+fn route_test_script<'t>(
+    scripts: &'t ScriptTable,
+    queue: &str,
+    universe: &str,
+    machine: &Machine,
+    fit: &BinaryFit,
+    gpu_flag: bool,
+) -> Res<(&'t str, &'t Route)> {
+    scripts.route(queue, universe, true).map_err(|_| {
+        let mut usable: Vec<&str> = scripts
+            .partition(true, universe)
+            .flat_map(|(_, route)| route.queues.iter().map(String::as_str))
+            .filter(|q| crate::sim::vars::binary_may_use(machine, fit, q, gpu_flag))
+            .collect();
+        usable.sort();
+        usable.dedup();
+        let what = format!("test {}", scripts.kind.noun());
+        if usable.is_empty() {
+            anyhow::anyhow!(
+                "no {what} serves queue \"{queue}\", nor any other queue config \"{}\" may run on, \
+                 so this machine cannot run its testsuite",
+                fit.label
+            )
+        } else {
+            anyhow::anyhow!(
+                "no {what} serves queue \"{queue}\"; config \"{}\" can run its testsuite on {}; \
+                 pick one of those with -q",
+                fit.label,
+                usable.join(", ")
+            )
+        }
+    })
 }
 
 fn start_impl(
@@ -212,49 +253,55 @@ fn start_impl(
     // §11.5: a test run reads reference data straight from the live source
     // tree, so a tree that moved since the build matters here even more than
     // for a sim. Still only a notice — never a refusal, never a rebuild.
-    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent);
+    crate::commands::delta::warn_if_sources_diverged(inst, &cfg, args.silent)?;
 
     // 2. Topology + queue/GPU guards (§4.4 / D12), exactly as a sim.
     let force_queue = args.force_queue || args.force;
-    let fit = QueueFit::from_config(&cfg);
-    let mut topo = resolve_topology(&args.topology, machine, db, &fit, force_queue)?;
+    let fit = BinaryFit::for_config(machine, &cfg)?;
+    let mut topo = resolve_topology(&args.topology, machine, db, Some(&fit), force_queue)?;
     let select = if args.tests.is_empty() { "all".to_owned() } else { args.tests.join(" ") };
+    // Resolved before anything is created or registered: a selection that
+    // names nothing fails here, not as a queued job that runs zero tests.
+    let flesh_select = crate::testsuite::select::resolve(&cactus_root, &cfg_name, &args.tests)?;
 
-    // 3. TEST script variants for the queue (§11.2: prefer the test
-    //    partition, fall back to normal) and the universes (§4.8); selection
+    // 3. TEST scripts for the queue (§11.2: test-marked scripts only, never a
+    //    normal one) and the universes (§4.8); selection
     //    is driven by the config's BUILD universe (§4.4).
-    let submit_scripts = machine.meta.script_variants(ScriptKind::Submit);
-    let run_scripts = machine.meta.script_variants(ScriptKind::Run);
     let cfg_universe = cfg.universe.as_deref().unwrap_or(HOST_UNIVERSE);
-    let (sub_variant, sub_entry) = submit_scripts.select(&topo.queue, cfg_universe, true, args.variant.as_deref())?;
-    let (run_variant, run_entry) = run_scripts.select(&topo.queue, cfg_universe, true, args.variant.as_deref())?;
+    // The queue routes each kind on its own (§11.2); nothing picks a test
+    // script by name. The submit script is only resolved for a submit: a
+    // local `test run` never uses one, and must not fail for lack of it.
+    let pick = |kind: ScriptKind| {
+        route_test_script(machine.meta.scripts(kind), &topo.queue, cfg_universe, machine, &fit, args.topology.gpu)
+    };
+    let (run_script_name, run_entry) = pick(ScriptKind::Run)?;
+    let sub = if submit { Some(pick(ScriptKind::Submit)?) } else { None };
+    let sub_entry = sub.map(|(_, entry)| entry);
 
-    // Testsuites run on a couple of ranks, not a full node: script-variant
+    // Testsuites run on a couple of ranks, not a full node: script
     // `tasks` (§4.2, mode-relevant script first), else 2 (the ET convention;
     // §11.6). @TASKS@ feeds CCTK_TESTSUITE_RUN_PROCESSORS, i.e. $nprocs.
-    let script_tasks = if submit {
-        sub_entry.tasks.or(run_entry.tasks)
-    } else {
-        run_entry.tasks.or(sub_entry.tasks)
+    let script_tasks = match sub_entry {
+        Some(sub_entry) => sub_entry.tasks.or(run_entry.tasks),
+        None => run_entry.tasks,
     };
     apply_tasks_default(&mut topo, &args.topology, script_tasks, Some(TESTSUITE_DEFAULT_TASKS));
-    let submit_uni = resolve_submit_universe(
-        machine,
-        sub_entry.universe.as_deref(),
-        submit_scripts.default_universe.as_deref(),
-    )?;
+    let submit_uni = match sub_entry {
+        Some(sub_entry) => resolve_submit_universe(machine, sub_entry.universe.as_deref())?,
+        None => None,
+    };
     let submit_uni_name = submit_uni.as_ref().map(|(name, _)| name.as_str());
     let run_uni = resolve_run_universe(
         machine,
         &cfg,
         &args.universe,
         run_entry.universe.as_deref(),
-        run_scripts.default_universe.as_deref(),
         verbose,
     )?;
     let run_uni_spec = run_uni.as_ref().map(|(name, u)| UniverseSpec::from_universe(name, u));
     let run_uni_name = run_uni.as_ref().map(|(name, _)| name.as_str());
-    let (sub_variant, run_variant) = (sub_variant.to_owned(), run_variant.to_owned());
+    let sub_script_name = sub.map(|(name, _)| name.to_owned());
+    let run_script_name = run_script_name.to_owned();
 
     // The run is named after its config (§11.3 has no name argument);
     // re-runs reuse the dir and allocate new result sets (§11.5).
@@ -278,28 +325,94 @@ fn start_impl(
     }
 
     let identity = Identity::resolve(db, hostname_override);
-    let sched = Scheduler::new(&machine.meta);
+    let sched = Scheduler::for_machine(machine);
 
     // A previous run of this config that is still in the queue must be dealt
     // with first (there is no reaper for tests — §11.6).
     if let Ok(old) = TestRun::open(&run_dir) {
-        if old.meta.job_id != NO_JOB_ID
-            && !LinkLock::is_held_live(&old.running_lock_path())?
-            && matches!(
-                sched.get_status(&old.meta.job_id)?,
-                JobStatus::Running | JobStatus::Queued | JobStatus::Holding
-            )
+        if old.lock_live()? {
+            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+        }
+        // After the old run's end, a job the scheduler still lists in a
+        // state its patterns read (leaving the queue, or starting again),
+        // or could not be asked about, may run beside a new run: refused,
+        // the safe reading for starting new work (§10).
+        use crate::scheduler::AfterEnd;
+        let finished = old.meta.timestamps.finished.is_some();
+        // `Some(answer)`: live; after the end, `answer` is the scheduler's
+        // (listed in a state, or the failed query's text where it could not
+        // be asked).
+        let live = |job| -> Res<Option<Option<AfterEnd>>> {
+            Ok(match finished {
+                true => match sched.ask_after_end(job)? {
+                    AfterEnd::Over(_) => None,
+                    answer => Some(Some(answer)),
+                },
+                false => crate::scheduler::is_live(sched.get_status(job)?, false).then_some(None),
+            })
+        };
+        if let Some(job) = old.pending_job(&sched)
+            && let Some(answer) = live(job)?
         {
+            let failed = match &answer {
+                Some(AfterEnd::Unanswered(failed)) => Some(failed.clone()),
+                _ => None,
+            };
+            // An older record's pid, or one sharing its process group (§10):
+            // never stopped, `-f` neither.
+            if sched.unverified(job) {
+                bail!("{}; then run the tests again", crate::scheduler::UnverifiedPid::of(job.id));
+            }
+            if sched.shares_group(job) {
+                bail!("{}; then run the tests again", crate::scheduler::SharedGroup(job.id.to_owned()));
+            }
+            if let Some(failed) = failed.as_deref()
+                && !args.force
+            {
+                bail!(
+                    "test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
+                     queued again: {failed}\n`cactup test stop {name}` asks the scheduler to stop the job (a job \
+                     it says it does not know is then taken as ended); or pass -f to stop it and run the tests",
+                    job.id
+                );
+            }
+            if let Some(AfterEnd::Listed(status)) = answer
+                && !args.force
+            {
+                bail!(
+                    "test run \"{name}\" ended, but the scheduler still lists its job {} {} (or pass -f to \
+                     stop it)",
+                    job.id,
+                    crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
+                );
+            }
             if !args.force {
                 bail!(
                     "test run \"{name}\" still has a live job ({}); \
                      `cactup test stop {name}` first, or pass -f to stop it",
-                    old.meta.job_id
+                    job.id
                 );
             }
-            sched.stop(&old.meta.job_id)?;
-        } else if LinkLock::is_held_live(&old.running_lock_path())? {
-            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+            match finished {
+                // After a failed query, a stop the scheduler refuses saying
+                // it does not know the job is taken as the job ended; any
+                // other failure of the stop command is an error.
+                true => {
+                    if let crate::scheduler::EndedStop::NotKnown(said) = sched.stop_judged(job, match failed.as_deref() {
+                        Some(failed) => crate::scheduler::StopCase::Unanswered(failed),
+                        None => crate::scheduler::StopCase::Listed,
+                    })? {
+                        println!(
+                            "The scheduler does not know test job {} (its stop command said: {said}): \
+                             taken as ended",
+                            job.id
+                        );
+                    }
+                }
+                false => {
+                    sched.stop(job)?;
+                }
+            }
         }
     }
 
@@ -327,6 +440,8 @@ fn start_impl(
             walltime: topo.total_wall,
             allocation: topo.allocation.clone(),
             job_id: NO_JOB_ID.to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             universe: run_uni_spec,
             results: None,
@@ -354,10 +469,11 @@ fn start_impl(
         &cactus_root,
         machine,
         &topo,
-        &select,
+        &flesh_select,
         &identity,
         &inst.alias,
         run_uni_name,
+        &machine.meta.path_for(db, "scratch-home")?.unwrap_or_default(),
     )?;
     // Effective knobs, `-K` overlay included, frozen for the compute node (§5, D11).
     vset.set_knobs(db.knob_snapshot());
@@ -366,20 +482,21 @@ fn start_impl(
 
     // 5. Scripts at the run root (§11.5): run-script always (the compute node
     //    executes it), submit-script for `test submit`.
-    let run_script = generate_script(machine, ScriptKind::Run, &run_variant, &vset, Phase::Run, run_uni_name)?;
+    let run_script = generate_script(machine, ScriptKind::Run, &run_script_name, &vset, Phase::Run, run_uni_name)?;
     write_executable(&run_dir.join("run-script"), &run_script)?;
 
-    if submit {
+    if let Some(sub_script_name) = &sub_script_name {
         // Submit-phase ENV_SETUP under the submit universe (§6.1).
         let mut submit_vars = vset.clone();
-        submit_vars.set("ENV_SETUP", machine.meta.effective_env(submit_uni_name, Phase::Submit));
+        submit_vars.set("ENV_SETUP", machine.meta.phase_env(submit_uni_name, Phase::Submit));
         let submit_script =
-            generate_script(machine, ScriptKind::Submit, &sub_variant, &submit_vars, Phase::Submit, submit_uni_name)?;
+            generate_script(machine, ScriptKind::Submit, sub_script_name, &submit_vars, Phase::Submit, submit_uni_name)?;
         write_executable(&run_dir.join("submit-script"), &submit_script)?;
         run.store_meta()?;
 
-        let job_id = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
-        run.meta.job_id = job_id.clone();
+        let submitted = sched.submit(&submit_vars, submit_uni.as_ref().map(|(n, u)| (n.as_str(), *u)))?;
+        run.meta.set_job(&submitted);
+        let job_id = submitted.id;
         run.meta.timestamps.submitted = Some(Utc::now());
         run.store_meta()?;
         run.log("test-submit", &format!("submitted {} as job {job_id} (select: {select})", results_name(results_id)));
@@ -406,6 +523,16 @@ fn run_compute(dir: &Path, results_id: u32) -> Res<()> {
     let mut run = TestRun::open(dir)?;
     {
         let _lock = run.lock_wait()?;
+        // Read again under the lock: a job the generic machine starts at
+        // once may get here before its submitter has recorded the job id
+        // (which it does holding the lock), and would write the record
+        // back without it.
+        run = TestRun::open(dir)?;
+        // Running, so not ended: a job the scheduler requeued after the
+        // run recorded its end (preemption, `scontrol requeue`, Torque's
+        // `qrerun`) is a job to ask the scheduler about again
+        // (`TestRun::pending_job`); `execute_testsuite` stores this.
+        run.meta.timestamps.finished = None;
         // The set was activated at submit time; re-assert defensively.
         fs::create_dir_all(results_dir(dir, results_id))?;
         activate_results(dir, results_id)?;
@@ -506,7 +633,50 @@ mod tests {
     use crate::testsuite::list_results_ids;
     use crate::walltime::Walltime;
 
-    /// A machine with BOTH normal and test-marked script variants (§11.2) and
+    /// A queue with no test script: the error offers only queues where this
+    /// config can actually run its testsuite (test scripts' queues narrowed
+    /// to its runs-on), and says so plainly when there are none.
+    #[test]
+    fn test_routing_miss_offers_only_queues_the_binary_may_use() {
+        let meta: crate::mdb::Meta = toml::from_str(
+            r#"
+            [machine]
+            nickname = "m"
+            [queues.gpu]
+            [queues.cpu]
+            [queues.big]
+            [submitscripts]
+            "default" = ["gpu", "cpu", "big"]
+            "test"    = { queues = ["gpu", "cpu"], test = true }
+            [runscripts]
+            "default" = ["gpu", "cpu", "big"]
+            "test"    = { queues = ["gpu", "cpu"], test = true }
+            "#,
+        )
+        .unwrap();
+        meta.validate("m").unwrap();
+        let cfg = |queues: &str| -> ConfigMeta {
+            toml::from_str(&format!(
+                "name = \"sim\"\nflavor = \"x\"\nthornlist = \"t\"\nmachine = \"m\"\n\
+                 config-id = \"c\"\nbuild-id = \"b\"\n[runs-on]\nqueues = [{queues}]\n"
+            ))
+            .unwrap()
+        };
+        let machine = Machine { name: "m".to_owned(), dir: std::path::PathBuf::from("/nonexistent"), layer: Layer::System, meta };
+        let runs = machine.meta.scripts(ScriptKind::Run);
+        let err = |cfg: &ConfigMeta| {
+            let fit = BinaryFit::from_config(cfg);
+            format!("{:#}", route_test_script(runs, "big", HOST_UNIVERSE, &machine, &fit, false).unwrap_err())
+        };
+        let msg = err(&cfg("\"cpu\", \"big\""));
+        assert!(msg.contains("can run its testsuite on cpu; pick one of those with -q"), "{msg}");
+        let msg = err(&cfg(""));
+        assert!(msg.contains("on cpu, gpu;"), "any-queue binary: every test queue qualifies: {msg}");
+        let msg = err(&cfg("\"big\""));
+        assert!(msg.contains("cannot run its testsuite"), "{msg}");
+    }
+
+    /// A machine with BOTH normal and test-marked scripts (§11.2) and
     /// a fake echo scheduler.
     fn fake_machine(dir: &Path) -> Machine {
         fs::create_dir_all(dir.join("submitscripts")).unwrap();
@@ -557,16 +727,14 @@ mod tests {
             default = true
             max-walltime = "8:00:00"
 
-            [variants.submitscript]
-            "default" = { queues = ["local"], default = true }
-            "test" = { queues = ["local"], test = true, default = true }
+            [submitscripts]
+            "default" = { queues = ["local"] }
+            "test" = { queues = ["local"], test = true }
 
-            [variants.runscript]
-            "default" = { queues = ["local"], default = true }
-            "test" = { queues = ["local"], test = true, default = true }
+            [runscripts]
+            "default" = { queues = ["local"] }
+            "test" = { queues = ["local"], test = true }
 
-            [variants.optionlist]
-            variants = []
             "#,
         )
         .unwrap();
@@ -593,7 +761,7 @@ mod tests {
             cfg_dir.join("cactup-config.toml"),
             r#"
             name = "tests"
-            variant = "default"
+            flavor = "default"
             thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-tests-1"
@@ -603,6 +771,12 @@ mod tests {
         .unwrap();
         fs::create_dir_all(root.join("exe")).unwrap();
         fs::write(root.join("exe/cactus_tests"), "#!/bin/sh\n").unwrap();
+        fs::write(cfg_dir.join("ThornList"), "McLachlan/ML_BSSN\nArrangement/Thorn\n").unwrap();
+        for thorn in ["McLachlan/ML_BSSN", "Arrangement/Thorn"] {
+            let test_dir = root.join("arrangements").join(thorn).join("test");
+            fs::create_dir_all(test_dir.join("t1")).unwrap();
+            fs::write(test_dir.join("t1.par"), "").unwrap();
+        }
         inst
     }
 
@@ -610,7 +784,6 @@ mod tests {
         TestStartArgs {
             silent: false,
             config: None,
-            variant: None,
             force: false,
             overwrite: false,
             force_queue: false,
@@ -663,7 +836,7 @@ mod tests {
         assert_eq!(run.meta.select, "all");
         assert_eq!(run.meta.tasks, 2, "testsuite default, not fill-the-node (§11.6)");
         assert!(run.meta.timestamps.submitted.is_some());
-        // The TEST-marked variants were selected, not the normal ones (§11.2).
+        // The TEST-marked scripts were selected, not the normal ones (§11.2).
         let submit_script = fs::read_to_string(run_dir.join("submit-script")).unwrap();
         assert!(submit_script.contains("--test-dir="), "{submit_script}");
         assert!(submit_script.contains("--results-id=0"), "{submit_script}");
@@ -693,6 +866,9 @@ mod tests {
         let results = run.meta.results.as_ref().unwrap();
         assert_eq!((results.passed, results.failed, results.results_id), (5, 2, 1));
         assert_eq!(run.meta.select, "McLachlan/ML_BSSN Arrangement");
+        // The flesh sees thorn names, never arrangement/Thorn (§11.3).
+        let harness = fs::read_to_string(run_dir.join("harness.txt")).unwrap();
+        assert_eq!(harness.trim(), "selection=ML_BSSN Thorn procs=2 config=tests");
 
         // --overwrite reuses the active set instead of allocating (§11.5);
         // an explicit -T beats the testsuite tasks default.
@@ -805,7 +981,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: "tests".to_owned(),
-            optionlist_source: OptionlistSource::Variant("default".to_owned()),
+            optionlist_source: OptionlistSource::Flavor("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.clone(),
@@ -813,12 +989,15 @@ mod tests {
             install_root: cactus_root.clone(),
             submitted: true,
             job_id: "JOB-Q1".to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             reservation: None,
             decision: "test decision".to_owned(),
             full_rebuild: false,
             make: None,
             build_env: String::new(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: None,
             global_shape_ignore: None,
@@ -826,7 +1005,7 @@ mod tests {
                 r#"
                 schema = 1
                 name = "tests"
-                variant = "default"
+                flavor = "default"
                 thornlist = "tests.th"
                 machine = "fake"
                 config-id = "cfg-tests"

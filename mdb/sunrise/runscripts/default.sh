@@ -1,5 +1,5 @@
 #! /bin/bash
-# sunrise runscript (variant "default"), ported from simfactory2
+# sunrise runscript (script "default"), ported from simfactory2
 # mdb/runscripts/sunrise.run.
 #
 # Variable renames vs. simfactory (design §6.3):

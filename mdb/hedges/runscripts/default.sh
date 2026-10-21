@@ -1,5 +1,5 @@
 #!/bin/bash
-# hedges runscript (variant "default"), ported from simfactory2
+# hedges runscript (script "default"), ported from simfactory2
 # mdb/runscripts/generic-mpi.run (always launches through mpirun, unlike
 # generic.run's single-process special case).
 # Variable renames vs simfactory (design §6.3): NUM_PROCS→@TASKS@,

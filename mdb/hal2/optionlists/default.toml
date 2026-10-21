@@ -1,9 +1,9 @@
-# hal2 optionlist (variant "default"), ported from simfactory2
+# hal2 optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/raspbian.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["local"]
+[cactup.runs-on]
+queues = ["local"]
+gpu    = false
 
 [options]
 # Configuration for a Raspbian installation, assuming the following list of

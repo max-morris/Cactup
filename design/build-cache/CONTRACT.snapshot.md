@@ -1,0 +1,491 @@
+# Interface contract: cactup build cache <-> Cactus build-speed work
+
+Two workstreams change how Cactus gets built, and Max wants them to stay
+mutually compatible:
+
+- **Cache side**: a shared compiler-output cache built into cactup.
+- **Speed side**: speed improvements to the Cactus build system.
+
+This file is the single source of truth for what each side depends on and
+what each side is changing. It is deliberately independent of any Claude
+session, account, or memory: sessions and accounts rotate, so neither side
+may assume the other remembers anything that is not written here.
+
+## How to use this file
+
+1. Read the whole file before changing anything listed in it.
+2. Parties are named by role ("cache side", "speed side"), never by session
+   name. Whoever currently holds a role edits that role's sections.
+3. Edit only your own side's sections. To object to, or ask about, the other
+   side's entry, add a dated item under "Open questions"; do not rewrite it.
+4. Before changing anything the other side lists as a dependency, add an
+   entry to your "Planned changes" section first, with enough detail for
+   the other side to adapt (the new recipe text, the new file layout).
+   Move it to "Landed changes" when it lands, with the commit.
+5. Every edit also gets one line in the change log at the bottom:
+   `YYYY-MM-DD  <role>  <what changed>`.
+6. Each side re-reads this file at every milestone of its own work, and
+   whenever a new session picks the work up.
+7. Neither side writes in the other's working tree:
+   cache side works in `~/cacti/build-cache` (and a sibling install it
+   creates for cross-installation tests); speed side works in
+   `~/cacti/speedup-build`. To test against the other side's changes, check
+   its branch out in your own tree.
+
+## Where each side's durable state lives
+
+- **Cache side**: cactup repo (`/home/max/src/Cactup`). The cache is on
+  master (since 2026-10-12; since 2026-10-16 with `cactup cache doctor`
+  and on by default); work continues on branches of its own, named in
+  STATUS's "Next step". Plan: `design/build-cache/PLAN.md`; current status
+  and next step: `design/build-cache/STATUS.md` (on master).
+- **Speed side**: (speed side: please fill in the repo, branch, worktree,
+  and any plan or status file.)
+
+## What the cache side is building
+
+cactup interposes a wrapper on each Cactus object compile. Eventually the
+wrapper computes a key from the compiler's own preprocessor output, the
+compiler's identity, its arguments, the platform, and selected environment
+variables; on a hit it restores the object instead of compiling, on a miss
+it runs the compiler unchanged and stores the result. What exists today
+(milestone M0a) only runs the compiler unchanged and logs one line per
+compile.
+
+The wrapper is fail-open by design. If the make system does not look the
+way it expects, a probe step turns the cache off for that build and prints
+one line saying why. So a speed-side change can at worst disable caching;
+it cannot break a build. Keeping the two compatible means keeping the cache
+*working*, not merely harmless.
+
+How it gets in front of the compiler: a makefile fragment, read through the
+`MAKEFILES` environment variable for the `make <config>` step only, that
+redefines Cactus's compile recipes inside Cactus's object sub-makes:
+
+```make
+override define COMPILE_C
+<the body copied from this configuration's make.config.rules, with $(CC)
+ replaced by: '<cactup>' __cc '<conf>' '$(CC)' '$(SHELL)'>
+endef
+```
+
+No compiler variable is touched and no recipe's environment changes.
+
+## Cache-side dependencies on the Cactus make system
+
+Baseline: flesh `lib/make` at commit `ae66cd2` (Cactus 4.20.0). "M0a" marks
+what the cache relied on from its first milestone; "later" marks what keying
+and serving added. Both are on master (since 2026-10-12).
+
+- **A1 (M0a). The compile recipes are canned sequences** named `COMPILE_C`,
+  `COMPILE_CXX`, `COMPILE_CU`, `COMPILE_F77`, `COMPILE_F`, `COMPILE_F90`,
+  each defined in `configs/<name>/config-data/make.config.rules` exactly
+  once, unconditionally (not inside `ifeq`/`ifdef`), as a line `define NAME`
+  with nothing after the name (no `=`, no comment), then `endef`, with
+  nothing else assigning to it and no nested `define`. The rules file must
+  not `include` other makefiles (the probe then declines for the whole
+  build: it cannot see what they define). Each
+  body contains exactly one reference to its compiler variable, spelled
+  `$(CC)`, `$(CXX)`, `$(CUCC)`, `$(F77)`, `$(F90)`, `$(F90)` respectively,
+  **in command position** (at the start of a recipe line, or right after
+  `;`, `&&` or `||` — also across a `\` line continuation — outside quotes
+  and backticks) and as a word of its own. The probe copies the body
+  and replaces that one reference. A recipe that does not fit is left
+  unwrapped (that language is then not cached): so `cd x ; $(CC) ...`
+  works, `cd x ; $(LAUNCHER) $(CC) ...` builds fine but uncached.
+- **A2 (M0a). Object compiles run in a sub-make that** (a) is given
+  `CCTK_TARGET=...` on its command line (`make.thornlib` does this for
+  `make.subdir`), (b) runs with its working directory under
+  `configs/<name>/build/`, (c) is given `SRCDIR=<the thorn's source
+  directory>`, and (d) is started by a make that itself read `MAKEFILES`
+  (so the variable is still in its environment). The fragment acts only
+  when (a) and (b) hold, and runs `grep -E` over `$(SRCDIR)/make.code.defn`
+  and `$(SRCDIR)/make.code.deps` to stand down for a thorn that mentions
+  `COMPILE_` in them or has an `include` (`-include`, `sinclude`), a
+  `define` or a `$(eval` directive in them (since M1a). `grep` must be
+  on the build's `PATH`.
+- **A3 (M0a). The object rules' recipes use those canned sequences**
+  (`$(COMPILE_C)` and so on), `make.config.rules` is included after the
+  fragment is read, and the only file read after `make.config.rules` that
+  may redefine a `COMPILE_*` sequence is the thorn's own `make.code.deps`
+  (a thorn whose fragments include other makefiles, `define` or `$(eval`
+  is left to plain make since M1a; a redefinition under a computed name
+  is not noticed and loses to the fragment's `override`).
+- **A4 (M0a). `MAKEFILES` is honored** by every make in the chain from
+  `make <config>` down to the object sub-makes, and none of Cactus's
+  makefiles reads `MAKEFILE_LIST` (the fragment removes itself from it).
+- **A5 (M0a). GNU make.** Checked on 4.2.1, 4.3 and 4.4.1 (real Cactus
+  trees on 4.3 and 4.4.1); a self-test in the build script decides for
+  anything else. `/proc/self/status` must be readable where compiles run.
+- **A6 (M0b). Compile recipe shape.** One source file per compiler
+  invocation, with `-c` and `-o <object>`, and no flag that makes the
+  compiler write a second file — with one exception, added for the speed
+  side's `C_DEPEND_COMPILE_FLAGS` recipe (seen in `~/cacti/speedup-build`
+  on 2026-10-01): **dependency output written by the compile is
+  understood** in the form `-MD`, optional `-MP`, **`-MF <file>`
+  given explicitly**, optional `-MT`/`-MQ <target>`. (Since 2026-10-13,
+  decision 28 of the cache: a compile with `-MMD`, whose list leaves out
+  system headers, is not cached, because the cache checks every stored
+  compile's own list of what it read; `-MD -MP` as the speed side uses
+  loses nothing.) Those flags are not
+  part of the key (same object with and without them) and are kept from
+  the cache's preprocessor runs. When the cache serves an object it will
+  have the dependency file written by its own preprocessor run with the
+  same flags, so what the cache needs from the recipe is: (a) `-MF` always
+  explicit (without it the file's place depends on `-o`); (b) the fix-up
+  of the file (`DEPEND_COMPILE_FIXER`) stays a recipe line of its own,
+  after the compile, not part of the compiler command; (c) no `-MG`, no
+  `-MJ`. A compile of any other shape still runs exactly as given, but
+  gets no key and will never be served.
+- **A10 (M0b). What goes into a key, as far as the make system decides it.**
+  None of this can break a build or make the cache wrong; all of it decides
+  how often the cache can serve.
+  (a) The key covers the *bytes* of every file a compile reads: the
+  processed source copy and every header. Generated headers that most
+  sources include (`cctk_DefineThorn.h`, `CParameterStructNames.h`, the
+  per-thorn `cctk_Arguments` and parameter headers) therefore decide the
+  hit rate. They must be the same bytes for the same inputs: no
+  timestamps, no absolute paths, no ordering that varies from run to run
+  (today they are: two configurations of one thornlist share every key).
+  (b) Absolute paths are tolerated in exactly these places: file names on
+  the command line, `-I` directories, and the *first line* of a processed
+  source copy when it is `#line <n> "<absolute path of the original>"`
+  (what `C_LINE_DIRECTIVES = yes` writes today). An absolute path anywhere
+  else in a file a compile reads ties the object to its installation.
+  (c) Compiles run from `<config>/scratch`; the Cactus root and the
+  configuration directory are the two prefixes the cache maps away.
+- **A7 (later). Dependency files** come from a separate `$(CC) -E -M ...`
+  run (`C_DEPEND` and friends), not from the compile itself.
+- **A8 (later). Fortran module files** all land flat in `$(TOP)/scratch`,
+  the compile cwd, and a thorn that produces a module is built before a
+  thorn that uses it (today through `USESTHORNS`).
+
+No longer a dependency (the first design needed them, review replaced it):
+object target names, `make.config.defn`, exported compiler variables.
+
+Changes the cache side can adapt to if told in advance (please add a
+"Planned changes" entry rather than avoiding them):
+
+- Merging dependency generation into the compile (`-MD -MF ...`; a
+  compile with `-MMD` is not cached since 2026-10-13, see A6).
+  The copied recipe carries it along automatically; the cache would later
+  store the depfile as an extra output and rewrite its paths on restore.
+- Precompiled headers, unity or batched compiles.
+- A different compile cwd or build-directory layout; dropping the processed
+  source copy.
+- Replacing recursive make (non-recursive make, ninja, anything else), or
+  moving object compiles out of `make.subdir`.
+- Renaming or restructuring the `COMPILE_*` sequences, or compiling without
+  them.
+- Changing how `C_LINE_DIRECTIVES` / `F_LINE_DIRECTIVES` work.
+- New default compiler flags (`-pipe`, `-ffile-prefix-map`, LTO).
+- Wrapping compilers yourself (ccache, sccache, distcc, or similar): cactup
+  leaves a compiler that already runs through one of these alone.
+- Changing the order in which thorns build (relevant to A8 once Fortran is
+  cached; the 2026-10-01 `build-speedup` commit `996c71f` does this, and
+  the M0a code is unaffected by it).
+
+## What the cache side adds that the speed side should know about
+
+With the knob `build-cache` off, nothing at all: the build script is byte
+for byte what it is without the cache. **`serve` is the default** (cache-side
+decision 34, on master since 2026-10-16, in released builds once deployed;
+see "Cache-side landed changes"): a build with no `build-cache` knob set
+serves from the cache. A timing build must say `-K build-cache=off` (per
+build: the knob in `~/.cactup`'s database is shared with Max's own builds).
+
+With `build-cache = record` (M0a; `serve` and `audit` do all of this too,
+and more, under "Cache-side landed changes"):
+
+- **C1.** One probe run and three tiny self-test `make` runs per build, after
+  `make <config>-config` (and after `-clean`). The probe creates
+  `configs/<name>/build/` if a `realclean` removed it.
+- **C2.** `make <config>` runs in a subshell with `MAKEFILES` naming
+  `<attempt>/cc/inject.mk` (after any entries the user already had). Every
+  make below it reads that file. In every one of them it defines an empty
+  rule for itself and reassigns `MAKEFILE_LIST` to drop its own name. In
+  Cactus's object sub-makes it also defines the `COMPILE_*` overrides and
+  one helper variable (`cactup_cc_run`), removes itself from the
+  `MAKEFILES` handed on to child processes, and runs one `grep -E` over
+  the thorn's two make fragments while parsing (a `cat` before M1a).
+- **C3.** Each object compile runs as a child of a short-lived cactup
+  process which appends one line to `<attempt>/cc/events.jsonl`.
+  Compilers, flags and objects are unchanged. **Since M0b a recording
+  build is slower**: for every C and C++ compile, cactup also runs the
+  compiler's preprocessor twice (`-E`, before and after the compile) and
+  reads every file that run names, twice, to key it; once per build and
+  compiler it also compiles two tiny trial files and (since M1a) asks
+  `$(SHELL) -c 'command -v <name>'` once, to see that bash's `BASH_ENV`
+  does not give the compiler's name another meaning. On the 25-thorn test
+  configuration that summed to about a third of the compile time again;
+  proper numbers come with M0c. Do not take speed measurements with
+  `build-cache = record` on and compare them with ones taken with it off.
+  **The recipe text changes**: with `SILENT=no`, or `make -n`, the compile
+  line reads `'<cactup>' __cc '<conf>' 'gcc' '/bin/bash' <flags...>` where
+  it read `gcc <flags...>`. Anything that parses make's echoed commands
+  sees that.
+- **C4.** One line in the build output after the compile step:
+  `cactup: build cache: compiles recorded: N`. Files in the attempt
+  directory: `cc/config.toml`, `cc/inject.mk`, `cc/selftest/`,
+  `cc/selftest.log`, `cc/events.jsonl`, `cc/compilers/`, `cc/hosts/`.
+- **C5.** Edits in the cactup repo: `Cargo.toml` (`rustix` as a direct
+  dependency), `src/main.rs` (wrapper dispatch at the top of `main`),
+  `src/build/mod.rs` (`prepare`: two build-script steps, through one call
+  into the new module), `src/build/attempt.rs` (one path helper),
+  `src/database.rs` and `src/args.rs` (the knob and its help), the new
+  `src/objcache/` and `tests/objcache.rs`, and one step in
+  `.github/workflows/ci.yml`.
+
+Planned when this was written (2026-10-01), landed since; what a serving
+build does now is under "Cache-side landed changes". The plan was: serving
+(then one preprocessor run on a hit, two on a miss, and no compile on a
+hit); `-ffile-prefix-map=...` flags added by the wrapper to the real compile
+for GCC and Clang family compilers (then they went to the extra
+preprocessor runs only); one call in `execute` after make.
+
+## Cache-side planned changes
+
+Nothing planned now changes what the speed side sees (2026-10-17): the
+cache's next milestones (Cray compilers, the whole-file cases, HIP) change
+none of the dependencies listed above. The two entries below are kept for
+the record: what they planned landed with M1, then gfortran (M2a) and CUDA
+(M4) (see "Cache-side landed changes").
+
+- 2026-10-02: M0a, M0b and the measurements (M0c) are done and reviewed
+  on `feature/build-cache` (up to `129ecf7`). The cache still only
+  records. **Max has given the go-ahead for M1**: the store (M1a), then
+  serving (M1b), then the maintenance commands (M1c); after that gfortran,
+  then CUDA. What serving will change for the speed side, once it lands:
+  real compiles gain `-ffile-prefix-map=...` flags (GCC and Clang
+  family); on a hit no compiler runs, and a dependency file the recipe
+  asked for (A6) is written by the cache's preprocessor run instead;
+  thorns whose `make.code.defn` or `make.code.deps` contain an `include`
+  directive, a `define` or `$(eval` are left out of the cache. Timings
+  taken with the cache serving are not comparable with ones taken
+  without it.
+
+- 2026-10-02: **M1a passed review** (at `9d8f62b`) on `feature/build-cache` (the store,
+  not yet used by builds; see A2, A3, C2, C3 for what changed in the
+  injection). Nothing yet changes a compile or its object. Still planned
+  for M1b (serving): real compiles gain `-ffile-prefix-map=...` flags (GCC
+  and Clang family); on a hit no compiler runs, and a dependency file the
+  recipe asked for (A6) is written by the cache's preprocessor run.
+  Timings taken with the cache serving are not comparable with ones
+  taken without it.
+
+## Cache-side landed changes
+
+- 2026-10-01, on `feature/build-cache` (not on master): M0a as described
+  under C1-C5. Checked in `~/cacti/build-cache` with GNU make 4.4.1 and GCC
+  14.2: a 25-thorn configuration (357 objects, all byte-identical with and
+  without the wrapper, `config-data` unchanged); a configuration that
+  builds HDF5 from source (384 Cactus objects logged, nothing of cactup in
+  HDF5's build or its installed `h5cc`); and the first configuration again
+  on the flesh at `build-speedup` `996c71f` (357 objects, identical).
+  Spec: §18 of `design/cactup-simfactory-design-new.md` on that branch.
+- 2026-10-01, on `feature/build-cache`: M0b. A recording build keys every
+  C and C++ compile it can (see A6, A10, C3) and `cactup cache report`
+  compares two builds. Same three configurations: objects still
+  byte-identical to a plain build; two configurations of one thornlist
+  share every key; a configuration with three thorns added shares 55%
+  (the generated headers of A10 (a) are why it is not more).
+
+- 2026-10-07, on `feature/build-cache`: **M1b (serving) passed review**
+  at `6b8efb1`; its full audit build in two installations is running.
+  **M1c (maintenance) passed review** at `01bd00a`: `cactup cache
+  stats/gc/verify` and a size notice (knob `build-cache-size`). Where the
+  objects live changed: by default `<install-home>/.cactup-build-cache`,
+  beside the installations (`install-home` is the knob of that name, else
+  the machine's, else `~/.cactup/cacti`); the knob `build-cache-home`
+  moves it, and replaces `build-cache-dir`. Every
+  `[paths]` key has a knob of the same name now. No `mdb/` change and no
+  `mdb/GENERATION` bump on the cache side (question c). A serving build
+  also writes one small use log per build under `<store>/used/`.
+
+- 2026-10-08, on `feature/build-cache`: **Fortran is cached** (gfortran;
+  M2a, passed its gate at `a14f279`). What it changes for the speed side, with the cache
+  serving or auditing: before each gfortran compile cactup runs gfortran
+  once more (`-cpp -undef -M -fsyntax-only`, in a directory of its own) to
+  learn which files the compile reads, and once more after it; the compile
+  names its source by its path from `scratch` (`../build/<Thorn>/x.f90`)
+  instead of the absolute path, and a source with line markers is
+  compiled as a copy in `build/<Thorn>/.cactup/` (left there); a hit
+  writes the module files into `scratch` itself, only those whose bytes
+  differ. Store entries are format 2 (`v2/`). In record mode the compile
+  is unchanged. Timings with the cache serving are not comparable.
+- 2026-10-12: **The cache is on master** (`5e661fc`, a fast-forward of
+  `feature/build-cache`): everything above, with `build-cache` still off
+  by default. Released builds of cactup carry it from then on.
+- 2026-10-13, on `feature/build-cache` (cache decision 28): a compile
+  with `-MMD` is no longer cached (its dependency list leaves out system
+  headers, and the cache checks each stored compile against its own list
+  of what it read); A6 says so. `-MD -MP`, which the speed side uses,
+  loses nothing. On master since 2026-10-16.
+- 2026-10-16: **master at `2b7bfbd`** (released): CUDA compiled with
+  `nvcc` is cached (M4), and `cactup cache doctor` says what keeps a
+  configuration's compiles out of the cache and why a build's were not
+  served (M5). The doctor runs the machine's environment setup and the
+  configuration's compilers on small probe sources, and reads the
+  thorns' make files with make; it builds nothing and writes nothing in
+  the Cactus tree. `build-cache` was still off by default at that commit.
+- 2026-10-16: **The cache on by default** (decision 34, Max), on master
+  (the commit after `2b7bfbd`; planned here earlier the same day), in
+  released builds once deployed. The knob `build-cache` unset means
+  `serve`; `off` (and a value or database that cannot be read) means
+  `off`. For the speed side: every build through cactup that does not say
+  `-K build-cache=off` serves and publishes objects: it gets the probe and
+  self-test makes (C1), `MAKEFILES` naming the injection (C2), the wrapper
+  in front of each object compile, `-ffile-prefix-map` in real compiles
+  (objects differ from a plain build's), and publishing into the shared
+  store; so its timings are not comparable with a plain build's. Pass
+  `-K build-cache=off` for timings.
+
+## Speed-side planned changes
+
+(speed side: please list here anything touching A1-A8, the compile recipes,
+the build-script steps cactup runs, the MDB `[build]` keys or optionlists,
+or the cactup files in C5.)
+
+## Speed-side landed changes
+
+(none recorded)
+
+## Ownership of shared cactup files
+
+Until the speed side says otherwise, the cache side assumes it is the only
+one editing `src/build/mod.rs` `prepare`/`execute` around the make steps and
+`src/build/attempt.rs` `BuildMeta`. If the speed side also needs to edit
+them, say so here and we split by function, and rebase on master before
+every milestone.
+
+## Open questions
+
+- 2026-10-01, cache side -> speed side:
+  a. Where does your work live (repo, branch, worktree; a flesh fork, or
+     cactup-side changes, or both)?
+  b. Which of the changes listed above are you planning or have already
+     made? What does the compile recipe look like in your version?
+  c. Do you change cactup's `prepare`/`execute`, or the MDB
+     (`[build].make`, optionlists)? Is an `mdb/GENERATION` bump planned?
+  d. Does anything in C1-C5, or in the planned additions below them, break
+     or distort your measurements?
+
+## Change log
+
+- 2026-10-01  cache side  Created the file: dependencies A1-A8, additions
+  C1-C4, planned milestones, questions a-d.
+- 2026-10-01  cache side  Added A9 (exported compiler variables, the
+  `VAR:n` marker); recorded M0a as landed on the feature branch, in review.
+- 2026-10-01  cache side  Replaced the injection after review (it now
+  redefines the `COMPILE_*` recipes instead of setting compiler variables
+  per target): rewrote the A list (A1-A5 current, A6-A8 for later) and the
+  C list (C1-C5 current). Noted that `build-speedup` `996c71f` was tested.
+- 2026-10-01  cache side  After review round 2: A1 now requires the
+  compiler reference in command position and an unconditional single
+  definition; A2 (d), A3's limit and A5's `/proc` added; C2-C5 completed
+  (the echoed recipe text, `MAKEFILE_LIST`, the count line, `Cargo.toml`,
+  CI). The wrapper now takes the compiler text as an argument.
+- 2026-10-01  cache side  After review round 3: A1 also requires that the
+  rules file includes no other makefile and that `define NAME` has nothing
+  after the name; command position excludes quoted text and continuation
+  lines.
+- 2026-10-01  cache side  M0a passed its review gate at `300fd0b`.
+- 2026-10-01  cache side  M0b in review: C1 (three self-test runs) and C3
+  (a recording build now runs the preprocessor twice more per C/C++
+  compile) updated; A1's command position now allows a continuation line
+  after a separator.
+- 2026-10-01  cache side  M0b after its first review: the key now covers
+  the bytes of every file a compile reads, not only the preprocessed text.
+  A6 is a current dependency (and says what `-MD` in the compile recipe
+  would do); A10 added (generated headers must be deterministic and free of
+  absolute paths; where absolute paths are tolerated); C3 and C4 updated.
+- 2026-10-01  cache side  M0b passed its review gate at `045eb76`; landed
+  and planned sections updated. No change to A or C since the last entry.
+- 2026-10-01  cache side  **Load on plato:** M0c runs full Einstein Toolkit
+  builds (`-j 8`) in `~/cacti/build-cache` and `~/cacti/build-cache-b`
+  from about 21:00 local for a few hours. Timings either side takes on
+  this host meanwhile are not comparable with quiet-host timings.
+- 2026-10-01  cache side  A6 rewritten: the speed side's
+  `C_DEPEND_COMPILE_FLAGS = -MD -MP` recipe (`-MF ... -MT ...` in
+  `COMPILE_C/CXX/CU`, fix-up in `POSTPROCESS_*`) is being taken up by the
+  cache as it stands; (a)-(c) say what must stay true of it. Not yet
+  through review on the cache side.
+- 2026-10-01  cache side  Load on plato is over (M0c builds finished about
+  22:00). Tested against `build-speedup` `5d8deb7` with
+  `C_DEPEND_COMPILE_FLAGS`/`CXX_DEPEND_COMPILE_FLAGS = -MD -MP`, in the
+  cache side's own installation (flesh checked out at that commit, then
+  put back): 25 thorns, 307 of 307 C/C++ compiles keyed with the same keys
+  as with the option off, and all 357 objects and 357 `.d` files byte for
+  byte those of a build without the cache. Your uncommitted changes to
+  `lib/sbin/CST` and `CSTUtils.pl` were not part of that test.
+- 2026-10-01  cache side  A6 as rewritten (dependency output written by
+  the compile) is through review on the cache side at `129ecf7`. Planned
+  section updated: M1 waits for Max.
+- 2026-10-02  cache side  M1 has Max's go-ahead; the planned section says
+  what serving will change. Nothing has changed yet.
+- 2026-10-02  cache side  M1a (store, stand-down for thorns that
+  include/define/eval, asking the shell about the compiler's name, GCC
+  specs files that only change the link) in review: A2, A3, C2, C3
+  updated. Your `build-speedup` `de1158a6` (parallel ccl parsing) noted;
+  tested at this gate (result in the next entry).
+- 2026-10-02  cache side  Tested M1a against `build-speedup` `2500bc4`
+  (your newest; `de1158a` and the linker option included), in the cache
+  side's own installation, flesh put back on master after: 25 thorns,
+  plain and with `build-cache = record`, objects and `.d` files byte for
+  byte the same (714 files); with `C_DEPEND_COMPILE_FLAGS =
+  CXX_DEPEND_COMPILE_FLAGS = -MD -MP` the same again, and the same 307
+  keys as without the option.
+- 2026-10-02  cache side  M1a passed its review gate at `9d8f62b`. Since
+  the entry above: a `\`-continued `include`/`define`/`$(eval` in a
+  thorn's make fragments, and `load`/`$(guile`, also stand the fragment
+  down (A2). Next: M1b, serving, which changes real compiles (see the
+  planned section).
+- 2026-10-02  cache side  **Load on plato:** full Einstein Toolkit builds (`-j 8`, three in a row, the third and second compiling most objects twice) in `~/cacti/build-cache` and `~/cacti/build-cache-b` from about 16:08 local, for about an hour. Timings taken meanwhile are not quiet-host timings.
+- 2026-10-07  cache side  **Load on plato:** the same three Einstein Toolkit builds again, from about 14:54 local, for about an hour.
+- 2026-10-07  cache side  **M1b (serving) in review** on `feature/build-cache`.
+  With `build-cache = serve` (or `audit`), what was planned is now there:
+  real C and C++ compiles gain `-ffile-prefix-map=<root>/=/cactup-root/`
+  and `-ffile-prefix-map=<config>/=/cactup-root/configs/@config/` (GCC and
+  Clang), so objects record those names (also in `__FILE__`); a hit runs
+  no compiler and writes the dependency file of A6 by the cache's own
+  preprocessor run (byte for byte the compile's, also its mode); the
+  compiler's stdout and stderr pass through cactup. `record` is unchanged
+  (byte for byte a plain build). Do not take timings with `serve` or
+  `audit` on.
+- 2026-10-07  cache side  **Load on plato:** five Einstein Toolkit builds (GCC and Clang) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 15:46 local, for about two hours.
+- 2026-10-07  cache side  **Load on plato:** after the running builds, five more Einstein Toolkit builds (the final M1b gate) until about two hours from 16:12 local.
+- 2026-10-07  cache side  M1b passed review at `6b8efb1`, M1c at `01bd00a`
+  (landed changes): the store's default moved beside the installations;
+  `build-cache-home` replaces the `build-cache-dir` knob.
+- 2026-10-07  cache side  **Load on plato:** five Einstein Toolkit builds (GCC, gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 22:57 local, for about an hour: the build cache now caches Fortran.
+- 2026-10-07  cache side  **Load on plato:** five more Einstein Toolkit builds (GCC, gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:49 local, for about an hour (the Fortran gate again, after a fix).
+- 2026-10-08  cache side  Fortran (gfortran) is cached on the feature branch (landed changes); its Einstein Toolkit audit builds on plato are done.
+- 2026-10-08  cache side  **Load on plato:** five more Einstein Toolkit builds (the Fortran gate after review fixes) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:03 local, for about an hour.
+- 2026-10-08  cache side  **Load on plato:** five more Einstein Toolkit builds (the Fortran gate on the reviewed commit) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:49 local, for about an hour.
+- 2026-10-08  cache side  M2a (gfortran) passed its review gate at `a14f279`; its Einstein Toolkit audit builds on plato are done.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (GCC and gfortran, line directives, Clang) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 13:13 local, for about an hour: the gate of M3a (the check after a compile without a second compiler run).
+- 2026-10-09  cache side  **Load on plato:** six more Einstein Toolkit builds (the M3a gate on its review commit) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 14:39 local, for about an hour, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six more Einstein Toolkit builds (the M3a gate after review round 1) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 16:07 local, for about an hour.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 2) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 16:48 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 3) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 17:36 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 4) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 18:26 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the M3a gate after review round 5) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:10 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 20:10 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 7) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 20:52 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 8) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 21:24 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 9) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 22:03 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 10) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:10 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-09  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of M3a narrowed to gfortran, after review round 11) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 23:37 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-10  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 00:41 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-10  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 3) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:06 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-10  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 4) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 01:41 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 5) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 15:37 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 6) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 17:21 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the changes after M3a, review 7) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 18:08 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-11  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the follow-up to review 7 after M3a) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:01 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-12  cache side  **Load on plato:** six Einstein Toolkit builds (the gate of the last fixes after M3a, before landing) in `~/cacti/build-cache` and `~/cacti/build-cache-b`, from about 19:40 local, for one to two hours, with two reviewer agents building in the cactup worktree meanwhile.
+- 2026-10-16  cache side  planned: `build-cache` defaults to `serve` (decision 34); timing builds must pass `-K build-cache=off`; the default line under "What the cache side adds" says so
+- 2026-10-16  cache side  landed entries caught up: the cache on master (2026-10-12, `5e661fc`), `-MMD` not cached (decision 28, 2026-10-13; A6 and "Changes the cache side can adapt to" say so), master at `2b7bfbd` (CUDA, `cache doctor`); "Where each side's durable state lives" names master
+- 2026-10-16  cache side  the decision-34 entry lists what a build with the cache on gets (C1, C2, the wrapper, `-ffile-prefix-map`, publishing); the `record` heading no longer says "on `feature/build-cache` only"
+- 2026-10-16  cache side  landed: `build-cache` defaults to `serve` on master (decision 34); the entry moved from planned to landed, the default line under "What the cache side adds" and "Where each side's durable state lives" say so
+- 2026-10-17  cache side  stale wording brought up to date, no change in substance: the A-section preamble, the paragraph on serving once planned, a note that the two 2026-10-02 planned entries landed with M1, the `2b7bfbd` entry's default line made past

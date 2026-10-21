@@ -1,5 +1,5 @@
 #!/bin/bash
-# cactup-tutorial runscript (variant "default"). It runs inside the job the
+# cactup-tutorial runscript (script "default"). It runs inside the job the
 # submitscript requested (or directly, for `cactup sim run`), on the one node
 # there is, and launches Cactus with OpenMPI 5's mpirun:
 #   --bind-to none   OpenMPI binds each rank to a core by default. Here

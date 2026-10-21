@@ -1,5 +1,5 @@
 #!/bin/bash
-# mel5 TEST runscript (variant "test") — marked test = true in meta.toml
+# mel5 TEST runscript (script "test") — marked test = true in meta.toml
 # (design §11.2). This is why a testsuite needs its OWN runscript: instead of
 # mpirun-ing a parfile like runscripts/default.sh, it drives
 # `make <config>-testsuite` and lets the Cactus flesh harness launch each test
@@ -14,7 +14,7 @@
 #                          `Thorn/testname` entries.
 # Plus the usual CONFIGURATION / TASKS / MACHINE / SOURCEDIR (design §6.3).
 #
-# env-setup is auto-prepended by cactup for .sh variants (design §6.1), so the
+# env-setup is auto-prepended by cactup for .sh scripts (design §6.1), so the
 # same module/MPI environment the config was built with is already in scope.
 
 echo "Preparing testsuite:"

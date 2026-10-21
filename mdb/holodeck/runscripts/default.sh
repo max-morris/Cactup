@@ -1,5 +1,5 @@
 #!/bin/bash
-# holodeck runscript (variant "default"), ported from simfactory2
+# holodeck runscript (script "default"), ported from simfactory2
 # mdb/runscripts/holodeck.run.
 #
 # Variable renames vs. simfactory (design §6.3):

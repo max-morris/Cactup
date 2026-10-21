@@ -1,4 +1,4 @@
-# et-cuda optionlist (variant "default"), ported from simfactory2
+# et-cuda optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/db-sing-nv.cfg — "Option list for the Einstein Toolkit".
 #
 # The "weird" options here should probably be made the default in the
@@ -11,8 +11,10 @@
 
 [cactup]
 # CUDA build (nvcc CUCC/LD, AMREX_ENABLE_CUDA = yes).
-gpu               = true
-compatible-queues = ["gpu2"]
+
+[cactup.runs-on]
+queues = ["gpu2"]
+gpu    = true
 
 [options]
 # Whenever this version string changes, the application is configured

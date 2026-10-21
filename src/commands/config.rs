@@ -153,12 +153,12 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
         bail!("no config named \"{name}\" in this installation (see `cactup config list`)");
     };
     println!("{}", meta.name.bold());
-    // Labeled for what it actually is: "variant" would misdescribe a config
+    // Labeled for what it actually is: "flavor" would misdescribe a config
     // built from a --optionlist file, and — now that the choice is sticky —
     // that path is what the next bare rebuild will use, so it is worth naming.
     match &meta.optionlist_source {
         OptionlistSource::Optionlist(path) => println!("  optionlist: {path}"),
-        OptionlistSource::Variant(v) => println!("  variant: {v}"),
+        OptionlistSource::Flavor(v) => println!("  flavor: {v}"),
     }
     // The bare path misleads on a custom installation: the live list's fixed
     // filename is `installation-default.th` whatever content it holds, so
@@ -187,7 +187,11 @@ pub(crate) fn show(ctx: &Ctx, installation: &Installation, name: Option<&str>) -
     };
     println!("  thornlist: {} ({provenance})", meta.thornlist);
     println!("  machine: {}", meta.machine);
-    println!("  gpu: {}  compatible-queues: {}", meta.gpu, meta.compatible_queues.join(", "));
+    let queues = if meta.runs_on.queues.is_empty() { "any".to_owned() } else { meta.runs_on.queues.join(", ") };
+    println!("  runs on: {queues}  gpu: {}", meta.runs_on.gpu);
+    if let Some(queue) = &meta.runs_on.default_queue {
+        println!("  default queue: {queue}");
+    }
     if let Some(universe) = &meta.universe {
         println!("  universe: {universe} (coerce-run-universe: {})", meta.coerce_run_universe);
     }
@@ -424,7 +428,7 @@ mod tests {
             cfg_dir.join("cactup-config.toml"),
             r#"
             name = "bbh"
-            variant = "default"
+            flavor = "default"
             thornlist = "installation-default.th"
             machine = "fake"
             config-id = "config-bbh-1"
@@ -464,7 +468,7 @@ mod tests {
             schema: crate::database::SCHEMA,
             attempt_id: 0,
             config: config.to_owned(),
-            optionlist_source: OptionlistSource::Variant("default".to_owned()),
+            optionlist_source: OptionlistSource::Flavor("default".to_owned()),
             machine: "fake".to_owned(),
             alias: "et".to_owned(),
             config_dir: config_dir.to_owned(),
@@ -472,12 +476,15 @@ mod tests {
             install_root: cactus_root.to_owned(),
             submitted: true,
             job_id: job_id.to_owned(),
+            job_host: None,
+            job_start: None,
             status: None,
             reservation: None,
             decision: "test decision".to_owned(),
             full_rebuild: false,
             make: None,
             build_env: String::new(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: None,
             global_shape_ignore: None,
@@ -485,7 +492,7 @@ mod tests {
                 r#"
                 schema = 1
                 name = "{config}"
-                variant = "default"
+                flavor = "default"
                 thornlist = "{config}.th"
                 machine = "fake"
                 config-id = "cfg-{config}"

@@ -40,6 +40,13 @@ pub struct Timestamps {
     pub submitted: Option<DateTime<Utc>>,
     pub started: Option<DateTime<Utc>>,
     pub finished: Option<DateTime<Utc>>,
+    /// When a stop cactup sent after the record's end, its status query
+    /// having failed, settled the job: the scheduler took the stop, or
+    /// refused it saying (by `unknown-job-pattern`) it does not know the
+    /// job. The job is over from then on, and asked about again only after
+    /// a later end (a requeued run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_stopped: Option<DateTime<Utc>>,
 }
 
 /// `[outcome]` in `build.toml`: recorded once the `make` invocation ends.
@@ -86,7 +93,7 @@ pub struct BuildMeta {
     pub schema: u32,
     pub attempt_id: u32,
     pub config: String,
-    /// Which optionlist this attempt was built from — the machine variant, or
+    /// Which optionlist this attempt was built from — the machine's flavor, or
     /// the `--optionlist` file (§7.8). Flattened, as in [`ConfigMeta`].
     #[serde(flatten)]
     pub optionlist_source: OptionlistSource,
@@ -103,6 +110,17 @@ pub struct BuildMeta {
     /// The scheduler's job id, `restart::NO_JOB_ID` when submission failed,
     /// or the pid for a foreground build.
     pub job_id: String,
+    // `job-ids = "pids"` (§10): where `job-id`'s process started.
+    /// On a machine whose job ids are pids: the host the job's process was
+    /// started on, recorded with its id. Absent on a batch scheduler's
+    /// machine, and in a record an older cactup made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_host: Option<String>,
+    /// With `job-host`: that process's start time, from `/proc/<pid>/stat`.
+    /// Absent with `job-host` set when the process had ended already when
+    /// cactup read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_start: Option<u64>,
     /// Last observed live status letter (cached; the live query is the
     /// source of truth, mirroring `TestMeta::status`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +155,15 @@ pub struct BuildMeta {
     /// the MDB there. Empty for a `--virtual-executable` build.
     #[serde(default)]
     pub build_env: String,
+    /// The build's provisioning steps (`provision`, then `build-provision`,
+    /// §6.1), as the build script runs them after `build_env`, each in a
+    /// subshell: frozen for the same D11 reason. Kept apart from
+    /// `build_env` because they cannot change the environment the build
+    /// runs in: not part of the build cache's key, never run by `cache
+    /// doctor`. Empty when the machine has none, and for a
+    /// `--virtual-executable` build.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub build_provisioning: String,
     /// `--virtual-executable`'s source path (§7.7), canonicalized at
     /// `prepare` time; `execute` copies it into place instead of running
     /// `make`. Not run through the build universe or a spawned shell — a
@@ -157,6 +184,7 @@ pub struct BuildMeta {
     pub global_shape_ignore: Option<String>,
     /// The fully-formed config metadata to store on success — `built` is
     /// unset until then (execute stamps it).
+    #[serde(deserialize_with = "ConfigMeta::deserialize_upgrading")]
     pub config_meta: ConfigMeta,
     #[serde(default)]
     pub vars: IndexMap<String, toml::Value>,
@@ -171,12 +199,30 @@ pub struct BuildMeta {
     pub outcome: Option<BuildOutcomeRecord>,
 }
 
+impl BuildMeta {
+    /// The recorded job, as the scheduler is asked about it, with when the
+    /// record was made (its submission, else its creation).
+    pub fn job(&self) -> crate::scheduler::JobRef<'_> {
+        crate::scheduler::JobRef::new(
+            &self.job_id,
+            self.job_host.as_deref(),
+            self.job_start,
+            self.timestamps.submitted.or(self.timestamps.created),
+        )
+    }
+
+    /// Record `job` (a submitted one, or a foreground run's pid) as this
+    /// attempt's job.
+    pub fn set_job(&mut self, job: &crate::scheduler::JobRecord) {
+        self.job_id = job.id.clone();
+        self.job_host = job.host.clone();
+        self.job_start = job.start;
+    }
+}
+
 /// A located build attempt.
 #[derive(Debug)]
 pub struct BuildAttempt {
-    // Pinned foundation API (build submit groundwork); only tests read this
-    // field so far — the command that consumes it lands later.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub id: u32,
     pub dir: PathBuf,
     pub meta: BuildMeta,
@@ -222,6 +268,14 @@ impl BuildAttempt {
         self.dir.join("cactup-optionlist.cfg")
     }
 
+    /// Touched by the build script once its configure step has succeeded:
+    /// which attempt configured the config last (the newest of these) is
+    /// what `cache doctor` checks a config's flags against. Nothing reads it
+    /// on the build path.
+    pub fn configured_stamp_path(&self) -> PathBuf {
+        self.dir.join(CONFIGURED_STAMP)
+    }
+
     /// This attempt's optionlist *source* snapshot (verbatim TOML, pre-render)
     /// — the §7.8 rebuild-decision diff input, installed alongside
     /// [`Self::optionlist_path`] on success.
@@ -256,6 +310,13 @@ impl BuildAttempt {
 
     pub fn heartbeat_path(&self) -> PathBuf {
         self.dir.join("heartbeat")
+    }
+
+    /// The build cache's files for this attempt (`crate::objcache`): its
+    /// frozen settings, the makefile fragment that wraps the compilers, and
+    /// the log of wrapped compiles. Absent when the cache is off.
+    pub fn cc_dir(&self) -> PathBuf {
+        self.dir.join("cc")
     }
 
     /// Every attempt id present as a `%04d` directory under `.cactup-builds`,
@@ -304,11 +365,28 @@ impl BuildAttempt {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(config_dir: &Path, id: u32) -> Res<BuildAttempt> {
         let dir = Self::attempt_dir(config_dir, id);
-        let path = Self::meta_path(&dir);
+        let meta = Self::read_meta(&dir)?;
+        Ok(BuildAttempt { id, dir, meta })
+    }
+
+    /// The `build.toml` in attempt directory `dir` (schema-guarded).
+    fn read_meta(dir: &Path) -> Res<BuildMeta> {
+        let path = Self::meta_path(dir);
         let text = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let meta: BuildMeta =
+        let mut table: toml::Table =
             toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+        // An attempt recorded before the optionlist "variant" was renamed
+        // "flavor" (config record schema 2): its embedded `config-meta` is
+        // upgraded by `ConfigMeta::deserialize_upgrading`; this is the same
+        // rename for the attempt's own copy of the key. Kept indefinitely,
+        // for the reason `ConfigMeta::from_table` gives.
+        if let Some(flavor) = table.remove("variant") {
+            table.insert("flavor".to_owned(), flavor);
+        }
+        let meta: BuildMeta = toml::Value::Table(table)
+            .try_into()
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
         if meta.schema > SCHEMA {
             bail!(
                 "{} has schema {} but this cactup understands at most schema {SCHEMA}; \
@@ -317,7 +395,37 @@ impl BuildAttempt {
                 meta.schema
             );
         }
-        Ok(BuildAttempt { id, dir, meta })
+        Ok(meta)
+    }
+
+    /// The lock of attempt directory `dir`'s record, waited for: the
+    /// submitter holds it while it submits and records the job, and the
+    /// compute side's writes take it ([`Self::store_meta_keeping_job`]), so
+    /// a job that starts at once never writes back a copy read before its
+    /// job id (and, where job ids are pids, its host and start time) was
+    /// recorded.
+    pub fn record_lock(dir: &Path) -> Res<crate::lock::LinkLock> {
+        crate::lock::LinkLock::acquire_wait(
+            &dir.join("record.lock"),
+            std::time::Duration::from_secs(crate::lock::HANDOFF_WAIT_SECS),
+        )
+    }
+
+    /// [`Self::store_meta`] under [`Self::record_lock`], keeping the job the
+    /// submitter recorded on disk (its id, host, start time, `submitted` and
+    /// when): what `execute` writes, which may run before the submitter has
+    /// recorded them.
+    pub fn store_meta_keeping_job(&mut self) -> Res<()> {
+        let _lock = Self::record_lock(&self.dir)?;
+        let disk = Self::read_meta(&self.dir)?;
+        if disk.submitted {
+            self.meta.submitted = true;
+            self.meta.job_id = disk.job_id;
+            self.meta.job_host = disk.job_host;
+            self.meta.job_start = disk.job_start;
+            self.meta.timestamps.submitted = disk.timestamps.submitted;
+        }
+        self.store_meta()
     }
 
     /// Create a fresh attempt directory and write its metadata.
@@ -345,6 +453,10 @@ impl BuildAttempt {
 /// Parse a `%04d` attempt directory name (>=4 ASCII digits, like
 /// `sim::restart`'s `output-%04d` parser minus the prefix — a build attempt
 /// dir carries no other name component).
+/// The file in an attempt's directory its build script writes once its
+/// configure step has succeeded ([`BuildAttempt::configured_stamp_path`]).
+pub const CONFIGURED_STAMP: &str = "configured";
+
 fn parse_attempt_dir_name(name: &str) -> Option<u32> {
     if name.len() < 4 || !name.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -367,7 +479,7 @@ mod tests {
             schema: SCHEMA,
             attempt_id: 0,
             config: "sim".to_owned(),
-            optionlist_source: OptionlistSource::Variant("generic".to_owned()),
+            optionlist_source: OptionlistSource::Flavor("generic".to_owned()),
             machine: "mike".to_owned(),
             alias: "et-dev".to_owned(),
             config_dir: PathBuf::from("/home/user/Cactus/configs/sim"),
@@ -375,6 +487,8 @@ mod tests {
             install_root: PathBuf::from("/home/user/et"),
             submitted: false,
             job_id: "12345".to_owned(),
+            job_host: None,
+            job_start: None,
             status: Some("R".to_owned()),
             reservation: Some(Reservation {
                 queue: "checkpt".to_owned(),
@@ -390,6 +504,7 @@ mod tests {
             full_rebuild: true,
             make: Some("make -j4".to_owned()),
             build_env: "module load gcc".to_owned(),
+            build_provisioning: String::new(),
             virtual_executable: None,
             universe: Some(UniverseSpec {
                 name: "et-sif".to_owned(),
@@ -405,6 +520,7 @@ mod tests {
                 submitted: None,
                 started: None,
                 finished: None,
+                job_stopped: None,
             },
             outcome: None,
         }
@@ -413,9 +529,9 @@ mod tests {
     fn sample_config_meta() -> ConfigMeta {
         toml::from_str(
             r#"
-            schema = 1
+            schema = 2
             name = "sim"
-            variant = "generic"
+            flavor = "generic"
             thornlist = "sim.th"
             machine = "mike"
             coerce-run-universe = true
@@ -424,6 +540,40 @@ mod tests {
             "#,
         )
         .unwrap()
+    }
+
+    /// An attempt recorded by a cactup from before the flavor rename — its
+    /// own `variant` key and its embedded schema-1 config record — opens as
+    /// the current shape, so `build list/show/log` keep working on it.
+    #[test]
+    fn opens_an_attempt_recorded_before_the_flavor_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path();
+        let meta = sample_meta();
+        let dir = BuildAttempt::attempt_dir(config_dir, meta.attempt_id);
+        BuildAttempt::create(dir.clone(), meta).unwrap();
+
+        // Rewrite what was stored into the old shape.
+        let path = BuildAttempt::meta_path(&dir);
+        let mut table: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let flavor = table.remove("flavor").unwrap();
+        table.insert("variant".to_owned(), flavor);
+        let cfg = table.get_mut("config-meta").unwrap().as_table_mut().unwrap();
+        cfg.insert("schema".to_owned(), toml::Value::Integer(1));
+        let flavor = cfg.remove("flavor").unwrap();
+        cfg.insert("variant".to_owned(), flavor);
+        cfg.remove("runs-on");
+        cfg.insert("gpu".to_owned(), toml::Value::Boolean(true));
+        cfg.insert("compatible-queues".to_owned(), toml::Value::Array(vec!["gpu".into()]));
+        fs::write(&path, toml::to_string(&table).unwrap()).unwrap();
+
+        let reopened = BuildAttempt::open(config_dir, 0).unwrap();
+        assert_eq!(reopened.meta.optionlist_source, OptionlistSource::Flavor("generic".to_owned()));
+        let cfg = &reopened.meta.config_meta;
+        assert_eq!(cfg.schema, crate::build::CONFIG_SCHEMA);
+        assert_eq!(cfg.optionlist_source, OptionlistSource::Flavor("generic".to_owned()));
+        assert_eq!(cfg.runs_on.queues, ["gpu"]);
+        assert!(cfg.runs_on.gpu);
     }
 
     #[test]

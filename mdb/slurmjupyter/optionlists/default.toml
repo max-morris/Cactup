@@ -1,9 +1,9 @@
-# slurmjupyter optionlist (variant "default"), ported from simfactory2
+# slurmjupyter optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/slurmjupyter.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["checkpt"]
+[cactup.runs-on]
+queues = ["checkpt"]
+gpu    = false
 
 [options]
 # Option list for the Einstein Toolkit

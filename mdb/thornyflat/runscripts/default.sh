@@ -1,5 +1,5 @@
 #! /bin/bash
-# thornyflat runscript (variant "default"), ported from simfactory2
+# thornyflat runscript (script "default"), ported from simfactory2
 # mdb/runscripts/thornyflat.run.
 #
 # Variable renames vs. simfactory (design §6.3):

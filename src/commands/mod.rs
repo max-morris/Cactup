@@ -3,6 +3,7 @@
 //! subcommand to it.
 
 pub mod build;
+pub mod cache;
 pub mod config;
 pub mod delta;
 pub mod install;

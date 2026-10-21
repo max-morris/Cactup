@@ -1,4 +1,4 @@
-# db1.hpc.lsu.edu optionlist (variant "native"), ported from simfactory2
+# db1.hpc.lsu.edu optionlist (flavor "native"), ported from simfactory2
 # mdb/optionlists/db-new.cfg — the native (non-Singularity) Deep Bayou build:
 # gcc/g++ for C/C++, ifort for Fortran, nvcc for CUDA and the link, against a
 # frozen set of prebuilt externals under
@@ -11,16 +11,18 @@
 # not carried; the surviving VERSION line is the last one in the file.
 
 [cactup]
-gpu               = true
-compatible-queues = ["gpu"]
 # Names no universe, so it falls back to the declared [universes.host] (§4.8
 # "implicit host universe": loads the host gcc/cuda/mpich modules, via
-# env-build-setup, around make). The run must NOT be coerced into it — the
+# build-env-setup, around make). The run must NOT be coerced into it — the
 # native runscript loads those modules itself. Routing to the "default"
 # run/submit scripts comes from this config's build universe ("host"),
-# matched against the `universes` list on the meta.toml script variants
+# matched against the `build-universes` list on the meta.toml scripts
 # (§4.8 Feature 1), not from a dedicated queue.
 coerce-run-universe = false
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu    = true
 
 [options]
 VERSION = "db-new-2026-07-07-externals-2026-06-23-cucc-openmp-cpp8-externals-2026-06-25"
@@ -39,9 +41,13 @@ CPPFLAGS = "-DMPICH_IGNORE_CXX_SEEK"
 FPPFLAGS = "-traditional"
 
 # gcc-safe CFLAGS: yaml-cpp's CMake passes CFLAGS to g++ as well
+# The ISA is pinned rather than taken from the build host (-march=native /
+# -xHOST): builds run on the login node (Xeon Gold 6226R) or a compute node
+# (6248R). Both are Cascade Lake today, but a pinned ISA keeps the binary
+# independent of where it was built.
 CFLAGS   = "-g -U__STRICT_ANSI__"
-CXXFLAGS = "-std=c++17 -g -march=native"
-F90FLAGS = "-g -align -pad -xHOST -diag-disable 10397"
+CXXFLAGS = "-std=c++17 -g -march=cascadelake"
+F90FLAGS = "-g -align -pad -xCORE-AVX512 -diag-disable 10397"
 
 # do not export symbols from hwloc so that it is not used by libmpich
 LIBDIRS = "${MKLROOT}/../compilers_and_libraries/linux/lib/intel64"
@@ -99,7 +105,7 @@ CXX_WARN_FLAGS = "-Wall"
 F90_WARN_FLAGS = "-Wall"
 
 # CUDA, configured with the flesh
-CUCCFLAGS           = "-std=c++17 -x cu --extended-lambda --expt-relaxed-constexpr -DSIMD_DISABLE -m 64 -arch sm_70 -Xcompiler -march=native -g -Drestrict=__restrict__"
+CUCCFLAGS           = "-std=c++17 -x cu --extended-lambda --expt-relaxed-constexpr -DSIMD_DISABLE -m 64 -arch sm_70 -Xcompiler -march=cascadelake -g -Drestrict=__restrict__"
 CUCC_DEBUG_FLAGS    = "-DCARPET_DEBUG -O0"
 CUCC_OPTIMISE_FLAGS = "-O3 -use_fast_math"
 CUCC_WARN_FLAGS     = "-Xcompiler -Wall"

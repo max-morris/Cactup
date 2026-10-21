@@ -1,4 +1,4 @@
-# supermucng runscript (variant "default"), ported from simfactory2
+# supermucng runscript (script "default"), ported from simfactory2
 # mdb/runscripts/supermucng.run; .py form of the earlier default.sh.
 #
 # Variable renames vs. simfactory (design §6.3):
@@ -6,7 +6,7 @@
 #   NUM_THREADS -> CPUS_PER_TASK
 # Metadata dir SIMFACTORY/ -> .cactup/ (design §9.3).
 #
-# env-setup is NOT auto-prepended for .py variants (design §6.1); it is
+# env-setup is NOT auto-prepended for .py scripts (design §6.1); it is
 # emitted right after the shebang, where cactup would have placed it for a
 # .sh runscript.
 #

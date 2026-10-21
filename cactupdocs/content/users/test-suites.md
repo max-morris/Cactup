@@ -24,8 +24,13 @@ Run only specific tests:
 ```sh
 cactup test run TestArrangement   # All tests in an arrangement
 cactup test run McLachlan/ML_BSSN # All tests in a thorn
+cactup test run ML_BSSN           # The same thorn, without its arrangement
 cactup test run some-test-name    # A specific test
+cactup test run ML_BSSN/some-test # A specific test of one thorn
 ```
+
+Where a name is both an arrangement and a thorn (CarpetX, for one), the bare
+name selects the whole arrangement; write `CarpetX/CarpetX` for just the thorn.
 
 Combine multiple selections:
 
@@ -49,11 +54,15 @@ Run with different topology (nodes, CPUs, GPU):
 cactup test run -n 2 --gpu -c 2     # 2 nodes, GPU, 2 CPUs per task
 ```
 
-Override the runscript variant:
+The queue decides which test scripts run, just as it does for simulations;
+to get different ones, choose a different queue with `-q`.
 
-```sh
-cactup test run --variant default    # Use a specific variant
-```
+Testsuites run only on queues the machine has a test script for. On any other
+queue, `test run`/`test submit` stops with an error listing the queues your
+config can run its testsuite on instead, for example
+`no test run script serves queue "bigmem"; config "sim" can run its testsuite
+on gpu2, gpu4; pick one of those with -q`. If there are none, the error says
+the machine cannot run that config's testsuite at all.
 
 Override the universe:
 
@@ -76,7 +85,7 @@ This requires a valid job allocation:
 cactup test submit -n 1 -w 1:00:00   # 1 node, 1 hour
 ```
 
-Pass `--config`, `--variant`, and `--universe` like with `test run`.
+Pass `--config` and `--universe` like with `test run`.
 
 ## Topology and resource control
 
@@ -170,12 +179,71 @@ If a test fails:
 
 ## Stopping and managing test runs
 
-Stop a queued or running test:
+Stop a test run you submitted to the queue (`test stop` asks the
+scheduler to cancel its job):
 
 ```sh
-cactup test stop mytest          # Graceful stop
-cactup test stop mytest --force  # Kill immediately
+cactup test stop mytest
 ```
+
+A test run you started in the foreground has no queued job: cactup does
+not stop it for you (the run's own process number is not something a
+scheduler knows). Interrupt it with Ctrl-C in the terminal running it.
+`test delete` refuses to remove a test run that is running; for one
+you submitted whose job the scheduler lists, `--force` cancels its job
+first. If canceling fails, nothing is deleted and cactup shows what the
+scheduler's cancel command said: a timeout, or Torque refusing a
+completed job, is an error until the scheduler answers or stops listing
+the job. Only where the scheduler says it does not know the job (by the
+machine's `unknown-job-pattern`) does `--force` delete the run, unless
+its lock is held: it is running, or it ended without letting go of the
+lock, which then expires within 15 minutes. A job the
+scheduler lists in a state cactup does not know (suspended, exiting, or
+ended) is not deleted without `--force`; `test stop` asks the scheduler
+to stop it, and once it is over `test delete` goes ahead. One whose lock is held while the scheduler does not list its job
+(it runs on another host, it ended without letting go of its lock, which
+expires within 15 minutes, or, on a machine that cannot tell, the scheduler
+could not be asked) is left as it is, `--force` too.
+
+On a batch system, for 14 days after a test run ended (asked only on the
+machine the run was made for), a job the scheduler still lists is taken for what it may be: put back in the queue
+(preemption, `scontrol requeue`), or just leaving it (Slurm lists an ended
+job as completing for a moment, or timed out for a few minutes), which
+cactup cannot tell apart; a job listed as completed (Slurm's `CD`, Torque's
+`C`) has simply ended. `test list` shows it `QUEUED AGAIN` or `STILL
+LISTED`, `test stop` cancels it, `test delete` refuses it without `--force`,
+and a new `test run` or `test submit` waits for it to leave (or for `test
+stop`). Where the machine definition
+says how the scheduler reports a job it does not know, a status query that
+fails stops `test stop`, `test delete` and a new `test run` or `test submit`
+with the scheduler's output rather than taking the job for ended, and `test
+list` shows `UNKNOWN`. For a run that had already finished, `test list`
+shows its recorded end and `test delete` notes the failed query and goes
+ahead, while the commands that act take the safe reading, since the job may
+have been queued again: a new `test run` or `test submit` refuses, printing
+the failed query, and `test stop` asks the scheduler to cancel the job
+anyway, saying it could not ask. Where the scheduler takes the cancel, or
+refuses it saying it does not know the job (by the machine's
+`unknown-job-pattern`), that settles it: cactup records the stop and from
+then on takes the job as ended (`--force` cancels the job and goes
+ahead). A cancel that fails otherwise (the controller not reached), or
+fails for a job the scheduler has just listed, is an error and records
+nothing: try again once the scheduler answers, or fix the pattern if the
+scheduler's message for a forgotten job is among what it printed. When `test stop` has nothing to cancel, it says what it knows (the
+scheduler does not know the job, or lists it as over, or the run has
+recorded its end). On a machine without a batch system (the generic machine), a
+submitted run's job is a background process: cactup asks about it and stops
+it only on the host that started it and only while that very process runs,
+so a reused process number is never stopped, and only where the process has
+a process group of its own (the machine's `submit` starts it with
+`setsid`). From another host, `test stop` says the run's job runs on the
+host that submitted it and to stop it there, and `test delete` refuses,
+while the run holds its lock. A run submitted by an older cactup is not
+stopped for you while a process with its number runs: check it and stop it
+yourself, as cactup says (`kill -- -<group>` where its process group holds
+only the job; else it names the processes to stop). Nor is a job whose
+process group holds processes it did not start: stop it and the processes
+it started yourself (`pstree -p <pid>` shows them).
 
 Move a test to trash:
 
@@ -267,10 +335,10 @@ cactup test run McLachlan/ML_BSSN
 cactup test submit -n 4 --gpu -w 1:00:00
 ```
 
-### Test with a custom runscript variant
+### Test on a specific partition
 
 ```sh
-cactup test run --variant cuda --gpu
+cactup test submit -q workq          # the queue picks that partition's test scripts
 ```
 
 ## Troubleshooting
@@ -279,7 +347,7 @@ cactup test run --variant cuda --gpu
 
 **"Cannot allocate job"**: `test submit` requires running inside an allocation. Try `test run` instead, or request an interactive allocation first.
 
-**"Test not found"**: test/arrangement/thorn names come from the built config's thorns; double-check the exact `Arrangement`, `Arrangement/Thorn`, or test name (they are case-sensitive).
+**"test selection … matches nothing"**: test/arrangement/thorn names come from the built config's thorns (its `ThornList`); double-check the exact `Arrangement`, `Arrangement/Thorn`, `Thorn`, or test name (they are case-sensitive). A thorn without tests cannot be selected either.
 
 **"Permission denied on test-home"**: Check that you have write access to your machine's `test-home` directory (see `cactup machine show`).
 

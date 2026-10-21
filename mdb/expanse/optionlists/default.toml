@@ -1,9 +1,9 @@
-# expanse optionlist (variant "default"), ported from simfactory2
+# expanse optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/expanse-gnu.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["compute"]
+[cactup.runs-on]
+queues = ["compute"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

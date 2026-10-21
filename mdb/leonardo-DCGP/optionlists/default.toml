@@ -1,9 +1,9 @@
-# LEONARDO optionlist (variant "default"), ported from simfactory2
+# LEONARDO optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/leonardo-DCGP.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["dcgp_usr_prod"]
+[cactup.runs-on]
+queues = ["dcgp_usr_prod"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

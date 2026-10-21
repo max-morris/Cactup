@@ -1,11 +1,9 @@
-# Graham optionlist (variant "gpu" = the CUDA/nvcc flavor), ported from
+# Graham optionlist (flavor "gpu" = the CUDA/nvcc flavor), ported from
 # simfactory2 mdb/optionlists/graham-gpu.cfg (upstream's separate "graham-gpu"
 # machine, folded in here — see meta.toml).
 
 [cactup]
-gpu               = true
-compatible-queues = ["gpu"]
-# Per-variant thorn toggles (§7.8): the CUDA build drops thorns nvcc can't
+# Per-flavor thorn toggles (§7.8): the CUDA build drops thorns nvcc can't
 # compile, on top of the machine-level BLAS/LAPACK disables. Verbatim from the
 # upstream graham-gpu machine's [build].disabled-thorns (minus BLAS/LAPACK,
 # which are already machine-level here).
@@ -19,6 +17,12 @@ disabled-thorns = [
     "EinsteinInitialData/Meudon_Bin_NS",
     "EinsteinInitialData/Meudon_Mag_NS",
 ]
+
+[cactup.runs-on]
+queues = ["gpu"]
+gpu    = true
+# The machine default queue is `cpu`, where this binary may not run.
+default-queue = "gpu"
 
 [options]
 # Whenever this version string changes, the application is configured

@@ -1,5 +1,5 @@
 #! /bin/bash
-# expanse runscript (variant "default"), ported from simfactory2
+# expanse runscript (script "default"), ported from simfactory2
 # mdb/runscripts/expanse.run.
 #
 # Variable renames vs. simfactory (design §6.3):

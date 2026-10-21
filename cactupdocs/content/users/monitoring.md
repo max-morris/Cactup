@@ -130,7 +130,7 @@ character you pressed on to the one under the pointer, so you can pull one
 field out of one line instead of taking the whole line. Drag past the right
 edge of a line and it runs to the end of it; drag off the top or bottom of
 the pane and it keeps extending to the edge of what's on screen. The
-selection survives releasing the button, so `y` afterwards copies it, and
+selection survives releasing the button, so `y` afterward copies it, and
 the footer counts what you have — characters inside a single line, lines
 once it spans more than one.
 
@@ -285,6 +285,29 @@ Stop a running or queued build:
 cactup build stop myconfig
 cactup build stop myconfig -f     # kill it directly instead of a graceful stop
 ```
+
+On a batch system, for 14 days after a build recorded its result (asked only
+on the machine the build was made for), a job the scheduler still lists (put back in the queue by preemption or `scontrol
+requeue`, or just leaving it: Slurm lists an ended job as completing for a
+moment, or timed out for a few minutes; one listed as completed, Slurm's
+`CD` or Torque's `C`, has simply ended) still counts as live: `build stop`
+cancels it, and a new build of that config refuses to start until it has
+left (`-f` cancels it first). `build list` shows the recorded result until a
+requeued job runs again. If the scheduler cannot be asked about a finished
+build's job, cactup takes the safe reading, since the job may have been
+queued again: a new build of that config refuses, printing the failed
+query, and `build stop` asks the scheduler to cancel the job anyway,
+saying it could not ask. Where the scheduler takes the cancel, or refuses
+it saying it does not know the job (by the machine's
+`unknown-job-pattern`), that settles it: cactup records the stop and from
+then on takes the job as ended (`-f` cancels the job and builds). A
+cancel that fails otherwise (the controller not reached), or fails for a
+job the scheduler has just listed, is an error and records nothing.
+When `build stop` has nothing to cancel, it says what it knows (the
+scheduler does not know the job, or lists it as over, or the build has
+finished). An unfinished build whose status query fails is shown
+`UNKNOWN`, `build stop` refuses with the scheduler's output, and `build
+prune` keeps it.
 
 Old build attempts accumulate under `.cactup-builds/` inside the config
 directory; prune them, keeping only the most recent N (never automatic —

@@ -3,7 +3,7 @@
 # cluster"). Upstream simfactory fragments Deep Bayou into four machine defs —
 # db1.hpc.lsu.edu (native), db-sing-nv (Singularity+CUDA), db-sing-cpu
 # (Singularity CPU), etworkshop-db (workshop image) — an artifact of
-# simfactory having no build-variant/universe concept. Cactup folds them back
+# simfactory having no build-flavor/universe concept. Cactup folds them back
 # into this single machine:
 #
 #   build flavor        optionlist   build universe   run/submit scripts
@@ -17,7 +17,7 @@
 # implicit default (§4.2). What used to be three cactup queues (gpu, sing-nv,
 # sing-cpu) impersonating partition names purely to route a built config to
 # its matching run/submit scripts is now first-class: each submitscript/
-# runscript variant below carries a `universes` compatibility list, and
+# runscript below carries a `build-universes` compatibility list, and
 # selection is filtered by the CONFIG's build universe (host / et-sing /
 # et-sing-cpu), defaulting to "host" when unset (§4.8, "implicit host
 # universe"). This relies on the one-directional D12 cross-check (§4.4): the
@@ -26,7 +26,7 @@
 # The upstream "etworkshop-db" workflow (build from
 # *inside* the workshop container) is still just the sing-nv flavor built with
 # `--no-universe` (its optionlist and run/submit scripts were byte-identical
-# to db-sing-nv); no separate variant is needed.
+# to db-sing-nv); no separate machine is needed.
 #
 # The dir name stays "db1.hpc.lsu.edu" (the login-node ini filename) even
 # though the native config self-names "db".
@@ -50,16 +50,33 @@ simulation-home = "/work/@USER@/simulations"
 test-home       = "/work/@USER@/tests"
 
 [hardware]
-# Availability vs. request (design §8.5): a Deep Bayou node has 48 CPUs/cores
-# and 2 GPUs. "Filling a node" = 2 tasks/node × 24 CPUs/task = 48 CPUs/node.
+# Availability vs. request (design §8.5): a Deep Bayou node (db001-db011) has
+# 48 CPUs/cores (2 × Xeon Gold 6248R, Cascade Lake) and 2 Tesla V100S GPUs
+# (sm_70). "Filling a node" = 2 tasks/node × 24 CPUs/task = 48 CPUs/node.
 max-cpus-per-node     = 48       # CPUs/cores available per node (NOT MPI ranks)
+max-gpus-per-node     = 2        # `scontrol show node`: Gres=gpu:2
 default-cpus-per-task = 24       # request default when `-c` omitted → fills the
-                                 # node as 2 tasks × 24 CPUs (floor(48/24) = 2)
-memory                = 196608   # MB per node
+                                 # node as 2 tasks × 24 CPUs (floor(48/24) = 2),
+                                 # one GPU each (the partition's DefCpuPerGPU=24)
+memory                = 191000   # MB per node (`scontrol show node`: RealMemory)
 
 [build]
 make      = "make -j@MAKEJOBS@"
-make-jobs = 8
+# A build goes to a compute node (buildsubmitscripts/default.py, §7.9), for
+# every flavor: the auto-choice picks `submit` because this machine can submit
+# builds. There it has a whole node's 48 cores. `cactup build run` still builds on the login
+# node; pass -j there to stay polite on a shared login node.
+make-jobs = 48
+
+# The build job's shape: one node, one task, all 48 cores. `make -j` is
+# shared-memory, so extra nodes buy nothing. It requests no GPU: the gpu
+# partition bills only GPUs (TRESBillingWeights=CPU=0,GRES/gpu=48), so a build
+# costs no SUs, and compiling needs none.
+queue         = "gpu"
+walltime      = "4:00:00"
+nodes         = 1
+tasks         = 1
+cpus-per-task = 48
 # No machine default build universe key here (§4.8 "implicit host universe"):
 # the native flavor's optionlist names no universe, so it falls back to the
 # declared [universes.host] below without needing `universe = "host"` spelled
@@ -76,15 +93,15 @@ make-jobs = 8
 # This universe declares NEITHER wrapper NOR wrapper-argv — it is an identity
 # universe (§4.8 "implicit host universe": Universe::wrap runs the command
 # bare via `sh -c`, exactly like today's no-universe path). It exists only to
-# carry env-build-setup below: cactup's build shell is a non-login `/bin/sh
+# carry build-env-setup below: cactup's build shell is a non-login `/bin/sh
 # -c`, where the `module` function is undefined, so the old approach wrapped
 # the whole build command in `bash -lc 'module … && '@COMMAND@` just to get a
 # shell where `module` works. Sourcing the Modules init script directly in
-# env-build-setup gets the same modules loaded ahead of the build command
+# build-env-setup gets the same modules loaded ahead of the build command
 # without wrapping it, and scopes the modules to the build phase only (§4.8
 # Feature 3: universe-level env-setup overrides).
 [universes.host]
-env-build-setup = """
+build-env-setup = """
 . "${MODULESHOME:-/usr/local/packages/Modules/4.5.0}/init/bash"
 module purge
 module load gcc/9.3.0
@@ -96,13 +113,16 @@ module load cuda/12.4.0 mpich/3.3.2/intel-19.1.3
 # (1) Deep Bayou only has singularity on the compute nodes, so srun is needed.
 # (2) Can't specify -A @ALLOCATION@ here; counting on a default allocation.
 # (3) Deep Bayou requires 48 cores per node.
+# The srun asks for all 48 cores, not upstream's 24: a queued build runs it as
+# a step of its 48-core build job, where 24 would leave `make -j48` on half the
+# node. From the login node (`cactup build run`) it is a whole-node job.
 # The RUN is not coerced into these (per-rank singularity lives in the sing
 # runscript — §4.8's MPI boundary; the sing optionlists set
 # coerce-run-universe = false).
 [universes.et-sing]
 wrapper-argv = [
     "srun", "-u", "-A", "@ALLOCATION@", "-p", "gpu",
-    "-n", "1", "--cpus-per-task", "24",
+    "-n", "1", "--cpus-per-task", "48",
     "singularity", "exec", "--nv",
     "--bind", "/var/spool", "--bind", "/ddnA", "--bind", "/project",
     "--bind", "/etc/ssh/ssh_known_hosts", "--bind", "/work", "--bind", "/scratch",
@@ -112,7 +132,7 @@ wrapper-argv = [
 [universes.et-sing-cpu]
 wrapper-argv = [
     "srun", "-u", "-A", "@ALLOCATION@", "-p", "gpu",
-    "-n", "1", "--cpus-per-task", "24",
+    "-n", "1", "--cpus-per-task", "48",
     "singularity", "exec",
     "--bind", "/var/spool", "--bind", "/ddnA", "--bind", "/project",
     "--bind", "/etc/ssh/ssh_known_hosts", "--bind", "/work", "--bind", "/scratch",
@@ -124,6 +144,8 @@ wrapper-argv = [
 submit          = "sbatch @SCRIPTFILE@ 2>&1"
 blocking-submit = "sbatch --wait @SCRIPTFILE@ 2>&1"
 get-status      = "squeue -j @JOB_ID@"
+# What squeue says (on stderr) of a job Slurm no longer knows.
+unknown-job-pattern = 'slurm_load_jobs error: Invalid job id specified'
 # One-call form `sim list` uses so it needn't ask job by job; `%i %t (%r)`
 # is what keeps the patterns below matching.
 get-status-many = "squeue -h -u @USER@ -o '%i %t (%r)'"
@@ -157,20 +179,23 @@ gpu = true
 # or with no universe recorded, which resolves to "host"); both Singularity
 # flavors share the "sing" scripts, gated on the et-sing/et-sing-cpu build
 # universes (upstream db-sing-cpu reused db-sing-nv's run/submit). build-universes
-# on the "default"/"test" variants keep them from also matching Singularity
+# on the "default"/"test" scripts keep them from also matching Singularity
 # builds now that there is only one queue to filter on.
-[variants.submitscript]
+[submitscripts]
 "default"   = { queues = ["gpu"], build-universes = ["host"] }
 "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
 "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
 "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
 
-[variants.runscript]
+# Serves builds in every universe: the native flavor's host universe and the
+# Singularity flavors' et-sing/et-sing-cpu, whose srun wrapper then runs as a
+# step of the build job. The route is picked by the build job's queue
+# ([build].queue), never by `--flavor` (§7.9).
+[buildsubmitscripts]
+"default" = { queues = ["gpu"] }
+
+[runscripts]
 "default"   = { queues = ["gpu"], build-universes = ["host"] }
 "sing"      = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"] }
 "test"      = { queues = ["gpu"], build-universes = ["host"], test = true }
 "sing-test" = { queues = ["gpu"], build-universes = ["et-sing", "et-sing-cpu"], test = true }
-
-[variants.optionlist]
-# Three build flavors; `config build` must pick one with --variant (§4.4).
-variants = ["native", "sing-nv", "sing-cpu"]

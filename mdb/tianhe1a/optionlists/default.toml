@@ -1,9 +1,9 @@
-# Tianhe-1A optionlist (variant "default"), ported from simfactory2
+# Tianhe-1A optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/tianhe1a.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["NO_QUEUE"]
+[cactup.runs-on]
+queues = ["NO_QUEUE"]
+gpu    = false
 
 [options]
 # tianhe1a

@@ -1,5 +1,5 @@
 #! /bin/bash
-# anvil runscript (variant "default"), ported from simfactory2
+# anvil runscript (script "default"), ported from simfactory2
 # mdb/runscripts/anvil.run.
 #
 # Variable renames vs. simfactory (design §6.3):

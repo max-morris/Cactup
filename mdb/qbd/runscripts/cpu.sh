@@ -1,5 +1,5 @@
 #! /bin/bash
-# qbd runscript (variant "cpu"): CPU partitions single/workq/checkpt/bigmem.
+# qbd runscript (script "cpu"): CPU partitions single/workq/checkpt/bigmem.
 # Mirrors runscripts/default.sh minus the GPU binding flags. srun, not mpirun:
 # mpirun does not work for multi-task jobs on QB4. Runs inside the allocation
 # the submitscript requested; passes none of -A/-p/-N itself.

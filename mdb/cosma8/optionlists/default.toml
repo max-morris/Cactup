@@ -1,9 +1,9 @@
-# cosma8 optionlist (variant "default"), ported from simfactory2
+# cosma8 optionlist (flavor "default"), ported from simfactory2
 # mdb/optionlists/cosma8.cfg.
 
-[cactup]
-gpu               = false
-compatible-queues = ["standard"]
+[cactup.runs-on]
+queues = ["standard"]
+gpu    = false
 
 [options]
 # Whenever this version string changes, the application is configured

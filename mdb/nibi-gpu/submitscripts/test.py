@@ -1,4 +1,4 @@
-# nibi-gpu TEST submitscript (variant "test") — marked test = true in
+# nibi-gpu TEST submitscript (script "test") — marked test = true in
 # meta.toml (design §11.2). Same #SBATCH header as submitscripts/default.py
 # (including the computed --exclusive/--mem/--gpus-per-node directives) but
 # WITHOUT restart chaining (a testsuite is one-shot — no recovery, no chain,
@@ -6,7 +6,7 @@
 # with the §11.6 locator flags (--test-dir + --results-id) instead of
 # `sim run`.
 #
-# .py variant (design §6.1): the --exclusive/--mem/--gpus-per-node directives
+# .py script (design §6.1): the --exclusive/--mem/--gpus-per-node directives
 # are computed, and the mail directives are guarded by `if EMAIL:` — cactup's
 # @NAME@ engine is literal-only (D7), so both move into Python.
 
@@ -32,7 +32,7 @@ lines.append("#SBATCH --no-requeue")
 lines.append("#SBATCH -o {0}".format(STDOUT_FILE))
 lines.append("#SBATCH -e {0}".format(STDERR_FILE))
 
-# env-setup is NOT auto-prepended for .py variants (design §6.1).
+# env-setup is NOT auto-prepended for .py scripts (design §6.1).
 lines.append(ENV_SETUP)
 
 lines.append("cd {0}".format(SOURCEDIR))

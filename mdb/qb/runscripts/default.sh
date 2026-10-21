@@ -1,5 +1,5 @@
 #! /bin/bash
-# qb runscript (variant "default"), ported from simfactory2
+# qb runscript (script "default"), ported from simfactory2
 # mdb/runscripts/qb-mvapich2.run.
 #
 # Variable renames vs. simfactory (design §6.3):

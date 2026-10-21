@@ -1,5 +1,5 @@
 #!/bin/bash
-# omnia runscript (variant "default"), ported from simfactory2
+# omnia runscript (script "default"), ported from simfactory2
 # mdb/runscripts/omnia.run.
 #
 # Variable renames vs simfactory (design §6.3): NUM_PROCS→@TASKS@,

@@ -1,5 +1,5 @@
 #! /bin/bash
-# Frontier runscript (variant "default"), ported from simfactory2
+# Frontier runscript (script "default"), ported from simfactory2
 # mdb/runscripts/frontier.run.
 #
 # Variable renames vs. simfactory (design §6.3):

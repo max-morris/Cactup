@@ -1,5 +1,5 @@
 #! /bin/bash
-# cosma8 runscript (variant "default"), ported from simfactory2
+# cosma8 runscript (script "default"), ported from simfactory2
 # mdb/runscripts/cosma8.run.
 #
 # Variable renames vs. simfactory (design §6.3):

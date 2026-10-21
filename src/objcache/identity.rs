@@ -1,0 +1,1561 @@
+//! Which compiler a command line runs: the part of a cache key that says
+//! "the same program would run", by content and not by name.
+//!
+//! A compiler is identified by the bytes of what actually does the work —
+//! the driver the command names, for GCC the back ends and assembler it
+//! runs, and the shared libraries each program loads (a distribution's
+//! Clang is a small driver in front of `libclang-cpp.so`) — plus what it
+//! says about itself (version, target, built-in specs) and the name it was
+//! run by (`clang` and `clang++` are one file). Its path
+//! is not part of it, so two installations of the same compiler agree; its
+//! modification time is not either, so one compiler copied twice does.
+//!
+//! Only a compiler cactup can identify *as itself* is cached. A wrapper
+//! (`mpicc`, a Cray `cc`, a site script) adds flags and picks a compiler by
+//! rules of its own; it passes `--version` through to the compiler, and so
+//! looks like one. The driver's own bytes have to say what it is.
+//!
+//! For the same reason a compiler that takes flags from a file of its own
+//! is not cached: a GCC with a `specs` file on disk, a Clang that reads a
+//! configuration file. What such a file adds never passes the reader of
+//! the command line (`compile`), so nothing the cache declines there — a
+//! flag that records the command line, one that puts unmapped paths into
+//! the object — would be declined. The one exception is a specs file that
+//! changes only how GCC links (`specs`).
+//!
+//! What this cannot see: files a compiler reads by rules of its own that
+//! are named nowhere here — a plugin directory, lists in Clang's resource
+//! directory (which is why sanitizers are not cached), anything a later
+//! compiler version adds. The list above is what is known.
+//!
+//! Hashing a compiler takes a moment (GCC's `cc1plus` is tens of megabytes)
+//! and every compile of a build asks, so the answer — also the answer "not
+//! one the cache works with" — is kept for the length of one build
+//! attempt, in `<attempt>/cc/compilers/`, and reused as long as every file
+//! it was computed from still looks the same (size, change time, inode).
+
+use super::hash::{bytes_digest, file_digest, Hasher};
+use crate::Res;
+use anyhow::{bail, Context};
+use serde::{Deserialize, Serialize};
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// The compiler families the cache has an argument reader for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Family {
+    Gcc,
+    Clang,
+    /// GCC's Fortran driver (§18.10).
+    Gfortran,
+    /// NVIDIA's CUDA driver (M4): its own toolchain, and a host compiler
+    /// identified for each compile.
+    Nvcc,
+}
+
+/// An identified compiler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Compiler {
+    /// The file that runs when the command line names this compiler, as an
+    /// absolute path. The wrapper starts *this*, under the name the recipe
+    /// used: what was identified and what runs must be one file.
+    pub path: PathBuf,
+    pub family: Family,
+    /// Does this compiler, given the path map of `key::PathMap`, make one
+    /// object of the same sources in two different places? Found by trying
+    /// ([`relocates`]): the map stands on it.
+    pub relocates: bool,
+    /// Does this compiler make the same object of a source with non-ASCII
+    /// bytes in the session's locale as in the C locale? Found by trying
+    /// ([`locale_neutral`]): if so, the locale is not keyed (§18.8).
+    pub locale_neutral: bool,
+    /// The digest that stands for this compiler in a key.
+    pub id: String,
+    /// The `specs` file a GCC reads, by its physical path, when it was
+    /// accepted for changing only how GCC links (`specs::link_only`).
+    /// Every compile must say it read this file and no other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specs: Option<PathBuf>,
+    /// The flags that select another of a GCC's sets of libraries and
+    /// programs than its default one (`-m32`, `-mx32`; `-print-multi-lib`):
+    /// the driver looks for its programs elsewhere then, where the identity
+    /// did not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multilib: Vec<String>,
+    /// For `nvcc`: it takes the module ID it is given in place of making
+    /// one of where and when it compiles, which makes its objects the same
+    /// each time (`cuda::Plan`, decision 25).
+    #[serde(default)]
+    pub takes_module_id: bool,
+    /// For `nvcc`: the programs of its own it runs (`cudafe++`, `cicc`,
+    /// `ptxas`, `fatbinary`), by physical path. A compile the cache runs
+    /// runs these, and no others of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchain: Vec<PathBuf>,
+    /// For `nvcc`: what its last step, the host compile of the code it
+    /// generates, read in its trial that is not the trial's own (CUDA's
+    /// `crt/host_runtime.h`, `fatbinary_section.h` and the like, which no
+    /// preprocessor pass reads: seen), by physical path. Part of its
+    /// identity, and watched; a compile whose last step reads anything
+    /// else its key does not cover is not stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_reads: Vec<PathBuf>,
+}
+
+/// One file an identity was computed from, as it looked then.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct Seen {
+    path: PathBuf,
+    /// Where the name leads: a link on the way turned to a tree of the same
+    /// files (hard links) leaves everything else as it was, but a program
+    /// takes its `$ORIGIN` (and the driver its prefix) from there (tried).
+    real: PathBuf,
+    size: u64,
+    ctime: i64,
+    ctime_nsec: i64,
+    ino: u64,
+    dev: u64,
+}
+
+impl Seen {
+    pub(super) fn of(path: &Path) -> Res<Self> {
+        // Opened, where it can be: on NFS an open fetches the file's
+        // attributes afresh, where a bare `stat` may answer from a cache up
+        // to a minute old (a toolchain reinstalled from another host).
+        // Without waiting: a FIFO would wait for a writer (`O_NONBLOCK`,
+        // the same on every Linux cactup is built for).
+        const O_NONBLOCK: i32 = 0o4000;
+        let meta = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NONBLOCK)
+            .open(path)
+            .and_then(|file| file.metadata())
+            .or_else(|_| fs::metadata(path))
+            .with_context(|| format!("Failed to look at {}", path.display()))?;
+        Ok(Self {
+            path: path.to_owned(),
+            real: fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?,
+            size: meta.len(),
+            // Change time, not modification time: `touch -r` and `cp -p`
+            // can set the latter back.
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            ino: meta.ino(),
+            dev: meta.dev(),
+        })
+    }
+}
+
+/// What is kept between the compiles of one build attempt.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct Remembered {
+    /// The compiler, or …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiler: Option<Compiler>,
+    /// … why it is not one the cache works with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected: Option<String>,
+    /// The environment that decides which helper programs the driver runs,
+    /// as it was.
+    env: String,
+    /// The driver's physical path: it finds its own programs from there,
+    /// and a link on the way turned to a tree of the same files (hard
+    /// links) leads it to that tree's (tried).
+    #[serde(default)]
+    driver: PathBuf,
+    files: Vec<Seen>,
+    /// The places searched before each file was found (by the driver for
+    /// its programs, along `PATH`, by the loader for libraries) that held
+    /// nothing: one that holds something now may be found first. A relative
+    /// one is looked at from the compile's own working directory.
+    #[serde(default)]
+    absent: Vec<PathBuf>,
+}
+
+/// The variables that decide which back ends and libraries a driver picks
+/// up, and whether Clang reads its configuration files. A change in one of
+/// them may mean another compiler under the same driver.
+const HELPER_ENV: &[&str] =
+    &["PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "LIBRARY_PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "GLIBC_TUNABLES", "CLANG_NO_DEFAULT_CONFIG"];
+
+fn helper_env() -> String {
+    let mut hasher = Hasher::new("compiler-env");
+    for name in HELPER_ENV {
+        hasher.feed(name.as_bytes());
+        hasher.feed(std::env::var_os(name).unwrap_or_default().as_bytes());
+    }
+    // And the locale, which the locale trial's answer is for.
+    let mut locale: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| name.as_bytes().starts_with(b"LC_") || name == "LANG" || name == "LANGUAGE")
+        .collect();
+    locale.sort();
+    for (name, value) in locale {
+        hasher.feed(name.as_bytes());
+        hasher.feed(value.as_bytes());
+    }
+    hasher.hex()
+}
+
+/// The file `execvp` would run for `program` from this working directory,
+/// as an absolute path: the name itself if it has a `/`, else the first
+/// executable regular file of that name on `PATH` — relative entries and
+/// empty ones (the working directory) included, as `execvp` includes them.
+pub fn find_program(program: &OsStr) -> Res<PathBuf> {
+    search_path(program, &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: false })?
+        .with_context(|| format!("{} is not on PATH", program.to_string_lossy()))
+}
+
+/// [`find_program`], with the places passed over on the way watched. A
+/// program found by a relative name (through a relative entry, or an empty
+/// one: the working directory) is another program, or none, from each
+/// compile's directory: a helper found so rules the compiler out.
+fn search_path(program: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
+    let path = std::env::var_os("PATH").context("PATH is not set")?;
+    search_along(program, &path, watched)
+}
+
+/// [`search_along`], the places passed over not kept: for a program that is
+/// then identified, and watched, on its own.
+pub(super) fn find_along(program: &OsStr, path: &OsStr) -> Res<Option<PathBuf>> {
+    let (mut files, mut absent) = (Vec::new(), Vec::new());
+    search_along(program, path, &mut Watched { files: &mut files, absent: &mut absent, helper: false })
+}
+
+/// [`search_path`] along `path`, a value of `PATH` (one a driver gives the
+/// programs it runs: `nvcc`'s).
+pub(super) fn search_along(program: &OsStr, path: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
+    let absolute = |path: &Path| std::path::absolute(path).with_context(|| format!("Failed to resolve {}", path.display()));
+    if program.as_bytes().contains(&b'/') {
+        return absolute(Path::new(program)).map(Some);
+    }
+    let executable = |path: &PathBuf| path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    let dirs = path.as_bytes().split(|b| *b == b':').map(|dir| if dir.is_empty() { Path::new(".") } else { Path::new(OsStr::from_bytes(dir)) });
+    for place in dirs.map(|dir| dir.join(program)) {
+        // `execvp` goes on past a file it may not run (no permission for
+        // this user, a filesystem mounted `noexec`): so does this search.
+        if executable(&place) && (!watched.helper || runs(&place)) {
+            if place.is_relative() && watched.helper {
+                bail!("{} is found through a relative entry of PATH, which each working directory may have another of", place.display());
+            }
+            return absolute(&place).map(Some);
+        }
+        watched.passed(&place);
+    }
+    Ok(None)
+}
+
+/// `entry` with the tokens glibc's loader expands in it (`$LIB`,
+/// `$PLATFORM`, `$ORIGIN`, also in braces) expanded as the loader of
+/// `program` expands them: it says what it takes them to be itself
+/// (`--list-diagnostics`, glibc 2.33 and later). A loader that does not
+/// say rules the compiler out.
+fn expand_tokens(program: &Path, entry: &str) -> Res<String> {
+    let loader = interpreter(program).with_context(|| format!("{} names no loader to ask what {entry} means", program.display()))?;
+    let said = ask(&loader, &["--list-diagnostics"])
+        .with_context(|| format!("the loader of {} does not say what {entry} means (glibc before 2.33?)", program.display()))?;
+    let value = |key: &str| {
+        said.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix("=\"")?.strip_suffix('"').map(str::to_owned))
+    };
+    let lib = value("dl_dst_lib").with_context(|| format!("the loader of {} does not say what $LIB means", program.display()))?;
+    let platform = value("dl_platform").with_context(|| format!("the loader of {} does not say what $PLATFORM means", program.display()))?;
+    let origin = fs::canonicalize(program)?.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned();
+    let mut expanded = entry.to_owned();
+    for (token, value) in [("LIB", &lib), ("PLATFORM", &platform), ("ORIGIN", &origin)] {
+        expanded = expanded.replace(&format!("${{{token}}}"), value).replace(&format!("${token}"), value);
+    }
+    if expanded.contains('$') {
+        bail!("{entry} names a token the loader of {} expands, which cactup does not know", program.display());
+    }
+    Ok(expanded)
+}
+
+/// The dynamic loader an ELF `program` names (`PT_INTERP`), if any.
+fn interpreter(program: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(program).ok()?;
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u64_at = |at: usize| bytes.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
+    let (phoff, phentsize, phnum) = (u64_at(0x20)?, u16_at(0x36)?, u16_at(0x38)?);
+    (0..phnum).find_map(|i| {
+        let header = phoff + i * phentsize;
+        (bytes.get(header..header + 4)? == 3u32.to_le_bytes()).then_some(())?;
+        let (offset, size) = (u64_at(header + 8)?, u64_at(header + 32)?);
+        let name = bytes.get(offset..offset + size)?;
+        Some(PathBuf::from(OsStr::from_bytes(name.split(|b| *b == 0).next()?)))
+    })
+}
+
+/// Is `program` an ELF file that names a dynamic loader (`PT_INTERP`)? Read
+/// from its program headers (64-bit, little-endian: the hosts cactup runs
+/// on); anything else is taken to name one.
+fn interpreted(program: &Path) -> bool {
+    let Ok(bytes) = fs::read(program) else { return true };
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u64_at = |at: usize| bytes.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
+    if !bytes.starts_with(b"\x7fELF") || bytes.get(4) != Some(&2) || bytes.get(5) != Some(&1) {
+        return true;
+    }
+    let (Some(phoff), Some(phentsize), Some(phnum)) = (u64_at(0x20), u16_at(0x36), u16_at(0x38)) else { return true };
+    (0..phnum).any(|i| bytes.get(phoff + i * phentsize..phoff + i * phentsize + 4).is_none_or(|kind| kind == 3u32.to_le_bytes()))
+}
+
+/// The library directory a GCC driver was configured with, as `-v` says
+/// (`--libdir=`; else `--exec-prefix=` or `--prefix=`, then `/usr/local`,
+/// with `lib` under it: autoconf's defaults). Its programs' prefix
+/// (`STANDARD_EXEC_PREFIX`) is `gcc` under it.
+fn configured_libdir(driver: &Path) -> PathBuf {
+    let mut command = Command::new(driver);
+    super::key::in_english(&mut command);
+    let said = command.arg("-v").stdin(Stdio::null()).stdout(Stdio::null()).output().map(|out| out.stderr).unwrap_or_default();
+    let said = String::from_utf8_lossy(&said);
+    let line = said.lines().find_map(|line| line.strip_prefix("Configured with: ")).unwrap_or_default();
+    libdir_from_configure(line)
+}
+
+/// The library directory a configure command line `line` sets, as configure
+/// reads it: `--name=value` or `--name value`, the last one given winning,
+/// values in the shell's quotes, `${prefix}` and `${exec_prefix}` in them
+/// standing for what those are.
+fn libdir_from_configure(line: &str) -> PathBuf {
+    // The words, as the shell split them.
+    let mut words = Vec::new();
+    let (mut word, mut quote, mut any) = (String::new(), None, false);
+    for c in line.chars() {
+        match (quote, c) {
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                any = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (None, c) if c.is_whitespace() => {
+                if any {
+                    words.push(std::mem::take(&mut word));
+                }
+                any = false;
+            }
+            (_, c) => {
+                word.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        words.push(word);
+    }
+    let option = |name: &str| {
+        let mut value = None;
+        for (at, word) in words.iter().enumerate() {
+            if let Some(given) = word.strip_prefix(&format!("{name}=")) {
+                value = Some(given.to_owned());
+            } else if word == name {
+                value = words.get(at + 1).cloned();
+            }
+        }
+        value
+    };
+    let prefix = option("--prefix").unwrap_or_else(|| "/usr/local".to_owned());
+    let exec_prefix = option("--exec-prefix").unwrap_or_else(|| "${prefix}".to_owned()).replace("${prefix}", &prefix);
+    let libdir = option("--libdir").unwrap_or_else(|| "${exec_prefix}/lib".to_owned());
+    PathBuf::from(libdir.replace("${exec_prefix}", &exec_prefix).replace("${prefix}", &prefix))
+}
+
+/// Does `program` start? Not where the system refuses to run it. Started
+/// is enough (the spawn says once the program is running), so it is
+/// stopped at once, and one that would hang holds nothing up.
+fn runs(program: &Path) -> bool {
+    let started = Command::new(program).arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    match started {
+        Ok(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+        Err(e) => e.kind() != std::io::ErrorKind::PermissionDenied,
+    }
+}
+
+/// Find `program` along `path` as a program another runs (`nvcc`'s host
+/// compiler), with the places passed over on the way, to be watched.
+pub(super) fn search_watching(program: &OsStr, path: &OsStr) -> Res<(Option<PathBuf>, Vec<Seen>, Vec<PathBuf>)> {
+    let (mut files, mut absent) = (Vec::new(), Vec::new());
+    let found = search_along(program, path, &mut Watched { files: &mut files, absent: &mut absent, helper: true })?;
+    Ok((found, files, absent))
+}
+
+/// What an identity is computed from: the files it read, and the places
+/// passed over before each file was found.
+pub(super) struct Watched<'a> {
+    pub(super) files: &'a mut Vec<Seen>,
+    pub(super) absent: &'a mut Vec<PathBuf>,
+    /// Searching for a program the driver runs (not the driver itself,
+    /// which each compile finds again from its own directory).
+    helper: bool,
+}
+
+impl Watched<'_> {
+    /// A place searched and passed over: one that holds nothing must go on
+    /// holding nothing, and anything there (a directory, a file the search
+    /// rejected) must stay as it is.
+    /// A relative one (an empty or relative entry of `PATH`,
+    /// `LD_LIBRARY_PATH` or `LIBRARY_PATH`) is looked at from each compile's
+    /// own directory (decision 22).
+    pub(super) fn passed(&mut self, place: &Path) {
+        match Seen::of(place) {
+            Ok(seen) => self.files.push(seen),
+            Err(_) => self.absent.push(place.to_owned()),
+        }
+    }
+}
+
+/// Identify the compiler `program` names, reusing what an earlier compile of
+/// this build attempt found if nothing has changed since. `Err` says why
+/// this is not a compiler the cache works with.
+#[cfg(test)]
+pub(super) fn identify(cc_dir: &Path, program: &OsStr) -> Res<Compiler> {
+    identify_watching(cc_dir, program).map(|(compiler, _)| compiler)
+}
+
+/// What a compiler's identity was computed from, kept by the compile that
+/// identified it: checked again, and its directories stamped, from memory
+/// (the memo is read once, and a memo that could not be written takes
+/// nothing away from the checks).
+#[derive(Debug, Clone)]
+pub(super) struct Watch {
+    program: OsString,
+    path: PathBuf,
+    env: String,
+    driver: PathBuf,
+    files: Vec<Seen>,
+    absent: Vec<PathBuf>,
+    /// Other compilers' identities this compile depends on as well (`nvcc`'s
+    /// host compiler), watched alike.
+    also: Vec<Watch>,
+}
+
+impl Watch {
+    /// This watch, with more places: files as they were, places that must
+    /// stay empty.
+    pub(super) fn with_places(mut self, files: Vec<Seen>, absent: Vec<PathBuf>) -> Watch {
+        self.files.extend(files);
+        self.absent.extend(absent);
+        self
+    }
+
+    /// This watch, and `other`'s too.
+    pub(super) fn and(mut self, other: Watch) -> Watch {
+        self.also.push(other);
+        self
+    }
+
+    /// Does the identity still hold: the same file found for the program,
+    /// the same environment, every file as it was, every place passed over
+    /// still empty?
+    pub(super) fn holds(&self) -> bool {
+        find_program(&self.program).is_ok_and(|path| path == self.path)
+            && helper_env() == self.env
+            && fs::canonicalize(&self.path).is_ok_and(|driver| driver == self.driver)
+            && self.files.iter().all(|seen| Seen::of(&seen.path).is_ok_and(|now| now == *seen))
+            && self.absent.iter().all(|place| fs::metadata(place).is_err())
+            && self.also.iter().all(Watch::holds)
+    }
+
+    /// The directories that hold the files the identity watches (by
+    /// absolute names), each as it looks now, and the way to every watched
+    /// name, entry by entry (`key::trail`: each directory and link by
+    /// device, inode and birth, a link by its change time and target).
+    /// Compiles do not write in those directories, so one that changes while
+    /// a compile runs means something came or went there (tried: an
+    /// assembler that deletes itself); and a link on the way turned to
+    /// another tree and back is a new link (tried). A place passed over that
+    /// is not there is looked at by its own name only, before and after
+    /// (decision 20: its nearest existing ancestor may be a busy directory,
+    /// the home directory or the temporary one, which compiles and people
+    /// write in all the time). A directory renamed away and the same one
+    /// renamed back is decision 9's limit here too.
+    pub(super) fn stamps(&self) -> Stamps {
+        let mut places: Vec<&PathBuf> = self.files.iter().flat_map(|seen| [&seen.path, &seen.real]).chain(&self.absent).collect();
+        places.retain(|place| place.is_absolute());
+        places.sort();
+        places.dedup();
+        let mut ways = Hasher::new("ways to what the identity watches");
+        let mut steps = std::collections::HashMap::new();
+        for place in &places {
+            super::key::trail(place, &mut ways, &mut steps);
+        }
+        let mut dirs: Vec<&Path> = self
+            .files
+            .iter()
+            .flat_map(|seen| [&seen.path, &seen.real])
+            .filter(|place| place.is_absolute())
+            .filter_map(|place| place.parent())
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        let mut dirs: Vec<(PathBuf, Option<Seen>)> = dirs.into_iter().map(|dir| (dir.to_owned(), Seen::of(dir).ok())).collect();
+        for other in &self.also {
+            let theirs = other.stamps();
+            dirs.extend(theirs.dirs);
+            ways.feed(theirs.ways.as_bytes());
+        }
+        Stamps { dirs, ways: ways.hex() }
+    }
+}
+
+/// [`identify`], with what the identity watches.
+pub(super) fn identify_watching(cc_dir: &Path, program: &OsStr) -> Res<(Compiler, Watch)> {
+    let (path, memo) = memo_of(cc_dir, program)?;
+    // The name it is run by is part of what it is.
+    let name = Path::new(program).file_name().unwrap_or(program);
+    let memo_dir = cc_dir.join("compilers");
+    let env = helper_env();
+    let watch = |remembered: &Remembered| Watch {
+        program: program.to_owned(),
+        path: path.clone(),
+        env: remembered.env.clone(),
+        driver: remembered.driver.clone(),
+        files: remembered.files.clone(),
+        absent: remembered.absent.clone(),
+        also: Vec::new(),
+    };
+    if let Some(remembered) = fs::read_to_string(&memo).ok().and_then(|text| toml::from_str::<Remembered>(&text).ok())
+        && remembered.env == env
+    {
+        let watching = watch(&remembered);
+        if watching.holds() {
+            match (remembered.compiler, remembered.rejected) {
+                (Some(compiler), _) => return Ok((compiler, watching)),
+                (None, Some(why)) => bail!("{why}"),
+                (None, None) => {}
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    let mut absent = Vec::new();
+    let examined = fs::create_dir_all(&memo_dir)
+        .with_context(|| format!("Failed to create {}", memo_dir.display()))
+        .and_then(|()| examine(&path, name, program, &memo_dir, &mut Watched { files: &mut files, absent: &mut absent, helper: true }));
+    // Each looked at by every compile: once is enough.
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files.dedup();
+    absent.sort();
+    absent.dedup();
+    let remembered = Remembered {
+        compiler: examined.as_ref().ok().cloned(),
+        rejected: examined.as_ref().err().map(|e| format!("{e:#}")),
+        env,
+        driver: fs::canonicalize(&path).unwrap_or_default(),
+        files,
+        absent,
+    };
+    // Best-effort: without it the next compile just looks again. Written
+    // whole and moved into place, since every compile of the build reads it.
+    if let Ok(text) = toml::to_string(&remembered)
+        && let Ok(mut temp) = tempfile::NamedTempFile::new_in(&memo_dir)
+        && temp.write_all(text.as_bytes()).is_ok()
+    {
+        let _ = temp.persist(&memo);
+    }
+    let watching = watch(&remembered);
+    examined.map(|compiler| (compiler, watching))
+}
+
+/// The file `program` names from here, and where what this build attempt
+/// found out about it is remembered.
+fn memo_of(cc_dir: &Path, program: &OsStr) -> Res<(PathBuf, PathBuf)> {
+    let path = find_program(program)?;
+    let name = Path::new(program).file_name().unwrap_or(program);
+    let mut memo_name = Hasher::new("compiler-memo");
+    memo_name.feed(path.as_os_str().as_bytes());
+    memo_name.feed(name.as_bytes());
+    Ok((path, cc_dir.join("compilers").join(format!("{}.toml", memo_name.hex()))))
+}
+
+/// Directories, each as it looked (`None`: not there), and the digest of
+/// every entry the watched names resolve through ([`Watch::stamps`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Stamps {
+    dirs: Vec<(PathBuf, Option<Seen>)>,
+    ways: String,
+}
+
+impl Stamps {
+    /// What changed between `self` and `now`, said for a person: the first
+    /// directory that changed, or the way to what is watched.
+    pub(super) fn changed(&self, now: &Stamps) -> Option<String> {
+        let dir = self.dirs.iter().zip(&now.dirs).find(|(was, is)| was != is).map(|(was, _)| was.0.display().to_string());
+        match (dir, self.ways != now.ways || self.dirs.len() != now.dirs.len()) {
+            (Some(dir), _) => Some(dir),
+            (None, true) => Some("a link or directory on the way to the compiler's programs or libraries".to_owned()),
+            (None, false) => None,
+        }
+    }
+}
+
+/// Run `program` with `args` and return its standard output, if it succeeds.
+pub(super) fn ask(program: &Path, args: &[&str]) -> Res<String> {
+    // In English: what a driver says of itself goes into its identity, and
+    // must not depend on the language of the session that asked first.
+    let mut command = Command::new(program);
+    super::key::in_english(&mut command);
+    let out = command
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("Failed to run {}", program.display()))?;
+    if !out.status.success() {
+        bail!("{} {} failed ({})", program.display(), args.join(" "), out.status);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The shared libraries the dynamic loader would load for `program`, as it
+/// resolves them in this environment. This is what `ldd` does: with
+/// `LD_TRACE_LOADED_OBJECTS` set, the loader lists them and exits without
+/// running the program. A statically linked program has no loader to read
+/// the variable and simply runs, which is why it is run as `--version`.
+///
+/// Where the loader looked first is watched too: it says so itself
+/// (`LD_DEBUG=libs`, glibc's). Each place it tried and passed over, and each
+/// directory on a search path that is not there (it is not tried again for
+/// the next library, but would be once it is there); the cache it read. A
+/// library found by a relative name (an empty `LD_LIBRARY_PATH` entry is the
+/// working directory) is one each compile's directory may have another of:
+/// that compiler is not one the cache works with.
+#[cfg(test)]
+fn loaded_libraries(program: &Path, watched: &mut Watched) -> Res<Vec<PathBuf>> {
+    loaded_libraries_with(program, None, watched)
+}
+
+/// [`loaded_libraries`], in the library path a driver gives the programs it
+/// runs (`nvcc`'s `LD_LIBRARY_PATH`), where it gives one.
+fn loaded_libraries_with(program: &Path, library_path: Option<&str>, watched: &mut Watched) -> Res<Vec<PathBuf>> {
+    let mut command = Command::new(program);
+    if let Some(library_path) = library_path {
+        command.env("LD_LIBRARY_PATH", library_path);
+    }
+    let out = command
+        .arg("--version")
+        .env("LD_TRACE_LOADED_OBJECTS", "1")
+        .env("LD_DEBUG", "libs")
+        // Else the loader says it in files of that name, not here.
+        .env_remove("LD_DEBUG_OUTPUT")
+        .stdin(Stdio::null())
+        .output();
+    let out = out.with_context(|| format!("Failed to run {} to list the libraries it loads", program.display()))?;
+    // `\tlibisl.so.23 => /lib/x86_64-linux-gnu/libisl.so.23 (0x00007f…)`,
+    // or a library preloaded by its path: `\t/opt/lib/libx.so (0x…)`.
+    let listed = String::from_utf8_lossy(&out.stdout);
+    let library = |line: &str| {
+        let line = line.trim();
+        let at = line.split_once(" => ").map_or(line, |(_, at)| at);
+        Some(PathBuf::from(at.rsplit_once(" (")?.0))
+    };
+    let mut libraries = Vec::new();
+    for path in listed.lines().filter_map(library) {
+        match () {
+            _ if path.is_absolute() => libraries.push(path),
+            // Opened as named, from the working directory, unsearched.
+            _ if path.as_os_str().as_bytes().contains(&b'/') => {
+                bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), path.display())
+            }
+            // The loader's own (`linux-vdso.so.1`), no file.
+            _ => {}
+        }
+    }
+    // `  1234:\t find library=libz.so.1 [0]; searching`, then its search
+    // paths and tries, the last try the one found.
+    let said = String::from_utf8_lossy(&out.stderr);
+    let mut tries: Vec<PathBuf> = Vec::new();
+    let settle = |tries: &mut Vec<PathBuf>, watched: &mut Watched| -> Res<()> {
+        if let Some(found) = tries.pop() {
+            // Found nowhere (a preloaded library that is not there): the
+            // last try was passed over too.
+            if fs::metadata(&found).is_err() {
+                watched.passed(&found);
+            } else if found.is_relative() {
+                bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), found.display());
+            }
+            for place in tries.drain(..) {
+                watched.passed(&place);
+            }
+        }
+        Ok(())
+    };
+    for line in said.lines() {
+        let line = line.split_once(':').map_or(line, |(_, rest)| rest).trim();
+        if line.starts_with("find library=") {
+            settle(&mut tries, watched)?;
+        } else if let Some(file) = line.strip_prefix("trying file=") {
+            tries.push(PathBuf::from(file));
+        } else if let Some(paths) = line.strip_prefix("search path=") {
+            let paths = paths.split('\t').next().unwrap_or_default();
+            // One that is no directory is not tried again either (a relative
+            // one, from each compile's own directory).
+            for dir in paths.split(':').filter(|dir| !dir.is_empty()) {
+                if !fs::metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+                    watched.passed(Path::new(dir));
+                }
+            }
+        } else if let Some(cache) = line.strip_prefix("search cache=") {
+            watched.passed(Path::new(cache));
+        }
+    }
+    settle(&mut tries, watched)?;
+    // A loader that is not glibc's says nothing of its search (musl's
+    // ignores both variables): a dynamic program it runs is ruled out.
+    if interpreted(program) && !said.contains("find library=") {
+        bail!("{} is run by a dynamic loader cactup cannot follow (not glibc's)", program.display());
+    }
+    // The system's own preload list, read by every loader that starts.
+    watched.passed(Path::new("/etc/ld.so.preload"));
+    // A library preloaded by its path that is not there: the loader says so
+    // and goes on, and loads it once it is there. Named through a token the
+    // loader expands (`$LIB`), it is watched where the loader would look.
+    if let Some(preload) = std::env::var_os("LD_PRELOAD") {
+        for entry in preload.as_bytes().split(|b| *b == b':' || *b == b' ').filter(|entry| entry.starts_with(b"/")) {
+            let entry = String::from_utf8_lossy(entry);
+            let entry = match entry.contains('$') {
+                true => expand_tokens(program, &entry)?,
+                false => entry.into_owned(),
+            };
+            watched.passed(Path::new(&entry));
+        }
+    }
+    Ok(libraries)
+}
+
+/// The sources of [`relocates`]' trial: a Cactus compile in miniature. The
+/// source is a build copy that says, as Cactus's do, which file it was
+/// copied from; it includes one header from the tree and one from the
+/// configuration, and each of the three records its own name (the source
+/// both ways a compiler offers).
+const TRIAL_SOURCE: &str = "#include \"file.h\"\n#include \"generated.h\"\n\
+    const char *cactup_trial_file = __FILE__;\nconst char *cactup_trial_where(void) { return __builtin_FILE(); }\n\
+    int cactup_trial(int x) { return twice(x) + *generated_file(); }\n";
+const TRIAL_HEADER: &str = "static inline int twice(int x) { return 2 * x; }\n";
+const TRIAL_GENERATED: &str = "static inline const char *generated_file(void) { return __FILE__; }\n";
+
+/// Compile the trial sources in a tree at `root` with a configuration
+/// called `config`, the way a serving cache compiles: from the
+/// configuration's `scratch`, with the tree and the configuration mapped to
+/// fixed names, the configuration's map last (as `key::PathMap::flags`
+/// gives them). The object, if the compile succeeds.
+fn trial_object(compiler: &Path, name: &OsStr, root: &Path, config: &str) -> Option<Vec<u8>> {
+    let config = root.join("configs").join(config);
+    let (src, build, bindings, scratch) = (root.join("src"), config.join("build"), config.join("bindings"), config.join("scratch"));
+    for dir in [&src, &build, &bindings, &scratch] {
+        fs::create_dir_all(dir).ok()?;
+    }
+    let original = src.join("file.c");
+    fs::write(&original, TRIAL_SOURCE).ok()?;
+    fs::write(build.join("file.c"), format!("#line 1 \"{}\"\n{TRIAL_SOURCE}", original.display())).ok()?;
+    fs::write(src.join("file.h"), TRIAL_HEADER).ok()?;
+    fs::write(bindings.join("generated.h"), TRIAL_GENERATED).ok()?;
+    let object = build.join("file.o");
+    let status = Command::new(compiler)
+        .arg0(name)
+        .args(["-g", "-c", "-o"])
+        .arg(&object)
+        .arg(build.join("file.c"))
+        .arg("-I")
+        .arg(&src)
+        .arg("-I")
+        .arg(&bindings)
+        .args(super::key::trial_flags(root, &config))
+        .current_dir(&scratch)
+        .env("PWD", &scratch)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if !status.status.success() {
+        trial_says(&format!("{} failed the trial compile ({}): {}", compiler.display(), status.status, String::from_utf8_lossy(&status.stderr)));
+    }
+    status.status.success().then(|| fs::read(&object).ok()).flatten()
+}
+
+/// Say `what` on stderr when the wrapper is asked to say why it passes
+/// compiles through (`CACTUP_CC_DEBUG`): why a compiler's trial failed.
+pub(super) fn trial_says(what: &str) {
+    if std::env::var_os("CACTUP_CC_DEBUG").is_some() {
+        eprintln!("cactup: {what}");
+    }
+}
+
+/// Does `compiler`, run as `name`, make one object of the same sources in
+/// two different places when given the key's path map? Tried in `dir`, on
+/// two small trees at paths of different length with configurations of
+/// different names, with debug information on.
+///
+/// This is the one way to know. What a compiler does with several
+/// `-ffile-prefix-map` options that match one path has differed between
+/// versions, and between `__FILE__` and debug information within one
+/// version; whether debug information carries a checksum of each source
+/// file's bytes (and so of the path in a build copy's first line) depends
+/// on the compiler and the format. A compiler without the option fails the
+/// trial like one that applies it differently.
+fn relocates(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
+    let Ok(trial) = tempfile::tempdir_in(dir) else { return false };
+    let Ok(trial_dir) = fs::canonicalize(trial.path()) else { return false };
+    let one = trial_object(compiler, name, &trial_dir.join("one/Cactus"), "a");
+    let other = trial_object(compiler, name, &trial_dir.join("another/deeper/Cactus"), "bb");
+    if one.is_some() && other.is_some() && one != other {
+        trial_says(&format!("{} made two objects of the trial in two places", compiler.display()));
+    }
+    one.is_some() && one == other
+}
+
+/// The source of [`locale_neutral`]'s trial: bytes outside ASCII in a
+/// comment, a string, a character constant's string and a wide string —
+/// what a compiler that reads its source by the locale would read
+/// otherwise. (Not in an identifier: GCC before 10 rejects those.)
+const LOCALE_TRIAL: &[u8] = b"#include <stddef.h>\n/* d\xc3\xa9j\xc3\xa0 vu, stra\xc3\x9fe */\n\
+    const char *cactup_trial_s = \"caf\xc3\xa9 \xc3\xbc \xe2\x82\xac\";\n\
+    const wchar_t *cactup_trial_w = L\"caf\xc3\xa9 \xc3\xbc \xe2\x82\xac\";\n\
+    int cactup_trial(void) { return sizeof(\"\xc3\xa9\") + (int)cactup_trial_w[3]; }\n";
+
+/// Does `compiler`, run as `name`, make one object of [`LOCALE_TRIAL`] in
+/// this process's locale and in the C locale (§18.8)? Each session is
+/// compared with the same reference, so two sessions whose compilers pass
+/// are interchangeable for it. A compiler that fails to compile it either
+/// way fails the trial and keeps the locale in its keys.
+fn locale_neutral(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
+    let Ok(trial) = tempfile::tempdir_in(dir) else { return false };
+    let source = trial.path().join("locale.c");
+    let object = trial.path().join("locale.o");
+    if fs::write(&source, LOCALE_TRIAL).is_err() {
+        return false;
+    }
+    let compile = |c_locale: bool| {
+        let mut command = Command::new(compiler);
+        command.arg0(name).args(["-g", "-c", "-o"]).arg(&object).arg(&source).current_dir(trial.path());
+        if c_locale {
+            for (variable, _) in std::env::vars_os() {
+                if variable.as_bytes().starts_with(b"LC_") || variable == "LANG" || variable == "LANGUAGE" {
+                    command.env_remove(variable);
+                }
+            }
+            command.env("LC_ALL", "C");
+        }
+        let status = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?;
+        status.success().then(|| fs::read(&object).ok()).flatten()
+    };
+    let session = compile(false);
+    session.is_some() && session == compile(true)
+}
+
+/// Look at the compiler at `path`, run as `name`, from scratch: what it is.
+/// Every file the answer was computed from goes into `files`, also when the
+/// answer is "not one the cache works with". `trial_dir` is a directory for
+/// [`relocates`] to try the compiler in.
+/// `name` is the name `program` (as the recipe gave it) runs by; the trials
+/// run the compiler as the recipe does, by `program` (a GCC driver finds its
+/// installation from the name it is run by, along `PATH` for a bare one, and
+/// on qbd a bare `gcc` found another GCC's: tried).
+fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched: &mut Watched) -> Res<Compiler> {
+    // The file that runs, behind whatever links name it (`cc` -> `gcc` ->
+    // `x86_64-linux-gnu-gcc-14`).
+    let driver = fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?;
+    watched.files.push(Seen::of(&driver)?);
+    // And by the name it was found by: a link on the way turned elsewhere
+    // leads to another file, while the one found is as it was.
+    watched.files.push(Seen::of(path)?);
+    let bytes = fs::read(&driver).with_context(|| format!("Failed to read {}", driver.display()))?;
+    if !bytes.starts_with(b"\x7fELF") {
+        bail!("{} is a script, not a compiler cactup can identify", path.display());
+    }
+    let contains = |marker: &[u8]| bytes.windows(marker.len()).any(|window| window == marker);
+    let says = ask(path, &["--version"])?;
+
+    // What the driver says, and what its own bytes say: a wrapper passes
+    // `--version` on to a compiler, but it is not made of one. (The strings
+    // are the title of Clang's `--help`, and two environment variables only
+    // GCC's driver has a use for.)
+    let family = if says.contains("clang version") && contains(b"clang LLVM compiler") {
+        Family::Clang
+    } else if says.contains("Free Software Foundation") && contains(b"COLLECT_GCC") && contains(b"GCC_EXEC_PREFIX") {
+        match says.lines().next().is_some_and(|line| line.contains("GNU Fortran")) {
+            true => Family::Gfortran,
+            false => Family::Gcc,
+        }
+    } else if says.contains("Cuda compilation tools") && contains(b"nvcc.profile") {
+        Family::Nvcc
+    } else {
+        bail!("{} is not a compiler cactup knows (or is a wrapper around one)", path.display());
+    };
+
+    let mut hasher = Hasher::new("compiler");
+    let mut specs = None;
+    let mut multilib = Vec::new();
+    let mut answers = Vec::new();
+    hasher.feed(name.as_bytes());
+    hasher.feed(bytes_digest(&bytes).as_bytes());
+    // The programs that do the work, each with the libraries it loads.
+    let mut programs: Vec<(PathBuf, Option<String>)> = vec![(driver.clone(), None)];
+    let mut toolchain = Vec::new();
+    match family {
+        Family::Clang => {
+            // What it says, without where it is installed. A configuration
+            // file it says it reads rules it out (and is watched, so that
+            // the answer changes when the file goes). This spares every
+            // compile the asking; which file a given compile reads is that
+            // compile's to say (`key::flags_from_elsewhere`).
+            for line in says.lines() {
+                match line.split_once(": ") {
+                    Some(("InstalledDir", _)) => {}
+                    Some(("Configuration file", file)) => {
+                        let file = Path::new(file.trim());
+                        watched.files.extend(Seen::of(file));
+                        bail!(
+                            "{} reads a configuration file ({}), which can add flags the cache does not see",
+                            path.display(),
+                            file.display()
+                        );
+                    }
+                    _ => hasher.feed(line.as_bytes()),
+                }
+            }
+        }
+        Family::Nvcc => {
+            hasher.feed(says.as_bytes());
+            super::cuda::examine(path, &driver, &mut hasher, watched, &mut programs)?;
+            toolchain = programs.iter().skip(1).map(|(file, _)| file.clone()).collect();
+        }
+        Family::Gcc | Family::Gfortran => {
+            hasher.feed(says.as_bytes());
+            // The programs the driver hands the work to.
+            let helpers: &[&str] = match family {
+                Family::Gfortran => &["f951", "as"],
+                _ => &["cc1", "cc1plus", "as"],
+            };
+            // Where the driver looks for them, in order (its own prefixes,
+            // `COMPILER_PATH`'s entries, each with the target's directories
+            // first): a program put at a place before the one found would
+            // run instead.
+            let said = ask(path, &["-print-search-dirs"])?;
+            let listed = |what: &str| -> Res<Vec<PathBuf>> {
+                Ok(said
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&format!("{what}: =")))
+                    .with_context(|| format!("{} does not say where it looks for its {what}", path.display()))?
+                    .split(':')
+                    .filter(|dir| !dir.is_empty())
+                    .map(PathBuf::from)
+                    .collect())
+            };
+            let dirs = listed("programs")?;
+            // Where it looks for a `specs` file (its library prefixes,
+            // `LIBRARY_PATH`'s entries among them): one that appears there
+            // has the compile read it (tried).
+            let libraries = listed("libraries")?;
+            for helper in helpers {
+                let named = ask(path, &[&format!("-print-prog-name={helper}")])?;
+                answers.push((helper, named.clone()));
+                // A bare name back means "whatever PATH has": a front end
+                // that is not installed (no C++), or the system assembler.
+                // Passed over first: each of the driver's places.
+                let found = match Path::new(named.trim()) {
+                    file if file.is_absolute() => {
+                        // A GCC built `--with-as` runs that assembler,
+                        // looking nowhere first.
+                        match dirs.iter().position(|dir| dir.join(helper) == file) {
+                            Some(at) => dirs[..at].iter().for_each(|dir| watched.passed(&dir.join(helper))),
+                            None if *helper == "as" => {}
+                            None => bail!("{} finds {} where it does not say it looks", path.display(), file.display()),
+                        }
+                        Some(file.to_owned())
+                    }
+                    name => {
+                        dirs.iter().for_each(|dir| watched.passed(&dir.join(helper)));
+                        search_path(name.as_os_str(), watched)?
+                    }
+                };
+                hasher.feed(helper.as_bytes());
+                match found {
+                    Some(file) => {
+                        watched.files.extend(Seen::of(&file));
+                        let file = fs::canonicalize(&file).unwrap_or(file);
+                        // A script runs some other program, which nothing
+                        // here would follow (a wrapper around `as`).
+                        // Nor a program that runs another (an ELF wrapper):
+                        // its bytes must say it is the one the driver means,
+                        // as the driver's must.
+                        let marker: &[u8] = match *helper {
+                            "as" => b"GNU assembler",
+                            "f951" => b"GNU Fortran",
+                            "cc1plus" => b"GNU C++",
+                            _ => b"GNU C",
+                        };
+                        let bytes = fs::read(&file).with_context(|| format!("Failed to read {}", file.display()))?;
+                        if !bytes.starts_with(b"\x7fELF") || !bytes.windows(marker.len()).any(|window| window == marker) {
+                            bail!("{} runs {} for {helper}, which is no program cactup can identify (a script or a wrapper, maybe)", path.display(), file.display());
+                        }
+                        hasher.feed(file_digest(&file)?.as_bytes());
+                        watched.files.push(Seen::of(&file)?);
+                        programs.push((file, None));
+                    }
+                    None if *helper == "cc1plus" => hasher.feed(b"absent"),
+                    None => bail!("{} names no {helper} cactup can find", path.display()),
+                }
+            }
+            // The rules by which the driver builds their command lines: the
+            // built-in ones (`-dumpspecs` ignores a specs file).
+            for line in ask(path, &["-print-multi-lib"])?.lines() {
+                let flags = line.split_once(';').map_or("", |(_, flags)| flags);
+                multilib.extend(flags.split('@').filter(|flag| !flag.is_empty()).map(|flag| format!("-{flag}")));
+            }
+            multilib.sort();
+            multilib.dedup();
+            let builtin = ask(path, &["-dumpspecs"])?;
+            hasher.feed(builtin.as_bytes());
+            hasher.feed(ask(path, &["-dumpmachine"])?.as_bytes());
+            // A `specs` file on disk (an absolute path back means there is
+            // one) overrides them, and rules the compiler out unless all it
+            // changes is how GCC links. Then its bytes are part of what the
+            // compiler is.
+            let file = ask(path, &["-print-file-name=specs"])?;
+            let file = Path::new(file.trim());
+            // Also its machine's directory (`/usr/lib/gcc/<machine>/`), which
+            // it reads one from without listing it (tried): above the
+            // directory it is installed in, and under the prefix it was
+            // configured with, which a relocated GCC still reads (tried).
+            let mut machines: Vec<PathBuf> = Vec::new();
+            if let Some(installed) = said.lines().find_map(|line| line.strip_prefix("install: ")).map(|dir| Path::new(dir.trim()))
+                && let Some(machine) = installed.parent()
+            {
+                machines.push(machine.to_owned());
+            }
+            machines.push(configured_libdir(path).join("gcc").join(ask(path, &["-dumpmachine"])?.trim()));
+            for machine in machines.iter().filter(|dir| dir.is_absolute()) {
+                if machine.join("specs") != file {
+                    watched.passed(&machine.join("specs"));
+                }
+            }
+            let before = libraries.iter().position(|dir| dir.join("specs") == file).unwrap_or(libraries.len());
+            // (A relative one, from a relative entry of `LIBRARY_PATH`, is a
+            // search through the working directory: below.)
+            libraries[..before].iter().for_each(|dir| watched.passed(&dir.join("specs")));
+            if file.is_absolute() {
+                watched.files.extend(Seen::of(file));
+                let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;
+                if let Err(why) = super::specs::link_only(&builtin, &text, &bytes) {
+                    bail!(
+                        "{} reads a specs file ({}) the cache does not accept, since it can add flags the cache does not see: it {why}",
+                        path.display(),
+                        file.display()
+                    );
+                }
+                hasher.feed(b"specs file");
+                hasher.feed(&text);
+                specs = Some(fs::canonicalize(file).with_context(|| format!("Failed to resolve {}", file.display()))?);
+            }
+        }
+    }
+    let mut libraries = Vec::new();
+    for (program, library_path) in &programs {
+        libraries.extend(loaded_libraries_with(program, library_path.as_deref(), watched)?);
+    }
+    libraries.sort();
+    libraries.dedup();
+    // The places passed over were looked at after the driver and the loader
+    // searched them: a program or library that appeared there in between
+    // would be watched as it is now, with the one found before hashed.
+    // Asked again, after the looking, they must say the same.
+    for (helper, named) in &answers {
+        if ask(path, &[&format!("-print-prog-name={helper}")])? != *named {
+            bail!("{} found another {helper} while it was examined", path.display());
+        }
+    }
+    let mut again = Vec::new();
+    for (program, library_path) in &programs {
+        again.extend(loaded_libraries_with(program, library_path.as_deref(), &mut Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true })?);
+    }
+    again.sort();
+    again.dedup();
+    if again != libraries {
+        bail!("{} loads other libraries than it did a moment ago", path.display());
+    }
+    for library in libraries {
+        watched.files.extend(Seen::of(&library));
+        let library = fs::canonicalize(&library).unwrap_or(library);
+        hasher.feed(file_digest(&library)?.as_bytes());
+        watched.files.push(Seen::of(&library)?);
+    }
+    let (mut takes_module_id, mut host_reads) = (false, Vec::new());
+    let (relocates, locale_neutral) = match family {
+        Family::Gfortran => (super::fortran::relocates(path, program, trial_dir), super::fortran::locale_neutral(path, program, trial_dir)),
+        // The locale stays in the key: no trial for it here.
+        Family::Nvcc => {
+            let trial = super::cuda::trial(path, program, trial_dir);
+            takes_module_id = trial.takes_id;
+            for read in trial.host_reads {
+                let file = fs::canonicalize(&read).with_context(|| format!("Failed to resolve {}", read.display()))?;
+                hasher.feed(file.as_os_str().as_bytes());
+                hasher.feed(file_digest(&file)?.as_bytes());
+                watched.files.extend(Seen::of(&read));
+                watched.files.push(Seen::of(&file)?);
+                host_reads.push(file);
+            }
+            host_reads.sort();
+            host_reads.dedup();
+            (trial.relocates, false)
+        }
+        _ => (relocates(path, program, trial_dir), locale_neutral(path, program, trial_dir)),
+    };
+    Ok(Compiler {
+        path: path.to_owned(),
+        family,
+        relocates,
+        locale_neutral,
+        id: hasher.hex(),
+        specs,
+        multilib,
+        takes_module_id,
+        toolchain,
+        host_reads,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_programs_the_way_execvp_does() {
+        let sh = find_program(OsStr::new("sh")).unwrap();
+        assert!(sh.is_absolute() && sh.ends_with("sh"));
+        assert_eq!(find_program(OsStr::new("/bin/sh")).unwrap(), Path::new("/bin/sh"));
+        assert!(find_program(OsStr::new("no-such-compiler-anywhere")).is_err());
+        // A name with a slash is a path from the working directory.
+        assert_eq!(find_program(OsStr::new("./x/cc")).unwrap(), std::env::current_dir().unwrap().join("x/cc"));
+    }
+
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        crate::objcache::make_executable(&path);
+        path
+    }
+
+    #[test]
+    fn a_script_is_not_a_compiler_and_that_is_remembered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mpicc = script(tmp.path(), "mpicc", "exec gcc \"$@\"");
+        let err = identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string();
+        assert!(err.contains("is a script"), "{err}");
+        // Remembered: the same answer, from the one file kept for it.
+        assert_eq!(fs::read_dir(tmp.path().join("compilers")).unwrap().count(), 1);
+        assert_eq!(identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string(), err);
+        // Until the file changes.
+        fs::write(&mpicc, "#!/bin/sh\nexec clang \"$@\"\n# changed\n").unwrap();
+        assert!(identify(tmp.path(), mpicc.as_os_str()).unwrap_err().to_string().contains("is a script"));
+    }
+
+    /// What a driver says of itself goes into its identity, so it is asked
+    /// in English whatever the session's language: the variables that pick
+    /// a message catalog are set or cleared on the way in.
+    #[test]
+    fn a_driver_is_asked_in_english() {
+        let tmp = tempfile::tempdir().unwrap();
+        let driver = script(tmp.path(), "cc", r#"echo "LC_MESSAGES=$LC_MESSAGES LANGUAGE=${LANGUAGE-unset} $1""#);
+        assert_eq!(ask(&driver, &["--version"]).unwrap(), "LC_MESSAGES=C LANGUAGE=unset --version\n");
+    }
+
+    /// The real GCC of this host, if it has one.
+    fn gcc() -> Option<PathBuf> {
+        let gcc = find_program(OsStr::new("gcc")).ok()?;
+        ask(&gcc, &["--version"]).is_ok_and(|says| says.contains("Free Software Foundation")).then_some(gcc)
+    }
+
+    #[test]
+    fn identifies_gcc_and_remembers_it() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let first = identify(tmp.path(), OsStr::new("gcc")).unwrap();
+        assert_eq!(first.family, Family::Gcc);
+        assert_eq!(first.path, gcc);
+        assert!(first.relocates && first.id.len() == 64);
+        // GCC reads its source as UTF-8 whatever the locale (§18.8).
+        assert!(first.locale_neutral);
+
+        // Remembered: one file, and the same answer from it.
+        let memos: Vec<_> = fs::read_dir(tmp.path().join("compilers")).unwrap().collect();
+        assert_eq!(memos.len(), 1);
+        assert_eq!(identify(tmp.path(), OsStr::new("gcc")).unwrap(), first);
+        // By path it is the same compiler.
+        assert_eq!(identify(tmp.path(), gcc.as_os_str()).unwrap().id, first.id);
+
+        // A memo that no longer matches what is on disk is not trusted.
+        let memo = memos[0].as_ref().unwrap().path();
+        let stale = fs::read_to_string(&memo).unwrap().replace(&first.id, &"0".repeat(64)).replace("size = ", "size = 1");
+        fs::write(&memo, stale).unwrap();
+        assert_eq!(identify(tmp.path(), OsStr::new("gcc")).unwrap().id, first.id);
+
+        // g++ is another driver with the same back ends: another identity.
+        if find_program(OsStr::new("g++")).is_ok() {
+            assert_ne!(identify(tmp.path(), OsStr::new("g++")).unwrap().id, first.id);
+        }
+        // So is the same file under another name: a compiler may behave by
+        // the name it is run by.
+        let alias = tmp.path().join("cc-by-another-name");
+        std::os::unix::fs::symlink(&gcc, &alias).unwrap();
+        assert_ne!(identify(tmp.path(), alias.as_os_str()).unwrap().id, first.id);
+    }
+
+    /// A copy of this host's GCC driver installed under `prefix` (its back
+    /// ends linked in where it looks for them), with `specs`, if given, as
+    /// the specs file it finds. GCC looks for both relative to where its
+    /// driver is, as a site-built GCC does.
+    fn gcc_under(gcc: &Path, prefix: &Path, specs: Option<&str>) -> PathBuf {
+        let cc1 = PathBuf::from(ask(gcc, &["-print-prog-name=cc1"]).unwrap().trim());
+        let version = cc1.parent().unwrap();
+        let triple = ask(gcc, &["-dumpmachine"]).unwrap().trim().to_owned();
+        let version_name = version.file_name().unwrap();
+        let libexec = prefix.join("libexec/gcc").join(&triple);
+        let lib = prefix.join("lib/gcc").join(&triple).join(version_name);
+        for dir in [&prefix.join("bin"), &libexec, &lib] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(version, libexec.join(version_name)).unwrap();
+        let driver = prefix.join("bin/gcc");
+        fs::copy(fs::canonicalize(gcc).unwrap(), &driver).unwrap();
+        crate::objcache::make_executable(&driver);
+        if let Some(specs) = specs {
+            fs::write(lib.join("specs"), specs).unwrap();
+        }
+        driver
+    }
+
+    #[test]
+    fn a_gcc_whose_specs_file_only_changes_the_link_is_one_the_cache_works_with() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let builtin = ask(&gcc, &["-dumpspecs"]).unwrap();
+        // qbd's specs file, made the way its administrators made it.
+        let sneaky = builtin.replacen("*cc1:\n", "*cc1:\n-DSNEAKY ", 1);
+        let qbd = builtin.replacen("*link_libgcc:\n%D\n", "*link_libgcc:\n%(link_libgcc_rpath) %D\n", 1)
+            + "*link_libgcc_rpath:\n-rpath /opt/gcc/lib64\n\n";
+        assert!(qbd.contains("%(link_libgcc_rpath) %D") && sneaky.contains("-DSNEAKY"), "not the sections expected");
+
+        let plain = gcc_under(&gcc, &tmp.path().join("plain"), None);
+        let plain = identify(tmp.path(), plain.as_os_str()).unwrap();
+        assert_eq!(plain.specs, None);
+
+        let linking = gcc_under(&gcc, &tmp.path().join("linking"), Some(&qbd));
+        let linking = identify(tmp.path(), linking.as_os_str()).unwrap();
+        let file = tmp.path().join("linking/lib/gcc").join(ask(&gcc, &["-dumpmachine"]).unwrap().trim());
+        assert!(linking.specs.as_ref().is_some_and(|specs| specs.starts_with(fs::canonicalize(file).unwrap())), "{linking:?}");
+        assert_ne!(linking.id, plain.id, "the specs file is part of what the compiler is");
+
+        let compiling = gcc_under(&gcc, &tmp.path().join("compiling"), Some(&sneaky));
+        let err = identify(tmp.path(), compiling.as_os_str()).unwrap_err().to_string();
+        assert!(err.contains("reads a specs file") && err.contains("changes cc1"), "{err}");
+    }
+
+    /// A compiler whose objects follow the locale fails the trial: here a
+    /// stand-in that writes its "object" by the locale it was run in.
+    #[test]
+    fn a_compiler_that_reads_the_locale_keeps_it_in_its_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let by_locale = script(tmp.path(), "by-locale", "while [ $# -gt 1 ]; do [ \"$1\" = -o ] && out=$2; shift; done; echo \"${LC_ALL-}${LANG-}\" > \"$out\"");
+        let fixed = script(tmp.path(), "fixed", "while [ $# -gt 1 ]; do [ \"$1\" = -o ] && out=$2; shift; done; echo same > \"$out\"");
+        // Run from a child, so that the session's locale is one this test
+        // sets, and not C already.
+        let outcome = |compiler: &Path| {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "objcache::identity::tests::child_tries_the_locale", "--nocapture", "--ignored"])
+                .env("CACTUP_LOCALE_TRIAL", compiler)
+                .env("LANG", "de_DE.UTF-8")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert!(outcome(&by_locale).contains("neutral: false"), "{}", outcome(&by_locale));
+        assert!(outcome(&fixed).contains("neutral: true"), "{}", outcome(&fixed));
+    }
+
+    /// Run only by `a_compiler_that_reads_the_locale_keeps_it_in_its_keys`.
+    #[test]
+    #[ignore]
+    fn child_tries_the_locale() {
+        let Some(compiler) = std::env::var_os("CACTUP_LOCALE_TRIAL") else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        let compiler = PathBuf::from(compiler);
+        println!("neutral: {}", locale_neutral(&compiler, compiler.file_name().unwrap(), tmp.path()));
+    }
+
+    #[test]
+    fn tries_whether_the_path_map_holds() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(relocates(&gcc, OsStr::new("gcc"), tmp.path()));
+        // Stand-ins that are GCC except for one thing each: applying the
+        // first matching map instead of the last (the maps handed over in
+        // the other order), ignoring the maps, not compiling at all.
+        let split = "maps=; rest=; for a; do case $a in -ffile-prefix-map=*) maps=\"$a $maps\";; *) rest=\"$rest $a\";; esac; done";
+        let first_wins = script(tmp.path(), "first-wins", &format!("{split}\nexec {} $rest $maps", gcc.display()));
+        let no_map = script(tmp.path(), "no-map", &format!("{split}\nexec {} $rest", gcc.display()));
+        for stand_in in [first_wins, no_map, script(tmp.path(), "broken", "exit 1"), PathBuf::from("/nonexistent/cc")] {
+            assert!(!relocates(&stand_in, stand_in.file_name().unwrap(), tmp.path()), "{}", stand_in.display());
+        }
+        // Nothing of the trials is left behind: only the three scripts.
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn a_relative_path_entry_finds_what_execvp_finds() {
+        let tmp = tempfile::tempdir().unwrap();
+        script(tmp.path(), "shadowcc", "exit 0");
+        // `find_program` reads PATH and the working directory of this
+        // process, which other tests share: ask a child, in its own.
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "objcache::identity::tests::child_resolves_shadowcc", "--nocapture", "--ignored"])
+            .current_dir(tmp.path())
+            .env("PATH", format!(".:{}", std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap();
+        let found = String::from_utf8_lossy(&out.stdout);
+        let expected = fs::canonicalize(tmp.path()).unwrap().join("shadowcc");
+        assert!(found.contains(&format!("found {}", expected.display())), "{found}{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A program or library put where the search passed over before what
+    /// it found is another compiler: the remembered identity does not hold.
+    /// (Tried for real: an assembler appearing on `PATH` mid-build assembled
+    /// objects stored under the real one's identity.)
+    #[test]
+    fn what_appears_before_a_program_or_library_found_is_seen() {
+        if gcc().is_none() {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("bin")).unwrap();
+        // `identify` reads the environment and the working directory of this
+        // process, which other tests share: ask a child, in its own.
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "objcache::identity::tests::child_watches_places", "--nocapture", "--ignored"])
+            .current_dir(tmp.path())
+            .env("PATH", format!("{}:{}", tmp.path().join("bin").display(), std::env::var("PATH").unwrap()))
+            .env("LD_LIBRARY_PATH", tmp.path().join("libs"))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains("assembler seen") && said.contains("link seen") && said.contains("script seen") && said.contains("library seen"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+        // A search that passes through the working directory (an empty entry
+        // before what it finds) is watched there, by name, from each
+        // compile's own directory: a file left at such a place means the
+        // identity no longer holds (decision 22). One after what is found is
+        // never searched.
+        for (variable, entries, relative) in [
+            ("LD_LIBRARY_PATH", ":/nonexistent-cactup-test", true),
+            ("LD_LIBRARY_PATH", "/nonexistent-cactup-test;", true),
+            ("LD_LIBRARY_PATH", "", false),
+            ("LIBRARY_PATH", "/nonexistent-cactup-test:", true),
+            ("LIBRARY_PATH", "/nonexistent-cactup-test", false),
+        ] {
+            let dir = tempfile::tempdir_in(tmp.path()).unwrap();
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "objcache::identity::tests::child_watches_relative_places", "--nocapture", "--ignored"])
+                .current_dir(dir.path())
+                .env(variable, entries)
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            let expected = match relative {
+                true => "relative place watched",
+                false => "no relative place",
+            };
+            assert!(said.contains(expected), "{variable}={entries:?}: {said}{}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    /// Run only by `what_appears_before_a_program_or_library_found_is_seen`.
+    #[test]
+    #[ignore]
+    fn child_watches_relative_places() {
+        let memo = tempfile::tempdir().unwrap();
+        let (_, watch) = identify_watching(memo.path(), OsStr::new("gcc")).unwrap();
+        let Some(place) = watch.absent.iter().find(|place| place.is_relative()).cloned() else {
+            println!("no relative place");
+            return;
+        };
+        assert!(watch.holds());
+        if let Some(dir) = place.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(&place, "left over\n").unwrap();
+        if !watch.holds() {
+            println!("relative place watched");
+        }
+    }
+
+    /// An assembler found through a relative entry of `PATH` is another one,
+    /// or none, from each compile's directory: the compiler is ruled out.
+    #[test]
+    fn a_helper_found_by_a_relative_name_rules_the_compiler_out() {
+        if gcc().is_none() {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        script(tmp.path(), "as", "exec /usr/bin/as \"$@\"");
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "objcache::identity::tests::child_identifies_gcc", "--nocapture", "--ignored"])
+            .current_dir(tmp.path())
+            .env("PATH", format!(".:{}", std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains("through a relative entry of PATH"), "{said}{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Run only by `a_helper_found_by_a_relative_name_rules_the_compiler_out`.
+    #[test]
+    #[ignore]
+    fn child_identifies_gcc() {
+        let memo = tempfile::tempdir().unwrap();
+        match identify(memo.path(), OsStr::new("gcc")) {
+            Ok(compiler) => println!("identified {}", compiler.id),
+            Err(e) => println!("not identified: {e:#}"),
+        }
+    }
+
+    /// A library preloaded through a token the loader expands is watched
+    /// where the loader looks: the loader says what the tokens mean.
+    #[test]
+    fn loader_tokens_are_expanded_as_the_loader_expands_them() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let cc1 = PathBuf::from(ask(&gcc, &["-print-prog-name=cc1"]).unwrap().trim());
+        let loader = interpreter(&cc1).unwrap();
+        let Ok(said) = ask(&loader, &["--list-diagnostics"]) else {
+            eprintln!("skipped: this loader does not say what its tokens mean");
+            return;
+        };
+        let lib = said.lines().find_map(|line| line.strip_prefix("dl_dst_lib=\"")?.strip_suffix('"')).unwrap().to_owned();
+        assert_eq!(expand_tokens(&cc1, "/opt/x/$LIB/libx.so").unwrap(), format!("/opt/x/{lib}/libx.so"));
+        assert_eq!(expand_tokens(&cc1, "/opt/${LIB}/y.so").unwrap(), format!("/opt/{lib}/y.so"));
+        let origin = fs::canonicalize(&cc1).unwrap().parent().unwrap().to_string_lossy().into_owned();
+        assert_eq!(expand_tokens(&cc1, "$ORIGIN/z.so").unwrap(), format!("{origin}/z.so"));
+        assert!(!expand_tokens(&cc1, "/opt/$PLATFORM/w.so").unwrap().contains('$'));
+        assert!(expand_tokens(&cc1, "/opt/$UNKNOWN/w.so").is_err());
+    }
+
+    /// The library directory a configure line sets, as configure reads it.
+    #[test]
+    fn a_configure_line_says_where_the_libraries_go() {
+        let at = |line: &str| libdir_from_configure(line).display().to_string();
+        assert_eq!(at("../src/configure -v --prefix=/usr --libdir=/usr/lib"), "/usr/lib");
+        assert_eq!(at("configure --prefix=/opt/gcc-14"), "/opt/gcc-14/lib");
+        assert_eq!(at("configure --prefix /opt/gcc-14 --exec-prefix=/opt/x"), "/opt/x/lib");
+        assert_eq!(at("configure --prefix=/a --libdir='${exec_prefix}/lib64'"), "/a/lib64");
+        assert_eq!(at("configure --prefix=/a --prefix=/b"), "/b/lib", "the last one given wins");
+        assert_eq!(at("configure --with-pkgversion='Debian 14.2.0-19' --prefix=\"/opt/my gcc\""), "/opt/my gcc/lib");
+        assert_eq!(at("configure"), "/usr/local/lib");
+    }
+
+    /// GCC reads a `specs` file from its machine's directory under the
+    /// library directory it was configured with, even relocated, without
+    /// listing it: that place is watched, for a relocated copy too (where it
+    /// is not the directory above the one the copy is installed in).
+    #[test]
+    fn the_configured_machine_directory_is_watched_for_a_specs_file() {
+        let Some(gcc) = gcc() else {
+            eprintln!("skipped: no GCC on this host");
+            return;
+        };
+        let machine = configured_libdir(&gcc).join("gcc").join(ask(&gcc, &["-dumpmachine"]).unwrap().trim()).join("specs");
+        if machine.exists() {
+            eprintln!("skipped: {} is there", machine.display());
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let driver = gcc_under(&gcc, &tmp.path().join("prefix"), None);
+        assert!(!machine.starts_with(tmp.path()));
+        let memo = tmp.path().join("memo");
+        fs::create_dir(&memo).unwrap();
+        let (_, watch) = identify_watching(&memo, driver.as_os_str()).unwrap();
+        assert!(watch.absent.contains(&machine), "{} not among {:?}", machine.display(), watch.absent);
+    }
+
+    /// Run only by `what_appears_before_a_program_or_library_found_is_seen`.
+    #[test]
+    #[ignore]
+    fn child_watches_places() {
+        let memo = tempfile::tempdir().unwrap();
+        let first = identify(memo.path(), OsStr::new("gcc")).unwrap();
+        assert_eq!(identify(memo.path(), OsStr::new("gcc")).unwrap(), first);
+        // Another assembler first on `PATH` (the same one with a byte more).
+        let mut other_bytes = fs::read(fs::canonicalize(find_program(OsStr::new("as")).unwrap()).unwrap()).unwrap();
+        other_bytes.push(0);
+        let other = std::env::current_dir().unwrap().join("other-as");
+        fs::write(&other, other_bytes).unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::copy(&other, "bin/as").unwrap();
+        if identify(memo.path(), OsStr::new("gcc")).is_ok_and(|now| now.id != first.id) {
+            println!("assembler seen");
+        }
+        fs::remove_file("bin/as").unwrap();
+        assert_eq!(identify(memo.path(), OsStr::new("gcc")).unwrap(), first);
+        // One that is a link to the real one, then turned to another.
+        let real_as = find_program(OsStr::new("as")).unwrap();
+        std::os::unix::fs::symlink(&real_as, "bin/as").unwrap();
+        let linked = identify(memo.path(), OsStr::new("gcc")).unwrap();
+        fs::remove_file("bin/as").unwrap();
+        std::os::unix::fs::symlink(&other, "bin/as").unwrap();
+        if identify(memo.path(), OsStr::new("gcc")).is_ok_and(|now| now.id != linked.id) {
+            println!("link seen");
+        }
+        fs::remove_file("bin/as").unwrap();
+        // One that is a script: what it runs is followed by nothing here.
+        script(Path::new("bin"), "as", "exec /usr/bin/as \"$@\"");
+        if identify(memo.path(), OsStr::new("gcc")).is_err_and(|e| format!("{e:#}").contains("a script or a wrapper, maybe")) {
+            println!("script seen");
+        }
+        fs::remove_file("bin/as").unwrap();
+        // A library put in the directory `LD_LIBRARY_PATH` names, which the
+        // loader tries before the one it found.
+        let (_, watch) = identify_watching(memo.path(), OsStr::new("gcc")).unwrap();
+        let cc1 = PathBuf::from(ask(&first.path, &["-print-prog-name=cc1"]).unwrap().trim());
+        let mut tried = Watched { files: &mut Vec::new(), absent: &mut Vec::new(), helper: true };
+        let libraries = loaded_libraries(&cc1, &mut tried).unwrap();
+        let library = libraries.iter().find(|library| !library.to_string_lossy().contains("ld-linux") && !library.to_string_lossy().contains("libc.so")).unwrap();
+        fs::create_dir("libs").unwrap();
+        fs::copy(library, Path::new("libs").join(library.file_name().unwrap())).unwrap();
+        if !watch.holds() {
+            println!("library seen");
+        }
+    }
+
+    /// Run only by `a_relative_path_entry_finds_what_execvp_finds`.
+    #[test]
+    #[ignore]
+    fn child_resolves_shadowcc() {
+        if let Ok(found) = find_program(OsStr::new("shadowcc")) {
+            println!("found {}", fs::canonicalize(found).unwrap().display());
+        }
+    }
+}
