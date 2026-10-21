@@ -98,6 +98,22 @@ This implicitly creates the simulation and submits it in one command. If the sim
 cactup sim submit mysim
 ```
 
+### Waiting for the jobs: `--block`
+
+`sim submit` returns as soon as the jobs are queued. With `--block` it waits
+until they are over, every chained job included (see Walltime below), and
+then says how each restart ended:
+
+```sh
+cactup sim submit mysim mysim.par -w 1:00:00 --block && ./analyze.sh mysim
+```
+
+It exits with an error unless every run finished successfully: a run that
+failed, one stopped (`sim stop`) before it ended, and a job that left the
+queue without its run recording an end all count against it. That makes it
+the way to run something after a simulation without a polling loop of your
+own. Ctrl-C stops the wait, not the jobs: they keep running in the queue.
+
 ## Implicit creation with submit/run
 
 Both `sim submit` and `sim run` can create the simulation if it doesn't exist:

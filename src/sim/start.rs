@@ -2,7 +2,7 @@
 //! generation, universes (§4.8), auto-recovery + walltime chaining (§8.8),
 //! and the compute-node path (§8.3.1).
 
-use crate::args::{SimRunArgs, SimStartArgs, UniverseFlags};
+use crate::args::{SimRunArgs, SimStartArgs, SimSubmitArgs, UniverseFlags};
 use crate::build::ConfigMeta;
 use crate::commands::build as build_cmd;
 use crate::commands::Ctx;
@@ -275,20 +275,136 @@ impl Identity {
 }
 
 /// `sim submit` (§8.3).
-pub fn submit(ctx: &Ctx, args: SimStartArgs) -> Res<()> {
+pub fn submit(ctx: &Ctx, args: SimSubmitArgs) -> Res<()> {
     let machine = crate::commands::machine::resolve(ctx)?;
     let inst = Installation::resolve(ctx)?;
     let db = ctx.db.read()?;
-    let sim = obtain_sim(ctx, &machine, &inst, &args)?;
-    submit_impl(
+    let sim = obtain_sim(ctx, &machine, &inst, &args.start)?;
+    let submitted = submit_impl(
         &inst,
         &machine,
         &db,
         &sim,
-        &args,
+        &args.start,
         ctx.globals.verbose,
         ctx.globals.hostname.as_deref(),
-    )
+    )?;
+    if !args.block {
+        return Ok(());
+    }
+    wait_for_restarts(&sim, &Scheduler::for_machine(&machine), &submitted, WAIT_JOB_CHECK_INTERVAL)
+}
+
+/// How often `sim submit --block` asks the scheduler whether a job it waits
+/// for is still there; the restart's own record is read every second.
+const WAIT_JOB_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How a restart `sim submit --block` waited for ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartEnd {
+    /// Its run recorded its end, and whether the run-script succeeded.
+    Ran(bool),
+    /// Ended by `sim stop` or `sim clean`: no run recorded an end.
+    Stopped,
+    /// Its job is gone and nothing recorded an end: the run died, or never
+    /// started.
+    Vanished,
+}
+
+/// `sim submit --block` (§8.3): wait for every restart this submission
+/// queued, in chain order, and fail unless each one's run ended and
+/// succeeded. Always polled, never the machine's `blocking-submit` (§7.9): a
+/// chain pre-submits all its jobs at once, which a command that returns
+/// only when its job has ended cannot do. The verdict is each restart's own
+/// record (`succeeded`), never a relayed exit code, as for a build. Ctrl-C
+/// stops the wait, never the jobs.
+fn wait_for_restarts(
+    sim: &Simulation,
+    sched: &Scheduler,
+    submitted: &[(u32, String)],
+    job_check: std::time::Duration,
+) -> Res<()> {
+    let jobs: Vec<&str> = submitted.iter().map(|(_, job)| job.as_str()).collect();
+    println!(
+        "Waiting for {} (job{} {}) — Ctrl-C stops waiting; the queued jobs keep running.",
+        sim.name.bold(),
+        if jobs.len() == 1 { "" } else { "s" },
+        jobs.join(", ")
+    );
+    let mut unfinished = Vec::new();
+    for (id, job) in submitted {
+        let dir = restart::dir_name(*id);
+        let end = wait_for_restart(sim, sched, *id, job_check)?;
+        match end {
+            RestartEnd::Ran(true) => println!("Restart {dir} (job {job}) finished."),
+            RestartEnd::Ran(false) => println!("{}", format!("Restart {dir} (job {job}) failed.").red()),
+            RestartEnd::Stopped => {
+                println!("{}", format!("Restart {dir} (job {job}) was stopped before its run ended.").yellow())
+            }
+            RestartEnd::Vanished => println!(
+                "{}",
+                format!("Restart {dir} (job {job}) left the queue without its run recording an end.").red()
+            ),
+        }
+        if end != RestartEnd::Ran(true) {
+            unfinished.push(dir);
+        }
+    }
+    if !unfinished.is_empty() {
+        bail!(
+            "simulation \"{}\" did not finish: {} (its output is in {})",
+            sim.name,
+            unfinished.join(", "),
+            sim.dir.display()
+        );
+    }
+    println!("{}", format!("Simulation {} finished.", sim.name.bold()).bright_green());
+    Ok(())
+}
+
+/// Wait for restart `id` to end (see [`wait_for_restarts`]). A job the
+/// scheduler cannot be asked about is waited for; one it no longer lists,
+/// whose run holds no lock, has ended.
+fn wait_for_restart(
+    sim: &Simulation,
+    sched: &Scheduler,
+    id: u32,
+    job_check: std::time::Duration,
+) -> Res<RestartEnd> {
+    let ended = |r: &Restart| match r.meta.succeeded {
+        Some(ok) => RestartEnd::Ran(ok),
+        None => RestartEnd::Stopped,
+    };
+    let mut last_job_check: Option<std::time::Instant> = None;
+    loop {
+        let r = Restart::load(&sim.dir, id)?;
+        if r.meta.terminated {
+            return Ok(ended(&r));
+        }
+        if last_job_check.is_none_or(|t| t.elapsed() >= job_check) {
+            last_job_check = Some(std::time::Instant::now());
+            let listed = match r.meta.scheduler_job(sched).map(|job| sched.get_status(job)) {
+                Some(Ok(status)) => crate::scheduler::is_live(status, false),
+                Some(Err(_)) => true,
+                None => false,
+            };
+            if !listed && !LinkLock::is_held_live(&r.running_lock_path()).unwrap_or(false) {
+                // Its run may have recorded its end since the read above.
+                let r = Restart::load(&sim.dir, id)?;
+                return Ok(if r.meta.terminated { ended(&r) } else { RestartEnd::Vanished });
+            }
+        }
+        for _ in 0..10 {
+            if gix::interrupt::is_triggered() {
+                bail!(
+                    "interrupted: stopped waiting for simulation \"{}\"; its queued jobs keep running \
+                     (`cactup sim list` shows them)",
+                    sim.name
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 fn submit_impl(
@@ -299,7 +415,7 @@ fn submit_impl(
     args: &SimStartArgs,
     verbose: bool,
     hostname_override: Option<&str>,
-) -> Res<()> {
+) -> Res<Vec<(u32, String)>> {
     let cactus_root = inst.cactus_root();
     let cfg = ConfigMeta::load(&cactus_root, &sim.meta.configuration)?
         .ok_or_else(|| config_missing_error(&cactus_root, machine, &sim.meta.configuration))?;
@@ -492,6 +608,8 @@ fn submit_impl(
     let scratch_home = machine.meta.path_for(db, "scratch-home")?.unwrap_or_default();
     let (sub_script_name, run_script_name) = (sub_script_name.to_owned(), run_script_name.to_owned());
 
+    // Each restart queued, with its job, for `--block`.
+    let mut submitted_restarts = Vec::new();
     for seg in 0..segments {
         // Every restart gets a fresh id: the reaper (above) cleared the stale
         // active restart, so `next_id` advances the chain.
@@ -562,6 +680,7 @@ fn submit_impl(
                 chained_job_id: chained,
                 status: None,
                 terminated: false,
+                succeeded: None,
                 universe: run_uni_spec.clone(),
                 vars: restart::freeze_vars(&vset),
                 knobs: restart::freeze_knobs(&vset),
@@ -609,9 +728,10 @@ fn submit_impl(
                 .unwrap_or_default()
         );
 
+        submitted_restarts.push((id, job_id.clone()));
         prev_job = Some(job_id);
     }
-    Ok(())
+    Ok(submitted_restarts)
 }
 
 #[cfg(test)]
@@ -802,6 +922,7 @@ fn run_interactive(
             chained_job_id: None,
             status: None,
             terminated: false,
+            succeeded: None,
             universe: run_uni_spec,
             vars: restart::freeze_vars(&vset),
             knobs: restart::freeze_knobs(&vset),
@@ -958,6 +1079,7 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     // and records its end again when it is over (§8.6).
     r.meta.terminated = false;
     r.meta.finished = None;
+    r.meta.succeeded = None;
     r.store()?;
 
     let tee_files = tee.then(|| {
@@ -970,6 +1092,7 @@ fn execute_restart(sim: &Simulation, r: &mut Restart, tee: bool) -> Res<()> {
     // checkpoint/termination behavior — cactup only bookkeeps (§8.8).
     r.meta.finished = Some(Utc::now());
     r.meta.terminated = true;
+    r.meta.succeeded = Some(matches!(&status, Ok(st) if st.success()));
     r.meta.status = Some("U".to_owned());
     r.store()?;
     let _ = parfile; // the ready-to-run parfile stays in the restart (§9.1)
@@ -1386,6 +1509,58 @@ mod tests {
         let log = fs::read_to_string(sim.log_path()).unwrap();
         assert!(log.contains("] create::"), "{log}");
         assert!(log.contains("] submit::submitted output-0000 as job JOB-0"), "{log}");
+    }
+
+    /// `sim submit --block` (§8.3) waits for every restart it queued and
+    /// takes each one's verdict from its record: a run that recorded success
+    /// finishes; one stopped before its run ended, one whose run failed, and
+    /// one whose job left the queue with nothing recorded do not. The fake
+    /// scheduler lists no job, so nothing here waits on a live one.
+    #[test]
+    fn block_reports_each_restarts_recorded_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let machine = fake_machine(&tmp.path().join("mdb-fake"));
+        let inst = fake_installation(&tmp.path().join("inst"));
+        let ctx = fake_ctx(&tmp.path().join("db"));
+        let parfile = tmp.path().join("bbh.par");
+        fs::write(&parfile, "ActiveThorns = \"IOUtil\"\n").unwrap();
+        let sim = crate::sim::create(&ctx, &machine, &inst, &create_req(&parfile)).unwrap();
+        let db = ctx.db.read().unwrap();
+        let sched = Scheduler::for_machine(&machine);
+
+        // 50 h on a 24 h ceiling: three chained restarts, all reported.
+        let submitted =
+            submit_impl(&inst, &machine, &db, &sim, &start_args("bbh", "50:00:00"), false, Some("testhost"))
+                .unwrap();
+        let ids: Vec<u32> = submitted.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [0, 1, 2]);
+        assert_eq!(submitted[1].1, "JOB-1");
+
+        let run_args = SimRunArgs {
+            start: start_args("bbh", "24:00:00"),
+            debug: false,
+            restart_id: Some(1),
+            sim_dir: Some(sim.dir.clone()),
+        };
+        run_compute(&run_args, &sim.dir, 1).unwrap();
+        assert_eq!(Restart::load(&sim.dir, 1).unwrap().meta.succeeded, Some(true));
+        let mut r0 = Restart::load(&sim.dir, 0).unwrap();
+        r0.meta.terminated = true;
+        r0.store().unwrap();
+
+        let none = std::time::Duration::ZERO;
+        assert_eq!(wait_for_restart(&sim, &sched, 0, none).unwrap(), RestartEnd::Stopped);
+        assert_eq!(wait_for_restart(&sim, &sched, 1, none).unwrap(), RestartEnd::Ran(true));
+        assert_eq!(wait_for_restart(&sim, &sched, 2, none).unwrap(), RestartEnd::Vanished);
+        let err = format!("{:#}", wait_for_restarts(&sim, &sched, &submitted, none).unwrap_err());
+        assert!(err.contains("did not finish: output-0000, output-0002"), "{err}");
+        wait_for_restarts(&sim, &sched, &submitted[1..2], none).unwrap();
+
+        let mut r1 = Restart::load(&sim.dir, 1).unwrap();
+        r1.meta.succeeded = Some(false);
+        r1.store().unwrap();
+        assert_eq!(wait_for_restart(&sim, &sched, 1, none).unwrap(), RestartEnd::Ran(false));
+        assert!(wait_for_restarts(&sim, &sched, &submitted[1..2], none).is_err());
     }
 
     /// §7.9's build-submit feature opens a real corruption race at `sim

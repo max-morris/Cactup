@@ -3479,8 +3479,8 @@ No restart is created yet (matches simfactory).
 ### 8.3 `sim submit`
 
 ```
-cactup sim submit [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] <sim> <TOPOLOGY…>
-cactup sim submit [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] <sim> <parfile> [--config C] <TOPOLOGY…>   # implicit create
+cactup sim submit [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] [--block] <sim> <TOPOLOGY…>
+cactup sim submit [-f] [--overwrite] [--force-queue] [--ignore-machine] [--universe U | --no-universe] [--block] <sim> <parfile> [--config C] <TOPOLOGY…>   # implicit create
 ```
 
 Port of `submit()` (`simfactory-docs.txt` §14.2):
@@ -3530,6 +3530,20 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   conditional — §6). Each segment continues from the prior one only insofar as
   its **parfile** recovers the newest checkpoint — cactup does not arrange that
   and takes no position on it (§8.8).
+- **`--block`** waits, once everything is submitted, for every restart this
+  submission queued (the whole chain), in order, and then reports each one's
+  end. The verdict is the restart's own record, as for a build (§7.9): the
+  run writes `succeeded` (did the run-script exit 0) into `restart.toml`
+  with `terminated`. A restart whose run succeeded finished; one whose run
+  failed, one `stop`/`clean` ended (`terminated` without `succeeded`), and
+  one whose job the scheduler no longer lists while no run holds its lock
+  and nothing was recorded did not, and any of these makes `sim submit`
+  fail once the last restart is over. The wait polls the record (every
+  second) and the scheduler (every 5 s; a failed query keeps waiting), and
+  never uses `[scheduler].blocking-submit`: a chain pre-submits all its
+  jobs at once, which a submit command that returns only when its job has
+  ended cannot do. Ctrl-C ends the wait with an "interrupted" error and
+  leaves the jobs queued.
 
 #### 8.3.1 Compute-node re-invocation
 
@@ -4274,7 +4288,8 @@ ids are pids
 the `job-host` and `job-start` recorded with `job-id` (§10; `build.toml` and
 `test.toml` carry them too), `job-stopped` (when a stop after the
 restart's end settled its job, §10; `build.toml`'s and `test.toml`'s
-`[timestamps]` carry it too), the last observed `status`, the resolved **run** `universe` (name + expanded
+`[timestamps]` carry it too), the last observed `status`, `terminated` and,
+when a run recorded its end, `succeeded` (§8.3's `--block`), the resolved **run** `universe` (name + expanded
 wrapper, or absent for the host context — §4.8, so the compute-node run applies it
 without re-reading the MDB), the frozen `[vars]` table (the §6.3 variable set)
 and `[knobs]` table (the effective knob snapshot, §5.1 — both so the compute

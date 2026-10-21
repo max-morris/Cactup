@@ -960,7 +960,7 @@ pub(crate) enum SimCommand {
     },
     // §8.3
     /// Submit a simulation to the queue (implicit create with a parfile)
-    Submit(SimStartArgs),
+    Submit(SimSubmitArgs),
     // §8.4
     /// Run a simulation interactively, bypassing the queue
     Run(SimRunArgs),
@@ -1052,6 +1052,17 @@ pub(crate) struct SimStartArgs {
     /// − buffer (default max(wall/24, 10 min)).
     #[clap(long, value_name = "(DD-)?HH:MM:SS", value_parser = parse_walltime)]
     pub checkpt_buffer: Option<Walltime>,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct SimSubmitArgs {
+    #[clap(flatten)]
+    pub start: SimStartArgs,
+    // §8.3. Not on `SimStartArgs`: `sim run` already runs in the foreground.
+    /// Wait for the simulation's jobs to finish before returning, every
+    /// chained one included; fails if a run fails.
+    #[clap(long)]
+    pub block: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1540,6 +1551,10 @@ mod tests {
             ])
             .is_err()
         );
+        // `sim submit --block` waits for the queued jobs (§8.3); `sim run`
+        // runs in the foreground, so it has no such flag.
+        assert!(Args::try_parse_from(["cactup", "sim", "submit", "s", "x.par", "--block"]).is_ok());
+        assert!(Args::try_parse_from(["cactup", "sim", "run", "s", "--block"]).is_err());
     }
 
     /// `--optionlist` names a user-supplied file in place of the machine's
