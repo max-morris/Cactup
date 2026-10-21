@@ -105,11 +105,13 @@ default-cpus-per-task = 4
 
 # A universe wraps the commands cactup runs for a config: its build and, by
 # default, its simulations (a flavor's optionlist can opt out with
-# coerce-run-universe = false). `cactup build NAME --universe
-# pinned` builds and runs under taskset, restricted to this container's CPUs.
+# coerce-run-universe = false). Without one, they run on the host as they
+# are. `cactup build NAME --universe taskset` builds and runs under taskset,
+# restricted to this container's CPUs: a stand-in for the container image a
+# cluster's universe would run in.
 # The CPU numbers differ from container to container, so they come from the
 # environment: the container's startup exports its CPU list as
 # CACTUP_TUTORIAL_CPUS, and sbatch passes the submitting shell's environment
 # on to the job, where the run is wrapped.
-[universes.pinned]
+[universes.taskset]
 wrapper-argv = ["taskset", "-c", "@ENV(CACTUP_TUTORIAL_CPUS)@"]
