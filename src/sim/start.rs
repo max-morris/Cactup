@@ -362,9 +362,41 @@ fn wait_for_restarts(
     Ok(())
 }
 
-/// Wait for restart `id` to end (see [`wait_for_restarts`]). A job the
-/// scheduler cannot be asked about is waited for; one it no longer lists,
-/// whose run holds no lock, has ended.
+/// How long `--block` waits, after a run recorded its end, for its job to
+/// leave the queue.
+const LEAVE_QUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// After a run recorded its end, its job is still listed while the
+/// scheduler finishes it (Slurm's `CG`): wait, briefly, for it to go, so a
+/// `sim delete` or `--overwrite` right after `--block` does not meet it. A
+/// failed query, or a job still listed after [`LEAVE_QUEUE_WAIT`], ends the
+/// wait as it is.
+fn leave_queue(sim: &Simulation, sched: &Scheduler, r: &Restart) -> Res<()> {
+    let Some(job) = r.meta.scheduler_job(sched) else { return Ok(()) };
+    let started = std::time::Instant::now();
+    while started.elapsed() < LEAVE_QUEUE_WAIT {
+        match sched.get_status(job) {
+            Ok(status) if crate::scheduler::is_live(status, true) => {}
+            _ => return Ok(()),
+        }
+        for _ in 0..10 {
+            if gix::interrupt::is_triggered() {
+                bail!(
+                    "interrupted: stopped waiting for simulation \"{}\"; its queued jobs keep running \
+                     (`cactup sim list` shows them)",
+                    sim.name
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
+/// Wait for restart `id` to end (see [`wait_for_restarts`]), and its job to
+/// leave the queue ([`leave_queue`]). A job the scheduler cannot be asked
+/// about is waited for; one it no longer lists, whose run holds no lock, has
+/// ended.
 fn wait_for_restart(
     sim: &Simulation,
     sched: &Scheduler,
@@ -379,6 +411,7 @@ fn wait_for_restart(
     loop {
         let r = Restart::load(&sim.dir, id)?;
         if r.meta.terminated {
+            leave_queue(sim, sched, &r)?;
             return Ok(ended(&r));
         }
         if last_job_check.is_none_or(|t| t.elapsed() >= job_check) {

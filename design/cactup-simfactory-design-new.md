@@ -3538,8 +3538,12 @@ Port of `submit()` (`simfactory-docs.txt` §14.2):
   failed, one `stop`/`clean` ended (`terminated` without `succeeded`), and
   one whose job the scheduler no longer lists while no run holds its lock
   and nothing was recorded did not, and any of these makes `sim submit`
-  fail once the last restart is over. The wait polls the record (every
-  second) and the scheduler (every 5 s; a failed query keeps waiting), and
+  fail once the last restart is over. A restart that recorded its end is
+  over once the scheduler no longer lists its job (Slurm's completing `CG`
+  lingers), so a `sim delete` right after does not meet it; that wait is
+  given up after a minute or on a failed query. The wait polls the record
+  (every second) and the scheduler (every 5 s; a failed query keeps
+  waiting), and
   never uses `[scheduler].blocking-submit`: a chain pre-submits all its
   jobs at once, which a submit command that returns only when its job has
   ended cannot do. Ctrl-C ends the wait with an "interrupted" error and
