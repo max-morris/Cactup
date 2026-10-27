@@ -201,7 +201,7 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
 
     // Orphans and config interactions are computed up front too — dry-run
     // prints all of it, and the real run needs them after the fetch anyway.
-    let orphans = enumerate_orphans(&inst, &list, &plan)?;
+    let mut orphans = enumerate_orphans(&inst, &list, &plan)?;
     let configs = crate::commands::config::list_configs(&inst.cactus_root())?;
 
     if args.dry_run {
@@ -325,6 +325,14 @@ pub fn dispatch(ctx: &Ctx, args: RefetchArgs) -> Res<()> {
     // into the fetchable set above, so this reports only the repos this run
     // genuinely left alone.
     print_skip_status(&plan.skipped, &forced_repo_names, overwrite_modified, &args, SkipPhase::Summary);
+
+    // A thorn the thornlist moved to another repo had its link repointed by
+    // the fetch; the orphan's links listed before it would delete that link.
+    refresh_orphan_links(
+        &inst.cactus_root().join("arrangements"),
+        &inst.root.join(&plan.root).join("repos"),
+        &mut orphans,
+    )?;
 
     // Orphan handling: always reported; removed only under --prune.
     report_orphans(&orphans);
@@ -854,6 +862,15 @@ fn symlinks_into(arrangements: &Path, repos_dir: &Path, repo: &str) -> Res<Vec<P
         }
     }
     Ok(out)
+}
+
+/// Re-read which arrangement symlinks point into each orphan, now that the
+/// fetch may have repointed some of them at a repo the thornlist names.
+fn refresh_orphan_links(arrangements: &Path, repos_dir: &Path, orphans: &mut [Orphan]) -> Res<()> {
+    for o in orphans {
+        o.symlinks = symlinks_into(arrangements, repos_dir, &o.repo)?;
+    }
+    Ok(())
 }
 
 fn report_orphans(orphans: &[Orphan]) {
@@ -1492,6 +1509,35 @@ mod tests {
         remove_pruned_repo_until(&inst, "Orphan", &repo, &GO).unwrap();
         assert!(!repo.exists());
         assert_eq!(fs::read_dir(pruning_dir(&inst)).unwrap().count(), 0);
+    }
+
+    /// A thorn that moved from an orphan repo to one the thornlist names keeps
+    /// its link: once the fetch repoints it, it is no longer the orphan's.
+    #[test]
+    fn a_link_the_fetch_repointed_is_not_pruned_with_the_old_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = tmp.path().join("Cactus/repos");
+        let arrangements = tmp.path().join("Cactus/arrangements");
+        fs::create_dir_all(repos.join("ExternalLibraries-Boost")).unwrap();
+        fs::create_dir_all(repos.join("Boost")).unwrap();
+        fs::create_dir_all(arrangements.join("ExternalLibraries")).unwrap();
+        let link = arrangements.join("ExternalLibraries/Boost");
+        std::os::unix::fs::symlink("../../repos/ExternalLibraries-Boost", &link).unwrap();
+
+        let mut orphans = vec![Orphan {
+            repo: "ExternalLibraries-Boost".to_string(),
+            dir: repos.join("ExternalLibraries-Boost"),
+            symlinks: symlinks_into(&arrangements, &repos, "ExternalLibraries-Boost").unwrap(),
+            prunable: true,
+        }];
+        assert_eq!(orphans[0].symlinks, vec![link.clone()]);
+
+        // The fetch repoints the thorn at the repo the thornlist now names.
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("../../repos/Boost", &link).unwrap();
+
+        refresh_orphan_links(&arrangements, &repos, &mut orphans).unwrap();
+        assert!(orphans[0].symlinks.is_empty());
     }
 
     #[test]
