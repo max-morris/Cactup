@@ -67,9 +67,9 @@ fn push_group(
 
 /// The `show` conformance block: the lines describing thorns whose on-disk
 /// contents do not match the installation's recorded thornlist. Empty when
-/// the tree fully conforms. Colourless strings on purpose (so they stay
+/// the tree fully conforms. Colorless strings on purpose (so they stay
 /// testable) paired with a per-line [`Tone`]; `show_installation` applies the
-/// colour.
+/// color.
 ///
 /// A failed repo is an error the user did not ask for and did not get — it is
 /// reported first, in [`Tone::Alarm`], ahead of a merely-skipped one (a
@@ -166,8 +166,9 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
 pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let database = ctx.db.read()?;
 
-    // No alias → the contextually-relevant installation: the active one.
-    let alias = match alias {
+    // No alias → the contextually-relevant installation: `-I`, else the
+    // active one (the same choice `Installation::resolve` makes).
+    let alias = match alias.or_else(|| ctx.globals.installation.clone()) {
         Some(alias) => alias,
         None => database.active_installation.clone().ok_or_else(|| {
             anyhow!(
@@ -406,5 +407,35 @@ mod tests {
         let detail_part = repo_line.split(" — ").nth(1).unwrap();
         // 97 chars of the original detail plus the ellipsis.
         assert_eq!(detail_part.chars().count(), 98, "{detail_part}");
+    }
+
+    /// `-I` picks what `show` shows when no alias is given: with an active
+    /// installation present, `-I nope` must fail on "nope" rather than quietly
+    /// show the active one.
+    #[test]
+    fn show_without_alias_honors_the_installation_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            d.installations.insert("et".to_owned(), entry(IndexMap::new()));
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: Some("nope".to_owned()),
+                hostname: None,
+                knob: Vec::new(),
+            },
+            db,
+        };
+        let err = show_installation(&ctx, None).unwrap_err().to_string();
+        assert!(err.contains("\"nope\""), "{err}");
     }
 }
