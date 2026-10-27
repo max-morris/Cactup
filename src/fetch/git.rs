@@ -354,41 +354,46 @@ pub fn clone(
     progress: &mut (impl prodash::NestedProgress<SubProgress: 'static> + 'static),
 ) -> Res<()> {
     let _span = crate::timing::span("git clone");
-    std::fs::create_dir_all(dest)
-        .with_context(|| format!("Failed to create {}", dest.display()))?;
-
     let branch_desc = branch.unwrap_or("<default>");
-    let mut prepare = gix::prepare_clone(url, dest)
-        .with_context(|| format!("Failed to prepare clone of {url}"))?
-        .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
-        .with_ref_name(branch)
-        .with_context(|| format!("Invalid branch name {branch_desc}"))?;
-    if let Some(branch) = branch {
-        // Single-branch: narrow the remote's fetch refspec to just this
-        // branch, exactly like `git clone --single-branch`.
-        let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
-        prepare = prepare.configure_remote(move |mut r| {
-            r.replace_refspecs(Some(refspec.as_str()), Direction::Fetch)?;
-            Ok(r)
-        });
-    }
 
-    let (mut checkout, _outcome) = prepare
-        .fetch_then_checkout(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-        .with_context(|| format!("Failed to fetch {url} (branch {branch_desc})"))?;
-    let (_repo, _outcome) = checkout
-        .main_worktree(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-        .with_context(|| format!("Failed to check out {url} (branch {branch_desc})"))?;
-    // gix's checkout returns `Ok` when interrupted, with only part of the
-    // tree written: that clone must not be reported as done.
-    if gix::interrupt::is_triggered() {
-        let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
-        bail!(
-            "interrupted during the clone's checkout: {} is incomplete; delete it, then fetch {name} again",
-            dest.display()
-        );
-    }
-    Ok(())
+    // Retried from the top on a transient failure: `dest` starts out empty,
+    // and gix deletes a directory it found empty when the clone into it does
+    // not finish, so a failed attempt leaves nothing behind.
+    super::retry::with_backoff(progress, |progress| {
+        std::fs::create_dir_all(dest)
+            .with_context(|| format!("Failed to create {}", dest.display()))?;
+        let mut prepare = gix::prepare_clone(url, dest)
+            .with_context(|| format!("Failed to prepare clone of {url}"))?
+            .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
+            .with_ref_name(branch)
+            .with_context(|| format!("Invalid branch name {branch_desc}"))?;
+        if let Some(branch) = branch {
+            // Single-branch: narrow the remote's fetch refspec to just this
+            // branch, exactly like `git clone --single-branch`.
+            let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+            prepare = prepare.configure_remote(move |mut r| {
+                r.replace_refspecs(Some(refspec.as_str()), Direction::Fetch)?;
+                Ok(r)
+            });
+        }
+
+        let (mut checkout, _outcome) = prepare
+            .fetch_then_checkout(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
+            .with_context(|| format!("Failed to fetch {url} (branch {branch_desc})"))?;
+        let (_repo, _outcome) = checkout
+            .main_worktree(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
+            .with_context(|| format!("Failed to check out {url} (branch {branch_desc})"))?;
+        // gix's checkout returns `Ok` when interrupted, with only part of the
+        // tree written: that clone must not be reported as done.
+        if gix::interrupt::is_triggered() {
+            let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
+            bail!(
+                "interrupted during the clone's checkout: {} is incomplete; delete it, then fetch {name} again",
+                dest.display()
+            );
+        }
+        Ok(())
+    })
 }
 
 /// Make a *clean* repo match `origin/<branch>`: fetch the branch by explicit
@@ -428,14 +433,21 @@ pub fn align(
     remote
         .replace_refspecs(Some(refspec.as_str()), Direction::Fetch)
         .with_context(|| "failed to set fetch refspec")?;
-    remote
-        .connect(Direction::Fetch)
-        .with_context(|| "failed to connect to origin")?
-        .prepare_fetch(&mut *progress, Default::default())
-        .with_context(|| "failed to prepare fetch")?
-        .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
-        .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
-        .with_context(|| format!("failed to fetch branch {branch}"))?;
+    // Only the fetch is retried on a transient failure: nothing in the repo
+    // moves until it has the whole pack. Never what follows — a second run
+    // of a checkout cut short would find HEAD already at the tip and call
+    // the half-written tree done.
+    super::retry::with_backoff(progress, |progress| {
+        remote
+            .connect(Direction::Fetch)
+            .with_context(|| "failed to connect to origin")?
+            .prepare_fetch(&mut *progress, Default::default())
+            .with_context(|| "failed to prepare fetch")?
+            .with_shallow(Shallow::DepthAtRemote(1.try_into().expect("nonzero")))
+            .receive(&mut *progress, &gix::interrupt::IS_INTERRUPTED)
+            .with_context(|| format!("failed to fetch branch {branch}"))?;
+        Ok(())
+    })?;
 
     let target_id = repo
         .find_reference(&format!("refs/remotes/origin/{branch}"))
