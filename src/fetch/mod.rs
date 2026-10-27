@@ -9,6 +9,7 @@ pub mod download;
 pub mod external;
 pub mod git;
 pub mod link;
+pub(crate) mod retry;
 
 use crate::thornlist::{Component, ComponentType, Thornlist};
 use crate::Res;

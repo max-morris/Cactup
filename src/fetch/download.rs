@@ -99,12 +99,14 @@ pub fn download_component(
     let tmp_path = dest_dir.join(format!("{filename}.part"));
 
     // Write to a same-directory temp file, then rename into place, so a
-    // reader never observes a partially-written destination file.
-    {
+    // reader never observes a partially-written destination file. A
+    // transient failure starts the download over: `File::create` truncates
+    // whatever the failed attempt wrote.
+    super::retry::with_backoff(progress, |progress| {
         let mut tmp_file = std::fs::File::create(&tmp_path)
             .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
-        download_to(client(), &fetch_url, &mut tmp_file, progress)?;
-    }
+        download_to(client(), &fetch_url, &mut tmp_file, progress).map(drop)
+    })?;
     std::fs::rename(&tmp_path, &dest_path).with_context(|| {
         format!("Failed to move {} into place at {}", tmp_path.display(), dest_path.display())
     })?;
@@ -236,6 +238,34 @@ mod tests {
         assert_eq!(sent.as_deref(), Some(USER_AGENT), "request head was:\n{head}");
     }
 
+    #[test]
+    fn a_download_that_fails_transiently_is_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let (base, server) = test_server::serve_with(2, move |_| match calls.fetch_add(1, Ordering::Relaxed) {
+            0 => ("503 Service Unavailable", String::new(), b"try later".to_vec()),
+            _ => ("200 OK", String::new(), b"payload".to_vec()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = http_component("file.txt", None);
+        c.url = Some(base);
+        let path = download_component(dir.path(), &c, &mut test_progress()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+        assert_eq!(server.join().expect("server thread").len(), 2);
+    }
+
+    #[test]
+    fn a_download_that_fails_for_good_is_asked_once() {
+        let (base, server) = test_server::serve(Vec::new(), 1);
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = http_component("file.txt", None);
+        c.url = Some(base);
+        let err = download_component(dir.path(), &c, &mut test_progress()).unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert!(!format!("{err:#}").contains("gave up"), "a 404 is not retried: {err:#}");
+        assert_eq!(server.join().expect("server thread").len(), 1);
+    }
+
     fn http_component(checkout: &str, name: Option<&str>) -> Component {
         Component {
             ty: ComponentType::Http,
@@ -340,7 +370,7 @@ pub(crate) mod test_server {
     /// Serve `requests` requests, answering each with what `reply` returns
     /// for its path: a status, extra header lines (each ending in CRLF) and
     /// a body.
-    fn serve_with(
+    pub(crate) fn serve_with(
         requests: usize,
         reply: impl Fn(&str) -> (&'static str, String, Vec<u8>) + Send + 'static,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
