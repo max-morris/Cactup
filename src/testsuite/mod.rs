@@ -193,15 +193,15 @@ impl TestRun {
     pub fn open(dir: &Path) -> Res<TestRun> {
         let path = Self::meta_path(dir);
         if !path.is_file() {
-            bail!("{} is not a cactup test run ({} does not exist)", dir.display(), path.display());
+            bail!("'{}' is not a cactup test run", dir.display());
         }
         let text = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+            .with_context(|| format!("Failed to read '{}'", path.display()))?;
         let meta: TestMeta =
-            toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
+            toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
         if meta.schema > SCHEMA {
             bail!(
-                "{} has schema {} but this cactup understands at most schema {SCHEMA}; \
+                "'{}' has schema {} but this cactup understands at most schema {SCHEMA}; \
                  please upgrade cactup",
                 path.display(),
                 meta.schema
@@ -215,14 +215,14 @@ impl TestRun {
         let registry = inst.tests()?;
         let entry = registry.tests.get(name).ok_or_else(|| {
             anyhow!(
-                "no test run named \"{name}\" in installation \"{}\" (see `cactup test list`)",
+                "No test run named \"{name}\" in installation \"{}\" (see `cactup test list`)",
                 inst.alias
             )
         })?;
         if !entry.dir.is_dir() {
             bail!(
-                "test run \"{name}\" is registered at {} but that directory is missing;\n\
-                 run `cactup test delete {name}` to drop the stale registry entry",
+                "Test run \"{name}\" is registered at '{}', which is missing; \
+                 run `cactup test delete {name}` to remove it",
                 entry.dir.display()
             );
         }
@@ -292,7 +292,7 @@ pub fn list_results_ids(run_dir: &Path) -> Res<Vec<u32>> {
     let mut ids = Vec::new();
     let entries = match fs::read_dir(run_dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
-        other => other.with_context(|| format!("Failed to read {}", run_dir.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", run_dir.display()))?,
     };
     for entry in entries {
         let entry = entry?;
@@ -319,7 +319,7 @@ pub fn active_results_id(run_dir: &Path) -> Res<Option<u32>> {
     let mut found = Vec::new();
     let entries = match fs::read_dir(run_dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        other => other.with_context(|| format!("Failed to read {}", run_dir.display()))?,
+        other => other.with_context(|| format!("Failed to read '{}'", run_dir.display()))?,
     };
     for entry in entries {
         let name = entry?.file_name();
@@ -334,7 +334,7 @@ pub fn active_results_id(run_dir: &Path) -> Res<Option<u32>> {
         [] => Ok(None),
         [one] => Ok(Some(*one)),
         several => bail!(
-            "test run at {} has more than one active result set ({:?}) — repair by hand",
+            "Test run at '{}' has more than one active result set ({:?}); fix it by hand",
             run_dir.display(),
             several
         ),
@@ -353,7 +353,7 @@ pub fn activate_results(run_dir: &Path, id: u32) -> Res<()> {
     }
     let link = run_dir.join(format!("{}-active", results_name(id)));
     std::os::unix::fs::symlink(results_name(id), &link)
-        .with_context(|| format!("Failed to create active symlink {}", link.display()))
+        .with_context(|| format!("Failed to create active symlink '{}'", link.display()))
 }
 
 #[cfg(test)]

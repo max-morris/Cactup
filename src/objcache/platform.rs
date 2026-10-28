@@ -99,12 +99,12 @@ struct Host {
 
 /// The host half of the platform, read from the host itself.
 fn host() -> Res<Host> {
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo").context("Failed to read /proc/cpuinfo")?;
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").context("Failed to read '/proc/cpuinfo'")?;
     let kinds = processor_kinds(&cpuinfo, caches_of);
-    anyhow::ensure!(!kinds.is_empty(), "/proc/cpuinfo names no processor cactup can read");
+    anyhow::ensure!(!kinds.is_empty(), "No processors found in '/proc/cpuinfo'");
     // Present on every current distribution, and inside a container it is
     // the container's: a build in another universe is another platform.
-    let os = fs::read("/etc/os-release").or_else(|_| fs::read("/usr/lib/os-release")).context("Failed to read /etc/os-release")?;
+    let os = fs::read("/etc/os-release").or_else(|_| fs::read("/usr/lib/os-release")).context("Failed to read '/etc/os-release'")?;
 
     let mut hasher = Hasher::new("host");
     hasher.feed(std::env::consts::ARCH.as_bytes());
@@ -130,7 +130,7 @@ pub struct Platform {
 /// for the build attempt — per host and per boot, should one attempt's
 /// compiles ever run on more than one.
 pub fn platform(conf: &BuildConf, cc_dir: &Path) -> Res<Platform> {
-    let read = |path: &str| fs::read_to_string(path).with_context(|| format!("Failed to read {path}"));
+    let read = |path: &str| fs::read_to_string(path).with_context(|| format!("Failed to read '{path}'"));
     let name = read("/proc/sys/kernel/hostname")?;
     let boot = read("/proc/sys/kernel/random/boot_id")?;
     let memo = cc_dir.join("hosts").join(bytes_digest(format!("{name}{boot}").as_bytes()));

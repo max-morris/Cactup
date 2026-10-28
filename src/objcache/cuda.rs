@@ -117,7 +117,7 @@ impl DryRun {
 /// not follow (a command substitution, an operator, a pattern, `~`, another
 /// form of `${…}`).
 pub fn shell_words(line: &str, get: impl Fn(&str) -> Option<String>) -> Result<Vec<String>, String> {
-    let unsupported = |what: &str| Err(format!("nvcc would run a command with {what} in it, which cactup does not repeat"));
+    let unsupported = |what: &str| Err(format!("nvcc would run a command with {what}, which cactup does not support"));
     let mut words = Vec::new();
     let (mut word, mut any) = (String::new(), false);
     let mut quote: Option<char> = None;
@@ -215,13 +215,13 @@ pub fn dry_run(path: &Path, name: &OsStr, args: &[OsString], dir: Option<&Path>)
         command.current_dir(dir);
     }
     super::key::in_english(&mut command);
-    let out = command.output().with_context(|| format!("Failed to run {} -dryrun", path.display()))?;
+    let out = command.output().with_context(|| format!("Failed to run '{}' -dryrun", path.display()))?;
     let run = DryRun::read(&String::from_utf8_lossy(&out.stderr));
     if let Some(why) = &run.unsupported {
         bail!("{why}");
     }
     if run.commands.is_empty() {
-        bail!("{} -dryrun does not say what it would run", path.display());
+        bail!("'{}' -dryrun listed no commands", path.display());
     }
     Ok(run)
 }
@@ -243,37 +243,37 @@ pub(super) fn examine(path: &Path, driver: &Path, hasher: &mut Hasher, watched: 
     let profile = driver.with_file_name("nvcc.profile");
     watched.files.push(Seen::of(&profile)?);
     hasher.feed(b"nvcc.profile");
-    hasher.feed(&fs::read(&profile).with_context(|| format!("Failed to read {}", profile.display()))?);
+    hasher.feed(&fs::read(&profile).with_context(|| format!("Failed to read '{}'", profile.display()))?);
     let name = path.file_name().unwrap_or(path.as_os_str());
     let run = dry_run(path, name, &plain_compile(), None)?;
-    let search = run.get("PATH").with_context(|| format!("{} does not say where it finds its programs", path.display()))?;
+    let search = run.get("PATH").with_context(|| format!("'{}' -dryrun sets no PATH", path.display()))?;
     let library_path = run.get("LD_LIBRARY_PATH").map(str::to_owned);
     for program in run.programs() {
         let base = program.rsplit('/').next().unwrap_or(program);
         let found = identity::search_along(OsStr::new(program), OsStr::new(search), watched)?
-            .with_context(|| format!("{} runs {base}, which is not where it looks", path.display()))?;
+            .with_context(|| format!("'{}' runs {base}, which is not on its PATH", path.display()))?;
         watched.files.extend(Seen::of(&found));
-        let file = fs::canonicalize(&found).with_context(|| format!("Failed to resolve {}", found.display()))?;
+        let file = fs::canonicalize(&found).with_context(|| format!("Failed to resolve '{}'", found.display()))?;
         // As for GCC's programs: its own bytes must say what it is.
         let marker = if base == "cudafe++" { "cudafe" } else { base };
-        let bytes = fs::read(&file).with_context(|| format!("Failed to read {}", file.display()))?;
+        let bytes = fs::read(&file).with_context(|| format!("Failed to read '{}'", file.display()))?;
         if !bytes.starts_with(b"\x7fELF") || !bytes.windows(marker.len()).any(|window| window == marker.as_bytes()) {
-            bail!("{} runs {} for {base}, which is no program cactup can identify (a script or a wrapper, maybe)", path.display(), file.display());
+            bail!("'{}' runs '{}' for {base}, which cactup cannot identify", path.display(), file.display());
         }
         hasher.feed(base.as_bytes());
         hasher.feed(file_digest(&file)?.as_bytes());
         watched.files.push(Seen::of(&file)?);
         programs.push((file, library_path.clone()));
     }
-    let libdevice = run.get("NVVMIR_LIBRARY_DIR").with_context(|| format!("{} does not say where its device library is", path.display()))?;
-    let dir = fs::canonicalize(libdevice).with_context(|| format!("Failed to resolve {libdevice}"))?;
+    let libdevice = run.get("NVVMIR_LIBRARY_DIR").with_context(|| format!("'{}' -dryrun sets no NVVMIR_LIBRARY_DIR", path.display()))?;
+    let dir = fs::canonicalize(libdevice).with_context(|| format!("Failed to resolve '{libdevice}'"))?;
     // The directory too: a file added to it changes it.
     watched.files.push(Seen::of(&dir)?);
     let mut files: Vec<PathBuf> = fs::read_dir(&dir)
-        .with_context(|| format!("Failed to read {}", dir.display()))?
+        .with_context(|| format!("Failed to read '{}'", dir.display()))?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<_, _>>()
-        .with_context(|| format!("Failed to read {}", dir.display()))?;
+        .with_context(|| format!("Failed to read '{}'", dir.display()))?;
     files.sort();
     for file in files {
         hasher.feed(file.file_name().unwrap_or_default().as_bytes());
@@ -283,7 +283,7 @@ pub(super) fn examine(path: &Path, driver: &Path, hasher: &mut Hasher, watched: 
     // (Not word for word: without `--objdir-as-tempdir` its intermediate
     // files have names of their own each time, `tmpxft_…`; seen.)
     if dry_run(path, name, &plain_compile(), None)?.toolchain() != run.toolchain() {
-        bail!("{} would run other programs than it said a moment ago", path.display());
+        bail!("'{}' -dryrun listed different programs when run again", path.display());
     }
     Ok(())
 }
@@ -338,7 +338,7 @@ impl Plan {
     /// working directory, with the module ID still to be given
     /// ([`Self::give_id`]).
     pub fn new(path: &Path, name: &OsStr, args: &[OsString]) -> Res<Self> {
-        Self::from_dry_run(dry_run(path, name, args, None)?, String::new()).with_context(|| format!("{} would compile in a way cactup cannot repeat", path.display()))
+        Self::from_dry_run(dry_run(path, name, args, None)?, String::new()).with_context(|| format!("unsupported compile by '{}'", path.display()))
     }
 
     fn from_dry_run(run: DryRun, id: String) -> Res<Self> {
@@ -352,7 +352,7 @@ impl Plan {
         for mut words in run.commands {
             let base = words[0].rsplit('/').next().unwrap_or(&words[0]).to_owned();
             if base == "rm" {
-                let [_, file] = words.as_slice() else { bail!("it would run rm otherwise than on one file") };
+                let [_, file] = words.as_slice() else { bail!("nvcc would run rm on other than one file") };
                 steps.push(Step::Remove(PathBuf::from(file)));
                 continue;
             }
@@ -361,7 +361,7 @@ impl Plan {
                 let file = words.iter().position(|word| word == "--module_id_file_name").and_then(|at| words.get(at + 1)).cloned();
                 match (made, file) {
                     (1, Some(file)) if id_file.is_none() => id_file = Some(PathBuf::from(file)),
-                    _ => bail!("its cudafe++ would not make one module ID in a file"),
+                    _ => bail!("nvcc's cudafe++ would not write exactly one module ID file"),
                 }
                 words.retain(|word| word != "--gen_module_id_file");
             }
@@ -373,8 +373,8 @@ impl Plan {
             }
             steps.push(Step::Run { words, file: None });
         }
-        let id_file = id_file.context("it would run no cudafe++ that makes a module ID")?;
-        let last = last.context("it would run no host compile of what it generates")?;
+        let id_file = id_file.context("nvcc would run no cudafe++ that writes a module ID")?;
+        let last = last.context("nvcc would run no host compile of the code it generates")?;
         // Short names of this process's own beside the object (one made of
         // the object's could pass the longest name a directory takes).
         let dir = id_file.parent().map(Path::to_owned).unwrap_or_default();
@@ -394,7 +394,7 @@ impl Plan {
     /// is what runs.
     pub fn resolve(&mut self, host: &Compiler, toolchain: &[PathBuf]) -> Res<()> {
         let search = self.get("PATH").map(OsString::from).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
-        let host_file = fs::canonicalize(&host.path).with_context(|| format!("Failed to resolve {}", host.path.display()))?;
+        let host_file = fs::canonicalize(&host.path).with_context(|| format!("Failed to resolve '{}'", host.path.display()))?;
         for step in &mut self.steps {
             let Step::Run { words, file } = step else { continue };
             let program = OsStr::new(&words[0]);
@@ -403,9 +403,9 @@ impl Plan {
                 false => identity::find_along(program, &search)?,
             };
             let found = found.with_context(|| format!("nvcc would run {}, which is not on its PATH", words[0]))?;
-            let real = fs::canonicalize(&found).with_context(|| format!("Failed to resolve {}", found.display()))?;
+            let real = fs::canonicalize(&found).with_context(|| format!("Failed to resolve '{}'", found.display()))?;
             if real != host_file && !toolchain.contains(&real) {
-                bail!("nvcc would run {}, which is neither its host compiler nor a program of its own it was identified with", found.display());
+                bail!("nvcc would run '{}', which is neither its host compiler nor part of its identified toolchain", found.display());
             }
             *file = Some(found);
         }
@@ -522,7 +522,7 @@ impl Plan {
             let mut words = words.iter();
             while let Some(word) = words.next() {
                 if word == "-I-" {
-                    bail!("its last step splits the include path (-I-)");
+                    bail!("nvcc's host compile step uses -I-");
                 }
                 let dir = match word.strip_prefix(option) {
                     Some("") => words.next().cloned(),
@@ -571,7 +571,7 @@ impl Plan {
         places.sort();
         places.dedup();
         if let Some(there) = places.iter().find(|place| fs::symlink_metadata(place).is_ok()) {
-            bail!("{} is where nvcc's last step looks for a file of CUDA's before CUDA's own", there.display());
+            bail!("'{}' shadows a CUDA header for nvcc's host compile step", there.display());
         }
         Ok(places)
     }
@@ -607,7 +607,7 @@ impl Plan {
     /// Run every step in turn, in `dir`, without a word to the terminal:
     /// for a trial. `Err` says what failed.
     fn run_quietly(&self, dir: &Path) -> Result<(), String> {
-        self.give_id().map_err(|e| format!("cannot write {}: {e}", self.id_file.display()))?;
+        self.give_id().map_err(|e| format!("cannot write '{}': {e}", self.id_file.display()))?;
         for (at, step) in self.steps.iter().enumerate() {
             let Some(mut command) = self.command(at) else {
                 if let Step::Remove(file) = step {
@@ -715,11 +715,11 @@ pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> Trial {
                 host_reads.get_or_insert_with(|| reads.into_iter().filter(|read| !scratch.join(read).starts_with(&trial_dir)).collect::<Vec<_>>());
             }
             Ok(None) => {
-                identity::trial_says(&format!("{}: the trial compile's last step did not say what it read", path.display()));
+                identity::trial_says(&format!("'{}': the trial compile's host step did not list the files it read", path.display()));
                 return failed;
             }
             Err(why) => {
-                identity::trial_says(&format!("{}: the trial compile: {why}", path.display()));
+                identity::trial_says(&format!("'{}': the trial compile: {why}", path.display()));
                 return failed;
             }
         }
@@ -730,9 +730,9 @@ pub(super) fn trial(path: &Path, name: &OsStr, dir: &Path) -> Trial {
     }
     let takes_id = objects.iter().all(|object| object.windows(id.len()).any(|window| window == id.as_bytes()));
     if !takes_id {
-        identity::trial_says(&format!("{} did not take the module ID it was given", path.display()));
+        identity::trial_says(&format!("'{}' ignored the given module ID", path.display()));
     } else if objects[0] != objects[1] {
-        identity::trial_says(&format!("{} made two objects of the trial in two places", path.display()));
+        identity::trial_says(&format!("'{}' made different trial objects in two directories", path.display()));
     }
     Trial { relocates: takes_id && objects[0] == objects[1], takes_id, host_reads: host_reads.unwrap_or_default() }
 }
@@ -774,13 +774,13 @@ pub(super) fn host(run: &DryRun, cc_dir: &Path) -> Res<(Compiler, identity::Watc
     // Along the `PATH` it gives, with the places passed over watched: a
     // `g++` that turns up ahead of this one is another host compiler.
     let program = OsStr::new(&first[0]);
-    let search = run.get("PATH").context("nvcc does not say where it finds the host compiler")?;
+    let search = run.get("PATH").context("nvcc -dryrun sets no PATH for the host compiler")?;
     let (found, files, absent) = identity::search_watching(program, OsStr::new(search))?;
     let found = found.with_context(|| format!("nvcc would run {}, which is not on its PATH", program.to_string_lossy()))?;
     let (host, watch) = identity::identify_watching(cc_dir, found.as_os_str())?;
     let watch = watch.with_places(files, absent);
     if !matches!(host.family, Family::Gcc | Family::Clang) {
-        bail!("nvcc's host compiler {} is not a C++ compiler cactup knows", found.display());
+        bail!("nvcc's host compiler '{}' is not GCC or Clang", found.display());
     }
     Ok((host, watch))
 }
@@ -919,7 +919,7 @@ fn run_passes(cuda: &Cuda, map: Option<&PathMap>, list: bool) -> Res<Passes> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("Failed to run {} as nvcc's preprocessor", cuda.host.path.display()))?;
+            .with_context(|| format!("Failed to run '{}' as nvcc's preprocessor", cuda.host.path.display()))?;
         PREPROCESSOR.store(child.id() as i32, Ordering::SeqCst);
         let said = child.stderr.take().map(|mut stderr| {
             std::thread::spawn(move || {

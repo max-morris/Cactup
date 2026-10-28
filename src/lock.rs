@@ -51,9 +51,9 @@ pub fn fileserver_now(dir: &Path) -> Res<SystemTime> {
     let probe = tempfile::Builder::new()
         .prefix(".cactup-clock.")
         .tempfile_in(dir)
-        .with_context(|| format!("Failed to create clock probe file in {}", dir.display()))?;
+        .with_context(|| format!("Failed to create clock probe file in '{}'", dir.display()))?;
     let mtime = file_mtime(probe.as_file())
-        .with_context(|| format!("Failed to read the mtime of {}", probe.path().display()));
+        .with_context(|| format!("Failed to read the mtime of '{}'", probe.path().display()));
     discard(probe);
     mtime
 }
@@ -86,11 +86,11 @@ pub fn write_stamp(path: &Path, bytes: &[u8]) -> Res<()> {
     let mut temp = tempfile::Builder::new()
         .prefix(".cactup-stamp.")
         .tempfile_in(dir)
-        .with_context(|| format!("Failed to create a temp file in {}", dir.display()))?;
+        .with_context(|| format!("Failed to create a temp file in '{}'", dir.display()))?;
     temp.write_all(bytes)
-        .with_context(|| format!("Failed to write {}", temp.path().display()))?;
+        .with_context(|| format!("Failed to write '{}'", temp.path().display()))?;
     temp.persist(path)
-        .with_context(|| format!("Failed to move a stamp into place at {}", path.display()))?;
+        .with_context(|| format!("Failed to move a stamp into place at '{}'", path.display()))?;
     Ok(())
 }
 
@@ -249,10 +249,10 @@ impl LinkLock {
         match Self::acquire_inner(path)? {
             Ok(lock) => Ok(lock),
             Err(holder) => bail!(
-                "{} is locked by {holder}. If that process is gone, the lock \
-                 will expire on its own; a live holder re-stamps it every \
-                 {HEARTBEAT_SECS}s.",
-                path.display()
+                "'{}' is locked by {holder}; if that process is gone, the lock expires within {} \
+                 minutes",
+                path.display(),
+                LOCK_STALE_SECS / 60
             ),
         }
     }
@@ -273,16 +273,16 @@ impl LinkLock {
                 Err(holder) => holder,
             };
             if gix::interrupt::is_triggered() {
-                bail!("interrupted while waiting for lock {}", path.display());
+                bail!("Interrupted while waiting for lock {}", path.display());
             }
             let elapsed = started.elapsed();
             if elapsed >= timeout {
                 bail!(
-                    "{} is still locked by {holder} after waiting {}s. If that process \
-                     is gone, the lock will expire on its own; a live holder re-stamps \
-                     it every {HEARTBEAT_SECS}s.",
+                    "'{}' is still locked by {holder} after waiting {}s; if that process is gone, \
+                     the lock expires within {} minutes",
                     path.display(),
-                    timeout.as_secs()
+                    timeout.as_secs(),
+                    LOCK_STALE_SECS / 60
                 );
             }
             std::thread::sleep((timeout - elapsed).min(Duration::from_secs(1)));
@@ -296,7 +296,7 @@ impl LinkLock {
         let _span = crate::timing::span("LinkLock acquire attempt");
         let dir = lock_dir(path)?;
         fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create lock directory {}", dir.display()))?;
+            .with_context(|| format!("Failed to create lock directory '{}'", dir.display()))?;
         let stamp = stamp_for(&our_hostname(), std::process::id());
 
         for attempt in 0..ACQUIRE_ATTEMPTS {
@@ -308,10 +308,10 @@ impl LinkLock {
             let temp = tempfile::Builder::new()
                 .prefix(".cactup-lock.")
                 .tempfile_in(dir)
-                .with_context(|| format!("Failed to create lock temp file in {}", dir.display()))?;
+                .with_context(|| format!("Failed to create lock temp file in '{}'", dir.display()))?;
             temp.as_file()
                 .write_all(stamp.as_bytes())
-                .with_context(|| format!("Failed to write lock temp file {}", temp.path().display()))?;
+                .with_context(|| format!("Failed to write lock temp file '{}'", temp.path().display()))?;
 
             let link_result = fs::hard_link(temp.path(), path);
 
@@ -348,17 +348,13 @@ impl LinkLock {
                 }
                 Err(e) => {
                     return Err(e).with_context(|| {
-                        format!("Failed to link lock file {}", path.display())
+                        format!("Failed to link lock file '{}'", path.display())
                     });
                 }
                 Ok(()) => unreachable!(),
             }
         }
-        bail!(
-            "Gave up acquiring lock {} after {ACQUIRE_ATTEMPTS} attempts \
-             (it keeps being taken and released or broken under us)",
-            path.display()
-        )
+        bail!("Gave up acquiring lock '{}' after {ACQUIRE_ATTEMPTS} attempts", path.display())
     }
 
     /// Re-stamp the lock's mtime; long-running holders call this every
@@ -368,7 +364,7 @@ impl LinkLock {
     /// measures staleness in; the local clock may be skewed from it.
     pub fn restamp(&self) -> Res<()> {
         fs::write(&self.path, &self.stamp)
-            .with_context(|| format!("Failed to re-stamp lock file {}", self.path.display()))
+            .with_context(|| format!("Failed to re-stamp lock file '{}'", self.path.display()))
     }
 
     /// Whether `path` is currently held by a live holder (per the §2.3
@@ -449,7 +445,7 @@ impl Drop for LinkLock {
 fn lock_dir(path: &Path) -> Res<&Path> {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| anyhow!("Lock path {} has no parent directory", path.display()))
+        .ok_or_else(|| anyhow!("Lock path '{}' has no parent directory", path.display()))
 }
 
 /// Judge the holder recorded in the lock file at `path`. `fs_now` must be an
@@ -458,11 +454,11 @@ fn lock_dir(path: &Path) -> Res<&Path> {
 fn assess_holder(path: &Path, fs_now: SystemTime) -> Res<Holder> {
     let meta = match fs::symlink_metadata(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Holder::Vanished),
-        other => other.with_context(|| format!("Failed to stat lock file {}", path.display()))?,
+        other => other.with_context(|| format!("Failed to stat lock file '{}'", path.display()))?,
     };
     let content = match fs::read_to_string(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Holder::Vanished),
-        other => other.with_context(|| format!("Failed to read lock file {}", path.display()))?,
+        other => other.with_context(|| format!("Failed to read lock file '{}'", path.display()))?,
     };
 
     let holder = parse_stamp(&content);
@@ -489,7 +485,7 @@ fn assess_holder(path: &Path, fs_now: SystemTime) -> Res<Holder> {
     // mtime timeout — a remote pid cannot be probed.
     let mtime = meta
         .modified()
-        .with_context(|| format!("Failed to read mtime of lock file {}", path.display()))?;
+        .with_context(|| format!("Failed to read mtime of lock file '{}'", path.display()))?;
     let age = fs_now.duration_since(mtime).unwrap_or(Duration::ZERO);
     if age >= Duration::from_secs(LOCK_STALE_SECS) {
         Ok(Holder::Stale)
@@ -534,10 +530,10 @@ fn break_stale(path: &Path, fs_now: SystemTime) -> Res<()> {
     let temp = tempfile::Builder::new()
         .prefix(".cactup-lock.")
         .tempfile_in(dir)
-        .with_context(|| format!("Failed to create breaker temp file in {}", dir.display()))?;
+        .with_context(|| format!("Failed to create breaker temp file in '{}'", dir.display()))?;
     temp.as_file()
         .write_all(stamp_for(&our_hostname(), std::process::id()).as_bytes())
-        .with_context(|| format!("Failed to write breaker temp file {}", temp.path().display()))?;
+        .with_context(|| format!("Failed to write breaker temp file '{}'", temp.path().display()))?;
     let link_result = fs::hard_link(temp.path(), &breaker);
     let nlink = {
         use std::os::unix::fs::MetadataExt;
@@ -560,7 +556,7 @@ fn break_stale(path: &Path, fs_now: SystemTime) -> Res<()> {
                 Ok(())
             }
             Err(e) => {
-                Err(e).with_context(|| format!("Failed to link breaker {}", breaker.display()))
+                Err(e).with_context(|| format!("Failed to link breaker '{}'", breaker.display()))
             }
             Ok(()) => unreachable!(),
         };
@@ -585,7 +581,7 @@ fn break_stale(path: &Path, fs_now: SystemTime) -> Res<()> {
                 }
                 Err(e) if e.kind() == ErrorKind::NotFound => Ok(()), // beaten to it
                 Err(e) => Err(e)
-                    .with_context(|| format!("Failed to break stale lock {}", path.display())),
+                    .with_context(|| format!("Failed to break stale lock '{}'", path.display())),
             }
         }
         Ok(_) => Ok(()), // vanished or freshly re-acquired: nothing to break

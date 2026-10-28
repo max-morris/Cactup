@@ -102,7 +102,7 @@ impl Mode {
     pub fn parse(s: &str) -> Res<Self> {
         match Self::ALL.into_iter().find(|mode| mode.name() == s) {
             Some(mode) => Ok(mode),
-            None => bail!("invalid build-cache value \"{s}\" (valid: off, record, serve, audit)"),
+            None => bail!("Invalid build-cache value \"{s}\" (valid: off, record, serve, audit)"),
         }
     }
 
@@ -129,7 +129,7 @@ pub fn validate_mode(value: &str) -> Res<String> {
 /// serving build says so (§18.9).
 pub fn validate_size(value: &str) -> Res<String> {
     let value = value.trim();
-    upkeep::parse_size(value).map_err(|e| anyhow::anyhow!("invalid build-cache-size: {e:#}"))?;
+    upkeep::parse_size(value).map_err(|e| anyhow::anyhow!("Invalid build-cache-size: {e:#}"))?;
     Ok(value.to_owned())
 }
 
@@ -144,7 +144,7 @@ pub fn validate_relocate(value: &str) -> Res<String> {
     match value.trim() {
         "yes" => Ok("yes".to_owned()),
         "no" => Ok("no".to_owned()),
-        other => bail!("invalid build-cache-relocate value \"{other}\" (valid: yes, no)"),
+        other => bail!("Invalid build-cache-relocate value \"{other}\" (valid: yes, no)"),
     }
 }
 
@@ -160,7 +160,7 @@ pub fn validate_exact_warnings(value: &str) -> Res<String> {
     match value.trim() {
         "true" => Ok("true".to_owned()),
         "false" => Ok("false".to_owned()),
-        other => bail!("invalid build-cache-preserve-exact-warnings value \"{other}\" (valid: true, false)"),
+        other => bail!("Invalid build-cache-preserve-exact-warnings value \"{other}\" (valid: true, false)"),
     }
 }
 
@@ -175,10 +175,9 @@ pub fn exact_warnings_from_db(db: &Database) -> bool {
 /// whose builds already do their I/O there, and hidden, as no alias is.
 const STORE_NAME: &str = ".cactup-build-cache";
 
-/// Where the store is (§18.7), and what said so, for people to read.
+/// Where the store is (§18.7).
 pub struct StoreRoot {
     pub path: PathBuf,
-    pub from: String,
     /// A place that could not be resolved on the way (an `@ENV(…)@` unset
     /// here): passed over for the next, and said.
     pub warnings: Vec<String>,
@@ -203,23 +202,19 @@ pub fn store_root(db: &Database, machine: Option<&crate::mdb::Machine>) -> Store
         };
         match place {
             Ok(Some(place)) if Path::new(&place).is_absolute() => {
-                return match key {
-                    "install-home" => StoreRoot {
-                        path: Path::new(&place).join(STORE_NAME),
-                        from: format!("beside the installations, {from}"),
-                        warnings,
-                    },
-                    _ => StoreRoot { path: PathBuf::from(place), from, warnings },
+                let path = match key {
+                    "install-home" => Path::new(&place).join(STORE_NAME),
+                    _ => PathBuf::from(place),
                 };
+                return StoreRoot { path, warnings };
             }
-            Ok(Some(place)) => warnings.push(format!("{from} \"{place}\" is not an absolute path")),
+            Ok(Some(place)) => warnings.push(format!("{from} '{place}' is not an absolute path")),
             Ok(None) => {}
             Err(e) => warnings.push(format!("{e:#}")),
         }
     }
     StoreRoot {
         path: crate::mdb::meta::fallback_home("install-home").unwrap_or_default().join(STORE_NAME),
-        from: "beside the installations, by default".to_owned(),
         warnings,
     }
 }
@@ -264,8 +259,8 @@ impl BuildConf {
     /// Read a frozen configuration. Any failure is the caller's cue to leave
     /// the cache out of it.
     pub fn load(path: &Path) -> Res<Self> {
-        let text = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))
+        let text = fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))
     }
 }
 
@@ -321,21 +316,21 @@ pub fn after_build(cc_dir: &Path) {
         let published: u64 = events.iter().filter(|e| e.published == Some(true)).filter_map(|e| e.object_bytes).sum();
         match upkeep::add_to_size(&conf.store, published) {
             Ok(None) => println!(
-                "{} build-cache-size is set, but the size of the build cache in {} is not known yet; \
-                 `cactup cache stats` measures it",
+                "{} build-cache-size is set, but the size of the build cache in '{}' is unknown; \
+                 run `cactup cache stats` to measure it",
                 "note:".bold(),
                 conf.store.display(),
             ),
             Ok(Some(bytes)) if bytes > limit => println!(
-                "{} the build cache in {} holds about {}, more than build-cache-size ({}); \
-                 `cactup cache gc --unused-for 30d` removes what no build has used in 30 days",
+                "{} the build cache in '{}' holds about {}, more than build-cache-size ({}); \
+                 see `cactup cache gc --unused-for 30d`",
                 "note:".bold(),
                 conf.store.display(),
                 upkeep::human(bytes),
                 upkeep::human(limit),
             ),
             Ok(_) => {}
-            Err(e) => eprintln!("{} build cache: could not keep the size of {}: {e:#}", "warning:".yellow().bold(), conf.store.display()),
+            Err(e) => eprintln!("{} build cache: could not update the size of '{}': {e:#}", "warning:".yellow().bold(), conf.store.display()),
         }
     }
 }
@@ -384,10 +379,10 @@ pub fn stage(cc_dir: &Path, mode: Mode, inputs: &StageInputs) -> Res<Option<Stag
         exact_warnings: inputs.exact_warnings,
         size_limit: inputs.size_limit,
     };
-    fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create {}", cc_dir.display()))?;
+    fs::create_dir_all(cc_dir).with_context(|| format!("Failed to create '{}'", cc_dir.display()))?;
     let path = conf_path(cc_dir);
     let text = toml::to_string(&conf).context("Failed to serialize the build-cache configuration")?;
-    fs::write(&path, text).with_context(|| format!("Failed to write {}", path.display()))?;
+    fs::write(&path, text).with_context(|| format!("Failed to write '{}'", path.display()))?;
     Ok(Some(Staged { mode, cactup: conf.cactup, cc_dir: cc_dir.to_owned(), config_dir: conf.config_dir }))
 }
 
@@ -606,9 +601,7 @@ mod tests {
         assert_eq!((root.path, root.warnings.len()), (default.clone(), 0));
         assert_eq!(store_root(&db, Some(&machine(""))).path, default);
         let installs = machine("install-home = \"/work/u\"");
-        let root = store_root(&db, Some(&installs));
-        assert_eq!(root.path, PathBuf::from("/work/u").join(STORE_NAME));
-        assert_eq!(root.from, "beside the installations, machine m's install-home");
+        assert_eq!(store_root(&db, Some(&installs)).path, PathBuf::from("/work/u").join(STORE_NAME));
         let both = machine("install-home = \"/work/u\"\nbuild-cache-home = \"/project/u/cache\"");
         assert_eq!(store_root(&db, Some(&both)).path, PathBuf::from("/project/u/cache"));
         // A machine's place that cannot be resolved here is passed over,
@@ -631,8 +624,7 @@ mod tests {
         db.set_knob("build-cache-home", "relative".to_owned());
         assert_eq!(store_root(&db, Some(&both)).path, PathBuf::from("/project/u/cache"));
         db.set_knob("build-cache-home", "/mine".to_owned());
-        let root = store_root(&db, Some(&both));
-        assert_eq!((root.path, root.from.as_str()), (PathBuf::from("/mine"), "the build-cache-home knob"));
+        assert_eq!(store_root(&db, Some(&both)).path, PathBuf::from("/mine"));
     }
 
     #[test]

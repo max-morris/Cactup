@@ -94,7 +94,7 @@ impl WisdomKind {
 }
 
 fn valid_values_error(knob: &str, got: &str, valid: &[&str]) -> anyhow::Error {
-    anyhow::anyhow!("invalid {knob} value \"{got}\" (valid: {})", valid.join(", "))
+    anyhow::anyhow!("Invalid {knob} value \"{got}\" (valid: {})", valid.join(", "))
 }
 
 /// Knob validator (§5): name → stored ordinal string.
@@ -155,7 +155,7 @@ fn pick(kind: WisdomKind) -> Option<&'static str> {
 pub fn dispatch(ctx: &Ctx) -> Res<()> {
     let (_, kind) = knob_settings(&ctx.db.read()?);
     let Some(text) = pick(kind) else {
-        bail!("the wisdom corpus is empty");
+        bail!("The wisdom corpus is empty");
     };
     println!("{text}");
     Ok(())

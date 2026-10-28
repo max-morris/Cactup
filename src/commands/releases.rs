@@ -38,8 +38,7 @@ pub fn dispatch(ctx: &Ctx, all: bool) -> Res<()> {
     // looking for something newer than the latest release will look.
     println!();
     println!(
-        "Newer than every release above is the manifest's master branch. Pass {} to \
-         {} or {} to install its tip instead of a release.",
+        "To use the manifest's master branch instead of a release, pass {} to {} or {}.",
         manifest::MASTER.bold(),
         "cactup install".bold(),
         "cactup inst refetch --release".bold()

@@ -207,8 +207,8 @@ pub(crate) fn copy_lines(lines: &[String]) -> Res<Copied> {
     let mut stdout = std::io::stdout();
     stdout
         .write_all(sequence.as_bytes())
-        .context("writing the OSC 52 clipboard sequence")?;
-    stdout.flush().context("flushing the OSC 52 clipboard sequence")?;
+        .context("Writing the OSC 52 clipboard sequence")?;
+    stdout.flush().context("Flushing the OSC 52 clipboard sequence")?;
     // Report what actually went out rather than what was asked for: a
     // truncated copy sends fewer lines than it was handed, and the notice in
     // the TUI has to be able to say so honestly.

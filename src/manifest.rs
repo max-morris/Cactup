@@ -108,23 +108,28 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
     if need_clone {
         headline.phase("fetching for the first time");
 
-        fs::create_dir_all(&manifest_dir)
-           .with_context(|| "Failed to create manifest directory")?;
+        // Retried from the top on a transient failure: gix deletes the
+        // (empty) directory it cloned into when the clone does not finish.
+        let repo = crate::fetch::retry::with_backoff(&mut headline, |headline| {
+            fs::create_dir_all(&manifest_dir)
+               .with_context(|| "Failed to create manifest directory")?;
 
-        let mut prepare =
-            gix::prepare_clone(manifest_url, &manifest_dir)?
-                .configure_remote(|r| {
-                    Ok(r.with_fetch_tags(Tags::All))
-                });
+            let mut prepare =
+                gix::prepare_clone(manifest_url, &manifest_dir)?
+                    .configure_remote(|r| {
+                        Ok(r.with_fetch_tags(Tags::All))
+                    });
 
-        // gix renames whatever item it's given as the fetch moves through
-        // phases and hangs its own bars off it; the Line keeps all of that
-        // on the one headline, so the label follows the phase and the bar
-        // never splits in two.
-        let (repo, _) = prepare.fetch_only(
-            &mut headline,
-            &gix::interrupt::IS_INTERRUPTED
-        ).with_context(|| "Failed to fetch manifest")?;
+            // gix renames whatever item it's given as the fetch moves through
+            // phases and hangs its own bars off it; the Line keeps all of that
+            // on the one headline, so the label follows the phase and the bar
+            // never splits in two.
+            let (repo, _) = prepare.fetch_only(
+                headline,
+                &gix::interrupt::IS_INTERRUPTED
+            ).with_context(|| "Failed to fetch manifest")?;
+            Ok(repo)
+        })?;
 
         headline.succeeded("fetched");
         progress_renderer.shutdown_and_wait();
@@ -163,9 +168,14 @@ pub fn ensure_manifest_repo(cactup_root: &Path, manifest_url: &str) -> Res<Repos
             repo.find_fetch_remote(None)? // origin
                 .with_fetch_tags(Tags::All);
 
-        remote.connect(Direction::Fetch)?
-              .prepare_fetch(&mut headline, Default::default())?
-              .receive(&mut headline, &gix::interrupt::IS_INTERRUPTED)?;
+        // Nothing moves until the pack is in, so a transient failure is
+        // retried from the connect.
+        crate::fetch::retry::with_backoff(&mut headline, |headline| {
+            remote.connect(Direction::Fetch)?
+                  .prepare_fetch(&mut *headline, Default::default())?
+                  .receive(&mut *headline, &gix::interrupt::IS_INTERRUPTED)?;
+            Ok(())
+        })?;
 
         headline.succeeded("up to date");
         progress_renderer.shutdown_and_wait();
@@ -242,7 +252,7 @@ impl<'repo> Release<'repo> {
     /// see [`MASTER_REF`].
     fn master(repo: &'repo Repository) -> Res<Self> {
         let master = repo.find_reference(MASTER_REF)
-                         .with_context(|| format!("the manifest repository has no {MASTER_REF}"))?;
+                         .with_context(|| format!("The manifest repository has no {MASTER_REF}"))?;
         Self::at(repo, MASTER.to_owned(), master)
     }
 
@@ -289,7 +299,7 @@ impl<'repo> Release<'repo> {
             tree.lookup_entry_by_path(&path)?
                 .ok_or({
                     let path_name = path.as_ref().to_str().ok_or(anyhow!("Invalid path"))?;
-                    anyhow!("File {} not found", path_name)
+                    anyhow!("File '{}' not found", path_name)
                 })?
                 .object()?
                 .into_blob()

@@ -234,17 +234,14 @@ fn running_without_job(run: &TestRun, sched: &Scheduler) -> Res<bool> {
 fn without_job(run: &TestRun, name: &str) -> String {
     if run.meta.timestamps.submitted.is_some() {
         format!(
-            "test run \"{name}\" was submitted and its job was asked to stop or is over, but its \
-             running.lock is still held: it is ending, or it ended without letting go of the lock \
-             (which then expires within {} minutes)",
+            "test run \"{name}\" was stopped or has ended, but its running.lock is still held; a \
+             stale lock expires within {} minutes",
             crate::lock::LOCK_STALE_SECS / 60
         )
     } else {
         format!(
-            "test run \"{name}\" ran in the foreground and its running.lock is held, with no queued \
-             job cactup can stop: it is running (interrupt it with Ctrl-C where it runs), or it \
-             ended without letting go of the lock (a host lost, a hangup; the lock then expires \
-             within {} minutes)",
+            "test run \"{name}\" ran in the foreground and its running.lock is held; interrupt it \
+             with Ctrl-C where it runs (a stale lock expires within {} minutes)",
             crate::lock::LOCK_STALE_SECS / 60
         )
     }
@@ -261,13 +258,12 @@ fn running_elsewhere(run: &TestRun, sched: &Scheduler, name: &str) -> String {
     // where job ids are pids, `ps` is what answers.
     let failed = match sched.tells_failed_queries() || !sched.may_requeue() {
         true => "",
-        false => " the scheduler could not be asked,",
+        false => " or could not be asked",
     };
     format!(
-        "test run \"{name}\" has its running.lock held, though the scheduler here does not list its \
-         job {}: it runs where this scheduler cannot see it (another host),{failed} or it ended \
-         without letting go of the lock (which then expires within {} minutes); cactup leaves it \
-         as it is: stop it where it runs, or try again later",
+        "test run \"{name}\" has its running.lock held, but the scheduler does not list its job \
+         {}{failed}; it may be running on another host. Stop it where it runs, or try again later \
+         (a stale lock expires within {} minutes)",
         run.meta.job_id,
         crate::lock::LOCK_STALE_SECS / 60
     )
@@ -311,9 +307,9 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             if let EndedStop::NotKnown(said) = sched.stop_judged(job.job(), StopCase::Unread)? {
                 if run.lock_live()? {
                     println!(
-                        "{}, and the scheduler says it does not know it ({said}), but the run's \
-                         running.lock is held: nothing recorded. Once the run lets go of it (a lock left by \
-                         a run that ended expires within {} minutes), run `cactup test stop {name}` again.",
+                        "{}, and the scheduler does not know it ({said}), but the run's running.lock is \
+                         held; nothing recorded. Run `cactup test stop {name}` again once the lock is \
+                         released (a stale lock expires within {} minutes).",
                         sentence(unread(job_id)),
                         crate::lock::LOCK_STALE_SECS / 60
                     );
@@ -322,8 +318,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 // Not stopped, and nothing of the run holds its lock: over,
                 // so `delete` and a new run go ahead.
                 println!(
-                    "{}, and the scheduler says it does not know it ({said}); nothing of the run holds its \
-                     lock, so cactup takes it as ended",
+                    "{}, and the scheduler does not know it ({said}); treating it as ended",
                     sentence(unread(job_id))
                 );
                 run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
@@ -334,7 +329,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             }
             // Taken: stopped, or over before (Slurm's `scancel` takes an
             // ended job without a word); over either way.
-            println!("{}; asked the scheduler to stop it (if it had not ended already)", sentence(unread(job_id)));
+            println!("{}; asked the scheduler to stop it", sentence(unread(job_id)));
             run.meta.timestamps.finished.get_or_insert_with(chrono::Utc::now);
             run.log("test-stop", &format!("asked the scheduler to stop job {job_id}"));
         }
@@ -355,13 +350,12 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             };
             match sched.stop_judged(job.job(), case)? {
                 EndedStop::Sent if unanswered => println!(
-                    "Could not ask the scheduler about test job {} (the run has ended); asked it to stop \
-                     the job in case it was queued again",
+                    "Could not query test job {}; asked the scheduler to stop it in case it was \
+                     queued again",
                     job_id.bold()
                 ),
                 EndedStop::Sent => println!(
-                    "Asked the scheduler to stop test job {}, still listed after the run ended (queued \
-                     again, or leaving the queue)",
+                    "Asked the scheduler to stop test job {}, still listed after the run ended",
                     job_id.bold()
                 ),
                 // After a failed query, a stop the scheduler refuses as a job
@@ -370,8 +364,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 EndedStop::NotKnown(said) => {
                     settled = true;
                     println!(
-                        "The scheduler does not know test job {job_id}, whose run has ended (its stop \
-                         command said: {said}): taken as ended"
+                        "The scheduler does not know test job {job_id} ({said}); treating it as ended"
                     );
                 }
             }
@@ -391,7 +384,7 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
                 // Its pid's process went between the query and the stop.
                 Stopped::Gone => println!("Test job {job_id} has ended; nothing to stop"),
                 // `job_state` says `OnHost` of such a job: not reached.
-                Stopped::Elsewhere(host) => bail!("test job {job_id} runs on host {host}: stop it there"),
+                Stopped::Elsewhere(host) => bail!("Test job {job_id} runs on host {host}: stop it there"),
             }
             // Over, as far as cactup is concerned (as `build stop` records
             // an outcome). Only once the stop was sent: a query that failed
@@ -405,17 +398,18 @@ fn stop_run(run: &mut TestRun, sched: &Scheduler, name: &str) -> Res<()> {
             return Ok(());
         }
         Job::OnHost => println!(
-            "Test job {job_id} was submitted on host {}, and nothing of the run holds its lock: taken as ended",
+            "Test job {job_id} was submitted on host {} and its run's lock is not held; treating it \
+             as ended",
             job.host.as_deref().unwrap_or_default()
         ),
         Job::Ended | Job::Absent if run.lock_live()? => {
             println!("{}", sentence(held_without_listed_job(run, sched, name)));
             return Ok(());
         }
-        Job::Ended => println!("The scheduler lists test job {job_id} as over (the run has ended); nothing to stop"),
+        Job::Ended => println!("Test job {job_id} has ended; nothing to stop"),
         // After the run's end, unlisted or a query that failed: ended.
         Job::Absent if run.meta.timestamps.finished.is_some() => {
-            println!("The scheduler does not know test job {job_id} (the run has ended); nothing to stop")
+            println!("The scheduler does not know test job {job_id}; nothing to stop")
         }
         Job::Absent => println!("Test job {job_id} is not in the queue; nothing to stop"),
     }
@@ -494,8 +488,7 @@ fn job_state(sched: &Scheduler, run: &TestRun, job: JobRef<'_>) -> Res<Job> {
 fn on_host(job: JobRef<'_>, name: &str) -> String {
     let host = job.host.unwrap_or_default();
     format!(
-        "test job {} runs on host {host}, where it was submitted, and this host cannot stop it: stop \
-         it there (`cactup test stop {name}` on {host})",
+        "test job {} runs on host {host}; stop it there with `cactup test stop {name}`",
         job.id
     )
 }
@@ -522,10 +515,7 @@ fn sentence(text: String) -> String {
 
 /// What `stop` and `delete` say of a [`Job::Unread`] job.
 fn unread(job_id: &str) -> String {
-    format!(
-        "the scheduler lists test job {job_id} in a state cactup does not read (suspended, exiting, or \
-         ended)"
-    )
+    format!("the scheduler lists test job {job_id} in a state cactup does not recognize")
 }
 
 /// Refuse to delete `run` while it runs, unless `force` and it is a job the
@@ -559,12 +549,12 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
             bail!("{}; then delete the test run", SharedGroup(job_id.to_owned()))
         }
         Job::Listed(status) if !force => bail!(
-            "test run \"{name}\" ended, but the scheduler still lists its job {job_id} {}; or use -f to \
+            "Test run \"{name}\" ended, but the scheduler still lists its job {job_id} {}; or use -f to \
              stop it and delete",
             crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
         ),
         Job::Live if !force => bail!(
-            "test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
+            "Test run \"{name}\" has a live job ({job_id}); `cactup test stop {name}` first, or use \
              -f to stop and delete"
         ),
         Job::Live => {
@@ -588,16 +578,15 @@ fn clear_to_delete(run: &TestRun, sched: &Scheduler, name: &str, force: bool) ->
                 // Not stopped: over, unless something still holds the lock.
                 if run.lock_live()? {
                     bail!(
-                        "{}, says it does not know it ({said}), and the run's running.lock is held: delete \
-                         it once the run has let go of the lock (a lock left by a run that ended expires \
-                         within {} minutes)",
+                        "{}, but the scheduler does not know it ({said}), and the run's running.lock \
+                         is held; delete it once the lock is released (a stale lock expires within {} \
+                         minutes)",
                         what,
                         crate::lock::LOCK_STALE_SECS / 60
                     );
                 }
                 println!(
-                    "{}, and the scheduler says it does not know it ({said}); nothing of the run holds its \
-                     lock, so cactup takes it as ended: deleting it",
+                    "{}, but the scheduler does not know it ({said}); deleting it",
                     sentence(what)
                 );
             }
@@ -616,7 +605,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
 
     let registry = inst.tests()?;
     let Some(entry) = registry.tests.get(name) else {
-        bail!("no test run named \"{name}\" (see `cactup test list`)");
+        bail!("No test run named \"{name}\" (see `cactup test list`)");
     };
     // A stale entry (dir vanished) is pruned rather than fataled.
     if !entry.dir.is_dir() {
@@ -625,7 +614,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
         reg.tests.shift_remove(name);
         locked.set_tests(&reg)?;
         println!(
-            "Test run {} directory {} was already gone; pruned the stale registry entry",
+            "Test run {} directory '{}' is missing; removed its registry entry",
             name.bold(),
             entry.dir.display()
         );
@@ -644,7 +633,7 @@ pub fn delete(ctx: &Ctx, name: &str, force: bool, purge: bool) -> Res<()> {
         println!("Deleted test run {} permanently", name.bold());
     } else {
         let dst = cache::move_to_trash(&test_home, &run.dir, &run.meta.test_run_id)?;
-        println!("Moved test run {} to {}", name.bold(), dst.display());
+        println!("Moved test run {} to '{}'", name.bold(), dst.display());
     }
 
     let locked = inst.locked()?;
@@ -667,10 +656,10 @@ pub fn clean(ctx: &Ctx) -> Res<()> {
     let inst = Installation::resolve(ctx)?;
     let removed = clean_tree(&inst.cactus_root())?;
     if removed.is_empty() {
-        println!("Nothing to clean: the source tree has no in-tree testsuite output.");
+        println!("No in-tree testsuite output to clean.");
     } else {
         for path in &removed {
-            println!("Removed {}", path.display());
+            println!("Removed '{}'", path.display());
         }
         println!("{}", format!("Cleaned {} in-tree testsuite path(s).", removed.len()).bright_green());
     }
@@ -685,14 +674,14 @@ fn clean_tree(cactus_root: &std::path::Path) -> Res<Vec<std::path::PathBuf>> {
         // it into the results dir it may point at.
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("Failed to inspect {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("Failed to inspect '{}'", path.display())),
             Ok(meta) => {
                 if meta.file_type().is_dir() {
                     fs::remove_dir_all(&path)
-                        .with_context(|| format!("Failed to remove {}", path.display()))?;
+                        .with_context(|| format!("Failed to remove '{}'", path.display()))?;
                 } else {
                     fs::remove_file(&path)
-                        .with_context(|| format!("Failed to remove {}", path.display()))?;
+                        .with_context(|| format!("Failed to remove '{}'", path.display()))?;
                 }
                 removed.push(path);
                 Ok(())
@@ -706,7 +695,7 @@ fn clean_tree(cactus_root: &std::path::Path) -> Res<Vec<std::path::PathBuf>> {
     match fs::read_dir(&configs_dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         entries => {
-            for entry in entries.with_context(|| format!("Failed to list {}", configs_dir.display()))? {
+            for entry in entries.with_context(|| format!("Failed to list '{}'", configs_dir.display()))? {
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
                     remove_entry(entry.path().join("TEST"))?;
@@ -929,7 +918,7 @@ mod tests {
         let exiting = Scheduler::new(&exiting);
         let mut ending = open(true, false, "JOB-6");
         let _held_ending = crate::lock::LinkLock::acquire(&ending.running_lock_path()).unwrap();
-        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state cactup does not read"));
+        assert!(clear_to_delete(&ending, &exiting, "t", false).unwrap_err().to_string().contains("in a state cactup does not recognize"));
         assert!(!stopped.exists());
         stop_run(&mut ending, &exiting, "t").unwrap();
         assert!(stopped.exists());
@@ -971,7 +960,7 @@ mod tests {
             let failing = Scheduler::new(&failing);
             let before = fs::read_to_string(TestRun::meta_path(&ended.dir)).unwrap();
             let err = clear_to_delete(&ended, &failing, "t", true).unwrap_err().to_string();
-            assert!(err.contains("the stop command for job JOB-7 failed") && err.contains("does not match it"), "{err}");
+            assert!(err.contains("The stop command for job JOB-7 failed") && err.contains("does not match it"), "{err}");
             let mut again = TestRun::open(&ended.dir).unwrap();
             assert!(stop_run(&mut again, &failing, "t").is_err());
             assert_eq!(fs::read_to_string(TestRun::meta_path(&ended.dir)).unwrap(), before, "recorded something");
@@ -1284,7 +1273,7 @@ mod tests {
             // again): the failed stop is an error, nothing deleted.
             if get_status.contains("PD") {
                 let err = clear_to_delete(&run, &transient, "t", true).unwrap_err().to_string();
-                assert!(err.contains("the stop command for job 4246 failed"), "{err}");
+                assert!(err.contains("The stop command for job 4246 failed"), "{err}");
             }
             assert_eq!(fs::read_to_string(TestRun::meta_path(&run.dir)).unwrap(), before, "recorded something");
         }

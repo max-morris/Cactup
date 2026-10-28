@@ -45,7 +45,7 @@ fn push_group(
 ) {
     for (repo, info) in repos.iter().take(repos_shown) {
         let repo_line = match &info.detail {
-            Some(detail) => format!("                  {repo} — {}", truncate_detail(detail)),
+            Some(detail) => format!("                  {repo}: {}", truncate_detail(detail)),
             None => format!("                  {repo}"),
         };
         lines.push((tone, repo_line));
@@ -67,9 +67,9 @@ fn push_group(
 
 /// The `show` conformance block: the lines describing thorns whose on-disk
 /// contents do not match the installation's recorded thornlist. Empty when
-/// the tree fully conforms. Colourless strings on purpose (so they stay
+/// the tree fully conforms. Colorless strings on purpose (so they stay
 /// testable) paired with a per-line [`Tone`]; `show_installation` applies the
-/// colour.
+/// color.
 ///
 /// A failed repo is an error the user did not ask for and did not get — it is
 /// reported first, in [`Tone::Alarm`], ahead of a merely-skipped one (a
@@ -94,16 +94,16 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
         if failed_count > 0 { ("INCOMPLETE", Tone::Alarm) } else { ("PARTIAL", Tone::Warn) };
     let header = match (failed_count > 0, skipped_count > 0) {
         (true, true) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch and \
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch and \
              {skipped_count} repo(s) were skipped; {thorn_count} thorn(s) on disk do not match \
              the thornlist above."
         ),
         (true, false) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch; {thorn_count} \
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch; {thorn_count} \
              thorn(s) on disk do not match the thornlist above."
         ),
         (false, true) => format!(
-            "  conformance:  {word} — {skipped_count} repo(s) were skipped, so {thorn_count} \
+            "  conformance:  {word}: {skipped_count} repo(s) were skipped, so {thorn_count} \
              thorn(s) on disk do not match the thornlist above."
         ),
         (false, false) => unreachable!(
@@ -143,8 +143,8 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
     if !skipped.is_empty() {
         lines.push((
             Tone::Plain,
-            "                Fetch over the skipped ones with `cactup inst refetch -f` \
-             (modified files are backed up first); `cactup inst delta` shows what differs."
+            "                Fetch over the skipped ones with `cactup inst refetch -f`; \
+             modified files are backed up first. `cactup inst delta` shows what differs."
                 .to_owned(),
         ));
     }
@@ -166,19 +166,19 @@ pub fn dispatch(ctx: &Ctx, cmd: InstallationCommand) -> Res<()> {
 pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     let database = ctx.db.read()?;
 
-    // No alias → the contextually-relevant installation: the active one.
-    let alias = match alias {
+    // No alias → the contextually-relevant installation: `-I`, else the
+    // active one (the same choice `Installation::resolve` makes).
+    let alias = match alias.or_else(|| ctx.globals.installation.clone()) {
         Some(alias) => alias,
         None => database.active_installation.clone().ok_or_else(|| {
             anyhow!(
-                "no active installation; run `cactup install`, or `cactup use <alias>` \
-                 to activate an existing one (see `cactup list`)"
+                "No active installation; run `cactup install` or `cactup use <alias>`"
             )
         })?,
     };
 
     let Some(entry) = database.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup list`)");
+        bail!("No installation named \"{alias}\" (see `cactup list`)");
     };
     let active = database.active_installation.as_deref() == Some(&alias);
 
@@ -403,8 +403,38 @@ mod tests {
         let repo_line = &lines[2].1;
         assert!(repo_line.contains('…'), "{repo_line}");
         assert!(!repo_line.contains(&long), "{repo_line}");
-        let detail_part = repo_line.split(" — ").nth(1).unwrap();
+        let detail_part = repo_line.split(": ").nth(1).unwrap();
         // 97 chars of the original detail plus the ellipsis.
         assert_eq!(detail_part.chars().count(), 98, "{detail_part}");
+    }
+
+    /// `-I` picks what `show` shows when no alias is given: with an active
+    /// installation present, `-I nope` must fail on "nope" rather than quietly
+    /// show the active one.
+    #[test]
+    fn show_without_alias_honors_the_installation_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::database::Db::in_dir(dir.path());
+        db.update(|d| {
+            d.installations.insert("et".to_owned(), entry(IndexMap::new()));
+            d.active_installation = Some("et".to_owned());
+            Ok(())
+        })
+        .unwrap();
+        let ctx = Ctx {
+            globals: crate::args::GlobalOpts {
+                verbose: false,
+                trace: false,
+                manifest_url: String::new(),
+                mdb_path: None,
+                machine: None,
+                installation: Some("nope".to_owned()),
+                hostname: None,
+                knob: Vec::new(),
+            },
+            db,
+        };
+        let err = show_installation(&ctx, None).unwrap_err().to_string();
+        assert!(err.contains("\"nope\""), "{err}");
     }
 }

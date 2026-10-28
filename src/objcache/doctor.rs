@@ -242,7 +242,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 severity: Severity::Unchecked,
                 language: None,
                 variable: None,
-                reason: format!("make could not give the configuration's compilers and flags ({e:#}), so they are not checked, nor what each thorn's own make files give its compiles"),
+                reason: format!("make could not give the configuration's compilers and flags: {e:#}"),
                 thorn: None,
                 fix: None,
                 sources: Vec::new(),
@@ -268,7 +268,7 @@ pub fn run(request: &Request, probe: bool) -> Reply {
                 severity: Severity::Note,
                 language: None,
                 variable: Some(variable.to_owned()),
-                reason: format!("{variable} has an entry that is not an absolute path (an empty one is the working directory)"),
+                reason: format!("{variable} has a relative or empty entry"),
                 thorn: None,
                 fix: None,
                 sources: Vec::new(),
@@ -345,12 +345,12 @@ fn unusable_tmpdir(given: Option<PathBuf>, scratch: Option<&Path>) -> Option<Raw
     let e = tempfile::Builder::new().prefix(".cactup-doctor-").tempfile_in(&place).err()?;
     let reason = match given {
         Some(_) if relative => format!(
-            "TMPDIR is \"{}\", which is no absolute path: the compiles run in {}, where no file can be made in it ({e}), so the build cache keeps every compile out",
+            "TMPDIR is \"{}\", a relative path, and no file can be created in it under '{}': {e}",
             dir.display(),
             scratch.map(Path::display).map(|shown| shown.to_string()).unwrap_or_default()
         ),
-        Some(_) => format!("TMPDIR is {}, where no file can be made ({e}), so the build cache keeps every compile out", dir.display()),
-        None => format!("TMPDIR is not set and no file can be made in /tmp ({e}), so the build cache keeps every compile out"),
+        Some(_) => format!("TMPDIR is '{}', where no file can be created: {e}", dir.display()),
+        None => format!("TMPDIR is not set and no file can be created in '/tmp': {e}"),
     };
     Some(Raw { severity: Severity::KeepsOut, language: None, variable: Some("TMPDIR".to_owned()), reason, thorn: None, fix: None, sources: Vec::new(), at: None })
 }
@@ -409,7 +409,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             severity: Severity::Unchecked,
             language: None,
             variable: None,
-            reason: "it is built by a Makefile of its own, not Cactus's: what its compiles get is not checked".to_owned(),
+            reason: "it is built by its own Makefile, not Cactus's".to_owned(),
             thorn: Some(format!("{thorn} ({})", src.join("Makefile").strip_prefix(cactus_root).unwrap_or(&src).display())),
             fix: None,
             sources: Vec::new(),
@@ -452,7 +452,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
         let made = match made {
             Ok(made) => made,
             Err(e) => {
-                found.push(unchecked(format!("make could not say what the thorn's compiles there get: {e:#}")));
+                found.push(unchecked(format!("make could not give this directory's compilers and flags: {e:#}")));
                 continue;
             }
         };
@@ -461,7 +461,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             // build stops at make.thornlib's `include` of it.
             let defn = dir.join("make.code.defn");
             if dir == cactus_root.join("arrangements").join(&thorn).join("src") && defn.exists() && std::fs::File::open(&defn).is_err() {
-                found.push(unchecked(format!("{} cannot be read: a build stops there", defn.strip_prefix(cactus_root).unwrap_or(&defn).display())));
+                found.push(unchecked(format!("'{}' cannot be read, so a build would fail there", defn.strip_prefix(cactus_root).unwrap_or(&defn).display())));
             }
             continue;
         }
@@ -473,7 +473,7 @@ fn thorn_checks(request: &Request, config_dir: &Path, values: &BTreeMap<String, 
             continue;
         }
         if let Some(why) = &made.failed {
-            found.push(unchecked(format!("make could not say what {} of the thorn's compiles there get: {why}", made.missing)));
+            found.push(unchecked(format!("make could not give the compilers and flags of {} of this directory's compiles: {why}", made.missing)));
         }
         // What each object's compile finds, one finding with the objects
         // that get it.
@@ -703,7 +703,6 @@ fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
     let files: Vec<PathBuf> = [dir.join("make.code.defn"), dir.join("make.code.deps")].into_iter().filter(|file| file.exists()).collect();
     let grep = |args: &[&str]| Command::new("grep").args(["-E"]).args(args).args(["-e", super::probe::STAND_DOWN, "/dev/null"]).args(&files).stdin(Stdio::null()).stderr(Stdio::null()).output();
     let shown = |file: &Path| file.strip_prefix(cactus_root).unwrap_or(file).display().to_string();
-    let fix = "the cache stays out of this directory's compiles only. It stands down wherever a thorn's make.code.defn or make.code.deps has an include, a define, an $(eval) or a COMPILE_ name (a comment too), or cannot be read";
     let out = grep(&["-n", "-m", "1"]).ok();
     match out.as_ref().and_then(|out| out.status.code()) {
         Some(1) => None,
@@ -713,17 +712,17 @@ fn stands_down(dir: &Path, cactus_root: &Path) -> Option<(String, String)> {
             let (number, line) = rest.split_once(':')?;
             let file = shown(Path::new(file));
             Some((
-                format!("line {number} of {file} (\"{}\") might define compile recipes of the directory's own, so the build cache stands down for its compiles", line.trim()),
-                format!("{fix}: the thorn's to change, if {file} can do without it"),
+                format!("line {number} of '{file}' (\"{}\") may define compile recipes, so the build cache stands down for this directory", line.trim()),
+                format!("remove that line from '{file}' if the thorn can do without it"),
             ))
         }
         _ => {
             let unread: Vec<String> = files.iter().filter(|file| std::fs::File::open(file).is_err()).map(|file| shown(file)).collect();
             let what = match unread.is_empty() {
                 true => "its make files could not be searched (grep failed)".to_owned(),
-                false => format!("{} cannot be read", unread.join(" and ")),
+                false => format!("'{}' cannot be read", unread.join("' and '")),
             };
-            Some((format!("{what}, so the build cache stands down for its compiles (make passes such a file over)"), format!("{fix}: let the file be read")))
+            Some((format!("{what}, so the build cache stands down for this directory"), "make the file readable".to_owned()))
         }
     }
 }
@@ -736,10 +735,10 @@ fn thorn_fix(raw: &Raw, file: Option<&Path>, config_dir: &Path, values: &BTreeMa
     let generated = file.is_some_and(|file| file.starts_with(config_dir.join("bindings")));
     let capability = file.is_some_and(|file| file.starts_with(config_dir.join("bindings/Configuration/Capabilities")));
     let r#where = match (file, capability, generated) {
-        (None, _, _) => "its make files make it (make.code.defn, make.code.deps, or what they include), maybe of a variable the option list can set too".to_owned(),
-        (Some(_), true, _) => "it comes with a capability: the file named is written by the thorn that provides the capability (an ExternalLibraries thorn takes it from its configuration, or from the option list's variables for that library), so change it there".to_owned(),
-        (Some(_), false, true) => "the file named is written from the thorn's configuration.ccl and what it requires: change it there".to_owned(),
-        (Some(_), false, false) => "the file named sets it: the thorn's to change, not the option list's".to_owned(),
+        (None, _, _) => "the thorn's make files set it (make.code.defn, make.code.deps, or what they include), possibly from a variable the option list can set too".to_owned(),
+        (Some(_), true, _) => "it comes with a capability: change it in the thorn that provides the capability (for an ExternalLibraries thorn, its configuration or the option list's variables for that library)".to_owned(),
+        (Some(_), false, true) => "the file named is generated from the thorn's configuration.ccl: change it there".to_owned(),
+        (Some(_), false, false) => "the file named sets it: change it in the thorn, not the option list".to_owned(),
     };
     match raw.severity {
         Severity::KeepsOut => Some(format!("the cache stays out of these compiles only; {where}{leave}")),
@@ -783,7 +782,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
     };
     let name = words[0].clone();
     if Path::new(&name).file_name().and_then(|name| name.to_str()).is_some_and(|program| super::wrapper::OTHER_WRAPPERS.contains(&program)) {
-        found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), format!("{} already stands in front of the compiler, and the cache does not stack on another wrapper", name.to_string_lossy())));
+        found.push(raw(Severity::KeepsOut, Some(&language.compiler_variable), format!("{} is another compiler wrapper, which the cache does not stack on", name.to_string_lossy())));
         return found;
     }
     // Not there at all: this configuration may not compile the language.
@@ -820,7 +819,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
         found.push(raw(
             Severity::Costs,
             Some(&language.compiler_variable),
-            "the compiler did not make one object of the trial in two places, so its objects are not shared between installations or configurations".to_owned(),
+            "the compiler's objects depend on the build path, so they are not shared between installations or configurations".to_owned(),
         ));
     }
     let source = format!("probe.{}", language.suffix);
@@ -841,7 +840,7 @@ fn check_language(request: &Request, language: &Language, values: &BTreeMap<Stri
             // Shell syntax the recipe's shell would expand first (`echo`
             // in backquotes): what the compile gets is not known here.
             Err(_) => {
-                found.push(raw(Severity::Unchecked, Some(variable), format!("{variable} has shell syntax the recipe's shell expands before the compiler runs (a command substitution, a ~ or a pattern), which this check does not, so its flags are not checked")));
+                found.push(raw(Severity::Unchecked, Some(variable), format!("{variable} has shell syntax (a command substitution, ~ or pattern) this check does not expand")));
                 continue;
             }
         };
@@ -1002,7 +1001,7 @@ const SECOND_OUTPUT: &str = "-o is given more than once";
 
 /// The note beside a first reason: nothing past it is read. `cache doctor`
 /// says it once, however many compiles have one.
-const FIRST_ONLY: &str = "only the first thing the build cache refuses in a compile is said (its reader stops there)";
+const FIRST_ONLY: &str = "only the first reason the build cache refuses a compile is reported";
 
 /// The reader's first reason for `flags`, if it has one, with the position
 /// of the one word it is about where it is about that occurrence only (a
@@ -1163,7 +1162,7 @@ fn evaluate(config_dir: &Path, variables: &[String]) -> Res<BTreeMap<String, Str
 fn evaluate_with(config_dir: &Path, variables: &[String], overrides: &[String]) -> Res<BTreeMap<String, String>> {
     let defn = config_dir.join("config-data/make.config.defn");
     if !defn.is_file() {
-        anyhow::bail!("{} is not there", defn.display());
+        anyhow::bail!("'{}' does not exist", defn.display());
     }
     let dir = temp_dir()?;
     // `$(info)`: no shell between make and the values (a quote in one is
@@ -1184,7 +1183,7 @@ fn evaluate_with(config_dir: &Path, variables: &[String], overrides: &[String]) 
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
         let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("it said nothing");
-        anyhow::bail!("make could not read {}: {last}", defn.display());
+        anyhow::bail!("make could not read '{}': {last}", defn.display());
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1241,7 +1240,7 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
     let read = run_to_files(Command::new(shell).arg("-n").arg("-c").arg(env).env_clear(), None, true).map_err(|e| format!("{e:#}"))?;
     if !read.status.success() {
         let said = String::from_utf8_lossy(&read.stderr);
-        return Err(format!("{shell} cannot read the setup ({}), so what it sets is not known", said.trim()));
+        return Err(format!("{shell} cannot read the setup: {}", said.trim()));
     }
     let mut fragile = Fragile::default();
     for state in ["unset", "empty", "set"] {
@@ -1301,7 +1300,7 @@ pub fn fragile_entries(env: &str, build: Option<&Path>) -> Result<Fragile, Strin
                 fragile.stopped.push(state);
                 values
             }
-            (None, None) => return Err(format!("with the path variables (PATH aside) {state} before it, the setup did not run to its end, and where it stopped is not known (it ends the shell its own way: a trap of its own on its exit, an exec), so what it sets is not known")),
+            (None, None) => return Err(format!("with the path variables other than PATH {state}, the setup did not finish and where it stopped is unknown (it sets its own exit trap or uses exec)")),
         };
         for line in values.lines() {
             let Some((variable, value)) = line.split_once('=').filter(|(variable, _)| PATH_VARIABLES.contains(variable)) else { continue };
@@ -1363,12 +1362,12 @@ pub fn in_build_environment(cactup: &Path, cactus_root: &Path, env: &str, reques
         anyhow::bail!("the build environment setup did not run to its end ({}): {last}", out.status);
     }
     if !through {
-        anyhow::bail!("the build environment setup ended the shell before its end (an exit, or a return), as the build's would");
+        anyhow::bail!("the build environment setup ended the shell before its end (an exit or return)");
     }
     if !out.status.success() {
         anyhow::bail!("the checks in the build environment failed ({}): {last}", out.status);
     }
-    anyhow::bail!("the checks in the build environment answered in a form this cactup cannot read")
+    anyhow::bail!("cannot read the reply of the checks in the build environment")
 }
 
 /// What the shell runs once the setup is through: the mark that says so,
@@ -1394,8 +1393,8 @@ fn temp_dir() -> Res<tempfile::TempDir> {
 /// Where [`temp_dir`] and [`temp_file`] look: TMPDIR, then /tmp.
 fn tried() -> String {
     match std::env::temp_dir() {
-        dir if dir == Path::new("/tmp") => "/tmp".to_owned(),
-        dir => format!("{} or /tmp", dir.display()),
+        dir if dir == Path::new("/tmp") => "'/tmp'".to_owned(),
+        dir => format!("'{}' or '/tmp'", dir.display()),
     }
 }
 
@@ -1435,7 +1434,7 @@ fn wait_interruptibly(mut child: std::process::Child, group: bool) -> Res<std::p
                 }
             }
             let _ = child.wait();
-            anyhow::bail!("interrupted");
+            anyhow::bail!("Interrupted");
         }
         std::thread::sleep(pause);
         pause = (pause * 2).min(std::time::Duration::from_millis(50));
@@ -1521,35 +1520,35 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
         let id = attempt.id;
         let why = match () {
             _ if defn.is_none() => "the configuration is not configured yet".to_owned(),
-            _ if failed => "the configuration's last configure failed, and what it left is not what a build compiles with".to_owned(),
+            _ if failed => "the configuration's last configure failed".to_owned(),
             // What its record shows: whether it ended, and whether its
             // script records a configure (one of an older cactup's does not).
             _ if vouched_at.is_none() => {
                 let ended = meta.outcome.is_some() || meta.timestamps.finished.is_some();
                 let records = std::fs::read_to_string(attempt.script_path()).ok().map(|script| script.contains(&attempt.configured_stamp_path().display().to_string()));
                 let how = match (ended, records) {
-                    (false, Some(true)) => "it has recorded neither an end nor that its configure step succeeded",
-                    (true, Some(true)) => "it ended without recording that its configure step succeeded",
-                    (_, Some(false)) => "its build script, of an older cactup's, records nothing of its configure",
-                    (_, None) => "its build script is not there to tell",
+                    (false, Some(true)) => "it has not finished or recorded a successful configure",
+                    (true, Some(true)) => "it ended without recording a successful configure",
+                    (_, Some(false)) => "its build script, from an older cactup, does not record its configure",
+                    (_, None) => "its build script is missing",
                 };
-                format!("build attempt {id:04}, the newest that builds, has left no record that it configured the configuration as it is now, so what it compiles with is not known ({how})")
+                format!("build attempt {id:04} has no record of configuring the configuration as it is now ({how})")
             }
-            _ => format!("the configuration has been configured again since build attempt {id:04}, the newest that builds, configured it, so what it is configured from is not known"),
+            _ => format!("the configuration was reconfigured after build attempt {id:04}"),
         };
         findings.push(Finding { severity: Severity::Unchecked, what: format!("{why}: its compilers and flags are not checked"), from: "the configuration".to_owned(), fix: None });
         findings.push(Finding {
             severity: Severity::Unchecked,
-            what: format!("what each thorn's own make files give its compiles is not checked: {why}"),
+            what: format!("the thorns' own compilers and flags are not checked: {why}"),
             from: "the configuration".to_owned(),
-            fix: Some("run cactup cache doctor again once a build has configured it (it does, before it compiles)".to_owned()),
+            fix: Some("run `cactup cache doctor` again after a build has configured it".to_owned()),
         });
     } else if !meta.config_dir.join("bindings/Configuration").is_dir() {
         findings.push(Finding {
             severity: Severity::Unchecked,
-            what: "the configuration's bindings are not written yet: what the capabilities a thorn requires give its compiles, and the bindings' own compiles, are not checked".to_owned(),
+            what: "the configuration's bindings are not written yet, so capability flags and the bindings' own compiles are not checked".to_owned(),
             from: "the configuration".to_owned(),
-            fix: Some("run cactup cache doctor again once a build has written them (a build does, before it compiles)".to_owned()),
+            fix: Some("run `cactup cache doctor` again after a build has written them".to_owned()),
         });
     }
     let written = match configured {
@@ -1576,9 +1575,9 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
     if first_only {
         findings.push(Finding {
             severity: Severity::Unchecked,
-            what: format!("{FIRST_ONLY}, so what else keeps those compiles out is not checked"),
-            from: "the build cache's reader of compiles".to_owned(),
-            fix: Some("change what is said, and run cactup cache doctor again".to_owned()),
+            what: format!("{FIRST_ONLY}; later ones are not checked"),
+            from: "the build cache".to_owned(),
+            fix: Some("fix the reported reason and run `cactup cache doctor` again".to_owned()),
         });
     }
     let found: Vec<Raw> = reply.found.iter().filter(|raw| raw.reason != FIRST_ONLY).map(|raw| with_flag_variable(raw, &reply.values)).collect();
@@ -1618,7 +1617,7 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             if !fragile.stopped.is_empty() {
                 findings.push(Finding {
                     severity: Severity::Unchecked,
-                    what: format!("with the path variables (PATH aside) {} before it, the setup stopped before its end (an exit, a command that failed under set -e, an unset variable under set -u): what it sets after that, with them so, is not checked", fragile.stopped.join(" or ")),
+                    what: format!("with the path variables other than PATH {}, the setup stopped early (an exit, a failed command under set -e, or an unset variable under set -u); what it sets after that is not checked", fragile.stopped.join(" or ")),
                     from: setup.clone(),
                     fix: None,
                 });
@@ -1626,7 +1625,7 @@ pub fn check_attempt(attempt: &crate::build::attempt::BuildAttempt, conf: BuildC
             for (variable, state, value) in fragile.found {
                 findings.push(Finding {
                     severity: Severity::Note,
-                    what: format!("with {variable} {state} before it runs, the setup makes it \"{value}\", with an entry that is not an absolute path (an empty one is the working directory)"),
+                    what: format!("with {variable} {state} beforehand, the setup sets it to \"{value}\", which has a relative or empty entry"),
                     from: setup.clone(),
                     fix: Some(format!("write it as export {variable}=\"/dir${{{variable}:+:${variable}}}\"")),
                 });
@@ -1712,13 +1711,13 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
         };
         let from = match from_shell {
             _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "this host's /tmp".to_owned(),
-            true => format!("your shell ({variable} is so before the build's environment setup runs: your login files, or what you loaded)"),
+            true => format!("your shell ({variable} is already so before the build's environment setup runs)"),
             false => setup.to_owned(),
         };
         let fix = match () {
-            _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "set TMPDIR to a directory that is there and writable, for the build".to_owned(),
-            _ if variable == "TMPDIR" && raw.reason.contains("no absolute path") => "give TMPDIR an absolute directory (a ~ in quotes is not expanded: write $HOME)".to_owned(),
-            _ if variable == "TMPDIR" => "set TMPDIR to a directory that is there and writable for you (or make the one it names)".to_owned(),
+            _ if variable == "TMPDIR" && raw.reason.contains("is not set") => "set TMPDIR to an existing, writable directory for the build".to_owned(),
+            _ if variable == "TMPDIR" && raw.reason.contains("a relative path") => "set TMPDIR to an absolute path (a quoted ~ is not expanded; use $HOME)".to_owned(),
+            _ if variable == "TMPDIR" => "set TMPDIR to an existing, writable directory, or create the one it names".to_owned(),
             _ if raw.reason.contains("is set") || variable == "LD_AUDIT" => format!("unset {variable} for the build"),
             _ if variable == "LD_PRELOAD" => "name each library LD_PRELOAD loads by its absolute path".to_owned(),
             _ => format!("give {variable} absolute directories only: export {variable}=\"/dir${{{variable}:+:${variable}}}\" adds one without an empty entry"),
@@ -1797,18 +1796,18 @@ fn trace(raw: &Raw, reply: &Reply, optionlist: &BTreeMap<String, String>, writte
 /// What would let compiles kept out for `why` in, where cactup knows.
 pub fn hint(why: &str) -> Option<&'static str> {
     let hints: [(&str, &str); 12] = [
-        ("is not a plain command naming a program", "name the compiler alone in the option list (CC = gcc, CXX = g++, and so on): settings such as LANG=C belong in the machine's environment setup, and flags in the flags variables"),
-        ("already stands in front of the compiler", "name the compiler itself in the option list (CC = gcc, not ccache gcc): the build cache takes ccache's place"),
+        ("is not a plain command naming a program", "name the compiler alone in the option list (CC = gcc); put settings such as LANG=C in the machine's environment setup, and flags in the flags variables"),
+        ("is another compiler wrapper", "name the compiler itself in the option list (CC = gcc, not ccache gcc)"),
         ("--objdir-as-tempdir", "give nvcc --objdir-as-tempdir in the option list's CUDA flags"),
-        ("records when each source was last changed", "take -G and -lineinfo out of the option list's CUDA flags for builds the cache is to serve (a debug build of CUDA code is not cached)"),
-        ("native targets the GPU", "name the GPU architecture in the option list instead of native (-arch=sm_80, say)"),
+        ("records when each source was last changed", "remove -G and -lineinfo from the option list's CUDA flags"),
+        ("native targets the GPU", "name the GPU architecture in the option list instead of native (e.g. -arch=sm_80)"),
         ("is not a flag the cache knows", "if the flag is not needed, leave it out; if it is, the cache does not know it yet"),
-        ("is read as one)", "the word named is read as a second source: leave it out, with the flag it belongs to, if the build does not need them (the cache takes a value apart from its flag only for flags it knows: -I, -D, -isystem and the like)"),
-        ("changes the compiler's flags behind its command line", "unset that variable for the build (your shell, or the machine's environment setup)"),
-        ("Disk quota exceeded", "a quota is used up (on the build cache's file system or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
-        ("No space left on device", "a file system is full (the build cache's or the build's): make room there (for the cache, cactup cache gc), or set build-cache-size to be told before"),
-        ("not published: Failed to create", "the build could not write in the build cache: look at its permissions and free space (cactup cache stats names it)"),
-        ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts whose processors are all alike"),
+        ("is read as one)", "the word named is read as a second source: leave it and its flag out if the build does not need them"),
+        ("changes the compiler's flags behind its command line", "unset that variable for the build, in your shell or the machine's environment setup"),
+        ("Disk quota exceeded", "a disk quota is exhausted: free space (`cactup cache gc` for the cache), or set build-cache-size for an early warning"),
+        ("No space left on device", "a file system is full: free space (`cactup cache gc` for the cache), or set build-cache-size for an early warning"),
+        ("not published: Failed to create", "the build could not write to the build cache: check its permissions and free space (see `cactup cache stats`)"),
+        ("it targets the processor it runs on", "name the processor in the option list instead of -march=native, or build on hosts with uniform processors"),
     ];
     hints.iter().find(|(pattern, _)| why.contains(pattern)).map(|(_, hint)| *hint)
 }
@@ -2252,7 +2251,7 @@ mod tests {
         let scratch = tmp.path().join("scratch");
         std::fs::create_dir_all(scratch.join("tmp")).unwrap();
         assert!(unusable_tmpdir(Some("~/tmp".into()), None).is_none());
-        assert!(unusable_tmpdir(Some("~/tmp".into()), Some(&scratch)).is_some_and(|raw| raw.reason.contains("no absolute path")));
+        assert!(unusable_tmpdir(Some("~/tmp".into()), Some(&scratch)).is_some_and(|raw| raw.reason.contains("a relative path")));
         assert!(unusable_tmpdir(Some("tmp".into()), Some(&scratch)).is_none());
         assert!(unusable_tmpdir(Some("".into()), Some(&scratch)).is_none());
         // A flag's value goes with it in what to leave out.

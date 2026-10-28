@@ -139,10 +139,10 @@ impl Seen {
             .open(path)
             .and_then(|file| file.metadata())
             .or_else(|_| fs::metadata(path))
-            .with_context(|| format!("Failed to look at {}", path.display()))?;
+            .with_context(|| format!("Failed to look at '{}'", path.display()))?;
         Ok(Self {
             path: path.to_owned(),
-            real: fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?,
+            real: fs::canonicalize(path).with_context(|| format!("Failed to resolve '{}'", path.display()))?,
             size: meta.len(),
             // Change time, not modification time: `touch -r` and `cp -p`
             // can set the latter back.
@@ -233,7 +233,7 @@ pub(super) fn find_along(program: &OsStr, path: &OsStr) -> Res<Option<PathBuf>> 
 /// [`search_path`] along `path`, a value of `PATH` (one a driver gives the
 /// programs it runs: `nvcc`'s).
 pub(super) fn search_along(program: &OsStr, path: &OsStr, watched: &mut Watched) -> Res<Option<PathBuf>> {
-    let absolute = |path: &Path| std::path::absolute(path).with_context(|| format!("Failed to resolve {}", path.display()));
+    let absolute = |path: &Path| std::path::absolute(path).with_context(|| format!("Failed to resolve '{}'", path.display()));
     if program.as_bytes().contains(&b'/') {
         return absolute(Path::new(program)).map(Some);
     }
@@ -244,7 +244,7 @@ pub(super) fn search_along(program: &OsStr, path: &OsStr, watched: &mut Watched)
         // this user, a filesystem mounted `noexec`): so does this search.
         if executable(&place) && (!watched.helper || runs(&place)) {
             if place.is_relative() && watched.helper {
-                bail!("{} is found through a relative entry of PATH, which each working directory may have another of", place.display());
+                bail!("'{}' is found through a relative entry of PATH", place.display());
             }
             return absolute(&place).map(Some);
         }
@@ -259,21 +259,21 @@ pub(super) fn search_along(program: &OsStr, path: &OsStr, watched: &mut Watched)
 /// (`--list-diagnostics`, glibc 2.33 and later). A loader that does not
 /// say rules the compiler out.
 fn expand_tokens(program: &Path, entry: &str) -> Res<String> {
-    let loader = interpreter(program).with_context(|| format!("{} names no loader to ask what {entry} means", program.display()))?;
+    let loader = interpreter(program).with_context(|| format!("'{}' names no dynamic loader to expand {entry}", program.display()))?;
     let said = ask(&loader, &["--list-diagnostics"])
-        .with_context(|| format!("the loader of {} does not say what {entry} means (glibc before 2.33?)", program.display()))?;
+        .with_context(|| format!("the loader of '{}' does not report what {entry} expands to (glibc before 2.33?)", program.display()))?;
     let value = |key: &str| {
         said.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix("=\"")?.strip_suffix('"').map(str::to_owned))
     };
-    let lib = value("dl_dst_lib").with_context(|| format!("the loader of {} does not say what $LIB means", program.display()))?;
-    let platform = value("dl_platform").with_context(|| format!("the loader of {} does not say what $PLATFORM means", program.display()))?;
+    let lib = value("dl_dst_lib").with_context(|| format!("the loader of '{}' does not report $LIB", program.display()))?;
+    let platform = value("dl_platform").with_context(|| format!("the loader of '{}' does not report $PLATFORM", program.display()))?;
     let origin = fs::canonicalize(program)?.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned();
     let mut expanded = entry.to_owned();
     for (token, value) in [("LIB", &lib), ("PLATFORM", &platform), ("ORIGIN", &origin)] {
         expanded = expanded.replace(&format!("${{{token}}}"), value).replace(&format!("${token}"), value);
     }
     if expanded.contains('$') {
-        bail!("{entry} names a token the loader of {} expands, which cactup does not know", program.display());
+        bail!("{entry} has a token the loader of '{}' expands that cactup does not support", program.display());
     }
     Ok(expanded)
 }
@@ -541,7 +541,7 @@ pub(super) fn identify_watching(cc_dir: &Path, program: &OsStr) -> Res<(Compiler
     let mut files = Vec::new();
     let mut absent = Vec::new();
     let examined = fs::create_dir_all(&memo_dir)
-        .with_context(|| format!("Failed to create {}", memo_dir.display()))
+        .with_context(|| format!("Failed to create '{}'", memo_dir.display()))
         .and_then(|()| examine(&path, name, program, &memo_dir, &mut Watched { files: &mut files, absent: &mut absent, helper: true }));
     // Each looked at by every compile: once is enough.
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -611,7 +611,7 @@ pub(super) fn ask(program: &Path, args: &[&str]) -> Res<String> {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .with_context(|| format!("Failed to run {}", program.display()))?;
+        .with_context(|| format!("Failed to run '{}'", program.display()))?;
     if !out.status.success() {
         bail!("{} {} failed ({})", program.display(), args.join(" "), out.status);
     }
@@ -651,7 +651,7 @@ fn loaded_libraries_with(program: &Path, library_path: Option<&str>, watched: &m
         .env_remove("LD_DEBUG_OUTPUT")
         .stdin(Stdio::null())
         .output();
-    let out = out.with_context(|| format!("Failed to run {} to list the libraries it loads", program.display()))?;
+    let out = out.with_context(|| format!("Failed to run '{}' to list the libraries it loads", program.display()))?;
     // `\tlibisl.so.23 => /lib/x86_64-linux-gnu/libisl.so.23 (0x00007f…)`,
     // or a library preloaded by its path: `\t/opt/lib/libx.so (0x…)`.
     let listed = String::from_utf8_lossy(&out.stdout);
@@ -666,7 +666,7 @@ fn loaded_libraries_with(program: &Path, library_path: Option<&str>, watched: &m
             _ if path.is_absolute() => libraries.push(path),
             // Opened as named, from the working directory, unsearched.
             _ if path.as_os_str().as_bytes().contains(&b'/') => {
-                bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), path.display())
+                bail!("'{}' loads '{}' by a relative path", program.display(), path.display())
             }
             // The loader's own (`linux-vdso.so.1`), no file.
             _ => {}
@@ -683,7 +683,7 @@ fn loaded_libraries_with(program: &Path, library_path: Option<&str>, watched: &m
             if fs::metadata(&found).is_err() {
                 watched.passed(&found);
             } else if found.is_relative() {
-                bail!("{} loads {} by a relative name, which each working directory may have another of", program.display(), found.display());
+                bail!("'{}' loads '{}' by a relative path", program.display(), found.display());
             }
             for place in tries.drain(..) {
                 watched.passed(&place);
@@ -714,7 +714,7 @@ fn loaded_libraries_with(program: &Path, library_path: Option<&str>, watched: &m
     // A loader that is not glibc's says nothing of its search (musl's
     // ignores both variables): a dynamic program it runs is ruled out.
     if interpreted(program) && !said.contains("find library=") {
-        bail!("{} is run by a dynamic loader cactup cannot follow (not glibc's)", program.display());
+        bail!("'{}' uses a dynamic loader other than glibc's", program.display());
     }
     // The system's own preload list, read by every loader that starts.
     watched.passed(Path::new("/etc/ld.so.preload"));
@@ -780,7 +780,7 @@ fn trial_object(compiler: &Path, name: &OsStr, root: &Path, config: &str) -> Opt
         .output()
         .ok()?;
     if !status.status.success() {
-        trial_says(&format!("{} failed the trial compile ({}): {}", compiler.display(), status.status, String::from_utf8_lossy(&status.stderr)));
+        trial_says(&format!("'{}' failed the trial compile ({}): {}", compiler.display(), status.status, String::from_utf8_lossy(&status.stderr)));
     }
     status.status.success().then(|| fs::read(&object).ok()).flatten()
 }
@@ -811,7 +811,7 @@ fn relocates(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
     let one = trial_object(compiler, name, &trial_dir.join("one/Cactus"), "a");
     let other = trial_object(compiler, name, &trial_dir.join("another/deeper/Cactus"), "bb");
     if one.is_some() && other.is_some() && one != other {
-        trial_says(&format!("{} made two objects of the trial in two places", compiler.display()));
+        trial_says(&format!("'{}' made different trial objects in two directories", compiler.display()));
     }
     one.is_some() && one == other
 }
@@ -866,14 +866,14 @@ fn locale_neutral(compiler: &Path, name: &OsStr, dir: &Path) -> bool {
 fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched: &mut Watched) -> Res<Compiler> {
     // The file that runs, behind whatever links name it (`cc` -> `gcc` ->
     // `x86_64-linux-gnu-gcc-14`).
-    let driver = fs::canonicalize(path).with_context(|| format!("Failed to resolve {}", path.display()))?;
+    let driver = fs::canonicalize(path).with_context(|| format!("Failed to resolve '{}'", path.display()))?;
     watched.files.push(Seen::of(&driver)?);
     // And by the name it was found by: a link on the way turned elsewhere
     // leads to another file, while the one found is as it was.
     watched.files.push(Seen::of(path)?);
-    let bytes = fs::read(&driver).with_context(|| format!("Failed to read {}", driver.display()))?;
+    let bytes = fs::read(&driver).with_context(|| format!("Failed to read '{}'", driver.display()))?;
     if !bytes.starts_with(b"\x7fELF") {
-        bail!("{} is a script, not a compiler cactup can identify", path.display());
+        bail!("'{}' is a script, not a compiler cactup can identify", path.display());
     }
     let contains = |marker: &[u8]| bytes.windows(marker.len()).any(|window| window == marker);
     let says = ask(path, &["--version"])?;
@@ -892,7 +892,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
     } else if says.contains("Cuda compilation tools") && contains(b"nvcc.profile") {
         Family::Nvcc
     } else {
-        bail!("{} is not a compiler cactup knows (or is a wrapper around one)", path.display());
+        bail!("'{}' is not a compiler cactup knows", path.display());
     };
 
     let mut hasher = Hasher::new("compiler");
@@ -918,7 +918,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
                         let file = Path::new(file.trim());
                         watched.files.extend(Seen::of(file));
                         bail!(
-                            "{} reads a configuration file ({}), which can add flags the cache does not see",
+                            "'{}' reads a configuration file '{}', which can add flags the cache does not see",
                             path.display(),
                             file.display()
                         );
@@ -948,7 +948,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
                 Ok(said
                     .lines()
                     .find_map(|line| line.strip_prefix(&format!("{what}: =")))
-                    .with_context(|| format!("{} does not say where it looks for its {what}", path.display()))?
+                    .with_context(|| format!("'{}' -print-search-dirs lists no {what}", path.display()))?
                     .split(':')
                     .filter(|dir| !dir.is_empty())
                     .map(PathBuf::from)
@@ -972,7 +972,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
                         match dirs.iter().position(|dir| dir.join(helper) == file) {
                             Some(at) => dirs[..at].iter().for_each(|dir| watched.passed(&dir.join(helper))),
                             None if *helper == "as" => {}
-                            None => bail!("{} finds {} where it does not say it looks", path.display(), file.display()),
+                            None => bail!("'{}' finds '{}' outside its search directories", path.display(), file.display()),
                         }
                         Some(file.to_owned())
                     }
@@ -997,16 +997,16 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
                             "cc1plus" => b"GNU C++",
                             _ => b"GNU C",
                         };
-                        let bytes = fs::read(&file).with_context(|| format!("Failed to read {}", file.display()))?;
+                        let bytes = fs::read(&file).with_context(|| format!("Failed to read '{}'", file.display()))?;
                         if !bytes.starts_with(b"\x7fELF") || !bytes.windows(marker.len()).any(|window| window == marker) {
-                            bail!("{} runs {} for {helper}, which is no program cactup can identify (a script or a wrapper, maybe)", path.display(), file.display());
+                            bail!("'{}' runs '{}' for {helper}, which cactup cannot identify", path.display(), file.display());
                         }
                         hasher.feed(file_digest(&file)?.as_bytes());
                         watched.files.push(Seen::of(&file)?);
                         programs.push((file, None));
                     }
                     None if *helper == "cc1plus" => hasher.feed(b"absent"),
-                    None => bail!("{} names no {helper} cactup can find", path.display()),
+                    None => bail!("cannot find the {helper} that '{}' runs", path.display()),
                 }
             }
             // The rules by which the driver builds their command lines: the
@@ -1048,17 +1048,17 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
             libraries[..before].iter().for_each(|dir| watched.passed(&dir.join("specs")));
             if file.is_absolute() {
                 watched.files.extend(Seen::of(file));
-                let text = fs::read(file).with_context(|| format!("Failed to read {}", file.display()))?;
+                let text = fs::read(file).with_context(|| format!("Failed to read '{}'", file.display()))?;
                 if let Err(why) = super::specs::link_only(&builtin, &text, &bytes) {
                     bail!(
-                        "{} reads a specs file ({}) the cache does not accept, since it can add flags the cache does not see: it {why}",
+                        "'{}' reads a specs file the cache does not support ('{}'): it {why}",
                         path.display(),
                         file.display()
                     );
                 }
                 hasher.feed(b"specs file");
                 hasher.feed(&text);
-                specs = Some(fs::canonicalize(file).with_context(|| format!("Failed to resolve {}", file.display()))?);
+                specs = Some(fs::canonicalize(file).with_context(|| format!("Failed to resolve '{}'", file.display()))?);
             }
         }
     }
@@ -1074,7 +1074,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
     // Asked again, after the looking, they must say the same.
     for (helper, named) in &answers {
         if ask(path, &[&format!("-print-prog-name={helper}")])? != *named {
-            bail!("{} found another {helper} while it was examined", path.display());
+            bail!("'{}' found a different {helper} when asked again", path.display());
         }
     }
     let mut again = Vec::new();
@@ -1084,7 +1084,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
     again.sort();
     again.dedup();
     if again != libraries {
-        bail!("{} loads other libraries than it did a moment ago", path.display());
+        bail!("'{}' loaded different libraries when run again", path.display());
     }
     for library in libraries {
         watched.files.extend(Seen::of(&library));
@@ -1100,7 +1100,7 @@ fn examine(path: &Path, name: &OsStr, program: &OsStr, trial_dir: &Path, watched
             let trial = super::cuda::trial(path, program, trial_dir);
             takes_module_id = trial.takes_id;
             for read in trial.host_reads {
-                let file = fs::canonicalize(&read).with_context(|| format!("Failed to resolve {}", read.display()))?;
+                let file = fs::canonicalize(&read).with_context(|| format!("Failed to resolve '{}'", read.display()))?;
                 hasher.feed(file.as_os_str().as_bytes());
                 hasher.feed(file_digest(&file)?.as_bytes());
                 watched.files.extend(Seen::of(&read));
@@ -1532,7 +1532,7 @@ mod tests {
         fs::remove_file("bin/as").unwrap();
         // One that is a script: what it runs is followed by nothing here.
         script(Path::new("bin"), "as", "exec /usr/bin/as \"$@\"");
-        if identify(memo.path(), OsStr::new("gcc")).is_err_and(|e| format!("{e:#}").contains("a script or a wrapper, maybe")) {
+        if identify(memo.path(), OsStr::new("gcc")).is_err_and(|e| format!("{e:#}").contains("which cactup cannot identify")) {
             println!("script seen");
         }
         fs::remove_file("bin/as").unwrap();
