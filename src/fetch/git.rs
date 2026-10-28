@@ -1164,6 +1164,40 @@ pub fn head_of(repo_dir: &Path) -> Res<(String, ObjectId)> {
     Ok((branch, id))
 }
 
+/// The branch `origin`'s HEAD names: the one a clone without `!REPO_BRANCH`
+/// checks out. One ref advertisement, nothing fetched. The clone's own
+/// `refs/remotes/origin/HEAD` cannot answer this — gix stores it as a plain
+/// commit id, not as a symref to a branch.
+pub fn remote_default_branch(repo_dir: &Path) -> Res<String> {
+    let _span = crate::timing::span("git default branch");
+    let repo = gix::open(repo_dir)
+        .with_context(|| format!("Failed to open {}", repo_dir.display()))?;
+    let remote = repo.find_remote("origin").with_context(|| "no origin remote")?;
+    // A single-branch clone's refspec filters the advertisement down to that
+    // one branch; ask for HEAD explicitly, or it is left out.
+    let head = gix::refspec::parse("HEAD".into(), gix::refspec::parse::Operation::Fetch)
+        .expect("HEAD is a valid refspec")
+        .to_owned();
+    let options = gix::remote::ref_map::Options { extra_refspecs: vec![head], ..Default::default() };
+    let (map, _) = remote
+        .connect(Direction::Fetch)
+        .with_context(|| "failed to connect to origin")?
+        .ref_map(gix::progress::Discard, options)
+        .with_context(|| "failed to list origin's refs")?;
+    map.remote_refs
+        .iter()
+        .find_map(|r| match r {
+            gix::protocol::handshake::Ref::Symbolic { full_ref_name, target, .. }
+            | gix::protocol::handshake::Ref::Unborn { full_ref_name, target }
+                if full_ref_name == "HEAD" =>
+            {
+                target.strip_prefix(b"refs/heads/").map(|b| b.to_str_lossy().into_owned())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("origin does not say which branch its HEAD is"))
+}
+
 /// A cheap early-out for the planner: is the repo already exactly at
 /// origin/<branch> according to local refs alone (no network)?
 pub fn at_local_origin_tip(repo_dir: &Path, branch: &str) -> bool {
