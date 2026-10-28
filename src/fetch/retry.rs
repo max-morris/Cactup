@@ -57,7 +57,7 @@ pub(crate) fn with_backoff<P: prodash::Progress, T>(
         };
         progress.set(0);
         if !count_down(progress, jittered(delay), retry + 1) {
-            return Err(error.context("interrupted while waiting to retry"));
+            return Err(error.context("Interrupted while waiting to retry"));
         }
         if let Some(phase) = &phase {
             progress.set_name(phase.clone());

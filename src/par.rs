@@ -70,7 +70,7 @@ pub(crate) fn parallel_map<T: Sync, R: Send>(
         }
     });
     if gix::interrupt::is_triggered() {
-        bail!("interrupted");
+        bail!("Interrupted");
     }
     Ok(slots
         .into_iter()

@@ -61,7 +61,7 @@ const RETIRED_FLAGS: &[RetiredFlag] = &[
 ];
 
 const TEST_SCRIPTS_BY_QUEUE: &str =
-    "the queue now picks the test scripts — choose a different queue with -q to use different ones";
+    "the queue now picks the test scripts; choose a different queue with -q";
 
 /// The rename notice for a retired flag on this command line, if any: the
 /// command line rewritten with the replacement, for the user to re-run.
@@ -257,14 +257,13 @@ pub(crate) struct Args {
 pub(crate) struct GlobalOpts {
     #[clap(short, long, global = true)]
     pub verbose: bool,
-    /// Print every shell command cactup runs to stderr as it happens (submit,
-    /// build, run, discovery, …) — useful for diagnosing scheduler failures.
+    /// Print every shell command cactup runs to stderr.
     #[clap(long, global = true)]
     pub trace: bool,
     #[clap(long, global = true, default_value = "https://bitbucket.org/einsteintoolkit/manifest.git")]
     pub manifest_url: String,
     // §2.2
-    /// Override the system MDB location (mainly for testing).
+    /// Override the system MDB location.
     #[clap(long, global = true, value_name = "PATH")]
     pub mdb_path: Option<PathBuf>,
     // §4.3
@@ -282,9 +281,8 @@ pub(crate) struct GlobalOpts {
     // §5.1
     /// Override a knob for this command only (NAME=VALUE or NAME VALUE; repeatable)
     ///
-    /// Nothing is stored: the value applies wherever this command reads the
-    /// knob — topology defaults, and `@KNOB(name)@` in scripts, optionlists
-    /// and parfiles. A custom knob need not exist yet.
+    /// Applies wherever this command reads the knob, including `@KNOB(name)@`
+    /// in scripts, optionlists and parfiles. A custom knob need not exist yet.
     #[clap(
         short = 'K',
         long = "knob",
@@ -303,13 +301,11 @@ pub(crate) enum Commands {
         #[clap(short, long, help = "List all releases instead of only the few most recent.")]
         all: bool,
     },
-    /// List Einstein Toolkit installations on this machine (top-level
-    /// equivalent of `installation list`)
+    /// List Einstein Toolkit installations on this machine (same as `installation list`)
     List,
     /// Show cactup's current state: active installation, active config, and machine
     Show,
-    /// Set the active Einstein Toolkit installation (top-level equivalent of
-    /// `installation use`)
+    /// Set the active Einstein Toolkit installation (same as `installation use`)
     Use {
         #[clap(help = "The alias of the installation to activate.")]
         alias: String,
@@ -336,32 +332,30 @@ pub(crate) enum Commands {
     Config(ConfigCommand),
     /// Build (or rebuild) a config in the active installation, and manage build attempts (--help for the build cache)
     ///
-    /// Five machine-global knobs control the build cache, which reuses the
-    /// objects earlier builds compiled:
+    /// Five machine-global knobs control the build cache, which reuses
+    /// objects compiled by earlier builds:
     ///
-    ///   build-cache          serve (the default): compile only what no
-    ///                        build compiled before, and keep what is
-    ///                        compiled; off: build without the cache;
-    ///                        audit: serve, but compile anyway and check
-    ///                        that every served object is the same;
-    ///                        record: only measure, changing nothing.
-    ///   build-cache-home     where cached objects are kept, as an absolute
-    ///                        path (default: .cactup-build-cache beside
-    ///                        your installations, in the install-home).
-    ///   build-cache-relocate yes (the default): objects record their
-    ///                        sources as /cactup-root/arrangements/...,
-    ///                        so every installation can share them; no:
-    ///                        they keep this installation's paths.
-    ///   build-cache-size     a size (200G): a build says when the cache
-    ///                        has grown past it. Nothing is removed but by
-    ///                        `cactup cache gc`.
+    ///   build-cache          serve (default): reuse cached objects and
+    ///                        cache new ones; off: do not use the cache;
+    ///                        audit: serve, but also compile and check
+    ///                        that each served object matches; record:
+    ///                        only measure, change nothing.
+    ///   build-cache-home     absolute path of the cache (default:
+    ///                        .cactup-build-cache in the install-home).
+    ///   build-cache-relocate yes (default): record source paths as
+    ///                        /cactup-root/arrangements/..., so all
+    ///                        installations can share objects; no: keep
+    ///                        this installation's paths.
+    ///   build-cache-size     a size such as 200G; a build reports when
+    ///                        the cache exceeds it. Only `cactup cache gc`
+    ///                        removes objects.
     ///   build-cache-preserve-exact-warnings
-    ///                        false (the default): a served object's
-    ///                        warnings are the ones its compile printed,
-    ///                        which in rare cases name a line or a macro
-    ///                        of another configuration's headers; true:
-    ///                        exactly this build's, at the cost of fewer
-    ///                        objects shared between configurations.
+    ///                        false (default): a served object shows the
+    ///                        warnings of its original compile, which may
+    ///                        rarely refer to another configuration's
+    ///                        headers; true: show exactly this build's
+    ///                        warnings, but share fewer objects between
+    ///                        configurations.
     ///
     /// Set them with `cactup knob`, or for one build with -K:
     ///
@@ -386,11 +380,10 @@ pub(crate) enum Commands {
     // §5
     /// Print or set machine-global default values
     ///
-    /// Standard knobs (allocation, queue, mail, …) always exist. A custom
-    /// knob has a name of your choosing — lowercase letters, digits after
-    /// the first character, dashes inside — and is read by @KNOB(name)@ in
-    /// parfiles, scripts and optionlists. Create one with -c; once it
-    /// exists, set it like any other knob, and remove it with `knob delete`.
+    /// Standard knobs (allocation, queue, mail, …) always exist. Custom knobs
+    /// are read by @KNOB(name)@ in parfiles, scripts and optionlists; create
+    /// one with -c and remove it with `knob delete`. A custom knob name uses
+    /// lowercase letters, digits and inner dashes, and starts with a letter.
     #[command(args_conflicts_with_subcommands = true)]
     Knob {
         /// The knob to print or set; omit to print all knobs.
@@ -398,8 +391,7 @@ pub(crate) enum Commands {
         /// The value to set; omit to print the knob.
         value: Option<String>,
         /// Create a custom knob. Required the first time a non-standard
-        /// name is set; a typo in a knob name is otherwise an error, not a
-        /// new knob.
+        /// name is set.
         #[clap(short, long)]
         custom: bool,
         #[clap(subcommand)]
@@ -412,17 +404,16 @@ pub(crate) enum Commands {
     // §16, §5
     /// Print one random piece of cactup wisdom (--help for how to configure)
     ///
-    /// Wisdom may also appear spontaneously after running a command. Two machine-global knobs
-    /// control that:
+    /// Wisdom may also appear after a command. Two machine-global knobs
+    /// control this:
     ///
-    ///   wisdom-frequency  How often the after-command wisdom fires:
+    ///   wisdom-frequency  How often wisdom appears after a command:
     ///                     off (never), rare (1 command in 15), normal
     ///                     (1 in 8, the default), chatty (1 in 4), or
     ///                     always.
-    ///   wisdom-kind       Which entries are eligible, here and after
-    ///                     commands: relevant (cactup feature tips only)
-    ///                     or all (the default: tips mixed with attributed
-    ///                     words of wisdom).
+    ///   wisdom-kind       Which entries are shown: relevant (cactup
+    ///                     tips only) or all (the default: tips and
+    ///                     quotes).
     ///
     /// Set them with `cactup knob`:
     ///
@@ -437,25 +428,23 @@ pub(crate) enum Commands {
     // §17, §5
     /// Update cactup and its machine database (--help for how to configure)
     ///
-    /// Installs the newest published cactup build next to the others in
-    /// $CACTUP_HOME/bin (~/.cactup/bin by default) and points bin/cactup at
-    /// it, then refreshes the machine database. Each build keeps its own
-    /// file, cactup-<build>, so a queued or running job keeps the build it
-    /// was submitted with. The build an update replaces is kept until you
-    /// remove it with --prune. A cactup built from source never updates
-    /// itself: use git pull and cargo build.
+    /// Installs the newest published build as cactup-<build> in
+    /// $CACTUP_HOME/bin (default ~/.cactup/bin), points bin/cactup at it,
+    /// and refreshes the machine database. Older builds are kept, so queued
+    /// jobs keep the build they were submitted with; --prune removes old
+    /// ones. A cactup built from source does not update itself; use git
+    /// pull and cargo build.
     ///
-    /// Before an interactive command, cactup also checks for a newer build
-    /// on its own, at most once a day. Three machine-global knobs control
-    /// updating:
+    /// cactup also checks for a newer build before an interactive command,
+    /// at most once a day. Three machine-global knobs control updating:
     ///
     ///   autoupdate  What that check does when a newer build exists:
-    ///               auto (the default: install it and carry on in it),
-    ///               notify (only say so), or off (do not check).
+    ///               auto (the default: install it and continue in it),
+    ///               notify (only report it), or off (do not check).
     ///   update-url  Where builds are published (default
     ///               https://max-morris.github.io/Cactup). Must be
-    ///               https; plain http only for a loopback test server
-    ///               (127.0.0.1, localhost, [::1]).
+    ///               https; http is allowed only for 127.0.0.1,
+    ///               localhost or [::1].
     ///   mdb-url     The git repository whose mdb branch carries the
     ///               machine database (default
     ///               https://github.com/max-morris/Cactup.git).
@@ -468,10 +457,9 @@ pub(crate) enum Commands {
         /// Only report the installed and the published build; change nothing.
         #[clap(long, conflicts_with = "prune")]
         check: bool,
-        /// Also remove the builds an update retired more than 30 days ago
-        /// (never the current or the running one), printing each file
-        /// removed. A job still running an older build fails to start its
-        /// next restart once that build is gone.
+        /// Also remove builds retired more than 30 days ago (never the
+        /// current or the running one). A job still using a removed build
+        /// cannot start its next restart.
         #[clap(long)]
         prune: bool,
     },
@@ -512,15 +500,14 @@ pub(crate) struct RefetchArgs {
     /// tip of the manifest's master branch (see `cactup releases`).
     #[clap(long, value_name = "RELEASE", conflicts_with = "thornlist")]
     pub release: Option<String>,
-    /// Bypass all nagging (implies --overwrite-modified and --replace-thornlist; also skips the --prune confirmation).
+    /// Skip all confirmations and checks (implies --overwrite-modified and --replace-thornlist).
     #[clap(short, long)]
     pub force: bool,
-    /// Fetch over repos with local modifications (they are backed up first).
-    /// The "all repos" form of `--overwrite`.
+    /// Fetch over local modifications in all repos (they are backed up first).
     #[clap(long)]
     pub overwrite_modified: bool,
-    /// Fetch over these specific repos' local modifications (space- or comma-separated;
-    /// repeatable). Names match a repo under `repos/` or any thorn it provides.
+    /// Fetch over local modifications in these repos (space- or comma-separated;
+    /// repeatable). A name may be a repo under `repos/` or one of its thorns.
     #[clap(long, value_name = "NAMES")]
     pub overwrite: Vec<String>,
     /// Proceed even when the live thornlist has hand edits, discarding them (a snapshot is kept).
@@ -529,21 +516,21 @@ pub(crate) struct RefetchArgs {
     /// Remove repos and thorn symlinks the thornlist no longer mentions (asks once; -f skips the confirmation).
     #[clap(long)]
     pub prune: bool,
-    /// Suppress the skipped-repos warning block (a one-line count is still printed). Unlike `install -s` this never assumes answers to prompts and never authorizes deletion.
+    /// Print only a count of skipped repos instead of the full warning. Unlike `install -s`, never answers prompts or authorizes deletion.
     #[clap(short, long)]
     pub silent: bool,
-    /// Print the full classification of what would happen and touch nothing.
+    /// Show what would happen and change nothing.
     #[clap(short = 'n', long, conflicts_with = "silent")]
     pub dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct InstallArgs {
-    #[clap(help = "The release to install, or \"master\" for the tip of the manifest's master branch (newer than every release). If unspecified, the most recent release will be installed.")]
+    #[clap(help = "The release to install, or \"master\" for the tip of the manifest's master branch (default: the most recent release).")]
     pub release: Option<String>,
-    #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release (a \"custom installation\").")]
+    #[clap(long, value_name = "PATH", conflicts_with = "release", help = "Install from this thornlist file instead of a release.")]
     pub thornlist: Option<PathBuf>,
-    #[clap(short, long, help = "The unique name of the installation. If unspecified, the release name will be used.")]
+    #[clap(short, long, help = "The unique name of the installation (default: the release name).")]
     pub alias: Option<String>,
     #[clap(short, long, help = "Assume default answers to all unspecified flags instead of prompting.")]
     pub silent: bool,
@@ -589,8 +576,8 @@ pub(crate) struct TopologyFlags {
     /// Node count (default: 1).
     #[clap(short, long, value_name = "N")]
     pub nodes: Option<u32>,
-    /// Total tasks (MPI ranks; default: the run/submit script's `tasks` setting,
-    /// else nodes * tasks-per-node — but 2 for `test run`/`test submit`).
+    /// Total tasks (MPI ranks). Default: the run/submit script's `tasks` setting,
+    /// else nodes * tasks-per-node; `test run`/`test submit` default to 2.
     #[clap(short = 'T', long, value_name = "N")]
     pub tasks: Option<u32>,
     /// Tasks per node (default: fill the node, floor(MAX_CPUS_PER_NODE / cpus);
@@ -614,8 +601,8 @@ pub(crate) struct TopologyFlags {
     #[clap(short = 'J', long, value_name = "NAME")]
     pub job_name: Option<String>,
     // §8.8
-    /// Total walltime for the whole simulation; chained into per-job segments
-    /// when it exceeds the queue ceiling.
+    /// Total walltime for the whole simulation; split into chained jobs when
+    /// it exceeds the queue's limit.
     #[clap(short, long, value_name = "(DD-)?HH:MM:SS", value_parser = parse_walltime)]
     pub wall_time: Option<Walltime>,
     /// stdout filename (default: template default).
@@ -643,8 +630,8 @@ pub(crate) struct BuildOpts {
     #[clap(long, value_name = "PATH")]
     pub thornlist: Option<PathBuf>,
     // §4.4
-    /// Optionlist flavor to build (required iff the machine has more than one
-    /// and none is marked default).
+    /// Optionlist flavor to build (required if the machine has several and
+    /// none is the default).
     #[clap(long, value_name = "FLAVOR")]
     pub flavor: Option<String>,
     // §4.4, §7.8
@@ -668,8 +655,8 @@ pub(crate) struct BuildOpts {
     #[clap(long)]
     pub profile: bool,
     // §7.8
-    /// Reconfigure and rebuild even if the config is up to date: incremental
-    /// unless a change needs a from-scratch rebuild (-f always does one).
+    /// Reconfigure and rebuild even if the config is up to date (incremental
+    /// where possible; -f always rebuilds from scratch).
     #[clap(long)]
     pub reconfig: bool,
     /// Clean the config before building.
@@ -720,11 +707,10 @@ pub(crate) struct BuildStartArgs {
     #[clap(flatten)]
     pub topology: TopologyFlags,
     // §8.3.1
-    /// Compute-node path: the config's on-disk directory, so the build needs
-    /// neither the global DB nor the registry. Requires --attempt-id.
+    /// For compute-node runs: the config's directory. Requires --attempt-id.
     #[clap(long, value_name = "PATH", requires = "attempt_id")]
     pub config_dir: Option<PathBuf>,
-    /// Compute-node locator: drive exactly this build attempt
+    /// For compute-node runs: the build attempt to run
     /// (`.cactup-builds/%04d`). Requires --config-dir.
     #[clap(long, value_name = "N", requires = "config_dir")]
     pub attempt_id: Option<u32>,
@@ -803,16 +789,13 @@ pub(crate) enum BuildCommand {
 pub(crate) enum CacheCommand {
     /// Summarize what a build recorded about its compiles, and compare it with another build
     ///
-    /// A build made with the build-cache knob set to record logs, for every
-    /// compile of a Cactus source file, the key it would be cached under.
-    /// This prints how many compiles got a key, why the others did not, and
-    /// what working out the keys cost.
+    /// A build made with the build-cache knob set to record logs the cache
+    /// key of every Cactus source compile. This prints how many compiles got
+    /// a key, why the others did not, and the time spent computing keys.
     ///
     /// With --against, --against-installation or --against-attempt it also
-    /// says how many of this build's compiles the other build's cache
-    /// entries would have served, and for the rest, which part of the key
-    /// differs. Nothing is read from or written to a cache: both builds
-    /// only recorded.
+    /// prints how many of this build's compiles the other build's entries
+    /// would have served, and for the rest, which part of the key differs.
     ///
     ///   cactup cache report sim --against sim-debug
     ///   cactup cache report sim --against-installation other-install
@@ -837,31 +820,24 @@ pub(crate) enum CacheCommand {
         #[clap(long)]
         long: bool,
     },
-    /// Say what keeps a config's compiles from the build cache, and why a build's were not served
+    /// Diagnose why a config's compiles bypass or miss the build cache
     ///
-    /// First it checks the config's build environment, as its newest build
-    /// set it up: the environment, the compilers and the flags, with the
-    /// cache's own rules, in that environment (it runs the compilers on
-    /// small probe sources, and builds nothing), and what each thorn's own
-    /// make files add for its compiles (read with make, as a build reads
-    /// them, so their $(shell ...) commands run). Each finding says where it
-    /// comes from (your shell, the machine's environment setup, the variable
-    /// of the config's make.config.defn that gives the flag, a thorn's file)
-    /// and what to change. A config's compilers and flags are checked where
-    /// what is configured now is its newest build's own configure;
-    /// otherwise the doctor says why not, and they are checked once a build
-    /// has configured it.
+    /// First it checks the build environment of the config's newest build
+    /// against the cache's rules: the environment, the compilers and flags
+    /// (it compiles small probe sources and builds nothing), and what each
+    /// thorn's make files add to its compiles (read with make, so their
+    /// $(shell ...) commands run). Each finding names its source (your
+    /// shell, the machine's environment setup, a make.config.defn variable,
+    /// a thorn's file) and what to change. Compilers and flags are checked
+    /// only if the config was last configured by its newest build.
     ///
-    /// Then it reads what a build that went through the cache logged of its
-    /// compiles (the newest build of the config that did, or --attempt) and
-    /// says: how many objects the cache gave; the compiles it kept out, by
-    /// reason, with what would let them in where that is known; the
-    /// objects the cache had from other sources, by the file that differed,
-    /// with whether the cache compared that file whole and why; the objects
-    /// it had built otherwise, by what differed (compiler, flags,
-    /// environment, host platform, cactup version); and the compiles of
-    /// which it compared every file whole, by reason. The cache itself is
-    /// not read.
+    /// Then it reads the compile log of the newest build that used the
+    /// cache (or --attempt) and reports: how many objects the cache served;
+    /// the compiles it kept out, by reason, with a fix where known; the
+    /// objects cached from other sources, by the file that differed; the
+    /// objects built otherwise, by what differed (compiler, flags,
+    /// environment, host platform, cactup version); and the compiles whose
+    /// files were compared whole, by reason. The cache itself is not read.
     ///
     ///   cactup cache doctor sim
     #[clap(verbatim_doc_comment)]
@@ -872,29 +848,26 @@ pub(crate) enum CacheCommand {
         #[clap(long, value_name = "N")]
         attempt: Option<u32>,
     },
-    /// Say what the build cache holds: objects, sizes, and how recently they were used
+    /// Show what the build cache holds: objects, sizes, and how recently they were used
     ///
-    /// Walks the cache directory (the build-cache-home knob; by default
-    /// .cactup-build-cache beside your installations) and reports, for each machine, how
-    /// many objects it keeps and their size, how many of them builds used
-    /// lately, and anything left over from an interrupted build.
+    /// Reports, for each machine in the cache directory (the
+    /// build-cache-home knob), the number and size of its objects, how many
+    /// were used recently, and anything left over from an interrupted build.
     #[clap(verbatim_doc_comment)]
     Stats,
-    /// Remove from the build cache what no build has used for a while
+    /// Remove objects no build has used recently from the build cache
     ///
-    /// Nothing is ever removed from the cache on its own: an old object is
-    /// what makes going back to an older version of a thorn cheap. This
-    /// removes the objects no build has used or stored for the given time,
-    /// and with --to-size, further ones, least recently used first, until
-    /// the cache is no larger than the given size. Either may be given
-    /// alone.
+    /// The cache is never pruned automatically. --unused-for removes the
+    /// objects no build has used or stored for the given time; --to-size
+    /// then removes the least recently used until the cache is no larger
+    /// than the given size. Either may be given alone.
     ///
     ///   cactup cache gc --unused-for 60d
     ///   cactup cache gc --to-size 200G
     ///   cactup cache gc --unused-for 30d --to-size 200G --dry-run
     #[clap(verbatim_doc_comment)]
     Gc {
-        /// Remove what no build has used for this long: a number with h, d, w, m (30 days) or y.
+        /// Remove objects unused for this long: a number with h, d, w, m (30 days) or y.
         #[clap(long, value_name = "AGE")]
         unused_for: Option<String>,
         /// Then remove the least recently used until the cache is no larger than this (200G, 500M).
@@ -905,10 +878,6 @@ pub(crate) enum CacheCommand {
         dry_run: bool,
     },
     /// Read every object in the build cache and remove the damaged ones
-    ///
-    /// A build already checks each object it takes from the cache and
-    /// removes a damaged one; this does the same for all of them at once.
-    #[clap(verbatim_doc_comment)]
     Verify,
 }
 
@@ -1018,12 +987,12 @@ pub(crate) struct SimStartArgs {
     /// The simulation name.
     pub sim: String,
     // §8.3
-    /// Parfile — triggers implicit create when the simulation doesn't exist.
+    /// Parfile; creates the simulation if it does not exist.
     pub parfile: Option<PathBuf>,
     /// Config for the implicit create (default: active config).
     #[clap(long, value_name = "CONFIG")]
     pub config: Option<String>,
-    /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
+    /// Skip all confirmations and checks (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
     /// Replace an existing simulation on implicit create.
@@ -1038,9 +1007,8 @@ pub(crate) struct SimStartArgs {
     /// your own risk.
     #[clap(long)]
     pub ignore_machine: bool,
-    /// Suppress the notice that the source tree has moved since this config
-    /// was built. Never affects what runs — a run always uses the executable
-    /// as it was built.
+    /// Suppress the notice that the source tree has changed since this
+    /// config was built.
     #[clap(short, long)]
     pub silent: bool,
     #[clap(flatten)]
@@ -1062,16 +1030,13 @@ pub(crate) struct SimRunArgs {
     #[clap(long)]
     pub debug: bool,
     // §8.3.1, §8.8
-    /// Compute-node locator: load and run exactly this output-%04d.
-    /// Internal plumbing baked into the generated submit-script as
-    /// `--restart-id=@RESTART_ID@`; requires --sim-dir, which is the only path
-    /// that honors it. Not a recovery knob — cactup does not steer recovery at
-    /// all.
+    /// For compute-node runs, used by generated submit scripts: the restart
+    /// (output-%04d) to run. Requires --sim-dir.
     #[clap(long, value_name = "N", requires = "sim_dir")]
     pub restart_id: Option<u32>,
     // §8.3.1
-    /// Compute-node path: the absolute simulation directory, so the
-    /// run needs neither the global DB nor the registry. Requires --restart-id.
+    /// For compute-node runs: the absolute simulation directory. Requires
+    /// --restart-id.
     #[clap(long, value_name = "PATH", requires = "restart_id")]
     pub sim_dir: Option<PathBuf>,
 }
@@ -1085,9 +1050,8 @@ pub(crate) enum TestCommand {
     /// Submit the test suite to the queue
     Submit(TestStartArgs),
     // §11.5
-    /// Remove in-tree testsuite output the flesh harness left in the Cactus
-    /// source tree (TEST/ at the Cactus root, configs/<cfg>/TEST) — cactup
-    /// runs redirect it to test-home
+    /// Remove test output left in the Cactus source tree (TEST/ and
+    /// configs/<cfg>/TEST)
     Clean,
     // §11.7
     /// List test runs
@@ -1133,7 +1097,7 @@ pub(crate) struct TestStartArgs {
     /// Config whose testsuite to run (default: the active config).
     #[clap(long, value_name = "CONFIG")]
     pub config: Option<String>,
-    /// Bypass all nagging (implies --overwrite, --force-queue and --ignore-machine).
+    /// Skip all confirmations and checks (implies --overwrite, --force-queue and --ignore-machine).
     #[clap(short, long)]
     pub force: bool,
     /// Replace an existing test run of the same name.
@@ -1147,9 +1111,8 @@ pub(crate) struct TestStartArgs {
     /// Use a config that was built for another machine, at your own risk.
     #[clap(long)]
     pub ignore_machine: bool,
-    /// Suppress the notice that the source tree has moved since this config
-    /// was built. Never affects what runs — a run always uses the executable
-    /// as it was built.
+    /// Suppress the notice that the source tree has changed since this
+    /// config was built.
     #[clap(short, long)]
     pub silent: bool,
     #[clap(flatten)]
@@ -1162,26 +1125,25 @@ pub(crate) struct TestStartArgs {
     /// and a thorn selects the arrangement. Empty selects all tests.
     pub tests: Vec<String>,
     // §11.6
-    /// Compute-node path: the absolute test-run directory, so the
-    /// run needs neither the global DB nor the registry.
+    /// For compute-node runs: the absolute test-run directory. Requires
+    /// --results-id.
     #[clap(long, value_name = "PATH", requires = "results_id")]
     pub test_dir: Option<PathBuf>,
-    /// Compute-node path: the results-%04d id to drive.
+    /// For compute-node runs: the results-%04d id to run. Requires --test-dir.
     #[clap(long, value_name = "N", requires = "test_dir")]
     pub results_id: Option<u32>,
 }
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum MachineCommand {
-    /// List all machines in the MDB (replaces print-mdb / list-machines)
+    /// List all machines in the MDB
     List,
     // §4.3
     /// Show the machine this host resolves to, or a named one
     Show {
         name: Option<String>,
-        /// List the machine's optionlist flavors with their details
-        /// (description, the queues their binaries run on, universe, …)
-        /// instead of the usual machine summary.
+        /// List the machine's optionlist flavors (description, queues,
+        /// universe, …) instead of the machine summary.
         #[clap(long)]
         flavors: bool,
     },
@@ -1194,7 +1156,7 @@ pub(crate) enum MachineCommand {
         /// currently-detected machine.
         #[clap(long, value_name = "BASE", num_args = 0..=1)]
         from_existing: Option<Option<String>>,
-        /// Take defaults instead of prompting (successor to setup-silent).
+        /// Take defaults instead of prompting.
         #[clap(long)]
         silent: bool,
         /// Skip generating hostname.regexp (machine only selectable via --machine).
@@ -1368,7 +1330,7 @@ mod tests {
         // A standard knob's own validation applies; a bad name is rejected.
         let parse_err = |argv: &[&str]| Args::try_parse_from(argv).unwrap_err().to_string();
         let err = parse_err(&["cactup", "-K", "wisdom-frequency=loud", "wisdom"]);
-        assert!(err.contains("invalid wisdom-frequency value"), "{err}");
+        assert!(err.contains("Invalid wisdom-frequency value"), "{err}");
         assert!(Args::try_parse_from(["cactup", "-K", "wisdom-frequency=chatty", "wisdom"]).is_ok());
         let err = parse_err(&["cactup", "-K", "Bad_Name=1", "wisdom"]);
         assert!(err.contains("not a valid knob name"), "{err}");

@@ -32,13 +32,13 @@ pub fn log_use(store: &Store, keys: &[String]) -> Res<()> {
         return Ok(());
     }
     let dir = used_dir(store.dir());
-    fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let mut temp = readable_temp(&dir)?;
     let mut text = keys.join("\n");
     text.push('\n');
     temp.write_all(text.as_bytes()).context("Failed to write a use log")?;
     let name = dir.join(format!("{:016x}{:016x}.keys", fastrand::u64(..), fastrand::u64(..)));
-    temp.persist_noclobber(&name).map_err(|e| e.error).with_context(|| format!("Failed to write {}", name.display()))?;
+    temp.persist_noclobber(&name).map_err(|e| e.error).with_context(|| format!("Failed to write '{}'", name.display()))?;
     Ok(())
 }
 
@@ -53,7 +53,7 @@ fn readable_temp(dir: &Path) -> Res<tempfile::NamedTempFile> {
         .prefix(".tmp-use-")
         .permissions(fs::Permissions::from_mode(0o666))
         .tempfile_in(dir)
-        .with_context(|| format!("Failed to create a temporary file in {}", dir.display()))
+        .with_context(|| format!("Failed to create a temporary file in '{}'", dir.display()))
 }
 
 /// One entry, as the walk found it.
@@ -196,10 +196,10 @@ fn read_piece(piece: &Piece) -> Res<Found> {
     let listing = match fs::read_dir(&piece.dir) {
         Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", piece.dir.display())),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read '{}'", piece.dir.display())),
     };
     for item in listing {
-        let item = item.with_context(|| format!("Failed to read {}", piece.dir.display()))?;
+        let item = item.with_context(|| format!("Failed to read '{}'", piece.dir.display()))?;
         let name = item.file_name().to_string_lossy().into_owned();
         let path = item.path();
         let meta = match fs::symlink_metadata(&path) {
@@ -272,7 +272,7 @@ fn read_units(dir: &Path) -> Res<Found> {
     let listing = match fs::read_dir(dir) {
         Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", dir.display())),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read '{}'", dir.display())),
     };
     for record in listing.flatten() {
         let name = record.file_name().to_string_lossy().into_owned();
@@ -302,9 +302,9 @@ pub fn scan(root: &Path) -> Res<Scan> {
     // the walk would look empty, and its entries unused.
     let list = |dir: &Path| -> Res<Vec<fs::DirEntry>> {
         match fs::read_dir(dir) {
-            Ok(listing) => listing.collect::<Result<Vec<_>, _>>().with_context(|| format!("Failed to read {}", dir.display())),
+            Ok(listing) => listing.collect::<Result<Vec<_>, _>>().with_context(|| format!("Failed to read '{}'", dir.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e).with_context(|| format!("Failed to read {}", dir.display())),
+            Err(e) => Err(e).with_context(|| format!("Failed to read '{}'", dir.display())),
         }
     };
     let mut scan = Scan::default();
@@ -480,7 +480,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
     let result = (|| -> Res<()> {
         for (entry, _) in &plan.entries {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
+                bail!("Interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
             }
             if entry.still_there() && fs::remove_file(&entry.path).is_ok() {
                 done.entries += 1;
@@ -490,7 +490,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
         }
         for temp in &plan.temps {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
+                bail!("Interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
             }
             if fs::remove_file(&temp.path).is_ok() {
                 done.temps += 1;
@@ -501,7 +501,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
         // An entry published since the walk keeps its record.
         for (record, entry, bytes) in &plan.records {
             if gix::interrupt::is_triggered() {
-                bail!("interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
+                bail!("Interrupted, after removing {} objects and {} records ({})", done.entries, done.records, human(done.bytes));
             }
             if fs::symlink_metadata(entry).is_err() && fs::remove_file(record).is_ok() {
                 done.records += 1;
@@ -520,7 +520,7 @@ pub fn carry_out(plan: &Plan) -> Res<Done> {
                 let mut temp = readable_temp(dir)?;
                 temp.write_all(text.as_bytes()).context("Failed to write the folded use log")?;
                 let name = dir.join(format!("{:016x}{:016x}.times", fastrand::u64(..), fastrand::u64(..)));
-                temp.persist_noclobber(&name).map_err(|e| e.error).with_context(|| format!("Failed to write {}", name.display()))?;
+                temp.persist_noclobber(&name).map_err(|e| e.error).with_context(|| format!("Failed to write '{}'", name.display()))?;
             }
             for log in logs {
                 let _ = fs::remove_file(log);
@@ -559,7 +559,7 @@ pub fn parse_size(text: &str) -> Res<u64> {
 /// days), as `30d`.
 pub fn parse_age(text: &str) -> Res<Duration> {
     let text = text.trim();
-    let bad = || anyhow::anyhow!("\"{text}\" is not an age (a number with h, d, w, m or y, as 30d)");
+    let bad = || anyhow::anyhow!("\"{text}\" is not an age (a number with h, d, w, m or y, e.g. 30d)");
     let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?);
     let number: u64 = number.parse().map_err(|_| bad())?;
     let hours: u64 = match unit {
@@ -599,10 +599,10 @@ fn size_stamp(root: &Path) -> PathBuf {
 pub fn stamp_size(root: &Path, bytes: u64) -> Res<()> {
     let stamp = size_stamp(root);
     let dir = stamp.parent().expect("the stamp is in a directory");
-    fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?;
     let mut temp = readable_temp(dir)?;
     temp.write_all(format!("{bytes}\n").as_bytes()).context("Failed to write the size stamp")?;
-    temp.persist(&stamp).map_err(|e| e.error).with_context(|| format!("Failed to write {}", stamp.display()))?;
+    temp.persist(&stamp).map_err(|e| e.error).with_context(|| format!("Failed to write '{}'", stamp.display()))?;
     Ok(())
 }
 

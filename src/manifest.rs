@@ -252,7 +252,7 @@ impl<'repo> Release<'repo> {
     /// see [`MASTER_REF`].
     fn master(repo: &'repo Repository) -> Res<Self> {
         let master = repo.find_reference(MASTER_REF)
-                         .with_context(|| format!("the manifest repository has no {MASTER_REF}"))?;
+                         .with_context(|| format!("The manifest repository has no {MASTER_REF}"))?;
         Self::at(repo, MASTER.to_owned(), master)
     }
 
@@ -299,7 +299,7 @@ impl<'repo> Release<'repo> {
             tree.lookup_entry_by_path(&path)?
                 .ok_or({
                     let path_name = path.as_ref().to_str().ok_or(anyhow!("Invalid path"))?;
-                    anyhow!("File {} not found", path_name)
+                    anyhow!("File '{}' not found", path_name)
                 })?
                 .object()?
                 .into_blob()

@@ -150,9 +150,9 @@ fn generation_notice(root: &Path, generation: u32) -> Option<String> {
     let stamp = read_stamp(root, generation)?;
     (stamp.tip_generation > generation).then(|| {
         format!(
-            "the machine database has moved to generation {}; this cactup (generation {generation}) \
-             keeps using the last generation-{generation} revision. Run `cactup update` (if that \
-             reports up to date, a release is still propagating; retry later)",
+            "the machine database has moved to generation {}; this cactup keeps using the last \
+             generation-{generation} revision. Run `cactup update`, and retry later if it reports \
+             up to date",
             stamp.tip_generation
         )
     })
@@ -219,7 +219,7 @@ pub fn sync_at(root: &Path, url: &str, generation: u32, mode: Mode) -> Res<PathB
     if let Some(dir) = fresh_link(root, generation, mode) {
         return Ok(dir);
     }
-    fs::create_dir_all(root).with_context(|| format!("Failed to create {}", root.display()))?;
+    fs::create_dir_all(root).with_context(|| format!("Failed to create '{}'", root.display()))?;
 
     // Phase-scoped renderer, one line, gix's phases collapsed onto it (the
     // same shape as the release manifest's fetch). Tests get the tree alone,
@@ -302,11 +302,10 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
         Err(e) => {
             let Some(dir) = current else {
                 bail!(
-                    "could not fetch the machine database from {url}: {e:#}\n\
-                     This cactup has no copy of it yet, and without one it cannot know which machine \
-                     it is on. Run `cactup update` on a host with network access (the copy in {} serves \
-                     every host that shares this home directory), or pass --mdb-path with the path of \
-                     a machine database on disk.",
+                    "Could not fetch the machine database from {url}: {e:#}\n\
+                     No local copy exists yet. Run `cactup update` on a host with network access \
+                     (the copy in '{}' serves every host sharing this home directory), or point \
+                     --mdb-path at a machine database on disk.",
                     root.display()
                 );
             };
@@ -325,12 +324,8 @@ fn sync_locked(root: &Path, url: &str, generation: u32, line: &mut Line) -> Res<
         let Some(dir) = current else {
             bail!(
                 "{url} has never published MDB generation {generation} (its newest is generation \
-                 {tip_generation}), which this cactup needs. {}",
-                if tip_generation > generation {
-                    "Run `cactup update` to get a cactup that reads the newer generation."
-                } else {
-                    "A release may still be propagating; retry later."
-                }
+                 {tip_generation}). {}",
+                if tip_generation > generation { "Run `cactup update`." } else { "Retry later." }
             );
         };
         keep_stamp(root, generation, &dir, Some((tip_generation, tip)));
@@ -434,9 +429,9 @@ fn open_repo(dir: &Path) -> Res<gix::Repository> {
         Err(_) => {
             if dir.exists() {
                 fs::remove_dir_all(dir)
-                    .with_context(|| format!("Failed to remove {}", dir.display()))?;
+                    .with_context(|| format!("Failed to remove '{}'", dir.display()))?;
             }
-            gix::init_bare(dir).with_context(|| format!("Failed to create {}", dir.display()))?
+            gix::init_bare(dir).with_context(|| format!("Failed to create '{}'", dir.display()))?
         }
     };
     // The fetch writes a reflog entry for the ref it moves, which gix refuses
@@ -480,7 +475,7 @@ fn preflight(repo: &gix::Repository, url: &str) -> Res<()> {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         if started.elapsed() >= PREFLIGHT_TIMEOUT {
             bail!("no connection to {host}:{port} within {}s", PREFLIGHT_TIMEOUT.as_secs());
@@ -570,14 +565,14 @@ fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix:
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(result) => return result,
             Err(RecvTimeoutError::Disconnected) => {
-                bail!("the machine database fetch stopped unexpectedly")
+                bail!("The machine database fetch stopped unexpectedly")
             }
             Err(RecvTimeoutError::Timeout) => {}
         }
         if gix::interrupt::is_triggered() {
             cancel.store(true, Ordering::Relaxed);
             let _ = rx.recv_timeout(FETCH_WIND_DOWN);
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         let reading = activity.reading();
         if reading != seen {
@@ -586,11 +581,11 @@ fn fetch_abandonable(repo: gix::Repository, url: &str, line: &Line) -> Res<(gix:
         let stall = stall_timeout();
         if moved.elapsed() >= stall {
             cancel.store(true, Ordering::Relaxed);
-            bail!("no response for {}s", stall.as_secs());
+            bail!("No response for {}s", stall.as_secs());
         }
         if started.elapsed() >= FETCH_MAX {
             cancel.store(true, Ordering::Relaxed);
-            bail!("the fetch did not finish within {} minutes", FETCH_MAX.as_secs() / 60);
+            bail!("The fetch did not finish within {} minutes", FETCH_MAX.as_secs() / 60);
         }
     }
 }
@@ -730,25 +725,25 @@ fn fetch_mdb_branch(
 ) -> Res<ObjectId> {
     let remote = repo
         .remote_at(url)
-        .with_context(|| format!("invalid mdb-url {url}"))?
+        .with_context(|| format!("Invalid mdb-url {url}"))?
         .with_refspecs([REFSPEC], Direction::Fetch)
         .expect("the refspec is valid")
         .with_fetch_tags(Tags::None);
     remote
         .connect(Direction::Fetch)
-        .with_context(|| format!("failed to connect to {url}"))?
+        .with_context(|| format!("Failed to connect to {url}"))?
         .prepare_fetch(&mut *progress, Default::default())
-        .with_context(|| format!("failed to list the branches of {url}"))?
+        .with_context(|| format!("Failed to list the branches of {url}"))?
         .receive(&mut *progress, cancel)
-        .with_context(|| format!("failed to fetch the mdb branch of {url}"))?;
+        .with_context(|| format!("Failed to fetch the mdb branch of {url}"))?;
     if cancel.load(Ordering::Relaxed) || gix::interrupt::is_triggered() {
-        bail!("interrupted");
+        bail!("Interrupted");
     }
     let tip = repo
         .find_reference(MDB_REF)
         .with_context(|| format!("{url} has no mdb branch"))?
         .peel_to_id()
-        .with_context(|| format!("failed to resolve the mdb branch of {url}"))?
+        .with_context(|| format!("Failed to resolve the mdb branch of {url}"))?
         .detach();
     Ok(tip)
 }
@@ -785,12 +780,12 @@ pub fn find_generation(
         .rev_walk([tip])
         .first_parent_only()
         .all()
-        .with_context(|| "failed to walk the MDB history")?;
+        .with_context(|| "Failed to walk the MDB history")?;
     for info in walk {
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
-        let id = info.with_context(|| "failed to walk the MDB history")?.id;
+        let id = info.with_context(|| "Failed to walk the MDB history")?.id;
         let found = commit_generation(repo, id)?;
         if found == generation {
             return Ok((Some(id), tip_generation));
@@ -816,7 +811,7 @@ pub fn install_commit(
     let found = commit_generation(repo, commit)?;
     if found != generation {
         bail!(
-            "publishing error: MDB commit {} says it is generation {found}, not {generation}",
+            "Publishing error: MDB commit {} says it is generation {found}, not {generation}",
             short(commit)
         );
     }
@@ -844,23 +839,23 @@ pub fn export_tree(
         .traverse()
         .breadthfirst
         .files()
-        .with_context(|| format!("failed to read the tree of MDB commit {commit}"))?;
+        .with_context(|| format!("Failed to read the tree of MDB commit {commit}"))?;
     let temp = tempfile::Builder::new()
         .prefix(&format!("{name}.tmp-"))
         .tempdir_in(root)
-        .with_context(|| format!("Failed to create a temp directory in {}", root.display()))?;
+        .with_context(|| format!("Failed to create a temp directory in '{}'", root.display()))?;
 
     // Named as gix names its checkout, so the line reads "checking out".
     let mut files = progress.add_child("checkout");
     files.init(Some(entries.len()), Some(prodash::unit::label("files")));
     for entry in &entries {
         if should_interrupt.load(Ordering::Relaxed) {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
-        let rel = entry.filepath.to_str().map_err(|_| anyhow!("non-UTF-8 path in the MDB"))?;
+        let rel = entry.filepath.to_str().map_err(|_| anyhow!("Non-UTF-8 path in the MDB"))?;
         let rel = Path::new(rel);
         if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
-            bail!("unsafe path {} in the MDB", rel.display());
+            bail!("Unsafe path '{}' in the MDB", rel.display());
         }
         let path = temp.path().join(rel);
         let write = || -> Res<()> {
@@ -883,12 +878,12 @@ pub fn export_tree(
                     use std::os::unix::ffi::OsStrExt;
                     std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&blob.data), &path)?;
                 }
-                EntryKind::Commit => bail!("the MDB may not contain submodules"),
+                EntryKind::Commit => bail!("The MDB may not contain submodules"),
                 EntryKind::Tree => unreachable!(),
             }
             Ok(())
         };
-        write().with_context(|| format!("Failed to write {}", path.display()))?;
+        write().with_context(|| format!("Failed to write '{}'", path.display()))?;
         files.inc();
     }
     // tempdir() creates its directory 0700.
@@ -898,7 +893,7 @@ pub fn export_tree(
     if let Err(e) = fs::rename(&staged, &dest) {
         let _ = fs::remove_dir_all(&staged);
         return Err(e)
-            .with_context(|| format!("Failed to move the MDB into place at {}", dest.display()));
+            .with_context(|| format!("Failed to move the MDB into place at '{}'", dest.display()));
     }
     Ok(dest)
 }
@@ -915,10 +910,10 @@ pub fn swap_link(root: &Path, generation: u32, name: &str) -> Res<bool> {
     let temp = tempfile::Builder::new()
         .prefix(&format!("gen-{generation}.tmp-"))
         .make_in(root, |path| std::os::unix::fs::symlink(name, path))
-        .with_context(|| format!("Failed to create a symlink in {}", root.display()))?;
+        .with_context(|| format!("Failed to create a symlink in '{}'", root.display()))?;
     temp.persist(&link)
         .map_err(|e| e.error)
-        .with_context(|| format!("Failed to move the link {} into place", link.display()))?;
+        .with_context(|| format!("Failed to move the link '{}' into place", link.display()))?;
     // A tree that is current again is no longer retired.
     let _ = fs::remove_file(root.join(format!("{name}.retired")));
     if let Some(old_name) = old.as_deref().and_then(Path::file_name) {
@@ -957,7 +952,7 @@ pub fn prune(root: &Path) -> Vec<String> {
             Err(e) => Err(e),
         };
         if let Err(e) = result {
-            warnings.push(format!("could not remove {}: {e}", path.display()));
+            warnings.push(format!("could not remove '{}': {e}", path.display()));
         }
     };
     for (name, path) in &entries {
@@ -1117,7 +1112,7 @@ mod tests {
         let remote = history(&[1, 2]);
         let root = tempfile::tempdir().unwrap();
         let err = install(&remote, remote.commits[1], root.path(), 1).unwrap_err().to_string();
-        assert!(err.contains("publishing error"), "{err}");
+        assert!(err.contains("Publishing error"), "{err}");
         assert!(names(root.path()).is_empty(), "{:?}", names(root.path()));
     }
 
@@ -1136,7 +1131,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("interrupted"), "{err}");
+        assert!(err.contains("Interrupted"), "{err}");
         assert!(names(root.path()).is_empty(), "{:?}", names(root.path()));
     }
 
@@ -1186,7 +1181,7 @@ mod tests {
         write_stamp(root.path(), 1, &stamp(3));
         let notice = generation_notice(root.path(), 1).unwrap();
         assert!(notice.contains("moved to generation 3"), "{notice}");
-        assert!(notice.contains("this cactup (generation 1)"), "{notice}");
+        assert!(notice.contains("last generation-1 revision"), "{notice}");
         assert!(notice.contains("cactup update"), "{notice}");
     }
 

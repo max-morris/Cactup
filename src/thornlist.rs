@@ -234,7 +234,7 @@ pub fn parse_config_list(
     let Some(root) = cactus_root.strip_prefix(install_root).ok().and_then(|p| p.to_str()).map(str::to_owned)
     else {
         return Ok(Err(format!(
-            "its Cactus root {} is not inside the installation {}",
+            "its Cactus root '{}' is not inside the installation '{}'",
             cactus_root.display(),
             install_root.display()
         )));
@@ -303,8 +303,7 @@ fn plain_thorns(text: &str) -> Result<Vec<String>, String> {
             }
             _ => {
                 return Err(format!(
-                    "its thornlist is neither a GetComponents (CRL) list (no !CRL_VERSION header) \
-                     nor a plain Cactus ThornList: line {} ({:?}) is not of the form \
+                    "its thornlist has no !CRL_VERSION header, and line {} ({:?}) is not of the form \
                      Arrangement/Thorn",
                     n + 1,
                     raw.trim()
@@ -429,22 +428,13 @@ fn splice_includes(text: &str, base: Option<&Path>) -> crate::Res<String> {
         };
         let target = caps[1].trim();
         if is_url(target) {
-            bail!(
-                "!INCLUDE of URL '{target}' is not yet supported (cactup only \
-                 resolves local-path includes; GetComponents itself only \
-                 supports URL includes, via curl/wget — see the thornlist \
-                 module docs)"
-            );
+            bail!("!INCLUDE of URL '{target}' is not yet supported; only local-path includes are");
         }
-        let base_dir = base.ok_or_else(|| {
-            anyhow!(
-                "!INCLUDE '{target}' has no base directory to resolve against \
-                 (parse() was called without parse_with_base)"
-            )
-        })?;
+        let base_dir = base
+            .ok_or_else(|| anyhow!("!INCLUDE '{target}' has no base directory to resolve against"))?;
         let include_path = base_dir.join(target);
         let include_src = std::fs::read_to_string(&include_path)
-            .with_context(|| format!("failed to read !INCLUDE file '{}'", include_path.display()))?;
+            .with_context(|| format!("Failed to read !INCLUDE file '{}'", include_path.display()))?;
         let normalized = normalize_crlf(&include_src);
         let nested_base = include_path.parent();
         let nested = splice_includes(&normalized, nested_base)?;
@@ -469,15 +459,12 @@ fn extract_header(text: &str) -> crate::Res<(String, bool, String)> {
             return Ok((version, experimental, body));
         }
         if line.chars().any(|c| c.is_alphanumeric() || c == '_') {
-            bail!(
-                "thornlist does not start with !CRL_VERSION (found unexpected \
-                 content before the header: {line:?})"
-            );
+            bail!("Thornlist has content before the !CRL_VERSION header: {line:?}");
         }
         // Neither blank/comment, version, nor word-bearing: GetComponents
         // silently falls through to the next line here too.
     }
-    bail!("thornlist is missing the required !CRL_VERSION header");
+    bail!("Thornlist is missing the required !CRL_VERSION header");
 }
 
 /// Step 6: collect `#DISABLED <arrangement>/<Thorn>` lines before any
@@ -739,15 +726,15 @@ fn build_section(
     };
 
     let ty = match &type_str {
-        None => bail!("section for target '{target}' is missing the required !TYPE directive"),
+        None => bail!("Section for target '{target}' is missing the required !TYPE directive"),
         Some(t) => ComponentType::parse(t)
-            .ok_or_else(|| anyhow!("section for target '{target}' has unrecognized !TYPE '{t}'"))?,
+            .ok_or_else(|| anyhow!("Section for target '{target}' has unrecognized !TYPE '{t}'"))?,
     };
 
     let url_orig = map
         .get("URL")
         .cloned()
-        .ok_or_else(|| anyhow!("section for target '{target}' (type {type_str:?}) is missing the required !URL directive"))?;
+        .ok_or_else(|| anyhow!("Section for target '{target}' (type {type_str:?}) is missing the required !URL directive"))?;
     let auth_url_orig = map.get("AUTH_URL").cloned();
 
     for token in checkout_val.split_whitespace() {

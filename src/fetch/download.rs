@@ -68,10 +68,7 @@ pub fn download_component(
     if component.ty == ComponentType::Ftp {
         let dest_dir = install_root.join(&component.target);
         bail!(
-            "component '{}' uses !TYPE = ftp, which cactup cannot fetch natively \
-             (reqwest, cactup's HTTP client, speaks only http/https — GetComponents \
-             itself only handled ftp by shelling out to wget, see the module docs). \
-             Fetch it manually into '{}' or install the component another way.",
+            "Component '{}' uses !TYPE = ftp, which cactup cannot fetch; fetch it manually into '{}'",
             component.checkout,
             dest_dir.display(),
         );
@@ -88,13 +85,13 @@ pub fn download_component(
     let url = component
         .url
         .as_deref()
-        .ok_or_else(|| anyhow!("component '{}' has no !URL", component.checkout))?;
+        .ok_or_else(|| anyhow!("Component '{}' has no !URL", component.checkout))?;
     let fetch_url = effective_url(url, &component.checkout);
     let filename = derive_filename(component.name.as_deref(), &component.checkout);
 
     let dest_dir = install_root.join(&component.target);
     std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("Failed to create {}", dest_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", dest_dir.display()))?;
     let dest_path = dest_dir.join(&filename);
     let tmp_path = dest_dir.join(format!("{filename}.part"));
 
@@ -104,11 +101,11 @@ pub fn download_component(
     // whatever the failed attempt wrote.
     super::retry::with_backoff(progress, |progress| {
         let mut tmp_file = std::fs::File::create(&tmp_path)
-            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
+            .with_context(|| format!("Failed to create '{}'", tmp_path.display()))?;
         download_to(client(), &fetch_url, &mut tmp_file, progress).map(drop)
     })?;
     std::fs::rename(&tmp_path, &dest_path).with_context(|| {
-        format!("Failed to move {} into place at {}", tmp_path.display(), dest_path.display())
+        format!("Failed to move '{}' to '{}'", tmp_path.display(), dest_path.display())
     })?;
 
     Ok(dest_path)
@@ -151,7 +148,7 @@ pub(crate) fn download_to(
     let mut total = 0u64;
     loop {
         if gix::interrupt::is_triggered() {
-            bail!("interrupted");
+            bail!("Interrupted");
         }
         let n = std::io::Read::read(&mut response, &mut buf)
             .with_context(|| format!("Failed to read the response body of {url}"))?;

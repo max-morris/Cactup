@@ -45,7 +45,7 @@ fn push_group(
 ) {
     for (repo, info) in repos.iter().take(repos_shown) {
         let repo_line = match &info.detail {
-            Some(detail) => format!("                  {repo} — {}", truncate_detail(detail)),
+            Some(detail) => format!("                  {repo}: {}", truncate_detail(detail)),
             None => format!("                  {repo}"),
         };
         lines.push((tone, repo_line));
@@ -94,16 +94,16 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
         if failed_count > 0 { ("INCOMPLETE", Tone::Alarm) } else { ("PARTIAL", Tone::Warn) };
     let header = match (failed_count > 0, skipped_count > 0) {
         (true, true) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch and \
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch and \
              {skipped_count} repo(s) were skipped; {thorn_count} thorn(s) on disk do not match \
              the thornlist above."
         ),
         (true, false) => format!(
-            "  conformance:  {word} — {failed_count} repo(s) FAILED to fetch; {thorn_count} \
+            "  conformance:  {word}: {failed_count} repo(s) FAILED to fetch; {thorn_count} \
              thorn(s) on disk do not match the thornlist above."
         ),
         (false, true) => format!(
-            "  conformance:  {word} — {skipped_count} repo(s) were skipped, so {thorn_count} \
+            "  conformance:  {word}: {skipped_count} repo(s) were skipped, so {thorn_count} \
              thorn(s) on disk do not match the thornlist above."
         ),
         (false, false) => unreachable!(
@@ -143,8 +143,8 @@ pub(crate) fn conformance_lines(entry: &CactusInstallation) -> Vec<(Tone, String
     if !skipped.is_empty() {
         lines.push((
             Tone::Plain,
-            "                Fetch over the skipped ones with `cactup inst refetch -f` \
-             (modified files are backed up first); `cactup inst delta` shows what differs."
+            "                Fetch over the skipped ones with `cactup inst refetch -f`; \
+             modified files are backed up first. `cactup inst delta` shows what differs."
                 .to_owned(),
         ));
     }
@@ -172,14 +172,13 @@ pub(crate) fn show_installation(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         Some(alias) => alias,
         None => database.active_installation.clone().ok_or_else(|| {
             anyhow!(
-                "no active installation; run `cactup install`, or `cactup use <alias>` \
-                 to activate an existing one (see `cactup list`)"
+                "No active installation; run `cactup install` or `cactup use <alias>`"
             )
         })?,
     };
 
     let Some(entry) = database.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup list`)");
+        bail!("No installation named \"{alias}\" (see `cactup list`)");
     };
     let active = database.active_installation.as_deref() == Some(&alias);
 
@@ -404,7 +403,7 @@ mod tests {
         let repo_line = &lines[2].1;
         assert!(repo_line.contains('…'), "{repo_line}");
         assert!(!repo_line.contains(&long), "{repo_line}");
-        let detail_part = repo_line.split(" — ").nth(1).unwrap();
+        let detail_part = repo_line.split(": ").nth(1).unwrap();
         // 97 chars of the original detail plus the ellipsis.
         assert_eq!(detail_part.chars().count(), 98, "{detail_part}");
     }

@@ -183,7 +183,7 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
                 "cactup" | "cactup.runs-on" => seen_cactup_header = true,
                 "options" => seen_options_header = true,
                 other => bail!(
-                    "unknown table header [{other}] at line {lineno}; only [cactup], \
+                    "Unknown table header [{other}] at line {lineno}; only [cactup], \
                      [cactup.runs-on] and [options] are recognized in an optionlist"
                 ),
             }
@@ -192,7 +192,7 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
         }
 
         let Some(eq_pos) = trimmed.find('=') else {
-            bail!("line {lineno} is neither a table header nor a KEY = VALUE line: {trimmed:?}");
+            bail!("Line {lineno} is neither a table header nor a KEY = VALUE line: {trimmed:?}");
         };
         any_option_line = true;
         let value_part = trimmed[eq_pos + 1..].trim_start();
@@ -254,20 +254,18 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
 
     if let (Some((tln, ttext)), Some((cln, ctext))) = (&toml_line, &cfg_line) {
         bail!(
-            "optionlist mixes TOML and native-Cactus value spellings (line {tln}: \"{ttext}\" \
-             looks like TOML, line {cln}: \"{ctext}\" looks like native Cactus); the three \
-             accepted forms — mdb TOML, options-only TOML, and a native .cfg — may not be \
-             intermixed in one file"
+            "Optionlist mixes TOML and native-Cactus value spellings: line {tln} (\"{ttext}\") \
+             looks like TOML, line {cln} (\"{ctext}\") looks like native Cactus"
         );
     }
 
     if !any_option_line {
-        bail!("optionlist declares no options");
+        bail!("Optionlist declares no options");
     }
 
     if seen_cactup_header {
         if !seen_options_header {
-            bail!("[cactup] header present but no [options] table; an mdb-style optionlist needs both");
+            bail!("[cactup] header present but no [options] table");
         }
         return Ok(OptionlistFormat::MdbToml);
     }
@@ -275,9 +273,8 @@ pub fn sniff(source: &str) -> Res<OptionlistFormat> {
     if cfg_line.is_some() {
         if seen_options_header {
             bail!(
-                "a [options] TOML table header appears over unquoted, native-Cactus-looking \
-                 values; the three accepted forms — mdb TOML, options-only TOML, and a native \
-                 .cfg — may not be intermixed in one file"
+                "An [options] table header appears over unquoted native-Cactus values; \
+                 TOML and native .cfg forms may not be mixed in one file"
             );
         }
         return Ok(OptionlistFormat::Cfg);
@@ -378,12 +375,12 @@ fn parse_cfg(source: &str) -> Res<Optionlist> {
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             // sniff should already have rejected this shape; defensive only.
             bail!(
-                "line {lineno} is a TOML-style table header, not valid in a native .cfg \
+                "Line {lineno} is a TOML-style table header, not valid in a native .cfg \
                  optionlist: {trimmed:?}"
             );
         }
         let Some(eq_pos) = trimmed.find('=') else {
-            bail!("line {lineno} is not a KEY = VALUE line: {trimmed:?}");
+            bail!("Line {lineno} is not a KEY = VALUE line: {trimmed:?}");
         };
         let key = trimmed[..eq_pos].trim().to_owned();
         let value = strip_trailing_comment(&trimmed[eq_pos + 1..]).trim().to_owned();
@@ -398,7 +395,7 @@ fn parse_cfg(source: &str) -> Res<Optionlist> {
     // to name — say "optionlist" instead of pointing at a section that isn't
     // there. (§7.8)
     if !options.contains_key("VERSION") {
-        bail!("optionlist must declare VERSION (emitted first; a change forces a full rebuild)");
+        bail!("Optionlist must declare VERSION");
     }
 
     Ok(Optionlist {
@@ -411,16 +408,16 @@ fn parse_cfg(source: &str) -> Res<Optionlist> {
 impl Optionlist {
     pub fn load(path: &Path) -> Res<Optionlist> {
         let source = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read optionlist {}", path.display()))?;
-        Self::parse(&source).with_context(|| format!("invalid optionlist {}", path.display()))
+            .with_context(|| format!("Failed to read optionlist '{}'", path.display()))?;
+        Self::parse(&source).with_context(|| format!("Invalid optionlist '{}'", path.display()))
     }
 
     /// Load a user-supplied optionlist in any of the three accepted forms
     /// (`OptionlistFormat`), auto-detected via `sniff`.
     pub fn load_any(path: &Path) -> Res<Optionlist> {
         let source = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read optionlist {}", path.display()))?;
-        Self::parse_any(&source).with_context(|| format!("invalid optionlist {}", path.display()))
+            .with_context(|| format!("Failed to read optionlist '{}'", path.display()))?;
+        Self::parse_any(&source).with_context(|| format!("Invalid optionlist '{}'", path.display()))
     }
 
     /// `load_any`'s string-level half.
@@ -453,10 +450,8 @@ impl Optionlist {
                 toml::Value::String(s) => OptionValue::Str(s),
                 toml::Value::Boolean(b) => OptionValue::Bool(b),
                 toml::Value::Integer(v) => OptionValue::Int(v),
-                toml::Value::Float(_) => bail!(
-                    "[options].{key} is a float; Cactus options are never floats — \
-                     quote it as a string if the dotted value is intended" // §7.8
-                ),
+                // §7.8: Cactus options are never floats.
+                toml::Value::Float(_) => bail!("[options].{key} is a float; quote it as a string"),
                 other => bail!(
                     "[options].{key} must be a string, boolean, or integer (got {})",
                     other.type_str()
@@ -467,7 +462,7 @@ impl Optionlist {
 
         raw.cactup.runs_on.validate()?;
         if !options.contains_key("VERSION") {
-            bail!("[options] must declare VERSION (emitted first; a change forces a full rebuild)");
+            bail!("[options] must declare VERSION");
         }
 
         Ok(Optionlist {
@@ -522,8 +517,7 @@ fn reject_generation_1_header(source: &str) -> Res<()> {
     for (old, new) in [("gpu", "gpu"), ("compatible-queues", "queues")] {
         if header.contains_key(old) {
             bail!(
-                "[cactup] {old} is no longer read there: since MDB generation 2 it lives in \
-                 [cactup.runs-on] as `{new}`; move it and rebuild"
+                "[cactup] {old} is no longer read; move it to [cactup.runs-on] as `{new}` and rebuild"
             );
         }
     }
@@ -540,11 +534,11 @@ pub fn load_header(path: &Path) -> Res<OptionlistHeader> {
         cactup: OptionlistHeader,
     }
     let source = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read optionlist {}", path.display()))?;
-    reject_generation_1_header(&source).with_context(|| format!("invalid optionlist {}", path.display()))?;
+        .with_context(|| format!("Failed to read optionlist '{}'", path.display()))?;
+    reject_generation_1_header(&source).with_context(|| format!("Invalid optionlist '{}'", path.display()))?;
     let raw: HeaderOnly = toml::from_str(&source)
-        .with_context(|| format!("invalid optionlist {}", path.display()))?;
-    raw.cactup.runs_on.validate().with_context(|| format!("invalid optionlist {}", path.display()))?;
+        .with_context(|| format!("Invalid optionlist '{}'", path.display()))?;
+    raw.cactup.runs_on.validate().with_context(|| format!("Invalid optionlist '{}'", path.display()))?;
     Ok(raw.cactup)
 }
 
@@ -720,7 +714,7 @@ mod tests {
         for key in ["gpu = true", "compatible-queues = [\"gpu\"]"] {
             let text = format!("[cactup]\n{key}\n[options]\nVERSION = \"1\"\n");
             let err = format!("{:#}", Optionlist::parse(&text).unwrap_err());
-            assert!(err.contains("it lives in [cactup.runs-on]"), "{key}: {err}");
+            assert!(err.contains("move it to [cactup.runs-on]"), "{key}: {err}");
         }
         let text = "[cactup.runs-on]\nqueue = [\"gpu\"]\n[options]\nVERSION = \"1\"\n";
         let err = format!("{:#}", Optionlist::parse(text).unwrap_err());
@@ -753,7 +747,7 @@ mod tests {
         assert!(msg.contains("line 1"), "{msg}");
         assert!(msg.contains("line 2"), "{msg}");
         assert!(msg.contains("CFLAGS = -O2"), "{msg}");
-        assert!(msg.contains("not be intermixed") || msg.contains("not intermixed"), "{msg}");
+        assert!(msg.contains("mixes TOML and native-Cactus"), "{msg}");
     }
 
     #[test]

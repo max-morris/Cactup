@@ -38,7 +38,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             let entry = db
                 .installations
                 .get(&alias)
-                .ok_or_else(|| anyhow::anyhow!("no installation named \"{alias}\" (see `cactup list`)"))?;
+                .ok_or_else(|| anyhow::anyhow!("No installation named \"{alias}\" (see `cactup list`)"))?;
             Installation::new(alias, &entry.path)
         }
         None => Installation::resolve(ctx)?,
@@ -51,13 +51,12 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
     // installation created before the native fetcher, which is worth saying
     // out loud rather than rendering as "everything diverged".
     let state = FetchState::read(&inst.root)?;
-    println!("{} — divergence from the last fetch", inst.alias.bold());
+    println!("{}: divergence from the last fetch", inst.alias.bold());
     if state.is_none() {
         println!(
-            "{} no fetch record ({}); cactup did not fetch this tree, so there is no \
-             baseline to compare commits against. Local modifications are still reported.",
+            "{} no fetch record at {}; commits are not compared.",
             "note:".yellow().bold(),
-            format!("{}/.cactup/fetch-state.toml", inst.root.display()).dimmed()
+            format!("'{}/.cactup/fetch-state.toml'", inst.root.display()).dimmed()
         );
     }
     let recorded = state.map(|s| s.repos).unwrap_or_default();
@@ -126,13 +125,13 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             None => {
                 if recorded.contains_key(repo) {
                     reported += 1;
-                    println!("  {} — {}", repo.bold(), "fetched, but no longer on disk".yellow());
+                    println!("  {}: {}", repo.bold(), "fetched, but no longer on disk".yellow());
                 }
                 continue;
             }
             Some(Err(e)) => {
                 reported += 1;
-                println!("  {} — {} {e:#}", repo.bold(), "could not inspect:".yellow());
+                println!("  {}: {} {e:#}", repo.bold(), "could not inspect:".yellow());
                 continue;
             }
             Some(Ok(diff)) => diff,
@@ -170,7 +169,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             println!(
                 "    untracked: {} file(s) {}",
                 diff.untracked.len(),
-                "— ignored by builds; blocks --prune".dimmed()
+                "(ignored by builds; blocks --prune)".dimmed()
             );
             if ctx.globals.verbose {
                 for path in &diff.untracked {
@@ -208,15 +207,14 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
                 // Spelled out rather than left as a path: this is the case a
                 // user reaches by hand and then forgets about.
                 LinkState::Replaced { existing } => (
-                    "a real directory, not a link into repos/ — built as-is, and no \
-                     refetch will replace it",
+                    "a real directory, not a link into repos/; a refetch will not replace it",
                     Some(existing.clone()),
                 ),
                 LinkState::Foreign { target } => {
-                    ("links outside repos/ — left untouched by a refetch", Some(target.clone()))
+                    ("links outside repos/; a refetch leaves it alone", Some(target.clone()))
                 }
                 LinkState::Misdirected { target } => {
-                    ("links to the wrong thorn — a refetch would repoint it", Some(target.clone()))
+                    ("links to the wrong thorn; a refetch would repoint it", Some(target.clone()))
                 }
                 LinkState::Dangling { target } => {
                     ("links to something that is not there", Some(target.clone()))
@@ -224,7 +222,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
                 LinkState::Missing => ("not linked into the build at all", None),
                 LinkState::Linked => unreachable!("filtered by is_divergence"),
             };
-            println!("    {} — {}", checkout.bold(), what.yellow());
+            println!("    {}: {}", checkout.bold(), what.yellow());
             if let Some(detail) = detail {
                 println!("      {}", detail.display().to_string().dimmed());
             }
@@ -236,7 +234,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
             format!("{} thorn(s) could not be resolved to a link path:", unresolvable.len()).yellow()
         );
         for (checkout, e) in &unresolvable {
-            println!("    {} — {e}", checkout.bold());
+            println!("    {}: {e}", checkout.bold());
         }
     }
 
@@ -254,7 +252,7 @@ pub fn installation_delta(ctx: &Ctx, alias: Option<String>) -> Res<()> {
         println!("\n  {clean} repo(s) {baseline}; {sound} thorn(s) linked as expected.");
         println!(
             "  {}",
-            "`cactup inst refetch -n` shows what a refetch would do with this state.".dimmed()
+            "`cactup inst refetch -n` shows what a refetch would do.".dimmed()
         );
     }
     Ok(())
@@ -267,8 +265,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         Some(name) => name,
         None => inst.meta()?.active_config.ok_or_else(|| {
             anyhow::anyhow!(
-                "no active config; name one, or run `cactup config use <name>` (see \
-                 `cactup config list`)"
+                "No active config; name one or run `cactup config use <name>`"
             )
         })?,
     };
@@ -278,13 +275,13 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         // flight?" question instead of a scheduler round-trip.
         let config_dir = cactus_root.join("configs").join(&name);
         if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &name, None) {
-            bail!("{phrase} — wait for it, or check `cactup build show {name}`");
+            bail!("{phrase}; wait for it or check `cactup build show {name}`");
         }
-        bail!("config \"{name}\" has never been built (no cactup-config.toml)");
+        bail!("Config \"{name}\" has never been built");
     };
 
     println!(
-        "{} — divergence from the last build{}",
+        "{}: divergence from the last build{}",
         name.bold(),
         meta.built.map(|t| format!(" ({})", t.format("%Y-%m-%d %H:%M UTC"))).unwrap_or_default()
     );
@@ -293,7 +290,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     // and it is what the rebuild decision reads.
     let processed = cactus_root.join("configs").join(&name).join(build::THORNLIST_PROCESSED);
     let text = std::fs::read_to_string(&processed)
-        .with_context(|| format!("Failed to read {}", processed.display()))?;
+        .with_context(|| format!("Failed to read '{}'", processed.display()))?;
     // The same three readings `cactup build` decides on (§7.4): the repos'
     // state, and each thorn's provider, shape and stamp. Leaving the thorn
     // half out let this say "matches" about a tree the next build rebuilds.
@@ -333,16 +330,14 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         // read to build "to establish a baseline" sends them in a circle.
         match (&live, &meta.sources) {
             (Err(why), None) if stamps_compared => println!(
-                "{} cactup cannot track this config's repos: {why}. Only its thorns' files \
-                 are compared; after changing the flesh, `cactup build {name} --reconfig` \
-                 rebuilds incrementally, and after a refetch, `cactup build {name} -f` rebuilds \
-                 from scratch.",
+                "{} cactup cannot track this config's repos: {why}. Only thorn files are \
+                 compared; after changing the flesh, run `cactup build {name} --reconfig`; \
+                 after a refetch, run `cactup build {name} -f`.",
                 "note:".yellow().bold()
             ),
             (Err(why), None) => println!(
-                "{} cactup cannot track this config's sources: {why}. It records no source \
-                 baseline, so there is nothing to compare; after changing the sources, \
-                 `cactup build {name} --reconfig` rebuilds incrementally.",
+                "{} cactup cannot track this config's sources: {why}. After changing them, \
+                 run `cactup build {name} --reconfig`.",
                 "note:".yellow().bold()
             ),
             (Err(why), Some(_)) => println!(
@@ -350,10 +345,9 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
                 "note:".yellow().bold()
             ),
             (Ok(_), _) => println!(
-                "{} no source baseline recorded for this config yet. The next `cactup build \
-                 {name}` records the sources as they are then (it does not compare them with \
-                 the last build), and every change after that is reported here. If they \
-                 changed since the last build, `cactup build {name} --reconfig` rebuilds them.",
+                "{} no source baseline recorded for this config yet; the next `cactup build \
+                 {name}` records one. If the sources changed since the last build, run \
+                 `cactup build {name} --reconfig`.",
                 "note:".yellow().bold()
             ),
         }
@@ -380,7 +374,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         .flatten()
         .collect();
     for repo in &change.moved {
-        println!("  {} — {}", repo.bold(), "now on a different commit".yellow());
+        println!("  {}: {}", repo.bold(), "now on a different commit".yellow());
         if let Some(diff) = details.get(repo) {
             println!(
                 "    commit:   {} (built {})",
@@ -395,7 +389,7 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         }
     }
     for repo in &change.edited {
-        println!("  {} — {}", repo.bold(), "locally edited since the build".yellow());
+        println!("  {}: {}", repo.bold(), "locally edited since the build".yellow());
         if let Some(diff) = details.get(repo) {
             print_modified(diff, verbose);
         }
@@ -405,10 +399,10 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     for repo in &change.vanished {
         let dir = repos_dir.join(repo);
         println!(
-            "  {} — {}",
+            "  {}: {}",
             repo.bold(),
             if dir.is_dir() {
-                "no longer a git repo; cactup cannot tell what this builds from".yellow()
+                "no longer a git repo".yellow()
             } else {
                 "gone from disk since the build".yellow()
             }
@@ -421,9 +415,9 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
     // What nothing above can speak for — and "matches" must not either.
     if !untracked.is_empty() {
         println!(
-            "  {} — {}",
+            "  {}: {}",
             build::summarize(&untracked).bold(),
-            "not a link into the installation's repos/, so not tracked: edits to it go unnoticed".yellow()
+            "not a link into repos/; edits to it go unnoticed".yellow()
         );
     }
 
@@ -435,9 +429,8 @@ pub fn config_delta(inst: &Installation, name: Option<String>, verbose: bool) ->
         ),
         // Built before stamps: nothing can say whether thorn files changed.
         SourceDelta::Unchanged if stamps_unrecorded => println!(
-            "  {} thorn files have no baseline yet (this config was built before cactup \
-             recorded one); the next `cactup build {name}` records it. If files git does not \
-             track were regenerated since, `cactup build {name} --reconfig` rebuilds them.",
+            "  {} thorn files have no baseline yet; the next `cactup build {name}` records one. \
+             If files git does not track changed since the last build, run `cactup build {name} --reconfig`.",
             "note:".yellow().bold()
         ),
         SourceDelta::Unchanged if !untracked.is_empty() => {
@@ -498,13 +491,11 @@ pub fn warn_if_sources_diverged(inst: &Installation, meta: &ConfigMeta, silent: 
         what.push(format!("{} no longer inspectable", change.vanished.len()));
     }
     println!(
-        "{} the source tree has moved since config {} was built ({}). This run uses the \
-         executable as built; `cactup config delta {}` shows what, `cactup build {}` \
-         recompiles, `-s` silences this.",
+        "{} the source tree changed since config {} was built ({}); this run uses the \
+         existing executable. See `cactup config delta {}`; `-s` silences this.",
         "note:".yellow().bold(),
         meta.name.bold(),
         what.join(", "),
-        meta.name,
         meta.name
     );
     Ok(())
@@ -522,13 +513,13 @@ pub fn check_machine(current: &Machine, recorded: &str, what: &str, ignore: bool
     }
     if !ignore {
         bail!(
-            "{what} was built for machine \"{recorded}\" but this is machine \"{}\"; \
-             pass --ignore-machine (or -f) to use it anyway, at your own risk",
+            "{what} was built for machine \"{recorded}\", not \"{}\"; pass --ignore-machine \
+             or -f to use it anyway",
             current.name
         );
     }
     println!(
-        "{} {what} was built for machine {} but this is machine {}; proceeding as asked.",
+        "{} {what} was built for machine {}, not {}; proceeding anyway.",
         "note:".yellow().bold(),
         recorded.bold(),
         current.name.bold()
@@ -584,7 +575,7 @@ impl ThornChanges {
         ];
         for (thorns, what) in kinds {
             if !thorns.is_empty() {
-                println!("  {} — {}", names(thorns).bold(), what.yellow());
+                println!("  {}: {}", names(thorns).bold(), what.yellow());
             }
         }
         kinds.iter().any(|(thorns, _)| !thorns.is_empty())
@@ -623,9 +614,9 @@ fn read_live_thornlist(inst: &Installation) -> Res<crate::thornlist::Thornlist> 
     let pristine = inst.source_thornlist_to_read();
     let path: &Path = if live.is_file() { &live } else { &pristine };
     let text = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read thornlist {}", path.display()))?;
+        .with_context(|| format!("Failed to read thornlist '{}'", path.display()))?;
     crate::thornlist::parse(&text)
-        .with_context(|| format!("Failed to parse thornlist {}", path.display()))
+        .with_context(|| format!("Failed to parse thornlist '{}'", path.display()))
 }
 
 #[cfg(test)]

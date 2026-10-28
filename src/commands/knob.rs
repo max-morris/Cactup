@@ -122,7 +122,7 @@ fn print_all(ctx: &Ctx) -> Res<()> {
         println!("  {knob} = {value}{}", override_marker(knob));
     }
     if !any {
-        println!("  {}", "(none — create one with `cactup knob -c NAME VALUE`)".dimmed());
+        println!("  {}", "(none; create one with `cactup knob -c NAME VALUE`)".dimmed());
     }
     Ok(())
 }
@@ -134,11 +134,8 @@ fn unset_note(name: &str) -> String {
 
 /// The error for a non-standard name nothing has created yet.
 fn unknown_custom(name: &str) -> String {
-    let known: Vec<&str> = KNOWN_KNOBS.iter().map(|s| s.name).collect();
     format!(
-        "no knob named \"{name}\" (standard knobs: {}). To create a custom knob of that name, \
-         pass -c/--custom: `cactup knob -c {name} VALUE`",
-        known.join(", ")
+        "No knob named \"{name}\" (see `cactup knob`); create it with `cactup knob -c {name} VALUE`"
     )
 }
 

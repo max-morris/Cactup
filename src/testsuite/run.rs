@@ -139,7 +139,7 @@ fn link_arrangements(run_dir: &Path, cactus_root: &Path) -> Res<()> {
         fs::remove_file(&link)?;
     }
     std::os::unix::fs::symlink(cactus_root.join("arrangements"), &link)
-        .with_context(|| format!("Failed to link {}", link.display()))
+        .with_context(|| format!("Failed to link '{}'", link.display()))
 }
 
 /// Route a test script for `queue` (§11.2), with an error that only offers
@@ -165,14 +165,13 @@ fn route_test_script<'t>(
         let what = format!("test {}", scripts.kind.noun());
         if usable.is_empty() {
             anyhow::anyhow!(
-                "no {what} serves queue \"{queue}\", nor any other queue config \"{}\" may run on, \
-                 so this machine cannot run its testsuite",
+                "No {what} serves queue \"{queue}\" or any other queue config \"{}\" may run on",
                 fit.label
             )
         } else {
             anyhow::anyhow!(
-                "no {what} serves queue \"{queue}\"; config \"{}\" can run its testsuite on {}; \
-                 pick one of those with -q",
+                "No {what} serves queue \"{queue}\"; config \"{}\" can be tested on {} (pick one \
+                 with -q)",
                 fit.label,
                 usable.join(", ")
             )
@@ -199,13 +198,8 @@ fn start_impl(
     // is the compute-node re-entry (handled earlier in `start`).
     if !submit && machine.meta.in_allocation() == Some(false) {
         bail!(
-            "`cactup test run` executes the testsuite here in the foreground, and {}'s \
-             test harness launches each test through a job launcher (e.g. srun) that needs \
-             a live allocation — but none of [{}] is set, so this looks like a login/submit \
-             node and every test would produce no output.\n\
-             Run `cactup test submit` to execute the suite on a compute node, or grab an \
-             interactive allocation first (e.g. `salloc` / `srun --pty`) and re-run \
-             `cactup test run`.",
+            "`cactup test run` needs a job allocation on {}, but none of [{}] is set; use \
+             `cactup test submit`, or run it inside an interactive allocation (e.g. `salloc`)",
             machine.name,
             machine.meta.scheduler.allocation_env.join(", "),
         );
@@ -226,12 +220,9 @@ fn start_impl(
         Some(cfg) => cfg,
         None => {
             if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-                bail!(
-                    "{phrase} — wait for it, or watch with `cactup build log {cfg_name}` / \
-                     `cactup build show {cfg_name}`"
-                );
+                bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
             }
-            bail!("config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
+            bail!("Config \"{cfg_name}\" has never been built (`cactup build {cfg_name}`)");
         }
     };
     // §7.4: a build is not portable across machines.
@@ -243,12 +234,9 @@ fn start_impl(
     )?;
     if !build::is_complete(&cactus_root, &cfg_name) {
         if let Some(phrase) = build_cmd::in_flight_build(&config_dir, &cfg_name, Some(machine)) {
-            bail!(
-                "{phrase} — wait for it, or watch with `cactup build log {cfg_name}` / \
-                 `cactup build show {cfg_name}`"
-            );
+            bail!("{phrase}; wait for it, or watch it with `cactup build log {cfg_name}`");
         }
-        bail!("config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
+        bail!("Config \"{cfg_name}\" is incomplete; rebuild it (`cactup build {cfg_name} -f`)");
     }
     // §11.5: a test run reads reference data straight from the live source
     // tree, so a tree that moved since the build matters here even more than
@@ -308,7 +296,7 @@ fn start_impl(
     let name = cfg_name.clone();
     let run_dir = test_home.join(&cfg_name).join(&name);
     fs::create_dir_all(run_dir.join(".cactup"))
-        .with_context(|| format!("Failed to create {}", run_dir.display()))?;
+        .with_context(|| format!("Failed to create '{}'", run_dir.display()))?;
     link_arrangements(&run_dir, &cactus_root)?;
 
     // Register it (§11.8) under the per-installation lock.
@@ -331,7 +319,7 @@ fn start_impl(
     // with first (there is no reaper for tests — §11.6).
     if let Ok(old) = TestRun::open(&run_dir) {
         if old.lock_live()? {
-            bail!("test run \"{name}\" is currently executing (running.lock is held)");
+            bail!("Test run \"{name}\" is already running");
         }
         // After the old run's end, a job the scheduler still lists in a
         // state its patterns read (leaving the queue, or starting again),
@@ -370,9 +358,9 @@ fn start_impl(
                 && !args.force
             {
                 bail!(
-                    "test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
-                     queued again: {failed}\n`cactup test stop {name}` asks the scheduler to stop the job (a job \
-                     it says it does not know is then taken as ended); or pass -f to stop it and run the tests",
+                    "Test run \"{name}\" ended, but the scheduler could not be asked whether its job {} was \
+                     queued again: {failed}\nRun `cactup test stop {name}`, or pass -f to stop it and run the \
+                     tests",
                     job.id
                 );
             }
@@ -380,15 +368,15 @@ fn start_impl(
                 && !args.force
             {
                 bail!(
-                    "test run \"{name}\" ended, but the scheduler still lists its job {} {} (or pass -f to \
-                     stop it)",
+                    "Test run \"{name}\" ended, but the scheduler still lists its job {} {}; or pass -f to \
+                     stop it",
                     job.id,
                     crate::scheduler::listed_after_end(status, &format!("cactup test stop {name}"))
                 );
             }
             if !args.force {
                 bail!(
-                    "test run \"{name}\" still has a live job ({}); \
+                    "Test run \"{name}\" still has a live job ({}); \
                      `cactup test stop {name}` first, or pass -f to stop it",
                     job.id
                 );
@@ -403,8 +391,7 @@ fn start_impl(
                         None => crate::scheduler::StopCase::Listed,
                     })? {
                         println!(
-                            "The scheduler does not know test job {} (its stop command said: {said}): \
-                             taken as ended",
+                            "The scheduler does not know test job {} ({said}); treating it as ended",
                             job.id
                         );
                     }
@@ -577,7 +564,7 @@ fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
     let status = status?;
     if !status.success() {
         run.log("test-run", &format!("testsuite run failed ({status})"));
-        bail!("the testsuite run-script exited unsuccessfully ({status})");
+        bail!("The testsuite run-script exited unsuccessfully ({status})");
     }
     match summary {
         Some((passed, failed)) => {
@@ -586,14 +573,14 @@ fn execute_testsuite(run: &mut TestRun, results_id: u32, tee: bool) -> Res<()> {
             if failed > 0 {
                 println!("{}", line.bright_red());
                 // CI-usable: non-zero when any test failed (§11.6).
-                bail!("{failed} test(s) failed (results in {})", results_dir(&run.dir, results_id).display());
+                bail!("{failed} test(s) failed; results in '{}'", results_dir(&run.dir, results_id).display());
             }
             println!("{}", line.bright_green());
         }
         None => {
             run.log("test-run", "completed, but no summary.log was found");
             eprintln!(
-                "{} the harness left no parsable summary in {}",
+                "{} no test summary found in '{}'",
                 "warning:".yellow().bold(),
                 results_dir(&run.dir, results_id).display()
             );
@@ -669,11 +656,11 @@ mod tests {
             format!("{:#}", route_test_script(runs, "big", HOST_UNIVERSE, &machine, &fit, false).unwrap_err())
         };
         let msg = err(&cfg("\"cpu\", \"big\""));
-        assert!(msg.contains("can run its testsuite on cpu; pick one of those with -q"), "{msg}");
+        assert!(msg.contains("can be tested on cpu (pick one with -q)"), "{msg}");
         let msg = err(&cfg(""));
-        assert!(msg.contains("on cpu, gpu;"), "any-queue binary: every test queue qualifies: {msg}");
+        assert!(msg.contains("on cpu, gpu ("), "any-queue binary: every test queue qualifies: {msg}");
         let msg = err(&cfg("\"big\""));
-        assert!(msg.contains("cannot run its testsuite"), "{msg}");
+        assert!(msg.contains("or any other queue config"), "{msg}");
     }
 
     /// A machine with BOTH normal and test-marked scripts (§11.2) and

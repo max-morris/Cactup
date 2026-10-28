@@ -17,7 +17,7 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
         match (&installation.release, &installation.thornlist) {
             (Some(release), _) => print!(" (release {})", release.bold()),
             // Symmetric with the release case: name what it was built from.
-            (None, Some(thornlist)) => print!(" (custom thornlist {})", thornlist.bold()),
+            (None, Some(thornlist)) => print!(" (custom thornlist {})", format!("'{thornlist}'").bold()),
             (None, None) => print!(" (custom)"),
         }
         // A refetch with an explicit source moved the tree off its
@@ -28,7 +28,7 @@ pub fn dispatch(ctx: &Ctx) -> Res<()> {
                 print!(", now on {}", current.bold())
             }
             (None, Some(current)) if Some(current) != installation.thornlist.as_ref() => {
-                print!(", now on thornlist {}", current.bold())
+                print!(", now on thornlist {}", format!("'{current}'").bold())
             }
             _ => {}
         }

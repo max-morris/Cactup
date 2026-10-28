@@ -10,15 +10,15 @@ use std::path::PathBuf;
 pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
     let db = ctx.db.read()?;
     let Some(entry) = db.installations.get(&alias) else {
-        bail!("no installation named \"{alias}\" (see `cactup list`)");
+        bail!("No installation named \"{alias}\" (see `cactup list`)");
     };
     let path = PathBuf::from(&entry.path);
 
     if !force {
         let answer = prompt_with_default(
             &format!(
-                "Really delete installation {} and its directory {}? Simulation/test output \
-                 under its sim-home/test-home is left untouched. Type \"yes\" to confirm",
+                "Really delete installation {} and its directory '{}'? Simulation and test \
+                 output is kept. Type \"yes\" to confirm",
                 alias.bold(),
                 path.display()
             ),
@@ -32,10 +32,10 @@ pub fn dispatch(ctx: &Ctx, alias: String, force: bool) -> Res<()> {
 
     if path.is_dir() {
         fs::remove_dir_all(&path)
-            .with_context(|| format!("Failed to remove {}", path.display()))?;
+            .with_context(|| format!("Failed to remove '{}'", path.display()))?;
     } else {
         println!(
-            "{} the installation directory {} was already gone; removing the registration only",
+            "{} '{}' no longer exists; removing the registration only",
             "note:".yellow(),
             path.display()
         );

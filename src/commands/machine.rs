@@ -71,7 +71,7 @@ pub fn resolve_with(
         Resolution::Known(machine) => Ok(machine),
         Resolution::Unrecognized(hostname) => {
             println!(
-                "Unrecognized host {}; using the built-in {} machine. Run `{}` to persist a tuned local machine.",
+                "Unrecognized host {}; using the built-in {} machine. Run `{}` to create one for this host.",
                 hostname.bold(),
                 "generic".bold(),
                 "cactup machine create".bold()
@@ -125,7 +125,7 @@ pub fn ensure_local_machine_with(
         Resolution::Known(machine) => Ok(machine),
         Resolution::Unrecognized(hostname) => {
             println!(
-                "Unrecognized host {}; persisting a tuned local machine in the user MDB.",
+                "Unrecognized host {}; creating a machine for it in the user MDB.",
                 hostname.bold()
             );
             let name = create_machine(db, mdb, None, None, true, false, hostname_override)?;
@@ -159,8 +159,7 @@ fn resolve_inner(
     let session = session_key();
     let cached_failed = |name: &str, e: anyhow::Error| {
         e.context(format!(
-            "the cached detected machine \"{name}\" failed to load; \
-             `cactup machine forget` clears the cache, --machine overrides it"
+            "the cached machine \"{name}\" failed to load; run `cactup machine forget` or pass --machine"
         ))
     };
 
@@ -202,8 +201,7 @@ fn resolve_inner(
             // to `generic` (§4.3).
             Some(previous) => {
                 println!(
-                    "{} no machine claims host {}; keeping {} (`cactup machine forget` re-detects, \
-                     --machine overrides).",
+                    "{} no machine claims host {}; keeping {} (`cactup machine forget` re-detects).",
                     "note:".yellow().bold(),
                     hostname.bold(),
                     previous.bold()
@@ -217,7 +215,7 @@ fn resolve_inner(
         several => {
             if !std::io::stdin().is_terminal() {
                 bail!(
-                    "host {hostname} is claimed by several machines ({}); \
+                    "Host {hostname} is claimed by several machines ({}); \
                      pass --machine <name> to pick one",
                     several.join(", ")
                 );
@@ -285,7 +283,7 @@ fn load_checked(mdb: &Mdb, name: &str) -> Res<Machine> {
                 "{}",
                 format!(
                     "Warning: the system-MDB machine \"{}\" has changed since {name} was created from it; \
-                     {name} will NOT pick up the change (re-create it to refresh).",
+                     re-create {name} to pick up the change.",
                     origin.from
                 )
                 .yellow()
@@ -364,7 +362,7 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
         },
     };
     let Some(name) = name else {
-        println!("{}", "(machine not yet detected — run `cactup machine show`)".yellow());
+        println!("{}", "(machine not yet detected; run `cactup machine show`)".yellow());
         return Ok(());
     };
     let mdb = Mdb::open(ctx.globals.mdb_path.as_deref(), &ctx.db)?;
@@ -379,7 +377,7 @@ pub(crate) fn show_cached_summary(ctx: &Ctx) -> Res<()> {
 /// The `machine show` summary block for an already-loaded machine.
 fn print_summary(machine: &Machine) -> Res<()> {
     let meta = &machine.meta;
-    println!("{} ({:?} MDB, {})", machine.name.bold(), machine.layer, machine.dir.display());
+    println!("{} ({:?} MDB, '{}')", machine.name.bold(), machine.layer, machine.dir.display());
     for (label, value) in [
         ("name", &meta.machine.name),
         ("nickname", &meta.machine.nickname),
@@ -500,11 +498,7 @@ fn print_summary(machine: &Machine) -> Res<()> {
 /// runs on, gpu/default markers, universe, per-flavor thorn toggles).
 fn show_flavors(machine: &Machine) -> Res<()> {
     let listed = machine.flavors()?;
-    println!(
-        "{} ({:?} MDB) — optionlist flavors:",
-        machine.name.bold(),
-        machine.layer
-    );
+    println!("{} ({:?} MDB) optionlist flavors:", machine.name.bold(), machine.layer);
     if listed.is_empty() {
         println!("  {}", "(none)".bright_red());
         return Ok(());
@@ -512,7 +506,7 @@ fn show_flavors(machine: &Machine) -> Res<()> {
     for flavor in &listed {
         let path = machine.optionlist_path(flavor);
         let header = optionlist::load_header(&path)
-            .with_context(|| format!("failed to read optionlist header for flavor \"{flavor}\""))?;
+            .with_context(|| format!("Failed to read optionlist header for flavor \"{flavor}\""))?;
         let runs_on = header.runs_on.clone();
         print!("- {}", flavor.bold());
         if header.default {
@@ -568,10 +562,7 @@ fn create_machine(
                     let hits = mdb.discover(&hostname, false)?;
                     match hits.as_slice() {
                         [only] => only.clone(),
-                        _ => bail!(
-                            "--from-existing with no value clones the detected machine, \
-                             but no machine is detected; name a base explicitly"
-                        ),
+                        _ => bail!("No detected machine to clone; pass --from-existing <machine>"),
                     }
                 }
             }
@@ -580,7 +571,7 @@ fn create_machine(
 
     let (base_dir, base_layer) = mdb
         .machine_dir(&base)
-        .ok_or_else(|| anyhow::anyhow!("base machine \"{base}\" does not exist in the MDB"))?;
+        .ok_or_else(|| anyhow::anyhow!("Base machine \"{base}\" does not exist in the MDB"))?;
     // A user-MDB base of another generation would be copied forward under a
     // generation stamp it does not deserve.
     if base_layer == Layer::User {
@@ -588,10 +579,7 @@ fn create_machine(
     }
     let target = mdb.user_root.join(&name);
     if target.exists() {
-        bail!(
-            "machine \"{name}\" already exists in the user MDB ({}); delete it first",
-            target.display()
-        );
+        bail!("Machine \"{name}\" already exists at '{}'; delete it first", target.display());
     }
 
     copy_dir(&base_dir, &target)?;
@@ -603,7 +591,7 @@ fn create_machine(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 return Err(e)
-                    .with_context(|| format!("Failed to remove {}", target.join(matcher).display()));
+                    .with_context(|| format!("Failed to remove '{}'", target.join(matcher).display()));
             }
         }
     }
@@ -614,7 +602,7 @@ fn create_machine(
     let meta_path = target.join("meta.toml");
     let mut table: toml::Table = fs::read_to_string(&meta_path)?
         .parse()
-        .with_context(|| format!("Failed to parse {}", meta_path.display()))?;
+        .with_context(|| format!("Failed to parse '{}'", meta_path.display()))?;
 
     let machine_tbl = subtable(&mut table, "machine");
     machine_tbl.insert("name".into(), name.clone().into());
@@ -663,7 +651,7 @@ fn create_machine(
     }
 
     fs::write(&meta_path, toml::to_string_pretty(&table)?)
-        .with_context(|| format!("Failed to write {}", meta_path.display()))?;
+        .with_context(|| format!("Failed to write '{}'", meta_path.display()))?;
 
     // Selectable only via --machine when --no-discover: no matcher file at
     // all. Otherwise a hostname.regexp claiming this host's FQDN or short
@@ -672,7 +660,7 @@ fn create_machine(
     if !no_discover {
         let regexp_path = target.join("hostname.regexp");
         fs::write(&regexp_path, format!("^(?:{}|{})$\n", regex::escape(&hostname), regex::escape(&short)))
-            .with_context(|| format!("Failed to write {}", regexp_path.display()))?;
+            .with_context(|| format!("Failed to write '{}'", regexp_path.display()))?;
         remember(db, &name, &hostname, session_key())?;
     }
 
@@ -712,21 +700,21 @@ fn create_machine(
     mdb.load(&name)?;
     println!(
         "{}",
-        format!("Created machine {} in the user MDB ({}).", name.bold(), target.display()).bright_green()
+        format!("Created machine {} at '{}'.", name.bold(), target.display()).bright_green()
     );
     Ok(name)
 }
 
 fn delete_machine(db: &Db, mdb: &Mdb, name: &str) -> Res<()> {
     match mdb.machine_dir(name) {
-        None => bail!("no machine named \"{name}\" in the MDB"),
+        None => bail!("No machine named \"{name}\" in the MDB"),
         Some((_, Layer::System)) => bail!(
             "\"{name}\" is a system-MDB machine and cannot be deleted; \
              override it instead with `cactup machine create {name} --from-existing {name}`"
         ),
         Some((dir, Layer::User)) => {
             fs::remove_dir_all(&dir)
-                .with_context(|| format!("Failed to remove {}", dir.display()))?;
+                .with_context(|| format!("Failed to remove '{}'", dir.display()))?;
             db.update(|db| {
                 if db.detected.as_ref().is_some_and(|d| d.name == name) {
                     db.detected = None;
@@ -748,8 +736,8 @@ fn subtable<'t>(table: &'t mut toml::Table, key: &str) -> &'t mut toml::Table {
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Res<()> {
-    fs::create_dir_all(to).with_context(|| format!("Failed to create {}", to.display()))?;
-    for entry in fs::read_dir(from).with_context(|| format!("Failed to list {}", from.display()))? {
+    fs::create_dir_all(to).with_context(|| format!("Failed to create '{}'", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("Failed to list '{}'", from.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         if name.to_string_lossy() == "__pycache__" {
@@ -760,7 +748,7 @@ fn copy_dir(from: &Path, to: &Path) -> Res<()> {
             copy_dir(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), &target)
-                .with_context(|| format!("Failed to copy {}", entry.path().display()))?;
+                .with_context(|| format!("Failed to copy '{}'", entry.path().display()))?;
         }
     }
     Ok(())
@@ -783,14 +771,14 @@ pub fn hash_machine_dir(dir: &Path) -> Res<String> {
     for rel in files {
         feed(rel.as_bytes());
         feed(&[0]);
-        feed(&fs::read(dir.join(&rel)).with_context(|| format!("Failed to read {rel} under {}", dir.display()))?);
+        feed(&fs::read(dir.join(&rel)).with_context(|| format!("Failed to read '{rel}' under '{}'", dir.display()))?);
         feed(&[0]);
     }
     Ok(format!("{hash:016x}"))
 }
 
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Res<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("Failed to list {}", dir.display()))? {
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to list '{}'", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let lossy = name.to_string_lossy();

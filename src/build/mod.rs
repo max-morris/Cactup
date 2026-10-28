@@ -213,15 +213,15 @@ impl ConfigMeta {
         let path = Self::path_for(cactus_root, name);
         let text = match fs::read_to_string(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            other => other.with_context(|| format!("Failed to read {}", path.display()))?,
+            other => other.with_context(|| format!("Failed to read '{}'", path.display()))?,
         };
         let table: toml::Table =
-            toml::from_str(&text).with_context(|| format!("Failed to parse {}", path.display()))?;
-        let meta =
-            ConfigMeta::from_table(table).with_context(|| format!("Failed to parse {}", path.display()))?;
+            toml::from_str(&text).with_context(|| format!("Failed to parse '{}'", path.display()))?;
+        let meta = ConfigMeta::from_table(table)
+            .with_context(|| format!("Failed to parse '{}'", path.display()))?;
         if meta.schema > CONFIG_SCHEMA {
             bail!(
-                "{} has schema {} (> {CONFIG_SCHEMA}); please upgrade cactup",
+                "'{}' has schema {} (> {CONFIG_SCHEMA}); please upgrade cactup",
                 path.display(),
                 meta.schema
             );
@@ -253,7 +253,7 @@ impl ConfigMeta {
     fn store(&self, cactus_root: &Path) -> Res<()> {
         let path = Self::path_for(cactus_root, &self.name);
         fs::write(&path, toml::to_string_pretty(self)?)
-            .with_context(|| format!("Failed to write {}", path.display()))
+            .with_context(|| format!("Failed to write '{}'", path.display()))
     }
 }
 
@@ -337,7 +337,7 @@ pub fn resolve_thornlist(
 ) -> Res<ResolvedThornlist> {
     if let Some(path) = cli {
         let text = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read thornlist {}", path.display()))?;
+            .with_context(|| format!("Failed to read thornlist '{}'", path.display()))?;
         // Canonicalize what we record: a relative path would resolve against
         // whatever directory a later rebuild happened to run from.
         let recorded = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
@@ -373,9 +373,8 @@ pub fn resolve_thornlist(
         let snapshot = config_file(cactus_root, name, THORNLIST_SNAPSHOT);
         let text = fs::read_to_string(&snapshot).with_context(|| {
             format!(
-                "config \"{name}\" was built from thornlist {stored_path}, which is no longer \
-                 readable, and there is no snapshot at {} to fall back on — pass --thornlist to \
-                 say which thornlist to build from",
+                "Config \"{name}\"'s thornlist '{stored_path}' is no longer readable and there is \
+                 no snapshot at '{}'; pass --thornlist to choose one",
                 snapshot.display()
             )
         })?;
@@ -388,7 +387,7 @@ pub fn resolve_thornlist(
 
     let default = default_thornlist(cactus_root);
     let text = fs::read_to_string(&default)
-        .with_context(|| format!("Failed to read thornlist {}", default.display()))?;
+        .with_context(|| format!("Failed to read thornlist '{}'", default.display()))?;
     Ok(ResolvedThornlist {
         recorded: default.display().to_string(),
         text,
@@ -579,7 +578,7 @@ fn warn_disabled_overrides(
     println!(
         "{}",
         format!(
-            "warning: the thornlist enables {} thorn(s) that the mdb disables — they will NOT \
+            "warning: the thornlist enables {} thorn(s) that the mdb disables; they will NOT \
              be built:",
             overrides.len(),
         )
@@ -594,7 +593,7 @@ fn warn_disabled_overrides(
         };
         println!(
             "{}",
-            format!("  {thorn} — disabled-thorns = [\"{spec}\"] ({source})").yellow()
+            format!("  {thorn}: disabled-thorns = [\"{spec}\"] ({source})").yellow()
         );
     }
 }
@@ -1294,18 +1293,13 @@ fn up_to_date_message(
         if untracked.is_empty() {
             String::new()
         } else {
-            format!(
-                " Not tracked, since they are not links into the installation's repos/, so edits \
-                 to them go unnoticed: {}.",
-                summarize(untracked)
-            )
+            format!(" Not links into repos/, so edits to them go unnoticed: {}.", summarize(untracked))
         }
     };
     let untracked_note = untracked_note_for(untracked);
     // The upgrade case: a config last built before stamps existed may have
     // had thorns regenerated since, and nothing could have noticed.
-    const NO_STAMPS: &str = "Its thorns' files had no baseline, so they become one now and later \
-                             edits to them are detected.";
+    const NO_STAMPS: &str = "Its thorns' files had no baseline; one is recorded now.";
     if let Some(why) = no_sources {
         let unseen = "Edits to the Cactus flesh and refetches that move it go unnoticed";
         // That sentence names the flesh already; the note names the rest.
@@ -1314,28 +1308,27 @@ fn up_to_date_message(
         let untracked_note = untracked_note_for(&others);
         return match stamps {
             StampReading::Compared => format!(
-                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
-                 universe, same thornlist, same thorn files), but it cannot track this config's \
-                 repos: {why}.{untracked_note} {unseen}; {AGAIN}."
+                "Config {name} is up to date (same optionlist, same universe, same thornlist, same \
+                 thorn files), but cactup cannot track its repos: {why}.{untracked_note} {unseen}; \
+                 {AGAIN}."
             ),
             StampReading::FirstBaseline => format!(
-                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
-                 universe, same thornlist), but it cannot track this config's repos: {why}. \
-                 {NO_STAMPS}{untracked_note} {unseen}. If thorns or the flesh changed since the \
-                 last build, {AGAIN}."
+                "Config {name} is up to date (same optionlist, same universe, same thornlist), but \
+                 cactup cannot track its repos: {why}. {NO_STAMPS}{untracked_note} {unseen}. If \
+                 thorns or the flesh changed since the last build, {AGAIN}."
             ),
             StampReading::Absent => format!(
-                "Config {name} is up to date as far as cactup can tell (same optionlist, same \
-                 universe, same thornlist), but it cannot track this config's sources: {why}. \
-                 Source edits and refetches go unnoticed; {AGAIN}."
+                "Config {name} is up to date (same optionlist, same universe, same thornlist), but \
+                 cactup cannot track its sources: {why}. Source edits and refetches go unnoticed; \
+                 {AGAIN}."
             ),
         };
     }
     if !had_baseline {
         return format!(
             "Config {name} is up to date (same optionlist, same universe, same thornlist). It had \
-             no source baseline, so the sources as they stand now become one and later changes \
-             are detected.{untracked_note} If they changed since the last build, {AGAIN}."
+             no source baseline; one is recorded now.{untracked_note} If sources changed since the \
+             last build, {AGAIN}."
         );
     }
     if stamps == StampReading::FirstBaseline {
@@ -1462,9 +1455,8 @@ pub fn resolve_optionlist(
                 // silently resolving to whatever the machine now calls its
                 // default.
                 bail!(
-                    "config \"{name}\" was built with optionlist flavor \"{recorded}\", which \
-                     machine \"{}\" no longer has (it now offers: {}) — pass --flavor to pick \
-                     one of those, or --optionlist to build from a file",
+                    "Config \"{name}\" was built with flavor \"{recorded}\", which machine \"{}\" \
+                     no longer has; pass --flavor (one of: {}) or --optionlist",
                     machine.name,
                     if listed.is_empty() { "none".to_owned() } else { listed.join(", ") },
                 );
@@ -1476,7 +1468,7 @@ pub fn resolve_optionlist(
                 // what they need — not a complaint about the snapshot.
                 if let Ok(source) = fs::read_to_string(recorded) {
                     let optionlist = Optionlist::parse_any(&source)
-                        .with_context(|| format!("invalid optionlist {recorded}"))?;
+                        .with_context(|| format!("Invalid optionlist '{recorded}'"))?;
                     return Ok(ResolvedOptionlist {
                         source: stored.optionlist_source.clone(),
                         optionlist,
@@ -1486,10 +1478,8 @@ pub fn resolve_optionlist(
                 let snapshot = config_file(cactus_root, name, OPTIONLIST_SNAPSHOT);
                 let source = fs::read_to_string(&snapshot).with_context(|| {
                     format!(
-                        "config \"{name}\" was built from optionlist {recorded}, which is no \
-                         longer readable, and there is no snapshot at {} to fall back on — pass \
-                         --optionlist to say which optionlist to build from, or --flavor to \
-                         switch to one of the machine's own",
+                        "Config \"{name}\"'s optionlist '{recorded}' is no longer readable and \
+                         there is no snapshot at '{}'; pass --optionlist or --flavor",
                         snapshot.display()
                     )
                 })?;
@@ -1498,10 +1488,8 @@ pub fn resolve_optionlist(
                 // such, pointing at the flag that names a current file instead.
                 let optionlist = Optionlist::parse_any(&source).with_context(|| {
                     format!(
-                        "config \"{name}\" was built from optionlist {recorded}, which is no longer \
-                         readable, and its snapshot {} cannot be read by this cactup — pass \
-                         --optionlist to name a current copy of the file, or --flavor to switch to one \
-                         of the machine's own",
+                        "Config \"{name}\"'s optionlist '{recorded}' is no longer readable and this \
+                         cactup cannot read its snapshot '{}'; pass --optionlist or --flavor",
                         snapshot.display()
                     )
                 })?;
@@ -1736,7 +1724,7 @@ fn prepare_with_cache(
 ) -> Res<Prepared> {
     let cactus_root = installation.cactus_root();
     if !cactus_root.is_dir() {
-        bail!("no Cactus tree at {}", cactus_root.display());
+        bail!("No Cactus tree at '{}'", cactus_root.display());
     }
     let config_dir = cactus_root.join("configs").join(name);
     // Loaded up front: it carries the thornlist this config was last built
@@ -1751,8 +1739,8 @@ fn prepare_with_cache(
     let ResolvedOptionlist { source: optionlist_source, optionlist, .. } = &resolved;
     if resolved.from_snapshot {
         println!(
-            "{} optionlist {optionlist_source} is no longer readable; building from the copy \
-             snapshotted in the config ({OPTIONLIST_SNAPSHOT}).",
+            "{} optionlist '{optionlist_source}' is no longer readable; building from the config's \
+             snapshot.",
             "warning:".yellow().bold(),
         );
     }
@@ -1762,7 +1750,7 @@ fn prepare_with_cache(
         && !machine.meta.queues.contains_key(queue)
     {
         bail!(
-            "optionlist {optionlist_source} names default-queue \"{queue}\" in [cactup.runs-on], \
+            "Optionlist '{optionlist_source}' names default-queue \"{queue}\" in [cactup.runs-on], \
              but machine \"{}\" has no such queue (it has: {})",
             machine.name,
             machine.meta.queues.keys().cloned().collect::<Vec<_>>().join(", ")
@@ -1786,11 +1774,9 @@ fn prepare_with_cache(
         resolve_thornlist(&cactus_root, name, stored_meta.as_ref(), opts.thornlist.as_deref())?;
     if thornlist.from_snapshot {
         println!(
-            "{} thornlist {} is no longer readable; building from the copy snapshotted in the \
-             config ({}).",
+            "{} thornlist '{}' is no longer readable; building from the config's snapshot.",
             "warning:".yellow().bold(),
             thornlist.recorded,
-            THORNLIST_SNAPSHOT,
         );
     }
     // Machine-level thorn toggles (§7.5) plus this flavor's own
@@ -2017,7 +2003,7 @@ fn prepare_with_cache(
         }
         if stored_optionlist.as_deref() != Some(optionlist.source.as_str()) {
             fs::write(&snapshot_path, &optionlist.source)
-                .with_context(|| format!("Failed to write {}", snapshot_path.display()))?;
+                .with_context(|| format!("Failed to write '{}'", snapshot_path.display()))?;
         }
         if sources_changed || providers_changed || shapes_changed || stamps_changed || header_changed {
             if let Some(live) = fresh_sources {
@@ -2040,23 +2026,21 @@ fn prepare_with_cache(
         && stamping
     {
         println!(
-            "{} cactup cannot track config {name}'s repos: {why}. Edits to its thorns' files \
-             still trigger a rebuild, but edits to the Cactus flesh and refetches that move it \
-             do not; pass --reconfig to rebuild after changing the flesh, or -f after a refetch.",
+            "{} cactup cannot track config {name}'s repos: {why}. Edits to the Cactus flesh and \
+             refetches will not trigger a rebuild; pass --reconfig after changing the flesh, or -f \
+             after a refetch.",
             "note:".yellow().bold()
         );
     } else if let Some(why) = &no_sources {
         println!(
-            "{} cactup cannot track config {name}'s sources: {why}. This build records no \
-             source baseline, so later edits and refetches will not trigger a rebuild; pass \
-             --reconfig to rebuild after changing them.",
+            "{} cactup cannot track config {name}'s sources: {why}. Later edits and refetches \
+             will not trigger a rebuild; pass --reconfig after changing them.",
             "note:".yellow().bold()
         );
     }
     if !untracked.is_empty() && fresh_sources.is_some() {
         println!(
-            "{} cactup does not track these sources of config {name}, which are not links into \
-             the installation's repos/: {}.",
+            "{} these sources of config {name} are not links into repos/ and are not tracked: {}.",
             "note:".yellow().bold(),
             summarize(&untracked)
         );
@@ -2066,15 +2050,11 @@ fn prepare_with_cache(
     // for the from-scratch rebuild that `-f` gives.
     if let RebuildDecision::Incremental(why) = decision {
         println!(
-            "Rebuilding config {name}: {why} — reconfiguring and rebuilding what that affects \
-             (pass -f for a from-scratch rebuild)."
+            "Rebuilding config {name} incrementally: {why}; pass -f to rebuild from scratch."
         );
     }
     if decision == RebuildDecision::Full(FLESH_NOT_AS_BUILT) {
-        println!(
-            "Rebuilding config {name} from scratch: the Cactus flesh is not what it was, so the \
-             make system and config-data are regenerated and every existing object is stale."
-        );
+        println!("Rebuilding config {name} from scratch: the Cactus flesh changed.");
     }
     // Name the repos, so a source-driven rebuild is actionable rather than
     // mysterious — especially the edited ones, which are the user's own work.
@@ -2086,10 +2066,7 @@ fn prepare_with_cache(
             println!("  locally edited: {}", summarize(&source_change.edited));
         }
         if !source_change.vanished.is_empty() {
-            println!(
-                "  no longer readable (gone, or no longer a git repo): {}",
-                summarize(&source_change.vanished)
-            );
+            println!("  no longer readable: {}", summarize(&source_change.vanished));
         }
         if stamp_rebuild {
             println!("  thorns with edited files: {}", summarize(&changed_stamps));
@@ -2159,7 +2136,7 @@ fn prepare_with_cache(
         _ => {
             let root = crate::objcache::store_root(knobs, Some(machine));
             for warning in &root.warnings {
-                println!("{} build cache: {warning}; looking further for its place", "warning:".yellow().bold());
+                println!("{} build cache: {warning}; ignored", "warning:".yellow().bold());
             }
             root.path
         }
@@ -2179,7 +2156,7 @@ fn prepare_with_cache(
     // Rendered native optionlist: render → inject flags → substitute (§7.8).
     let rendered = vars
         .substitute(&inject_build_flags(&optionlist.render(), flags), Syntax::Hash)
-        .context("substituting the rendered optionlist")?;
+        .context("Substituting the rendered optionlist")?;
 
     // §7.7: virtual/prebuilt executable — canonicalize now (a relative path
     // would resolve against whatever directory `execute` happens to run
@@ -2203,7 +2180,7 @@ fn prepare_with_cache(
         // control of parallelism.
         let make = vars
             .substitute(machine.meta.build.make.as_deref().unwrap_or(DEFAULT_MAKE), Syntax::Shell)
-            .context("substituting the machine make command")?;
+            .context("Substituting the machine make command")?;
         // Build-phase env for the resolved universe (§6.1): universe env keys
         // override the machine [environment] key-by-key. The provisioning
         // steps likewise, kept apart: the setup alone is what the cache
@@ -2356,17 +2333,17 @@ fn prepare_with_cache(
     // see this function's doc comment). `execute` installs them into
     // configs/<name>/ only once the build actually succeeds.
     fs::write(attempt.optionlist_path(), &rendered)
-        .with_context(|| format!("Failed to write {}", attempt.optionlist_path().display()))?;
+        .with_context(|| format!("Failed to write '{}'", attempt.optionlist_path().display()))?;
     fs::write(attempt.optionlist_snapshot_path(), &optionlist.source)
-        .with_context(|| format!("Failed to write {}", attempt.optionlist_snapshot_path().display()))?;
+        .with_context(|| format!("Failed to write '{}'", attempt.optionlist_snapshot_path().display()))?;
     fs::write(attempt.thornlist_path(), &thornlist_processed)
-        .with_context(|| format!("Failed to write {}", attempt.thornlist_path().display()))?;
+        .with_context(|| format!("Failed to write '{}'", attempt.thornlist_path().display()))?;
     // Snapshot the source verbatim, so a rebuild survives the file it came
     // from moving or being deleted (resolve_thornlist step 3). Written from
     // `thornlist.text`, not the processed copy: a rebuild must re-apply
     // whatever the machine's thorn toggles say *then*, not replay old ones.
     fs::write(attempt.thornlist_snapshot_path(), &thornlist.text)
-        .with_context(|| format!("Failed to write {}", attempt.thornlist_snapshot_path().display()))?;
+        .with_context(|| format!("Failed to write '{}'", attempt.thornlist_snapshot_path().display()))?;
 
     Ok(Prepared::Ready(
         attempt,
@@ -2443,9 +2420,8 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     // silently recreating (resurrecting) a deleted config.
     if !config_dir.is_dir() || !attempt.dir.is_dir() {
         bail!(
-            "config \"{name}\" (or this build's own attempt directory, {}) no longer exists — \
-             it was likely removed (e.g. by `cactup config delete`) while this build was \
-             queued; refusing to recreate it",
+            "Config \"{name}\" or its attempt directory '{}' no longer exists; refusing to \
+             recreate it",
             attempt.dir.display(),
         );
     }
@@ -2458,7 +2434,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     // '…/config-data'".
     for sub in ["build", "lib", "scratch", "config-data"] {
         fs::create_dir_all(config_dir.join(sub))
-            .with_context(|| format!("Failed to create {}", config_dir.join(sub).display()))?;
+            .with_context(|| format!("Failed to create '{}'", config_dir.join(sub).display()))?;
     }
 
     // Per-config build lock, heartbeat-kept across the (long) make (§2.3 #4).
@@ -2495,8 +2471,9 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                 // `install_root`, and `cactus_root` are all already frozen in
                 // `attempt.meta`, so this reads no MDB, global DB,
                 // installation registry, or knob (D11-clean).
-                let processed_thornlist = fs::read_to_string(attempt.thornlist_path())
-                    .with_context(|| format!("Failed to read {}", attempt.thornlist_path().display()))?;
+                let processed_thornlist = fs::read_to_string(attempt.thornlist_path()).with_context(|| {
+                    format!("Failed to read '{}'", attempt.thornlist_path().display())
+                })?;
                 let fresh_list =
                     crate::thornlist::parse_config_list(&processed_thornlist, &install_root, &cactus_root)?.ok();
                 // Best-effort, matching `prepare`'s own tolerance: an
@@ -2538,7 +2515,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
     {
         println!(
             "Note: config {name} was rebuilt by another `cactup build` while this one was \
-             queued; proceeding anyway — this build was explicitly requested."
+             queued; building anyway."
         );
     }
     let (sources_now, _) =
@@ -2561,8 +2538,8 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         attempt.meta.full_rebuild = true;
         attempt.meta.decision = FLESH_NOT_AS_BUILT.to_owned();
         println!(
-            "Escalating config {name} to a from-scratch rebuild: the Cactus flesh moved while \
-             this build was queued, so the make system and config-data must be regenerated."
+            "Rebuilding config {name} from scratch: the Cactus flesh changed while this build was \
+             queued."
         );
         attempt.store_meta_keeping_job()?;
     }
@@ -2592,23 +2569,19 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                     Ok(()) => Ok(()),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                     Err(e) => Err(e).with_context(|| {
-                        format!(
-                            "Failed to remove stale per-thorn build state {} — proceeding would risk \
-                             compiling or linking against a thorn's old provider",
-                            path.display()
-                        )
+                        format!("Failed to remove stale per-thorn build state '{}'", path.display())
                     }),
                 }
             }
             if !changed_providers.is_empty() {
                 println!(
-                    "  changed provider (removing their stale per-thorn build state): {}",
+                    "  changed provider (removing stale build state): {}",
                     summarize(&changed_providers)
                 );
             }
             if !changed_shapes.is_empty() {
                 println!(
-                    "  changed contents (removing their stale per-thorn build state): {}",
+                    "  changed contents (removing stale build state): {}",
                     summarize(&changed_shapes)
                 );
             }
@@ -2624,9 +2597,10 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         // Not run through the build universe or a spawned shell: a plain
         // in-process file copy, exactly as before this split.
         let exe_dir = cactus_root.join("exe");
-        fs::create_dir_all(&exe_dir).with_context(|| format!("Failed to create {}", exe_dir.display()))?;
+        fs::create_dir_all(&exe_dir)
+            .with_context(|| format!("Failed to create '{}'", exe_dir.display()))?;
         fs::copy(prebuilt, exe_dir.join(format!("cactus_{name}")))
-            .with_context(|| format!("Failed to copy {}", prebuilt.display()))?;
+            .with_context(|| format!("Failed to copy '{}'", prebuilt.display()))?;
         None
     } else {
         let vset = thaw_vars(&attempt.meta.vars, &attempt.meta.knobs)?;
@@ -2637,8 +2611,8 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             && (spec.wrapper.is_some() || spec.wrapper_argv.is_some())
         {
             println!(
-                "Building inside universe \"{}\"; if its wrapper goes through the \
-                 scheduler, output stays silent until the job is allocated (check the queue).",
+                "Building inside universe \"{}\"; if its wrapper queues a job, output starts \
+                 once the job is allocated.",
                 spec.name,
             );
         }
@@ -2653,7 +2627,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         // was never configured to begin with.
         if flesh_escalated && is_configured(&cactus_root, &name) {
             let make = attempt.meta.make.as_deref().context(
-                "a from-scratch rebuild was needed but no `make` command was frozen for this attempt",
+                "A from-scratch rebuild was needed but no `make` command was frozen for this attempt",
             )?;
             let realclean_script = realclean_script(&cactus_root, &attempt.meta.build_env, make, &name);
             let realclean_path = attempt.dir.join("build-script-realclean");
@@ -2665,7 +2639,7 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
             let realclean_status = spawn_and_wait(cmd, &attempt.heartbeat_path(), tee_files)?;
             if !realclean_status.success() {
                 bail!(
-                    "the escalated realclean step failed ({realclean_status}); see {} and {}",
+                    "The realclean step failed ({realclean_status}); see '{}' and '{}'",
                     realclean_out.display(),
                     realclean_err.display(),
                 );
@@ -2692,14 +2666,14 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         attempt.meta.outcome = Some(BuildOutcomeRecord { exit_status: st.code(), complete: false });
         attempt.store_meta_keeping_job()?;
         eprintln!(
-            "\n{} the build failed ({st})\n{} {} and {}",
+            "\n{} the build failed ({st})\n{} '{}' and '{}'",
             "✗".red().bold(),
             "→ build output:".red().bold(),
             attempt.out_path().display(),
             attempt.err_path().display(),
         );
         bail!(
-            "the build failed ({st}); see {} and {}",
+            "The build failed ({st}); see '{}' and '{}'",
             attempt.out_path().display(),
             attempt.err_path().display(),
         );
@@ -2715,18 +2689,18 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
         let (missing, hint) = if !is_configured(&cactus_root, &name) {
             (
                 completeness_marker(&cactus_root, &name),
-                "the configure step did not complete — look near the top of build.out/build.err",
+                "the configure step did not complete (look near the top of build.out/build.err)",
             )
         } else {
             (
                 executable_path(&cactus_root, &name),
-                "the compile/link step did not complete — look near the end of build.out/build.err",
+                "the compile/link step did not complete (look near the end of build.out/build.err)",
             )
         };
         let (out, err) = (attempt.out_path(), attempt.err_path());
         let log_hint = if out.exists() || err.exists() {
             eprintln!(
-                "\n{} the build command finished but {} is missing — the config is incomplete\n  {}\n{} {} and {}",
+                "\n{} the build command finished but '{}' is missing\n  {}\n{} '{}' and '{}'",
                 "✗".red().bold(),
                 missing.display(),
                 hint,
@@ -2734,15 +2708,15 @@ pub fn execute(attempt: &mut BuildAttempt, tee: bool, probe: Option<SourceProbe>
                 out.display(),
                 err.display(),
             );
-            format!("; {hint}; see {} and {}", out.display(), err.display())
+            format!(": {hint}; see '{}' and '{}'", out.display(), err.display())
         } else {
-            format!("; {hint}")
+            format!(": {hint}")
         };
         attempt.meta.outcome =
             Some(BuildOutcomeRecord { exit_status: status.and_then(|s| s.code()), complete: false });
         attempt.store_meta_keeping_job()?;
         bail!(
-            "the build command finished but {} is missing — the config is incomplete{log_hint}",
+            "The build command finished but '{}' is missing{log_hint}",
             missing.display(),
         );
     }
